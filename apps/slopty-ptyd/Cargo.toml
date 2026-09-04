@@ -1,0 +1,32 @@
+[package]
+name = "slopty-ptyd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty PTY custodian: owns PTY masters so shells survive host daemon restarts"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "slopty-ptyd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+nix.workspace = true
+parking_lot.workspace = true
+rustix.workspace = true
+slopty-core.workspace = true
+slopty-proto.workspace = true
+slopty-pty.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

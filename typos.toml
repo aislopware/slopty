@@ -1,0 +1,20 @@
+[default]
+extend-ignore-re = [ "(?i)objc", "\\b[0-9a-f]{7,40}\\b", "\\bBA\\b" ]
+
+[default.extend-words]
+# terminal / VT jargon that typos flags
+ser = "ser"
+de = "de"
+sav = "sav"
+LOD = "LOD"     # level of detail
+flate = "flate" # DEFLATE
+
+[files]
+extend-exclude = [
+    "**/*.snap",
+    "Cargo.lock",
+    "vendor/",
+    ".research/",
+    "**/*.metal",
+    "**/fixtures/",
+]

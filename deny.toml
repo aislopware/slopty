@@ -1,0 +1,72 @@
+# cargo-deny 0.20 — https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+]
+all-features = false
+exclude-dev = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = [ "https://github.com/rustsec/advisory-db" ]
+yanked = "deny"
+ignore = [  ]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "OpenSSL",
+    "BSL-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+exceptions = [  ]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    { crate = "openssl-sys", reason = "rustls only" },
+    { crate = "openssl", reason = "rustls only" },
+    { crate = "audiopus", reason = "unmaintained; use `opus`" },
+    { crate = "reed-solomon-erasure", reason = "unmaintained; use reed-solomon-simd" },
+    { crate = "objc", reason = "use objc2" },
+    { crate = "cocoa", reason = "use objc2-app-kit" },
+]
+skip = [  ]
+skip-tree = [  ]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
+allow-git = [
+    "https://github.com/Uzaaft/libghostty-rs",
+    "https://github.com/aislopware/zed",
+    "https://github.com/aislopware/gpui-kit",
+    "https://github.com/zed-industries/zed",
+    "https://github.com/zed-industries/font-kit",
+]
+
+[sources.allow-org]
+github = [ "aislopware", "zed-industries" ]

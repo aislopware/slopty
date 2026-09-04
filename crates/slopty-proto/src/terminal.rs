@@ -1,0 +1,221 @@
+//! Terminal sessions: lifecycle, input, frames.
+
+use serde::{Deserialize, Serialize};
+use slopty_core::SessionId;
+use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, TermModes};
+
+use crate::input::{CellMetrics, KeyEvent, MouseEvent};
+
+/// Terminal size in cells.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct TermSize {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+    /// Client cell pixel metrics.
+    pub metrics: CellMetrics,
+}
+
+impl Default for TermSize {
+    fn default() -> Self {
+        Self { cols: 80, rows: 24, metrics: CellMetrics { cell_width: 8, cell_height: 16 } }
+    }
+}
+
+impl TermSize {
+    /// Width in pixels.
+    #[must_use]
+    pub const fn width_px(self) -> u32 {
+        (self.cols as u32).saturating_mul(self.metrics.cell_width as u32)
+    }
+
+    /// Height in pixels.
+    #[must_use]
+    pub const fn height_px(self) -> u32 {
+        (self.rows as u32).saturating_mul(self.metrics.cell_height as u32)
+    }
+}
+
+/// Request to create a session.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct OpenSession {
+    /// Initial size.
+    pub size: TermSize,
+    /// Working directory; the host's default when `None`.
+    pub cwd: Option<String>,
+    /// Program and arguments; the user's login shell when empty.
+    pub command: Vec<String>,
+    /// Extra environment.
+    pub env: Vec<(String, String)>,
+    /// Display name.
+    pub title: Option<String>,
+    /// Attach immediately on the same connection.
+    pub attach: bool,
+}
+
+/// Lifecycle state of a session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SessionState {
+    /// The child is alive.
+    Running,
+    /// The child exited; the last screen is retained until closed.
+    Exited {
+        /// Exit status, or the signal number negated.
+        status: i32,
+    },
+}
+
+/// A session as listed by the host.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// Identity.
+    pub id: SessionId,
+    /// Title (OSC 0/2, else the command).
+    pub title: String,
+    /// Current working directory if known (OSC 7).
+    pub cwd: Option<String>,
+    /// Current size.
+    pub cols: u16,
+    /// Current size.
+    pub rows: u16,
+    /// State.
+    pub state: SessionState,
+    /// Number of attached clients.
+    pub viewers: u16,
+    /// Command line the session was started with.
+    pub command: Vec<String>,
+}
+
+/// Why a session closed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CloseReason {
+    /// A client asked.
+    Requested,
+    /// The child exited and the session was not retained.
+    Exited,
+    /// The host is shutting down.
+    HostShutdown,
+}
+
+/// Client → host, scoped to one session.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TermRequest {
+    /// Attach: the host opens a session stream and sends a full frame.
+    Attach {
+        /// The client's size; becomes the PTY size if this client is the driver.
+        size: TermSize,
+    },
+    /// Stop receiving frames; the session lives on.
+    Detach,
+    /// Terminate the child and drop the session.
+    Close,
+    /// Client size changed.
+    Resize(TermSize),
+    /// Claim or release the right to drive the PTY size.
+    Drive {
+        /// True to claim.
+        drive: bool,
+    },
+    /// Key event.
+    Key(KeyEvent),
+    /// Pointer event.
+    Mouse(MouseEvent),
+    /// Paste text (host applies bracketed paste if the mode is on).
+    Paste(String),
+    /// Raw bytes to the PTY (tooling, tests).
+    Raw(Vec<u8>),
+    /// Focus changed (DEC 1004).
+    Focus {
+        /// True when focused.
+        focused: bool,
+    },
+    /// Ask for scrollback lines `[start, start + count)`.
+    FetchLines {
+        /// First absolute line.
+        start: LineIndex,
+        /// How many.
+        count: u32,
+    },
+    /// Answer to a clipboard read the program requested (OSC 52 `?`), if the user allowed it.
+    ClipboardRead {
+        /// Contents.
+        text: String,
+    },
+}
+
+/// One frame: the changed rows since the previous frame (or every row when `full`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Frame {
+    /// Monotonic per session stream. A gap means the client must request a resync.
+    pub seq: u64,
+    /// True when `updates` holds every row (attach, resize, resync).
+    pub full: bool,
+    /// Bumped whenever absolute line numbering was invalidated (reflow on resize, RIS, alternate
+    /// screen switch). The client drops its line cache when this changes.
+    pub epoch: u32,
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+    /// Cursor.
+    pub cursor: Cursor,
+    /// Modes.
+    pub modes: TermModes,
+    /// Oldest scrollback line still retrievable.
+    pub oldest_line: LineIndex,
+    /// Absolute index of the first visible row: `total_lines - rows` when at the bottom.
+    pub first_visible_line: LineIndex,
+    /// Total lines (history + screen).
+    pub total_lines: u64,
+    /// Highest key `seq` whose bytes reached the PTY before this frame was captured.
+    pub input_ack: u64,
+    /// Changed rows.
+    pub updates: Vec<RowUpdate>,
+}
+
+/// Host → client on the session stream.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TermEvent {
+    /// Grid changed.
+    Frame(Frame),
+    /// Scrollback lines in reply to `FetchLines` (may be shorter than asked if evicted).
+    Lines {
+        /// First absolute line.
+        start: LineIndex,
+        /// The lines.
+        lines: Vec<Line>,
+    },
+    /// Title changed.
+    Title(String),
+    /// Working directory changed.
+    Cwd(String),
+    /// BEL.
+    Bell,
+    /// The program wrote to the clipboard (OSC 52).
+    ClipboardWrite {
+        /// Contents.
+        text: String,
+    },
+    /// The program asked to read the clipboard; the client may answer with `ClipboardRead`.
+    ClipboardReadRequest,
+    /// Child exited.
+    Exited {
+        /// Status.
+        status: i32,
+    },
+    /// The PTY size changed (another client drives it).
+    Resized {
+        /// Columns.
+        cols: u16,
+        /// Rows.
+        rows: u16,
+    },
+    /// Driver changed.
+    Driver {
+        /// True when this client now drives the size.
+        you: bool,
+    },
+    /// Something went wrong with a request.
+    Error(String),
+}

@@ -1,0 +1,233 @@
+[workspace]
+resolver = "3"
+members = [ "crates/*", "apps/*", "xtask" ]
+# default-members: every member builds on the host; iOS-only crates are cfg-gated internally
+exclude = [ "vendor", ".research" ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/aislopware/slopty"
+publish = false
+
+# ---------------------------------------------------------------------------------------------
+# Dependencies. Versions verified on crates.io 2026-09-04. objc2 family is pinned exact: the
+# framework crates share one generated ABI surface and move as a unit.
+# ---------------------------------------------------------------------------------------------
+[workspace.dependencies]
+# workspace crates
+slopty-core = { path = "crates/slopty-core" }
+slopty-proto = { path = "crates/slopty-proto" }
+slopty-grid = { path = "crates/slopty-grid" }
+slopty-engine = { path = "crates/slopty-engine" }
+slopty-pty = { path = "crates/slopty-pty" }
+
+# core
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+bitflags = { version = "2.13.1", features = [ "serde" ] }
+bytes = { version = "1.12.1", features = [ "serde" ] }
+smallvec = { version = "1.16.0", features = [ "serde", "union", "const_generics", "const_new" ] }
+parking_lot = "0.12.5"
+uuid = { version = "1.26.0", features = [ "v4", "v7", "serde", "fast-rng" ] }
+camino = { version = "1.2.5", features = [ "serde1" ] }
+
+# serialization
+serde = { version = "1.0.229", features = [ "derive", "rc" ] }
+serde_json = "1.0.151"
+postcard = { version = "1.1.3", default-features = false, features = [ "alloc", "use-std" ] }
+zerocopy = { version = "0.8.56", features = [ "derive" ] }
+
+# async / io
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+    "macros",
+    "signal",
+    "process",
+    "fs",
+] }
+
+# observability
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = [ "env-filter", "json", "fmt" ] }
+rustix = { version = "1.1.4", features = [
+    "fs",
+    "process",
+    "pty",
+    "termios",
+    "net",
+    "event",
+    "pipe",
+] }
+nix = { version = "0.31.3", features = [
+    "term",
+    "process",
+    "signal",
+    "fs",
+    "poll",
+    "socket",
+    "uio",
+] }
+
+# terminal engine
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "5988a0b7" }
+
+# cli / scripts
+clap = { version = "4.6.6", features = [ "derive", "env" ] }
+xshell = "0.2.7"
+
+# testing
+insta = { version = "1.48.0", features = [ "yaml", "redactions" ] }
+proptest = "1.11.0"
+tempfile = "3.27.0"
+pretty_assertions = "1.4.1"
+
+# ---------------------------------------------------------------------------------------------
+# Lints. Groups are `warn` here; the gate (`cargo gate`) runs clippy with `-D warnings`, so a
+# warning never reaches main. Restriction lints are opted in one by one.
+# ---------------------------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+unreachable_pub = "allow"                                         # binaries have many crate-level pub items; re-enable per crate
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+meta_variable_misuse = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+single_use_lifetimes = "warn"
+unnameable_types = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = [ "cfg(miri)" ] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# restriction: things that must never ship
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+unreachable = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+exit = "warn"
+mem_forget = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+unwrap_in_result = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+allow_attributes_without_reason = "warn"
+allow_attributes = "warn"
+str_to_string = "warn"
+
+clone_on_ref_ptr = "warn"
+rc_buffer = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+lossy_float_literal = "warn"
+float_cmp_const = "warn"
+verbose_file_reads = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+mixed_read_write_in_expression = "warn"
+same_name_method = "warn"
+semicolon_inside_block = "warn"
+tests_outside_test_module = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unseparated_literal_suffix = "warn"
+if_then_some_else_none = "warn"
+infinite_loop = "warn"
+large_include_file = "warn"
+missing_assert_message = "warn"
+renamed_function_params = "warn"
+redundant_type_annotations = "warn"
+ref_patterns = "warn"
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+map_err_ignore = "warn"
+non_zero_suggestions = "warn"
+pathbuf_init_then_push = "warn"
+partial_pub_fields = "warn"
+precedence_bits = "warn"
+string_lit_chars_any = "warn"
+suspicious_xor_used_as_pow = "warn"
+try_err = "warn"
+unused_result_ok = "warn"
+
+# Not enabled on purpose: `shadow_unrelated` (sequential test steps legitimately reuse names).
+
+# pedantic/nursery relief with reasons
+module_name_repetitions = "allow" # `grid::GridRow` is clearer than `grid::Row` at call sites
+missing_errors_doc = "allow"      # error enums are documented on the type
+missing_panics_doc = "allow"      # `panic` lint forbids panics; the doc would lie
+must_use_candidate = "allow"      # too noisy for builders; applied by hand where it matters
+cargo_common_metadata = "allow"   # publish = false
+multiple_crate_versions = "allow" # gated by cargo-deny instead
+similar_names = "allow"           # `rx`/`tx`, `cols`/`rows`
+struct_excessive_bools = "allow"  # config structs
+too_many_lines = "allow"          # judged in review
+option_if_let_else = "allow"      # nursery; frequently less readable
+future_not_send = "allow"         # GPUI is !Send by design
+
+[workspace.lints.rustdoc]
+all = { level = "warn", priority = -1 }
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "allow"
+
+# ---------------------------------------------------------------------------------------------
+# Profiles. `panic = "unwind"` everywhere: objc2 catches Objective-C exceptions by unwinding, and
+# `abort` would turn any of them into a process abort.
+# ---------------------------------------------------------------------------------------------
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+overflow-checks = true
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.test]
+inherits = "dev"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+strip = "none"
+overflow-checks = true
+
+# Shipping builds: symbols packed into dSYMs by xtask, then stripped.
+[profile.dist]
+inherits = "release"
+split-debuginfo = "packed"
+strip = "debuginfo"
+
+# Fast-starting per-event binaries (hook relay): size over throughput.
+[profile.tiny]
+inherits = "release"
+opt-level = "z"
+lto = "fat"

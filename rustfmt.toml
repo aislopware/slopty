@@ -1,0 +1,14 @@
+edition = "2024"
+style_edition = "2024"
+max_width = 100
+use_small_heuristics = "Max"
+newline_style = "Unix"
+# Nightly-only options below. `cargo xtask fmt` / the gate run `cargo +nightly fmt`; stable
+# rustfmt ignores them, so always format through xtask (setup installs nightly rustfmt).
+unstable_features = true
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+wrap_comments = true
+comment_width = 100
+format_code_in_doc_comments = true
+reorder_impl_items = true

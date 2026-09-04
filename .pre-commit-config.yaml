@@ -1,0 +1,21 @@
+# prek (pre-commit compatible). Fast checks only; `cargo gate` is the full bar.
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt (nightly)
+        entry: cargo +nightly fmt --all -- --check
+        language: system
+        pass_filenames: false
+        types: [rust]
+      - id: taplo
+        name: taplo
+        entry: taplo fmt --check
+        language: system
+        pass_filenames: false
+        types: [toml]
+      - id: typos
+        name: typos
+        entry: typos
+        language: system
+        pass_filenames: false

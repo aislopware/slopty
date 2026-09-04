@@ -1,0 +1,19 @@
+[package]
+name = "slopty-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Identifiers, clocks and small shared types for Slopty"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+
+
+[dev-dependencies]
+serde_json.workspace = true

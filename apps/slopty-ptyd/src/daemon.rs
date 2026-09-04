@@ -1,0 +1,295 @@
+//! Socket server: one task per connection, shared session table.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::os::fd::OwnedFd;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context as _, Result};
+use bytes::BytesMut;
+use parking_lot::Mutex;
+use slopty_core::SessionId;
+use slopty_proto::codec;
+use slopty_pty::fdpass;
+use slopty_pty::protocol::{PTYD_PROTOCOL, PtydEvent, PtydRequest};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::broadcast;
+
+use crate::session::{Broadcast, Session};
+
+/// Everything shared between connections.
+struct State {
+    sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
+    events: broadcast::Sender<Broadcast>,
+    backlog_bytes: usize,
+    next_conn: AtomicU64,
+    shutdown: tokio::sync::Notify,
+}
+
+/// Bind and serve until `Shutdown`.
+pub async fn run(socket: &Path, backlog_bytes: usize) -> Result<()> {
+    let listener = bind(socket).await?;
+    tracing::info!(path = %socket.display(), pid = std::process::id(), "slopty-ptyd listening");
+    let (events, _) = broadcast::channel(256);
+    let state = Arc::new(State {
+        sessions: Mutex::new(HashMap::new()),
+        events,
+        backlog_bytes,
+        next_conn: AtomicU64::new(1),
+        shutdown: tokio::sync::Notify::new(),
+    });
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.context("accept")?;
+                let st = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let id = st.next_conn.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = Connection::new(id, stream, st).serve().await {
+                        tracing::debug!(conn = id, error = %e, "connection ended");
+                    }
+                });
+            }
+            () = state.shutdown.notified() => break,
+        }
+    }
+
+    tracing::info!("shutting down: hanging up every session");
+    let sessions: Vec<Arc<Session>> = state.sessions.lock().values().cloned().collect();
+    for s in sessions {
+        let _ignored = s.signal(libc_sighup());
+    }
+    let _ignored = std::fs::remove_file(socket);
+    Ok(())
+}
+
+const fn libc_sighup() -> i32 {
+    1
+}
+
+/// Create the socket directory (0700) and bind, replacing a dead socket file.
+async fn bind(socket: &Path) -> Result<UnixListener> {
+    if let Some(dir) = socket.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        rustix::fs::chmod(dir, rustix::fs::Mode::RWXU)
+            .with_context(|| format!("chmod {}", dir.display()))?;
+    }
+    if socket.exists() {
+        if UnixStream::connect(socket).await.is_ok() {
+            anyhow::bail!("another slopty-ptyd is already listening on {}", socket.display());
+        }
+        tracing::warn!(path = %socket.display(), "removing stale socket");
+        std::fs::remove_file(socket).context("remove stale socket")?;
+    }
+    let listener =
+        UnixListener::bind(socket).with_context(|| format!("bind {}", socket.display()))?;
+    rustix::fs::chmod(socket, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+        .context("chmod socket")?;
+    Ok(listener)
+}
+
+struct Connection {
+    id: u64,
+    stream: UnixStream,
+    state: Arc<State>,
+    buf: BytesMut,
+    fds: VecDeque<OwnedFd>,
+    attached: HashSet<SessionId>,
+    greeted: bool,
+}
+
+impl Connection {
+    fn new(id: u64, stream: UnixStream, state: Arc<State>) -> Self {
+        Self {
+            id,
+            stream,
+            state,
+            buf: BytesMut::with_capacity(64 << 10),
+            fds: VecDeque::new(),
+            attached: HashSet::new(),
+            greeted: false,
+        }
+    }
+
+    async fn serve(mut self) -> Result<()> {
+        let mut events = self.state.events.subscribe();
+        let result = loop {
+            tokio::select! {
+                read = fdpass::recv(&self.stream, &mut self.buf, &mut self.fds) => {
+                    match read {
+                        Ok(0) => break Ok(()),
+                        Ok(_) => {}
+                        Err(e) => break Err(e.into()),
+                    }
+                    // Stray fds from a client are closed on drop; we never expect any.
+                    self.fds.clear();
+                    loop {
+                        let req = match codec::try_decode::<PtydRequest>(&mut self.buf) {
+                            Ok(Some(req)) => req,
+                            Ok(None) => break,
+                            Err(e) => return Err(e.into()),
+                        };
+                        if let Err(e) = self.handle(req).await {
+                            tracing::debug!(conn = self.id, error = %e, "request failed");
+                            return Err(e);
+                        }
+                    }
+                }
+                ev = events.recv() => match ev {
+                    Ok(Broadcast::Exited { id, status }) => {
+                        self.reply(&PtydEvent::Exited { id, status }, None).await?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(conn = self.id, lagged = n, "event stream lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                },
+            }
+        };
+        // Whatever we held goes back to ptyd's care.
+        for id in std::mem::take(&mut self.attached) {
+            let session = self.state.sessions.lock().get(&id).cloned();
+            if let Some(s) = session {
+                *s.attached_by.lock() = None;
+                s.resume_reader();
+            }
+        }
+        result
+    }
+
+    async fn reply(&self, ev: &PtydEvent, fd: Option<std::os::fd::BorrowedFd<'_>>) -> Result<()> {
+        let frame = codec::encode(ev)?;
+        fdpass::send(&self.stream, &frame, fd).await?;
+        Ok(())
+    }
+
+    async fn error(&self, id: Option<SessionId>, message: impl Into<String>) -> Result<()> {
+        self.reply(&PtydEvent::Error { id, message: message.into() }, None).await
+    }
+
+    fn session(&self, id: SessionId) -> Option<Arc<Session>> {
+        self.state.sessions.lock().get(&id).cloned()
+    }
+
+    async fn handle(&mut self, req: PtydRequest) -> Result<()> {
+        if !self.greeted {
+            return match req {
+                PtydRequest::Hello { protocol } if protocol == PTYD_PROTOCOL => {
+                    self.greeted = true;
+                    self.reply(
+                        &PtydEvent::Hello { protocol: PTYD_PROTOCOL, pid: std::process::id() },
+                        None,
+                    )
+                    .await
+                }
+                PtydRequest::Hello { protocol } => {
+                    self.reply(
+                        &PtydEvent::Hello { protocol: PTYD_PROTOCOL, pid: std::process::id() },
+                        None,
+                    )
+                    .await?;
+                    anyhow::bail!("protocol mismatch: client {protocol}, ours {PTYD_PROTOCOL}")
+                }
+                _ => anyhow::bail!("first message must be Hello"),
+            };
+        }
+        match req {
+            PtydRequest::Hello { .. } => self.error(None, "already greeted").await,
+            PtydRequest::Spawn { id, spec } => {
+                if self.session(id).is_some() {
+                    return self.error(Some(id), "session id already exists").await;
+                }
+                match Session::spawn(id, &spec, self.state.backlog_bytes, self.state.events.clone())
+                {
+                    Ok(session) => {
+                        let pid = session.pid;
+                        tracing::info!(session = %id, pid, tty = %session.tty.display(), "spawned");
+                        self.state.sessions.lock().insert(id, session);
+                        self.reply(&PtydEvent::Spawned { id, pid }, None).await
+                    }
+                    Err(e) => self.error(Some(id), e.to_string()).await,
+                }
+            }
+            PtydRequest::Attach { id } => {
+                let Some(session) = self.session(id) else {
+                    return self.error(Some(id), "no such session").await;
+                };
+                let claimed = {
+                    let mut holder = session.attached_by.lock();
+                    match *holder {
+                        Some(other) if other != self.id => false,
+                        _ => {
+                            *holder = Some(self.id);
+                            true
+                        }
+                    }
+                };
+                if !claimed {
+                    return self.error(Some(id), "attached by another connection").await;
+                }
+                let (backlog, dropped) = session.pause_reader().await;
+                self.attached.insert(id);
+                let size = *session.size.lock();
+                let ev = PtydEvent::Attached { id, backlog, dropped, size };
+                self.reply(&ev, Some(session.master_fd())).await
+            }
+            PtydRequest::Detach { id } => {
+                let Some(session) = self.session(id) else {
+                    return self.error(Some(id), "no such session").await;
+                };
+                if self.attached.remove(&id) {
+                    *session.attached_by.lock() = None;
+                    session.resume_reader();
+                }
+                self.reply(&PtydEvent::Ok, None).await
+            }
+            PtydRequest::Resize { id, size } => {
+                let Some(session) = self.session(id) else {
+                    return self.error(Some(id), "no such session").await;
+                };
+                *session.size.lock() = size;
+                match slopty_pty::pty::set_size(session.master_fd(), size) {
+                    Ok(()) => self.reply(&PtydEvent::Ok, None).await,
+                    Err(e) => self.error(Some(id), e.to_string()).await,
+                }
+            }
+            PtydRequest::Signal { id, signal } => {
+                let Some(session) = self.session(id) else {
+                    return self.error(Some(id), "no such session").await;
+                };
+                match session.signal(signal) {
+                    Ok(()) => self.reply(&PtydEvent::Ok, None).await,
+                    Err(e) => self.error(Some(id), e.to_string()).await,
+                }
+            }
+            PtydRequest::Close { id } => {
+                let Some(session) = self.state.sessions.lock().remove(&id) else {
+                    return self.error(Some(id), "no such session").await;
+                };
+                self.attached.remove(&id);
+                if session.exited.lock().is_none() {
+                    let _hup = session.signal(libc_sighup());
+                    let s = Arc::clone(&session);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        if s.exited.lock().is_none() {
+                            let _kill = s.signal(9);
+                        }
+                    });
+                }
+                self.reply(&PtydEvent::Ok, None).await
+            }
+            PtydRequest::List => {
+                let list = self.state.sessions.lock().values().map(|s| s.info()).collect();
+                self.reply(&PtydEvent::Sessions(list), None).await
+            }
+            PtydRequest::Shutdown => {
+                self.reply(&PtydEvent::Ok, None).await?;
+                self.state.shutdown.notify_one();
+                Ok(())
+            }
+        }
+    }
+}

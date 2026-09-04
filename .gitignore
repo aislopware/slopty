@@ -1,0 +1,13 @@
+/target
+/.research
+/vendor/ghostty/zig-out
+/vendor/ghostty/.zig-cache
+*.dSYM
+.DS_Store
+/apps/slopty-ios/xcode/*.xcodeproj
+/apps/slopty-ios/xcode/*.xcframework
+/apps/slopty-ios/xcode/build
+.idea/
+.vscode/
+*.profraw
+/mutants.out*
