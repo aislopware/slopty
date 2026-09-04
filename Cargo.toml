@@ -23,6 +23,8 @@ slopty-proto = { path = "crates/slopty-proto" }
 slopty-grid = { path = "crates/slopty-grid" }
 slopty-engine = { path = "crates/slopty-engine" }
 slopty-pty = { path = "crates/slopty-pty" }
+slopty-host = { path = "crates/slopty-host" }
+slopty-net = { path = "crates/slopty-net" }
 
 # core
 anyhow = "1.0.104"
@@ -74,6 +76,14 @@ nix = { version = "0.31.3", features = [
     "socket",
     "uio",
 ] }
+
+# networking. iroh 1.x runs on n0's own QUIC stack (noq), not quinn. Default features include
+# `fast-apple-datapath` (dlsym of private `sendmsg_x`/`recvmsg_x`): fine for the Developer-ID host,
+# never for the App Store client, so it is a slopty-net feature the macOS apps opt into.
+iroh = { version = "1.1.0", default-features = false, features = [ "tls-ring" ] }
+iroh-mdns-address-lookup = "0.5.0"
+iroh-tickets = "1.0.0"
+data-encoding = "2.11.1"
 
 # terminal engine
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "5988a0b7" }

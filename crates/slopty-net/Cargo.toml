@@ -1,0 +1,37 @@
+[package]
+name = "slopty-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty transport: iroh endpoint, pairing/trust, framed control and session streams"
+
+[lints]
+workspace = true
+
+[features]
+default = [  ]
+# dlsym of Apple's private `sendmsg_x`/`recvmsg_x` for batched UDP. Host (Developer ID) only;
+# never in the App Store client.
+apple-fast-datapath = [ "iroh/fast-apple-datapath" ]
+# mDNS advertisement + lookup on the local network.
+mdns = [ "dep:iroh-mdns-address-lookup" ]
+
+[dependencies]
+bytes.workspace = true
+data-encoding.workspace = true
+iroh.workspace = true
+iroh-mdns-address-lookup = { workspace = true, optional = true }
+iroh-tickets.workspace = true
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slopty-core.workspace = true
+slopty-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -35,7 +35,10 @@ allow = [
     "Unlicense",
 ]
 confidence-threshold = 0.8
-exceptions = [  ]
+exceptions = [
+    # Mozilla's CA bundle as data; permissive, data-only licence.
+    { allow = [ "CDLA-Permissive-2.0" ], crate = "webpki-roots" },
+]
 
 [licenses.private]
 ignore = true

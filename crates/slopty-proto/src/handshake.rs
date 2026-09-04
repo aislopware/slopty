@@ -54,6 +54,9 @@ pub struct Hello {
     pub app_version: String,
     /// Features.
     pub caps: Caps,
+    /// One-time pairing token from the host's pairing ticket. Present on the first connection
+    /// only; afterwards the transport identity (the client's endpoint key) is the credential.
+    pub pair_token: Option<[u8; 32]>,
 }
 
 /// Host's acceptance.

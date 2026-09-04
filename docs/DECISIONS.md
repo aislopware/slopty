@@ -69,14 +69,29 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 
 ## Transport
 
-- ✅ **iroh 1.1.0** (verified crates.io 2026-08-25). QUIC via quinn underneath: streams for
-  control/terminal, unreliable datagrams for media, connection migration for Wi-Fi↔cellular,
-  hole punching + relay fallback, E2E encryption keyed by node identity. Local discovery via
-  iroh's mDNS feature; pairing by QR/short code.
+- ✅ **iroh 1.1.0** (verified from source in the cargo registry 2026-09-04). QUIC via n0's own
+  `noq` 1.2.0 underneath (a quinn fork; **not** the `quinn` crate, so quinn docs/types do not
+  apply): streams for control/terminal, unreliable datagrams for media, connection migration for
+  Wi-Fi↔cellular, hole punching + relay fallback, E2E encryption keyed by endpoint identity.
   Rejected: slop-desk's raw UDP + "the WireGuard mesh is the security boundary" (phone-anywhere
   needs app-level auth); WebRTC (ICE/SDP dead weight); MoQ (relay/pub-sub shape).
-- 🔬 **quinn congestion controller: Cubic**, not BBR (quinn marks BBR experimental). Media path
-  runs its own delay-gradient bitrate controller on top.
+- ✅ **Default features off.** `default-features = false, features = ["tls-ring"]`. iroh's default
+  set includes `fast-apple-datapath` (dlsym of private `sendmsg_x`/`recvmsg_x`), which is fine for
+  the Developer-ID host daemon and a review risk for the App Store client, so it is exposed as
+  the `slopty-net/apple-fast-datapath` feature and only `slopty-hostd` turns it on.
+- ✅ **LAN discovery** is a separate crate, `iroh-mdns-address-lookup` 0.5.0 (there is no
+  `discovery-local-network` feature in iroh 1.x). Behind `slopty-net/mdns`; hosts advertise,
+  clients only look up. Wide-area lookup is iroh's `presets::N0` (DNS + pkarr on n0's infra).
+- ✅ **Pairing**: `PairTicket { addr, token }` (`iroh-tickets` 1.0.0, base32 string, kind
+  `sloptypair`), token single-use with a 10-minute TTL. On redeem the host trusts the client's
+  endpoint key in `trust.json` (mode 0600); afterwards the QUIC handshake is the whole
+  authentication and `Hello.pair_token` stays `None`. Rejections are sent then linger up to 2 s
+  so the client reads `Rejected` before the connection closes (QUIC close discards unread data).
+- ✅ **One connection per client**: bidi control stream opened by the client; one uni stream per
+  attached session opened by the host, first message `StreamHeader { session }`; datagrams for
+  media. Transport config: idle 45 s, keep-alive 5 s, 4 MiB datagram buffers.
+- 🔬 **Congestion controller**: noq default (Cubic). Media path runs its own delay-gradient
+  bitrate controller on top; revisit BBR once noq marks it stable.
 
 ## Video
 
@@ -127,6 +142,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ nextest 0.9.143 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
   cargo-deny 0.20.2 · cargo-shear 1.13.4 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
   typos 1.50.1 · taplo 0.10 · prek 0.5.2 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
+- ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message (commit-msg
+  hook via prek, and `cargo gate` over the range since the last tag); `git-cliff` 2.14.1 computes
+  the next version (`--bumped-version`, pre-1.0 rules: breaking → minor, feat → patch) and writes
+  `CHANGELOG.md`; `cargo xtask release` glues them and tags `vX.Y.Z`. Rejected: cocogitto
+  (last release 2026-03, overlaps both), release-plz / cargo-release (crates.io-centric; nothing
+  here is published).
 - ✅ Miri only for pure crates (cannot cross objc2 FFI); cargo-careful + ASan/TSan nightly lane for
   the rest; `leaks --atExit` for framework wrappers (Valgrind does not exist on Apple silicon).
 - ✅ No mold/lld on macOS (Apple's ld-prime is competitive; mold's Mach-O port is commercial).

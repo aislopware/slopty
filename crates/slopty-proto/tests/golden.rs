@@ -40,6 +40,7 @@ mod golden {
                 name: "iPad".to_owned(),
                 app_version: "0.1.0".to_owned(),
                 caps: Caps::HEVC | Caps::OPUS | Caps::PREDICTION,
+                pair_token: None,
             }),
         );
     }

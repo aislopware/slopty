@@ -19,3 +19,8 @@ repos:
         entry: typos
         language: system
         pass_filenames: false
+      - id: committed
+        name: committed (conventional commit message)
+        entry: committed --commit-file
+        language: system
+        stages: [commit-msg]

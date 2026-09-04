@@ -30,6 +30,14 @@ use slopty_core::SessionId;
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// First message on every host → client session stream, naming the session whose
+/// [`terminal::TermEvent`]s follow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct StreamHeader {
+    /// The session.
+    pub session: SessionId,
+}
+
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
