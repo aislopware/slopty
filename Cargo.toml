@@ -27,6 +27,7 @@ slopty-host = { path = "crates/slopty-host" }
 slopty-net = { path = "crates/slopty-net" }
 slopty-client = { path = "crates/slopty-client" }
 slopty-predict = { path = "crates/slopty-predict" }
+slopty-codec = { path = "crates/slopty-codec" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
 
@@ -91,6 +92,84 @@ data-encoding = "2.11.1"
 
 # media: systematic Reed–Solomon over GF(2^16) with NEON; parity per video frame
 reed-solomon-simd = "3.1.0"
+
+# Apple frameworks (objc2 family, pinned exact; see the note above). Feature lists are trimmed
+# to the headers each crate needs so the generated surface stays small.
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSError",
+    "NSString",
+    "NSObject",
+    "NSEnumerator",
+] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFBase",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFCGTypes",
+] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMTime",
+    "CMSampleBuffer",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMAttachment",
+    "CMSync",
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferIOSurface",
+    "CVReturn",
+    "objc2-core-graphics",
+] }
+objc2-video-toolbox = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "VTBase",
+    "VTSession",
+    "VTErrors",
+    "VTCompressionSession",
+    "VTCompressionProperties",
+    "VTDecompressionSession",
+    "VTDecompressionProperties",
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "SCStream",
+    "SCShareableContent",
+    "SCError",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGBase",
+    "CGGeometry",
+    "CGDirectDisplay",
+    "CGWindow",
+    "CGEvent",
+    "CGEventTypes",
+    "CGEventSource",
+    "CGError",
+] }
+block2 = "=0.6.2"
+dispatch2 = "=0.3.1"
 
 # UI. GPUI from our zed fork (branch `slopty` = zed@801c087, the commit gpui-kit's gpui-pre 0.3.1
 # snapshots) and gpui-kit from our fork (v0.6.0 + one commit pointing it at the zed fork). Both

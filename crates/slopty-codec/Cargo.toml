@@ -1,0 +1,29 @@
+[package]
+name = "slopty-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "VideoToolbox HEVC/H.264 encode (macOS) and decode (macOS, iOS) with Annex B framing"
+
+[lints]
+workspace = true
+
+[dependencies]
+slopty-proto.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-core-foundation.workspace = true
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+objc2-video-toolbox.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation.workspace = true
+objc2-core-video.workspace = true
