@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use slopty_agent::Hook;
 use slopty_host::ctl::{CtlReply, CtlRequest, PairedSummary};
+use slopty_proto::HostMsg;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -85,6 +87,21 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
                 }
             }
             Err(e) => CtlReply::Error { message: format!("bad endpoint id: {e}") },
+        },
+        CtlRequest::Hook { session, payload } => match Hook::parse(&payload) {
+            Ok(hook) => {
+                if daemon.host.get(session).is_err() {
+                    return CtlReply::Error { message: "no such session".to_owned() };
+                }
+                let event = daemon.agents.lock().apply(session, &hook);
+                let changed = event.is_some();
+                if let Some(event) = event {
+                    tracing::debug!(%session, status = ?event.status, "agent");
+                    let _sent = daemon.events.send(HostMsg::Agent(event));
+                }
+                CtlReply::Ok { changed }
+            }
+            Err(e) => CtlReply::Error { message: format!("bad hook payload: {e}") },
         },
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "slopty-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty agent tracking: Claude Code hook events → per-session agent status"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+slopty-core.workspace = true
+slopty-proto.workspace = true

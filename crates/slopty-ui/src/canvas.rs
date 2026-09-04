@@ -20,6 +20,7 @@ use gpui::{
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
@@ -103,6 +104,8 @@ pub enum CanvasEvent {
     Zoom(f32),
     /// A terminal rang its bell.
     Bell(SessionId),
+    /// A coding agent in this session needs the human (permission, question, finished turn).
+    Attention(SessionId),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -121,6 +124,8 @@ pub struct CanvasView {
     theme: Theme,
     terminals: HashMap<SessionId, Entity<TerminalView>>,
     sessions: HashMap<SessionId, SessionSummary>,
+    /// Coding agents the host has observed, by session.
+    agents: HashMap<SessionId, AgentEvent>,
     screens: HashMap<ItemId, Entity<ScreenView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
@@ -185,6 +190,7 @@ impl CanvasView {
             theme,
             terminals: HashMap::new(),
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
+            agents: HashMap::new(),
             screens: HashMap::new(),
             pending_opens: HashMap::new(),
             titles_requested: false,
@@ -264,7 +270,23 @@ impl CanvasView {
     /// A session is gone.
     pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.sessions.remove(&session);
+        self.agents.remove(&session);
         self.reconcile(cx);
+        cx.notify();
+    }
+
+    /// The host observed a coding agent's state in a session.
+    pub fn agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+        let session = event.session;
+        if event.status == AgentStatus::None {
+            self.agents.remove(&session);
+        } else {
+            let attention = event.attention;
+            self.agents.insert(session, event);
+            if attention {
+                cx.emit(CanvasEvent::Attention(session));
+            }
+        }
         cx.notify();
     }
 
@@ -798,7 +820,21 @@ impl CanvasView {
             }
             ItemKind::Note { .. } => ("note".to_owned(), false),
         };
-        let border = if focused || active { theme.surfaces.accent } else { theme.surfaces.border };
+        let agent = match item.kind {
+            ItemKind::Terminal { session } => self.agents.get(&session),
+            _ => None,
+        };
+        let badge = agent.map(|a| agent_badge(a, theme, ui_size));
+        let needs_human = agent.is_some_and(
+            |a| matches!(&a.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt),
+        );
+        let border = if needs_human {
+            theme.terminal.palette(3)
+        } else if focused || active {
+            theme.surfaces.accent
+        } else {
+            theme.surfaces.border
+        };
 
         let title_bar = div()
             .id(element_id("title", id))
@@ -825,7 +861,10 @@ impl CanvasView {
                     0.9,
                 ),
             ))
-            .child(SharedString::from(title));
+            .child(
+                div().flex_1().overflow_hidden().text_ellipsis().child(SharedString::from(title)),
+            )
+            .when_some(badge, gpui::ParentElement::child);
 
         let body: gpui::AnyElement = match item.kind {
             ItemKind::Terminal { session } => match (card, self.terminals.get(&session)) {
@@ -1027,4 +1066,46 @@ impl Render for CanvasView {
                 )
             })
     }
+}
+
+/// The agent pill in a terminal's title bar: a coloured dot and a short word or the detail.
+fn agent_badge(agent: &AgentEvent, theme: &Theme, ui_size: f32) -> gpui::AnyElement {
+    let (label, color) = match &agent.status {
+        AgentStatus::None => return div().into_any_element(),
+        AgentStatus::Idle => ("claude".to_owned(), theme.surfaces.text_muted),
+        AgentStatus::Working => ("working".to_owned(), theme.surfaces.accent),
+        AgentStatus::Tool { tool } => {
+            (agent.detail.clone().unwrap_or_else(|| tool.clone()), theme.terminal.palette(6))
+        }
+        AgentStatus::Blocked(BlockReason::Permission { tool }) => {
+            let what = agent.detail.clone().unwrap_or_else(|| tool.clone());
+            (format!("allow? {what}"), theme.terminal.palette(3))
+        }
+        AgentStatus::Blocked(BlockReason::Question) => {
+            ("asking you".to_owned(), theme.terminal.palette(3))
+        }
+        AgentStatus::Blocked(BlockReason::Elicitation) => {
+            ("needs input".to_owned(), theme.terminal.palette(3))
+        }
+        AgentStatus::Blocked(BlockReason::IdlePrompt) => {
+            ("idle".to_owned(), theme.surfaces.text_muted)
+        }
+        AgentStatus::Done => ("done".to_owned(), theme.terminal.palette(2)),
+    };
+    div()
+        .flex()
+        .items_center()
+        .flex_none()
+        .max_w(px(ui_size * 22.0))
+        .overflow_hidden()
+        .gap(px(ui_size * 0.4))
+        .px(px(ui_size * 0.5))
+        .py(px(ui_size * 0.1))
+        .rounded(px(ui_size * 0.5))
+        .bg(hsla_alpha(color, 0.12))
+        .text_size(px(ui_size * 0.9))
+        .text_color(hsla(color))
+        .child(div().flex_none().size(px(ui_size * 0.5)).rounded_full().bg(hsla(color)))
+        .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)))
+        .into_any_element()
 }

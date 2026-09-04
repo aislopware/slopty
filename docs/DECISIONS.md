@@ -397,5 +397,20 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 
 - ✅ Hooks are the authoritative signal (33 events as of 2026-09; we register the status-bearing
   subset), transcript JSONL is read-only context, screen heuristics corroborate only.
+- ✅ Relay path (verified 2026-09-04 with Claude Code 2.1.260 running `-p` inside a Slopty
+  shell): `slopty hook install` registers `{"command": "<abs slopty>", "args": ["hook"],
+  "async": true, "timeout": 5}` for 12 events (`SessionStart/End`, `UserPromptSubmit`,
+  `Pre/PostToolUse`, `PostToolUseFailure`, `PermissionRequest/Denied`, `Notification`,
+  `Elicitation/Result`, `Stop`) in `~/.claude/settings.json` (or `--settings`). Exec form
+  (no shell) and `async` so the agent never waits on us. The relay reads `SLOPTY_SESSION` and
+  `SLOPTY_HOSTD_SOCKET`, both injected by the host into every session's environment, posts
+  `CtlRequest::Hook` and exits 0 whatever happens. `slopty-agent::Tracker` maps hooks to
+  `AgentStatus`; `AgentEvent.attention` is true only on entering a blocked state or `Done`,
+  so the permission `Notification` that follows a `PermissionRequest` does not alert twice.
+  Joining clients get the current table after the canvas snapshot (no proto change: `HostMsg::Agent`
+  already existed). Observed cycle: Idle → Working → Tool{Bash} → Working → Done → None.
+- 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
+  did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
+  transcript tail could recover the rest. Not built.
 - ⏸ ACP via `agent-client-protocol` 2.0.0 + `@agentclientprotocol/claude-agent-acp` for structured
   driving — after the PTY path works.

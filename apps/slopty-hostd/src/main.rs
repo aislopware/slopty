@@ -10,9 +10,11 @@ mod ctl;
 mod paths;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
+use slopty_agent::AgentTable;
 use slopty_core::HostId;
 use slopty_host::{CanvasStore, Host};
 use slopty_net::Reach;
@@ -58,6 +60,8 @@ pub struct Daemon {
     pub events: broadcast::Sender<slopty_proto::HostMsg>,
     /// The canvas document.
     pub canvas: CanvasStore,
+    /// Coding agents observed in sessions (fed by `slopty hook` over the control socket).
+    pub agents: Arc<parking_lot::Mutex<AgentTable>>,
 }
 
 #[tokio::main]
@@ -86,7 +90,15 @@ async fn main() -> Result<()> {
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
-    let daemon = Daemon { host, listener, id, name: paths::host_name(), events, canvas };
+    let daemon = Daemon {
+        host,
+        listener,
+        id,
+        name: paths::host_name(),
+        events,
+        canvas,
+        agents: Arc::default(),
+    };
 
     if let Some(mut exits) = daemon.host.take_exits() {
         let host = daemon.host.clone();
@@ -99,6 +111,11 @@ async fn main() -> Result<()> {
     }
 
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
+    // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket.
+    daemon.host.set_session_env(vec![(
+        "SLOPTY_HOSTD_SOCKET".to_owned(),
+        ctl_path.to_string_lossy().into_owned(),
+    )]);
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
     daemon.listener.online().await;

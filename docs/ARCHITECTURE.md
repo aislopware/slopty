@@ -115,10 +115,18 @@ the source of truth for what is being streamed.
 ## 5. Agents
 
 Claude Code only, for now. Signals in precedence order: hooks (delivered to `slopty-hostd` over
-a Unix socket by the `slopty` CLI acting as hook relay) → JSONL transcript tail → terminal
-title/OSC → foreground-process presence. One state machine per session, ledger keyed by
-`tool_use_id`, asymmetric dissent watchdog. Later: ACP (`agent-client-protocol`) for structured
-control.
+its control socket by `slopty hook`, the relay Claude Code runs for each event) → JSONL
+transcript tail → terminal title/OSC → foreground-process presence. Only the first is built.
+
+The host spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_HOSTD_SOCKET=<path>`;
+the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
+exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
+`AgentStatus` (`Idle`, `Working`, `Tool`, `Blocked{Permission|Question|Elicitation|IdlePrompt}`,
+`Done`) and flags `attention` on the transitions worth a sound. The daemon broadcasts each
+change as `HostMsg::Agent` and replays the table to joining clients. The canvas shows the status
+as a pill in the terminal's title bar and outlines the item when the agent needs the human.
+`slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`.
+Later: ACP (`agent-client-protocol`) for structured control.
 
 ## 6. UI
 
@@ -156,7 +164,7 @@ way the CLI does and the connect loop resumes.
 | `slopty-capture` | ScreenCaptureKit | host |
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |
 | `slopty-input` | CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) | host |
-| `slopty-agent` | Claude Code hooks/JSONL state machine | host |
+| `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | host |
 | `slopty-host` | session manager, mux, fan-out | host |
 | `slopty-client` | client session state, canvas document | client |
 | `slopty-theme` | design tokens | client |

@@ -56,6 +56,10 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
     out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
+    let agents = daemon.agents.lock().snapshot();
+    for event in agents {
+        out.send(HostMsg::Agent(event)).await.map_err(|_gone| NetError::Closed)?;
+    }
 
     let mut events = daemon.events.subscribe();
     let (datagrams, datagram_rx) = mpsc::channel::<Bytes>(DATAGRAM_QUEUE);
@@ -335,6 +339,7 @@ impl Peer<'_> {
                 self.forget(session);
                 match self.daemon.host.close(session).await {
                     Ok(()) => {
+                        self.daemon.agents.lock().forget(session);
                         let reason = CloseReason::Requested;
                         let _sent =
                             self.daemon.events.send(HostMsg::SessionClosed { session, reason });

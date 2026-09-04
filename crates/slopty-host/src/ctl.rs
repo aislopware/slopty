@@ -2,7 +2,7 @@
 //! over a Unix socket, one request and one reply per connection.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::ClientId;
+use slopty_core::{ClientId, SessionId};
 use slopty_proto::terminal::SessionSummary;
 
 /// CLI → daemon.
@@ -19,6 +19,13 @@ pub enum CtlRequest {
     Revoke {
         /// Endpoint id (hex).
         endpoint: String,
+    },
+    /// A coding-agent hook fired inside a session (relayed by `slopty hook`).
+    Hook {
+        /// The session the hook ran in (`SLOPTY_SESSION`).
+        session: SessionId,
+        /// The hook's stdin, verbatim JSON.
+        payload: String,
     },
 }
 

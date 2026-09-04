@@ -19,6 +19,7 @@ anyhow.workspace = true
 clap.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
+slopty-agent.workspace = true
 slopty-capture.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true

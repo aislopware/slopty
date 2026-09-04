@@ -7888,6 +7888,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopty-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "slopty-core",
+ "slopty-proto",
+]
+
+[[package]]
 name = "slopty-app"
 version = "0.1.0"
 dependencies = [
@@ -7932,6 +7942,7 @@ dependencies = [
  "clap",
  "rustix",
  "serde_json",
+ "slopty-agent",
  "slopty-capture",
  "slopty-client",
  "slopty-core",
@@ -8039,7 +8050,9 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "parking_lot",
  "serde_json",
+ "slopty-agent",
  "slopty-capture",
  "slopty-client",
  "slopty-core",

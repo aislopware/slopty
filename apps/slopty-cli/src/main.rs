@@ -1,6 +1,7 @@
 //! `slopty` — the command-line face of Slopty.
 //!
 //! * `slopty host …` talks to the local `slopty-hostd` over its control socket.
+//! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
 //! * `slopty pair <ticket>` pairs this machine with a host.
 //! * `slopty sessions|open|attach` are a real client over iroh: a raw-mode terminal that renders
 //!   frames locally. It is the reference client for latency measurements and works before (and
@@ -11,6 +12,7 @@
 mod attach;
 mod bench;
 mod client;
+mod hook;
 mod hostctl;
 
 use std::path::PathBuf;
@@ -35,6 +37,11 @@ enum Cmd {
     Host {
         #[command(subcommand)]
         cmd: hostctl::HostCmd,
+    },
+    /// Claude Code hook relay: forwards the hook on stdin to the host daemon (exits 0 always).
+    Hook {
+        #[command(subcommand)]
+        cmd: Option<hook::HookCmd>,
     },
     /// Pair with a host using the ticket it printed.
     Pair {
@@ -135,6 +142,11 @@ async fn main() -> Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
     match cli.cmd {
         Cmd::Host { cmd } => hostctl::run(cmd).await,
+        Cmd::Hook { cmd: None } => {
+            hook::relay().await;
+            Ok(())
+        }
+        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd),
         Cmd::Pair { ticket } => client::pair(&data_dir, &ticket).await,
         Cmd::Hosts => client::hosts(&data_dir),
         Cmd::Forget { host } => client::forget(&data_dir, &host),

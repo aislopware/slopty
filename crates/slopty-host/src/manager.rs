@@ -23,6 +23,9 @@ struct Entry {
     exited: Option<i32>,
 }
 
+/// Environment variable naming the session a process runs in (its [`SessionId`]).
+pub const SESSION_ENV: &str = "SLOPTY_SESSION";
+
 /// The host's session table. Cheap to clone; shared by every connection handler.
 #[derive(Clone)]
 pub struct Host {
@@ -33,6 +36,8 @@ struct Inner {
     ptyd: tokio::sync::Mutex<PtydClient>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
     exits: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, i32)>>>,
+    /// Environment every session gets on top of the request's (`SLOPTY_HOSTD_SOCKET`).
+    session_env: Mutex<Vec<(String, String)>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -53,6 +58,7 @@ impl Host {
                 ptyd: tokio::sync::Mutex::new(client),
                 sessions: Mutex::new(HashMap::new()),
                 exits: Mutex::new(Some(exits)),
+                session_env: Mutex::new(Vec::new()),
             }),
         };
         for info in existing {
@@ -77,13 +83,24 @@ impl Host {
         }
     }
 
+    /// Environment variables every future session is spawned with, in addition to the
+    /// request's. The daemon uses this to tell sessions where its control socket is.
+    pub fn set_session_env(&self, env: Vec<(String, String)>) {
+        *self.inner.session_env.lock() = env;
+    }
+
     /// Create a session.
     pub async fn open(&self, req: &OpenSession) -> Result<SessionHandle, HostError> {
         let id = SessionId::new();
+        // Programs in the session (the `slopty hook` relay above all) learn which session they
+        // run in from the environment.
+        let mut env = self.inner.session_env.lock().clone();
+        env.extend(req.env.iter().cloned());
+        env.push((SESSION_ENV.to_owned(), id.to_string()));
         let spec = SpawnSpec {
             command: req.command.clone(),
             cwd: req.cwd.clone().map(PathBuf::from),
-            env: req.env.clone(),
+            env,
             size: req.size,
         };
         self.inner.ptyd.lock().await.spawn(id, spec).await?;

@@ -467,6 +467,9 @@ pub fn open_workspace(
                     LinkEvent::Control(HostMsg::Screen(event)) => {
                         canvas.update(cx, |c, cx| c.screen_event(event, cx));
                     }
+                    LinkEvent::Control(HostMsg::Agent(event)) => {
+                        canvas.update(cx, |c, cx| c.agent_event(event, cx));
+                    }
                     LinkEvent::Control(_) => {}
                     LinkEvent::Disconnected(why) => {
                         workspace.update(cx, |ws, cx| {

@@ -57,7 +57,7 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
     Ok(())
 }
 
-async fn call(req: CtlRequest) -> Result<CtlReply> {
+pub async fn call(req: CtlRequest) -> Result<CtlReply> {
     let path = socket();
     let stream = UnixStream::connect(&path)
         .await

@@ -35,6 +35,7 @@ slopty-platform = { path = "crates/slopty-platform" }
 slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
+slopty-agent = { path = "crates/slopty-agent" }
 
 # core
 anyhow = "1.0.104"
