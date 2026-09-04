@@ -8,11 +8,12 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use rustix::termios::{self, OptionalActions, Termios};
+use slopty_client::{Effect, HostLink, LinkEvent, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{Color, Line, Style, StyleFlags, Underline};
 use slopty_net::{ClientMsg, HostMsg};
 use slopty_proto::input::CellMetrics;
-use slopty_proto::terminal::{Frame, OpenSession, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{CloseReason, OpenSession, TermEvent, TermRequest, TermSize};
 
 use crate::client::{Session, connect_to};
 
@@ -108,35 +109,56 @@ fn enter_raw() -> Result<RawGuard> {
     Ok(RawGuard(saved))
 }
 
-async fn run(mut session: Session, id: SessionId) -> Result<()> {
-    let (header, mut events) = session.conn.accept_session_stream().await?;
-    if header.session != id {
-        bail!("host opened a stream for another session");
-    }
+async fn run(session: Session, id: SessionId) -> Result<()> {
+    let Session { conn, endpoint } = session;
+    let size = local_size()?;
+    let mut link = HostLink::start(conn);
+    let mut events = link.events().context("events taken")?;
+    let mut state = TermState::new(size);
     let raw = enter_raw()?;
     let mut stdin = tokio::io::stdin();
     let mut input = vec![0_u8; 4096];
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
-    let mut frames: u64 = 0;
     let outcome: Result<&'static str> = loop {
         tokio::select! {
             ev = events.recv() => match ev {
-                Ok(TermEvent::Frame(frame)) => {
-                    frames = frames.saturating_add(1);
-                    paint(&frame)?;
+                Some(LinkEvent::Term { session, event }) if session == id => {
+                    let mut done = None;
+                    for effect in state.apply(event) {
+                        match effect {
+                            Effect::Request(req) => {
+                                link.send(ClientMsg::Term { session: id, req }).await?;
+                            }
+                            Effect::Bell => {
+                                let mut out = std::io::stdout();
+                                out.write_all(b"\x07")?;
+                                out.flush()?;
+                            }
+                            Effect::Exited(status) => {
+                                done = Some(if status == 0 { "exited" } else { "exited with error" });
+                            }
+                            Effect::Error(e) => tracing::warn!(error = %e, "host error"),
+                            Effect::Title(_)
+                            | Effect::Cwd(_)
+                            | Effect::ClipboardWrite(_)
+                            | Effect::ClipboardReadRequest => {}
+                        }
+                    }
+                    paint(&state)?;
+                    if let Some(why) = done {
+                        break Ok(why);
+                    }
                 }
-                Ok(TermEvent::Bell) => {
-                    let mut out = std::io::stdout();
-                    out.write_all(b"\x07")?;
-                    out.flush()?;
+                Some(LinkEvent::Control(HostMsg::SessionClosed { session, reason })) if session == id => {
+                    break Ok(match reason {
+                        CloseReason::Requested => "closed",
+                        CloseReason::Exited => "exited",
+                        CloseReason::HostShutdown => "host shut down",
+                    });
                 }
-                Ok(TermEvent::Exited { status }) => {
-                    break Ok(if status == 0 { "exited" } else { "exited with error" });
-                }
-                Ok(TermEvent::Error(e)) => break Err(anyhow::anyhow!("host: {e}")),
-                Ok(_other) => {}
-                Err(slopty_net::NetError::Closed) => break Ok("session stream closed"),
-                Err(e) => break Err(e.into()),
+                Some(LinkEvent::Control(_) | LinkEvent::Term { .. }) => {}
+                Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),
+                None => break Ok("link closed"),
             },
             read = tokio::io::AsyncReadExt::read(&mut stdin, &mut input) => {
                 let n = read?;
@@ -148,51 +170,44 @@ async fn run(mut session: Session, id: SessionId) -> Result<()> {
                     break Ok("detached");
                 }
                 let req = TermRequest::Raw(bytes.to_vec());
-                session.conn.tx.send(&ClientMsg::Term { session: id, req }).await?;
+                link.send(ClientMsg::Term { session: id, req }).await?;
             }
             _sig = winch.recv() => {
-                let size = local_size()?;
-                let req = TermRequest::Resize(size);
-                session.conn.tx.send(&ClientMsg::Term { session: id, req }).await?;
-            }
-            msg = session.conn.rx.recv() => match msg {
-                Ok(HostMsg::SessionClosed { session: s, reason }) if s == id => {
-                    break Ok(match reason {
-                        slopty_proto::terminal::CloseReason::Requested => "closed",
-                        slopty_proto::terminal::CloseReason::Exited => "exited",
-                        slopty_proto::terminal::CloseReason::HostShutdown => "host shut down",
-                    });
+                for effect in state.resize(local_size()?) {
+                    if let Effect::Request(req) = effect {
+                        link.send(ClientMsg::Term { session: id, req }).await?;
+                    }
                 }
-                Ok(_other) => {}
-                Err(e) => break Err(e.into()),
-            },
+            }
         }
     };
     drop(raw);
-    let rtt = session.conn.rtt().map_or_else(|| "?".to_owned(), |d| format!("{d:.1?}"));
+    let rtt = link.rtt().map_or_else(|| "?".to_owned(), |d| format!("{d:.1?}"));
     let why = outcome?;
-    println!("[{why}; {frames} frames; rtt {rtt}]");
-    session.conn.tx.send(&ClientMsg::Term { session: id, req: TermRequest::Detach }).await?;
-    session.close().await;
+    println!("[{why}; {} frames; rtt {rtt}]", state.frames());
+    let _detached = link.send(ClientMsg::Term { session: id, req: TermRequest::Detach }).await;
+    link.close();
+    endpoint.close().await;
     Ok(())
 }
 
-/// Draw one frame's changed rows and place the cursor.
-fn paint(frame: &Frame) -> Result<()> {
+/// Redraw every row and place the cursor.
+fn paint(state: &TermState) -> Result<()> {
     let mut buf = Vec::with_capacity(8192);
     buf.extend_from_slice(b"\x1b[?25l");
-    for update in &frame.updates {
-        let row = u32::from(update.row).saturating_add(1);
-        buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
-        paint_line(&mut buf, &update.line);
+    for (i, row) in state.view().iter().enumerate() {
+        let line_no = i.saturating_add(1);
+        buf.extend_from_slice(format!("\x1b[{line_no};1H").as_bytes());
+        match row.line {
+            Some(line) => paint_line(&mut buf, line),
+            None => buf.extend_from_slice(b"\x1b[0m\x1b[2m~"),
+        }
         buf.extend_from_slice(b"\x1b[0m\x1b[K");
     }
-    let (r, c) = (
-        u32::from(frame.cursor.row).saturating_add(1),
-        u32::from(frame.cursor.col).saturating_add(1),
-    );
+    let cursor = state.cursor();
+    let (r, c) = (u32::from(cursor.row).saturating_add(1), u32::from(cursor.col).saturating_add(1));
     buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
-    if frame.cursor.visible {
+    if cursor.visible && state.view_offset() == 0 {
         buf.extend_from_slice(b"\x1b[?25h");
     }
     let mut out = std::io::stdout();

@@ -3252,13 +3252,28 @@ dependencies = [
  "clap",
  "rustix",
  "serde_json",
+ "slopty-client",
  "slopty-core",
  "slopty-grid",
  "slopty-host",
  "slopty-net",
  "slopty-proto",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "slopty-client"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "slopty-core",
+ "slopty-grid",
+ "slopty-net",
+ "slopty-proto",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

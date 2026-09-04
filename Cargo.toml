@@ -25,6 +25,7 @@ slopty-engine = { path = "crates/slopty-engine" }
 slopty-pty = { path = "crates/slopty-pty" }
 slopty-host = { path = "crates/slopty-host" }
 slopty-net = { path = "crates/slopty-net" }
+slopty-client = { path = "crates/slopty-client" }
 
 # core
 anyhow = "1.0.104"
