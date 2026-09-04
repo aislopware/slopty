@@ -170,6 +170,7 @@ fn main() -> Result<()> {
         handle.spawn(async move {
             let _sent = ready_tx.send(net::connect_host().await);
         });
+        let close_handle = handle.clone();
         cx.spawn(async move |cx| {
             let outcome = ready_rx.await;
             let Ok(Ok(connected)) = outcome else {
@@ -279,7 +280,9 @@ fn main() -> Result<()> {
                 }
             }
             drop(link);
-            endpoint.close().await;
+            // iroh's close uses tokio timers, which need a runtime context this GPUI task
+            // does not have; run it on the runtime and wait for the join.
+            let _closed = close_handle.spawn(async move { endpoint.close().await }).await;
         })
         .detach();
         cx.activate(true);
