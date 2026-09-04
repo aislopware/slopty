@@ -134,10 +134,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   loopback-only and the WireGuard case was never measured. What QUIC buys: reliable streams and
   unreliable datagrams on one connection, migration, NAT traversal and relay fallback for a
   phone off the mesh, and app-level auth instead of "the mesh is the boundary".
-- 🔬 **Direct-only mode** for hosts that live on a private mesh (NetBird/Tailscale): bind with
-  `RelayMode::Disabled` + `clear_address_lookup()` + mDNS, tickets carry the mesh address, no
-  relay in the picture. Planned; blocked on understanding the path flap first, because with no
-  relay a dropped direct path kills the connection instead of degrading it.
+- ✅ **Direct-only mode** (`slopty_net::Reach::DirectOnly`; hostd `--direct-only`, every binary
+  honours `SLOPTY_DIRECT_ONLY=1`) for hosts and clients on a private mesh (NetBird/Tailscale)
+  or one LAN: `RelayMode::Disabled` + `clear_address_lookup()`, mDNS kept. The ticket then
+  carries only IP addresses (the mesh address among them) and a relay can never be selected: a
+  dropped direct path drops the connection, which the app's reconnect loop turns into a
+  ~1 s blip instead of a silent ×50 latency step. Gotchas: `Endpoint::online()` waits for a
+  home relay and hangs with relays off, so `endpoint::online` watches `watch_addr()` for the
+  first `TransportAddr::Ip` instead; a client that paired in `Anywhere` mode has a stored
+  address with a relay URL, so `client::connect` strips relay entries when direct-only (else
+  the dial waits on a relay it cannot use). Loopback test `direct_only_pairs_without_a_relay`
+  asserts the ticket is relay-free and the selected path is direct. Roaming caveat: with no
+  relay and no pkarr the client only knows the addresses in its stored ticket plus mDNS, so a
+  host whose mesh IP changes needs re-pairing.
 - 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
   43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
   prefers a live direct path over relay, so the direct path must have been *closed*, not

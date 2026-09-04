@@ -11,7 +11,7 @@ use slopty_proto::terminal::TermEvent;
 use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, StreamHeader};
 use tokio::sync::Mutex;
 
-use crate::endpoint::{Role, bind};
+use crate::endpoint::{Reach, Role, bind};
 use crate::framed::{FramedRecv, FramedSend};
 use crate::pairing::{PairTicket, TrustStore};
 use crate::{ALPN, NetError};
@@ -36,6 +36,7 @@ pub mod close_code {
 pub struct HostListener {
     endpoint: Endpoint,
     store: Arc<Mutex<TrustStore>>,
+    reach: Reach,
 }
 
 /// A client that passed authentication. The caller answers its `Hello` with a `HelloAck`.
@@ -57,9 +58,15 @@ pub struct AuthenticatedClient {
 
 impl HostListener {
     /// Bind with the store's key.
-    pub async fn bind(store: TrustStore) -> Result<Self, NetError> {
-        let endpoint = bind(store.secret().clone(), Role::Host).await?;
-        Ok(Self { endpoint, store: Arc::new(Mutex::new(store)) })
+    pub async fn bind(store: TrustStore, reach: Reach) -> Result<Self, NetError> {
+        let endpoint = bind(store.secret().clone(), Role::Host, reach).await?;
+        Ok(Self { endpoint, store: Arc::new(Mutex::new(store)), reach })
+    }
+
+    /// How far this listener reaches.
+    #[must_use]
+    pub const fn reach(&self) -> Reach {
+        self.reach
     }
 
     /// The endpoint.
@@ -74,9 +81,10 @@ impl HostListener {
         self.endpoint.addr()
     }
 
-    /// Wait until relay + direct addresses are known (so a ticket is complete).
+    /// Wait until the addresses a ticket needs are known: the relay for [`Reach::Anywhere`],
+    /// a direct address for [`Reach::DirectOnly`].
     pub async fn online(&self) {
-        self.endpoint.online().await;
+        crate::endpoint::online(&self.endpoint, self.reach).await;
     }
 
     /// Mint a pairing ticket.

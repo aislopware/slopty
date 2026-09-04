@@ -8,7 +8,7 @@ use slopty_proto::handshake::{Hello, HelloAck, Rejection};
 use slopty_proto::terminal::TermEvent;
 use slopty_proto::{ClientMsg, HostMsg, StreamHeader};
 
-use crate::endpoint::{Role, bind};
+use crate::endpoint::{Reach, Role, bind};
 use crate::framed::{FramedRecv, FramedSend};
 use crate::pairing::PairTicket;
 use crate::{ALPN, NetError};
@@ -43,26 +43,33 @@ pub struct HostConn {
 }
 
 /// Bind a client endpoint.
-pub async fn bind_client(secret: SecretKey) -> Result<Endpoint, NetError> {
-    bind(secret, Role::Client).await
+pub async fn bind_client(secret: SecretKey, reach: Reach) -> Result<Endpoint, NetError> {
+    bind(secret, Role::Client, reach).await
 }
 
-/// Connect using a pairing ticket: the token goes into `hello.pair_token`.
+/// Connect using a pairing ticket: the token goes into `hello.pair_token`. `reach` must be
+/// what `endpoint` was bound with.
 pub async fn connect_with_ticket(
     endpoint: &Endpoint,
+    reach: Reach,
     ticket: &PairTicket,
     mut hello: Hello,
 ) -> Result<HostConn, HandshakeError> {
     hello.pair_token = Some(ticket.token);
-    connect(endpoint, ticket.addr.clone(), hello).await
+    connect(endpoint, reach, ticket.addr.clone(), hello).await
 }
 
 /// Connect to a host we are already paired with (or with `hello.pair_token` set by the caller).
+/// `reach` must be what `endpoint` was bound with.
 pub async fn connect(
     endpoint: &Endpoint,
+    reach: Reach,
     addr: EndpointAddr,
     hello: Hello,
 ) -> Result<HostConn, HandshakeError> {
+    // A direct-only endpoint has no relays; an address stored by an earlier pairing may still
+    // carry one. Drop it so the dial cannot wait on a relay we will never use.
+    let addr = if reach.is_direct_only() { direct_only(addr) } else { addr };
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| NetError::Connect(e.to_string()))?;
     let remote = conn.remote_id();
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::Stream(e.to_string()))?;
@@ -98,4 +105,10 @@ impl HostConn {
     pub fn rtt(&self) -> Option<Duration> {
         crate::endpoint::rtt(&self.conn)
     }
+}
+
+/// The same address without its relay entries.
+fn direct_only(addr: EndpointAddr) -> EndpointAddr {
+    let id = addr.id;
+    EndpointAddr::from_parts(id, addr.addrs.into_iter().filter(|a| !a.is_relay()))
 }

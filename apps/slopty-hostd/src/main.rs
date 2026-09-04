@@ -15,6 +15,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_core::HostId;
 use slopty_host::{CanvasStore, Host};
+use slopty_net::Reach;
 use slopty_net::host::HostListener;
 use slopty_net::pairing::TrustStore;
 use tokio::sync::broadcast;
@@ -36,6 +37,10 @@ struct Args {
     /// Print a pairing ticket on stdout once the endpoint is online.
     #[arg(long)]
     print_ticket: bool,
+    /// No relay, no wide-area lookup: clients must reach this host directly (LAN or a private
+    /// mesh such as `NetBird`). Also `SLOPTY_DIRECT_ONLY=1`.
+    #[arg(long, env = Reach::ENV)]
+    direct_only: bool,
 }
 
 /// Shared daemon state.
@@ -76,7 +81,8 @@ async fn main() -> Result<()> {
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let store = TrustStore::open(&data_dir.join("trust.json"))?;
     let id = paths::host_id(&data_dir)?;
-    let listener = HostListener::bind(store).await?;
+    let reach = if args.direct_only { Reach::DirectOnly } else { Reach::Anywhere };
+    let listener = HostListener::bind(store, reach).await?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
@@ -96,7 +102,12 @@ async fn main() -> Result<()> {
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
     daemon.listener.online().await;
-    tracing::info!(id = %daemon.listener.addr().id, name = %daemon.name, "online");
+    tracing::info!(
+        id = %daemon.listener.addr().id,
+        name = %daemon.name,
+        reach = ?daemon.listener.reach(),
+        "online"
+    );
     if !slopty_input::can_post() {
         tracing::warn!(
             "no post-event (Accessibility) access: remote-window input will be dropped; \

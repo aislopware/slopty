@@ -7,7 +7,7 @@ use slopty_core::ClientId;
 use slopty_net::client::{HostConn, bind_client, connect, connect_with_ticket};
 use slopty_net::identity::{Identity, KnownHost};
 use slopty_net::pairing::PairTicket;
-use slopty_net::{EndpointAddr, EndpointId};
+use slopty_net::{EndpointAddr, EndpointId, Reach};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, ClientKind, Hello};
 
@@ -55,9 +55,10 @@ fn unix_now() -> u64 {
 pub async fn pair(data_dir: &Path, ticket: &str) -> Result<()> {
     let ticket: PairTicket = ticket.trim().parse().context("parse ticket")?;
     let mut me = identity(data_dir)?;
-    let endpoint = bind_client(me.secret().clone()).await?;
+    let reach = Reach::from_env();
+    let endpoint = bind_client(me.secret().clone(), reach).await?;
     eprintln!("connecting to {}…", ticket.addr.id);
-    let conn = connect_with_ticket(&endpoint, &ticket, hello(me.client())).await?;
+    let conn = connect_with_ticket(&endpoint, reach, &ticket, hello(me.client())).await?;
     me.remember(KnownHost {
         host: conn.ack.host,
         name: conn.ack.name.clone(),
@@ -119,9 +120,10 @@ impl Session {
 pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
     let me = identity(data_dir)?;
     let (_id, known) = pick(&me, needle)?;
-    let endpoint = bind_client(me.secret().clone()).await?;
+    let reach = Reach::from_env();
+    let endpoint = bind_client(me.secret().clone(), reach).await?;
     let addr: EndpointAddr = known.addr;
-    let conn = connect(&endpoint, addr, hello(me.client())).await?;
+    let conn = connect(&endpoint, reach, addr, hello(me.client())).await?;
     Ok(Session { conn, endpoint })
 }
 

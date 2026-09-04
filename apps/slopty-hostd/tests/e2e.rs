@@ -10,7 +10,7 @@ mod tests {
     use slopty_core::ClientId;
     use slopty_net::client::{HostConn, bind_client, connect_with_ticket};
     use slopty_net::pairing::PairTicket;
-    use slopty_net::{ClientMsg, HostMsg, SecretKey};
+    use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
@@ -86,7 +86,7 @@ mod tests {
             .unwrap();
         let ticket: PairTicket = line.trim().parse().unwrap();
 
-        let endpoint = bind_client(SecretKey::generate()).await.unwrap();
+        let endpoint = bind_client(SecretKey::generate(), Reach::Anywhere).await.unwrap();
         let hello = Hello {
             protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
@@ -96,10 +96,13 @@ mod tests {
             caps: Caps::empty(),
             pair_token: None,
         };
-        let host = tokio::time::timeout(STEP, connect_with_ticket(&endpoint, &ticket, hello))
-            .await
-            .unwrap()
-            .unwrap();
+        let host = tokio::time::timeout(
+            STEP,
+            connect_with_ticket(&endpoint, Reach::Anywhere, &ticket, hello),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         guard.1 = Some(endpoint);
         (guard, host)
     }

@@ -140,7 +140,7 @@ and keys as `ScreenInput`, and asks the host for a stream scale matching its pai
 | `slopty-engine` | `VtEngine` trait + libghostty-vt backend | host |
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | host |
 | `slopty-predict` | speculative local echo | client |
-| `slopty-net` | iroh endpoint, pairing/auth, channels | all |
+| `slopty-net` | iroh endpoint (`Reach::Anywhere` relays+pkarr, or `DirectOnly`), pairing/auth, channels | all |
 | `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
 | `slopty-capture` | ScreenCaptureKit | host |
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |

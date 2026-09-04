@@ -18,6 +18,7 @@ pub mod host;
 pub mod identity;
 pub mod pairing;
 
+pub use endpoint::Reach;
 pub use iroh::endpoint::Connection;
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 pub use slopty_proto::{ClientMsg, HostMsg};

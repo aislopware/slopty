@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use slopty_client::{HostLink, LinkEvent};
 use slopty_core::ClientId;
+use slopty_net::Reach;
 use slopty_net::client::{bind_client, connect};
 use slopty_net::identity::Identity;
 use slopty_proto::ClientMsg;
@@ -42,7 +43,8 @@ pub async fn connect_host() -> Result<Connected> {
         [] => bail!("no paired host; run `slopty pair <ticket>` first"),
         _many => hosts.first().cloned().context("hosts")?,
     };
-    let endpoint = bind_client(me.secret().clone()).await?;
+    let reach = Reach::from_env();
+    let endpoint = bind_client(me.secret().clone(), reach).await?;
     let hello = Hello {
         protocol: slopty_proto::PROTOCOL_VERSION,
         client: me.client(),
@@ -52,7 +54,7 @@ pub async fn connect_host() -> Result<Connected> {
         caps: Caps::empty(),
         pair_token: None,
     };
-    let conn = connect(&endpoint, host.addr.clone(), hello).await?;
+    let conn = connect(&endpoint, reach, host.addr.clone(), hello).await?;
     let ack = conn.ack.clone();
     let mut link = HostLink::start(conn);
     let events = link.events().context("events")?;
