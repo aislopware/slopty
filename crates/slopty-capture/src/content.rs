@@ -141,6 +141,7 @@ const fn to_f32(v: f64) -> f32 {
 /// Ask ScreenCaptureKit for the current shareable content. `done` runs on a ScreenCaptureKit
 /// queue. The first call in a process triggers the Screen Recording permission prompt.
 pub fn enumerate(done: impl FnOnce(Result<Shareable, CaptureError>) + Send + 'static) {
+    crate::ensure_core_graphics();
     let done = Mutex::new(Some(done));
     let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let Some(done) = done.lock().take() else { return };

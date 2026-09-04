@@ -102,6 +102,7 @@ impl std::fmt::Debug for Target {
 impl Target {
     /// Resolve a target against a content snapshot.
     pub fn resolve(content: &Shareable, kind: CaptureTarget) -> Result<Self, CaptureError> {
+        crate::ensure_core_graphics();
         match kind {
             CaptureTarget::Window(id) => {
                 let window = content.window(id).ok_or(CaptureError::NotFound(kind))?;

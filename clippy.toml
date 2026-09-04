@@ -9,6 +9,7 @@ allow-print-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 doc-valid-idents = [
+    "SkyLight",
     "objc2",
     "GPUI",
     "macOS",

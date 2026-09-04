@@ -1,6 +1,7 @@
 //! Cheap WindowServer queries the cursor channel needs: pointer position and the current
 //! bounds of a window or display, without re-enumerating shareable content.
 
+use std::ffi::c_void;
 use std::ptr;
 
 use objc2_core_foundation::{
@@ -8,7 +9,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCreateDescriptionFromArray, kCGWindowBounds,
+    CGWindowListCreateDescriptionFromArray, kCGWindowBounds, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
@@ -56,18 +57,29 @@ pub fn target_bounds(target: CaptureTarget) -> Option<Rect> {
     }
 }
 
-/// Bounds of one window from the window list (cheap: one WindowServer round trip).
-#[must_use]
-pub fn window_bounds(id: WindowId) -> Option<Rect> {
-    let number = CFNumber::new_i64(i64::from(id.0));
-    let ids: CFRetained<CFArray<CFNumber>> = CFArray::from_retained_objects(&[number]);
-    // SAFETY: the array holds `CFNumber` window ids, which is what the function documents.
-    let descriptions = unsafe { CGWindowListCreateDescriptionFromArray(Some(ids.as_opaque())) }?;
+/// The window-list description of one window (one WindowServer round trip).
+fn window_description(id: WindowId) -> Option<CFRetained<CFDictionary<CFString, CFType>>> {
+    // `CGWindowListCreateDescriptionFromArray` wants the raw `CGWindowID`s *as the array
+    // values* (an array built with NULL callbacks), not boxed `CFNumber`s: with numbers it
+    // returns an empty array (observed macOS 26.5).
+    let mut values: [*const c_void; 1] = [id.0 as usize as *const c_void];
+    // SAFETY: `values` outlives the call, `num_values` is its exact length and NULL callbacks
+    // mean the array stores the pointer-sized integers verbatim, which is what the window
+    // list API documents for its id array.
+    let ids = unsafe { CFArray::new(None, values.as_mut_ptr(), 1, ptr::null()) }?;
+    // SAFETY: the array holds `CGWindowID`s, which is what the function documents.
+    let descriptions = unsafe { CGWindowListCreateDescriptionFromArray(Some(&ids)) }?;
     // SAFETY: `CGWindowListCreateDescriptionFromArray` documents an array of dictionaries keyed
     // by the `kCGWindow*` strings.
     let descriptions: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
         unsafe { CFRetained::cast_unchecked(descriptions) };
-    let description = descriptions.get(0)?;
+    descriptions.get(0)
+}
+
+/// Bounds of one window from the window list (cheap: one WindowServer round trip).
+#[must_use]
+pub fn window_bounds(id: WindowId) -> Option<Rect> {
+    let description = window_description(id)?;
     // SAFETY: framework-provided constant string.
     let key: &CFString = unsafe { kCGWindowBounds };
     let bounds = description.get(key)?;
@@ -77,4 +89,15 @@ pub fn window_bounds(id: WindowId) -> Option<Rect> {
     let ok =
         unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), ptr::from_mut(&mut rect)) };
     ok.then(|| Rect::from_cg(rect))
+}
+
+/// Process id of the application that owns a window.
+#[must_use]
+pub fn window_owner_pid(id: WindowId) -> Option<i32> {
+    let description = window_description(id)?;
+    // SAFETY: framework-provided constant string.
+    let key: &CFString = unsafe { kCGWindowOwnerPID };
+    let pid = description.get(key)?;
+    let pid: CFRetained<CFNumber> = pid.downcast().ok()?;
+    pid.as_i32()
 }

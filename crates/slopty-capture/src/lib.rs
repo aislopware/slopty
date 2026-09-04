@@ -12,7 +12,7 @@ mod geometry;
 mod stream;
 
 pub use content::{Shareable, enumerate};
-pub use geometry::{Rect, pointer_location, target_bounds, window_bounds};
+pub use geometry::{Rect, pointer_location, target_bounds, window_bounds, window_owner_pid};
 pub use stream::{Capture, CaptureConfig, CapturedFrame, PixelFormat, Target, host_now_us};
 
 /// Capture failures.
@@ -42,4 +42,14 @@ impl CaptureError {
             message: error.localizedDescription().to_string(),
         }
     }
+}
+
+/// Connect the process to the WindowServer once. `SCContentFilter` init calls into SkyLight,
+/// which asserts (`CGS_REQUIRE_INIT`) if nothing has initialised CoreGraphics yet; that is the
+/// case in a daemon whose first ScreenCaptureKit call is a window filter, not a display query.
+pub(crate) fn ensure_core_graphics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _main = objc2_core_graphics::CGMainDisplayID();
+    });
 }
