@@ -4,7 +4,9 @@
 //! `surface` element samples it through `CVMetalTextureCache`, so nothing is copied on the
 //! client. The host's cursor is drawn here from the cursor channel (one RTT behind the pointer,
 //! not one video pipeline). Pointer, scroll and key events inside the view go to the host as
-//! `ScreenInput` in stream pixels; the host injects them. The view also asks the host for a
+//! `ScreenInput` in stream pixels; the host injects them. ⌘ chords the canvas binds (⌘T/⌘O/⌘W,
+//! zoom) never reach the view because GPUI runs key bindings before key listeners; every other
+//! chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also asks the host for a
 //! smaller stream when it is painted small (canvas zoomed out), quantised so the encoder is
 //! not rebuilt on every wheel tick.
 
@@ -23,7 +25,7 @@ use slopty_client::{CursorState, ScreenHandle};
 use slopty_codec::DecodedFrame;
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
-use slopty_proto::input::{KeyAction, MouseButton as ProtoButton};
+use slopty_proto::input::{KeyAction, KeyCode, MouseButton as ProtoButton};
 use slopty_proto::screen::{
     CaptureTarget, Quality, ScreenInput, ScreenRequest, ScrollPhase, VideoCodec,
 };
@@ -80,6 +82,9 @@ pub struct ScreenView {
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
     frames: u64,
+    /// Keys whose press went to the host, so a release for a locally-handled chord (its press
+    /// was eaten by a canvas binding) is not forwarded as a stray key-up.
+    held: Vec<KeyCode>,
     _pump: Task<()>,
 }
 
@@ -164,6 +169,7 @@ impl ScreenView {
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
             frames: 0,
+            held: Vec::new(),
             _pump: pump,
         }
     }
@@ -210,6 +216,22 @@ impl ScreenView {
         self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
     }
 
+    /// The host resized the target: the stream now has this pixel size at the current quality
+    /// scale, so the native size follows from it.
+    pub fn set_geometry(&mut self, width: u32, height: u32) {
+        self.size = (width, height);
+        let scale = self.quality.scale.clamp(MIN_SCALE, 1.0);
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let native = (width as f32 / scale, height as f32 / scale);
+        self.native = native;
+    }
+
+    /// Native size of the target in stream pixels at scale 1.
+    #[must_use]
+    pub const fn native(&self) -> (f32, f32) {
+        self.native
+    }
+
     fn take_frame(&mut self, frame: Option<Arc<DecodedFrame>>, cx: &mut Context<Self>) {
         let Some(frame) = frame else { return };
         let raw = std::ptr::from_ref(frame.image.as_cv())
@@ -246,6 +268,7 @@ impl ScreenView {
         let (stream_w, stream_h) = (self.size.0 as f32, self.size.1 as f32);
         let x = (f32::from(position.x) - f32::from(self.bounds.origin.x)) / width * stream_w;
         let y = (f32::from(position.y) - f32::from(self.bounds.origin.y)) / height * stream_h;
+        tracing::trace!(?position, bounds = ?self.bounds, size = ?self.size, x, y, "to_stream");
         (x, y)
     }
 
@@ -322,12 +345,12 @@ impl ScreenView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if ev.keystroke.modifiers.platform {
-            // ⌘ chords stay local (canvas actions); the host's own shortcuts come later.
-            return;
+        let code = keys::key_code(&ev.keystroke.key);
+        if !self.held.contains(&code) {
+            self.held.push(code);
         }
         self.input(ScreenInput::Key {
-            code: keys::key_code(&ev.keystroke.key),
+            code,
             action: if ev.is_held { KeyAction::Repeat } else { KeyAction::Press },
             mods: keys::mods(ev.keystroke.modifiers),
             text: ev.keystroke.key_char.clone().filter(|t| !t.is_empty()),
@@ -335,16 +358,17 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
-    fn key_up(&mut self, ev: &KeyUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
-        if ev.keystroke.modifiers.platform {
-            return;
-        }
+    fn key_up(&mut self, ev: &KeyUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let code = keys::key_code(&ev.keystroke.key);
+        let Some(at) = self.held.iter().position(|&c| c == code) else { return };
+        self.held.swap_remove(at);
         self.input(ScreenInput::Key {
-            code: keys::key_code(&ev.keystroke.key),
+            code,
             action: KeyAction::Release,
             mods: keys::mods(ev.keystroke.modifiers),
             text: None,
         });
+        cx.stop_propagation();
     }
 
     /// The host's pointer as an arrow, in view coordinates.
@@ -422,8 +446,10 @@ impl Render for ScreenView {
             },
             |_bounds, (), _window, _cx| {},
         )
+        // `inset_0` matters: an absolute element without insets sits at its static position,
+        // which for a later sibling is *below* the picture, one body-height off.
         .absolute()
-        .size_full();
+        .inset_0();
 
         let picture = self.latest.as_ref().map_or_else(
             || {

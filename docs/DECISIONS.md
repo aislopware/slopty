@@ -146,7 +146,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the dial waits on a relay it cannot use). Loopback test `direct_only_pairs_without_a_relay`
   asserts the ticket is relay-free and the selected path is direct. Roaming caveat: with no
   relay and no pkarr the client only knows the addresses in its stored ticket plus mDNS, so a
-  host whose mesh IP changes needs re-pairing.
+  host whose mesh IP changes needs re-pairing. Observed 2026-09-04: when the host process is
+  killed, the client's lone direct path times out at 15 s, noq logs `failed closing path
+  err=LastOpenPath` and keeps it, and the connection only drops at the 45 s idle timeout
+  (`IDLE_TIMEOUT`); the top bar shows a stale RTT until then. 🔬 A liveness signal from the
+  control stream (host heartbeat message) would let the app show "host unreachable" at ~5 s.
 - 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
   43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
   prefers a live direct path over relay, so the direct path must have been *closed*, not
@@ -278,10 +282,32 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   process to the WindowServer yet (a hostd whose first SCK call is a window filter, e.g. a
   client reconnecting with a persisted window item). `slopty-capture` calls `CGMainDisplayID`
   once before any enumerate/resolve.
+- ✅ **⌘ chords go to the remote window unless the canvas binds them** (2026-09-04). GPUI runs
+  key bindings before key listeners, so ⌘T/⌘N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- never reach `ScreenView`;
+  every other chord (⌘C/⌘V/⌘Z/⌘S/⌘K…) is forwarded with `Mods::SUPER` and no text (GPUI gives
+  no `key_char` for ⌘ chords; the injector's virtual keycode carries it). Verified: ⌘K from the
+  app reached hostd as `Key { K, Press, SUPER }` and cleared the streamed Ghostty. The view
+  tracks pressed keys so a release whose press was eaten by a canvas binding is not forwarded.
+  ⌘Q/⌘H/⌘M stay with the app (menu bar). Modifier-only presses are not forwarded (GPUI has no
+  key-down for them); the injector sets flags per event instead.
+- ⚠️ **An absolute GPUI element without insets sits at its static position.** `ScreenView`
+  recorded its bounds from a `canvas().absolute().size_full()` placed *after* the picture, so
+  Taffy put it one body-height below the real top: every pointer event mapped ~834 px too high
+  and the injector clamped it to the window's top edge (clicks "worked" only by landing on the
+  title bar). Fixed with `inset_0()`; the canvas viewport recorder got the same for safety.
+- ✅ **Host window resizes are polled, not observed** (2026-09-04). ScreenCaptureKit keeps
+  scaling a window into the old output size (a 600×830 window in a 1264×834 stream looked
+  2× wide), so `ScreenStream::check_geometry` (one `CGWindowListCreateDescriptionFromArray`
+  per stream, every 250 ms from the hostd connection loop) compares the target's bounds with
+  the stream's native size, rebuilds encoder + capture at the new size with a keyframe, and
+  emits `ScreenEvent::Geometry`. The client's `ScreenView` updates its native size and the
+  canvas gives the item the new aspect (width kept, `Place`). Verified: 600×830 → 900×500 changed
+  the item to 1264×736 and the picture painted unstretched. No public resize notification
+  exists for another app's window short of AX observers, which need the same polling fallback.
 - ✅ **Magnify is ignored** for now: there is no public constructor for gesture `CGEvent`s.
 - 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
   `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
-  unverified; ⌘-chords are not forwarded yet anyway).
+  unverified; verify with a ⌘ chord once the daemon is signed).
 
 ## Tooling (versions verified on crates.io / GitHub 2026-09-04)
 

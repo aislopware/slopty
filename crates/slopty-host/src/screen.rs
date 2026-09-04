@@ -311,6 +311,8 @@ pub struct ScreenStream {
     /// Client input aimed at this stream, in its pixel coordinates.
     injector: Injector,
     point_scale: f64,
+    /// Last requested quality; re-applied when the target changes size.
+    quality: Quality,
 }
 
 impl std::fmt::Debug for ScreenStream {
@@ -393,6 +395,7 @@ impl ScreenStream {
             cursor,
             injector,
             point_scale,
+            quality,
         };
         Ok((stream, opened))
     }
@@ -418,6 +421,7 @@ impl ScreenStream {
     /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
     /// capture; a bitrate-only change is applied in place.
     pub fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
+        self.quality = *quality;
         let (capture_config, encoder_config) = configs(self.native, quality);
         if capture_config == self.capture_config
             && encoder_config.codec == self.encoder_config.codec
@@ -430,6 +434,37 @@ impl ScreenStream {
             }
             return Ok(());
         }
+        self.reconfigure(capture_config, encoder_config)
+    }
+
+    /// Follow the target's size: a window the user resized on the host gets a stream of its new
+    /// size (fresh encoder, keyframe) and the client hears `Geometry`. Cheap when nothing
+    /// changed (one WindowServer query); call it a few times a second.
+    pub fn check_geometry(&mut self) -> Result<Option<ScreenEvent>, ScreenError> {
+        let Some(rect) = slopty_capture::target_bounds(self.target) else { return Ok(None) };
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+        let px = |points: f64| (points * self.point_scale).round().clamp(2.0, 16_384.0) as u32;
+        let native = (px(rect.w), px(rect.h));
+        if native == self.native {
+            return Ok(None);
+        }
+        tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
+        self.native = native;
+        let (capture_config, encoder_config) = configs(native, &self.quality);
+        self.reconfigure(capture_config, encoder_config)?;
+        Ok(Some(ScreenEvent::Geometry {
+            stream: self.id,
+            width: self.capture_config.width,
+            height: self.capture_config.height,
+        }))
+    }
+
+    /// Rebuild the encoder and reconfigure the capture for a new size, rate or codec.
+    fn reconfigure(
+        &mut self,
+        capture_config: CaptureConfig,
+        encoder_config: EncoderConfig,
+    ) -> Result<(), ScreenError> {
         let weak = Arc::downgrade(&self.shared);
         let encoder = build_encoder(&weak, encoder_config)?;
         *self.shared.encoder.write() = Some(encoder);

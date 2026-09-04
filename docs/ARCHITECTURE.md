@@ -128,7 +128,10 @@ zed PR #63068 rebased onto the pin, extended for touch momentum, `paint_surface`
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
-and keys as `ScreenInput`, and asks the host for a stream scale matching its painted width.
+and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and asks the host for
+a stream scale matching its painted width. When the host window changes size, hostd notices
+within 250 ms, restarts the stream at the new size and sends `Geometry`; the canvas re-aspects
+the item.
 
 ## 7. Crate map
 

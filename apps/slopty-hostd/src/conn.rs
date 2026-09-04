@@ -17,6 +17,9 @@ use tokio::task::JoinHandle;
 
 use crate::Daemon;
 
+/// How often a stream's target is checked for a size change.
+const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Events buffered per attached session before the client is considered stuck.
 const SINK_DEPTH: usize = 256;
 /// Outbound control messages buffered before the writer applies backpressure.
@@ -73,8 +76,17 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
         paths,
     };
 
+    // Window resizes on the host are polled: ScreenCaptureKit keeps scaling the old output
+    // size until the capture is reconfigured.
+    let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
+    geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
+            _ = geometry.tick(), if !peer.screens.is_empty() => {
+                if !peer.check_geometry().await {
+                    break Ok(());
+                }
+            }
             msg = rx.recv() => {
                 let msg = match msg {
                     Ok(m) => m,
@@ -284,6 +296,26 @@ impl Peer<'_> {
     }
 
     /// Stop every screen stream (the connection is going away).
+    /// Tell the client about streams whose target changed size. False once the client is gone.
+    async fn check_geometry(&mut self) -> bool {
+        let mut events = Vec::new();
+        for (id, stream) in &mut self.screens {
+            match stream.check_geometry() {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(client = %self.client, stream = %id, error = %e, "geometry");
+                }
+            }
+        }
+        for event in events {
+            if self.out.send(HostMsg::Screen(event)).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn close_screens(&mut self) {
         for (_id, stream) in self.screens.drain() {
             stream.close().await;

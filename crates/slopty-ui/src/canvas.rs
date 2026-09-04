@@ -18,7 +18,7 @@ use gpui::{
     ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div, point, px, size,
 };
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
-use slopty_core::{ClientId, ItemId, SessionId};
+use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
@@ -307,9 +307,10 @@ impl CanvasView {
                     self.screens.remove(&id);
                 }
             }
-            ScreenEvent::Geometry { .. }
-            | ScreenEvent::Cursor { .. }
-            | ScreenEvent::ListingChanged => {}
+            ScreenEvent::Geometry { stream, width, height } => {
+                self.follow_geometry(stream, width, height, cx);
+            }
+            ScreenEvent::Cursor { .. } | ScreenEvent::ListingChanged => {}
         }
         cx.notify();
     }
@@ -342,6 +343,39 @@ impl CanvasView {
         }));
         self.pending_focus_picker = true;
         self.picker = Some(picker);
+    }
+
+    /// The host window changed size: keep the item's width and give it the new aspect, so the
+    /// picture is never stretched and pointer mapping stays exact.
+    fn follow_geometry(
+        &mut self,
+        stream: StreamId,
+        width: u32,
+        height: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let ids: Vec<ItemId> = self
+            .screens
+            .iter()
+            .filter(|(_, v)| v.read(cx).stream() == stream)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(view) = self.screens.get(&id) {
+                view.update(cx, |v, _| v.set_geometry(width, height));
+            }
+            let Some(old) = self.doc.get(id).map(|i| i.rect) else { continue };
+            #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+            let aspect = height as f32 / width as f32;
+            let mut rect = old;
+            rect.h = snap(rect.w.mul_add(aspect, TITLE_H));
+            if (rect.h - old.h).abs() >= 1.0 {
+                self.propose(CanvasOp::Place { id, rect });
+            }
+        }
     }
 
     /// Put a window/display item on the canvas; `reconcile` opens its stream.
@@ -924,7 +958,7 @@ impl Render for CanvasView {
             |_bounds, (), _window, _cx| {},
         )
         .absolute()
-        .size_full();
+        .inset_0();
 
         let empty = self.is_empty();
         let rendered: Vec<gpui::AnyElement> =
