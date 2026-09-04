@@ -8,10 +8,12 @@
 #![cfg(target_os = "macos")]
 
 mod content;
+mod geometry;
 mod stream;
 
 pub use content::{Shareable, enumerate};
-pub use stream::{Capture, CaptureConfig, CapturedFrame, PixelFormat, Target};
+pub use geometry::{Rect, pointer_location, target_bounds, window_bounds};
+pub use stream::{Capture, CaptureConfig, CapturedFrame, PixelFormat, Target, host_now_us};
 
 /// Capture failures.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

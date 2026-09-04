@@ -101,6 +101,13 @@ pub struct Decoder {
     frames_in: u64,
 }
 
+// SAFETY: VideoToolbox sessions are documented as usable from any thread; the decode path
+// is only ever driven by one caller at a time (`decode` takes `&mut self`) and the output
+// callback arrives on a VideoToolbox thread. `Shared` is only touched through atomics and the
+// `Send + Sync` sink.
+#[expect(clippy::non_send_fields_in_send_ty, reason = "VTDecompressionSession is thread-safe")]
+unsafe impl Send for Decoder {}
+
 impl std::fmt::Debug for Decoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Decoder")

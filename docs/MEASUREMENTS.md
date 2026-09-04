@@ -75,3 +75,35 @@ per the pure-Rust rule.
 `slopty sessions` end to end (bind endpoint, connect, Hello/HelloAck, close): about 2 s wall in
 a debug build, dominated by endpoint bind (relay connection + discovery). The apps keep one
 endpoint alive for the process lifetime, so this is paid once, not per session.
+
+## 2026-09-04 — screen pipeline, first display at 0.5×, loopback, debug build
+
+Setup: mac-studio (Apple silicon), `crates/slopty-host/tests/screen.rs` opens the main display
+(native 1920×1080 pt at 1× → 960×540 stream at `scale: 0.5`, 60 fps cap, 8 Mbit/s HEVC) for 2 s
+with a mostly static desktop, counting datagrams from the pipeline's queue. Latency is
+capture timestamp (SCK, host clock) → packet leaves the VideoToolbox callback, i.e. capture
+queue delay + encode + packetize, measured inside the process.
+
+| metric                              | value            |
+| ----------------------------------- | ---------------- |
+| frames captured / encoded / dropped | 67 / 67 / 0      |
+| datagrams (data + parity + cursor)  | 83 + 70 + 1      |
+| capture→packet latency, mean        | 8.8 ms           |
+| capture→packet latency, max         | 113.7 ms (frame 0, encoder warm-up) |
+
+Command:
+
+```sh
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-host --no-capture display_stream
+```
+
+End to end through hostd and iroh (`apps/slopty-hostd/tests/e2e.rs`, `screen_stream_over_iroh`):
+86 frames in 3 s reassembled and hardware-decoded on the client, 0 lost, 0 NACKs, 0 FEC
+recoveries on the loopback path.
+
+```sh
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-hostd --no-capture screen_stream
+```
+
+Not yet measured: a moving picture at native scale, a lossy path, and the client's
+arrival→present hold; the numbers above only prove the pipeline and its clock plumbing.

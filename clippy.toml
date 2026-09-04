@@ -24,6 +24,7 @@ doc-valid-idents = [
     "CoreMedia",
     "CoreVideo",
     "CoreFoundation",
+    "WindowServer",
     "CoreText",
     "libghostty",
     "libghostty-vt",

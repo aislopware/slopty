@@ -8,10 +8,12 @@
 pub mod canvas;
 pub mod ctl;
 pub mod manager;
+pub mod screen;
 pub mod session;
 
 pub use canvas::CanvasStore;
 pub use manager::Host;
+pub use screen::{DatagramBudget, ScreenError, ScreenStream};
 pub use session::{ClientSink, SessionHandle};
 
 /// Host errors.
@@ -35,4 +37,7 @@ pub enum HostError {
     /// Canvas document problem.
     #[error("canvas: {0}")]
     Canvas(String),
+    /// Remote window pipeline.
+    #[error(transparent)]
+    Screen(#[from] ScreenError),
 }

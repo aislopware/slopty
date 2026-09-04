@@ -7968,12 +7968,16 @@ dependencies = [
 name = "slopty-host"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "parking_lot",
  "serde",
  "serde_json",
+ "slopty-capture",
+ "slopty-codec",
  "slopty-core",
  "slopty-engine",
  "slopty-grid",
+ "slopty-media",
  "slopty-proto",
  "slopty-pty",
  "tempfile",
@@ -7987,10 +7991,14 @@ name = "slopty-hostd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "serde_json",
+ "slopty-capture",
+ "slopty-codec",
  "slopty-core",
  "slopty-host",
+ "slopty-media",
  "slopty-net",
  "slopty-proto",
  "tempfile",

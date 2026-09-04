@@ -28,6 +28,8 @@ slopty-net = { path = "crates/slopty-net" }
 slopty-client = { path = "crates/slopty-client" }
 slopty-predict = { path = "crates/slopty-predict" }
 slopty-codec = { path = "crates/slopty-codec" }
+slopty-capture = { path = "crates/slopty-capture" }
+slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
 

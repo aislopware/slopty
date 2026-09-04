@@ -87,10 +87,13 @@ Loss recovery order: FEC (free) → NACK inside the playout window → `ForceLTR
 P-frame from an acked LTR) → IDR only when no acked LTR exists. Cursor is a separate low-rate
 channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
 
-Crates: `slopty-capture`, `slopty-codec` (encode half is `cfg(macos)`), `slopty-media`
-(`Packetizer` → datagrams + parity + retransmit history; `Reassembler` → in-order frames,
-NACK/refresh `Action`s, `ReceiverReport`; `Redundancy` → parity ratio; pure, no clocks, property
-tested), `slopty-input`.
+Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
+`slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
+retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;
+`Redundancy` → parity ratio; pure, no clocks, property tested), `slopty-host::screen`
+(`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
+path's datagram limit; cursor sampler), `slopty-input`. `slopty-hostd` owns one datagram pump
+per connection and maps `ScreenRequest`s onto the streams it opened for that client.
 
 ## 4. Canvas
 

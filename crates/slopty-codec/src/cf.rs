@@ -68,7 +68,25 @@ pub fn micros(time: CMTime) -> Option<u64> {
     if !time.flags.contains(CMTimeFlags::Valid) || time.timescale <= 0 {
         return None;
     }
-    let value = u64::try_from(time.value).ok()?;
-    let scale = u64::try_from(time.timescale).ok()?;
-    value.saturating_mul(1_000_000).checked_div(scale)
+    let value = u128::from(u64::try_from(time.value).ok()?);
+    let scale = u128::from(u32::try_from(time.timescale).ok()?);
+    // The host clock is nanoseconds since boot (about 1e15 after days of uptime), so the
+    // product needs more than 64 bits.
+    u64::try_from(value.saturating_mul(1_000_000).checked_div(scale)?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn micros_survives_large_host_clock_values() {
+        // 12 days of uptime on the nanosecond host clock.
+        let ns = 12 * 24 * 3600 * 1_000_000_000_i64;
+        let t = CMTime { value: ns, timescale: 1_000_000_000, flags: CMTimeFlags::Valid, epoch: 0 };
+        assert_eq!(micros(t), Some(12 * 24 * 3600 * 1_000_000));
+        assert_eq!(micros(time_us(123_456)), Some(123_456));
+        let invalid = CMTime { value: 0, timescale: 0, flags: CMTimeFlags::Valid, epoch: 0 };
+        assert_eq!(micros(invalid), None);
+    }
 }

@@ -87,16 +87,28 @@ uuid_id!(
     ItemId
 );
 
-/// A window on the host being streamed. Host-scoped; `CGWindowID` values are reused by macOS,
-/// so this is our own allocation, not the system id.
+/// A window on the host that can be streamed: the `CGWindowID`. macOS reuses these, so a
+/// client always opens a stream against a listing it just received.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct WindowId(pub u32);
+
+impl fmt::Display for WindowId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "window#{}", self.0)
+    }
+}
 
 /// A connection-scoped stream identity allocated by the host.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct StreamId(pub u32);
+
+impl fmt::Display for StreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "stream#{}", self.0)
+    }
+}
 
 #[cfg(test)]
 mod tests {

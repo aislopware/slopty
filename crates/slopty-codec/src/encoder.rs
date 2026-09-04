@@ -96,6 +96,15 @@ pub struct Encoder {
     ltr: bool,
 }
 
+// SAFETY: VideoToolbox sessions are documented as usable from any thread:
+// `VTSessionSetProperty`, `VTCompressionSessionEncodeFrame` and `VTCompressionSessionInvalidate`
+// are serialised inside the framework, and the output callback already arrives on a
+// VideoToolbox thread. `Shared` is only touched through atomics and the `Send + Sync` sink.
+#[expect(clippy::non_send_fields_in_send_ty, reason = "VTCompressionSession is thread-safe")]
+unsafe impl Send for Encoder {}
+// SAFETY: as above; every `&self` method is a thread-safe VideoToolbox call.
+unsafe impl Sync for Encoder {}
+
 impl std::fmt::Debug for Encoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Encoder")

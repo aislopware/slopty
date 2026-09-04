@@ -77,6 +77,7 @@ pub struct Target {
     kind: CaptureTarget,
     filter: Retained<SCContentFilter>,
     pixel_size: (u32, u32),
+    point_scale: f32,
 }
 
 // SAFETY: `SCContentFilter` is an immutable description object that ScreenCaptureKit reads
@@ -113,7 +114,8 @@ impl Target {
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
         };
-        Self { kind, pixel_size: filter_pixel_size(&filter), filter }
+        let (pixel_size, point_scale) = filter_pixel_size(&filter);
+        Self { kind, filter, pixel_size, point_scale }
     }
 
     fn display(kind: CaptureTarget, display: &SCDisplay) -> Self {
@@ -126,7 +128,8 @@ impl Target {
                 &none,
             )
         };
-        Self { kind, pixel_size: filter_pixel_size(&filter), filter }
+        let (pixel_size, point_scale) = filter_pixel_size(&filter);
+        Self { kind, filter, pixel_size, point_scale }
     }
 
     /// The target this resolves.
@@ -140,20 +143,27 @@ impl Target {
     pub const fn pixel_size(&self) -> (u32, u32) {
         self.pixel_size
     }
+
+    /// Native pixels per point of the target (the backing scale of its display).
+    #[must_use]
+    pub const fn point_scale(&self) -> f32 {
+        self.point_scale
+    }
 }
 
-/// Pixel size of a filter's content rect, rounded up to even.
-fn filter_pixel_size(filter: &SCContentFilter) -> (u32, u32) {
+/// Pixel size of a filter's content rect, rounded up to even, and its points-to-pixels scale.
+fn filter_pixel_size(filter: &SCContentFilter) -> ((u32, u32), f32) {
     // SAFETY: plain getters on a valid object.
     let rect = unsafe { filter.contentRect() };
     // SAFETY: as above.
-    let scale = f64::from(unsafe { filter.pointPixelScale() });
+    let point_scale = unsafe { filter.pointPixelScale() };
+    let scale = f64::from(point_scale);
     let even = |v: f64| -> u32 {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let px = (v * scale).round().clamp(2.0, 16_384.0) as u32;
         px.next_multiple_of(2)
     };
-    (even(rect.size.width), even(rect.size.height))
+    ((even(rect.size.width), even(rect.size.height)), point_scale)
 }
 
 type FrameSink = Box<dyn Fn(CapturedFrame) + Send + Sync>;
@@ -244,9 +254,11 @@ fn micros(time: CMTime) -> Option<u64> {
     if !time.flags.contains(CMTimeFlags::Valid) || time.timescale <= 0 {
         return None;
     }
-    let value = u64::try_from(time.value).ok()?;
-    let scale = u64::try_from(time.timescale).ok()?;
-    value.saturating_mul(1_000_000).checked_div(scale)
+    let value = u128::from(u64::try_from(time.value).ok()?);
+    let scale = u128::from(u32::try_from(time.timescale).ok()?);
+    // The host clock is nanoseconds since boot (about 1e15 after days of uptime), so the
+    // product needs more than 64 bits.
+    u64::try_from(value.saturating_mul(1_000_000).checked_div(scale)?).ok()
 }
 
 /// Now on the host time clock, microseconds; the clock ScreenCaptureKit stamps frames with.

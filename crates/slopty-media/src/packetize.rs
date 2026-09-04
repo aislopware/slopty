@@ -50,20 +50,25 @@ pub struct Layout {
     pub parity_count: u8,
 }
 
+/// Smallest payload we will ever cut to; below this the per-datagram overhead dominates.
+pub const MIN_PAYLOAD: usize = 256;
+
 /// Choose fragment count and size for `len` bitstream bytes at `parity_permille` redundancy.
 ///
-/// Fragments are balanced (all the same size, as small as the count allows) so the padding in
-/// the last one never exceeds two bytes per fragment.
-pub fn layout(len: usize, parity_permille: u16) -> Result<Layout, MediaError> {
+/// `max_payload` caps the payload per datagram (clamped to `MIN_PAYLOAD..=MAX_PAYLOAD` and
+/// rounded down to even). Fragments are balanced (all the same size, as small as the count allows)
+/// so the padding in the last one never exceeds two bytes per fragment.
+pub fn layout(len: usize, parity_permille: u16, max_payload: usize) -> Result<Layout, MediaError> {
     if len == 0 {
         return Err(MediaError::Empty);
     }
+    let max_payload = max_payload.clamp(MIN_PAYLOAD, MAX_PAYLOAD) & !1;
     let total = len.saturating_add(FRAME_PREFIX_BYTES);
-    let data_count = total.div_ceil(MAX_PAYLOAD);
+    let data_count = total.div_ceil(max_payload);
     if data_count > MAX_DATA_FRAGMENTS {
         return Err(MediaError::FrameTooLarge { len });
     }
-    let shard_bytes = total.div_ceil(data_count).next_multiple_of(2).min(MAX_PAYLOAD);
+    let shard_bytes = total.div_ceil(data_count).next_multiple_of(2).min(max_payload);
     let parity_count = if parity_permille == 0 {
         0
     } else {
@@ -103,6 +108,7 @@ pub struct Packetizer {
     stream: StreamId,
     next_frame: u32,
     parity_permille: u16,
+    max_payload: usize,
     encoder: Option<ReedSolomonEncoder>,
     body: Vec<u8>,
     history: VecDeque<SentFrame>,
@@ -128,6 +134,7 @@ impl Packetizer {
             stream,
             next_frame: 0,
             parity_permille: DEFAULT_PARITY_PERMILLE,
+            max_payload: MAX_PAYLOAD,
             encoder: None,
             body: Vec::new(),
             history: VecDeque::with_capacity(HISTORY_FRAMES),
@@ -144,6 +151,25 @@ impl Packetizer {
     #[must_use]
     pub const fn parity_permille(&self) -> u16 {
         self.parity_permille
+    }
+
+    /// Cap datagrams at `bytes` (header included) because the path cannot carry
+    /// [`MAX_DATAGRAM`](slopty_proto::media::MAX_DATAGRAM) yet; QUIC starts at a 1200-byte MTU
+    /// and its datagram budget grows with path MTU discovery.
+    pub const fn set_max_datagram(&mut self, bytes: usize) {
+        self.max_payload = bytes.saturating_sub(HEADER_BYTES);
+    }
+
+    /// Largest payload the next frame will be cut to.
+    #[must_use]
+    pub const fn max_payload(&self) -> usize {
+        if self.max_payload < MIN_PAYLOAD {
+            MIN_PAYLOAD
+        } else if self.max_payload > MAX_PAYLOAD {
+            MAX_PAYLOAD
+        } else {
+            self.max_payload & !1
+        }
     }
 
     /// The number the next frame will get.
@@ -165,7 +191,7 @@ impl Packetizer {
         frame: &EncodedFrame<'_>,
         send_ms_lo: u8,
     ) -> Result<&SentFrame, MediaError> {
-        let layout = layout(frame.data.len(), self.parity_permille)?;
+        let layout = layout(frame.data.len(), self.parity_permille, self.max_payload)?;
         let number = self.next_frame;
         self.next_frame = self.next_frame.wrapping_add(1);
 
@@ -318,7 +344,7 @@ mod tests {
     #[test]
     fn layout_balances_fragments() {
         for len in [1, 100, 1167, 1168, 1169, 2337, 30_000, 1_000_000] {
-            let l = layout(len, 200).unwrap();
+            let l = layout(len, 200, MAX_PAYLOAD).unwrap();
             let total = len + FRAME_PREFIX_BYTES;
             assert!(
                 l.shard_bytes <= MAX_PAYLOAD && l.shard_bytes.is_multiple_of(2),
@@ -334,16 +360,32 @@ mod tests {
             ));
         }
         assert_eq!(
-            layout(1168, 200).unwrap(),
+            layout(1168, 200, MAX_PAYLOAD).unwrap(),
             Layout { data_count: 1, shard_bytes: 1184, parity_count: 1 }
         );
-        assert_eq!(layout(1169, 0).unwrap().parity_count, 0);
-        assert_eq!(layout(1169, 200).unwrap().data_count, 2);
-        assert!(matches!(layout(0, 200), Err(MediaError::Empty)));
+        assert_eq!(layout(1169, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
+        assert_eq!(layout(1169, 200, MAX_PAYLOAD).unwrap().data_count, 2);
+        assert!(matches!(layout(0, 200, MAX_PAYLOAD), Err(MediaError::Empty)));
         assert!(matches!(
-            layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200),
+            layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),
             Err(MediaError::FrameTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn layout_honours_a_smaller_path_budget() {
+        // QUIC before MTU discovery: 1200-byte MTU leaves about 1168 bytes per datagram.
+        let l = layout(5000, 0, 1168 - HEADER_BYTES).unwrap();
+        assert!(l.shard_bytes <= 1152 && l.shard_bytes.is_multiple_of(2), "{l:?}");
+        assert!(usize::from(l.data_count) * l.shard_bytes >= 5000 + FRAME_PREFIX_BYTES);
+        // Odd budgets round down; tiny budgets are floored.
+        assert_eq!(layout(100, 0, 1001).unwrap().shard_bytes, 116);
+        assert!(layout(100_000, 0, 10).unwrap().shard_bytes <= MIN_PAYLOAD);
+        let mut p = Packetizer::new(StreamId(1));
+        p.set_max_datagram(1168);
+        assert_eq!(p.max_payload(), 1152);
+        p.set_max_datagram(5000);
+        assert_eq!(p.max_payload(), MAX_PAYLOAD);
     }
 
     #[test]

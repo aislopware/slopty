@@ -153,6 +153,27 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   against `docs/MEASUREMENTS.md` once the capture path exists.
 - ✅ **Redundancy control** (`Redundancy`): parity permille = clamp(2 × EWMA(datagram loss) +
   50, 50, 500), ×1.5 bump when a report shows a frame lost outright. 🔬 Heuristic; measure.
+- ✅ **Host pipeline** (`slopty-host::screen`, verified on hardware 2026-09-04): one
+  `ScreenStream` per open stream: SCK frame → `Encoder::encode` on the SCK queue → packetize in
+  the VideoToolbox output callback → bounded datagram queue (4096) → one pump task per
+  connection calling `Connection::send_datagram`. Backpressure drops whole *captured* frames
+  when fewer than 256 slots are free and flags the next frame as an LTR refresh; a full queue
+  mid-frame drops the rest of that frame (the reassembler NACKs). Encoder sessions are
+  `Send + Sync` (VideoToolbox is documented thread-safe); the packet sink holds a `Weak` so an
+  encoder never keeps its own stream alive.
+- ✅ **Datagram budget**: QUIC's datagram limit starts near 1168 B at the 1200-byte initial MTU
+  and grows with path-MTU discovery, so the protocol's 1200-byte `MAX_DATAGRAM` is a ceiling,
+  not a promise. The pump reads `Connection::max_datagram_size()` into a shared
+  `DatagramBudget`; the packetizer cuts the next frame to it (`Packetizer::set_max_datagram`),
+  and a datagram cut before the budget shrank is discarded rather than rejected by QUIC.
+- ✅ **Stream ids** are allocated per connection by the host, starting at 1; `WindowId` *is*
+  the `CGWindowID` (clients open against a listing they just received, so reuse is harmless).
+- ✅ **Cursor channel** samples `CGEventGetLocation` at 120 Hz on the host, re-reads the
+  target's bounds at 10 Hz (`CGWindowListCreateDescriptionFromArray` / `CGDisplayBounds`), and
+  sends a datagram only when the stream-pixel position or visibility changed.
+- ⚠️ **`CMTime` → µs must use 128-bit math**: the host clock is nanoseconds since boot, so
+  `value × 1e6` overflows `u64` after a few hours of uptime and silently saturates (found when
+  every latency read 0). Fixed in `slopty-codec::cf::micros`; unit-tested with a 12-day value.
 - ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
   present on arrival. 🔬 slop-desk measured vsync-locked = +2 frames at 60 fps; re-measure with
   our harness before ruling.
