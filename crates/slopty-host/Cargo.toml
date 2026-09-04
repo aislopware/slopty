@@ -19,6 +19,7 @@ slopty-capture.workspace = true
 slopty-codec.workspace = true
 slopty-core.workspace = true
 slopty-engine.workspace = true
+slopty-input.workspace = true
 slopty-media.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true

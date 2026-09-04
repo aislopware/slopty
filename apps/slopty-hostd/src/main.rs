@@ -92,6 +92,13 @@ async fn main() -> Result<()> {
 
     daemon.listener.online().await;
     tracing::info!(id = %daemon.listener.addr().id, name = %daemon.name, "online");
+    if !slopty_input::can_post() {
+        tracing::warn!(
+            "no post-event (Accessibility) access: remote-window input will be dropped; \
+             asking macOS now"
+        );
+        let _granted = slopty_input::request_post();
+    }
     if args.print_ticket {
         #[expect(clippy::print_stdout, reason = "the ticket is the program's output")]
         {

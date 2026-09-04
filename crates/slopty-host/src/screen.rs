@@ -22,9 +22,12 @@ use slopty_capture::{
 };
 use slopty_codec::{CodecError, EncodedPacket, Encoder, EncoderConfig, FrameOptions};
 use slopty_core::StreamId;
+use slopty_input::{Injector, InputError};
 use slopty_media::{EncodedFrame, MediaError, Packetizer, Redundancy, cursor_datagram};
 use slopty_proto::media::MAX_DATAGRAM;
-use slopty_proto::screen::{CaptureTarget, Quality, ReceiverReport, ScreenEvent, VideoCodec};
+use slopty_proto::screen::{
+    CaptureTarget, Quality, ReceiverReport, ScreenEvent, ScreenInput, VideoCodec,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -51,6 +54,9 @@ pub enum ScreenError {
     /// Packetizer.
     #[error(transparent)]
     Media(#[from] MediaError),
+    /// Event injection.
+    #[error(transparent)]
+    Input(#[from] InputError),
     /// A callback-based framework call never completed.
     #[error("screen pipeline closed")]
     Closed,
@@ -302,6 +308,9 @@ pub struct ScreenStream {
     capture_config: CaptureConfig,
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
+    /// Client input aimed at this stream, in its pixel coordinates.
+    injector: Injector,
+    point_scale: f64,
 }
 
 impl std::fmt::Debug for ScreenStream {
@@ -372,8 +381,19 @@ impl ScreenStream {
             scale,
             hdr: false,
         };
-        let stream =
-            Self { id, target, native, capture, shared, capture_config, encoder_config, cursor };
+        let injector = Injector::new(target, point_scale * zoom);
+        let stream = Self {
+            id,
+            target,
+            native,
+            capture,
+            shared,
+            capture_config,
+            encoder_config,
+            cursor,
+            injector,
+            point_scale,
+        };
         Ok((stream, opened))
     }
 
@@ -420,9 +440,21 @@ impl ScreenStream {
                 tracing::warn!(stream = %id, error = %e, "capture reconfigure failed");
             }
         });
+        let zoom = f64::from(capture_config.width) / f64::from(self.native.0);
+        self.injector.set_scale(self.point_scale * zoom);
         self.capture_config = capture_config;
         self.encoder_config = encoder_config;
         Ok(())
+    }
+
+    /// Deliver client input to the streamed window or display.
+    pub fn inject(&mut self, input: &ScreenInput) -> Result<(), ScreenError> {
+        Ok(self.injector.inject(input)?)
+    }
+
+    /// Give the streamed window's application keyboard focus on the host.
+    pub fn focus(&self) -> Result<(), ScreenError> {
+        Ok(self.injector.focus()?)
     }
 
     /// Fold in a receiver report: LTR acks feed the encoder, loss feeds the parity ratio.

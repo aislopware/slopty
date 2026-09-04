@@ -125,6 +125,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - 🔬 **Congestion controller**: noq default (Cubic). Media path runs its own delay-gradient
   bitrate controller on top; revisit BBR once noq marks it stable.
 
+- ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
+  which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
+  disconnect until the close was spawned onto the runtime and joined (crash report
+  2026-09-04). Rule: anything from iroh/tokio-time runs via `runtime.spawn`, GPUI tasks only
+  await join handles and channels.
+
 ## Video
 
 - ✅ **HEVC Main (8-bit 4:2:0) default, Main10/P010 when the source is HDR.** AV1 is decode-only
@@ -215,10 +221,34 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 
 ## Input
 
-- ✅ `objc2-core-graphics` 0.3.2 `CGEvent` (`post_to_pid`, `new_scroll_wheel_event2`,
-  `keyboard_set_unicode_string`, autorepeat field). Host daemon ships non-sandboxed and
-  Developer-ID signed (App Sandbox blocks `CGEventPost`; macOS 26 drops modifier combos from
-  unsigned processes per slop-desk — 🔬 verify).
+- ✅ **`slopty-input` = `CGEvent` injection, one `Injector` per screen stream** (verified end to
+  end 2026-09-04: keys typed into the Slopty app landed in a streamed Ghostty window). Stream
+  pixels map back to global points through the target's current bounds (cached 100 ms) and the
+  stream's pixels-per-point scale, which `ScreenStream` updates on every quality change.
+  Window streams post with `CGEventPostToPid` to the owner; display streams post to the HID tap.
+  Keys carry the client's text via `CGEventKeyboardSetUnicodeString`, so host and client
+  layouts need not agree; bare modifier keys post as `FlagsChanged`. Needs post-event
+  (Accessibility) access: `slopty-hostd` preflights at start-up, warns, and asks once.
+- ⚠️ **macOS delivers keyboard events only to the active app.** Events posted to an inactive
+  pid queue up and all land the moment the app activates (observed macOS 26.5: four probe keys
+  arrived as `echoecho` after activation). So the injector activates the owner
+  (`NSRunningApplication::activateWithOptions`) before a button-down or key press when it is
+  not active, and the client sends `Focus` when a screen view gains focus. The host's own
+  desktop sees that app come to the front; there is no public API around this.
+- ⚠️ **`CGWindowListCreateDescriptionFromArray` takes raw `CGWindowID`s as array values**, in a
+  `CFArray` built with NULL callbacks, not boxed `CFNumber`s: with numbers it returns an empty
+  array (observed macOS 26.5; the docs say "array of window IDs"). `window_bounds` returned
+  `None` for every window until this was fixed; the gated `slopty-capture` geometry test pins it.
+- ⚠️ **Initialise CoreGraphics before ScreenCaptureKit in a daemon.** `SCContentFilter
+  initWithDesktopIndependentWindow:` calls SkyLight, which aborts with
+  `Assertion failed: (did_initialize), function CGS_REQUIRE_INIT` when nothing has connected the
+  process to the WindowServer yet (a hostd whose first SCK call is a window filter, e.g. a
+  client reconnecting with a persisted window item). `slopty-capture` calls `CGMainDisplayID`
+  once before any enumerate/resolve.
+- ✅ **Magnify is ignored** for now: there is no public constructor for gesture `CGEvent`s.
+- 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
+  `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
+  unverified; ⌘-chords are not forwarded yet anyway).
 
 ## Tooling (versions verified on crates.io / GitHub 2026-09-04)
 

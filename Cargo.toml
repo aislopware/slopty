@@ -29,6 +29,7 @@ slopty-client = { path = "crates/slopty-client" }
 slopty-predict = { path = "crates/slopty-predict" }
 slopty-codec = { path = "crates/slopty-codec" }
 slopty-capture = { path = "crates/slopty-capture" }
+slopty-input = { path = "crates/slopty-input" }
 slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
@@ -170,7 +171,14 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGEvent",
     "CGEventTypes",
     "CGEventSource",
+    "CGRemoteOperation",
     "CGError",
+    "libc",
+] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "NSRunningApplication",
+    "libc",
 ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"

@@ -92,7 +92,10 @@ Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;
 `Redundancy` → parity ratio; pure, no clocks, property tested), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
-path's datagram limit; cursor sampler), `slopty-input`. `slopty-hostd` owns one datagram pump
+path's datagram limit; cursor sampler; input injection), `slopty-input` (client
+`ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays;
+activates the owner before clicks and keys because macOS only delivers keyboard events to the
+active app). `slopty-hostd` owns one datagram pump
 per connection and maps `ScreenRequest`s onto the streams it opened for that client.
 
 ## 4. Canvas
@@ -141,7 +144,7 @@ and keys as `ScreenInput`, and asks the host for a stream scale matching its pai
 | `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
 | `slopty-capture` | ScreenCaptureKit | host |
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |
-| `slopty-input` | input event model + CGEvent injection | split |
+| `slopty-input` | CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) | host |
 | `slopty-agent` | Claude Code hooks/JSONL state machine | host |
 | `slopty-host` | session manager, mux, fan-out | host |
 | `slopty-client` | client session state, canvas document | client |

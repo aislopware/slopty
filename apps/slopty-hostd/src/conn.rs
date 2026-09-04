@@ -262,8 +262,19 @@ impl Peer<'_> {
                     s.nack(frame, &fragments);
                 }
             }
-            ScreenRequest::Input { stream, .. } | ScreenRequest::Focus(stream) => {
-                tracing::trace!(client = %self.client, %stream, "screen input not served yet");
+            ScreenRequest::Input { stream, input } => {
+                if let Some(s) = self.screens.get_mut(&stream)
+                    && let Err(e) = s.inject(&input)
+                {
+                    tracing::debug!(client = %self.client, %stream, error = %e, "input");
+                }
+            }
+            ScreenRequest::Focus(stream) => {
+                if let Some(s) = self.screens.get(&stream)
+                    && let Err(e) = s.focus()
+                {
+                    tracing::debug!(client = %self.client, %stream, error = %e, "focus");
+                }
             }
         }
     }

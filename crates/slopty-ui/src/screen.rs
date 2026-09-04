@@ -262,6 +262,9 @@ impl ScreenView {
     }
 
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            self.send(ScreenRequest::Focus(self.stream));
+        }
         self.focus.focus(window, cx);
         let button = proto_button(ev.button);
         let (x, y) = self.to_stream(ev.position);

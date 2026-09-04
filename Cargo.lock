@@ -5569,6 +5569,7 @@ checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.13.1",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-io-surface",
@@ -7981,6 +7982,7 @@ dependencies = [
  "slopty-core",
  "slopty-engine",
  "slopty-grid",
+ "slopty-input",
  "slopty-media",
  "slopty-proto",
  "slopty-pty",
@@ -8002,12 +8004,27 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-host",
+ "slopty-input",
  "slopty-net",
  "slopty-proto",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "slopty-input"
+version = "0.1.0"
+dependencies = [
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "slopty-capture",
+ "slopty-proto",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
