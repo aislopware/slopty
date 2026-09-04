@@ -4,6 +4,7 @@
 //! reads the PTY master, feeds the engine, coalesces frames, and fans them out to attached client
 //! sinks. [`manager::Host`] owns the session table and talks to `slopty-ptyd`.
 
+pub mod ctl;
 pub mod manager;
 pub mod session;
 

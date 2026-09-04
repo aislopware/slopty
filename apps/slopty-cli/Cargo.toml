@@ -1,0 +1,28 @@
+[package]
+name = "slopty-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "slopty: command-line client and host control for Slopty"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "slopty"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+slopty-core.workspace = true
+slopty-grid.workspace = true
+slopty-host.workspace = true
+slopty-net = { workspace = true, features = [ "apple-fast-datapath", "mdns" ] }
+slopty-proto.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

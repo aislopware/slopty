@@ -1,0 +1,142 @@
+//! Identity, pairing, and connecting as a client.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result, bail};
+use slopty_core::ClientId;
+use slopty_net::client::{HostConn, bind_client, connect, connect_with_ticket};
+use slopty_net::identity::{Identity, KnownHost};
+use slopty_net::pairing::PairTicket;
+use slopty_net::{EndpointAddr, EndpointId};
+use slopty_proto::PROTOCOL_VERSION;
+use slopty_proto::handshake::{Caps, ClientKind, Hello};
+
+/// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("SLOPTY_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    home.join("Library").join("Application Support").join("Slopty")
+}
+
+fn identity(data_dir: &Path) -> Result<Identity> {
+    Ok(Identity::open(&data_dir.join("client.json"))?)
+}
+
+fn hello(client: ClientId) -> Hello {
+    Hello {
+        protocol: PROTOCOL_VERSION,
+        client,
+        kind: ClientKind::Tool,
+        name: format!("slopty cli @ {}", host_name()),
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        caps: Caps::empty(),
+        pair_token: None,
+    }
+}
+
+fn host_name() -> String {
+    std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "mac".to_owned())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+pub async fn pair(data_dir: &Path, ticket: &str) -> Result<()> {
+    let ticket: PairTicket = ticket.trim().parse().context("parse ticket")?;
+    let mut me = identity(data_dir)?;
+    let endpoint = bind_client(me.secret().clone()).await?;
+    eprintln!("connecting to {}…", ticket.addr.id);
+    let conn = connect_with_ticket(&endpoint, &ticket, hello(me.client())).await?;
+    me.remember(KnownHost {
+        host: conn.ack.host,
+        name: conn.ack.name.clone(),
+        addr: ticket.addr.clone(),
+        paired_at: unix_now(),
+    })?;
+    println!("paired with {} ({})", conn.ack.name, ticket.addr.id);
+    conn.conn.close(0_u32.into(), b"paired");
+    endpoint.close().await;
+    Ok(())
+}
+
+pub fn hosts(data_dir: &Path) -> Result<()> {
+    let me = identity(data_dir)?;
+    println!("client {}  endpoint {}", me.client(), me.secret().public());
+    for (id, h) in me.hosts() {
+        println!("{id}  {}  ({})", h.name, h.host);
+    }
+    Ok(())
+}
+
+pub fn forget(data_dir: &Path, needle: &str) -> Result<()> {
+    let mut me = identity(data_dir)?;
+    let (id, host) = me.find(needle).context("no unique host matches")?;
+    me.forget(&id)?;
+    println!("forgot {} ({id})", host.name);
+    Ok(())
+}
+
+/// Pick a host: by prefix, or the only one.
+fn pick(me: &Identity, needle: Option<&str>) -> Result<(EndpointId, KnownHost)> {
+    if let Some(n) = needle {
+        return me.find(n).context("no unique host matches");
+    }
+    let hosts = me.hosts();
+    match hosts.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => bail!("no paired hosts; run `slopty pair <ticket>`"),
+        _many => bail!("several hosts; pass --host"),
+    }
+}
+
+/// A live connection to a paired host.
+pub struct Session {
+    /// The connection.
+    pub conn: HostConn,
+    /// Our endpoint (closed with the session).
+    pub endpoint: slopty_net::Endpoint,
+}
+
+impl Session {
+    /// Close cleanly.
+    pub async fn close(self) {
+        self.conn.conn.close(0_u32.into(), b"bye");
+        self.endpoint.close().await;
+    }
+}
+
+pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
+    let me = identity(data_dir)?;
+    let (_id, known) = pick(&me, needle)?;
+    let endpoint = bind_client(me.secret().clone()).await?;
+    let addr: EndpointAddr = known.addr;
+    let conn = connect(&endpoint, addr, hello(me.client())).await?;
+    Ok(Session { conn, endpoint })
+}
+
+pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
+    let session = connect_to(data_dir, needle).await?;
+    println!("{}", session.conn.ack.name);
+    println!("  paths: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    println!("  paths after 1.5 s: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
+    for s in &session.conn.ack.sessions {
+        println!(
+            "  {}  {}x{}  {:?}  {} viewer(s)  {}",
+            s.id, s.cols, s.rows, s.state, s.viewers, s.title
+        );
+    }
+    session.close().await;
+    Ok(())
+}

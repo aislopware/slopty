@@ -137,7 +137,7 @@ Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, on
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app | client |
 | `apps/slopty-ios` | iOS static library + Xcode project | client |
-| `apps/slopty-cli` | `slopty` CLI: hook relay, ctl, pairing | host |
+| `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
 | `xtask` | all scripts (build, gates, bundle, sign) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-host`.
