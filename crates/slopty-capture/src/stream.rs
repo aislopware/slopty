@@ -10,7 +10,8 @@ use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{CMClock, CMSampleBuffer, CMTime, CMTimeFlags};
 use objc2_core_video::{
-    CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
@@ -28,8 +29,11 @@ use crate::{CaptureError, Shareable};
 /// Pixel layout of captured frames.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PixelFormat {
-    /// 8-bit 4:2:0 bi-planar, video range (`420v`); what the HEVC Main encoder wants.
+    /// 8-bit 4:2:0 bi-planar, video range (`420v`).
     Nv12,
+    /// 8-bit 4:2:0 bi-planar, full range (`420f`); what the client's Metal surface path
+    /// samples, so the stream stays full range end to end.
+    Nv12Full,
     /// 10-bit 4:2:0 bi-planar, video range (`x420`); for Main10 / HDR.
     P010,
     /// 8-bit BGRA; for debugging and screenshots.
@@ -40,6 +44,7 @@ impl PixelFormat {
     const fn os_type(self) -> u32 {
         match self {
             Self::Nv12 => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            Self::Nv12Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             Self::P010 => kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
             Self::Bgra => kCVPixelFormatType_32BGRA,
         }

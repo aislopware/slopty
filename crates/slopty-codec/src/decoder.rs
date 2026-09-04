@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
-use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
     CMVideoFormatDescriptionCreateFromH264ParameterSets,
@@ -14,6 +14,7 @@ use objc2_core_media::{
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
@@ -195,14 +196,21 @@ impl Decoder {
             unsafe { session.invalidate() }
             self.session = None;
         }
+        // Full-range bi-planar 4:2:0 is what GPUI's surface path samples (two Metal planes
+        // through `CVMetalTextureCache`); the decoder converts if the stream is video range.
+        let format_type = CFNumber::new_i32(i32::from_ne_bytes(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange.to_ne_bytes(),
+        ));
         let attrs = CFDictionary::<CFString, CFType>::from_slices(
             &[
                 // SAFETY: framework-provided constant string.
                 unsafe { kCVPixelBufferIOSurfacePropertiesKey },
                 // SAFETY: framework-provided constant string.
                 unsafe { kCVPixelBufferMetalCompatibilityKey },
+                // SAFETY: framework-provided constant string.
+                unsafe { kCVPixelBufferPixelFormatTypeKey },
             ],
-            &[&CFDictionary::<CFString, CFType>::empty(), cf::boolean(true)],
+            &[&CFDictionary::<CFString, CFType>::empty(), cf::boolean(true), &format_type],
         );
         let record = VTDecompressionOutputCallbackRecord {
             decompressionOutputCallback: Some(output_callback),

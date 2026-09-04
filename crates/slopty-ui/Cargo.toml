@@ -12,8 +12,11 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+core-foundation.workspace = true
+core-video.workspace = true
 gpui.workspace = true
 slopty-client.workspace = true
+slopty-codec.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-predict.workspace = true

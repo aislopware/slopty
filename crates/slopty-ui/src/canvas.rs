@@ -21,11 +21,14 @@ use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
+use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest, TermSize};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
+use crate::picker::{PickerEvent, WindowPicker};
+use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
 
 /// Canvas actions (bound in [`key_bindings`]).
@@ -41,6 +44,8 @@ pub mod actions {
         [
             /// Open a new shell on the host.
             NewTerminal,
+            /// Put a host window or display on the canvas.
+            AddWindow,
             /// Close the active item (terminates its session).
             CloseItem,
             /// Zoom in about the viewport centre.
@@ -54,7 +59,7 @@ pub mod actions {
         ]
     );
 }
-pub use actions::{CloseItem, FitAll, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
+pub use actions::{AddWindow, CloseItem, FitAll, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
 
 /// Key bindings for the canvas context.
 #[must_use]
@@ -63,6 +68,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-t", NewTerminal, CTX),
         KeyBinding::new("cmd-n", NewTerminal, CTX),
+        KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
         KeyBinding::new("cmd-=", ZoomIn, CTX),
         KeyBinding::new("cmd-shift-=", ZoomIn, CTX),
@@ -85,6 +91,8 @@ const GRIP: f32 = 14.0;
 const MIN_ITEM: f32 = 160.0;
 /// Zoom step for ⌘= / ⌘-.
 const ZOOM_STEP: f32 = 1.25;
+/// Largest item a picked window gets on the canvas, in points.
+const MAX_PICKED: (f32, f32) = (1600.0, 1000.0);
 
 /// Things the surrounding chrome may show.
 #[derive(Clone, PartialEq, Debug)]
@@ -111,12 +119,25 @@ pub struct CanvasView {
     theme: Theme,
     terminals: HashMap<SessionId, Entity<TerminalView>>,
     sessions: HashMap<SessionId, SessionSummary>,
+    screens: HashMap<ItemId, Entity<ScreenView>>,
+    /// Streams requested from the host but not yet `Opened`, by target.
+    pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// Item titles the picker gave us (the document only stores ids).
+    titles: HashMap<ItemId, String>,
+    open_screen: ScreenFactory,
+    picker: Option<Entity<WindowPicker>>,
+    /// A `List` is in flight for the picker.
+    picker_wanted: bool,
     /// Viewport origin (window coordinates) and size, recorded each frame.
     viewport: (Point<Pixels>, Size<Pixels>),
     drag: Option<Drag>,
     active: Option<ItemId>,
     /// A terminal to focus on the next frame (one we just opened).
     pending_focus: Option<SessionId>,
+    /// Focus the picker on the next frame.
+    pending_focus_picker: bool,
+    /// Focus the canvas itself on the next frame (after the picker closes).
+    pending_focus_self: bool,
     focus: FocusHandle,
     subscriptions: Vec<gpui::Subscription>,
 }
@@ -144,6 +165,7 @@ impl CanvasView {
         me: ClientId,
         out: mpsc::Sender<ClientMsg>,
         sessions: Vec<SessionSummary>,
+        open_screen: ScreenFactory,
         theme: Theme,
         cx: &Context<Self>,
     ) -> Self {
@@ -155,10 +177,18 @@ impl CanvasView {
             theme,
             terminals: HashMap::new(),
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
+            screens: HashMap::new(),
+            pending_opens: HashMap::new(),
+            titles: HashMap::new(),
+            open_screen,
+            picker: None,
+            picker_wanted: false,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             drag: None,
             active: None,
             pending_focus: None,
+            pending_focus_picker: false,
+            pending_focus_self: false,
             focus: cx.focus_handle(),
             subscriptions: Vec::new(),
         }
@@ -233,6 +263,106 @@ impl CanvasView {
         }
     }
 
+    /// A remote-window event from the host.
+    pub fn screen_event(&mut self, event: ScreenEvent, cx: &mut Context<Self>) {
+        match event {
+            ScreenEvent::Listing { windows, displays } => {
+                if self.picker_wanted {
+                    self.picker_wanted = false;
+                    self.show_picker(windows, displays, cx);
+                }
+            }
+            ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
+                let Some(id) = self.pending_opens.remove(&target) else {
+                    tracing::debug!(%stream, ?target, "opened stream nobody asked for; closing");
+                    self.send(ClientMsg::Screen(ScreenRequest::Close(stream)));
+                    return;
+                };
+                let handle = (self.open_screen)(stream, codec);
+                let out = self.out.clone();
+                let theme = self.theme.clone();
+                let quality = self.quality_for();
+                let opened =
+                    crate::screen::Opened { stream, target, size: (width, height), quality };
+                let view = cx.new(|cx| ScreenView::new(opened, handle, out, theme, cx));
+                self.subscriptions
+                    .push(cx.subscribe(&view, |_this, _view, _event, cx| cx.notify()));
+                self.screens.insert(id, view);
+            }
+            ScreenEvent::Closed { stream, reason } => {
+                let gone: Vec<ItemId> = self
+                    .screens
+                    .iter()
+                    .filter(|(_, v)| v.read(cx).stream() == stream)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in gone {
+                    tracing::info!(%stream, %reason, "screen closed by host");
+                    self.screens.remove(&id);
+                }
+            }
+            ScreenEvent::Geometry { .. }
+            | ScreenEvent::Cursor { .. }
+            | ScreenEvent::ListingChanged => {}
+        }
+        cx.notify();
+    }
+
+    /// Requested quality for a new stream: full scale unless the canvas is zoomed out.
+    fn quality_for(&self) -> Quality {
+        let zoom = self.camera.zoom.clamp(0.25, 1.0);
+        let scale = (zoom * 4.0).ceil() / 4.0;
+        Quality { scale, ..Quality::default() }
+    }
+
+    fn show_picker(
+        &mut self,
+        windows: Vec<slopty_proto::screen::WindowInfo>,
+        displays: Vec<slopty_proto::screen::DisplayInfo>,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = self.theme.clone();
+        let picker = cx.new(|cx| WindowPicker::new(windows, displays, theme, cx));
+        self.subscriptions.push(cx.subscribe(&picker, |this, _picker, event, cx| {
+            match event {
+                PickerEvent::Pick { target, size, title } => {
+                    this.add_screen_item(*target, *size, title.clone());
+                }
+                PickerEvent::Dismiss => {}
+            }
+            this.picker = None;
+            this.pending_focus_self = true;
+            cx.notify();
+        }));
+        self.pending_focus_picker = true;
+        self.picker = Some(picker);
+    }
+
+    /// Put a window/display item on the canvas; `reconcile` opens its stream.
+    fn add_screen_item(&mut self, target: CaptureTarget, size: (f32, f32), title: String) {
+        let (mut w, mut h) = (size.0.max(160.0), size.1.max(120.0));
+        let shrink = (MAX_PICKED.0 / w).min(MAX_PICKED.1 / h).min(1.0);
+        w = snap(w * shrink);
+        h = snap(h.mul_add(shrink, TITLE_H));
+        let rect = self.doc.free_slot((w, h));
+        let kind = match target {
+            CaptureTarget::Window(window) => ItemKind::Window { window },
+            CaptureTarget::Display(display) => ItemKind::Display { display },
+        };
+        let id = ItemId::new();
+        self.titles.insert(id, title);
+        let item = CanvasItem {
+            id,
+            kind,
+            rect,
+            z: self.doc.top_z().saturating_add(1),
+            group: None,
+            sleeping: false,
+        };
+        self.propose(CanvasOp::Upsert(item));
+        self.active = Some(id);
+    }
+
     /// A session-stream event.
     pub fn term_event(&self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
         match (self.terminals.get(&session), event) {
@@ -291,11 +421,49 @@ impl CanvasView {
             }
             self.terminals.remove(&session);
         }
+        self.reconcile_screens();
         if let Some(active) = self.active
             && self.doc.get(active).is_none()
         {
             self.active = self.doc.by_z().last().map(|i| i.id);
         }
+    }
+
+    /// Open streams for window/display items that lack one; drop views whose item is gone.
+    fn reconcile_screens(&mut self) {
+        let wanted: Vec<(ItemId, CaptureTarget)> = self
+            .doc
+            .items()
+            .filter(|i| !i.sleeping)
+            .filter_map(|i| match i.kind {
+                ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
+                ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
+                ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+            })
+            .collect();
+        for &(id, target) in &wanted {
+            if self.screens.contains_key(&id) || self.pending_opens.values().any(|&p| p == id) {
+                continue;
+            }
+            if self.pending_opens.contains_key(&target) {
+                continue;
+            }
+            let quality = self.quality_for();
+            self.pending_opens.insert(target, id);
+            self.send(ClientMsg::Screen(ScreenRequest::Open { target, quality }));
+        }
+        let gone: Vec<ItemId> = self
+            .screens
+            .keys()
+            .filter(|id| !wanted.iter().any(|(w, _)| w == *id))
+            .copied()
+            .collect();
+        for id in gone {
+            // Dropping the view sends `Close` for its stream.
+            self.screens.remove(&id);
+            self.titles.remove(&id);
+        }
+        self.pending_opens.retain(|_, id| wanted.iter().any(|(w, _)| w == id));
     }
 
     fn send(&self, msg: ClientMsg) {
@@ -322,6 +490,13 @@ impl CanvasView {
             title: None,
             attach: false,
         }));
+        cx.notify();
+    }
+
+    /// ⌘O: ask the host for its windows, then show the picker.
+    pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
+        self.picker_wanted = true;
+        self.send(ClientMsg::Screen(ScreenRequest::List));
         cx.notify();
     }
 
@@ -519,8 +694,21 @@ impl CanvasView {
                     .unwrap_or_else(|| "shell".to_owned());
                 (title, focused)
             }
-            ItemKind::Window { window } => (format!("window {}", window.0), false),
-            ItemKind::Display { display } => (format!("display {display}"), false),
+            ItemKind::Window { window: host_window } => {
+                let view = self.screens.get(&item.id);
+                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
+                let title = self
+                    .titles
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("window {}", host_window.0));
+                (title, focused)
+            }
+            ItemKind::Display { display } => {
+                let view = self.screens.get(&item.id);
+                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
+                (format!("display {display}"), focused)
+            }
             ItemKind::Note { .. } => ("note".to_owned(), false),
         };
         let border = if focused || active { theme.surfaces.accent } else { theme.surfaces.border };
@@ -588,7 +776,43 @@ impl CanvasView {
                     })
                     .into_any_element(),
             },
-            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => div()
+            ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                match (card, self.screens.get(&item.id)) {
+                    (false, Some(view)) => {
+                        let painted = s.w * window.scale_factor();
+                        view.update(cx, |v, _| v.set_painted_width(painted));
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(view.clone())
+                            .into_any_element()
+                    }
+                    (true, Some(view)) => {
+                        let frames = view.read(cx).frames();
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .p(px(10.0))
+                            .text_size(px(11.0))
+                            .text_color(hsla(theme.surfaces.text_muted))
+                            .font_family(theme.typography.ui_family.clone())
+                            .child(SharedString::from(format!("{frames} frames")))
+                            .into_any_element()
+                    }
+                    (_, None) => div()
+                        .flex_1()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(ui_size))
+                        .text_color(hsla(theme.surfaces.text_muted))
+                        .child(if item.sleeping { "sleeping" } else { "opening…" })
+                        .into_any_element(),
+                }
+            }
+            ItemKind::Note { .. } => div()
                 .flex_1()
                 .w_full()
                 .flex()
@@ -646,6 +870,16 @@ impl Render for CanvasView {
             let handle = view.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        if std::mem::take(&mut self.pending_focus_picker)
+            && let Some(picker) = &self.picker
+        {
+            let handle = picker.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        if std::mem::take(&mut self.pending_focus_self) {
+            window.focus(&self.focus, cx);
+        }
+        let picker = self.picker.clone();
         let items = self.doc.by_z().into_iter().cloned().collect::<Vec<_>>();
         let entity = cx.entity();
         let record_bounds = canvas(
@@ -669,6 +903,7 @@ impl Render for CanvasView {
             .overflow_hidden()
             .bg(hsla(self.theme.surfaces.canvas))
             .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
@@ -682,6 +917,7 @@ impl Render for CanvasView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(record_bounds)
             .children(rendered)
+            .children(picker)
             .when(empty, |el| {
                 el.child(
                     div()
@@ -693,7 +929,7 @@ impl Render for CanvasView {
                         .text_size(px(13.0))
                         .text_color(hsla(self.theme.surfaces.text_muted))
                         .font_family(self.theme.typography.ui_family.clone())
-                        .child("⌘T opens a shell on the host"),
+                        .child("⌘T opens a shell on the host · ⌘O adds a window"),
                 )
             })
     }

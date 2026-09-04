@@ -182,6 +182,7 @@ impl Drop for ScreenHandle {
 /// Start receiving `stream`: reassembly, decode, NACK/refresh/report traffic on `out`.
 #[must_use]
 pub fn spawn_screen(
+    runtime: &tokio::runtime::Handle,
     router: &ScreenRouter,
     stream: StreamId,
     codec: VideoCodec,
@@ -207,7 +208,7 @@ pub fn spawn_screen(
         cursor_seq: None,
         counters: ScreenStats::default(),
     };
-    let task = tokio::spawn(worker.run());
+    let task = runtime.spawn(worker.run());
     ScreenHandle { stream, frames, cursor, stats, router: router.clone(), task }
 }
 

@@ -49,6 +49,21 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Terminal zoom scales paint, not the grid.** `TerminalElement::zoom` derives cols×rows from
   the *unscaled* item rect and paints at `font_size × zoom`; zooming never resizes the PTY. Shaped
   rows are cached per (content, focus, font size).
+- ✅ **Remote windows are `surface` elements, verified 2026-09-04.** `slopty-ui::screen::ScreenView`
+  wraps the decoder's `CVPixelBuffer` with `core_video::CVPixelBuffer::wrap_under_get_rule` (own
+  retain, so the frame `Arc` may drop first) and paints `gpui::surface(buffer).object_fit(Fill)`.
+  A Ghostty window streamed from the host rendered pixel-exact through the Metal path with no
+  copy. The view keeps only the newest frame; a pump task awaits the client `watch` channels for
+  frames and cursor and calls `cx.notify()`.
+- ✅ **Stream quality follows painted size.** `ScreenView::set_painted_width` (called from the
+  canvas at paint time with the item's on-screen width in device pixels) quantises the wanted
+  scale to quarter steps and sends `SetQuality` at most every 400 ms, so zooming the canvas
+  re-encodes at a matching resolution instead of downscaling a full-size stream. Below
+  `CARD_ZOOM` the item is a summary card ("N frames") and the surface is not painted at all.
+- ✅ **Picker is a modal overlay, ⌘O.** `slopty-ui::picker::WindowPicker` lists on-screen windows
+  (sorted app → title) and displays from a `Listing`; Escape or a backdrop click dismisses, a row
+  click picks. Bound to ⌘O because Raycast owns ⌘⇧N system-wide on the dev Mac (evidence: the
+  first binding opened Raycast's clipboard history instead).
 
 ## Terminal
 
@@ -187,6 +202,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ⚠️ **`CMTime` → µs must use 128-bit math**: the host clock is nanoseconds since boot, so
   `value × 1e6` overflows `u64` after a few hours of uptime and silently saturates (found when
   every latency read 0). Fixed in `slopty-codec::cf::micros`; unit-tested with a 12-day value.
+- ✅ **420f end to end.** Capture asks SCK for `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange`
+  (`PixelFormat::Nv12Full`), and the decoder's output attributes pin the same format with
+  `kCVPixelBufferMetalCompatibilityKey`, because GPUI's `metal_renderer` asserts that exact
+  format (`assert_eq!` in `draw_surfaces`) and samples the two planes as R8/RG8. Any other
+  format would either abort the app or need a colour-space conversion on the client.
 - ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
   present on arrival. 🔬 slop-desk measured vsync-locked = +2 frames at 60 fps; re-measure with
   our harness before ruling.

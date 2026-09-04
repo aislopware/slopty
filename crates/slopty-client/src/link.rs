@@ -44,6 +44,8 @@ pub struct HostLink {
     events: Option<mpsc::Receiver<LinkEvent>>,
     conn: slopty_net::Connection,
     router: ScreenRouter,
+    /// The runtime the link's tasks run on; screen workers join them from any thread.
+    runtime: tokio::runtime::Handle,
     tasks: JoinSet<()>,
 }
 
@@ -138,15 +140,16 @@ impl HostLink {
             }
         });
 
-        Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, tasks }
+        let runtime = tokio::runtime::Handle::current();
+        Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, runtime, tasks }
     }
 
     /// Start receiving a screen stream the host has `Opened`. Drop the handle to stop; send
-    /// `ScreenRequest::Close` as well so the host stops capturing.
+    /// `ScreenRequest::Close` as well so the host stops capturing. Callable from any thread.
     #[must_use]
     pub fn screen(&self, stream: StreamId, codec: VideoCodec) -> ScreenHandle {
         let conn = self.conn.clone();
-        spawn_screen(&self.router, stream, codec, self.out.clone(), move || {
+        spawn_screen(&self.runtime, &self.router, stream, codec, self.out.clone(), move || {
             slopty_net::endpoint::rtt(&conn)
         })
     }

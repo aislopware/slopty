@@ -104,7 +104,10 @@ line cache and stop painting; off-screen video pauses decode (kind-aware culling
 document synced through the host so every client sees the same canvas (`slopty-host::canvas`
 owns it, `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws
 it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface).
+grip resizes, ⌘T/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface). Remote-window items are
+created from the picker (⌘O); `reconcile_screens` opens a stream for every window/display item
+that lacks one and closes streams for items that disappeared, so the document, not the UI, is
+the source of truth for what is being streamed.
 
 ## 5. Agents
 
@@ -120,6 +123,9 @@ GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit 
 gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). iOS backend comes from
 zed PR #63068 rebased onto the pin, extended for touch momentum, `paint_surface`, and keyboard.
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
+`slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
+`CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
+and keys as `ScreenInput`, and asks the host for a stream scale matching its painted width.
 
 ## 7. Crate map
 

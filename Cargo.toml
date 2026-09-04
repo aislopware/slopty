@@ -38,6 +38,8 @@ anyhow = "1.0.104"
 thiserror = "2.0.20"
 bitflags = { version = "2.13.1", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
+core-foundation = "0.10.1"
+core-video = "0.5.2"
 smallvec = { version = "1.16.0", features = [ "serde", "union", "const_generics", "const_new" ] }
 parking_lot = "0.12.5"
 uuid = { version = "1.26.0", features = [ "v4", "v7", "serde", "fast-rng" ] }

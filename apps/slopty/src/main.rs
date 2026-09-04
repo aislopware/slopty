@@ -185,10 +185,14 @@ fn main() -> Result<()> {
             };
             let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
             let link = std::sync::Arc::new(link);
+            let screen_link = std::sync::Arc::clone(&link);
+            let open_screen: slopty_ui::screen::ScreenFactory =
+                std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
             let canvas = workspace.update(cx, |ws, cx| {
                 let theme = ws.theme.clone();
                 let sessions = ack.sessions.clone();
-                let canvas = cx.new(|cx| CanvasView::new(me, sender, sessions, theme, cx));
+                let canvas =
+                    cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
                 ws.subscriptions.push(cx.subscribe(&canvas, |ws, _canvas, event, cx| {
                     if let CanvasEvent::Zoom(z) = event {
                         ws.zoom = *z;
@@ -259,6 +263,9 @@ fn main() -> Result<()> {
                     }
                     LinkEvent::Control(HostMsg::Term { session, event }) => {
                         canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                    }
+                    LinkEvent::Control(HostMsg::Screen(event)) => {
+                        canvas.update(cx, |c, cx| c.screen_event(event, cx));
                     }
                     LinkEvent::Control(_) => {}
                     LinkEvent::Disconnected(why) => {
