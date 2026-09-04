@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
 mod gate;
+mod ime;
 mod ios;
 mod release;
 mod run;
@@ -31,6 +32,14 @@ enum Cmd {
         /// Skip installing tools; only sync submodules.
         #[arg(long)]
         no_tools: bool,
+    },
+    /// List enabled macOS input sources, or select one by id (for input-method testing).
+    Ime {
+        /// Input source id to select (e.g. `com.apple.inputmethod.VietnameseSimpleTelex`).
+        id: Option<String>,
+        /// List every installed source, not only the enabled ones.
+        #[arg(long)]
+        all: bool,
     },
     /// Run the full pre-commit gate: fmt, clippy on every triple, tests, docs, deny, shear, typos.
     Gate {
@@ -91,6 +100,7 @@ fn main() -> Result<()> {
     sh.change_dir(tools::repo_root()?);
     match cli.cmd {
         Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
+        Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         Cmd::Gate { fix, quick } => gate::run(&sh, gate::Options { fix, quick }),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),

@@ -127,6 +127,16 @@ pub fn rtt(conn: &iroh::endpoint::Connection) -> Option<Duration> {
     conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| p.rtt())
 }
 
+/// UDP datagrams received on the connection so far.
+///
+/// With `KEEP_ALIVE` pings from the other side a healthy connection moves this counter every
+/// few seconds; a counter that stands still is the earliest sign the peer is gone, long before
+/// `IDLE_TIMEOUT`.
+#[must_use]
+pub fn received_datagrams(conn: &iroh::endpoint::Connection) -> u64 {
+    conn.stats().udp_rx.datagrams
+}
+
 /// Whether the selected path is relayed (`None` while no path is selected).
 #[must_use]
 pub fn relayed(conn: &iroh::endpoint::Connection) -> Option<bool> {

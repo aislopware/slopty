@@ -71,7 +71,7 @@ pub struct Prepared {
     rows: Vec<PreparedRow>,
     cursor: Option<(Bounds<Pixels>, CursorShape, Hsla)>,
     background: Hsla,
-    /// Predicted glyphs drawn over the grid (local echo).
+    /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
 }
 
@@ -274,7 +274,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepared {
-        let (theme, rows_view, cursor, view_offset, modes, known_family, predicted) = {
+        let (theme, rows_view, cursor, view_offset, modes, known_family, predicted, marked) = {
             let view = self.view.read(cx);
             let state = view.state();
             let rows: Vec<Option<Line>> =
@@ -288,6 +288,7 @@ impl Element for TerminalElement {
                 state.modes(),
                 view.font_family().map(str::to_owned),
                 predicted.map(|(p, _)| p).unwrap_or_default(),
+                view.marked().map(str::to_owned),
             )
         };
         let palette = &theme.terminal;
@@ -427,7 +428,8 @@ impl Element for TerminalElement {
         let cursor_visible = cursor.visible
             && view_offset == 0
             && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
-        let cursor_prepared = cursor_visible.then(|| {
+        // While an input method composes, its underlined preview stands in for the cursor.
+        let cursor_prepared = (cursor_visible && marked.is_none()).then(|| {
             let x = origin.x + cell_width * f32::from(cursor.col);
             let y = origin.y + line_height * f32::from(cursor.row);
             let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
@@ -435,7 +437,7 @@ impl Element for TerminalElement {
         });
 
         // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
-        let overlay = predicted
+        let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
             .iter()
             .map(|p| {
                 let mut run = text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette);
@@ -458,6 +460,23 @@ impl Element for TerminalElement {
                 (at, shaped)
             })
             .collect();
+        // The input method's composition, underlined at the cursor (what Terminal.app does).
+        if let Some(text) = marked.filter(|_| cursor_visible) {
+            let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
+            run.underline =
+                Some(UnderlineStyle { thickness: px(1.0), color: Some(run.color), wavy: false });
+            let shaped = text_system.shape_line(
+                SharedString::from(text),
+                font_size,
+                &[run],
+                Some(cell_width),
+            );
+            let at = point(
+                origin.x + cell_width * f32::from(cursor.col),
+                origin.y + line_height * f32::from(cursor.row),
+            );
+            overlay.push((at, shaped));
+        }
 
         Prepared {
             metrics,
@@ -528,9 +547,9 @@ impl Element for TerminalElement {
             }
         }
         for (at, line) in &prepared.overlay {
-            // Cover whatever the host currently shows in that cell, then draw the guess.
+            // Cover whatever the host currently shows there, then draw the guess or preview.
             window.paint_quad(fill(
-                Bounds::new(*at, size(m.cell_width, m.line_height)),
+                Bounds::new(*at, size(line.width.max(m.cell_width), m.line_height)),
                 prepared.background,
             ));
             if let Err(e) = line.paint(*at, m.line_height, TextAlign::Left, None, window, cx) {

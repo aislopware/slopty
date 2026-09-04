@@ -78,10 +78,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `Camera::reveal`ed on the next frame (pan if they fit, else zoom out no further than
   `CARD_ZOOM` and anchor top-left), because the host's `free_slot` places them to the right of
   everything, off a phone's screen.
-- 🔬 **Input methods in terminals.** With `prefers_ime_for_printable_keys` left false, macOS
-  sends printable keys straight to `key_down`, so Telex/Japanese/… composition never starts.
-  Turning it on requires drawing marked text at the cursor (`replace_and_mark_text_in_range`)
-  the way Terminal.app and Ghostty do. Not done yet.
+- ✅ **Input methods in terminals.** In the fork, `prefers_ime_for_printable_keys` follows
+  `accepts_text_input` (true for `TerminalView`), so with the input handler installed macOS
+  routes printable keys through the active input method. `TerminalView` keeps the marked text
+  (`replace_and_mark_text_in_range`/`unmark_text`), the element draws it underlined at the
+  cursor over the host's cells and hides the block cursor meanwhile (what Terminal.app does),
+  and the commit arrives through `replace_text_in_range` as raw bytes. Covered by the GPUI test
+  `composition_is_previewed_then_committed_as_raw_bytes` (gpui `test-support`). A live Telex
+  run was not possible from the automation session (see `cargo xtask ime` below).
+- ✅ **`cargo xtask ime [id] [--all]`** lists/selects macOS input sources through HIToolbox's
+  `TISSelectInputSource` (Carbon), for input-method testing. Caveat found 2026-09-05: the
+  agent's shell runs in a `Background` launchd session (`launchctl managername`), where TIS
+  refuses to select (`paramErr -50`) and synthetic ⌃Space never reaches the hotkey; the tool
+  works from a real Terminal in the Aqua session.
 - 🔬 **Phone-sized terminals.** A terminal opened from a desktop is wider than a phone; today
   the phone sees it at `CARD_ZOOM`–1× and pans. The architecture's driver/viewer sizing
   (one client owns the PTY size) is the real answer: a phone that becomes the driver resizes
@@ -198,8 +207,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   host whose mesh IP changes needs re-pairing. Observed 2026-09-04: when the host process is
   killed, the client's lone direct path times out at 15 s, noq logs `failed closing path
   err=LastOpenPath` and keeps it, and the connection only drops at the 45 s idle timeout
-  (`IDLE_TIMEOUT`); the top bar shows a stale RTT until then. 🔬 A liveness signal from the
-  control stream (host heartbeat message) would let the app show "host unreachable" at ~5 s.
+  (`IDLE_TIMEOUT`); the top bar showed a stale RTT until then. ✅ Liveness now comes from
+  QUIC itself, no protocol message: the app samples `ConnectionStats.udp_rx.datagrams` once a
+  second (`HostLink::received_datagrams`); keep-alive pings make a live host send something
+  every 5 s, so a counter that stands still for `SILENCE_WARN` = 8 s turns the RTT readout into
+  a yellow "host silent Ns". Verified 2026-09-05 by `SIGSTOP`ping hostd.
 - 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
   43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
   prefers a live direct path over relay, so the direct path must have been *closed*, not

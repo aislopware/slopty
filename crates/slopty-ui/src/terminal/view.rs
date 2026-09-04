@@ -45,6 +45,8 @@ pub struct TerminalView {
     font_family: Option<String>,
     zoom: f32,
     predictor: Predictor,
+    /// Text an input method is composing at the cursor (Telex, kana, …), not yet sent.
+    marked: Option<String>,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -91,6 +93,7 @@ impl TerminalView {
             font_family: None,
             zoom: 1.0,
             predictor: Predictor::new(policy_from_env()),
+            marked: None,
         }
     }
 
@@ -147,6 +150,12 @@ impl TerminalView {
     #[must_use]
     pub const fn prediction_stats(&self) -> (u64, u64) {
         self.predictor.stats()
+    }
+
+    /// Composition in progress, drawn at the cursor by the element.
+    #[must_use]
+    pub fn marked(&self) -> Option<&str> {
+        self.marked.as_deref()
     }
 
     /// Cell metrics measured by the element on its last layout.
@@ -293,10 +302,12 @@ impl TerminalView {
 
 /// Text input on top of the key path.
 ///
-/// Keys reach the terminal through [`TerminalView::key_down`]; this handler exists so the
-/// platform treats a focused terminal as a text field: iOS raises the soft keyboard (typed
-/// characters still arrive as key events), and macOS input methods commit composed text here.
-/// The terminal has no editable buffer, so ranges are empty and composition is not previewed.
+/// Keys reach the terminal through [`TerminalView::key_down`]; this handler makes the platform
+/// treat a focused terminal as a text field: iOS raises the soft keyboard, and macOS routes
+/// printable keys through the active input method, which previews its composition here
+/// (`replace_and_mark_text_in_range`, drawn underlined at the cursor) and commits it with
+/// `replace_text_in_range`. The terminal has no editable buffer, so the only range that exists
+/// is the marked text's.
 impl EntityInputHandler for TerminalView {
     fn text_for_range(
         &mut self,
@@ -322,10 +333,14 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<std::ops::Range<usize>> {
-        None
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.marked.take().is_some() {
+            cx.notify();
+        }
+    }
 
     fn replace_text_in_range(
         &mut self,
@@ -334,7 +349,9 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.marked = None;
         if text.is_empty() {
+            cx.notify();
             return;
         }
         if self.state.view_offset() != 0 {
@@ -347,11 +364,13 @@ impl EntityInputHandler for TerminalView {
     fn replace_and_mark_text_in_range(
         &mut self,
         _range: Option<std::ops::Range<usize>>,
-        _new_text: &str,
+        new_text: &str,
         _new_selected_range: Option<std::ops::Range<usize>>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
+        cx.notify();
     }
 
     fn bounds_for_range(
@@ -406,5 +425,53 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+    use slopty_proto::terminal::TermRequest;
+
+    use super::*;
+
+    /// An input method previews its composition at the cursor and nothing reaches the host
+    /// until it commits; the commit goes out as raw bytes and clears the preview.
+    #[gpui::test]
+    fn composition_is_previewed_then_committed_as_raw_bytes(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        // Construction attaches; only raw input matters here.
+        let is_raw =
+            |msg: &ClientMsg| matches!(msg, ClientMsg::Term { req: TermRequest::Raw(_), .. });
+        while let Ok(msg) = rx.try_recv() {
+            assert!(!is_raw(&msg), "no input before typing");
+        }
+        view.update_in(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "ti\u{1ebf}", None, window, cx);
+            assert_eq!(view.marked(), Some("ti\u{1ebf}"));
+            assert_eq!(view.marked_text_range(window, cx), Some(0..3));
+            assert!(rx.try_recv().is_err(), "nothing sent while composing");
+
+            view.replace_and_mark_text_in_range(None, "", None, window, cx);
+            assert_eq!(view.marked(), None, "empty marked text ends the preview");
+
+            view.replace_and_mark_text_in_range(None, "vi\u{1ec7}", None, window, cx);
+            view.replace_text_in_range(None, "vi\u{1ec7}t", window, cx);
+            assert_eq!(view.marked(), None, "commit clears the preview");
+        });
+        match rx.try_recv() {
+            Ok(ClientMsg::Term { req: TermRequest::Raw(bytes), .. }) => {
+                assert_eq!(bytes, "vi\u{1ec7}t".as_bytes());
+            }
+            other => panic!("expected the committed text as raw bytes, got {other:?}"),
+        }
+        view.update_in(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "a", None, window, cx);
+            view.unmark_text(window, cx);
+            assert_eq!(view.marked(), None);
+        });
     }
 }

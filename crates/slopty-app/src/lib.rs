@@ -30,6 +30,8 @@ const LEADING_INSET: f32 = 78.0;
 const LEADING_INSET: f32 = 12.0;
 /// Keyboard shortcut hints make sense where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
+/// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
+const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// The pairing panel: shown until this installation knows a host.
 #[derive(Debug)]
@@ -51,6 +53,8 @@ pub struct Workspace {
     zoom: f32,
     rtt: Option<std::time::Duration>,
     relayed: Option<bool>,
+    /// How long the host has sent nothing at all, once past [`SILENCE_WARN`].
+    silent: Option<std::time::Duration>,
     theme: Theme,
     subscriptions: Vec<gpui::Subscription>,
     pairing: Option<Pairing>,
@@ -255,11 +259,15 @@ impl Workspace {
             )))
             .child(label(self.status.clone()))
             .child(div().flex_1())
-            .child(label(match (self.rtt, self.relayed) {
-                (Some(d), Some(true)) => format!("{:.1} ms via relay", d.as_secs_f64() * 1e3),
-                (Some(d), _) => format!("{:.1} ms", d.as_secs_f64() * 1e3),
-                (None, _) => String::new(),
-            }))
+            .child(match (self.silent, self.rtt, self.relayed) {
+                (Some(gap), _, _) => label(format!("host silent {}s", gap.as_secs()))
+                    .text_color(hsla(self.theme.terminal.palette(3))),
+                (None, Some(d), Some(true)) => {
+                    label(format!("{:.1} ms via relay", d.as_secs_f64() * 1e3))
+                }
+                (None, Some(d), _) => label(format!("{:.1} ms", d.as_secs_f64() * 1e3)),
+                (None, None, _) => label(String::new()),
+            })
             .child(label(format!("{zoom_pct}%")))
             .child(fit_button)
             .child(new_button)
@@ -336,6 +344,7 @@ pub fn open_workspace(
         zoom: 1.0,
         rtt: None,
         relayed: None,
+        silent: None,
         theme: theme.clone(),
         subscriptions: Vec::new(),
         pairing: None,
@@ -413,21 +422,32 @@ pub fn open_workspace(
                 let handle = focus_canvas.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
             });
-            // RTT readout once a second: the top bar shows it and predictors gate on it.
+            // Once a second: RTT for the top bar and the predictors, and a liveness check. QUIC
+            // keep-alives make the host send something every few seconds; when the received
+            // datagram count stops moving the host is gone or unreachable, and the bar says so
+            // long before the transport's idle timeout drops the connection.
             let rtt_link = std::sync::Arc::downgrade(&link);
             let rtt_canvas = canvas.clone();
             let rtt_workspace = workspace.clone();
             cx.spawn(async move |cx| {
+                let mut heard = (0_u64, std::time::Instant::now());
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                     let Some(link) = rtt_link.upgrade() else { break };
                     let rtt = link.rtt();
                     let relayed = link.relayed();
-                    tracing::debug!(paths = %link.paths(), "link paths");
+                    let received = link.received_datagrams();
+                    if received != heard.0 {
+                        heard = (received, std::time::Instant::now());
+                    }
+                    let gap = heard.1.elapsed();
+                    let silent = (gap >= SILENCE_WARN).then_some(gap);
+                    tracing::debug!(paths = %link.paths(), received, "link paths");
                     rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
                     rtt_workspace.update(cx, |ws, cx| {
                         ws.rtt = rtt;
                         ws.relayed = relayed;
+                        ws.silent = silent;
                         cx.notify();
                     });
                 }

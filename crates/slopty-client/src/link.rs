@@ -191,6 +191,12 @@ impl HostLink {
         slopty_net::endpoint::rtt(&self.conn)
     }
 
+    /// UDP datagrams received so far; unchanged for several seconds means the host is silent.
+    #[must_use]
+    pub fn received_datagrams(&self) -> u64 {
+        slopty_net::endpoint::received_datagrams(&self.conn)
+    }
+
     /// Whether the selected path goes through a relay (`None` while no path is selected).
     #[must_use]
     pub fn relayed(&self) -> Option<bool> {

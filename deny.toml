@@ -91,6 +91,8 @@ allow-git = [
     "https://github.com/aislopware/gpui-kit",
     "https://github.com/zed-industries/zed",
     "https://github.com/zed-industries/font-kit",
+    # gpui's `test-support` (dev-dependency of slopty-ui) pins proptest to a git revision.
+    "https://github.com/proptest-rs/proptest",
 ]
 
 [sources.allow-org]

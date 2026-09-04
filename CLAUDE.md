@@ -33,4 +33,5 @@ hypothesis until DECISIONS.md marks it verified.
 - `cargo xtask setup` installs tools (binstall) and initialises submodules.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
-- `cargo xtask run host|app` to launch; `cargo xtask ios sim|device` for the phone.
+- `cargo xtask run host|app` to launch; `cargo xtask ios sim|device` for the phone;
+  `cargo xtask ime [id]` switches the macOS input source for input-method tests.
