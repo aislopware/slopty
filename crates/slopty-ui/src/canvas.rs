@@ -17,7 +17,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div, point, px, size,
 };
-use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
+use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
@@ -253,11 +253,38 @@ impl CanvasView {
         tracing::debug!(?change, version = self.doc.version(), "canvas sync");
         self.reconcile(cx);
         if let Some((id, session)) = ours {
+            self.fit_to_viewport(id);
             self.active = Some(id);
             self.pending_focus = Some(session);
             self.reveal_pending = Some(id);
         }
         cx.notify();
+    }
+
+    /// Shrink an item the host just placed for us so it fits this viewport at zoom 1: a phone
+    /// gets a phone-sized terminal (and, as its driver, a PTY of that size) instead of a desktop
+    /// one it can only read zoomed out. Desktop viewports are larger than the default and are
+    /// left alone.
+    fn fit_to_viewport(&mut self, id: ItemId) {
+        let (_, vp) = self.viewport;
+        let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
+        if vw <= 1.0 || vh <= 1.0 {
+            return;
+        }
+        let Some(item) = self.doc.get(id) else { return };
+        let margin = 2.0 * GAP;
+        let max_w = snap((vw - margin).max(MIN_ITEM));
+        let max_h = snap((vh - margin).max(MIN_ITEM));
+        if item.rect.w <= max_w && item.rect.h <= max_h {
+            return;
+        }
+        let rect = Rect {
+            x: item.rect.x,
+            y: item.rect.y,
+            w: item.rect.w.min(max_w),
+            h: item.rect.h.min(max_h),
+        };
+        self.propose(CanvasOp::Place { id, rect });
     }
 
     /// A session appeared (ours or another client's).

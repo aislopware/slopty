@@ -91,10 +91,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   agent's shell runs in a `Background` launchd session (`launchctl managername`), where TIS
   refuses to select (`paramErr -50`) and synthetic ⌃Space never reaches the hotkey; the tool
   works from a real Terminal in the Aqua session.
-- 🔬 **Phone-sized terminals.** A terminal opened from a desktop is wider than a phone; today
-  the phone sees it at `CARD_ZOOM`–1× and pans. The architecture's driver/viewer sizing
-  (one client owns the PTY size) is the real answer: a phone that becomes the driver resizes
-  the PTY to what fits.
+- ✅ **Phone-sized terminals.** The host places every new terminal at `TERMINAL_SIZE`
+  (720×440). When the item is one *we* opened, `CanvasView::fit_to_viewport` immediately
+  proposes a `Place` that clamps it to the viewport minus `GAP` at zoom 1, so a phone gets a
+  phone-wide terminal and, being its driver, a PTY of that width; desktop viewports exceed the
+  default and are untouched. Terminals opened elsewhere are still viewed zoomed out; the
+  driver/viewer hand-off (a phone that takes over an existing desktop terminal) remains 🔬.
+  Verified on the iOS 26.5 simulator 2026-09-05: "+ shell" on the phone opens a 43×22 PTY
+  shown at 100 % across the phone's width. Landscape (both directions in the spec) rotates the
+  GPUI window with the keyboard; nothing else was needed.
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 - ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font
