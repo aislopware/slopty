@@ -228,6 +228,16 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   now hold an `NSProcessInfo` latency-critical activity (`slopty-platform::Activity`) as a
   precaution against App Nap / timer coalescing. Next occurrence: read the reason, then rule.
 
+- ✅ **A dying connection detaches only its own sinks** (2026-09-05). Symptom on the simulator:
+  ~45 s after relaunching the app, every terminal stopped updating while the host kept running
+  the typed commands. Cause: the relaunched app reconnects under the same `ClientId`; the old
+  QUIC connection idles out (`IDLE_TIMEOUT`) later and hostd's cleanup called
+  `Host::client_gone(client)`, which detached *every* viewer with that id, i.e. the new
+  connection's. Rule: viewer eviction is scoped to the connection that attached it:
+  `SessionHandle::detach_sink(client, &sink)` removes a viewer only if `Sender::same_channel`
+  matches, and `Peer::drop` in hostd uses it; `client_gone` is gone. Regression test
+  `stale_connection_detach_keeps_the_reconnected_viewer`.
+
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report

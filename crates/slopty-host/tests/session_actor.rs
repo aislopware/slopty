@@ -185,4 +185,34 @@ mod actor {
         child.wait().await.unwrap();
         session.close();
     }
+
+    /// A client that reconnects replaces its old viewer; the old connection dying afterwards
+    /// must not evict the new one.
+    #[tokio::test]
+    async fn stale_connection_detach_keeps_the_reconnected_viewer() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "read x; exit 0"]);
+        let a = ClientId::new();
+        let (old_tx, mut old_rx) = mpsc::channel(64);
+        let (new_tx, mut new_rx) = mpsc::channel(64);
+        session.attach(a, size(40, 6), old_tx.clone()).unwrap();
+        wait_for(&mut old_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+
+        session.attach(a, size(40, 6), new_tx).unwrap();
+        wait_for(&mut new_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1);
+
+        // The old connection goes away: scoped to its own sink, nothing changes.
+        session.detach_sink(a, &old_tx).unwrap();
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1);
+        session.request(a, TermRequest::Raw(b"x".to_vec())).unwrap();
+        let (_, screen) = wait_for(&mut new_rx, |_, screen| text(screen).contains('x')).await;
+        assert!(text(&screen).contains('x'));
+
+        // An unscoped detach still removes the client.
+        session.detach(a).unwrap();
+        assert_eq!(session.snapshot().await.unwrap().viewers, 0);
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
 }

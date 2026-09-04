@@ -26,7 +26,7 @@ pub type ClientSink = mpsc::Sender<TermEvent>;
 /// Commands into the actor.
 enum Cmd {
     Attach { client: ClientId, size: TermSize, sink: ClientSink },
-    Detach { client: ClientId },
+    Detach { client: ClientId, sink: Option<ClientSink> },
     Request { client: ClientId, req: TermRequest },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     Close,
@@ -84,9 +84,17 @@ impl SessionHandle {
         self.send(Cmd::Attach { client, size, sink })
     }
 
-    /// Detach a client.
+    /// Detach a client, whatever sink it is attached through.
     pub fn detach(&self, client: ClientId) -> Result<(), HostError> {
-        self.send(Cmd::Detach { client })
+        self.send(Cmd::Detach { client, sink: None })
+    }
+
+    /// Detach a client only if it is still attached through `sink`.
+    ///
+    /// A connection that dies after the same client reconnected (a relaunched app whose old
+    /// QUIC connection idles out) must not evict the new connection's viewer.
+    pub fn detach_sink(&self, client: ClientId, sink: &ClientSink) -> Result<(), HostError> {
+        self.send(Cmd::Detach { client, sink: Some(sink.clone()) })
     }
 
     /// Forward a terminal request from a client.
@@ -377,9 +385,14 @@ impl Actor {
                     self.send_to(client, TermEvent::Exited { status });
                 }
             }
-            Cmd::Detach { client } => {
-                self.viewers.retain(|v| v.client != client);
-                self.on_viewer_gone(client);
+            Cmd::Detach { client, sink } => {
+                let before = self.viewers.len();
+                self.viewers.retain(|v| {
+                    v.client != client || sink.as_ref().is_some_and(|s| !s.same_channel(&v.sink))
+                });
+                if self.viewers.len() != before {
+                    self.on_viewer_gone(client);
+                }
             }
             Cmd::Request { client, req } => self.request(client, req).await,
             Cmd::Snapshot { reply } => {

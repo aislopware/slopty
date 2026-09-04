@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use slopty_core::{ClientId, SessionId};
+use slopty_core::SessionId;
 use slopty_proto::terminal::{OpenSession, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::socket_path;
 use slopty_pty::{PtydClient, SpawnSpec};
@@ -188,12 +188,5 @@ impl Host {
     pub async fn record_size(&self, id: SessionId, size: TermSize) -> Result<(), HostError> {
         self.inner.ptyd.lock().await.resize(id, size).await?;
         Ok(())
-    }
-
-    /// Detach every client of `client` from every session (connection dropped).
-    pub fn client_gone(&self, client: ClientId) {
-        for e in self.inner.sessions.lock().values() {
-            let _ignored = e.handle.detach(client);
-        }
     }
 }

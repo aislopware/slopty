@@ -6,6 +6,7 @@ use bytes::Bytes;
 use slopty_core::{ClientId, SessionId, StreamId};
 use slopty_host::HostError;
 use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, listing};
+use slopty_host::session::ClientSink;
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
@@ -32,7 +33,6 @@ pub async fn serve(daemon: Daemon, client: AuthenticatedClient) {
     if let Err(e) = run(&daemon, client).await {
         tracing::info!(%remote, error = %e, "client finished");
     }
-    daemon.host.client_gone(id);
 }
 
 async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetError> {
@@ -152,7 +152,8 @@ struct Peer<'d> {
     conn: Connection,
     client: ClientId,
     out: mpsc::Sender<HostMsg>,
-    attached: HashMap<SessionId, JoinHandle<()>>,
+    /// Per attached session: the stream pump and the sink the actor writes into.
+    attached: HashMap<SessionId, (JoinHandle<()>, ClientSink)>,
     screens: HashMap<StreamId, ScreenStream>,
     next_stream: u32,
     datagrams: mpsc::Sender<Bytes>,
@@ -163,8 +164,13 @@ struct Peer<'d> {
 
 impl Drop for Peer<'_> {
     fn drop(&mut self) {
-        for task in self.attached.values() {
+        // Detach only what this connection attached: the same client may already be back on a
+        // new connection, and its viewers must survive the old one idling out.
+        for (session, (task, sink)) in &self.attached {
             task.abort();
+            if let Ok(handle) = self.daemon.host.get(*session) {
+                let _ignored = handle.detach_sink(self.client, sink);
+            }
         }
         self.pump.abort();
         self.paths.abort();
@@ -361,7 +367,7 @@ impl Peer<'_> {
     }
 
     fn forget(&mut self, session: SessionId) {
-        if let Some(task) = self.attached.remove(&session) {
+        if let Some((task, _sink)) = self.attached.remove(&session) {
             task.abort();
         }
     }
@@ -387,7 +393,7 @@ impl Peer<'_> {
             }
         };
         let (sink, mut events) = mpsc::channel::<TermEvent>(SINK_DEPTH);
-        if let Err(e) = handle.attach(self.client, size, sink) {
+        if let Err(e) = handle.attach(self.client, size, sink.clone()) {
             return self.report(session, &e).await;
         }
         let client = self.client;
@@ -401,6 +407,6 @@ impl Peer<'_> {
             }
             let _finished = stream.finish();
         });
-        self.attached.insert(session, task);
+        self.attached.insert(session, (task, sink));
     }
 }
