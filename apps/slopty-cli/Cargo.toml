@@ -19,8 +19,9 @@ anyhow.workspace = true
 clap.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
-slopty-core.workspace = true
+slopty-capture.workspace = true
 slopty-client.workspace = true
+slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-host.workspace = true
 slopty-net = { workspace = true, features = [ "mdns" ] }

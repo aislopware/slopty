@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -40,6 +41,10 @@ const DEFAULT_RTT: Duration = Duration::from_millis(20);
 #[derive(Clone, Debug, Default)]
 pub struct ScreenRouter {
     inner: Arc<Mutex<Routes>>,
+    /// Diagnostic loss injection: drop this many datagrams per thousand, from
+    /// `SLOPTY_DROP_PERMILLE`. Zero in normal use.
+    drop_permille: u32,
+    lcg: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Default)]
@@ -64,14 +69,42 @@ impl Routes {
 }
 
 impl ScreenRouter {
-    /// Empty router.
+    /// Empty router. Reads `SLOPTY_DROP_PERMILLE` once for loss injection.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let drop_permille = std::env::var("SLOPTY_DROP_PERMILLE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map_or(0, |v| v.min(1000));
+        if drop_permille > 0 {
+            tracing::warn!(drop_permille, "media loss injection is on");
+        }
+        Self { drop_permille, ..Self::default() }
+    }
+
+    /// Whether loss injection says to drop this datagram (a 64-bit LCG, no `rand` dependency).
+    fn inject_loss(&self) -> bool {
+        if self.drop_permille == 0 {
+            return false;
+        }
+        let next = self
+            .lcg
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+                Some(
+                    x.wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407),
+                )
+            })
+            .unwrap_or(0);
+        let roll = u32::try_from((next >> 33) % 1000).unwrap_or(0);
+        roll < self.drop_permille
     }
 
     /// Deliver one datagram (called by the connection's datagram reader).
     pub fn route(&self, datagram: Bytes) {
+        if self.inject_loss() {
+            return;
+        }
         let Some((header, _payload)) = MediaHeader::parse(&datagram) else { return };
         let stream = StreamId(header.stream.get());
         self.inner.lock().deliver(stream, datagram);

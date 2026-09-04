@@ -7894,6 +7894,7 @@ dependencies = [
  "clap",
  "rustix",
  "serde_json",
+ "slopty-capture",
  "slopty-client",
  "slopty-core",
  "slopty-grid",

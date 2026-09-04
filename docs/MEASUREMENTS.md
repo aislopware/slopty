@@ -105,5 +105,38 @@ recoveries on the loopback path.
 SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-hostd --no-capture screen_stream
 ```
 
-Not yet measured: a moving picture at native scale, a lossy path, and the client's
-arrival→present hold; the numbers above only prove the pipeline and its clock plumbing.
+## 2026-09-04 — screen stream end to end, native scale, loopback, debug build
+
+Setup: mac-studio, `slopty-hostd --direct-only` and `slopty bench screen` on the same machine
+(`SLOPTY_DIRECT_ONLY=1`), iroh direct path (QUIC rtt 1–6 ms as reported by the client while
+streaming). Latency is ScreenCaptureKit's frame timestamp (host clock) → decoded frame handed to
+the client, i.e. capture queue + HEVC encode + packetize + QUIC + reassembly + VideoToolbox
+decode, measured with `slopty_capture::host_now_us()` on the receiving side (same clock, same
+machine). "Moving" = `seq 1 6000000` scrolling in a 900×500 Ghostty window; 60 fps cap,
+30 Mbit/s target. Loss injection is `SLOPTY_DROP_PERMILLE=20` on the client (2 % of media
+datagrams dropped before the router).
+
+| run                                  | fps  | capture→decoded p50 / p90 / max | arrival gap p50 / p90 | datagrams | FEC / lost / NACK |
+| ------------------------------------ | ---- | ------------------------------- | --------------------- | --------- | ----------------- |
+| main display 1920×1080, mostly still | 49.0 | 9.5 / 17.9 / (≈0 min) ms        | 17.7 / 35.9 ms        | 521       | 0 / 0 / 0         |
+| Ghostty window 900×500, scrolling    | 53.1 | 10.9 / 15.8 / 113.8 ms          | 17.5 / 27.5 ms        | 521       | 0 / 0 / 0         |
+| same, 2 % datagram loss injected     | 51.1 | 11.5 / 16.6 / 124.3 ms          | 17.7 / 33.5 ms        | 490       | 9 / 0 / 0         |
+
+Commands:
+
+```sh
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --list
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --display 6 --seconds 5
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --window 927 --seconds 5
+SLOPTY_DROP_PERMILLE=20 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --window 927 --seconds 5
+```
+
+Takeaways: ~10 ms from capture to a decoded frame on the client at native scale, one frame of
+arrival jitter; the first frame after `Open` takes ~250 ms (SCK start + encoder warm-up, also the
+max latency outlier). 2 % loss is absorbed entirely by parity: no NACK, no refresh, no lost
+frame. Window capture has a floor of ~8 ms where display capture goes down to <1 ms — SCK's
+window path composites separately; worth a look if the budget ever needs it. The 60 fps cap
+yields ~50–53 delivered fps on a 60 Hz display.
+
+Not yet measured: the client's arrival→present hold in the GPUI app, a real lossy/jittery path
+(Wi-Fi, LTE), and a release build.
