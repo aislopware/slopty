@@ -5519,6 +5519,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-audio-toolbox"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6948501a91121d6399b79abaa33a8aa4ea7857fe019f341b8c23ad6e81b79b08"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-cloud-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7907,6 +7917,7 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-net",
+ "slopty-platform",
  "slopty-proto",
  "slopty-theme",
  "slopty-ui",
@@ -8134,6 +8145,7 @@ name = "slopty-platform"
 version = "0.1.0"
 dependencies = [
  "objc2 0.6.4",
+ "objc2-audio-toolbox",
  "objc2-foundation 0.3.2",
 ]
 

@@ -218,6 +218,7 @@ settings:
           - "-lc++"
     dependencies:
       - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
       - sdk: CoreFoundation.framework
       - sdk: CoreGraphics.framework
       - sdk: CoreMedia.framework

@@ -409,6 +409,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   so the permission `Notification` that follows a `PermissionRequest` does not alert twice.
   Joining clients get the current table after the canvas snapshot (no proto change: `HostMsg::Agent`
   already existed). Observed cycle: Idle → Working → Tool{Bash} → Working → Done → None.
+- ✅ Attention signal: `AgentEvent.attention` → `CanvasEvent::Attention` → `slopty_platform::attention()`,
+  which is `AudioServicesPlayAlertSound(kSystemSoundID_UserPreferredAlert)` on macOS (the alert the
+  user picked in System Settings, respects their volume) and `AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)`
+  on iOS (`objc2-audio-toolbox`, `AudioServices` feature; AudioToolbox.framework linked in the
+  iOS spec). No `UNUserNotificationCenter`: it needs a signed bundle with the notification
+  entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.

@@ -1,5 +1,5 @@
 //! Process-level platform helpers: keep the process out of App Nap and timer coalescing while
-//! a session is live.
+//! a session is live, and raise the user's attention.
 //!
 //! macOS throttles timers and network work of applications whose windows are occluded or
 //! hidden (App Nap) and coalesces timers of background processes. iroh's per-path heartbeat is
@@ -40,5 +40,28 @@ impl Drop for Activity {
         // SAFETY: `token` is exactly the object `beginActivityWithOptions:reason:` returned,
         // which is what `endActivity:` requires.
         unsafe { NSProcessInfo::processInfo().endActivity(&self.token) }
+    }
+}
+
+/// Get the human's attention: the user's alert sound on macOS, a vibration on iOS.
+///
+/// Fire-and-forget; the system sound server plays asynchronously.
+pub fn attention() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: AudioToolbox documents `AudioServicesPlayAlertSound` as callable from any thread
+    // with any `SystemSoundID`; `kSystemSoundID_UserPreferredAlert` is the constant it names for
+    // the alert chosen in System Settings.
+    unsafe {
+        objc2_audio_toolbox::AudioServicesPlayAlertSound(
+            objc2_audio_toolbox::kSystemSoundID_UserPreferredAlert,
+        );
+    }
+    #[cfg(target_os = "ios")]
+    // SAFETY: as above; `kSystemSoundID_Vibrate` is the documented constant for the vibration
+    // pattern (a no-op on devices without a vibrator, such as the simulator).
+    unsafe {
+        objc2_audio_toolbox::AudioServicesPlaySystemSound(
+            objc2_audio_toolbox::kSystemSoundID_Vibrate,
+        );
     }
 }

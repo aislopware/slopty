@@ -12,4 +12,5 @@ workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
+objc2-audio-toolbox.workspace = true
 objc2-foundation.workspace = true

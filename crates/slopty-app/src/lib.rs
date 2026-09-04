@@ -391,12 +391,17 @@ pub fn open_workspace(
                 let sessions = ack.sessions.clone();
                 let canvas =
                     cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
-                ws.subscriptions.push(cx.subscribe(&canvas, |ws, _canvas, event, cx| {
-                    if let CanvasEvent::Zoom(z) = event {
-                        ws.zoom = *z;
-                        cx.notify();
-                    }
-                }));
+                ws.subscriptions.push(cx.subscribe(
+                    &canvas,
+                    |ws, _canvas, event, cx| match event {
+                        CanvasEvent::Zoom(z) => {
+                            ws.zoom = *z;
+                            cx.notify();
+                        }
+                        CanvasEvent::Attention(_session) => slopty_platform::attention(),
+                        CanvasEvent::Bell(_session) => {}
+                    },
+                ));
                 ws.canvas = Some(canvas.clone());
                 ws.host_name.clone_from(&ack.name);
                 "connected".clone_into(&mut ws.status);
