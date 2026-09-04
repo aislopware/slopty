@@ -535,10 +535,15 @@ impl CanvasView {
         let Some(id) = self.active else { return };
         let Some(item) = self.doc.get(id).cloned() else { return };
         match item.kind {
-            ItemKind::Terminal { session } => {
+            // A live session closes through the host, which removes the item; an ended one
+            // has nothing to close, so drop the item straight from the document.
+            ItemKind::Terminal { session } if self.sessions.contains_key(&session) => {
                 self.send(ClientMsg::Term { session, req: TermRequest::Close });
             }
-            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => {
+            ItemKind::Terminal { .. }
+            | ItemKind::Window { .. }
+            | ItemKind::Display { .. }
+            | ItemKind::Note { .. } => {
                 self.propose(CanvasOp::Remove(id));
             }
         }
