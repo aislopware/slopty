@@ -20,7 +20,7 @@ clap.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
 slopty-host.workspace = true
-slopty-net = { workspace = true, features = [ "apple-fast-datapath", "mdns" ] }
+slopty-net = { workspace = true, features = [ "mdns" ] }
 slopty-proto.workspace = true
 tokio.workspace = true
 tracing.workspace = true

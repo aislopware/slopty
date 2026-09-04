@@ -58,6 +58,7 @@ impl HostLink {
             loop {
                 match rx.recv().await {
                     Ok(msg) => {
+                        tracing::trace!(kind = msg.kind(), "control message");
                         if control_events.send(LinkEvent::Control(msg)).await.is_err() {
                             break;
                         }
@@ -109,6 +110,7 @@ impl HostLink {
 
         tasks.spawn(async move {
             while let Some(msg) = out_rx.recv().await {
+                tracing::trace!(kind = msg.kind(), "control send");
                 let mut tx = writer_tx.lock().await;
                 if let Err(e) = tx.send(&msg).await {
                     tracing::debug!(error = %e, "control write failed");
@@ -147,6 +149,18 @@ impl HostLink {
     #[must_use]
     pub fn rtt(&self) -> Option<std::time::Duration> {
         slopty_net::endpoint::rtt(&self.conn)
+    }
+
+    /// Whether the selected path goes through a relay (`None` while no path is selected).
+    #[must_use]
+    pub fn relayed(&self) -> Option<bool> {
+        slopty_net::endpoint::relayed(&self.conn)
+    }
+
+    /// Every path, for diagnostics.
+    #[must_use]
+    pub fn paths(&self) -> String {
+        slopty_net::endpoint::describe_paths(&self.conn)
     }
 
     /// Close the connection and stop the tasks.

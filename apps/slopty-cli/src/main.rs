@@ -65,6 +65,15 @@ enum Cmd {
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Measure application round-trip time to a host (control-stream ping).
+    Ping {
+        /// Host name or endpoint id prefix.
+        #[arg(long)]
+        host: Option<String>,
+        /// Number of probes.
+        #[arg(long, default_value_t = 20)]
+        count: u32,
+    },
     /// Attach to an existing session.
     Attach {
         /// Host name or endpoint id prefix.
@@ -96,5 +105,6 @@ async fn main() -> Result<()> {
             attach::open(&data_dir, host.as_deref(), cwd, command).await
         }
         Cmd::Attach { host, session } => attach::attach(&data_dir, host.as_deref(), &session).await,
+        Cmd::Ping { host, count } => client::ping(&data_dir, host.as_deref(), count).await,
     }
 }

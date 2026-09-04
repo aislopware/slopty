@@ -140,3 +140,45 @@ pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
     session.close().await;
     Ok(())
 }
+
+/// Application-level round trips: `Ping` on the control stream, `Pong` back. Prints per-probe
+/// and summary numbers plus the QUIC path view, so transport and app latency can be compared.
+pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
+    use slopty_core::MonoTime;
+    use slopty_proto::{ClientMsg, HostMsg};
+
+    let mut session = connect_to(data_dir, needle).await?;
+    println!("{}", session.conn.ack.name);
+    let mut samples = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let sent = MonoTime::now();
+        session.conn.tx.send(&ClientMsg::Ping { sent_at: sent }).await?;
+        let rtt = loop {
+            match session.conn.rx.recv().await? {
+                HostMsg::Pong { sent_at } if sent_at == sent => {
+                    break std::time::Duration::from_nanos(MonoTime::now().since(sent).as_nanos());
+                }
+                _other => {}
+            }
+        };
+        println!("  #{i:<3} app rtt {:>8.3} ms", rtt.as_secs_f64() * 1e3);
+        samples.push(rtt);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    samples.sort();
+    if let (Some(min), Some(max)) = (samples.first(), samples.last()) {
+        let total: std::time::Duration = samples.iter().sum();
+        let avg = total.checked_div(u32::try_from(samples.len()).unwrap_or(1)).unwrap_or_default();
+        let median = samples.get(samples.len() / 2).copied().unwrap_or_default();
+        println!(
+            "  app rtt min {:.3} ms  median {:.3} ms  avg {:.3} ms  max {:.3} ms",
+            min.as_secs_f64() * 1e3,
+            median.as_secs_f64() * 1e3,
+            avg.as_secs_f64() * 1e3,
+            max.as_secs_f64() * 1e3,
+        );
+    }
+    println!("  quic paths: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
+    session.close().await;
+    Ok(())
+}

@@ -3,6 +3,25 @@
 Numbers that drove or confirmed a decision, with the exact command that produced them. Re-run
 before trusting; hardware and network are stated per entry.
 
+## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
+
+Setup: mac-studio, `slopty-ptyd` + `slopty-hostd` + `slopty ping` on the same machine, debug
+build, direct path selected. `slopty ping` sends `ClientMsg::Ping` on the control stream and
+times the `Pong` (application level, includes both daemons' channel hops).
+
+| build of hostd + cli                    | app rtt min | median | max   | QUIC rtt (direct path) |
+| --------------------------------------- | ----------- | ------ | ----- | ---------------------- |
+| `slopty-net/apple-fast-datapath` on     | 52.8 ms     | 53.8   | 56.9  | 48.3 ms                |
+| feature off (plain `sendmsg`/`recvmsg`) | 0.41 ms     | 0.82   | 1.41  | 1.6 ms                 |
+
+Command:
+
+```sh
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client target/debug/slopty ping --count 15
+```
+
+Ruling: the feature is removed from the workspace (DECISIONS.md, Transport).
+
 ## 2026-09-04 — keystroke echo round trip, loopback, debug build
 
 Setup: mac-studio (Apple silicon), `slopty-ptyd` + `slopty-hostd` + `slopty open -- /bin/sh`

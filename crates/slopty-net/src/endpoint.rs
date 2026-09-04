@@ -62,6 +62,12 @@ pub fn rtt(conn: &iroh::endpoint::Connection) -> Option<Duration> {
     conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| p.rtt())
 }
 
+/// Whether the selected path is relayed (`None` while no path is selected).
+#[must_use]
+pub fn relayed(conn: &iroh::endpoint::Connection) -> Option<bool> {
+    conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| p.is_relay())
+}
+
 /// Human-readable description of every path (for diagnostics): `*` marks the selected one.
 #[must_use]
 pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {

@@ -63,6 +63,21 @@ pub enum ClientMsg {
     },
 }
 
+impl ClientMsg {
+    /// Variant name, for logs.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Hello(_) => "Hello",
+            Self::Term { .. } => "Term",
+            Self::OpenSession(_) => "OpenSession",
+            Self::Canvas(_) => "Canvas",
+            Self::Screen(_) => "Screen",
+            Self::Ping { .. } => "Ping",
+        }
+    }
+}
+
 /// Everything a host sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum HostMsg {
@@ -97,4 +112,22 @@ pub enum HostMsg {
         /// The client's timestamp from the ping.
         sent_at: slopty_core::MonoTime,
     },
+}
+
+impl HostMsg {
+    /// Variant name, for logs.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::HelloAck(_) => "HelloAck",
+            Self::Rejected(_) => "Rejected",
+            Self::SessionOpened(_) => "SessionOpened",
+            Self::SessionClosed { .. } => "SessionClosed",
+            Self::Term { .. } => "Term",
+            Self::Canvas(_) => "Canvas",
+            Self::Screen(_) => "Screen",
+            Self::Agent(_) => "Agent",
+            Self::Pong { .. } => "Pong",
+        }
+    }
 }

@@ -12,9 +12,6 @@ workspace = true
 
 [features]
 default = [  ]
-# dlsym of Apple's private `sendmsg_x`/`recvmsg_x` for batched UDP. Host (Developer ID) only;
-# never in the App Store client.
-apple-fast-datapath = [ "iroh/fast-apple-datapath" ]
 # mDNS advertisement + lookup on the local network.
 mdns = [ "dep:iroh-mdns-address-lookup" ]
 
