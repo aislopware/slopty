@@ -2,7 +2,7 @@
 //!
 //! Items live in canvas units; the [`Camera`] maps them to the viewport. Terminals keep their
 //! grid across zoom (the element scales its paint geometry), and below
-//! [`slopty_client::canvas::CARD_ZOOM`] they collapse to summary cards.
+//! [`slopty_client::canvas::CARD_ZOOM`] terminals collapse to summary cards; video keeps painting.
 //!
 //! Interaction (macOS): two-finger scroll pans, pinch or ⌘-scroll zooms about the pointer,
 //! dragging a title bar moves, the corner grip resizes, dragging empty space pans. Every
@@ -134,6 +134,10 @@ pub struct CanvasView {
     picker_wanted: bool,
     /// Viewport origin (window coordinates) and size, recorded each frame.
     viewport: (Point<Pixels>, Size<Pixels>),
+    /// Fit every item into the viewport on the next frame (once the viewport is known).
+    fit_pending: bool,
+    /// Bring this item into view on the next frame (one we just created).
+    reveal_pending: Option<ItemId>,
     drag: Option<Drag>,
     active: Option<ItemId>,
     /// A terminal to focus on the next frame (one we just opened).
@@ -189,6 +193,8 @@ impl CanvasView {
             picker: None,
             picker_wanted: false,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
+            fit_pending: false,
+            reveal_pending: None,
             drag: None,
             active: None,
             pending_focus: None,
@@ -243,6 +249,7 @@ impl CanvasView {
         if let Some((id, session)) = ours {
             self.active = Some(id);
             self.pending_focus = Some(session);
+            self.reveal_pending = Some(id);
         }
         cx.notify();
     }
@@ -612,6 +619,17 @@ impl CanvasView {
 
     /// ⌘1
     pub fn fit_all(&mut self, _: &FitAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.fit_now(cx);
+    }
+
+    /// Fit every item on the next frame, when the viewport size is known. Used right after
+    /// the first canvas snapshot so a phone does not open onto empty space beside a layout
+    /// made on a desktop.
+    pub const fn fit_when_painted(&mut self) {
+        self.fit_pending = true;
+    }
+
+    fn fit_now(&mut self, cx: &mut Context<Self>) {
         let (_, vp) = self.viewport;
         let rects: Vec<Rect> = self.doc.items().map(|i| i.rect).collect();
         self.camera.fit(rects, (f32::from(vp.width), f32::from(vp.height)));
@@ -846,8 +864,12 @@ impl CanvasView {
                     .into_any_element(),
             },
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
-                match (card, self.screens.get(&item.id)) {
-                    (false, Some(view)) => {
+                // Video paints at every zoom: the view asks the host for a stream scale that
+                // matches its painted width, so a thumbnail costs a thumbnail-sized stream,
+                // and a live picture beats a frame counter (a phone fitting a desktop layout
+                // sits well below `CARD_ZOOM`).
+                match self.screens.get(&item.id) {
+                    Some(view) => {
                         let painted = s.w * window.scale_factor();
                         view.update(cx, |v, _| v.set_painted_width(painted));
                         div()
@@ -857,19 +879,7 @@ impl CanvasView {
                             .child(view.clone())
                             .into_any_element()
                     }
-                    (true, Some(view)) => {
-                        let frames = view.read(cx).frames();
-                        div()
-                            .flex_1()
-                            .w_full()
-                            .p(px(10.0))
-                            .text_size(px(11.0))
-                            .text_color(hsla(theme.surfaces.text_muted))
-                            .font_family(theme.typography.ui_family.clone())
-                            .child(SharedString::from(format!("{frames} frames")))
-                            .into_any_element()
-                    }
-                    (_, None) => div()
+                    None => div()
                         .flex_1()
                         .w_full()
                         .flex()
@@ -953,7 +963,22 @@ impl Render for CanvasView {
         let entity = cx.entity();
         let record_bounds = canvas(
             move |bounds, _window, cx| {
-                entity.update(cx, |this, _| this.viewport = (bounds.origin, bounds.size));
+                entity.update(cx, |this, cx| {
+                    this.viewport = (bounds.origin, bounds.size);
+                    if std::mem::take(&mut this.fit_pending) && !this.is_empty() {
+                        this.fit_now(cx);
+                    }
+                    if let Some(rect) =
+                        this.reveal_pending.take().and_then(|id| this.doc.get(id)).map(|i| i.rect)
+                    {
+                        this.camera.reveal(
+                            rect,
+                            (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+                        );
+                        cx.emit(CanvasEvent::Zoom(this.camera.zoom));
+                        cx.notify();
+                    }
+                });
             },
             |_bounds, (), _window, _cx| {},
         )

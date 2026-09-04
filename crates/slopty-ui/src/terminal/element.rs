@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
 
 use gpui::{
-    App, BorrowAppContext as _, Bounds, Element, ElementId, Entity, Font, FontId, GlobalElementId,
-    Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, SharedString, Size,
-    StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, px,
-    relative, size,
+    App, BorrowAppContext as _, Bounds, Element, ElementId, ElementInputHandler, Entity,
+    Focusable as _, Font, FontId, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
+    Pixels, Point, ShapedLine, SharedString, Size, StrikethroughStyle, Style, TextAlign, TextRun,
+    UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use slopty_grid::{CursorShape, Line, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
@@ -480,6 +480,10 @@ impl Element for TerminalElement {
     ) {
         let prepared = prepaint;
         let m = prepared.metrics;
+        // Registers the view as the text-input target while it is focused (soft keyboard on
+        // iOS, input-method commits on macOS).
+        let focus = self.view.read(cx).focus_handle(cx);
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
         window.paint_quad(fill(bounds, prepared.background));
         for row in &prepared.rows {
             for (start, end, color) in &row.quads {

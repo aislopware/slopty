@@ -123,8 +123,11 @@ control.
 ## 6. UI
 
 GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit tracks) plus
-gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). iOS backend comes from
-zed PR #63068 rebased onto the pin, extended for touch momentum, `paint_surface`, and keyboard.
+gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). The iOS backend is zed PR
+#63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
+video), `Window::insets()` (safe area, keyboard) and a native pinch recognizer; one finger
+taps and pans through gpui core's touch recognizer, two fingers pinch-zoom, both landing in the
+same canvas handlers the Mac uses.
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
@@ -132,6 +135,11 @@ and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and a
 a stream scale matching its painted width. When the host window changes size, hostd notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the canvas re-aspects
 the item.
+
+**Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
+ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,
+which is the only practical path on a phone). `slopty_app::net::pair_host` redeems it the same
+way the CLI does and the connect loop resumes.
 
 ## 7. Crate map
 
@@ -153,10 +161,11 @@ the item.
 | `slopty-client` | client session state, canvas document | client |
 | `slopty-theme` | design tokens | client |
 | `slopty-ui` | GPUI elements and views | client |
+| `slopty-app` | the app shell shared by macOS and iOS: workspace window, pairing panel, host link loop | client |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
-| `apps/slopty` | macOS app | client |
-| `apps/slopty-ios` | iOS static library + Xcode project | client |
+| `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
+| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim\|device` generates the Xcode project | client |
 | `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
 | `xtask` | all scripts (build, gates, bundle, sign) | dev |
 

@@ -8,10 +8,10 @@ use xshell::{Shell, cmd};
 pub const TRIPLES: [&str; 3] =
     ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"];
 
-/// Crates that only build on the host triple (they wrap host-only frameworks or are dev tools),
-/// plus the ones waiting on the GPUI iOS backend (`slopty-ui`; see DECISIONS.md "iOS backend"):
-/// they leave this list when the fork gains `gpui_ios`.
-pub const HOST_ONLY_CRATES: [&str; 12] = [
+/// Crates that only build on the host triple: they wrap host-only frameworks (`ScreenCaptureKit`,
+/// `CGEvent`, PTYs) or are dev tools. The client crates (`slopty-ui`, `slopty-app`) build for iOS
+/// through the fork's `gpui_ios`.
+pub const HOST_ONLY_CRATES: [&str; 11] = [
     "slopty-engine",
     "slopty-pty",
     "slopty-capture",
@@ -22,7 +22,6 @@ pub const HOST_ONLY_CRATES: [&str; 12] = [
     "slopty-ptyd",
     "slopty-cli",
     "slopty",
-    "slopty-ui",
     "xtask",
 ];
 

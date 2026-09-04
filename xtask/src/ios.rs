@@ -1,18 +1,322 @@
-//! `xtask ios`: the iOS build pipeline (filled in during the iOS phase).
+//! `xtask ios`: build the Rust static library, generate the Xcode project with `XcodeGen`, build
+//! the app bundle, and run it on the simulator or a connected device.
+//!
+//! The only non-Rust source is `apps/slopty-ios/app/main.m` (the UIKit bootstrap). The `XcodeGen`
+//! spec and `Info.plist` are generated under `target/ios/<sdk>/` on every run, so nothing in
+//! the tree is Xcode-specific.
 
-use anyhow::{Result, bail};
-use clap::Subcommand;
-use xshell::Shell;
+use anyhow::{Context as _, Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::{Args, Subcommand};
+use xshell::{Shell, cmd};
+
+use crate::tools::step;
+
+/// Bundle identifier of the iOS app.
+const BUNDLE_ID: &str = "dev.aislopware.slopty";
+/// Product / scheme name.
+const PRODUCT: &str = "Slopty";
+/// Deployment target (the project floor).
+const IOS_VERSION: &str = "26.5";
+/// Simulator device created by `sim` when none exists.
+const SIM_NAME: &str = "Slopty iPhone";
+/// Device type for the simulator.
+const SIM_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro";
+/// Runtime for the simulator.
+const SIM_RUNTIME: &str = "com.apple.CoreSimulator.SimRuntime.iOS-26-5";
 
 /// iOS subcommands.
 #[derive(Subcommand, Debug)]
 pub enum IosCmd {
-    /// Build the Rust static library for the simulator and run it.
-    Sim,
-    /// Build for a connected device and run it.
+    /// Build for the simulator, install and launch it (streams the app's stderr).
+    Sim(IosOpts),
+    /// Build for a connected device (signed with `SLOPTY_TEAM_ID`), install and launch it.
+    Device(IosOpts),
+}
+
+/// Shared options.
+#[derive(Args, Debug, Clone)]
+pub struct IosOpts {
+    /// Build with `--release`.
+    #[arg(long)]
+    release: bool,
+    /// `RUST_LOG` filter for the app.
+    #[arg(long, default_value = "info,iroh::_events::path=debug")]
+    log: String,
+    /// Direct-only reach (no relay), for hosts on the same LAN or mesh.
+    #[arg(long)]
+    direct_only: bool,
+    /// Only build; do not install or launch.
+    #[arg(long)]
+    no_run: bool,
+    /// Device name or identifier for `device` (default: the first connected iPhone/iPad).
+    #[arg(long)]
+    device: Option<String>,
+}
+
+/// One SDK flavour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sdk {
+    Simulator,
     Device,
 }
 
-pub fn run(_sh: &Shell, cmd: &IosCmd) -> Result<()> {
-    bail!("iOS pipeline is not wired yet ({cmd:?}); see docs/ARCHITECTURE.md §6")
+impl Sdk {
+    const fn triple(self) -> &'static str {
+        match self {
+            Self::Simulator => "aarch64-apple-ios-sim",
+            Self::Device => "aarch64-apple-ios",
+        }
+    }
+
+    const fn xcode_sdk(self) -> &'static str {
+        match self {
+            Self::Simulator => "iphonesimulator",
+            Self::Device => "iphoneos",
+        }
+    }
+
+    const fn dir(self) -> &'static str {
+        match self {
+            Self::Simulator => "sim",
+            Self::Device => "device",
+        }
+    }
+}
+
+pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
+    match cmd {
+        IosCmd::Sim(opts) => {
+            let app = build(sh, Sdk::Simulator, opts)?;
+            if !opts.no_run {
+                run_simulator(sh, &app, opts)?;
+            }
+        }
+        IosCmd::Device(opts) => {
+            let app = build(sh, Sdk::Device, opts)?;
+            if !opts.no_run {
+                run_device(sh, &app, opts)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the static library and the app bundle; returns the `.app` path.
+fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
+    let root = crate::tools::repo_root()?;
+    let profile = if opts.release { "release" } else { "debug" };
+    let triple = sdk.triple();
+    let cargo_flags: &[&str] = if opts.release { &["--release"] } else { &[] };
+    {
+        let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
+        step(
+            &format!("cargo build slopty-ios ({triple}, {profile})"),
+            &cmd!(sh, "cargo build -p slopty-ios --target {triple} {cargo_flags...}"),
+        )?;
+    }
+    let lib = root.join("target").join(triple).join(profile).join("libslopty_ios.a");
+    if !lib.exists() {
+        bail!("static library missing: {lib}");
+    }
+
+    let out = root.join("target").join("ios").join(sdk.dir());
+    sh.create_dir(&out)?;
+    let shim = root.join("apps").join("slopty-ios").join("app").join("main.m");
+    sh.write_file(out.join("project.yml"), project_spec(sdk, &shim, &lib))?;
+    step(
+        "xcodegen generate",
+        &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
+    )?;
+
+    let configuration = if opts.release { "Release" } else { "Debug" };
+    let derived = out.join("derived");
+    let xcode_sdk = sdk.xcode_sdk();
+    let project = out.join(format!("{PRODUCT}.xcodeproj"));
+    let mut xcodebuild = cmd!(
+        sh,
+        "xcodebuild -quiet -project {project} -scheme {PRODUCT} -sdk {xcode_sdk} -configuration {configuration} -derivedDataPath {derived}"
+    );
+    match sdk {
+        Sdk::Simulator => xcodebuild = xcodebuild.arg("CODE_SIGNING_ALLOWED=NO"),
+        Sdk::Device => {
+            let team = std::env::var("SLOPTY_TEAM_ID")
+                .context("set SLOPTY_TEAM_ID to your Apple Developer team id for device builds")?;
+            xcodebuild = xcodebuild
+                .arg(format!("DEVELOPMENT_TEAM={team}"))
+                .arg("CODE_SIGN_STYLE=Automatic")
+                .arg("-allowProvisioningUpdates");
+        }
+    }
+    step("xcodebuild", &xcodebuild.arg("build"))?;
+    let app = derived
+        .join("Build")
+        .join("Products")
+        .join(format!("{configuration}-{xcode_sdk}"))
+        .join(format!("{PRODUCT}.app"));
+    if !app.exists() {
+        bail!("app bundle missing: {app}");
+    }
+    println!("✔ {app}");
+    Ok(app)
+}
+
+/// The `XcodeGen` spec: one application target wrapping the static library.
+fn project_spec(sdk: Sdk, shim: &Utf8Path, lib: &Utf8Path) -> String {
+    let lib_dir = lib.parent().map_or(".", Utf8Path::as_str);
+    let signing = match sdk {
+        Sdk::Simulator => "    CODE_SIGNING_ALLOWED: NO\n",
+        Sdk::Device => "",
+    };
+    format!(
+        r#"name: {PRODUCT}
+options:
+  deploymentTarget:
+    iOS: "{IOS_VERSION}"
+  bundleIdPrefix: dev.aislopware
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    SWIFT_VERSION: "6.0"
+{signing}targets:
+  {PRODUCT}:
+    type: application
+    platform: iOS
+    sources:
+      - path: {shim}
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: {PRODUCT}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: SloptySceneDelegate
+        UILaunchScreen: {{}}
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: Slopty finds your host on the local network.
+        NSBonjourServices:
+          - _slopty._udp
+        CADisableMinimumFrameDurationOnPhone: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}
+        PRODUCT_NAME: {PRODUCT}
+        DEAD_CODE_STRIPPING: YES
+        LIBRARY_SEARCH_PATHS:
+          - "{lib_dir}"
+        OTHER_LDFLAGS:
+          - "-Wl,-force_load,{lib}"
+          - "-lc++"
+    dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreText.framework
+      - sdk: CoreVideo.framework
+      - sdk: Foundation.framework
+      - sdk: Metal.framework
+      - sdk: Network.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: UIKit.framework
+      - sdk: VideoToolbox.framework
+"#
+    )
+}
+
+/// Boot the simulator (creating it on first use), install and launch with the console attached.
+fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
+    let udid = simulator_udid(sh)?;
+    let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().quiet();
+    boot.run()?;
+    step("open Simulator.app", &cmd!(sh, "open -a Simulator"))?;
+    step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))?;
+    let _log = sh.push_env("SIMCTL_CHILD_RUST_LOG", &opts.log);
+    let _direct =
+        sh.push_env("SIMCTL_CHILD_SLOPTY_DIRECT_ONLY", u8::from(opts.direct_only).to_string());
+    step(
+        "simctl launch (Ctrl-C to detach; the app keeps running)",
+        &cmd!(sh, "xcrun simctl launch --console-pty {udid} {BUNDLE_ID}"),
+    )
+}
+
+/// The simulator to use: `SLOPTY_SIM_UDID`, else the device named [`SIM_NAME`], created if needed.
+fn simulator_udid(sh: &Shell) -> Result<String> {
+    if let Ok(udid) = std::env::var("SLOPTY_SIM_UDID") {
+        return Ok(udid);
+    }
+    let list = cmd!(sh, "xcrun simctl list devices available").read()?;
+    for line in list.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(SIM_NAME)
+            && let Some((_, after)) = rest.split_once('(')
+            && let Some((udid, _)) = after.split_once(')')
+        {
+            return Ok(udid.to_owned());
+        }
+    }
+    println!("▶ creating simulator {SIM_NAME:?}");
+    let udid = cmd!(sh, "xcrun simctl create {SIM_NAME} {SIM_DEVICE_TYPE} {SIM_RUNTIME}").read()?;
+    Ok(udid.trim().to_owned())
+}
+
+/// Install on a connected device via `devicectl` and launch with the console attached.
+fn run_device(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
+    let device = match &opts.device {
+        Some(d) => d.clone(),
+        None => first_device(sh)?,
+    };
+    step(
+        "devicectl install",
+        &cmd!(sh, "xcrun devicectl device install app --device {device} {app}"),
+    )?;
+    let env_json = format!(
+        "{{\"RUST_LOG\":\"{}\",\"SLOPTY_DIRECT_ONLY\":\"{}\"}}",
+        opts.log,
+        u8::from(opts.direct_only)
+    );
+    step(
+        "devicectl launch",
+        &cmd!(
+            sh,
+            "xcrun devicectl device process launch --console --device {device} --environment-variables {env_json} {BUNDLE_ID}"
+        ),
+    )
+}
+
+/// The first connected (available) device from `devicectl`.
+fn first_device(sh: &Shell) -> Result<String> {
+    let json = cmd!(sh, "xcrun devicectl list devices --json-output /dev/stdout --quiet").read()?;
+    // Minimal parse: the identifier of the first device whose connection is not "unavailable".
+    let mut identifier: Option<String> = None;
+    let mut available = false;
+    for line in json.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("\"identifier\" : \"") {
+            identifier =
+                rest.strip_suffix("\",").or_else(|| rest.strip_suffix('"')).map(str::to_owned);
+        }
+        if line.contains("\"transportType\"") && !line.contains("unavailable") {
+            available = true;
+        }
+        if line.starts_with('}') {
+            if available && let Some(id) = identifier.take() {
+                return Ok(id);
+            }
+            identifier = None;
+            available = false;
+        }
+    }
+    bail!("no connected device; pass --device <name-or-udid> (see `xcrun devicectl list devices`)")
 }

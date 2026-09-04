@@ -30,15 +30,62 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   pinned by rev; cargo caches the fetch. A zed submodule would put a multi-GB checkout in every
   clone and CI run for four crates we build. To hack on the fork: clone it next to this repo and
   add a `[patch."https://github.com/aislopware/zed"]` block locally (never committed).
-- ✅ **iOS backend = zed PR #63068 rebased.** Verified: PR open, 36 files, +4436, base `fd82517`,
-  author still iterating (comment 2026-08-26). Cherry-pick onto `801c087` conflicts in 5 files
-  (`gestures.rs`, `key_dispatch.rs`, `window.rs`, `platform/test/window.rs`, `gpui_apple/build.rs`)
-  because upstream merged touch events (#63373) after the PR. Resolve in the iOS phase. Reference
-  implementation that ships today: `tanlethanh/zed@feat/gpui-mobile` used by zedra (cloned under
-  `.research/`), 8.5k lines, old `objc` crate, Swift shell — use for behaviour, not code.
+- ✅ **iOS backend = zed PR #63068's `gpui_ios` crate on top of upstream `801c087`, with the
+  PR's gpui-core edits dropped** (2026-09-04, fork branch `slopty`). The cherry-pick conflicted
+  in 5 files because upstream had meanwhile absorbed everything the PR changed in `gpui` itself
+  (`WindowInsets`/`on_insets_changed`, soft keyboard + `TextInputStateChange`, app lifecycle,
+  memory warnings, `PlatformGestures`) and replaced its `TouchGestureArena` with
+  `TouchGestureRecognizer` (#63373), which synthesises mouse events from taps so ordinary
+  `on_click` handlers work under touch. Ruling: `git checkout HEAD` for every `crates/gpui/src`
+  file, keep `gpui_ios`, `gpui_apple` (iOS SDK selection in `build.rs`, iOS-safe atlas and
+  renderer) and `gpui_platform` (`cfg(target_os = "ios")` → `gpui_ios::current_platform`). Two
+  fixes were needed for the newer API: `Platform::on_quit` takes `FnMut() -> bool`, and
+  `TouchEvent` gained `predicted_position`, filled from
+  `UIEvent.predictedTouchesForTouch:` for moved touches. Shaders: iOS builds use
+  `gpui_apple/runtime_shaders` (compiled by `MTLDevice` at launch) so the pipeline has no
+  Metal-toolchain dependency; the toolchain is installed on the build Mac anyway
+  (`xcodebuild -downloadComponent MetalToolchain`). Reference implementation for behaviour
+  only: `tanlethanh/zed@feat/gpui-mobile` (zedra), cloned under `.research/`.
 - ✅ **Zero-copy video in GPUI.** `gpui::surface(CVPixelBuffer)` → `paint_surface` →
-  `CVMetalTextureCache` in `gpui_apple/metal_renderer.rs` (verified by reading source). It is
-  `cfg(target_os = "macos")`; our fork lifts the gate for iOS.
+  `CVMetalTextureCache` in `gpui_apple/metal_renderer.rs` (verified by reading source). Upstream
+  gates it to macOS and stubs `draw_surfaces` on iOS; fork commit `a7cc3f4` lifts every gate to
+  `any(macos, ios)` (`core-video` 0.5 builds for both), so the phone paints the decoder's
+  `CVPixelBuffer` the same zero-copy way. Checked on macOS, `aarch64-apple-ios-sim` and
+  `aarch64-apple-ios`.
+- ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
+  things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`
+  on iOS), and stand-ins for three CGL symbols (`CGLErrorString`, `CGLGetCurrentContext`,
+  `CGLTexImageIOSurface2D`) that the `io-surface` crate references from `bind_to_gl_texture`.
+  `-Wl,-U,<sym>` lets the link pass but dyld's chained fixups bind at load and the app dies
+  with "symbol not found in flat namespace", so `apps/slopty-ios` defines them as `extern "C"`
+  functions that `unreachable!()`; nothing on iOS calls them. Dead-code stripping does not
+  remove the references. `gpui-kit` widgets default to the light theme: the app forces
+  `ThemeMode::Dark`. Phones have no CLI, so `slopty-app` shows a pairing panel (ticket field,
+  "Paste & pair" reading `UIPasteboard`, which iOS gates behind a paste-permission alert) and
+  the connect loop waits on it; the same panel serves macOS first runs. A phone joining a
+  desktop-made canvas would open onto empty space (items sit at desktop coordinates), so the
+  first snapshot schedules `fit_when_painted`. Safe area / keyboard come from the fork's new
+  `Window::insets()` (`a140f32`). Touch: gpui core's portable recognizer turns one finger into
+  taps / pans (scroll events) but has no pinch and ignores a second finger, so a pinch on the
+  simulator moved the item instead of zooming; the fork adds a native
+  `UIPinchGestureRecognizer` on the Metal view that emits GPUI `PinchEvent`s with incremental
+  deltas, the same event the macOS trackpad produces, so the canvas's `capture_pinch` handler
+  serves both. Soft keyboard: iOS raises it only for a focused element that registered a text
+  input handler, so `TerminalView` implements `EntityInputHandler` (empty ranges, no
+  composition preview; committed text goes to the PTY as `TermRequest::Raw`) and
+  `TerminalElement::paint` registers it; keys still arrive as key events on both platforms
+  (gpui_ios turns `insertText:` into `KeyDown`). Items created from this client are
+  `Camera::reveal`ed on the next frame (pan if they fit, else zoom out no further than
+  `CARD_ZOOM` and anchor top-left), because the host's `free_slot` places them to the right of
+  everything, off a phone's screen.
+- 🔬 **Input methods in terminals.** With `prefers_ime_for_printable_keys` left false, macOS
+  sends printable keys straight to `key_down`, so Telex/Japanese/… composition never starts.
+  Turning it on requires drawing marked text at the cursor (`replace_and_mark_text_in_range`)
+  the way Terminal.app and Ghostty do. Not done yet.
+- 🔬 **Phone-sized terminals.** A terminal opened from a desktop is wider than a phone; today
+  the phone sees it at `CARD_ZOOM`–1× and pans. The architecture's driver/viewer sizing
+  (one client owns the PTY size) is the real answer: a phone that becomes the driver resizes
+  the PTY to what fits.
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 - ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font
@@ -58,8 +105,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Stream quality follows painted size.** `ScreenView::set_painted_width` (called from the
   canvas at paint time with the item's on-screen width in device pixels) quantises the wanted
   scale to quarter steps and sends `SetQuality` at most every 400 ms, so zooming the canvas
-  re-encodes at a matching resolution instead of downscaling a full-size stream. Below
-  `CARD_ZOOM` the item is a summary card ("N frames") and the surface is not painted at all.
+  re-encodes at a matching resolution instead of downscaling a full-size stream. Video paints
+  at every zoom (a thumbnail costs a thumbnail-sized stream); only terminals collapse to cards
+  below `CARD_ZOOM`. Changed 2026-09-04 when the phone fitted a desktop layout at 28 % and
+  showed "2151 frames" instead of the picture.
 - ✅ **Picker is a modal overlay, ⌘O.** `slopty-ui::picker::WindowPicker` lists on-screen windows
   (sorted app → title) and displays from a `Listing`; Escape or a backdrop click dismisses, a row
   click picks. Bound to ⌘O because Raycast owns ⌘⇧N system-wide on the dev Mac (evidence: the

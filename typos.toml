@@ -8,6 +8,7 @@ de = "de"
 sav = "sav"
 LOD = "LOD"     # level of detail
 flate = "flate" # DEFLATE
+udid = "udid"   # Apple device identifier (simctl/devicectl)
 
 [files]
 extend-exclude = [

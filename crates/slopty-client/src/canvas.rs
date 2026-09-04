@@ -216,6 +216,38 @@ impl Camera {
         self.zoom < CARD_ZOOM
     }
 
+    /// Bring `r` into view at a usable size with the least movement: pan when it fits at the
+    /// current zoom and the zoom is not card level; otherwise zoom to fit it, clamped to
+    /// `CARD_ZOOM..=1` (a terminal stays a terminal on a phone that cannot fit a
+    /// desktop-sized one; it may then hang off the right/bottom edge), anchored top-left.
+    pub fn reveal(&mut self, r: Rect, viewport: (f32, f32)) {
+        let (vw, vh) = viewport;
+        let pad = GAP * 2.0;
+        let fit_zoom = ((vw - pad) / r.w.max(1.0)).min((vh - pad) / r.h.max(1.0));
+        if fit_zoom < self.zoom || self.cards() {
+            self.zoom = fit_zoom.clamp(CARD_ZOOM, 1.0);
+            self.x = r.x - GAP / self.zoom;
+            self.y = r.y - GAP / self.zoom;
+            return;
+        }
+        let s = self.to_screen(r);
+        let dx = if s.x < GAP {
+            GAP - s.x
+        } else if s.x + s.w > vw - GAP {
+            (vw - GAP) - (s.x + s.w)
+        } else {
+            0.0
+        };
+        let dy = if s.y < GAP {
+            GAP - s.y
+        } else if s.y + s.h > vh - GAP {
+            (vh - GAP) - (s.y + s.h)
+        } else {
+            0.0
+        };
+        self.pan(dx, dy);
+    }
+
     /// Fit `rects` into a `(w, h)` viewport with padding, centred.
     pub fn fit(&mut self, rects: impl IntoIterator<Item = Rect>, viewport: (f32, f32)) {
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
@@ -288,6 +320,39 @@ mod tests {
         assert_eq!(change, CanvasChange::Echo);
         assert_eq!(doc.get(a.id).map(|i| i.z), Some(2));
         assert_eq!(doc.top_z(), 3);
+    }
+
+    #[test]
+    fn reveal_pans_when_the_item_fits_and_zooms_out_when_it_does_not() {
+        let mut cam = Camera::default();
+        let r = Rect { x: 1000.0, y: 0.0, w: 300.0, h: 200.0 };
+        cam.reveal(r, (800.0, 600.0));
+        let s = cam.to_screen(r);
+        assert!((cam.zoom - 1.0).abs() < f32::EPSILON);
+        assert!((s.x + s.w - (800.0 - GAP)).abs() < 0.01, "{s:?}");
+        assert!(s.y >= GAP - 0.01, "{s:?}");
+
+        let mut cam = Camera::default();
+        let wide = Rect { x: 0.0, y: 0.0, w: 1200.0, h: 200.0 };
+        cam.reveal(wide, (400.0, 800.0));
+        assert!((cam.zoom - CARD_ZOOM).abs() < f32::EPSILON, "{cam:?}");
+        let s = cam.to_screen(wide);
+        assert!((s.x - GAP).abs() < 0.01 && (s.y - GAP).abs() < 0.01, "{s:?}");
+
+        // Card level: zoom in to the item even though it "fits".
+        let mut cam = Camera { x: 0.0, y: 0.0, zoom: 0.2 };
+        let small = Rect { x: 2000.0, y: 0.0, w: 300.0, h: 200.0 };
+        cam.reveal(small, (400.0, 800.0));
+        assert!((cam.zoom - 1.0).abs() < f32::EPSILON, "{cam:?}");
+        let s = cam.to_screen(small);
+        assert!((s.x - GAP).abs() < 0.01 && (s.y - GAP).abs() < 0.01, "{s:?}");
+
+        let mut cam = Camera::default();
+        let tall = Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 };
+        cam.reveal(tall, (800.0, 300.0));
+        assert!(cam.zoom < 1.0 && cam.zoom > CARD_ZOOM, "{cam:?}");
+        let s = cam.to_screen(tall);
+        assert!(s.y + s.h <= 300.0 - GAP + 0.01, "{s:?}");
     }
 
     #[test]

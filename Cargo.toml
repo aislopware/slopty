@@ -30,6 +30,7 @@ slopty-predict = { path = "crates/slopty-predict" }
 slopty-codec = { path = "crates/slopty-codec" }
 slopty-capture = { path = "crates/slopty-capture" }
 slopty-input = { path = "crates/slopty-input" }
+slopty-app = { path = "crates/slopty-app" }
 slopty-platform = { path = "crates/slopty-platform" }
 slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
@@ -190,6 +191,9 @@ dispatch2 = "=0.3.1"
 # snapshots) and gpui-kit from our fork (v0.6.0 + one commit pointing it at the zed fork). Both
 # use `branch` so the two sources unify; Cargo.lock pins the commits.
 gpui = { git = "https://github.com/aislopware/zed.git", branch = "slopty" }
+gpui_ios = { git = "https://github.com/aislopware/zed.git", branch = "slopty", features = [
+    "runtime_shaders",
+] }
 gpui-kit = { git = "https://github.com/aislopware/gpui-kit.git", branch = "slopty", default-features = false, features = [
     "component",
     "assets",

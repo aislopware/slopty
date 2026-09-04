@@ -3,9 +3,10 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, Render, ScrollDelta,
-    ScrollWheelEvent, Styled as _, Window, div,
+    Autocapitalize, Bounds, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
+    TextInputAction, TextInputConfiguration, UTF16Selection, Window, div, point, size,
 };
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
@@ -287,6 +288,109 @@ impl TerminalView {
             px,
             py,
         }));
+    }
+}
+
+/// Text input on top of the key path.
+///
+/// Keys reach the terminal through [`TerminalView::key_down`]; this handler exists so the
+/// platform treats a focused terminal as a text field: iOS raises the soft keyboard (typed
+/// characters still arrive as key events), and macOS input methods commit composed text here.
+/// The terminal has no editable buffer, so ranges are empty and composition is not previewed.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.view_offset() != 0 {
+            self.state.scroll_to_bottom();
+        }
+        self.send(TermRequest::Raw(text.as_bytes().to_vec()));
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        _new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The cursor cell: where an input method should hang its candidate window.
+        let m = self.metrics?;
+        let cursor = self.state.cursor();
+        let origin = point(
+            m.origin.x + m.cell_width * f32::from(cursor.col),
+            m.origin.y + m.line_height * f32::from(cursor.row),
+        );
+        Some(Bounds::new(origin, size(m.cell_width, m.line_height)))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn text_input_configuration(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> TextInputConfiguration {
+        TextInputConfiguration {
+            autocorrect: false,
+            autocapitalize: Autocapitalize::None,
+            suggestions: false,
+            input_action: TextInputAction::Enter,
+        }
     }
 }
 

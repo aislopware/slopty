@@ -1,25 +1,25 @@
 [package]
-name = "slopty"
+name = "slopty-ios"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty macOS app"
+description = "Slopty iOS app: the static library the UIKit shell links"
 
 [lints]
 workspace = true
 
-[[bin]]
-name = "slopty-app"
-path = "src/main.rs"
+[lib]
+name = "slopty_ios"
+path = "src/lib.rs"
+crate-type = [ "staticlib", "rlib" ]
 
-[dependencies]
-anyhow.workspace = true
+[target.'cfg(target_os = "ios")'.dependencies]
 gpui.workspace = true
 gpui-kit.workspace = true
+gpui_ios.workspace = true
 slopty-app.workspace = true
-slopty-platform.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

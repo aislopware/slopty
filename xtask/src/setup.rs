@@ -52,6 +52,10 @@ pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {
             println!("  note: `brew install zig` (0.16) is needed to build libghostty-vt");
         }
     }
+    if !no_tools && !has(sh, "xcodegen") {
+        // XcodeGen is a Swift tool with no cargo distribution; Homebrew is the supported route.
+        step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
+    }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
     if has(sh, "prek") {
         step(
