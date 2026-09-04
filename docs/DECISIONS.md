@@ -23,6 +23,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   LICENSE file verified). It depends on `gpui-pre` from crates.io; Cargo `[patch]` cannot rename
   packages (tested 2026-09-04: a `package =` key in `[patch]` is silently ignored), so a one-commit
   fork re-points its deps at our zed fork. Upstream sync = rebase that commit.
+  Done 2026-09-04: `aislopware/zed` branch `slopty` = 801c087; `aislopware/gpui-kit` branch `slopty`
+  = v0.6.0 + one commit (`gpui`, `gpui_platform`, `gpui_web`, `gpui_macros`, `reqwest_client`,
+  `sum_tree` → git deps on the zed fork; `reqwest` → zed's `zed-reqwest` git fork).
+- ✅ **Forks are git dependencies, not submodules.** `gpui = { git = "…/aislopware/zed", rev = … }`
+  pinned by rev; cargo caches the fetch. A zed submodule would put a multi-GB checkout in every
+  clone and CI run for four crates we build. To hack on the fork: clone it next to this repo and
+  add a `[patch."https://github.com/aislopware/zed"]` block locally (never committed).
 - ✅ **iOS backend = zed PR #63068 rebased.** Verified: PR open, 36 files, +4436, base `fd82517`,
   author still iterating (comment 2026-08-26). Cherry-pick onto `801c087` conflicts in 5 files
   (`gestures.rs`, `key_dispatch.rs`, `window.rs`, `platform/test/window.rs`, `gpui_apple/build.rs`)
@@ -34,6 +41,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `cfg(target_os = "macos")`; our fork lifts the gate for iOS.
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
+- ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font
+  Mono (MIT) ship inside `slopty-ui` and are registered with `TextSystem::add_fonts` at startup;
+  every run carries a `FontFallbacks` chain (symbols → Menlo → Apple Color Emoji). Evidence
+  2026-09-04: "JetBrains Mono" was not installed on the dev Mac and GPUI silently resolved a
+  proportional face, producing broken cell alignment. Bundling also makes iOS identical.
+- ✅ **Terminal zoom scales paint, not the grid.** `TerminalElement::zoom` derives cols×rows from
+  the *unscaled* item rect and paints at `font_size × zoom`; zooming never resizes the PTY. Shaped
+  rows are cached per (content, focus, font size).
 
 ## Terminal
 
@@ -75,10 +90,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   Wi-Fi↔cellular, hole punching + relay fallback, E2E encryption keyed by endpoint identity.
   Rejected: slop-desk's raw UDP + "the WireGuard mesh is the security boundary" (phone-anywhere
   needs app-level auth); WebRTC (ICE/SDP dead weight); MoQ (relay/pub-sub shape).
-- ✅ **Default features off.** `default-features = false, features = ["tls-ring"]`. iroh's default
-  set includes `fast-apple-datapath` (dlsym of private `sendmsg_x`/`recvmsg_x`), which is fine for
-  the Developer-ID host daemon and a review risk for the App Store client, so it is exposed as
-  the `slopty-net/apple-fast-datapath` feature and only `slopty-hostd` turns it on.
+- ✅ **Default features off; `fast-apple-datapath` is banned.** `default-features = false,
+  features = ["tls-ring"]`. iroh's default set includes `fast-apple-datapath` (dlsym of private
+  `sendmsg_x`/`recvmsg_x`, batched UDP). Measured 2026-09-04 on loopback (`slopty ping`, see
+  MEASUREMENTS.md): with it on both ends the app round trip is **53 ms** and QUIC's own RTT
+  estimate 48 ms; with it off, **0.8 ms**. The batching path waits to fill batches, which is
+  exactly wrong for keystrokes. The feature no longer exists in `slopty-net`; do not re-add it.
 - ✅ **LAN discovery** is a separate crate, `iroh-mdns-address-lookup` 0.5.0 (there is no
   `discovery-local-network` feature in iroh 1.x). Behind `slopty-net/mdns`; hosts advertise,
   clients only look up. Wide-area lookup is iroh's `presets::N0` (DNS + pkarr on n0's infra).
@@ -161,6 +178,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (undiscoverable, not keyboard-navigable). We own the renderer, so zoom is real, and we add
   keyboard navigation, zoom-to-fit/selection, grid snap, arrange-by-repo and a minimap (kolu).
 - ✅ Kind-aware culling: terminals keep state and stop painting off-screen; video pauses decode.
+- ✅ **Host-authoritative document, optimistic client.** `slopty-host::CanvasStore` owns the
+  document (JSON at `<data>/canvas.json`, atomic rename, serialised writers), validates every
+  `CanvasOp` (finite, clamped geometry; unknown ids rejected), bumps a version and broadcasts a
+  `CanvasSync::Delta { by }`. Clients apply their own ops immediately and recognise the echo by
+  `by == me`. A new session gets a terminal item automatically (right of the rightmost, snapped
+  to 16 units) so every client sees it in the same place; a closed session removes its item.
+- ✅ Snapshot is pushed right after `HelloAck` on the control stream; no client request needed.
 
 ## Claude Code
 

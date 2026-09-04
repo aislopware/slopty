@@ -49,6 +49,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
         sessions: daemon.host.summaries().await,
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
+    out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
 
     let mut events = daemon.events.subscribe();
     let mut peer = Peer { daemon, conn, client: hello.client, out, attached: HashMap::new() };
@@ -120,6 +121,9 @@ impl Peer<'_> {
                     if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
                         let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));
                     }
+                    if let Some(delta) = self.daemon.canvas.ensure_terminal(session, self.client) {
+                        let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                    }
                     if req.attach {
                         self.attach(session, req.size).await;
                     }
@@ -127,8 +131,14 @@ impl Peer<'_> {
                 Err(e) => self.report(SessionId::nil(), &e).await,
             },
             ClientMsg::Term { session, req } => self.term(session, req).await,
-            ClientMsg::Canvas(_) | ClientMsg::Screen(_) => {
-                tracing::debug!(client = %self.client, "canvas/screen not served yet");
+            ClientMsg::Canvas(op) => match self.daemon.canvas.apply(op, self.client) {
+                Ok(delta) => {
+                    let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                }
+                Err(e) => self.report(SessionId::nil(), &e).await,
+            },
+            ClientMsg::Screen(_) => {
+                tracing::debug!(client = %self.client, "screen not served yet");
             }
         }
     }
@@ -149,6 +159,9 @@ impl Peer<'_> {
                         let reason = CloseReason::Requested;
                         let _sent =
                             self.daemon.events.send(HostMsg::SessionClosed { session, reason });
+                        for delta in self.daemon.canvas.remove_session(session, self.client) {
+                            let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                        }
                     }
                     Err(e) => self.report(session, &e).await,
                 }
@@ -170,6 +183,7 @@ impl Peer<'_> {
     }
 
     async fn report(&self, session: SessionId, e: &HostError) {
+        tracing::warn!(client = %self.client, %session, error = %e, "request failed");
         let event = TermEvent::Error(e.to_string());
         let _sent = self.out.send(HostMsg::Term { session, event }).await;
     }

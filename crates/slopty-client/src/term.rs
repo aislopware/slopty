@@ -126,6 +126,12 @@ impl TermState {
         self.driving
     }
 
+    /// Numbering epoch of the last frame (`None` before the first).
+    #[must_use]
+    pub const fn epoch(&self) -> Option<u32> {
+        self.epoch
+    }
+
     /// Highest key `seq` the host has applied.
     #[must_use]
     pub const fn input_ack(&self) -> u64 {

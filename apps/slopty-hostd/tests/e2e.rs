@@ -109,12 +109,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        let opened = tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap();
-        let session = match opened {
-            HostMsg::SessionOpened(summary) => Some(summary.id),
-            _other => None,
-        }
-        .expect("first control message after OpenSession is SessionOpened");
+        // The canvas snapshot (sent right after HelloAck) and the canvas delta for the new
+        // terminal item interleave with SessionOpened on the control stream; skip them.
+        let session = loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::SessionOpened(summary) => break summary.id,
+                HostMsg::Canvas(_sync) => {}
+                other => panic!("unexpected control message before SessionOpened: {other:?}"),
+            }
+        };
         let (header, mut events) =
             tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
         assert_eq!(header.session, session);
@@ -154,9 +157,12 @@ mod tests {
             }
         }
         host.tx.send(&ClientMsg::Ping { sent_at: slopty_core::MonoTime::now() }).await.unwrap();
-        assert!(matches!(
-            tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap(),
-            HostMsg::Pong { .. }
-        ));
+        loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::Pong { .. } => break,
+                HostMsg::Canvas(_sync) => {}
+                other => panic!("unexpected control message before Pong: {other:?}"),
+            }
+        }
     }
 }

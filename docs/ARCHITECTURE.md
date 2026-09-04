@@ -96,7 +96,10 @@ One infinite 2D plane per workspace (kolu model). Items: terminal, remote window
 note. Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
 at ≥ 0.6×, summary card (title, last lines, agent state) below. Off-screen terminals keep their
 line cache and stop painting; off-screen video pauses decode (kind-aware culling). Layout is a
-document synced through the host so every client sees the same canvas.
+document synced through the host so every client sees the same canvas (`slopty-host::canvas`
+owns it, `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws
+it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
+grip resizes, ⌘T/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface).
 
 ## 5. Agents
 

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_core::HostId;
-use slopty_host::Host;
+use slopty_host::{CanvasStore, Host};
 use slopty_net::host::HostListener;
 use slopty_net::pairing::TrustStore;
 use tokio::sync::broadcast;
@@ -49,8 +49,10 @@ pub struct Daemon {
     pub id: HostId,
     /// Human name (hostname).
     pub name: String,
-    /// Events every connected client should hear (session opened/closed).
+    /// Events every connected client should hear (session opened/closed, canvas deltas).
     pub events: broadcast::Sender<slopty_proto::HostMsg>,
+    /// The canvas document.
+    pub canvas: CanvasStore,
 }
 
 #[tokio::main]
@@ -72,7 +74,8 @@ async fn main() -> Result<()> {
     let listener = HostListener::bind(store).await?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
-    let daemon = Daemon { host, listener, id, name: paths::host_name(), events };
+    let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
+    let daemon = Daemon { host, listener, id, name: paths::host_name(), events, canvas };
 
     if let Some(mut exits) = daemon.host.take_exits() {
         let host = daemon.host.clone();
