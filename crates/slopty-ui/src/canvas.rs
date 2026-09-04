@@ -21,7 +21,9 @@ use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
-use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{
+    CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
+};
 use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest, TermSize};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -122,6 +124,8 @@ pub struct CanvasView {
     screens: HashMap<ItemId, Entity<ScreenView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// A `List` is in flight to name restored window items.
+    titles_requested: bool,
     /// Item titles the picker gave us (the document only stores ids).
     titles: HashMap<ItemId, String>,
     open_screen: ScreenFactory,
@@ -179,6 +183,7 @@ impl CanvasView {
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             screens: HashMap::new(),
             pending_opens: HashMap::new(),
+            titles_requested: false,
             titles: HashMap::new(),
             open_screen,
             picker: None,
@@ -267,6 +272,7 @@ impl CanvasView {
     pub fn screen_event(&mut self, event: ScreenEvent, cx: &mut Context<Self>) {
         match event {
             ScreenEvent::Listing { windows, displays } => {
+                self.fill_titles(&windows);
                 if self.picker_wanted {
                     self.picker_wanted = false;
                     self.show_picker(windows, displays, cx);
@@ -317,8 +323,8 @@ impl CanvasView {
 
     fn show_picker(
         &mut self,
-        windows: Vec<slopty_proto::screen::WindowInfo>,
-        displays: Vec<slopty_proto::screen::DisplayInfo>,
+        windows: Vec<WindowInfo>,
+        displays: Vec<DisplayInfo>,
         cx: &mut Context<Self>,
     ) {
         let theme = self.theme.clone();
@@ -430,7 +436,31 @@ impl CanvasView {
     }
 
     /// Open streams for window/display items that lack one; drop views whose item is gone.
+    /// Window items restored from the document have no title until a `Listing` names them.
+    fn fill_titles(&mut self, windows: &[WindowInfo]) {
+        self.titles_requested = false;
+        for item in self.doc.items() {
+            let ItemKind::Window { window } = item.kind else { continue };
+            if self.titles.contains_key(&item.id) {
+                continue;
+            }
+            if let Some(info) = windows.iter().find(|w| w.id == window) {
+                let title =
+                    if info.title.is_empty() { info.app.clone() } else { info.title.clone() };
+                self.titles.insert(item.id, title);
+            }
+        }
+    }
+
     fn reconcile_screens(&mut self) {
+        let untitled = self
+            .doc
+            .items()
+            .any(|i| matches!(i.kind, ItemKind::Window { .. }) && !self.titles.contains_key(&i.id));
+        if untitled && !self.titles_requested {
+            self.titles_requested = true;
+            self.send(ClientMsg::Screen(ScreenRequest::List));
+        }
         let wanted: Vec<(ItemId, CaptureTarget)> = self
             .doc
             .items()

@@ -165,127 +165,140 @@ fn main() -> Result<()> {
             }
         };
 
-        // Connect on the tokio side; hand the link's channels to GPUI.
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        handle.spawn(async move {
-            let _sent = ready_tx.send(net::connect_host().await);
-        });
-        let close_handle = handle.clone();
+        // Connect on the tokio side; hand the link's channels to GPUI. Runs forever: a lost
+        // connection (host restart, network change) is retried with a capped backoff.
         cx.spawn(async move |cx| {
-            let outcome = ready_rx.await;
-            let Ok(Ok(connected)) = outcome else {
-                let why = match outcome {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    _ => "connection task died".to_owned(),
-                };
-                workspace.update(cx, |ws, cx| {
-                    ws.status = why;
-                    cx.notify();
+            let mut failures: u32 = 0;
+            loop {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                handle.spawn(async move {
+                    let _sent = ready_tx.send(net::connect_host().await);
                 });
-                return;
-            };
-            let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
-            let link = std::sync::Arc::new(link);
-            let screen_link = std::sync::Arc::clone(&link);
-            let open_screen: slopty_ui::screen::ScreenFactory =
-                std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
-            let canvas = workspace.update(cx, |ws, cx| {
-                let theme = ws.theme.clone();
-                let sessions = ack.sessions.clone();
-                let canvas =
-                    cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
-                ws.subscriptions.push(cx.subscribe(&canvas, |ws, _canvas, event, cx| {
-                    if let CanvasEvent::Zoom(z) = event {
-                        ws.zoom = *z;
-                        cx.notify();
-                    }
-                }));
-                ws.canvas = Some(canvas.clone());
-                ws.host_name.clone_from(&ack.name);
-                "connected".clone_into(&mut ws.status);
-                cx.notify();
-                canvas
-            });
-            let focus_canvas = canvas.clone();
-            let _focused = window.update(cx, move |_root, window, cx| {
-                let handle = focus_canvas.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            });
-            // RTT readout once a second: the top bar shows it and predictors gate on it.
-            let rtt_link = std::sync::Arc::downgrade(&link);
-            let rtt_canvas = canvas.clone();
-            let rtt_workspace = workspace.clone();
-            cx.spawn(async move |cx| {
-                loop {
-                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                    let Some(link) = rtt_link.upgrade() else { break };
-                    let rtt = link.rtt();
-                    let relayed = link.relayed();
-                    tracing::debug!(paths = %link.paths(), "link paths");
-                    rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
-                    rtt_workspace.update(cx, |ws, cx| {
-                        ws.rtt = rtt;
-                        ws.relayed = relayed;
+                let outcome = ready_rx.await;
+                let Ok(Ok(connected)) = outcome else {
+                    let why = match outcome {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        _ => "connection task died".to_owned(),
+                    };
+                    failures = failures.saturating_add(1);
+                    let delay = retry_delay(failures);
+                    workspace.update(cx, |ws, cx| {
+                        ws.status = format!("{why}; retrying in {}s", delay.as_secs());
                         cx.notify();
                     });
-                }
-            })
-            .detach();
-            let mut first_snapshot = true;
-            tracing::debug!(sessions = ack.sessions.len(), "link up; pumping events");
-            while let Some(event) = events.recv().await {
-                tracing::trace!(?event, "link event");
-                match event {
-                    LinkEvent::Term { session, event } => {
-                        canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Canvas(sync)) => {
-                        let is_snapshot =
-                            matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
-                        canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
-                        if is_snapshot && first_snapshot {
-                            first_snapshot = false;
-                            // First run: an empty canvas gets one shell so there is something
-                            // to type into.
-                            let _opened = window.update(cx, |_root, window, cx| {
-                                canvas.update(cx, |c, cx| {
-                                    if c.is_empty() {
-                                        c.new_terminal(&NewTerminal, window, cx);
-                                    }
-                                });
-                            });
+                    cx.background_executor().timer(delay).await;
+                    continue;
+                };
+                failures = 0;
+                let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
+                let link = std::sync::Arc::new(link);
+                let screen_link = std::sync::Arc::clone(&link);
+                let open_screen: slopty_ui::screen::ScreenFactory =
+                    std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
+                let canvas = workspace.update(cx, |ws, cx| {
+                    let theme = ws.theme.clone();
+                    let sessions = ack.sessions.clone();
+                    let canvas =
+                        cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
+                    ws.subscriptions.push(cx.subscribe(&canvas, |ws, _canvas, event, cx| {
+                        if let CanvasEvent::Zoom(z) = event {
+                            ws.zoom = *z;
+                            cx.notify();
                         }
-                    }
-                    LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
-                        canvas.update(cx, |c, cx| c.session_opened(summary, cx));
-                    }
-                    LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
-                        canvas.update(cx, |c, cx| c.session_closed(session, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Term { session, event }) => {
-                        canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Screen(event)) => {
-                        canvas.update(cx, |c, cx| c.screen_event(event, cx));
-                    }
-                    LinkEvent::Control(_) => {}
-                    LinkEvent::Disconnected(why) => {
-                        workspace.update(cx, |ws, cx| {
-                            ws.canvas = None;
-                            ws.status = format!("disconnected: {why}");
+                    }));
+                    ws.canvas = Some(canvas.clone());
+                    ws.host_name.clone_from(&ack.name);
+                    "connected".clone_into(&mut ws.status);
+                    cx.notify();
+                    canvas
+                });
+                let focus_canvas = canvas.clone();
+                let _focused = window.update(cx, move |_root, window, cx| {
+                    let handle = focus_canvas.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                });
+                // RTT readout once a second: the top bar shows it and predictors gate on it.
+                let rtt_link = std::sync::Arc::downgrade(&link);
+                let rtt_canvas = canvas.clone();
+                let rtt_workspace = workspace.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                        let Some(link) = rtt_link.upgrade() else { break };
+                        let rtt = link.rtt();
+                        let relayed = link.relayed();
+                        tracing::debug!(paths = %link.paths(), "link paths");
+                        rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
+                        rtt_workspace.update(cx, |ws, cx| {
+                            ws.rtt = rtt;
+                            ws.relayed = relayed;
                             cx.notify();
                         });
-                        break;
+                    }
+                })
+                .detach();
+                let mut first_snapshot = true;
+                tracing::debug!(sessions = ack.sessions.len(), "link up; pumping events");
+                while let Some(event) = events.recv().await {
+                    tracing::trace!(?event, "link event");
+                    match event {
+                        LinkEvent::Term { session, event } => {
+                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Canvas(sync)) => {
+                            let is_snapshot =
+                                matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
+                            canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
+                            if is_snapshot && first_snapshot {
+                                first_snapshot = false;
+                                // First run: an empty canvas gets one shell so there is something
+                                // to type into.
+                                let _opened = window.update(cx, |_root, window, cx| {
+                                    canvas.update(cx, |c, cx| {
+                                        if c.is_empty() {
+                                            c.new_terminal(&NewTerminal, window, cx);
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
+                            canvas.update(cx, |c, cx| c.session_opened(summary, cx));
+                        }
+                        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+                            canvas.update(cx, |c, cx| c.session_closed(session, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Term { session, event }) => {
+                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Screen(event)) => {
+                            canvas.update(cx, |c, cx| c.screen_event(event, cx));
+                        }
+                        LinkEvent::Control(_) => {}
+                        LinkEvent::Disconnected(why) => {
+                            workspace.update(cx, |ws, cx| {
+                                ws.canvas = None;
+                                ws.status = format!("disconnected: {why}; reconnecting…");
+                                cx.notify();
+                            });
+                            break;
+                        }
                     }
                 }
+                drop(link);
+                // iroh's close uses tokio timers, which need a runtime context this GPUI task
+                // does not have; run it on the runtime and wait for the join.
+                let _closed = handle.spawn(async move { endpoint.close().await }).await;
+                cx.background_executor().timer(retry_delay(0)).await;
             }
-            drop(link);
-            // iroh's close uses tokio timers, which need a runtime context this GPUI task
-            // does not have; run it on the runtime and wait for the join.
-            let _closed = close_handle.spawn(async move { endpoint.close().await }).await;
         })
         .detach();
         cx.activate(true);
     });
     Ok(())
+}
+
+/// Backoff between connection attempts: 1 s after a drop, doubling per failure, capped.
+fn retry_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1_u64 << failures.min(4)).min(10))
 }
