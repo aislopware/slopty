@@ -29,6 +29,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-slopty-codec.workspace = true
-slopty-media.workspace = true
+slopty-client.workspace = true
 tempfile.workspace = true

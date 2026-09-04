@@ -4,14 +4,17 @@
 
 use std::sync::Arc;
 
-use slopty_core::SessionId;
+use slopty_core::{SessionId, StreamId};
 use slopty_net::client::HostConn;
 use slopty_net::framed::FramedSend;
 use slopty_net::{ClientMsg, HostMsg, NetError};
 use slopty_proto::handshake::HelloAck;
+use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::TermEvent;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
+
+use crate::screen::{ScreenHandle, ScreenRouter, spawn_screen};
 
 /// Bounded queues: a client that cannot keep up sees backpressure, not unbounded memory.
 const EVENT_DEPTH: usize = 4096;
@@ -40,6 +43,7 @@ pub struct HostLink {
     out: mpsc::Sender<ClientMsg>,
     events: Option<mpsc::Receiver<LinkEvent>>,
     conn: slopty_net::Connection,
+    router: ScreenRouter,
     tasks: JoinSet<()>,
 }
 
@@ -119,7 +123,38 @@ impl HostLink {
             }
         });
 
-        Self { ack, out: out_tx, events: Some(events_rx), conn: quic, tasks }
+        let router = ScreenRouter::new();
+        let datagram_conn = quic.clone();
+        let datagram_router = router.clone();
+        tasks.spawn(async move {
+            loop {
+                match datagram_conn.read_datagram().await {
+                    Ok(datagram) => datagram_router.route(datagram),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "read_datagram ended");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, tasks }
+    }
+
+    /// Start receiving a screen stream the host has `Opened`. Drop the handle to stop; send
+    /// `ScreenRequest::Close` as well so the host stops capturing.
+    #[must_use]
+    pub fn screen(&self, stream: StreamId, codec: VideoCodec) -> ScreenHandle {
+        let conn = self.conn.clone();
+        spawn_screen(&self.router, stream, codec, self.out.clone(), move || {
+            slopty_net::endpoint::rtt(&conn)
+        })
+    }
+
+    /// The datagram router (to forget backlogs of streams that closed before attaching).
+    #[must_use]
+    pub const fn screens(&self) -> &ScreenRouter {
+        &self.router
     }
 
     /// The host's `HelloAck`.

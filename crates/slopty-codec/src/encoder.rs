@@ -190,7 +190,10 @@ impl Encoder {
         match self.set(key, value, call) {
             Ok(()) => true,
             Err(CodecError::Os { status, .. }) if status == kVTPropertyNotSupportedErr => {
-                tracing::warn!(call, "encoder does not support this property");
+                tracing::debug!(
+                    call,
+                    "encoder does not support this property (expected on Apple silicon for AllowOpenGOP, MaxFrameDelayCount, PrioritizeEncodingSpeedOverQuality)"
+                );
                 false
             }
             Err(err) => {

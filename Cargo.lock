@@ -7907,9 +7907,13 @@ dependencies = [
 name = "slopty-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "parking_lot",
  "pretty_assertions",
+ "slopty-codec",
  "slopty-core",
  "slopty-grid",
+ "slopty-media",
  "slopty-net",
  "slopty-proto",
  "tokio",
@@ -7995,10 +7999,9 @@ dependencies = [
  "clap",
  "serde_json",
  "slopty-capture",
- "slopty-codec",
+ "slopty-client",
  "slopty-core",
  "slopty-host",
- "slopty-media",
  "slopty-net",
  "slopty-proto",
  "tempfile",

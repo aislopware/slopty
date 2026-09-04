@@ -6,6 +6,7 @@ mod tests {
     use std::process::Stdio;
     use std::time::Duration;
 
+    use slopty_client::LinkEvent;
     use slopty_core::ClientId;
     use slopty_net::client::{HostConn, bind_client, connect_with_ticket};
     use slopty_net::pairing::PairTicket;
@@ -179,9 +180,10 @@ mod tests {
         }
     }
 
-    /// Streams the first display through hostd and decodes it on the client side. Needs
-    /// Screen Recording permission for the test process, so it only runs when
-    /// `SLOPTY_SCREEN_E2E=1`.
+    /// Streams the first display through hostd into the real client stack (`HostLink` +
+    /// `ScreenHandle`): reassembly, NACK/report traffic and hardware decode all run as the app
+    /// would run them. Needs Screen Recording permission for the test process, so it only runs
+    /// when `SLOPTY_SCREEN_E2E=1`.
     #[tokio::test]
     async fn screen_stream_over_iroh() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
@@ -189,110 +191,73 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let (_guard, mut host) = connect(dir.path()).await;
+        let (_guard, host) = connect(dir.path()).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
 
-        host.tx.send(&ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
         let display = loop {
-            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
-                HostMsg::Screen(ScreenEvent::Listing { displays, windows }) => {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, windows })) => {
                     eprintln!("{} windows, {} displays", windows.len(), displays.len());
                     break displays.first().expect("a display").id;
                 }
-                HostMsg::Canvas(_sync) => {}
-                other => panic!("unexpected control message before Listing: {other:?}"),
+                LinkEvent::Control(HostMsg::Canvas(_sync)) => {}
+                other => panic!("unexpected event before Listing: {other:?}"),
             }
         };
 
         let quality = Quality { fps: 60, bitrate_bps: 8_000_000, scale: 0.5, ..Quality::default() };
         let target = CaptureTarget::Display(display);
-        host.tx.send(&ClientMsg::Screen(ScreenRequest::Open { target, quality })).await.unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::Open { target, quality })).await.unwrap();
         let (stream, codec, width, height) = loop {
-            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
-                HostMsg::Screen(ScreenEvent::Opened { stream, codec, width, height, .. }) => {
-                    break (stream, codec, width, height);
-                }
-                HostMsg::Screen(ScreenEvent::Closed { reason, .. }) => {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream,
+                    codec,
+                    width,
+                    height,
+                    ..
+                })) => break (stream, codec, width, height),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
                     panic!("open failed: {reason}")
                 }
-                HostMsg::Canvas(_sync) => {}
-                other => panic!("unexpected control message before Opened: {other:?}"),
+                LinkEvent::Control(HostMsg::Canvas(_sync)) => {}
+                other => panic!("unexpected event before Opened: {other:?}"),
             }
         };
         eprintln!("opened {stream} {codec:?} {width}x{height}");
 
-        let decoded = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let sink_count = std::sync::Arc::clone(&decoded);
-        let mut decoder = slopty_codec::Decoder::new(codec, move |frame| {
+        let screen = link.screen(stream, codec);
+        let mut frames = screen.frames();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut decoded = 0_u32;
+        while tokio::time::timeout_at(deadline, frames.changed()).await.is_ok_and(|r| r.is_ok()) {
+            let frame = frames.borrow_and_update().clone().expect("a frame after a change");
             assert_eq!(
                 (frame.image.width(), frame.image.height()),
                 (width as usize, height as usize)
             );
-            sink_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-        let mut reassembler = slopty_media::Reassembler::new(
-            stream,
-            slopty_media::Config::default(),
-            std::time::Instant::now(),
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        let mut frames = 0_u32;
-        let mut cursor = 0_u32;
-        let mut first_keyframe = None;
-        while tokio::time::Instant::now() < deadline {
-            let datagram = match tokio::time::timeout_at(deadline, host.conn.read_datagram()).await
-            {
-                Ok(Ok(d)) => d,
-                Ok(Err(e)) => panic!("read_datagram: {e}"),
-                Err(_elapsed) => break,
-            };
-            let now = std::time::Instant::now();
-            match reassembler.ingest(&datagram, now) {
-                slopty_media::Ingest::Cursor { .. } => cursor += 1,
-                slopty_media::Ingest::Video => {
-                    while let Some(frame) = reassembler.next_frame() {
-                        frames += 1;
-                        first_keyframe.get_or_insert(frame.info.keyframe);
-                        if let Some(token) = frame.info.ltr_token {
-                            reassembler.ack_ltr(token);
-                        }
-                        decoder.decode(&frame.data, u64::from(frame.info.capture_ts_us)).unwrap();
-                    }
-                }
-                _other => {}
-            }
-            for action in reassembler.tick(now, Duration::from_millis(2)) {
-                let req = match action {
-                    slopty_media::Action::Nack { frame, fragments } => {
-                        ScreenRequest::Nack { stream, frame, fragments }
-                    }
-                    slopty_media::Action::RequestRefresh { last_good_frame } => {
-                        ScreenRequest::RequestRefresh { stream, last_good_frame }
-                    }
-                };
-                host.tx.send(&ClientMsg::Screen(req)).await.unwrap();
-            }
+            decoded += 1;
         }
-        let report = reassembler.take_report(0);
-        host.tx.send(&ClientMsg::Screen(ScreenRequest::Report { stream, report })).await.unwrap();
-        let stats = reassembler.stats();
-        eprintln!(
-            "frames {frames}, decoded {}, cursor {cursor}, {stats:?}",
-            decoded.load(std::sync::atomic::Ordering::Relaxed)
-        );
-        assert_eq!(first_keyframe, Some(true), "stream starts with a keyframe");
-        assert!(frames >= 10, "expected a steady stream, got {frames} frames");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(decoded.load(std::sync::atomic::Ordering::Relaxed) >= frames.saturating_sub(3));
+        let stats = screen.stats();
+        eprintln!("decoded {decoded}, cursor {:?}, {stats:?}", *screen.cursor().borrow());
+        assert!(decoded >= 10, "expected a steady stream, got {decoded} decoded frames");
+        assert!(stats.frames >= u64::from(decoded), "{stats:?}");
+        assert_eq!(stats.decode_errors, 0, "{stats:?}");
+        assert_eq!(stats.frames_lost, 0, "{stats:?}");
+        drop(screen);
 
-        host.tx.send(&ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
         loop {
-            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
-                HostMsg::Screen(ScreenEvent::Closed { stream: s, .. }) => {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { stream: s, .. })) => {
                     assert_eq!(s, stream);
                     break;
                 }
                 _other => {}
             }
         }
+        link.close();
     }
 }

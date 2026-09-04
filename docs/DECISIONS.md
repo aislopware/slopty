@@ -171,6 +171,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Cursor channel** samples `CGEventGetLocation` at 120 Hz on the host, re-reads the
   target's bounds at 10 Hz (`CGWindowListCreateDescriptionFromArray` / `CGDisplayBounds`), and
   sends a datagram only when the stream-pixel position or visibility changed.
+- ✅ **Client receive path** (`slopty-client::screen`, verified end to end 2026-09-04):
+  `HostLink` reads every datagram and a `ScreenRouter` fans out by stream id, keeping a
+  512-datagram backlog for streams whose `Opened` has not been processed yet (datagrams beat the
+  control stream). One task per stream: reassemble → decode; the reassembler's timers run at
+  2 ms while frames are pending and 50 ms when idle; a receiver report goes out every 50 ms.
+  The newest decoded frame and the cursor position are `watch` channels: the UI paints the
+  latest and never queues video. Dropping the handle unroutes the stream; the caller still
+  sends `Close` so the host stops capturing.
+- ⚠️ **Unsupported encoder properties on Apple silicon** (M-series, macOS 26.5, observed
+  2026-09-04): `AllowOpenGOP`, `MaxFrameDelayCount` and `PrioritizeEncodingSpeedOverQuality`
+  return `kVTPropertyNotSupportedErr` under low-latency rate control. They are optional in
+  `Encoder::new` and logged at debug; low-latency mode already implies no reordering and no
+  frame delay, so nothing is lost.
 - ⚠️ **`CMTime` → µs must use 128-bit math**: the host clock is nanoseconds since boot, so
   `value × 1e6` overflows `u64` after a few hours of uptime and silently saturates (found when
   every latency read 0). Fixed in `slopty-codec::cf::micros`; unit-tested with a 12-day value.

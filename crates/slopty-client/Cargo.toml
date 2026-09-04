@@ -11,8 +11,12 @@ description = "Slopty client core: terminal session state, line cache, connectio
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+parking_lot.workspace = true
+slopty-codec.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
+slopty-media.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
 tokio.workspace = true
