@@ -302,6 +302,16 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// The terminal of the active item, if the active item is a terminal.
+    #[must_use]
+    pub fn active_terminal(&self) -> Option<Entity<TerminalView>> {
+        let item = self.doc.get(self.active?)?;
+        match item.kind {
+            ItemKind::Terminal { session } => self.terminals.get(&session).cloned(),
+            _ => None,
+        }
+    }
+
     /// The host observed a coding agent's state in a session.
     pub fn agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
         let session = event.session;

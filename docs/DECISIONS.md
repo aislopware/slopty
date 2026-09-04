@@ -100,6 +100,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   Verified on the iOS 26.5 simulator 2026-09-05: "+ shell" on the phone opens a 43×22 PTY
   shown at 100 % across the phone's width. Landscape (both directions in the spec) rotates the
   GPUI window with the keyboard; nothing else was needed.
+- ✅ **iOS key bar.** The soft keyboard has no esc/tab/ctrl/arrows, so the iOS app
+  (`KEY_BAR = cfg!(target_os = "ios")`) draws a 40 pt row above the keyboard with esc, tab, ⌃,
+  ←↑↓→, `-`, `/`, `|`, `~`. Keys go through `TerminalView::press`, the same path as hardware
+  key events; ⌃ is *sticky*: it arms `set_sticky_control` and the next key (bar or typed
+  character, including text arriving through `replace_text_in_range`) is sent with the control
+  modifier, then it disarms. Covered by `sticky_control_applies_to_the_next_key_only`; verified
+  on the simulator 2026-09-05 (⌃ + `c` interrupts `sleep 30`, arrows recall history). The bar
+  only renders while a terminal is the canvas's active item.
+
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 - ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font

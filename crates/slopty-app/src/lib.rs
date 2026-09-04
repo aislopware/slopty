@@ -7,6 +7,7 @@
 
 pub mod net;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
@@ -19,6 +20,7 @@ use slopty_proto::HostMsg;
 use slopty_theme::Theme;
 use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewTerminal};
 use slopty_ui::colors::hsla;
+use slopty_ui::terminal::TerminalView;
 
 /// Height of the top bar (the titlebar area; traffic lights sit at its left on macOS).
 const TOP_BAR: f32 = 38.0;
@@ -30,6 +32,26 @@ const LEADING_INSET: f32 = 78.0;
 const LEADING_INSET: f32 = 12.0;
 /// Keyboard shortcut hints make sense where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
+/// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
+const KEY_BAR: bool = cfg!(target_os = "ios");
+/// Key bar height in points.
+const KEY_BAR_H: f32 = 40.0;
+
+/// The key bar's keys: label, GPUI key name, and the character it types (`None` for
+/// non-printing keys).
+const BAR_KEYS: [(&str, &str, Option<&str>); 11] = [
+    ("esc", "escape", None),
+    ("tab", "tab", None),
+    ("⌃", "", None),
+    ("←", "left", None),
+    ("↑", "up", None),
+    ("↓", "down", None),
+    ("→", "right", None),
+    ("-", "-", Some("-")),
+    ("/", "/", Some("/")),
+    ("|", "|", Some("|")),
+    ("~", "~", Some("~")),
+];
 /// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
 const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 
@@ -201,6 +223,63 @@ impl Workspace {
             )
     }
 
+    /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
+    /// above the keyboard inset while a terminal is active.
+    fn key_bar(&self, terminal: &Entity<TerminalView>, cx: &Context<Self>) -> gpui::AnyElement {
+        let s = &self.theme.surfaces;
+        let armed = terminal.read(cx).sticky_control();
+        let mut bar = div()
+            .h(px(KEY_BAR_H))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(6.0))
+            .gap(px(4.0))
+            .bg(hsla(s.panel))
+            .border_t_1()
+            .border_color(hsla(s.border))
+            .font_family(self.theme.typography.ui_family.clone());
+        for (label, key, typed) in BAR_KEYS {
+            let is_control = key.is_empty();
+            let lit = is_control && armed;
+            let target = terminal.clone();
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("key-{label}")))
+                    .flex_1()
+                    .h(px(KEY_BAR_H - 10.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .text_size(px(14.0))
+                    .text_color(hsla(if lit { s.canvas } else { s.text }))
+                    .bg(hsla(if lit { s.accent } else { s.canvas }))
+                    .active(|el| el.opacity(0.7))
+                    .child(SharedString::from(label))
+                    .on_click(move |_ev, _window, cx| {
+                        target.update(cx, |t, cx| {
+                            if is_control {
+                                let on = !t.sticky_control();
+                                t.set_sticky_control(on, cx);
+                            } else {
+                                t.press(
+                                    gpui::Keystroke {
+                                        modifiers: gpui::Modifiers::default(),
+                                        key: key.to_owned(),
+                                        key_char: typed.map(str::to_owned),
+                                    },
+                                    cx,
+                                );
+                            }
+                        });
+                    }),
+            );
+        }
+        bar.into_any_element()
+    }
+
     fn top_bar(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
         let s = &self.theme.surfaces;
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
@@ -299,6 +378,10 @@ impl Render for Workspace {
                 .text_color(hsla(surfaces.text_muted))
                 .child(SharedString::from(self.status.clone())),
         };
+        let key_bar = KEY_BAR
+            .then(|| self.canvas.as_ref()?.read(cx).active_terminal())
+            .flatten()
+            .map(|terminal| self.key_bar(&terminal, cx));
         div()
             .size_full()
             .flex()
@@ -310,10 +393,12 @@ impl Render for Workspace {
                     .flex_1()
                     .w_full()
                     .flex()
+                    .flex_col()
                     .pl(insets.left)
                     .pr(insets.right)
                     .pb(insets.bottom)
-                    .child(body),
+                    .child(body)
+                    .when_some(key_bar, gpui::ParentElement::child),
             )
     }
 }

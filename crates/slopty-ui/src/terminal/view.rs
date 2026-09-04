@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Autocapitalize, Bounds, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
     TextInputAction, TextInputConfiguration, UTF16Selection, Window, div, point, size,
 };
@@ -47,6 +47,8 @@ pub struct TerminalView {
     predictor: Predictor,
     /// Text an input method is composing at the cursor (Telex, kana, …), not yet sent.
     marked: Option<String>,
+    /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
+    sticky_control: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -94,6 +96,7 @@ impl TerminalView {
             zoom: 1.0,
             predictor: Predictor::new(policy_from_env()),
             marked: None,
+            sticky_control: false,
         }
     }
 
@@ -152,6 +155,40 @@ impl TerminalView {
         self.predictor.stats()
     }
 
+    /// Arm or disarm Control for the next key; a soft keyboard has no Control key of its own.
+    pub fn set_sticky_control(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.sticky_control = on;
+        cx.notify();
+    }
+
+    /// Whether the next key gets Control.
+    #[must_use]
+    pub const fn sticky_control(&self) -> bool {
+        self.sticky_control
+    }
+
+    /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
+    pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.sticky_control) {
+            keystroke.modifiers.control = true;
+        }
+        self.key_seq = self.key_seq.wrapping_add(1);
+        let key = keys::key_event(self.key_seq, &keystroke, false);
+        tracing::trace!(session = %self.session, ?key, "key");
+        if self.state.view_offset() != 0 {
+            self.state.scroll_to_bottom();
+        }
+        let _guess = self.predictor.on_key(
+            &key,
+            self.state.cursor(),
+            self.state.size().cols,
+            self.state.modes(),
+            Instant::now(),
+        );
+        self.send(TermRequest::Key(key));
+        cx.notify();
+    }
+
     /// Composition in progress, drawn at the cursor by the element.
     #[must_use]
     pub fn marked(&self) -> Option<&str> {
@@ -167,6 +204,18 @@ impl TerminalView {
     /// Feed an event from the link.
     pub fn apply(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let reconcile = matches!(event, TermEvent::Frame(_));
+        if let TermEvent::Frame(frame) = &event {
+            tracing::trace!(
+                session = %self.session,
+                seq = frame.seq,
+                full = frame.full,
+                epoch = frame.epoch,
+                rows = frame.updates.len(),
+                cursor = ?frame.cursor,
+                view_offset = self.state.view_offset(),
+                "frame"
+            );
+        }
         if matches!(event, TermEvent::Resized { .. }) {
             self.predictor.flush();
         }
@@ -230,20 +279,13 @@ impl TerminalView {
         if event.keystroke.modifiers.platform {
             return;
         }
-        self.key_seq = self.key_seq.wrapping_add(1);
-        let key = keys::key_event(self.key_seq, &event.keystroke, event.is_held);
-        tracing::trace!(session = %self.session, ?key, "key");
-        if self.state.view_offset() != 0 {
-            self.state.scroll_to_bottom();
+        if event.is_held {
+            self.key_seq = self.key_seq.wrapping_add(1);
+            let key = keys::key_event(self.key_seq, &event.keystroke, true);
+            self.send(TermRequest::Key(key));
+        } else {
+            self.press(event.keystroke.clone(), cx);
         }
-        let _guess = self.predictor.on_key(
-            &key,
-            self.state.cursor(),
-            self.state.size().cols,
-            self.state.modes(),
-            Instant::now(),
-        );
-        self.send(TermRequest::Key(key));
         cx.stop_propagation();
         cx.notify();
     }
@@ -352,6 +394,20 @@ impl EntityInputHandler for TerminalView {
         self.marked = None;
         if text.is_empty() {
             cx.notify();
+            return;
+        }
+        // ⌃ armed on the key bar: a single typed character becomes a control key.
+        let mut chars = text.chars();
+        if self.sticky_control
+            && let (Some(c), None) = (chars.next(), chars.next())
+            && c.is_ascii()
+        {
+            let keystroke = Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: c.to_ascii_lowercase().to_string(),
+                key_char: None,
+            };
+            self.press(keystroke, cx);
             return;
         }
         if self.state.view_offset() != 0 {
@@ -473,5 +529,60 @@ mod tests {
             view.unmark_text(window, cx);
             assert_eq!(view.marked(), None);
         });
+    }
+
+    /// The key bar's ⌃ arms Control for exactly one key, whether it comes from the bar
+    /// (`press`) or from the soft keyboard as typed text.
+    #[gpui::test]
+    fn sticky_control_applies_to_the_next_key_only(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        while rx.try_recv().is_ok() {}
+        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            let mut out = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                if let ClientMsg::Term { req: TermRequest::Key(key), .. } = msg {
+                    out.push(key);
+                }
+            }
+            out
+        };
+        view.update_in(cx, |view, window, cx| {
+            view.set_sticky_control(true, cx);
+            assert!(view.sticky_control());
+            view.replace_text_in_range(None, "c", window, cx);
+            assert!(!view.sticky_control(), "consumed by the typed character");
+            view.replace_text_in_range(None, "d", window, cx);
+        });
+        let sent = keys(&mut rx);
+        assert_eq!(sent.len(), 1, "only the armed character became a key event");
+        assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
+        assert_eq!(sent[0].unshifted, Some('c'));
+
+        view.update_in(cx, |view, _window, cx| {
+            view.set_sticky_control(true, cx);
+            view.press(
+                Keystroke {
+                    modifiers: gpui::Modifiers::default(),
+                    key: "left".into(),
+                    key_char: None,
+                },
+                cx,
+            );
+            view.press(
+                Keystroke {
+                    modifiers: gpui::Modifiers::default(),
+                    key: "up".into(),
+                    key_char: None,
+                },
+                cx,
+            );
+        });
+        let sent = keys(&mut rx);
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
+        assert!(!sent[1].mods.contains(slopty_proto::input::Mods::CTRL));
     }
 }
