@@ -58,6 +58,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
     let (datagrams, datagram_rx) = mpsc::channel::<Bytes>(DATAGRAM_QUEUE);
     let budget = DatagramBudget::new();
     let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
+    let paths = tokio::spawn(slopty_net::endpoint::log_path_events(conn.clone(), "host"));
     let mut peer = Peer {
         daemon,
         conn,
@@ -69,6 +70,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
         datagrams,
         budget,
         pump,
+        paths,
     };
 
     let result = loop {
@@ -140,6 +142,7 @@ struct Peer<'d> {
     datagrams: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     pump: JoinHandle<()>,
+    paths: JoinHandle<()>,
 }
 
 impl Drop for Peer<'_> {
@@ -148,6 +151,7 @@ impl Drop for Peer<'_> {
             task.abort();
         }
         self.pump.abort();
+        self.paths.abort();
     }
 }
 

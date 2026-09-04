@@ -18,6 +18,7 @@ mdns = [ "dep:iroh-mdns-address-lookup" ]
 [dependencies]
 bytes.workspace = true
 data-encoding.workspace = true
+futures-core.workspace = true
 iroh.workspace = true
 iroh-mdns-address-lookup = { workspace = true, optional = true }
 iroh-tickets.workspace = true

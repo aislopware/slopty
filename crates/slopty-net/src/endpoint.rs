@@ -1,8 +1,10 @@
 //! Endpoint construction.
 
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::time::Duration;
 
-use iroh::endpoint::{IdleTimeout, QuicTransportConfig, VarInt, presets};
+use iroh::endpoint::{IdleTimeout, PathEvent, QuicTransportConfig, VarInt, presets};
 use iroh::{Endpoint, SecretKey};
 
 use crate::{ALPN, NetError};
@@ -80,4 +82,46 @@ pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Log every path change on `conn` at info level until the connection closes.
+///
+/// Opened, closed (with the path's final stats) and selected. Path flaps are the first thing
+/// to look at when latency jumps, so both ends run this for every connection.
+pub async fn log_path_events(conn: iroh::endpoint::Connection, side: &'static str) {
+    let mut events = conn.path_events();
+    let remote = conn.remote_id().fmt_short();
+    loop {
+        let next = poll_fn(|cx| {
+            use futures_core::Stream as _;
+            Pin::new(&mut events).poll_next(cx)
+        })
+        .await;
+        let Some(event) = next else { break };
+        match event {
+            PathEvent::Opened { id, remote_addr, local_addr, .. } => {
+                tracing::info!(side, %remote, ?id, %remote_addr, ?local_addr, "path opened");
+            }
+            PathEvent::Closed { id, remote_addr, last_stats, .. } => {
+                tracing::info!(
+                    side,
+                    %remote,
+                    ?id,
+                    %remote_addr,
+                    rtt_ms = last_stats.rtt.as_secs_f64() * 1000.0,
+                    lost = last_stats.lost_packets,
+                    black_holes = last_stats.black_holes_detected,
+                    congestion_events = last_stats.congestion_events,
+                    "path closed"
+                );
+            }
+            PathEvent::Selected { id, remote_addr, .. } => {
+                tracing::info!(side, %remote, ?id, %remote_addr, "path selected");
+            }
+            PathEvent::Lagged { missed, .. } => {
+                tracing::debug!(side, missed, "path events lagged");
+            }
+            _ => {}
+        }
+    }
 }

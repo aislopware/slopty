@@ -30,6 +30,7 @@ slopty-predict = { path = "crates/slopty-predict" }
 slopty-codec = { path = "crates/slopty-codec" }
 slopty-capture = { path = "crates/slopty-capture" }
 slopty-input = { path = "crates/slopty-input" }
+slopty-platform = { path = "crates/slopty-platform" }
 slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
@@ -39,6 +40,7 @@ anyhow = "1.0.104"
 thiserror = "2.0.20"
 bitflags = { version = "2.13.1", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
+futures-core = "0.3.34"
 core-foundation = "0.10.1"
 core-video = "0.5.2"
 smallvec = { version = "1.16.0", features = [ "serde", "union", "const_generics", "const_new" ] }
@@ -108,6 +110,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "NSString",
     "NSObject",
     "NSEnumerator",
+    "NSProcessInfo",
 ] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",

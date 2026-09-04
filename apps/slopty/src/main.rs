@@ -117,14 +117,19 @@ impl Render for Workspace {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| {
+                // iroh's path events carry the abandon reason; always keep them.
+                tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
+            },
+        ))
         .with_writer(std::io::stderr)
         .init();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
+    // Held for the whole run: App Nap would otherwise throttle the link's heartbeats while the
+    // window is covered and the direct path would be abandoned.
+    let _activity = slopty_platform::Activity::latency_critical("Slopty remote session");
     let theme = Theme::default();
 
     gpui_kit::application().run(move |cx| {

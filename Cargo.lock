@@ -7857,6 +7857,7 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-net",
+ "slopty-platform",
  "slopty-proto",
  "slopty-theme",
  "slopty-ui",
@@ -8006,6 +8007,7 @@ dependencies = [
  "slopty-host",
  "slopty-input",
  "slopty-net",
+ "slopty-platform",
  "slopty-proto",
  "tempfile",
  "tokio",
@@ -8047,6 +8049,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "data-encoding",
+ "futures-core",
  "iroh",
  "iroh-mdns-address-lookup",
  "iroh-tickets",
@@ -8059,6 +8062,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "slopty-platform"
+version = "0.1.0"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

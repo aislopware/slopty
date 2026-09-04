@@ -140,6 +140,8 @@ impl HostLink {
             }
         });
 
+        let paths_conn = quic.clone();
+        tasks.spawn(slopty_net::endpoint::log_path_events(paths_conn, "client"));
         let runtime = tokio::runtime::Handle::current();
         Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, runtime, tasks }
     }

@@ -58,13 +58,18 @@ pub struct Daemon {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| {
+                // iroh's path events carry the abandon reason; always keep them.
+                tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
+            },
+        ))
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    // Sharp timers for the whole daemon: screen capture, encode and QUIC heartbeats all run on
+    // timers macOS would otherwise coalesce for a background process.
+    let _activity = slopty_platform::Activity::latency_critical("Slopty host");
 
     let data_dir = args.data_dir.unwrap_or_else(paths::data_dir);
     std::fs::create_dir_all(&data_dir)

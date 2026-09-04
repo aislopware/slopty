@@ -125,6 +125,30 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - 🔬 **Congestion controller**: noq default (Cubic). Media path runs its own delay-gradient
   bitrate controller on top; revisit BBR once noq marks it stable.
 
+- ✅ **QUIC datagrams, not raw UDP over a WireGuard mesh** (re-examined 2026-09-04 when the
+  status bar showed ~100 ms). A QUIC datagram is one UDP packet plus ~30 bytes of header and one
+  AEAD (hardware AES-GCM); WireGuard spends the same per packet on ChaCha20, so "UDP + WG" moves
+  the crypto, it does not remove it. Measured: app RTT 0.8 ms on loopback, 0.9–2 ms on the LAN
+  direct path; the ~100 ms readings were the *relay* path (n0's aps1 server) while iroh had
+  dropped the direct path (see below). slop-desk's transport doc admits its numbers were
+  loopback-only and the WireGuard case was never measured. What QUIC buys: reliable streams and
+  unreliable datagrams on one connection, migration, NAT traversal and relay fallback for a
+  phone off the mesh, and app-level auth instead of "the mesh is the boundary".
+- 🔬 **Direct-only mode** for hosts that live on a private mesh (NetBird/Tailscale): bind with
+  `RelayMode::Disabled` + `clear_address_lookup()` + mDNS, tickets carry the mesh address, no
+  relay in the picture. Planned; blocked on understanding the path flap first, because with no
+  relay a dropped direct path kills the connection instead of degrading it.
+- 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
+  43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
+  prefers a live direct path over relay, so the direct path must have been *closed*, not
+  deselected. `slopty_net::endpoint::log_path_events` now logs opened/closed/selected with the
+  closed path's final stats on both ends, and both binaries default their log filter to
+  `iroh::_events::path=debug`, which carries noq's abandon reason (`TimedOut` = 15 s path idle
+  with 5 s heartbeats, `UnusableAfterNetworkChange`, `RemoteAbandoned`). Not reproduced by a
+  full `cargo xtask gate` on all cores nor by covering the app window for 70 s. Both processes
+  now hold an `NSProcessInfo` latency-critical activity (`slopty-platform::Activity`) as a
+  precaution against App Nap / timer coalescing. Next occurrence: read the reason, then rule.
+
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report
