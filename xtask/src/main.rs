@@ -7,12 +7,13 @@
 
 mod gate;
 mod ios;
+mod release;
 mod setup;
 mod tools;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use xshell::Shell;
+use xshell::{Shell, cmd};
 
 /// Slopty automation.
 #[derive(Parser)]
@@ -55,6 +56,21 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Cut a release: bump the workspace version from Conventional Commits, regenerate
+    /// CHANGELOG.md, commit and tag.
+    Release {
+        /// Explicit version instead of the one computed from commits.
+        #[arg(long)]
+        version: Option<String>,
+        /// Show the computed version and changelog without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the gate (only if it already passed on this exact tree).
+        #[arg(long)]
+        skip_gate: bool,
+    },
+    /// Print the changelog for unreleased commits.
+    Changelog,
     /// iOS: build the static library, package the xcframework, generate and build the Xcode
     /// project.
     Ios {
@@ -74,6 +90,10 @@ fn main() -> Result<()> {
         Cmd::Lint => gate::lint(&sh),
         Cmd::Test { args } => gate::test(&sh, &args),
         Cmd::Doc { open } => gate::doc(&sh, open),
+        Cmd::Release { version, dry_run, skip_gate } => {
+            release::run(&sh, &release::Options { version, dry_run, skip_gate })
+        }
+        Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
     }
 }

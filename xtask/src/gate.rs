@@ -26,6 +26,7 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     shear(sh, opts.fix)?;
     typos(sh, opts.fix)?;
     taplo(sh, opts.fix)?;
+    commits(sh)?;
     println!("✔ gate passed");
     Ok(())
 }
@@ -93,4 +94,11 @@ fn typos(sh: &Shell, fix: bool) -> Result<()> {
 fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     let check: &[&str] = if apply { &[] } else { &["--check"] };
     step("taplo", &cmd!(sh, "taplo fmt {check...}"))
+}
+
+/// Every commit since the last tag (or the root) follows Conventional Commits.
+fn commits(sh: &Shell) -> Result<()> {
+    let last_tag = cmd!(sh, "git describe --tags --abbrev=0").quiet().ignore_stderr().read().ok();
+    let range = last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}..HEAD", t.trim()));
+    step("committed", &cmd!(sh, "committed {range} --no-merge-commit"))
 }

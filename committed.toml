@@ -1,0 +1,23 @@
+# Commit message lint (crate-ci/committed). Enforced by the prek commit-msg hook and in CI.
+style = "conventional"
+subject_length = 72
+subject_capitalized = false
+subject_not_punctuated = true
+imperative_subject = true
+line_length = 100
+allowed_types = [
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "docs",
+    "test",
+    "build",
+    "ci",
+    "chore",
+    "style",
+    "revert",
+]
+merge_commit = false
+no_wip = true
+no_fixup = true

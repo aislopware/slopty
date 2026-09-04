@@ -7,6 +7,11 @@ hypothesis until DECISIONS.md marks it verified.
 ## Non-negotiables
 - Pure Rust. Scripts are `cargo xtask <cmd>`; never add shell scripts, Makefiles or a justfile.
 - Floor macOS 26.5 / iOS 26.5. No availability checks, no fallbacks.
+- Commit messages follow Conventional Commits, linted by `committed` (commit-msg hook + gate):
+  `feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert(scope)?: imperative summary`,
+  `!` or a `BREAKING CHANGE:` footer for breaking changes. Releases are derived from them:
+  `cargo xtask release` (git-cliff computes the version, regenerates `CHANGELOG.md`, commits
+  `chore(release): vX.Y.Z`, tags). Never edit `CHANGELOG.md` or the workspace version by hand.
 - `cargo gate` must pass before a commit: fmt, clippy `-D warnings` (all targets, all three
   triples), nextest, doc, deny, shear, typos, taplo. Never `#[allow]` a lint without a
   `reason = "..."`; never weaken `[workspace.lints]` to make something compile.

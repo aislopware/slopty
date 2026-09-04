@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: gate
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: cargo-bins/cargo-binstall@main
+      - run: brew install zig
+      - run: cargo xtask setup
+      - run: cargo xtask gate
+
+  # Unsigned, un-notarized artifacts for now; Developer-ID signing + notarization land with
+  # `cargo xtask dist`.
+  release:
+    name: release ${{ github.ref_name }}
+    needs: gate
+    if: github.ref_type == 'tag'
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm git-cliff@2.14.1
+      - run: brew install zig
+      - run: cargo build --profile dist -p slopty-hostd -p slopty-ptyd
+      - run: |
+          mkdir -p dist
+          tar -C target/dist -czf dist/slopty-host-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-hostd slopty-ptyd
+          git cliff --latest --strip all > dist/notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: dist/notes.md
+          files: dist/*.tar.gz

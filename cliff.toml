@@ -1,0 +1,60 @@
+# git-cliff configuration: CHANGELOG.md and release version bumps are derived from Conventional
+# Commits. `cargo xtask release` drives it; do not edit CHANGELOG.md by hand.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to Slopty. Generated from Conventional Commits by git-cliff.
+
+"""
+body = """
+{%- macro remote_url() -%}
+  https://github.com/aislopware/slopty
+{%- endmacro -%}
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}]({{ self::remote_url() }}/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+  {% if commit.breaking %}**BREAKING** {% endif %}\
+  {{ commit.message | upper_first }} \
+  ([{{ commit.id | truncate(length=7, end="") }}]({{ self::remote_url() }}/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+require_conventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+    { message = "^docs", group = "<!-- 4 -->Documentation" },
+    { message = "^test", group = "<!-- 5 -->Testing" },
+    { message = "^build|^ci", group = "<!-- 6 -->Build and CI" },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore|^style", group = "<!-- 7 -->Miscellaneous" },
+    { body = ".*security", group = "<!-- 8 -->Security" },
+]
+
+[bump]
+# Pre-1.0: a breaking change bumps minor, a feature bumps patch (semver spec §4).
+features_always_bump_minor = false
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"
