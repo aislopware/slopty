@@ -1,0 +1,425 @@
+//! Host side: split an encoded frame into datagrams and add parity.
+
+use std::collections::VecDeque;
+
+use bytes::{BufMut, Bytes, BytesMut};
+use reed_solomon_simd::ReedSolomonEncoder;
+use slopty_core::StreamId;
+use slopty_proto::media::{
+    FRAME_PREFIX_BYTES, FramePrefix, HEADER_BYTES, Kind, MAX_PAYLOAD, MediaHeader, flags,
+};
+use zerocopy::little_endian::{U16, U32, U64};
+use zerocopy::{FromBytes, IntoBytes};
+
+use crate::MediaError;
+
+/// Most data fragments in one frame. With at most [`MAX_PARITY_FRAGMENTS`] parity fragments every
+/// combination stays inside what the GF(2^16) engine supports (checked by a test).
+pub const MAX_DATA_FRAGMENTS: usize = 32_768;
+/// Most parity fragments in one frame (the header field is a byte).
+pub const MAX_PARITY_FRAGMENTS: usize = 255;
+/// Parity ratio when nothing is known about the link, in thousandths (Sunshine's 20 %).
+pub const DEFAULT_PARITY_PERMILLE: u16 = 200;
+/// Frames kept for retransmission. At 60 fps this is about half a second, more than any playout
+/// window a NACK is still worth answering in.
+pub const HISTORY_FRAMES: usize = 32;
+
+/// One encoded frame handed to the packetizer.
+#[derive(Clone, Copy, Debug)]
+pub struct EncodedFrame<'a> {
+    /// The bitstream (an access unit in Annex B or length-prefixed form; opaque here).
+    pub data: &'a [u8],
+    /// IDR frame.
+    pub keyframe: bool,
+    /// Long-term-reference token the receiver must acknowledge, if the encoder marked one.
+    pub ltr_token: Option<u64>,
+    /// Encoded as a recovery frame from an acknowledged LTR.
+    pub ltr_refresh: bool,
+    /// Capture time, host monotonic microseconds (low 32 bits).
+    pub capture_ts_us: u32,
+}
+
+/// How a frame is cut up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Layout {
+    /// Data fragments.
+    pub data_count: u16,
+    /// Payload bytes per fragment (data and parity alike); even, ≤ [`MAX_PAYLOAD`].
+    pub shard_bytes: usize,
+    /// Parity fragments.
+    pub parity_count: u8,
+}
+
+/// Choose fragment count and size for `len` bitstream bytes at `parity_permille` redundancy.
+///
+/// Fragments are balanced (all the same size, as small as the count allows) so the padding in
+/// the last one never exceeds two bytes per fragment.
+pub fn layout(len: usize, parity_permille: u16) -> Result<Layout, MediaError> {
+    if len == 0 {
+        return Err(MediaError::Empty);
+    }
+    let total = len.saturating_add(FRAME_PREFIX_BYTES);
+    let data_count = total.div_ceil(MAX_PAYLOAD);
+    if data_count > MAX_DATA_FRAGMENTS {
+        return Err(MediaError::FrameTooLarge { len });
+    }
+    let shard_bytes = total.div_ceil(data_count).next_multiple_of(2).min(MAX_PAYLOAD);
+    let parity_count = if parity_permille == 0 {
+        0
+    } else {
+        data_count
+            .saturating_mul(usize::from(parity_permille))
+            .div_ceil(1000)
+            .clamp(1, MAX_PARITY_FRAGMENTS)
+    };
+    Ok(Layout {
+        data_count: u16::try_from(data_count).unwrap_or(u16::MAX),
+        shard_bytes,
+        parity_count: u8::try_from(parity_count).unwrap_or(u8::MAX),
+    })
+}
+
+/// A packetized frame: its datagrams in send order (data first, then parity).
+#[derive(Clone, Debug)]
+pub struct SentFrame {
+    /// Frame number.
+    pub frame: u32,
+    /// Cut.
+    pub layout: Layout,
+    /// Ready-to-send datagrams.
+    pub datagrams: Vec<Bytes>,
+}
+
+impl SentFrame {
+    /// Bytes on the wire including parity.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.datagrams.iter().map(Bytes::len).sum()
+    }
+}
+
+/// Turns encoded frames into datagrams; keeps recent frames for NACK replies.
+pub struct Packetizer {
+    stream: StreamId,
+    next_frame: u32,
+    parity_permille: u16,
+    encoder: Option<ReedSolomonEncoder>,
+    body: Vec<u8>,
+    history: VecDeque<SentFrame>,
+    datagrams_sent: u64,
+}
+
+impl std::fmt::Debug for Packetizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Packetizer")
+            .field("stream", &self.stream)
+            .field("next_frame", &self.next_frame)
+            .field("parity_permille", &self.parity_permille)
+            .field("history", &self.history.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Packetizer {
+    /// A packetizer for one stream, numbering frames from zero.
+    #[must_use]
+    pub fn new(stream: StreamId) -> Self {
+        Self {
+            stream,
+            next_frame: 0,
+            parity_permille: DEFAULT_PARITY_PERMILLE,
+            encoder: None,
+            body: Vec::new(),
+            history: VecDeque::with_capacity(HISTORY_FRAMES),
+            datagrams_sent: 0,
+        }
+    }
+
+    /// Parity ratio in thousandths of the data fragment count (0 disables FEC).
+    pub const fn set_parity_permille(&mut self, permille: u16) {
+        self.parity_permille = if permille > 1000 { 1000 } else { permille };
+    }
+
+    /// Current parity ratio in thousandths.
+    #[must_use]
+    pub const fn parity_permille(&self) -> u16 {
+        self.parity_permille
+    }
+
+    /// The number the next frame will get.
+    #[must_use]
+    pub const fn next_frame(&self) -> u32 {
+        self.next_frame
+    }
+
+    /// Datagrams produced so far, retransmissions included.
+    #[must_use]
+    pub const fn datagrams_sent(&self) -> u64 {
+        self.datagrams_sent
+    }
+
+    /// Cut `frame` into datagrams and add parity. `send_ms_lo` is the low byte of the host's
+    /// millisecond clock, stamped on every datagram.
+    pub fn packetize(
+        &mut self,
+        frame: &EncodedFrame<'_>,
+        send_ms_lo: u8,
+    ) -> Result<&SentFrame, MediaError> {
+        let layout = layout(frame.data.len(), self.parity_permille)?;
+        let number = self.next_frame;
+        self.next_frame = self.next_frame.wrapping_add(1);
+
+        let data_count = usize::from(layout.data_count);
+        let parity_count = usize::from(layout.parity_count);
+        let total = data_count.saturating_mul(layout.shard_bytes);
+        self.body.clear();
+        self.body.resize(total, 0);
+        let prefix = FramePrefix {
+            len: U32::new(u32::try_from(frame.data.len()).unwrap_or(u32::MAX)),
+            capture_ts_us: U32::new(frame.capture_ts_us),
+            ltr_token: U64::new(frame.ltr_token.unwrap_or(0)),
+        };
+        if let Some(head) = self.body.get_mut(..FRAME_PREFIX_BYTES) {
+            head.copy_from_slice(prefix.as_bytes());
+        }
+        if let Some(dst) = self
+            .body
+            .get_mut(FRAME_PREFIX_BYTES..)
+            .and_then(|rest| rest.get_mut(..frame.data.len()))
+        {
+            dst.copy_from_slice(frame.data);
+        }
+
+        let mut header = MediaHeader {
+            stream: U32::new(self.stream.0),
+            frame: U32::new(number),
+            index: U16::new(0),
+            data_count: U16::new(layout.data_count),
+            parity_count: layout.parity_count,
+            kind: Kind::VideoData as u8,
+            flags: frame_flags(frame),
+            send_ms_lo,
+        };
+        let mut datagrams = Vec::with_capacity(data_count.saturating_add(parity_count));
+        for (index, shard) in self.body.chunks_exact(layout.shard_bytes).enumerate() {
+            header.index = U16::new(u16::try_from(index).unwrap_or(u16::MAX));
+            datagrams.push(datagram(&header, shard));
+        }
+
+        if parity_count > 0 {
+            let encoder = match self.encoder.as_mut() {
+                Some(encoder) => {
+                    encoder.reset(data_count, parity_count, layout.shard_bytes)?;
+                    encoder
+                }
+                None => self.encoder.insert(ReedSolomonEncoder::new(
+                    data_count,
+                    parity_count,
+                    layout.shard_bytes,
+                )?),
+            };
+            for shard in self.body.chunks_exact(layout.shard_bytes) {
+                encoder.add_original_shard(shard)?;
+            }
+            let parity = encoder.encode()?;
+            header.kind = Kind::VideoParity as u8;
+            for (offset, shard) in parity.recovery_iter().enumerate() {
+                let index = data_count.saturating_add(offset);
+                header.index = U16::new(u16::try_from(index).unwrap_or(u16::MAX));
+                datagrams.push(datagram(&header, shard));
+            }
+        }
+
+        self.datagrams_sent = self.datagrams_sent.saturating_add(datagrams.len() as u64);
+        if self.history.len() >= HISTORY_FRAMES {
+            self.history.pop_front();
+        }
+        self.history.push_back(SentFrame { frame: number, layout, datagrams });
+        self.history.back().ok_or(MediaError::Empty)
+    }
+
+    /// Answer a NACK: the requested data fragments of `frame` with the retransmit flag set.
+    /// Empty `fragments` means every data fragment. Frames outside the history yield nothing.
+    pub fn retransmit(&mut self, frame: u32, fragments: &[u16]) -> Vec<Bytes> {
+        let Some(sent) = self.history.iter().find(|s| s.frame == frame) else {
+            return Vec::new();
+        };
+        let data_count = usize::from(sent.layout.data_count);
+        let out: Vec<Bytes> = if fragments.is_empty() {
+            sent.datagrams.iter().take(data_count).map(retransmission).collect()
+        } else {
+            fragments
+                .iter()
+                .map(|&i| usize::from(i))
+                .filter(|&i| i < data_count)
+                .filter_map(|i| sent.datagrams.get(i))
+                .map(retransmission)
+                .collect()
+        };
+        self.datagrams_sent = self.datagrams_sent.saturating_add(out.len() as u64);
+        out
+    }
+}
+
+const fn frame_flags(frame: &EncodedFrame<'_>) -> u8 {
+    let mut f = 0;
+    if frame.keyframe {
+        f |= flags::KEYFRAME;
+    }
+    if frame.ltr_token.is_some() {
+        f |= flags::LTR;
+    }
+    if frame.ltr_refresh {
+        f |= flags::LTR_REFRESH;
+    }
+    f
+}
+
+fn datagram(header: &MediaHeader, payload: &[u8]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(HEADER_BYTES.saturating_add(payload.len()));
+    buf.put_slice(header.as_bytes());
+    buf.put_slice(payload);
+    buf.freeze()
+}
+
+fn retransmission(original: &Bytes) -> Bytes {
+    let mut buf = BytesMut::from(original.as_ref());
+    if let Ok((header, _payload)) = MediaHeader::mut_from_prefix(buf.as_mut()) {
+        header.flags |= flags::RETRANSMIT;
+    }
+    buf.freeze()
+}
+
+/// One Opus packet as a datagram, or `None` when it does not fit.
+#[must_use]
+pub fn audio_datagram(stream: StreamId, seq: u32, send_ms_lo: u8, opus: &[u8]) -> Option<Bytes> {
+    if opus.len() > MAX_PAYLOAD {
+        return None;
+    }
+    let header = MediaHeader {
+        stream: U32::new(stream.0),
+        frame: U32::new(seq),
+        index: U16::new(0),
+        data_count: U16::new(1),
+        parity_count: 0,
+        kind: Kind::Audio as u8,
+        flags: 0,
+        send_ms_lo,
+    };
+    Some(datagram(&header, opus))
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::media::MAX_DATAGRAM;
+
+    use super::*;
+
+    #[test]
+    fn layout_balances_fragments() {
+        for len in [1, 100, 1167, 1168, 1169, 2337, 30_000, 1_000_000] {
+            let l = layout(len, 200).unwrap();
+            let total = len + FRAME_PREFIX_BYTES;
+            assert!(
+                l.shard_bytes <= MAX_PAYLOAD && l.shard_bytes.is_multiple_of(2),
+                "{len}: {l:?}"
+            );
+            assert!(usize::from(l.data_count) * l.shard_bytes >= total, "{len}: {l:?}");
+            // Balanced: one fragment fewer would not fit.
+            assert!((usize::from(l.data_count) - 1) * MAX_PAYLOAD < total, "{len}: {l:?}");
+            assert!(l.parity_count >= 1);
+            assert!(ReedSolomonEncoder::supports(
+                usize::from(l.data_count),
+                usize::from(l.parity_count)
+            ));
+        }
+        assert_eq!(
+            layout(1168, 200).unwrap(),
+            Layout { data_count: 1, shard_bytes: 1184, parity_count: 1 }
+        );
+        assert_eq!(layout(1169, 0).unwrap().parity_count, 0);
+        assert_eq!(layout(1169, 200).unwrap().data_count, 2);
+        assert!(matches!(layout(0, 200), Err(MediaError::Empty)));
+        assert!(matches!(
+            layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200),
+            Err(MediaError::FrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn every_supported_extreme_is_accepted_by_the_engine() {
+        for data in [1, 2, 3, 255, 256, 257, MAX_DATA_FRAGMENTS] {
+            for parity in [1, 2, 255] {
+                assert!(ReedSolomonEncoder::supports(data, parity), "{data}/{parity}");
+            }
+        }
+    }
+
+    #[test]
+    fn packetize_emits_data_then_parity_under_the_mtu() {
+        let mut p = Packetizer::new(StreamId(3));
+        let data: Vec<u8> = (0..5000_u32).map(|i| (i % 251) as u8).collect();
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe: true,
+            ltr_token: Some(42),
+            ltr_refresh: false,
+            capture_ts_us: 99,
+        };
+        let sent = p.packetize(&frame, 7).unwrap().clone();
+        assert_eq!(sent.frame, 0);
+        assert_eq!(sent.layout.data_count, 5);
+        assert_eq!(sent.layout.parity_count, 1);
+        assert_eq!(sent.datagrams.len(), 6);
+        for (i, dg) in sent.datagrams.iter().enumerate() {
+            assert!(dg.len() <= MAX_DATAGRAM);
+            let (h, payload) = MediaHeader::parse(dg).unwrap();
+            assert_eq!(payload.len(), sent.layout.shard_bytes);
+            assert_eq!(h.stream.get(), 3);
+            assert_eq!(usize::from(h.index.get()), i);
+            assert_eq!(h.flags, flags::KEYFRAME | flags::LTR);
+            assert_eq!(h.send_ms_lo, 7);
+            assert_eq!(h.is_parity(), i == 5);
+        }
+        let (_h, first) = MediaHeader::parse(&sent.datagrams[0]).unwrap();
+        let (prefix, rest) = FramePrefix::parse(first).unwrap();
+        assert_eq!(prefix.len.get(), 5000);
+        assert_eq!(prefix.ltr_token.get(), 42);
+        assert_eq!(&rest[..8], &data[..8]);
+        assert_eq!(p.next_frame(), 1);
+        assert_eq!(p.datagrams_sent(), 6);
+    }
+
+    #[test]
+    fn retransmit_answers_from_history_with_the_flag_set() {
+        let mut p = Packetizer::new(StreamId(1));
+        let data = vec![1_u8; 3000];
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe: false,
+            ltr_token: None,
+            ltr_refresh: false,
+            capture_ts_us: 0,
+        };
+        for _ in 0..HISTORY_FRAMES + 2 {
+            p.packetize(&frame, 0).unwrap();
+        }
+        assert!(p.retransmit(0, &[0]).is_empty(), "evicted from history");
+        let all = p.retransmit(u32::try_from(HISTORY_FRAMES).unwrap(), &[]);
+        assert_eq!(all.len(), 3, "all data fragments, no parity");
+        let some = p.retransmit(u32::try_from(HISTORY_FRAMES + 1).unwrap(), &[2, 0, 9]);
+        assert_eq!(some.len(), 2, "out-of-range indexes are dropped");
+        let (h, _) = MediaHeader::parse(&some[0]).unwrap();
+        assert_eq!(h.index.get(), 2);
+        assert_eq!(h.flags & flags::RETRANSMIT, flags::RETRANSMIT);
+    }
+
+    #[test]
+    fn audio_fits_or_is_refused() {
+        let dg = audio_datagram(StreamId(1), 5, 0, &[9; 120]).unwrap();
+        let (h, payload) = MediaHeader::parse(&dg).unwrap();
+        assert_eq!(h.kind(), Some(Kind::Audio));
+        assert_eq!(payload.len(), 120);
+        assert!(audio_datagram(StreamId(1), 5, 0, &[9; MAX_PAYLOAD + 1]).is_none());
+    }
+}

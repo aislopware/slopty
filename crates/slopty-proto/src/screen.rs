@@ -222,7 +222,8 @@ pub enum ScreenRequest {
         stream: StreamId,
         /// Frame.
         frame: u32,
-        /// Missing fragment indices.
+        /// Missing data fragment indices; empty means "every fragment" (nothing of the frame
+        /// arrived, so the client does not know how many there are).
         fragments: Vec<u16>,
     },
     /// Raise/focus the window on the host.

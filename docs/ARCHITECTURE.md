@@ -88,7 +88,9 @@ P-frame from an acked LTR) → IDR only when no acked LTR exists. Cursor is a se
 channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
 
 Crates: `slopty-capture`, `slopty-codec` (encode half is `cfg(macos)`), `slopty-media`
-(packetizer, FEC, jitter/present policy — pure and fuzzable), `slopty-input`.
+(`Packetizer` → datagrams + parity + retransmit history; `Reassembler` → in-order frames,
+NACK/refresh `Action`s, `ReceiverReport`; `Redundancy` → parity ratio; pure, no clocks, property
+tested), `slopty-input`.
 
 ## 4. Canvas
 
@@ -127,7 +129,7 @@ Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, on
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | host |
 | `slopty-predict` | speculative local echo | client |
 | `slopty-net` | iroh endpoint, pairing/auth, channels | all |
-| `slopty-media` | packetizer, FEC, present queue | all |
+| `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
 | `slopty-capture` | ScreenCaptureKit | host |
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |
 | `slopty-input` | input event model + CGEvent injection | split |

@@ -89,6 +89,9 @@ iroh-mdns-address-lookup = "0.5.0"
 iroh-tickets = "1.0.0"
 data-encoding = "2.11.1"
 
+# media: systematic Reed–Solomon over GF(2^16) with NEON; parity per video frame
+reed-solomon-simd = "3.1.0"
+
 # UI. GPUI from our zed fork (branch `slopty` = zed@801c087, the commit gpui-kit's gpui-pre 0.3.1
 # snapshots) and gpui-kit from our fork (v0.6.0 + one commit pointing it at the zed fork). Both
 # use `branch` so the two sources unify; Cargo.lock pins the commits.

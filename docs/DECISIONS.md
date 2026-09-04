@@ -138,6 +138,21 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   defaults `minimumFrameInterval` to 1/60 — measure.
 - ✅ **FEC**: `reed-solomon-simd` 3.1.0 (NEON), systematic RS per frame, redundancy adaptive
   (~20 % default, Sunshine's number). NACK inside the playout window before LTR refresh.
+- ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
+  length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
+  same even size ≤ 1184 B, so padding ≤ 2 B per fragment and the RS shard size is inferred from
+  any fragment); parity indexes follow the data indexes in the same header. The prefix rides
+  under parity so a recovered frame recovers its metadata. Max 32 768 data + 255 parity
+  fragments per frame; every such pair is a supported RS configuration (tested).
+- ✅ **Loss policy** (`Reassembler`): deliver strictly in order; NACK after 3 ms of silence on an
+  incomplete frame (fragments leave the host back to back), at most 2 tries one RTT apart; a
+  frame that never showed up at all is NACKed whole (`fragments = []`); give up after
+  `3 ms + 2·(RTT + 3 ms) + 10 ms`, then `RequestRefresh{last_good}` and ignore everything until
+  an IDR or LTR-refresh frame. Parity is decoded only when data fragments are missing. Late
+  parity for an already complete frame is dropped unread. 🔬 Timings are first guesses; tune
+  against `docs/MEASUREMENTS.md` once the capture path exists.
+- ✅ **Redundancy control** (`Redundancy`): parity permille = clamp(2 × EWMA(datagram loss) +
+  50, 50, 500), ×1.5 bump when a report shows a frame lost outright. 🔬 Heuristic; measure.
 - ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
   present on arrival. 🔬 slop-desk measured vsync-locked = +2 frames at 60 fps; re-measure with
   our harness before ruling.

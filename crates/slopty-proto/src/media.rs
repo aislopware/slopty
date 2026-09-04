@@ -4,7 +4,7 @@
 //! and a sender writes it into the front of a buffer with no allocation. Everything after the
 //! header is opaque to this module.
 
-use zerocopy::little_endian::{U16, U32};
+use zerocopy::little_endian::{I32, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 /// Largest datagram we will ever send. Under the 1280-byte IPv6 minimum MTU after QUIC/UDP
@@ -104,6 +104,59 @@ impl MediaHeader {
 
 const _: () = assert!(size_of::<MediaHeader>() == HEADER_BYTES, "header layout drifted");
 
+/// Bytes of [`FramePrefix`].
+pub const FRAME_PREFIX_BYTES: usize = 16;
+
+/// Per-frame metadata carried *inside* the fragmented payload, ahead of the encoded bitstream.
+///
+/// It is protected by the frame's parity like the bitstream, so a recovered frame recovers its
+/// metadata too. The fragmented body is `FramePrefix ‖ bitstream ‖ zero padding`; every fragment
+/// of a frame (data and parity) carries the same number of payload bytes.
+#[derive(
+    Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq,
+)]
+#[repr(C)]
+pub struct FramePrefix {
+    /// Bitstream bytes that follow; anything after them is padding.
+    pub len: U32,
+    /// Host capture timestamp, microseconds on the host's monotonic clock (low 32 bits). Echoed
+    /// in `ReceiverReport::last_host_send_ts_us` and used for one-way-delay *trend*.
+    pub capture_ts_us: U32,
+    /// The long-term-reference token to acknowledge when [`flags::LTR`] is set; zero otherwise.
+    pub ltr_token: U64,
+}
+
+impl FramePrefix {
+    /// Split a reassembled body into its prefix and the bytes after it.
+    #[must_use]
+    pub fn parse(body: &[u8]) -> Option<(&Self, &[u8])> {
+        Self::ref_from_prefix(body).ok()
+    }
+}
+
+const _: () = assert!(size_of::<FramePrefix>() == FRAME_PREFIX_BYTES, "prefix layout drifted");
+
+/// Bytes of [`CursorUpdate`].
+pub const CURSOR_BYTES: usize = 12;
+
+/// Payload of a [`Kind::Cursor`] datagram: pointer position in stream pixels.
+#[derive(
+    Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq,
+)]
+#[repr(C)]
+pub struct CursorUpdate {
+    /// X in stream pixels; negative when left of the captured area.
+    pub x: I32,
+    /// Y in stream pixels.
+    pub y: I32,
+    /// 1 when the pointer should be drawn.
+    pub visible: u8,
+    /// Zero.
+    pub reserved: [u8; 3],
+}
+
+const _: () = assert!(size_of::<CursorUpdate>() == CURSOR_BYTES, "cursor layout drifted");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +182,26 @@ mod tests {
         assert_eq!(payload[0], 0xEE);
         assert!(parsed.is_parity());
         assert_eq!(parsed.kind(), Some(Kind::VideoParity));
+    }
+
+    #[test]
+    fn frame_prefix_and_cursor_layouts() {
+        let prefix = FramePrefix {
+            len: U32::new(0x0102_0304),
+            capture_ts_us: U32::new(5),
+            ltr_token: U64::new(0x0807_0605_0403_0201),
+        };
+        let mut body = prefix.as_bytes().to_vec();
+        body.push(0xCC);
+        let (parsed, rest) = FramePrefix::parse(&body).unwrap();
+        assert_eq!(parsed, &prefix);
+        assert_eq!(rest, &[0xCC]);
+        assert_eq!(&body[..4], &[4, 3, 2, 1]);
+        assert_eq!(&body[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(FramePrefix::parse(&body[..FRAME_PREFIX_BYTES - 1]).is_none());
+
+        let cursor = CursorUpdate { x: I32::new(-1), y: I32::new(2), visible: 1, reserved: [0; 3] };
+        assert_eq!(cursor.as_bytes(), &[255, 255, 255, 255, 2, 0, 0, 0, 1, 0, 0, 0]);
     }
 
     #[test]
