@@ -198,7 +198,11 @@ mod actor {
         wait_for(&mut old_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
 
         session.attach(a, size(40, 6), new_tx).unwrap();
-        wait_for(&mut new_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        let (events, _) =
+            wait_for(&mut new_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_))))
+                .await;
+        // The reconnecting driver is told it still drives.
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
         assert_eq!(session.snapshot().await.unwrap().viewers, 1);
 
         // The old connection goes away: scoped to its own sink, nothing changes.

@@ -267,6 +267,17 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Whether this client's size is the one the PTY follows.
+    #[must_use]
+    pub const fn driving(&self) -> bool {
+        self.state.driving()
+    }
+
+    /// Ask the host to make this client the driver: the PTY takes our size from now on.
+    pub fn drive(&self) {
+        self.send(TermRequest::Drive { drive: true });
+    }
+
     fn send(&self, req: TermRequest) {
         let msg = ClientMsg::Term { session: self.session, req };
         if let Err(e) = self.out.try_send(msg) {

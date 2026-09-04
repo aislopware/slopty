@@ -19,6 +19,8 @@ pub const CARD_ZOOM: f32 = 0.6;
 pub const SNAP: f32 = 16.0;
 /// Gap between auto-placed items.
 pub const GAP: f32 = 24.0;
+/// Size the host gives a new terminal item (`slopty_host::canvas::TERMINAL_SIZE`).
+pub const TERMINAL_SIZE: (f32, f32) = (720.0, 440.0);
 
 /// The document.
 #[derive(Clone, Debug, Default)]

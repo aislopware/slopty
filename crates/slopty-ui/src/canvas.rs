@@ -17,7 +17,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div, point, px, size,
 };
-use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, snap};
+use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
@@ -266,15 +266,8 @@ impl CanvasView {
     /// one it can only read zoomed out. Desktop viewports are larger than the default and are
     /// left alone.
     fn fit_to_viewport(&mut self, id: ItemId) {
-        let (_, vp) = self.viewport;
-        let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
-        if vw <= 1.0 || vh <= 1.0 {
-            return;
-        }
+        let Some((max_w, max_h)) = self.viewport_max() else { return };
         let Some(item) = self.doc.get(id) else { return };
-        let margin = 2.0 * GAP;
-        let max_w = snap((vw - margin).max(MIN_ITEM));
-        let max_h = snap((vh - margin).max(MIN_ITEM));
         if item.rect.w <= max_w && item.rect.h <= max_h {
             return;
         }
@@ -285,6 +278,40 @@ impl CanvasView {
             h: item.rect.h.min(max_h),
         };
         self.propose(CanvasOp::Place { id, rect });
+    }
+
+    /// The largest item that fits this viewport at zoom 1 with a `GAP` margin.
+    fn viewport_max(&self) -> Option<(f32, f32)> {
+        let (_, vp) = self.viewport;
+        let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
+        if vw <= 1.0 || vh <= 1.0 {
+            return None;
+        }
+        let margin = 2.0 * GAP;
+        Some((snap((vw - margin).max(MIN_ITEM)), snap((vh - margin).max(MIN_ITEM))))
+    }
+
+    /// Drive the terminal in `id` from here: size the item for this viewport (no larger than
+    /// the viewport, no smaller than the default unless the viewport is) and take the PTY
+    /// size. The phone uses it to take over a desktop terminal; the desktop to take it back.
+    pub fn take_over(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(item) = self.doc.get(id) else { return };
+        let ItemKind::Terminal { session } = item.kind else { return };
+        let rect = item.rect;
+        if let Some((max_w, max_h)) = self.viewport_max() {
+            let w = rect.w.clamp(TERMINAL_SIZE.0.min(max_w), max_w);
+            let h = rect.h.clamp(TERMINAL_SIZE.1.min(max_h), max_h);
+            if (w, h) != (rect.w, rect.h) {
+                self.propose(CanvasOp::Place { id, rect: Rect { x: rect.x, y: rect.y, w, h } });
+            }
+        }
+        if let Some(view) = self.terminals.get(&session) {
+            view.read(cx).drive();
+        }
+        self.active = Some(id);
+        self.pending_focus = Some(session);
+        self.reveal_pending = Some(id);
+        cx.notify();
     }
 
     /// A session appeared (ours or another client's).
@@ -862,6 +889,16 @@ impl CanvasView {
             _ => None,
         };
         let badge = agent.map(|a| agent_badge(a, theme, ui_size));
+        // Another client's size rules this PTY: offer to take it (on the active item only, so
+        // a wall of cards stays readable).
+        let take = match item.kind {
+            ItemKind::Terminal { session } if active => self
+                .terminals
+                .get(&session)
+                .filter(|v| !v.read(cx).driving())
+                .map(|_| take_button(id, theme, ui_size, cx)),
+            _ => None,
+        };
         let needs_human = agent.is_some_and(
             |a| matches!(&a.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt),
         );
@@ -898,6 +935,9 @@ impl CanvasView {
                     0.9,
                 ),
             ))
+            // "take" sits left of the title so it stays reachable on a phone when the item is
+            // wider than the screen.
+            .when_some(take, gpui::ParentElement::child)
             .child(
                 div().flex_1().overflow_hidden().text_ellipsis().child(SharedString::from(title)),
             )
@@ -1106,6 +1146,33 @@ impl Render for CanvasView {
 }
 
 /// The agent pill in a terminal's title bar: a coloured dot and a short word or the detail.
+/// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
+fn take_button(
+    id: ItemId,
+    theme: &Theme,
+    ui_size: f32,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    div()
+        .id(element_id("take", id))
+        .flex_none()
+        .px(px(ui_size * 0.5))
+        .py(px(ui_size * 0.1))
+        .rounded(px(ui_size * 0.35))
+        .bg(hsla_alpha(theme.surfaces.accent, 0.25))
+        .text_color(hsla(theme.surfaces.text))
+        .cursor_pointer()
+        .child("take")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.take_over(id, cx);
+            }),
+        )
+        .into_any_element()
+}
+
 fn agent_badge(agent: &AgentEvent, theme: &Theme, ui_size: f32) -> gpui::AnyElement {
     let (label, color) = match &agent.status {
         AgentStatus::None => return div().into_any_element(),

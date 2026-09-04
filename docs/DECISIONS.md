@@ -96,10 +96,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   proposes a `Place` that clamps it to the viewport minus `GAP` at zoom 1, so a phone gets a
   phone-wide terminal and, being its driver, a PTY of that width; desktop viewports exceed the
   default and are untouched. Terminals opened elsewhere are still viewed zoomed out; the
-  driver/viewer hand-off (a phone that takes over an existing desktop terminal) remains 🔬.
+  driver/viewer hand-off is the "take" pill below.
   Verified on the iOS 26.5 simulator 2026-09-05: "+ shell" on the phone opens a 43×22 PTY
   shown at 100 % across the phone's width. Landscape (both directions in the spec) rotates the
   GPUI window with the keyboard; nothing else was needed.
+- ✅ **Driver hand-off is explicit: the "take" pill.** A terminal whose PTY follows another
+  client's size shows "take" in its title bar (`TerminalState::driving` is false).
+  `CanvasView::take_over` sizes the item for this viewport (clamped between the default
+  `TERMINAL_SIZE` and the viewport minus `GAP`), sends `TermRequest::Drive`, focuses and
+  reveals it. Item geometry is shared canvas state, so the other client sees the terminal
+  shrink or grow: that *is* the signal that someone else drives it, and their own "take"
+  brings it back. Rejected: tmux-style "latest input drives" (a phone typing one command would
+  keep shrinking the desktop's terminal) and per-client geometry (a second document model).
+
 - ✅ **iOS key bar.** The soft keyboard has no esc/tab/ctrl/arrows, so the iOS app
   (`KEY_BAR = cfg!(target_os = "ios")`) draws a 40 pt row above the keyboard with esc, tab, ⌃,
   ←↑↓→, `-`, `/`, `|`, `~`. Keys go through `TerminalView::press`, the same path as hardware

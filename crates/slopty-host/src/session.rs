@@ -370,6 +370,10 @@ impl Actor {
                     self.driver = Some(client);
                     self.send_to(client, TermEvent::Driver { you: true });
                     self.apply_size(size);
+                } else if self.driver == Some(client) {
+                    // A reconnecting driver (relaunched app) learns it still drives.
+                    self.send_to(client, TermEvent::Driver { you: true });
+                    self.apply_size(size);
                 }
                 if let Some(t) = &self.title {
                     self.send_to(client, TermEvent::Title(t.clone()));
