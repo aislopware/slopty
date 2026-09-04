@@ -25,8 +25,9 @@ hypothesis until DECISIONS.md marks it verified.
   produced them.
 
 ## Layout
-`crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/` pinned submodules
-(ghostty, zed fork, gpui-kit fork), `docs/` design + decisions.
+`crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/ghostty` pinned submodule
+(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/zed` (branch
+`slopty`) and gpui-kit from `aislopware/gpui-kit` (branch `slopty`) as rev-pinned git dependencies.
 
 ## Dev loop
 - `cargo xtask setup` installs tools (binstall) and initialises submodules.

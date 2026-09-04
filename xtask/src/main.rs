@@ -8,6 +8,7 @@
 mod gate;
 mod ios;
 mod release;
+mod run;
 mod setup;
 mod tools;
 
@@ -71,6 +72,11 @@ enum Cmd {
     },
     /// Print the changelog for unreleased commits.
     Changelog,
+    /// Launch the host daemons or the app from the dev tree.
+    Run {
+        #[command(subcommand)]
+        cmd: run::RunCmd,
+    },
     /// iOS: build the static library, package the xcframework, generate and build the Xcode
     /// project.
     Ios {
@@ -94,6 +100,7 @@ fn main() -> Result<()> {
             release::run(&sh, &release::Options { version, dry_run, skip_gate })
         }
         Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
+        Cmd::Run { cmd } => run::run(&sh, &cmd),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
     }
 }

@@ -1,0 +1,14 @@
+//! GPUI views and elements.
+//!
+//! * [`terminal`] — the terminal view (an entity owning a `TermState`) and its element (the
+//!   painter). Rows are painted straight from the grid; no intermediate widget tree.
+//! * [`canvas`] — the infinite plane: items, camera, drag/zoom, actions.
+//! * [`keys`] — GPUI keystrokes → protocol key events.
+//! * [`colors`] — theme tokens → GPUI colours.
+//! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
+
+pub mod canvas;
+pub mod colors;
+pub mod fonts;
+pub mod keys;
+pub mod terminal;

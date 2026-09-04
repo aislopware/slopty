@@ -1,0 +1,15 @@
+[package]
+name = "slopty-theme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty design tokens: terminal palette, typography, spacing"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+slopty-grid.workspace = true

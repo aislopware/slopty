@@ -1,0 +1,700 @@
+//! `CanvasView`: the infinite plane.
+//!
+//! Items live in canvas units; the [`Camera`] maps them to the viewport. Terminals keep their
+//! grid across zoom (the element scales its paint geometry), and below
+//! [`slopty_client::canvas::CARD_ZOOM`] they collapse to summary cards.
+//!
+//! Interaction (macOS): two-finger scroll pans, pinch or ⌘-scroll zooms about the pointer,
+//! dragging a title bar moves, the corner grip resizes, dragging empty space pans. Every
+//! geometry change is applied locally first and proposed to the host on release.
+
+use std::collections::HashMap;
+
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div, point, px, size,
+};
+use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, snap};
+use slopty_core::{ClientId, ItemId, SessionId};
+use slopty_proto::ClientMsg;
+use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
+use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest, TermSize};
+use slopty_theme::Theme;
+use tokio::sync::mpsc;
+
+use crate::colors::{hsla, hsla_alpha};
+use crate::terminal::{TerminalView, TerminalViewEvent};
+
+/// Canvas actions (bound in [`key_bindings`]).
+pub mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        canvas,
+        [
+            /// Open a new shell on the host.
+            NewTerminal,
+            /// Close the active item (terminates its session).
+            CloseItem,
+            /// Zoom in about the viewport centre.
+            ZoomIn,
+            /// Zoom out about the viewport centre.
+            ZoomOut,
+            /// Zoom to 100%.
+            ZoomReset,
+            /// Fit every item in the viewport.
+            FitAll,
+        ]
+    );
+}
+pub use actions::{CloseItem, FitAll, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
+
+/// Key bindings for the canvas context.
+#[must_use]
+pub fn key_bindings() -> Vec<KeyBinding> {
+    const CTX: Option<&str> = Some("Canvas");
+    vec![
+        KeyBinding::new("cmd-t", NewTerminal, CTX),
+        KeyBinding::new("cmd-n", NewTerminal, CTX),
+        KeyBinding::new("cmd-w", CloseItem, CTX),
+        KeyBinding::new("cmd-=", ZoomIn, CTX),
+        KeyBinding::new("cmd-shift-=", ZoomIn, CTX),
+        KeyBinding::new("cmd--", ZoomOut, CTX),
+        KeyBinding::new("cmd-0", ZoomReset, CTX),
+        KeyBinding::new("cmd-1", FitAll, CTX),
+    ]
+}
+
+/// A stable element id for `(part, item)`.
+fn element_id(part: &str, id: ItemId) -> ElementId {
+    ElementId::from(format!("{part}-{}", id.as_uuid()))
+}
+
+/// Title bar height at zoom 1, in points.
+const TITLE_H: f32 = 28.0;
+/// Resize grip size at zoom 1.
+const GRIP: f32 = 14.0;
+/// Smallest item on screen while dragging.
+const MIN_ITEM: f32 = 160.0;
+/// Zoom step for ⌘= / ⌘-.
+const ZOOM_STEP: f32 = 1.25;
+
+/// Things the surrounding chrome may show.
+#[derive(Clone, PartialEq, Debug)]
+pub enum CanvasEvent {
+    /// Zoom changed (for a status readout).
+    Zoom(f32),
+    /// A terminal rang its bell.
+    Bell(SessionId),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Drag {
+    Move { id: ItemId, grab: Point<Pixels>, start: Rect },
+    Resize { id: ItemId, grab: Point<Pixels>, start: Rect },
+    Pan { last: Point<Pixels> },
+}
+
+/// The plane.
+pub struct CanvasView {
+    doc: CanvasDoc,
+    camera: Camera,
+    me: ClientId,
+    out: mpsc::Sender<ClientMsg>,
+    theme: Theme,
+    terminals: HashMap<SessionId, Entity<TerminalView>>,
+    sessions: HashMap<SessionId, SessionSummary>,
+    /// Viewport origin (window coordinates) and size, recorded each frame.
+    viewport: (Point<Pixels>, Size<Pixels>),
+    drag: Option<Drag>,
+    active: Option<ItemId>,
+    /// A terminal to focus on the next frame (one we just opened).
+    pending_focus: Option<SessionId>,
+    focus: FocusHandle,
+    subscriptions: Vec<gpui::Subscription>,
+}
+
+impl std::fmt::Debug for CanvasView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanvasView")
+            .field("items", &self.doc.items().count())
+            .field("camera", &self.camera)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EventEmitter<CanvasEvent> for CanvasView {}
+
+impl Focusable for CanvasView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl CanvasView {
+    /// A canvas for one host link.
+    pub fn new(
+        me: ClientId,
+        out: mpsc::Sender<ClientMsg>,
+        sessions: Vec<SessionSummary>,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Self {
+        Self {
+            doc: CanvasDoc::default(),
+            camera: Camera::default(),
+            me,
+            out,
+            theme,
+            terminals: HashMap::new(),
+            sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
+            viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
+            drag: None,
+            active: None,
+            pending_focus: None,
+            focus: cx.focus_handle(),
+            subscriptions: Vec::new(),
+        }
+    }
+
+    /// Camera zoom.
+    #[must_use]
+    pub const fn zoom(&self) -> f32 {
+        self.camera.zoom
+    }
+
+    /// Number of items.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.doc.items().count()
+    }
+
+    /// True when nothing is on the canvas.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The terminal view for `session`, if it is on the canvas.
+    #[must_use]
+    pub fn terminal(&self, session: SessionId) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(&session)
+    }
+
+    // ----- host events ---------------------------------------------------------------------
+
+    /// A canvas snapshot or delta from the host.
+    pub fn apply_sync(&mut self, sync: CanvasSync, cx: &mut Context<Self>) {
+        // An item the host created for us (our `OpenSession`) becomes active and focused.
+        let ours = match &sync {
+            CanvasSync::Delta { by, op: CanvasOp::Upsert(item), .. } if *by == self.me => {
+                match item.kind {
+                    ItemKind::Terminal { session } => Some((item.id, session)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let change = self.doc.apply_sync(sync, self.me);
+        tracing::debug!(?change, version = self.doc.version(), "canvas sync");
+        self.reconcile(cx);
+        if let Some((id, session)) = ours {
+            self.active = Some(id);
+            self.pending_focus = Some(session);
+        }
+        cx.notify();
+    }
+
+    /// A session appeared (ours or another client's).
+    pub fn session_opened(&mut self, summary: SessionSummary, cx: &mut Context<Self>) {
+        self.sessions.insert(summary.id, summary);
+        self.reconcile(cx);
+        cx.notify();
+    }
+
+    /// A session is gone.
+    pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.sessions.remove(&session);
+        self.reconcile(cx);
+        cx.notify();
+    }
+
+    /// Link RTT (fanned out to every terminal's predictor).
+    pub fn set_rtt(&self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+        for view in self.terminals.values() {
+            view.update(cx, |v, _| v.set_rtt(rtt));
+        }
+    }
+
+    /// A session-stream event.
+    pub fn term_event(&self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
+        match (self.terminals.get(&session), event) {
+            (Some(view), event) => view.update(cx, |v, cx| v.apply(event, cx)),
+            (None, TermEvent::Error(e)) => tracing::warn!(%session, error = %e, "host"),
+            (None, _other) => {}
+        }
+    }
+
+    /// Create views for terminal items whose session is alive; drop views whose item is gone.
+    fn reconcile(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<SessionId> = self
+            .doc
+            .items()
+            .filter_map(|i| match i.kind {
+                ItemKind::Terminal { session } if !i.sleeping => Some(session),
+                _ => None,
+            })
+            .filter(|s| self.sessions.contains_key(s))
+            .collect();
+        for session in &wanted {
+            if self.terminals.contains_key(session) {
+                continue;
+            }
+            let summary = self.sessions.get(session);
+            let size = summary.map_or_else(TermSize::default, |s| TermSize {
+                cols: s.cols,
+                rows: s.rows,
+                ..TermSize::default()
+            });
+            let out = self.out.clone();
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| TerminalView::new(*session, size, out, theme, cx));
+            let sid = *session;
+            self.subscriptions.push(cx.subscribe(
+                &view,
+                move |this, _view, event, cx| match event {
+                    TerminalViewEvent::Bell => cx.emit(CanvasEvent::Bell(sid)),
+                    TerminalViewEvent::Exited(_) => {
+                        this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
+                    }
+                    TerminalViewEvent::Title(_) => cx.notify(),
+                },
+            ));
+            self.send(ClientMsg::Term { session: *session, req: TermRequest::Attach { size } });
+            self.terminals.insert(*session, view);
+            if self.active.is_none() {
+                self.active = self.doc.item_for_session(*session).map(|i| i.id);
+            }
+        }
+        let gone: Vec<SessionId> =
+            self.terminals.keys().filter(|s| !wanted.contains(s)).copied().collect();
+        for session in gone {
+            if self.sessions.contains_key(&session) {
+                self.send(ClientMsg::Term { session, req: TermRequest::Detach });
+            }
+            self.terminals.remove(&session);
+        }
+        if let Some(active) = self.active
+            && self.doc.get(active).is_none()
+        {
+            self.active = self.doc.by_z().last().map(|i| i.id);
+        }
+    }
+
+    fn send(&self, msg: ClientMsg) {
+        if let Err(e) = self.out.try_send(msg) {
+            tracing::warn!(error = %e, "outbound queue");
+        }
+    }
+
+    fn propose(&mut self, op: CanvasOp) {
+        self.doc.apply_op(&op);
+        self.send(ClientMsg::Canvas(op));
+    }
+
+    // ----- commands ------------------------------------------------------------------------
+
+    /// Open a new shell; the host places it.
+    pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
+        tracing::debug!("open session");
+        self.send(ClientMsg::OpenSession(OpenSession {
+            size: TermSize::default(),
+            cwd: None,
+            command: Vec::new(),
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        }));
+        cx.notify();
+    }
+
+    /// Close the active item.
+    pub fn close_item(&mut self, _: &CloseItem, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.active else { return };
+        let Some(item) = self.doc.get(id).cloned() else { return };
+        match item.kind {
+            ItemKind::Terminal { session } => {
+                self.send(ClientMsg::Term { session, req: TermRequest::Close });
+            }
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => {
+                self.propose(CanvasOp::Remove(id));
+            }
+        }
+        cx.notify();
+    }
+
+    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let (_, vp) = self.viewport;
+        self.camera.zoom_at(factor, f32::from(vp.width) / 2.0, f32::from(vp.height) / 2.0);
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    /// ⌘=
+    pub fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(ZOOM_STEP, cx);
+    }
+
+    /// ⌘-
+    pub fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(1.0 / ZOOM_STEP, cx);
+    }
+
+    /// ⌘0
+    pub fn zoom_reset(&mut self, _: &ZoomReset, _window: &mut Window, cx: &mut Context<Self>) {
+        let (_, vp) = self.viewport;
+        let factor = 1.0 / self.camera.zoom;
+        self.camera.zoom_at(factor, f32::from(vp.width) / 2.0, f32::from(vp.height) / 2.0);
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    /// ⌘1
+    pub fn fit_all(&mut self, _: &FitAll, _window: &mut Window, cx: &mut Context<Self>) {
+        let (_, vp) = self.viewport;
+        let rects: Vec<Rect> = self.doc.items().map(|i| i.rect).collect();
+        self.camera.fit(rects, (f32::from(vp.width), f32::from(vp.height)));
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    // ----- pointer -------------------------------------------------------------------------
+
+    fn local(&self, p: Point<Pixels>) -> Point<Pixels> {
+        p - self.viewport.0
+    }
+
+    fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let delta = match ev.delta {
+            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+            ScrollDelta::Lines(l) => (l.x * 20.0, l.y * 20.0),
+        };
+        if ev.modifiers.platform {
+            let local = self.local(ev.position);
+            let factor = (-delta.1 * 0.01).exp();
+            self.camera.zoom_at(factor, f32::from(local.x), f32::from(local.y));
+            cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        } else {
+            self.camera.pan(delta.0, delta.1);
+        }
+        cx.notify();
+    }
+
+    fn pinch(&mut self, ev: &PinchEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let local = self.local(ev.position);
+        let factor = (1.0 + ev.delta).max(0.05);
+        self.camera.zoom_at(factor, f32::from(local.x), f32::from(local.y));
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    fn begin_pan(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        self.drag = Some(Drag::Pan { last: ev.position });
+        cx.notify();
+    }
+
+    fn begin_move(&mut self, id: ItemId, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(start) = self.doc.get(id).map(|i| i.rect) else { return };
+        self.activate(id, cx);
+        self.drag = Some(Drag::Move { id, grab: ev.position, start });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn begin_resize(&mut self, id: ItemId, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(start) = self.doc.get(id).map(|i| i.rect) else { return };
+        self.activate(id, cx);
+        self.drag = Some(Drag::Resize { id, grab: ev.position, start });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn click_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        // Items own their clicks: the root must not start a pan or steal focus.
+        cx.stop_propagation();
+        self.activate(id, cx);
+    }
+
+    fn activate(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        self.active = Some(id);
+        if self.doc.by_z().last().is_none_or(|top| top.id != id) {
+            self.propose(CanvasOp::Raise(id));
+        }
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.drag = None;
+            return;
+        }
+        let zoom = self.camera.zoom;
+        match drag {
+            Drag::Pan { last } => {
+                let d = ev.position - last;
+                self.camera.pan(f32::from(d.x), f32::from(d.y));
+                self.drag = Some(Drag::Pan { last: ev.position });
+            }
+            Drag::Move { id, grab, start } => {
+                let d = ev.position - grab;
+                let rect = Rect {
+                    x: start.x + f32::from(d.x) / zoom,
+                    y: start.y + f32::from(d.y) / zoom,
+                    ..start
+                };
+                self.doc.apply_op(&CanvasOp::Place { id, rect });
+            }
+            Drag::Resize { id, grab, start } => {
+                let d = ev.position - grab;
+                let rect = Rect {
+                    w: (start.w + f32::from(d.x) / zoom).max(MIN_ITEM),
+                    h: (start.h + f32::from(d.y) / zoom).max(MIN_ITEM),
+                    ..start
+                };
+                self.doc.apply_op(&CanvasOp::Place { id, rect });
+            }
+        }
+        cx.notify();
+    }
+
+    fn mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else { return };
+        match drag {
+            Drag::Pan { .. } => {}
+            Drag::Move { id, .. } | Drag::Resize { id, .. } => {
+                if let Some(item) = self.doc.get(id) {
+                    let r = item.rect;
+                    let rect = Rect { x: snap(r.x), y: snap(r.y), w: snap(r.w), h: snap(r.h) };
+                    self.propose(CanvasOp::Place { id, rect });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    // ----- render --------------------------------------------------------------------------
+
+    fn render_item(
+        &self,
+        item: &CanvasItem,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let zoom = self.camera.zoom;
+        let s = self.camera.to_screen(item.rect);
+        let active = self.active == Some(item.id);
+        let id = item.id;
+        let card = zoom < CARD_ZOOM;
+        let title_h = if card { TITLE_H } else { TITLE_H * zoom };
+        let ui_size = if card { 12.0 } else { 12.0 * zoom };
+
+        let (title, focused) = match item.kind {
+            ItemKind::Terminal { session } => {
+                let view = self.terminals.get(&session);
+                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
+                let title = view
+                    .and_then(|v| v.read(cx).state().title().map(str::to_owned))
+                    .or_else(|| self.sessions.get(&session).map(|s| s.title.clone()))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "shell".to_owned());
+                (title, focused)
+            }
+            ItemKind::Window { window } => (format!("window {}", window.0), false),
+            ItemKind::Display { display } => (format!("display {display}"), false),
+            ItemKind::Note { .. } => ("note".to_owned(), false),
+        };
+        let border = if focused || active { theme.surfaces.accent } else { theme.surfaces.border };
+
+        let title_bar = div()
+            .id(element_id("title", id))
+            .h(px(title_h))
+            .w_full()
+            .flex()
+            .items_center()
+            .px(px(10.0 * if card { 1.0 } else { zoom }))
+            .gap(px(6.0))
+            .bg(hsla(theme.surfaces.panel))
+            .border_b_1()
+            .border_color(hsla(theme.surfaces.border))
+            .text_size(px(ui_size))
+            .text_color(hsla(if active { theme.surfaces.text } else { theme.surfaces.text_muted }))
+            .font_family(theme.typography.ui_family.clone())
+            .cursor_grab()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev, _w, cx| this.begin_move(id, ev, cx)),
+            )
+            .child(div().size(px(7.0 * if card { 1.0 } else { zoom })).rounded_full().bg(
+                hsla_alpha(
+                    if focused { theme.surfaces.accent } else { theme.surfaces.text_muted },
+                    0.9,
+                ),
+            ))
+            .child(SharedString::from(title));
+
+        let body: gpui::AnyElement = match item.kind {
+            ItemKind::Terminal { session } => match (card, self.terminals.get(&session)) {
+                (false, Some(view)) => {
+                    view.update(cx, |v, _| v.set_zoom(zoom));
+                    div().flex_1().w_full().overflow_hidden().child(view.clone()).into_any_element()
+                }
+                (true, Some(view)) => {
+                    let (cols, rows) = {
+                        let size = view.read(cx).state().size();
+                        (size.cols, size.rows)
+                    };
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .p(px(10.0))
+                        .text_size(px(11.0))
+                        .text_color(hsla(theme.surfaces.text_muted))
+                        .font_family(theme.typography.ui_family.clone())
+                        .child(SharedString::from(format!("{cols}×{rows}")))
+                        .into_any_element()
+                }
+                (_, None) => div()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(ui_size))
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .child(if self.sessions.contains_key(&session) {
+                        "attaching…"
+                    } else {
+                        "session ended"
+                    })
+                    .into_any_element(),
+            },
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(ui_size))
+                .text_color(hsla(theme.surfaces.text_muted))
+                .child("not yet")
+                .into_any_element(),
+        };
+
+        let grip = div()
+            .id(element_id("grip", id))
+            .absolute()
+            .right_0()
+            .bottom_0()
+            .size(px(GRIP * if card { 1.0 } else { zoom }))
+            .cursor_nwse_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev, _w, cx| this.begin_resize(id, ev, cx)),
+            );
+
+        div()
+            .id(element_id("item", id))
+            .absolute()
+            .left(px(s.x))
+            .top(px(s.y))
+            .w(px(s.w))
+            .h(px(s.h))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(theme.radius * if card { 1.0 } else { zoom }))
+            .border_1()
+            .border_color(hsla(border))
+            .bg(hsla(theme.terminal.bg))
+            .shadow_md()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _ev, _w, cx| this.click_item(id, cx)),
+            )
+            .child(title_bar)
+            .child(body)
+            .child(grip)
+            .into_any_element()
+    }
+}
+
+impl Render for CanvasView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(session) = self.pending_focus.take()
+            && let Some(view) = self.terminals.get(&session)
+        {
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        let items = self.doc.by_z().into_iter().cloned().collect::<Vec<_>>();
+        let entity = cx.entity();
+        let record_bounds = canvas(
+            move |bounds, _window, cx| {
+                entity.update(cx, |this, _| this.viewport = (bounds.origin, bounds.size));
+            },
+            |_bounds, (), _window, _cx| {},
+        )
+        .absolute()
+        .size_full();
+
+        let empty = self.is_empty();
+        let rendered: Vec<gpui::AnyElement> =
+            items.iter().map(|item| self.render_item(item, window, cx)).collect();
+        div()
+            .id("canvas")
+            .key_context("Canvas")
+            .track_focus(&self.focus)
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(hsla(self.theme.surfaces.canvas))
+            .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::close_item))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
+            .on_action(cx.listener(Self::fit_all))
+            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .capture_pinch(cx.listener(Self::pinch))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_pan))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .child(record_bounds)
+            .children(rendered)
+            .when(empty, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(13.0))
+                        .text_color(hsla(self.theme.surfaces.text_muted))
+                        .font_family(self.theme.typography.ui_family.clone())
+                        .child("⌘T opens a shell on the host"),
+                )
+            })
+    }
+}

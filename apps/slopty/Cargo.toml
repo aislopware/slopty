@@ -1,0 +1,29 @@
+[package]
+name = "slopty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty macOS app"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "slopty-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui-kit.workspace = true
+slopty-client.workspace = true
+slopty-core.workspace = true
+slopty-net = { workspace = true, features = [ "mdns" ] }
+slopty-proto.workspace = true
+slopty-theme.workspace = true
+slopty-ui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

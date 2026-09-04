@@ -6,6 +6,7 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-dbg-in-tests = true
 allow-print-in-tests = true
+allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 doc-valid-idents = [
     "objc2",
@@ -36,4 +37,13 @@ disallowed-methods = [
 disallowed-types = [
     { path = "std::sync::Mutex", reason = "use parking_lot::Mutex" },
     { path = "std::sync::RwLock", reason = "use parking_lot::RwLock" },
+]
+# GPUI geometry is f32 underneath; `Pixels` arithmetic cannot overflow in any meaningful sense.
+arithmetic-side-effects-allowed = [ "gpui::Pixels", "gpui::Point", "gpui::Size", "gpui::Bounds" ]
+arithmetic-side-effects-allowed-binary = [
+    [ "gpui::Pixels", "f32" ],
+    [ "gpui::Point", "gpui::Point" ],
+    [ "gpui::Point", "gpui::Pixels" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Point<gpui::Pixels>" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Pixels" ],
 ]

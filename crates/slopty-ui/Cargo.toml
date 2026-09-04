@@ -1,0 +1,23 @@
+[package]
+name = "slopty-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty GPUI views and elements: terminal, canvas, chrome"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+slopty-client.workspace = true
+slopty-core.workspace = true
+slopty-grid.workspace = true
+slopty-predict.workspace = true
+slopty-proto.workspace = true
+slopty-theme.workspace = true
+tokio.workspace = true
+tracing.workspace = true
