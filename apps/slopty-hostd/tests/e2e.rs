@@ -23,16 +23,21 @@ mod tests {
     const MAX_HOLD_MS: f64 = 500.0;
 
     /// A sibling binary from the same build. `cargo test -p slopty-hostd` on its own does not
-    /// build ptyd, so build it on demand.
+    /// build ptyd, so build it on demand — into the profile directory this test binary came
+    /// from, or a `--release` run would build a debug ptyd and then look for it beside the
+    /// release hostd.
     fn bin(name: &str) -> PathBuf {
         let hostd = PathBuf::from(env!("CARGO_BIN_EXE_slopty-hostd"));
         let path = hostd.with_file_name(name);
         if !path.exists() {
+            let release = hostd.parent().is_some_and(|dir| dir.ends_with("release"));
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = std::process::Command::new(cargo)
-                .args(["build", "-p", name])
-                .status()
-                .expect("run cargo");
+            let mut build = std::process::Command::new(cargo);
+            build.args(["build", "-p", name]);
+            if release {
+                build.arg("--release");
+            }
+            let status = build.status().expect("run cargo");
             assert!(status.success(), "build {name}");
         }
         path

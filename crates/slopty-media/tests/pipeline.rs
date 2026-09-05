@@ -166,7 +166,7 @@ mod tests {
         let s0 = h.send(&key, true, false);
         let data_count = usize::from(s0.layout.data_count);
         let parity_count = usize::from(s0.layout.parity_count);
-        assert_eq!((data_count, parity_count), (26, 5));
+        assert_eq!((data_count, parity_count), (26, 6));
         // Drop as many data fragments as there is parity, including the first (the prefix).
         let dropped: Vec<usize> = (0..parity_count).collect();
         h.deliver_except(&s0, &dropped);
@@ -176,7 +176,7 @@ mod tests {
         assert!(out[0].info.recovered);
         assert!(h.tick().is_empty(), "nothing to NACK");
         let stats = h.rx.stats();
-        assert_eq!((stats.frames_fec, stats.datagrams_lost), (1, 5));
+        assert_eq!((stats.frames_fec, stats.datagrams_lost), (1, 6));
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
 
         let p = frame_bytes(2, 30_000);
         let s1 = h.send(&p, false, false);
-        // 26 data + 5 parity; drop 8 data fragments.
+        // 26 data + 6 parity; drop 8 data fragments.
         let dropped: Vec<usize> = vec![0, 3, 4, 10, 11, 12, 20, 25];
         h.deliver_except(&s1, &dropped);
         assert!(h.drain().is_empty());
@@ -200,13 +200,13 @@ mod tests {
         assert_eq!(actions, vec![Action::Nack { frame: 1, fragments: expected.clone() }]);
         assert!(h.tick().is_empty(), "one NACK per round trip");
 
-        // Only three of the retransmissions make it: parity covers the rest.
+        // Only two of the retransmissions make it: parity covers the rest.
         let resent = h.tx.retransmit(1, &expected);
         assert_eq!(resent.len(), 8);
         let (hdr, _) = MediaHeader::parse(&resent[0]).unwrap();
         assert_eq!(hdr.flags & flags::RETRANSMIT, flags::RETRANSMIT);
         h.advance(RTT);
-        h.deliver(&resent[..3]);
+        h.deliver(&resent[..2]);
         let out = h.drain();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, p);

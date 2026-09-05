@@ -58,20 +58,7 @@ pub const MIN_PAYLOAD: usize = 256;
 /// `max_payload` caps the payload per datagram (clamped to `MIN_PAYLOAD..=MAX_PAYLOAD` and
 /// rounded down to even). Fragments are balanced (all the same size, as small as the count allows)
 /// so the padding in the last one never exceeds two bytes per fragment.
-///
-/// The parity count is the ratio *rounded to nearest*, not rounded up: on a still window most
-/// frames are one or two fragments, and rounding any non-zero ratio up to a whole fragment put
-/// ~40 % of the stream's bytes on the wire as parity nobody asked for (MEASUREMENTS, "parity
-/// overhead by frame size"). A frame too small for the ratio to buy a fragment is recovered by
-/// NACK instead. `min_parity` is the floor for frames the stream cannot afford to lose — an IDR
-/// or an LTR refresh, whose loss costs a refresh round trip and everything in flight behind it —
-/// and does not apply when parity is switched off altogether.
-pub fn layout(
-    len: usize,
-    parity_permille: u16,
-    max_payload: usize,
-    min_parity: u8,
-) -> Result<Layout, MediaError> {
+pub fn layout(len: usize, parity_permille: u16, max_payload: usize) -> Result<Layout, MediaError> {
     if len == 0 {
         return Err(MediaError::Empty);
     }
@@ -85,8 +72,10 @@ pub fn layout(
     let parity_count = if parity_permille == 0 {
         0
     } else {
-        let scaled = data_count.saturating_mul(usize::from(parity_permille)).saturating_add(500);
-        (scaled / 1000).clamp(usize::from(min_parity), MAX_PARITY_FRAGMENTS)
+        data_count
+            .saturating_mul(usize::from(parity_permille))
+            .div_ceil(1000)
+            .clamp(1, MAX_PARITY_FRAGMENTS)
     };
     Ok(Layout {
         data_count: u16::try_from(data_count).unwrap_or(u16::MAX),
@@ -202,10 +191,7 @@ impl Packetizer {
         frame: &EncodedFrame<'_>,
         send_ms_lo: u8,
     ) -> Result<&SentFrame, MediaError> {
-        // A frame the receiver would have to ask for twice keeps its one parity fragment however
-        // small it is: an IDR or an LTR refresh is what a lost frame is recovered *with*.
-        let min_parity = u8::from(frame.keyframe || frame.ltr_refresh);
-        let layout = layout(frame.data.len(), self.parity_permille, self.max_payload, min_parity)?;
+        let layout = layout(frame.data.len(), self.parity_permille, self.max_payload)?;
         let number = self.next_frame;
         self.next_frame = self.next_frame.wrapping_add(1);
 
@@ -358,7 +344,7 @@ mod tests {
     #[test]
     fn layout_balances_fragments() {
         for len in [1, 100, 1167, 1168, 1169, 2337, 30_000, 1_000_000] {
-            let l = layout(len, 200, MAX_PAYLOAD, 1).unwrap();
+            let l = layout(len, 200, MAX_PAYLOAD).unwrap();
             let total = len + FRAME_PREFIX_BYTES;
             assert!(
                 l.shard_bytes <= MAX_PAYLOAD && l.shard_bytes.is_multiple_of(2),
@@ -374,70 +360,27 @@ mod tests {
             ));
         }
         assert_eq!(
-            layout(1168, 200, MAX_PAYLOAD, 1).unwrap(),
+            layout(1168, 200, MAX_PAYLOAD).unwrap(),
             Layout { data_count: 1, shard_bytes: 1184, parity_count: 1 }
         );
-        assert_eq!(layout(1169, 0, MAX_PAYLOAD, 1).unwrap().parity_count, 0, "off stays off");
-        assert_eq!(layout(1169, 200, MAX_PAYLOAD, 0).unwrap().data_count, 2);
-        assert!(matches!(layout(0, 200, MAX_PAYLOAD, 0), Err(MediaError::Empty)));
+        assert_eq!(layout(1169, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
+        assert_eq!(layout(1169, 200, MAX_PAYLOAD).unwrap().data_count, 2);
+        assert!(matches!(layout(0, 200, MAX_PAYLOAD), Err(MediaError::Empty)));
         assert!(matches!(
-            layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD, 0),
+            layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),
             Err(MediaError::FrameTooLarge { .. })
         ));
     }
 
     #[test]
-    fn small_frames_get_the_ratio_rounded_not_a_whole_fragment() {
-        let parity = |fragments: usize, permille: u16| {
-            // One byte over a fragment boundary buys the next fragment.
-            let len = (fragments - 1) * MAX_PAYLOAD + 1;
-            let l = layout(len, permille, MAX_PAYLOAD, 0).unwrap();
-            assert_eq!(usize::from(l.data_count), fragments, "{fragments}/{permille}: {l:?}");
-            usize::from(l.parity_count)
-        };
-        // The controller's floor (50 ‰) on a still window: nothing until the ratio earns a
-        // fragment, which is where the ~40 % overhead of the old rule came from.
-        assert_eq!((parity(1, 50), parity(2, 50), parity(9, 50), parity(10, 50)), (0, 0, 0, 1));
-        // The default (200 ‰): a three-fragment frame is worth one, one and two are not.
-        assert_eq!((parity(1, 200), parity(2, 200), parity(3, 200), parity(8, 200)), (0, 0, 1, 2));
-        // A path bad enough for the controller's ceiling protects even a single fragment.
-        assert_eq!((parity(1, 500), parity(2, 500), parity(3, 500)), (1, 1, 2));
-        // Rounding never runs away: the ratio is still the ratio on a big frame.
-        assert_eq!(parity(100, 200), 20);
-        // A frame the stream is recovered *with* keeps its fragment at any size.
-        assert_eq!(usize::from(layout(100, 50, MAX_PAYLOAD, 1).unwrap().parity_count), 1);
-    }
-
-    #[test]
-    fn keyframes_and_refreshes_keep_parity_that_other_small_frames_lose() {
-        let mut p = Packetizer::new(StreamId(1));
-        p.set_parity_permille(50);
-        let data = vec![7_u8; 900];
-        let small = EncodedFrame {
-            data: &data,
-            keyframe: false,
-            ltr_token: None,
-            ltr_refresh: false,
-            capture_ts_us: 0,
-        };
-        assert_eq!(p.packetize(&small, 0).unwrap().layout.parity_count, 0, "a quiet update");
-        let idr = EncodedFrame { keyframe: true, ..small };
-        assert_eq!(p.packetize(&idr, 0).unwrap().layout.parity_count, 1, "an IDR");
-        let refresh = EncodedFrame { ltr_refresh: true, ..small };
-        assert_eq!(p.packetize(&refresh, 0).unwrap().layout.parity_count, 1, "an LTR refresh");
-        p.set_parity_permille(0);
-        assert_eq!(p.packetize(&idr, 0).unwrap().layout.parity_count, 0, "FEC off means off");
-    }
-
-    #[test]
     fn layout_honours_a_smaller_path_budget() {
         // QUIC before MTU discovery: 1200-byte MTU leaves about 1168 bytes per datagram.
-        let l = layout(5000, 0, 1168 - HEADER_BYTES, 0).unwrap();
+        let l = layout(5000, 0, 1168 - HEADER_BYTES).unwrap();
         assert!(l.shard_bytes <= 1152 && l.shard_bytes.is_multiple_of(2), "{l:?}");
         assert!(usize::from(l.data_count) * l.shard_bytes >= 5000 + FRAME_PREFIX_BYTES);
         // Odd budgets round down; tiny budgets are floored.
-        assert_eq!(layout(100, 0, 1001, 0).unwrap().shard_bytes, 116);
-        assert!(layout(100_000, 0, 10, 0).unwrap().shard_bytes <= MIN_PAYLOAD);
+        assert_eq!(layout(100, 0, 1001).unwrap().shard_bytes, 116);
+        assert!(layout(100_000, 0, 10).unwrap().shard_bytes <= MIN_PAYLOAD);
         let mut p = Packetizer::new(StreamId(1));
         p.set_max_datagram(1168);
         assert_eq!(p.max_payload(), 1152);
