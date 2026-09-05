@@ -243,6 +243,12 @@ pub struct ScreenStats {
     /// Parity the host is sending, in thousandths of the data fragments, as observed on the
     /// wire: the receiver's view of what the redundancy controller settled on.
     pub parity_permille: u16,
+    /// Data and parity fragments the host cut the frames seen so far into. The ratio is
+    /// [`Self::parity_permille`]; the counts also say how big the frames were, which is what
+    /// decides whether the parity policy could cost anything at all.
+    pub data_shards: u64,
+    /// Parity fragments the host added to them.
+    pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
     /// Refresh requests sent.
@@ -643,6 +649,8 @@ impl Worker {
         self.counters.frames_lost = stats.frames_lost;
         self.counters.datagrams_lost = stats.datagrams_lost;
         self.counters.parity_permille = observed_parity(&stats);
+        self.counters.data_shards = stats.data_shards;
+        self.counters.parity_shards = stats.parity_shards;
         self.counters.stalls = stats.stalls;
         self.counters.stalled_ms = stats.stalled_ms;
         self.counters.stalled = self.reassembler.stalled(now);

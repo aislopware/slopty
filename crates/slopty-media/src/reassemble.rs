@@ -36,6 +36,10 @@ use crate::cursor::parse_cursor;
 /// heartbeats at half this while its source is quiet.
 pub const STALL_GAP: Duration = Duration::from_millis(50);
 
+/// How far apart two `send_ms_lo` stamps can be before the byte's wrap makes the difference
+/// meaningless. A silence this long is a stall by any reading, so the ambiguity costs nothing.
+const SEND_STAMP_RANGE: Duration = Duration::from_millis(256);
+
 /// How long to wait on an incomplete frame before asking for its missing fragments, as a
 /// function of the round trip.
 ///
@@ -357,6 +361,9 @@ pub struct Reassembler {
     /// A video datagram of this stream has arrived at least once; before that, silence is the
     /// stream starting up (the cursor arrives before the first frame), not a stall.
     any_arrived: bool,
+    /// The host's send stamp on the last datagram that carried a fresh one, so the silence the
+    /// host made itself can be told from the silence the link made (see `link_gap`).
+    last_send_ms_lo: Option<u8>,
     /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
     last_rtt: Duration,
     /// [`Config::nack_delay`] evaluated for `last_rtt`, so `stalled` and `resume` (which have no
@@ -403,6 +410,7 @@ impl Reassembler {
             arrived_at: now,
             stall_charged_to: now,
             any_arrived: false,
+            last_send_ms_lo: None,
             last_rtt,
             nack_delay: cfg.nack_delay.for_rtt(last_rtt),
             last_host_ts_us: 0,
@@ -472,11 +480,23 @@ impl Reassembler {
             return Ingest::Ignored(Ignored::Foreign);
         }
         let gap = now.saturating_duration_since(self.arrived_at);
-        if self.stalled(now) {
-            self.charge_stall(now);
+        let host_gap = self.host_gap(header, gap);
+        let link_gap = gap.saturating_sub(host_gap);
+        if self.any_arrived && link_gap >= self.stall_threshold() {
+            tracing::debug!(
+                stream = %self.stream,
+                ?gap,
+                ?host_gap,
+                ?link_gap,
+                "stall released: the link held datagrams the host had already sent"
+            );
+            self.charge_stall(now, host_gap);
             self.window.stalls = self.window.stalls.saturating_add(1);
             self.stats.stalls = self.stats.stalls.saturating_add(1);
             self.resume(now, gap);
+        }
+        if header.flags & flags::RETRANSMIT == 0 {
+            self.last_send_ms_lo = Some(header.send_ms_lo);
         }
         self.arrived_at = now;
         // Anything on the stream — a heartbeat included — proves the host is still there, so the
@@ -719,18 +739,43 @@ impl Reassembler {
         self.nack_delay
     }
 
-    /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the
-    /// stream's first video datagram: that wait is the host starting the stream).
-    #[must_use]
-    pub fn stalled(&self, now: Instant) -> bool {
-        self.any_arrived && now.saturating_duration_since(self.arrived_at) >= self.stall_threshold()
+    /// How much of a `gap` in arrivals the host made itself, read off its own send clock.
+    ///
+    /// Every datagram carries the low byte of the host's millisecond clock, so the difference
+    /// between two stamps is how long the host waited between sending them. A source with
+    /// nothing to draw waits; a link that holds datagrams and releases them together does not,
+    /// and its stamps come out bunched. Subtracting the host's share is what tells the two
+    /// apart — the heartbeat is the same statement in datagram form, and this reads it even
+    /// when the beat that would have carried it was late.
+    ///
+    /// Zero when the stamp cannot be trusted: no previous stamp, a gap past the byte's range,
+    /// or a retransmission (which carries the original frame's stamp). Then the gap is the
+    /// link's, which is the reading this had before.
+    fn host_gap(&self, header: &MediaHeader, gap: Duration) -> Duration {
+        if header.flags & flags::RETRANSMIT != 0 || gap >= SEND_STAMP_RANGE {
+            return Duration::ZERO;
+        }
+        let Some(previous) = self.last_send_ms_lo else { return Duration::ZERO };
+        Duration::from_millis(u64::from(header.send_ms_lo.wrapping_sub(previous)))
     }
 
-    /// Charge the silence since the last datagram (the part not yet charged) to the current
-    /// report window, so a stall is reported whether it released or is still on.
-    fn charge_stall(&mut self, now: Instant) {
+    /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the
+    /// stream's first video datagram: that wait is the host starting the stream, and never
+    /// while the host says its source is idle: silence from a window that is not drawing is
+    /// the source's, not the link's).
+    #[must_use]
+    pub fn stalled(&self, now: Instant) -> bool {
+        self.any_arrived
+            && self.source_live
+            && now.saturating_duration_since(self.arrived_at) >= self.stall_threshold()
+    }
+
+    /// Charge the silence since the last datagram (the part not yet charged, less the part the
+    /// host spent not sending) to the current report window, so a stall is reported whether it
+    /// released or is still on.
+    fn charge_stall(&mut self, now: Instant, host_gap: Duration) {
         let from = self.arrived_at.max(self.stall_charged_to);
-        let silence = now.saturating_duration_since(from);
+        let silence = now.saturating_duration_since(from).saturating_sub(host_gap);
         self.window.stalled = self.window.stalled.saturating_add(silence);
         self.stats.stalled_ms =
             self.stats.stalled_ms.saturating_add(u64::try_from(silence.as_millis()).unwrap_or(0));
@@ -874,7 +919,9 @@ impl Reassembler {
     /// progress to this window.
     pub fn take_report(&mut self, now: Instant, late_frames: u32) -> ReceiverReport {
         if self.stalled(now) {
-            self.charge_stall(now);
+            // Still in it: no datagram has arrived to say how much of it was the host's, so all
+            // of it is charged. The stamp settles the account when the silence ends.
+            self.charge_stall(now, Duration::ZERO);
         }
         let window = std::mem::take(&mut self.window);
         let mut holds = window.holds_ns;
