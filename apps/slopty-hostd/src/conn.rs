@@ -11,7 +11,7 @@ use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, HelloAck};
-use slopty_proto::screen::{ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -25,6 +25,8 @@ const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(25
 const SINK_DEPTH: usize = 256;
 /// Outbound control messages buffered before the writer applies backpressure.
 const CONTROL_DEPTH: usize = 1024;
+/// Loss feedback datagrams buffered between the reader and the peer loop.
+const FEEDBACK_DEPTH: usize = 256;
 
 pub async fn serve(daemon: Daemon, client: AuthenticatedClient) {
     let remote = client.remote;
@@ -68,6 +70,8 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     let budget = DatagramBudget::new();
     let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
     let paths = tokio::spawn(slopty_net::endpoint::log_path_events(conn.clone(), "host"));
+    let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
+    let feedback = tokio::spawn(read_feedback(conn.clone(), feedback_tx));
     let mut peer = Peer {
         daemon,
         conn,
@@ -80,6 +84,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         budget,
         pump,
         paths,
+        feedback,
     };
 
     // Window resizes on the host are polled: ScreenCaptureKit keeps scaling the old output
@@ -101,6 +106,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
                 };
                 peer.handle(msg).await;
             }
+            Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             ev = events.recv() => {
                 match ev {
                     Ok(msg) => {
@@ -129,6 +135,27 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     drop(peer);
     writer.abort();
     result
+}
+
+/// Read the client's loss feedback datagrams until the connection ends.
+async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
+    loop {
+        let datagram = match conn.read_datagram().await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!(error = %e, "read_datagram ended");
+                break;
+            }
+        };
+        match slopty_proto::codec::decode_body::<Feedback>(&datagram) {
+            Ok(feedback) => {
+                if out.send(feedback).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, len = datagram.len(), "bad feedback datagram"),
+        }
+    }
 }
 
 /// Drain the media queue into QUIC datagrams, tracking what the path can carry.
@@ -167,6 +194,7 @@ struct Peer<'d> {
     budget: DatagramBudget,
     pump: JoinHandle<()>,
     paths: JoinHandle<()>,
+    feedback: JoinHandle<()>,
 }
 
 impl Drop for Peer<'_> {
@@ -181,6 +209,7 @@ impl Drop for Peer<'_> {
         }
         self.pump.abort();
         self.paths.abort();
+        self.feedback.abort();
     }
 }
 
@@ -269,6 +298,12 @@ impl Peer<'_> {
             }
             ScreenRequest::Close(id) => {
                 if let Some(stream) = self.screens.remove(&id) {
+                    tracing::info!(
+                        client = %self.client,
+                        %id,
+                        path = %slopty_net::endpoint::describe_health(&self.conn),
+                        "screen closing"
+                    );
                     stream.close().await;
                     let reason = "closed by client".to_owned();
                     let event = ScreenEvent::Closed { stream: id, reason };
@@ -285,16 +320,6 @@ impl Peer<'_> {
             ScreenRequest::Report { stream, report } => {
                 if let Some(s) = self.screens.get(&stream) {
                     s.report(&report);
-                }
-            }
-            ScreenRequest::RequestRefresh { stream, last_good_frame } => {
-                if let Some(s) = self.screens.get(&stream) {
-                    s.request_refresh(last_good_frame);
-                }
-            }
-            ScreenRequest::Nack { stream, frame, fragments } => {
-                if let Some(s) = self.screens.get(&stream) {
-                    s.nack(frame, &fragments);
                 }
             }
             ScreenRequest::Input { stream, input } => {
@@ -314,7 +339,29 @@ impl Peer<'_> {
         }
     }
 
-    /// Stop every screen stream (the connection is going away).
+    /// Loss feedback from a datagram: retransmit or refresh.
+    fn feedback(&self, feedback: Feedback) {
+        match feedback {
+            Feedback::Nack { stream, frame, fragments } => {
+                if let Some(s) = self.screens.get(&stream) {
+                    tracing::debug!(
+                        %stream,
+                        frame,
+                        missing = fragments.len(),
+                        path = %slopty_net::endpoint::describe_health(&self.conn),
+                        "nack"
+                    );
+                    s.nack(frame, &fragments);
+                }
+            }
+            Feedback::Refresh { stream, last_good_frame } => {
+                if let Some(s) = self.screens.get(&stream) {
+                    s.request_refresh(last_good_frame);
+                }
+            }
+        }
+    }
+
     /// Tell the client about streams whose target changed size. False once the client is gone.
     async fn check_geometry(&mut self) -> bool {
         let mut events = Vec::new();

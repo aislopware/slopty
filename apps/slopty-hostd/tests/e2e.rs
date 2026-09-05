@@ -72,6 +72,9 @@ mod tests {
             .arg("--data-dir")
             .arg(dir.join("data"))
             .arg("--print-ticket")
+            // Any free port: the developer's own hostd may hold the default one.
+            .arg("--port")
+            .arg("0")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)

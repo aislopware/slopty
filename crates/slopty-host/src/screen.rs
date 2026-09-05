@@ -512,6 +512,9 @@ impl ScreenStream {
     /// Retransmit fragments of a recent frame.
     pub fn nack(&self, frame: u32, fragments: &[u16]) {
         let datagrams = self.shared.packetizer.lock().retransmit(frame, fragments);
+        if datagrams.is_empty() {
+            tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
+        }
         for datagram in datagrams {
             if !self.shared.push(datagram) {
                 break;

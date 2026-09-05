@@ -209,13 +209,20 @@ pub enum ScreenRequest {
         /// Report.
         report: ReceiverReport,
     },
-    /// The client lost a frame it could not recover; the host should refresh from an acked LTR.
-    RequestRefresh {
-        /// Stream.
-        stream: StreamId,
-        /// Highest frame fully decoded.
-        last_good_frame: u32,
-    },
+    /// Raise/focus the window on the host.
+    Focus(StreamId),
+}
+
+/// Loss feedback, client → host, sent as a QUIC **datagram** rather than on the control stream.
+///
+/// The control stream is ordered: one lost packet carrying a NACK would hold every later NACK
+/// back until QUIC's loss timer retransmits it (a whole PTO, tens of milliseconds on Wi-Fi), by
+/// which time the receiver has given up and asked for a refresh. As datagrams each NACK stands
+/// alone; the receiver's own retries provide the reliability. Encoded with
+/// [`codec::encode_body`](crate::codec::encode_body); a datagram that fails to decode is
+/// ignored.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Feedback {
     /// Ask for retransmission of specific fragments (inside the playout window).
     Nack {
         /// Stream.
@@ -226,8 +233,13 @@ pub enum ScreenRequest {
         /// arrived, so the client does not know how many there are).
         fragments: Vec<u16>,
     },
-    /// Raise/focus the window on the host.
-    Focus(StreamId),
+    /// The client lost a frame it could not recover; the host should refresh from an acked LTR.
+    Refresh {
+        /// Stream.
+        stream: StreamId,
+        /// Highest frame fully decoded.
+        last_good_frame: u32,
+    },
 }
 
 /// Receiver-side telemetry, all relative so no clock sync is assumed.

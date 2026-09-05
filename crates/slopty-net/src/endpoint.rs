@@ -4,7 +4,7 @@ use std::future::poll_fn;
 use std::pin::Pin;
 use std::time::Duration;
 
-use iroh::endpoint::{IdleTimeout, PathEvent, QuicTransportConfig, VarInt, presets};
+use iroh::endpoint::{BindOpts, IdleTimeout, PathEvent, QuicTransportConfig, VarInt, presets};
 use iroh::{Endpoint, RelayMode, SecretKey, TransportAddr, Watcher as _};
 
 use crate::{ALPN, NetError};
@@ -73,16 +73,46 @@ pub fn transport_config() -> QuicTransportConfig {
         .build()
 }
 
-/// Bind an endpoint.
+/// UDP port a host binds unless told otherwise (`slopty-hostd --port`).
+///
+/// A host must keep its port across restarts: a paired client on another subnet (a phone on a
+/// mesh, a laptop on Wi-Fi) only knows the address from the ticket and cannot hear mDNS, so a
+/// random port per launch would strand it until it re-pairs.
+pub const HOST_PORT: u16 = 45550;
+
+/// Bind an endpoint on any free port.
 ///
 /// [`Reach::Anywhere`] uses n0's production relays and DNS/pkarr address lookup so a host is
 /// reachable from anywhere by id; [`Reach::DirectOnly`] turns both off. With the `mdns`
 /// feature either mode also advertises/looks up on the LAN.
 pub async fn bind(secret: SecretKey, role: Role, reach: Reach) -> Result<Endpoint, NetError> {
+    bind_on(secret, role, reach, 0).await
+}
+
+/// [`bind`] on a fixed UDP `port` (0 for any free port). A port already in use is an error:
+/// falling back to a random one would reintroduce the strand-on-restart problem
+/// [`HOST_PORT`] exists to avoid.
+pub async fn bind_on(
+    secret: SecretKey,
+    role: Role,
+    reach: Reach,
+    port: u16,
+) -> Result<Endpoint, NetError> {
     let builder = Endpoint::builder(presets::N0)
         .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
         .transport_config(transport_config());
+    let builder = if port == 0 {
+        builder
+    } else {
+        let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+        let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+        builder
+            .clear_ip_transports()
+            .bind_addr(v4)
+            .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
+            .map_err(|e| NetError::Bind(e.to_string()))?
+    };
     let builder = match reach {
         Reach::Anywhere => builder,
         Reach::DirectOnly => builder.relay_mode(RelayMode::Disabled).clear_address_lookup(),
@@ -155,6 +185,26 @@ pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The selected path's congestion picture plus the datagram send buffer headroom, for logs.
+///
+/// `cwnd` is the congestion window in bytes; `space` is how many bytes of datagrams the QUIC
+/// stack will still queue before it starts dropping the oldest — media that sits in that
+/// buffer waiting for `cwnd` is latency the receiver sees as loss.
+#[must_use]
+pub fn describe_health(conn: &iroh::endpoint::Connection) -> String {
+    let space = conn.datagram_send_buffer_space();
+    conn.paths().iter().find(iroh::endpoint::Path::is_selected).map_or_else(
+        || format!("no selected path; space {space}"),
+        |p| {
+            let s = p.stats();
+            format!(
+                "rtt {:.1?} cwnd {} congestion {} lost {} pkts/{} B mtu {} space {space}",
+                s.rtt, s.cwnd, s.congestion_events, s.lost_packets, s.lost_bytes, s.current_mtu
+            )
+        },
+    )
 }
 
 /// Log every path change on `conn` at info level until the connection closes.

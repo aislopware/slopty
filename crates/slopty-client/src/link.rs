@@ -14,7 +14,7 @@ use slopty_proto::terminal::TermEvent;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
-use crate::screen::{ScreenHandle, ScreenRouter, spawn_screen};
+use crate::screen::{ScreenHandle, ScreenRouter, Uplink, spawn_screen};
 
 /// Bounded queues: a client that cannot keep up sees backpressure, not unbounded memory.
 const EVENT_DEPTH: usize = 4096;
@@ -151,9 +151,20 @@ impl HostLink {
     #[must_use]
     pub fn screen(&self, stream: StreamId, codec: VideoCodec) -> ScreenHandle {
         let conn = self.conn.clone();
-        spawn_screen(&self.runtime, &self.router, stream, codec, self.out.clone(), move || {
-            slopty_net::endpoint::rtt(&conn)
-        })
+        let feedback_conn = self.conn.clone();
+        let feedback = move |datagram: bytes::Bytes| match feedback_conn.send_datagram(datagram) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(%stream, error = %e, "feedback datagram");
+                feedback_conn.close_reason().is_none()
+            }
+        };
+        let uplink = Uplink {
+            control: self.out.clone(),
+            feedback: Box::new(feedback),
+            rtt: Box::new(move || slopty_net::endpoint::rtt(&conn)),
+        };
+        spawn_screen(&self.runtime, &self.router, stream, codec, uplink)
     }
 
     /// The datagram router (to forget backlogs of streams that closed before attaching).

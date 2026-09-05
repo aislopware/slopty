@@ -43,6 +43,10 @@ struct Args {
     /// mesh such as `NetBird`). Also `SLOPTY_DIRECT_ONLY=1`.
     #[arg(long, env = Reach::ENV)]
     direct_only: bool,
+    /// UDP port to listen on; 0 picks a random free port (clients that cannot hear mDNS
+    /// then lose the host after a restart). Also `SLOPTY_PORT`.
+    #[arg(long, env = "SLOPTY_PORT", default_value_t = slopty_net::endpoint::HOST_PORT)]
+    port: u16,
 }
 
 /// Shared daemon state.
@@ -86,7 +90,9 @@ async fn main() -> Result<()> {
     let store = TrustStore::open(&data_dir.join("trust.json"))?;
     let id = paths::host_id(&data_dir)?;
     let reach = if args.direct_only { Reach::DirectOnly } else { Reach::Anywhere };
-    let listener = HostListener::bind(store, reach).await?;
+    let listener = HostListener::bind_on(store, reach, args.port)
+        .await
+        .with_context(|| format!("bind UDP port {} (is another hostd running?)", args.port))?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;

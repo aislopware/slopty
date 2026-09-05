@@ -11,7 +11,7 @@ use slopty_proto::terminal::TermEvent;
 use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, StreamHeader};
 use tokio::sync::Mutex;
 
-use crate::endpoint::{Reach, Role, bind};
+use crate::endpoint::{Reach, Role, bind_on};
 use crate::framed::{FramedRecv, FramedSend};
 use crate::pairing::{PairTicket, TrustStore};
 use crate::{ALPN, NetError};
@@ -57,9 +57,15 @@ pub struct AuthenticatedClient {
 }
 
 impl HostListener {
-    /// Bind with the store's key.
+    /// Bind with the store's key on any free port.
     pub async fn bind(store: TrustStore, reach: Reach) -> Result<Self, NetError> {
-        let endpoint = bind(store.secret().clone(), Role::Host, reach).await?;
+        Self::bind_on(store, reach, 0).await
+    }
+
+    /// Bind with the store's key on a fixed UDP `port` (0 for any); see
+    /// [`HOST_PORT`](crate::endpoint::HOST_PORT).
+    pub async fn bind_on(store: TrustStore, reach: Reach, port: u16) -> Result<Self, NetError> {
+        let endpoint = bind_on(store.secret().clone(), Role::Host, reach, port).await?;
         Ok(Self { endpoint, store: Arc::new(Mutex::new(store)), reach })
     }
 

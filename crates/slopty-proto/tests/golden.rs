@@ -3,10 +3,11 @@
 
 #[cfg(test)]
 mod golden {
-    use slopty_core::{ClientId, MonoTime, SessionId};
+    use slopty_core::{ClientId, MonoTime, SessionId, StreamId};
     use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
+    use slopty_proto::screen::Feedback;
     use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -91,6 +92,17 @@ mod golden {
                 ],
             },
         );
+    }
+
+    #[test]
+    fn feedback() {
+        let nack =
+            Feedback::Nack { stream: StreamId(7), frame: 0x0102_0304, fragments: vec![2, 5] };
+        let bytes = codec::encode_body(&nack).expect("encodes");
+        insta::assert_snapshot!("client_nack", hex(&bytes));
+        let refresh = Feedback::Refresh { stream: StreamId(7), last_good_frame: 300 };
+        let bytes = codec::encode_body(&refresh).expect("encodes");
+        insta::assert_snapshot!("client_refresh", hex(&bytes));
     }
 
     #[test]
