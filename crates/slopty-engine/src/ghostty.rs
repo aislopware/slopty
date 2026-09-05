@@ -76,6 +76,10 @@ impl GhosttyEngine {
             u32::from(config.size.metrics.cell_width),
             u32::from(config.size.metrics.cell_height),
         )?;
+        // libghostty-vt also caps scrollback by *bytes*, and its default is 10 KB: with only
+        // the line limit raised a session kept about one page (~900 rows) of history. The line
+        // limit is the contract; lift the byte cap so it governs.
+        term.set_scrollback_max_bytes(None)?;
         term.set_scrollback_max_lines(Some(config.scrollback_lines as usize))?;
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
@@ -878,5 +882,53 @@ mod tests {
         assert_eq!(cells[1].width, CellWidth::SpacerTail);
         assert_eq!(cells[2].text.as_str(), "x");
         assert_eq!(f.updates[0].line.text(), "字x");
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use slopty_proto::input::CellMetrics;
+
+    use super::*;
+
+    fn engine(scrollback_lines: u32) -> GhosttyEngine {
+        GhosttyEngine::new(EngineConfig {
+            size: TermSize {
+                cols: 80,
+                rows: 24,
+                metrics: CellMetrics { cell_width: 8, cell_height: 16 },
+            },
+            scrollback_lines,
+        })
+        .unwrap()
+    }
+
+    fn write_lines(e: &mut GhosttyEngine, n: u32) {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for i in 0..n {
+            writeln!(out, "line {i} the quick brown fox jumps over the lazy dog\r")
+                .expect("string");
+        }
+        e.write(out.as_bytes());
+    }
+
+    #[test]
+    fn the_line_limit_governs_retained_history() {
+        // The 10 KB byte default would keep about one page here.
+        let mut e = engine(50_000);
+        write_lines(&mut e, 20_000);
+        let total = e.total_lines().unwrap();
+        assert!(total >= 20_000, "kept {total} rows of 20k written");
+    }
+
+    #[test]
+    fn history_is_pruned_near_the_line_limit() {
+        let mut e = engine(1_000);
+        write_lines(&mut e, 20_000);
+        let total = e.total_lines().unwrap();
+        // Pruning is page-granular (a page is several hundred rows), so the count lands
+        // within a page of the limit on either side; what matters is that it is bounded.
+        assert!(total < 2_000, "kept {total} rows with a 1k limit");
     }
 }
