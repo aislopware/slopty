@@ -17,6 +17,13 @@ use crate::HostError;
 /// Output is coalesced into at most one frame per this interval while it keeps arriving; an
 /// idle burst is flushed immediately on the next tick.
 const COALESCE: Duration = Duration::from_millis(2);
+/// While output keeps flowing, frames go out no closer together than this: 125 frames per
+/// second per session is more than any display shows (120 Hz `ProMotion`), and without the
+/// cap a `yes`-like flood sent one frame per `COALESCE`, five hundred a second per session,
+/// which twenty sessions turned into a client that could not keep up (MEASUREMENTS,
+/// 2026-09-05 "frame budget"). A burst after a quiet spell still leaves after `COALESCE`, so
+/// a keystroke's echo is not delayed.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
 /// Search hits sent back at most; the count still covers every hit.
@@ -221,6 +228,21 @@ struct Actor {
     /// `written_seq` as of the most recent PTY read: what the next frame may acknowledge.
     ack_seq: u64,
     frame_due: Option<tokio::time::Instant>,
+    /// When the last frame left, for [`MIN_FRAME_INTERVAL`].
+    last_frame: Option<tokio::time::Instant>,
+}
+
+/// When the frame for output that arrived at `now` should go out: `COALESCE` later, or at the
+/// end of the previous frame's `MIN_FRAME_INTERVAL` if that is later.
+fn frame_due_after(
+    now: tokio::time::Instant,
+    last_frame: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    let soon = now.checked_add(COALESCE).unwrap_or(now);
+    match last_frame.and_then(|at| at.checked_add(MIN_FRAME_INTERVAL)) {
+        Some(paced) if paced > soon => paced,
+        _ => soon,
+    }
 }
 
 impl Actor {
@@ -246,6 +268,7 @@ impl Actor {
             written_seq: 0,
             ack_seq: 0,
             frame_due: None,
+            last_frame: None,
         })
     }
 
@@ -279,7 +302,7 @@ impl Actor {
                         self.engine.write(buf.get(..n).unwrap_or_default());
                         self.after_output().await;
                         if self.frame_due.is_none() {
-                            self.frame_due = Some(tokio::time::Instant::now().checked_add(COALESCE).unwrap_or_else(tokio::time::Instant::now));
+                            self.frame_due = Some(frame_due_after(tokio::time::Instant::now(), self.last_frame));
                         }
                     }
                     Err(e) => {
@@ -335,7 +358,10 @@ impl Actor {
             return;
         }
         match self.engine.take_frame(self.ack_seq) {
-            Ok(Some(frame)) => self.broadcast(&TermEvent::Frame(frame)),
+            Ok(Some(frame)) => {
+                self.last_frame = Some(tokio::time::Instant::now());
+                self.broadcast(&TermEvent::Frame(frame));
+            }
             Ok(None) => {}
             Err(e) => {
                 tracing::error!(session = %self.id, error = %e, "frame build failed");
@@ -555,5 +581,28 @@ impl Actor {
             tracing::warn!(session = %self.id, error = %e, "pty write failed");
             self.send_to(client, TermEvent::Error(e.to_string()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_burst_after_a_quiet_spell_leaves_after_coalesce() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(frame_due_after(now, None), now + COALESCE);
+        let long_ago = now.checked_sub(Duration::from_secs(1)).unwrap();
+        assert_eq!(frame_due_after(now, Some(long_ago)), now + COALESCE);
+    }
+
+    #[test]
+    fn a_flood_is_paced_to_the_minimum_interval() {
+        let now = tokio::time::Instant::now();
+        let just_sent = now.checked_sub(Duration::from_millis(1)).unwrap();
+        assert_eq!(frame_due_after(now, Some(just_sent)), just_sent + MIN_FRAME_INTERVAL);
+        // Exactly at the boundary, `COALESCE` wins (it is later).
+        let at_boundary = now.checked_sub(MIN_FRAME_INTERVAL).unwrap();
+        assert_eq!(frame_due_after(now, Some(at_boundary)), now + COALESCE);
     }
 }
