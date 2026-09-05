@@ -293,6 +293,50 @@ mod tests {
         assert!(!h.rx.awaiting_refresh());
     }
 
+    /// Silence past the stall gap is charged to the report window it falls in, whether the
+    /// stall is still on at report time or released inside the window; a stall spanning two
+    /// reports is split between them and its release is counted once.
+    #[test]
+    fn reports_carry_the_stall_time_and_count() {
+        let mut h = Harness::new();
+        // The host takes a while to send the first frame: that is not a stall.
+        h.advance(Duration::from_millis(300));
+        assert!(!h.rx.stalled(h.now));
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (0, 0), "nothing before the first datagram");
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        assert_eq!(h.rx.stats().stalls, 0, "the start-up wait is not a release either");
+        // 30 ms of silence: an ordinary inter-frame gap, not a stall.
+        h.advance(Duration::from_millis(30));
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (0, 0));
+        assert!(!h.rx.stalled(h.now));
+        // 120 ms with nothing at all: the report finds the stall in progress and charges all
+        // the silence since the last datagram, including the 30 ms before the last report.
+        h.advance(Duration::from_millis(120));
+        assert!(h.rx.stalled(h.now));
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (150, 0), "still on: time, no release yet");
+        // 40 ms more, then the link moves again: only the part not yet charged, one release.
+        h.advance(Duration::from_millis(40));
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s1.datagrams);
+        assert!(!h.rx.stalled(h.now));
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (40, 1));
+        assert_eq!((h.rx.stats().stalls, h.rx.stats().stalled_ms), (1, 190));
+        // A stall that starts and releases inside one window.
+        h.advance(Duration::from_millis(80));
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (80, 1));
+        let r = h.rx.take_report(h.now, 0);
+        assert_eq!((r.stalled_ms, r.stalls), (0, 0), "the window is reset");
+    }
+
     #[test]
     fn a_stall_longer_than_max_hold_gives_up() {
         let mut h = Harness::new();
@@ -403,6 +447,7 @@ mod tests {
         assert_eq!((report.acked_ltr_len, report.acked_ltr[0]), (1, 0xABCD));
         assert_eq!(report.late_frames, 1);
         assert_eq!(report.queue_depth, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (0, 0), "4 ms of silence is not a stall");
         let empty = h.rx.take_report(h.now, 0);
         assert_eq!((empty.frames_ok, empty.acked_ltr_len), (0, 0));
     }
