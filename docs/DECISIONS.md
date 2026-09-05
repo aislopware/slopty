@@ -1838,3 +1838,47 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   environment is what lets one test process run three rates back to back — mutating the
   environment in a multi-threaded process is `unsafe` in Rust 2024, and the drop rate is state
   the test owns anyway.
+- ✅ **A stall is the link's silence, not the source's** (2026-09-06, measured). The receiver
+  counted a stall whenever nothing arrived for a stall gap, which read the capture's own quiet
+  gaps as a held link: 3 / 2 / 0 / 2 stalls per 5 s on an idle machine at 0 / 20 / 50 / 100 ‰
+  (MEASUREMENTS, "parity, NACK and refresh under injected loss"), enough that the gated test
+  skipped its per-rate verdicts on every run. The heartbeat was supposed to prevent this — it
+  says "the link is up, the source is quiet" — but a beat that is itself late leaves the same
+  hole. The answer was already on the wire: every datagram carries `send_ms_lo`, the low byte of
+  the host's millisecond clock, so the difference between two stamps is how long the host waited
+  between sending them. `link_gap = arrival_gap − host_gap` is the link's share, and only that is
+  compared with the stall threshold and charged to `stalled_ms` — RFC 3550's interarrival
+  arithmetic, used for attribution rather than jitter. Three cases keep the old pessimistic
+  reading, because they are cases where the receiver genuinely cannot tell: a gap past the
+  stamp's 256 ms range, a retransmission (it carries the original frame's stamp), and no previous
+  stamp at all. `Reassembler::stalled` also returns false while the host reports the source idle,
+  which is the in-progress half — a gap that has not ended yet has no stamp to settle it. Result:
+  0 stalls at every rate, and the gated test asserts its verdicts again. Tests:
+  `a_quiet_source_whose_heartbeat_was_late_is_not_a_stall` and
+  `only_the_hosts_share_of_a_gap_is_forgiven` (`crates/slopty-media/tests/pipeline.rs`), with the
+  existing stall tests rewritten to produce their frames *before* the silence they are released
+  after, which is what a held link actually looks like.
+- ❌ **Dropping parity on small frames** (2026-09-06, measured and reverted). The packetizer
+  rounds any non-zero parity ratio up to one whole fragment, so a still window — where frames are
+  two to five fragments — puts 240–440 ‰ of its data fragment count on the wire as parity the
+  controller never asked for. Rounding to the ratio instead (nearest, then a quarter, with a
+  floor kept for IDR and LTR-refresh frames) did what it promised: parity seen fell to 47–80 ‰
+  against a one-per-frame counterfactual of 285–309 ‰ for the same frames. It also lost frames.
+  At 20 ‰ datagram loss the run lost 2 and took 2 refreshes where the minimum loses none, and at
+  100 ‰ it lost up to 9: a two- or three-fragment frame with no parity has nothing between a
+  single drop and a NACK round trip, and when the retransmission is dropped too the frame is
+  gone. The minimum stays, because the trade it makes is the right way round — it is a large
+  *percentage* of a stream that is already small (a still window is ~0.5 Mbit/s, so 30 % of it is
+  ~150 kbit/s) and costs nothing on the busy screens where bytes are worth something, since those
+  frames run to tens of fragments. Group parity across consecutive small frames was not built:
+  it needs a wire change and it can only repair once the whole group has arrived, which on a
+  still window is hundreds of milliseconds — all of that to save a fraction of 150 kbit/s.
+- ✅ **The gated loss test asserts, and says when it cannot** (2026-09-06). Its verdicts used to
+  be skipped whenever any row stalled, which after the stall fix would mean never; a run that
+  cannot be believed is now identified by its arrival gaps instead. Past
+  `Config::max_hold` (500 ms) a frame dies of the scheduler rather than of the injected loss, so
+  a row with a gap that long prints and skips. The frame *count* is not a health signal — a still
+  desktop draws 8 fps because nothing is changing — which an earlier version of this guard got
+  wrong. The loss verdict is a rate (under one frame in a hundred), not zero: a two-fragment
+  frame plus one parity is beyond repair when two of its three datagrams go, and at 50 ‰ that is
+  about one frame in three hundred whatever the policy does.

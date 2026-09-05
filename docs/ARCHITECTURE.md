@@ -179,7 +179,21 @@ because loss arrives in bursts: protection has to be there for the second half o
 must not be given back by one clean report. A change smaller than 2 % does not move the ratio at
 all, since every change re-cuts the frame layout. Windows the receiver spent stalled are excluded
 from the estimate: a link holding packets and releasing them together is not a link dropping
-them, and the fragments such a window reports missing usually arrive with the release.
+them, and the fragments such a window reports missing usually arrive with the release. Every
+frame gets at least one parity fragment whatever the ratio works out to, which on a still window
+(two to five fragments per frame) is 240–440 ‰ of overhead and on a busy one is nothing —
+measured, and measured again with the minimum removed, which cost frames at 20 ‰ loss for a
+saving of ~150 kbit/s.
+
+**Whose silence is it.** A receiver that sees nothing arrive cannot assume the link is at fault:
+a capture with nothing to draw is silent too, and the heartbeat that says so can itself be late.
+Every datagram carries `send_ms_lo`, the low byte of the host's send clock, so the difference
+between two stamps is how long the host waited between sending them; subtracting that from the
+arrival gap leaves the link's share, and only that counts as a stall or is charged to
+`stalled_ms`. Past the stamp's 256 ms range, on a retransmission (which carries its original
+frame's stamp) and while a gap is still open the receiver keeps the pessimistic reading. This
+matters beyond the HUD: the bitrate and parity controllers both throw away windows the receiver
+spent stalled, so mislabelling a quiet source as a stall threw away good evidence.
 
 **When to stop asking.** A receiver that needs a refresh repeats the request with a doubling
 backoff, which is right for a stream that has stopped and wrong for a target that never started:

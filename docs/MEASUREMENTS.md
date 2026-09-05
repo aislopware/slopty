@@ -924,3 +924,69 @@ Takeaways:
 
 Not measured here: the loss path over the mesh with the new controller (needs a second machine
 and a busy screen), and the refresh storm guard end to end (a hidden window over the socket).
+
+## 2026-09-06 — stall attribution, parity overhead and a release row (loopback)
+
+Commands (same test, both profiles; the machine has to be idle — `pgrep -fl "cargo|rustc"`):
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
+  cargo nextest run -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
+  cargo nextest run --release -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+```
+
+Setup as in the section above: hostd and client in one process over iroh's direct path, main
+display, 5 s per rate, loss injected on the client's receive path from a fixed seed. Two columns
+are new. *Fragments/frame* is `data_shards / frames`, and *one-per-frame would be* is
+`1000 × frames / data_shards` — what the packetizer's one-parity-fragment minimum costs for
+exactly the frames this run saw, which is the only fair comparison when the capture target is the
+machine's own display and its content is not under the test's control.
+
+Release, a still desktop (the four rows are one run, verdicts asserted):
+
+| drop | frames | by parity | by NACK | lost | NACK / refresh | datagrams (lost) | kB (B/frame) | fragments/frame | parity seen (one-per-frame) | stalls | gap p50 / p90 / max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 ‰   | 96 | 0  | 0 | 0 | 0 / 0 | 598 (0)  | 494 (5149) | 3 | 295 ‰ (258 ‰) | 0 | 53.9 / 94.0 / 118.4 ms |
+| 20 ‰  | 88 | 4  | 0 | 0 | 0 / 0 | 514 (6)  | 397 (4521) | 3 | 350 ‰ (296 ‰) | 0 | 69.6 / 94.2 / 112.6 ms |
+| 50 ‰  | 95 | 20 | 1 | 0 | 1 / 0 | 568 (22) | 474 (4996) | 3 | 327 ‰ (261 ‰) | 0 | 67.0 / 84.2 / 95.6 ms  |
+| 100 ‰ | 73 | 12 | 1 | 0 | 1 / 0 | 465 (24) | 359 (4918) | 3 | 343 ‰ (258 ‰) | 0 | 82.8 / 97.6 / 119.7 ms |
+
+Debug, a busy desktop (58 fps, 17 ms between frames — the same test minutes earlier, while a
+build was drawing to a terminal on the captured display):
+
+| drop | frames | by parity | by NACK | lost | NACK / refresh | datagrams (lost) | kB (B/frame) | fragments/frame | parity seen (one-per-frame) | stalls | gap p50 / p90 / max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 ‰   | 288 | 0  | 0 | 0 | 0 / 0 | 1000 (0) | 834 (2896) | 2 | 432 ‰ (413 ‰) | 0 | 17.3 / 18.9 / 41.0 ms |
+| 20 ‰  | 288 | 18 | 0 | 0 | 0 / 0 | 977 (20) | 836 (2904) | 2 | 436 ‰ (414 ‰) | 0 | 17.3 / 18.2 / 54.3 ms |
+| 50 ‰  | 285 | 25 | 3 | 1 | 4 / 1 | 948 (28) | 805 (2826) | 2 | 436 ‰ (410 ‰) | 0 | 17.3 / 19.9 / 49.0 ms |
+| 100 ‰ | 285 | 58 | 7 | 2 | 9 / 2 | 910 (69) | 773 (2713) | 2 | 441 ‰ (408 ‰) | 0 | 17.2 / 19.1 / 54.0 ms |
+
+Takeaways:
+
+* **Stalls: 3 / 2 / 0 / 2 before, 0 / 0 / 0 / 0 after**, on an idle machine at the same four
+  rates (the "before" is the table above this one, taken with the same test the night before).
+  Every one of them was the receiver reading its own capture's quiet gap as a held link. Now the
+  gap is compared with the host's send stamps and only the link's share is charged, so the gated
+  test asserts its per-rate verdicts again instead of skipping them whenever a row stalled.
+* **A release build is 3× the frame rate of a debug one and changes no verdict.** Nothing is lost
+  or refreshed at any rate in release; the numbers that move are throughput (release reached
+  ~19 fps on a still desktop against debug's ~8 on the same content) and the arrival gap. Loss
+  recovery is not CPU-bound at these rates: the debug run repairs the same fraction of frames.
+* **The one-parity-fragment minimum costs 240–440 ‰ of the data fragments on a still window and
+  ~0 on a busy one**, because a still window's frames are two to five fragments and a busy one's
+  are tens. Removing it is measured and rejected in DECISIONS: parity fell to ~50 ‰ but the run
+  lost 2 frames and took 2 refreshes at 20 ‰ where the minimum loses none. The absolute cost is
+  small where the ratio is large — a still window streams ~0.5 Mbit/s, so 30 % of it is
+  ~150 kbit/s.
+* Frames beyond parity's reach are not zero at 50–100 ‰ and cannot be: a two-fragment frame plus
+  one parity is gone when two of its three datagrams are, which at 50 ‰ is about one frame in
+  three hundred. The gated test's verdict is a rate (under one frame in a hundred), not zero.
+* Rows are only comparable within a run. The capture target is the machine's own display, so a
+  row's frame count and frame size are whatever the desktop drew during those 5 s; the
+  *one-per-frame* column exists so the parity comparison survives that.
+
+Not measured here: a scrolling terminal window as the capture target (the test cannot drive the
+desktop, and driving the app's own UI to make it draw is the app self-test's job), the loss path
+over the mesh, and group parity shared across consecutive small frames (not implemented — the
+minimum measured well enough not to need a wire change).
