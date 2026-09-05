@@ -3,8 +3,9 @@
 //!
 //! A frame counts as matching when at most `tolerance` of its pixels differ by more than
 //! [`CHANNEL_SLACK`] in any channel: font hinting, the RTT readout and a blinking cursor
-//! move a few hundred pixels, a broken layout moves a few hundred thousand. Set
-//! `SLOPTY_E2E_ACCEPT=1` (`cargo xtask e2e app --accept`) to (re)write the goldens.
+//! move a few hundred pixels, a broken layout moves a few hundred thousand. Pass `--accept`
+//! to write missing and failing goldens, or `--accept-all` to rewrite every golden (via
+//! `SLOPTY_E2E_ACCEPT=changed` and `SLOPTY_E2E_ACCEPT=all`).
 
 use std::path::{Path, PathBuf};
 
@@ -67,12 +68,70 @@ pub fn compare(actual: &RgbaImage, golden: &RgbaImage) -> (Diff, RgbaImage) {
     (Diff { differing, total: u64::from(w).saturating_mul(u64::from(h)) }, diff)
 }
 
+/// Policy for accepting golden renders.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Accept {
+    /// Keep matching goldens and fail on changes.
+    Off,
+    /// Write missing or failing goldens; keep matching goldens.
+    Changed,
+    /// Rewrite every golden encountered.
+    All,
+}
+
+impl Accept {
+    /// Parse the accept mode from an environment variable value.
+    #[must_use]
+    pub fn parse(val: Option<&str>) -> Self {
+        match val {
+            Some("1" | "changed") => Self::Changed,
+            Some("all") => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    /// Read the accept mode from `SLOPTY_E2E_ACCEPT`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let val = std::env::var("SLOPTY_E2E_ACCEPT").ok();
+        Self::parse(val.as_deref())
+    }
+}
+
+/// Action to take on a golden snapshot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GoldenAction {
+    /// Write or overwrite the golden.
+    Write,
+    /// Keep the existing golden unchanged.
+    Keep,
+    /// Fail the snapshot comparison.
+    Fail,
+}
+
+/// Decide what action to take for a golden snapshot.
+#[must_use]
+pub const fn golden_action(
+    accept: Accept,
+    golden_exists: bool,
+    within_tolerance: bool,
+) -> GoldenAction {
+    if !golden_exists {
+        return GoldenAction::Write;
+    }
+    match (accept, within_tolerance) {
+        (Accept::All, _) | (Accept::Changed, false) => GoldenAction::Write,
+        (Accept::Changed | Accept::Off, true) => GoldenAction::Keep,
+        (Accept::Off, false) => GoldenAction::Fail,
+    }
+}
+
 /// Compare `actual` with `golden/<name>.png`.
 ///
-/// Missing golden or `SLOPTY_E2E_ACCEPT=1`: the frame becomes the golden and the call
-/// succeeds. Otherwise the frame is written to `<artifacts>/<name>.actual.png` and, when it
-/// differs beyond `tolerance`, the diff to `<artifacts>/<name>.diff.png`, and the error names
-/// both files.
+/// When accepting, `--accept` writes missing and failing goldens, while `--accept-all`
+/// rewrites every golden. Otherwise the frame is written to `<artifacts>/<name>.actual.png`
+/// and, when it differs beyond `tolerance`, the diff to `<artifacts>/<name>.diff.png`, and the
+/// error names both files.
 ///
 /// # Errors
 ///
@@ -90,8 +149,10 @@ pub fn assert_matches(
     let actual_path = artifacts.join(format!("{name}.actual.png"));
     actual.save(&actual_path).with_context(|| format!("write {}", actual_path.display()))?;
 
-    let accept = std::env::var_os("SLOPTY_E2E_ACCEPT").is_some_and(|v| v == "1");
-    if accept || !golden_path.exists() {
+    let accept = Accept::from_env();
+    let golden_exists = golden_path.exists();
+    if !golden_exists {
+        let _action = golden_action(accept, false, false);
         std::fs::create_dir_all(golden_dir())?;
         actual.save(&golden_path).with_context(|| format!("write {}", golden_path.display()))?;
         eprintln!("snapshot {name}: wrote golden {}", golden_path.display());
@@ -100,38 +161,55 @@ pub fn assert_matches(
             total: u64::from(actual.width()).saturating_mul(u64::from(actual.height())),
         });
     }
+
     let golden = image::open(&golden_path)
         .with_context(|| format!("read {}", golden_path.display()))?
         .into_rgba8();
-    if golden.dimensions() != actual.dimensions() {
-        bail!(
-            "snapshot {name}: golden is {:?}, frame is {:?} (see {})",
-            golden.dimensions(),
-            actual.dimensions(),
-            actual_path.display()
-        );
-    }
     let (diff, image) = compare(actual, &golden);
+    let same_size = golden.dimensions() == actual.dimensions();
     let fraction = diff.fraction();
-    eprintln!(
-        "snapshot {name}: {} of {} pixels differ ({:.3}%)",
-        diff.differing,
-        diff.total,
-        fraction * 100.0
-    );
-    if fraction > tolerance {
-        let diff_path = artifacts.join(format!("{name}.diff.png"));
-        image.save(&diff_path)?;
-        bail!(
-            "snapshot {name}: {:.3}% of pixels differ (tolerance {:.3}%)\n  actual: {}\n  diff:   {}\n  golden: {}",
-            fraction * 100.0,
-            tolerance * 100.0,
-            actual_path.display(),
-            diff_path.display(),
-            golden_path.display()
-        );
+    let within_tolerance = same_size && fraction <= tolerance;
+    let action = golden_action(accept, true, within_tolerance);
+
+    match action {
+        GoldenAction::Write => {
+            std::fs::create_dir_all(golden_dir())?;
+            actual
+                .save(&golden_path)
+                .with_context(|| format!("write {}", golden_path.display()))?;
+            eprintln!("snapshot {name}: wrote golden {}", golden_path.display());
+            Ok(diff)
+        }
+        GoldenAction::Keep => {
+            eprintln!(
+                "snapshot {name}: {} of {} pixels differ ({:.3}%)",
+                diff.differing,
+                diff.total,
+                fraction * 100.0
+            );
+            Ok(diff)
+        }
+        GoldenAction::Fail => {
+            if !same_size {
+                bail!(
+                    "snapshot {name}: golden is {:?}, frame is {:?} (see {})",
+                    golden.dimensions(),
+                    actual.dimensions(),
+                    actual_path.display()
+                );
+            }
+            let diff_path = artifacts.join(format!("{name}.diff.png"));
+            image.save(&diff_path)?;
+            bail!(
+                "snapshot {name}: {:.3}% of pixels differ (tolerance {:.3}%)\n  actual: {}\n  diff:   {}\n  golden: {}",
+                fraction * 100.0,
+                tolerance * 100.0,
+                actual_path.display(),
+                diff_path.display(),
+                golden_path.display()
+            );
+        }
     }
-    Ok(diff)
 }
 
 #[cfg(test)]
@@ -168,5 +246,37 @@ mod tests {
         let b = solid(1, 1, [1, 1, 1]);
         let (diff, _) = compare(&a, &b);
         assert_eq!(diff.differing, 3);
+    }
+
+    #[test]
+    fn accept_parsing() {
+        assert_eq!(Accept::parse(Some("1")), Accept::Changed);
+        assert_eq!(Accept::parse(Some("changed")), Accept::Changed);
+        assert_eq!(Accept::parse(Some("all")), Accept::All);
+        assert_eq!(Accept::parse(None), Accept::Off);
+        assert_eq!(Accept::parse(Some("")), Accept::Off);
+        assert_eq!(Accept::parse(Some("0")), Accept::Off);
+        assert_eq!(Accept::parse(Some("other")), Accept::Off);
+    }
+
+    #[test]
+    fn golden_action_nine_combinations() {
+        // Missing golden: writes regardless of accept mode.
+        assert_eq!(golden_action(Accept::Off, false, false), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::Changed, false, false), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::All, false, false), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::Off, false, true), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::Changed, false, true), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::All, false, true), GoldenAction::Write);
+
+        // Golden exists, within tolerance: keep unless All.
+        assert_eq!(golden_action(Accept::Off, true, true), GoldenAction::Keep);
+        assert_eq!(golden_action(Accept::Changed, true, true), GoldenAction::Keep);
+        assert_eq!(golden_action(Accept::All, true, true), GoldenAction::Write);
+
+        // Golden exists, beyond tolerance: fail unless accepting.
+        assert_eq!(golden_action(Accept::Off, true, false), GoldenAction::Fail);
+        assert_eq!(golden_action(Accept::Changed, true, false), GoldenAction::Write);
+        assert_eq!(golden_action(Accept::All, true, false), GoldenAction::Write);
     }
 }

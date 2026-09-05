@@ -56,7 +56,7 @@ hypothesis until DECISIONS.md marks it verified.
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
    dump, render). `dump` is the structured state (items, focus, zoom, terminal rows);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
-   `crates/slopty-e2e/golden` (`--accept` rewrites goldens). Nothing touches another app.
+   `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet.
 4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,

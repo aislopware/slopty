@@ -42,9 +42,12 @@ pub struct E2eOpts {
     /// Which tests.
     #[arg(value_enum, default_value_t = Case::App)]
     case: Case,
-    /// Rewrite the render goldens under `crates/slopty-e2e/golden/` from this run.
+    /// Write missing and failing render goldens under `crates/slopty-e2e/golden/`.
     #[arg(long)]
     accept: bool,
+    /// Rewrite every render golden under `crates/slopty-e2e/golden/`.
+    #[arg(long)]
+    accept_all: bool,
     /// Data directory for the daemons the tests spawn (default `target/e2e`).
     #[arg(long)]
     data_dir: Option<String>,
@@ -128,7 +131,13 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         sh.push_env("SLOPTY_E2E_ARTIFACTS", &artifacts),
         sh.push_env("RUST_LOG", &opts.log),
     ];
-    let _accept = opts.accept.then(|| sh.push_env("SLOPTY_E2E_ACCEPT", "1"));
+    let _accept = if opts.accept_all {
+        Some(sh.push_env("SLOPTY_E2E_ACCEPT", "all"))
+    } else if opts.accept {
+        Some(sh.push_env("SLOPTY_E2E_ACCEPT", "changed"))
+    } else {
+        None
+    };
 
     // Build every binary a suite may spawn up front, so a test never shells out to cargo.
     // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
