@@ -1525,8 +1525,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   for a `#!` script so `~/.claude/local/claude` shows as `sh <script>`, the npm install shows
   as `node …/claude-code/cli.js`, and `slopty_pty::pty::resolve_command` itself starts an
   unfound `claude` as `zsh -lic claude`. So a name or `argv[0]` of `claude` counts outright,
-  and a shell or JS runtime counts when one of its arguments names the agent. A bare login
-  shell (`argv[0] = "-zsh"`) does not, and neither does `sh -c 'echo claude'`.
+  and a runtime counts only for the *first* argument that is not a flag — the script it runs —
+  or, for a shell's `-c`, for the first word of the command it was handed. A bare login shell
+  (`argv[0] = "-zsh"`) does not count, and neither does `sh -c 'echo claude'` or
+  `node server.js --model claude`: the agent's name as somebody else's argument proves
+  nothing.
 - ✅ **The transcript is the newest `.jsonl` in the project directory, modified at or after
   the agent process started** (2026-09-05, verified against `~/.claude/projects` directory
   names only, never their contents). Claude Code escapes the working directory by replacing
@@ -1547,6 +1550,18 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the `Tail` is dropped so the new conversation is read from its top. Without this the status
   froze on the old file's last record, so a cleared session sat on `Done` through its next
   turn.
+- ✅ **A tracker follows a process, not a terminal** (2026-09-05). `Observation` carries the
+  foreground process's pid and start time, and a tracker whose process changes is reset before
+  it is attributed again: one `claude` exiting and another starting inside a 750 ms tick would
+  otherwise inherit the first one's transcript, status and hooks in a terminal that looks
+  unchanged. The reset also clears the transcript path, so the next lookup finds the new
+  conversation and the tail starts over.
+- ✅ **A poll event a hook has overtaken is dropped, not sent** (2026-09-05). hostd computes
+  the tick's events under the lock and broadcasts them *before* it reads any file, and every
+  event is checked against the table (`AgentTable::is_current`) immediately before it goes
+  out. A hook arriving on the control socket between the poll and the send has already told
+  every client something newer; without the check the poll's older state was put back and, for
+  example, a permission badge vanished until the next hook.
 - ✅ **Hooks decide the status; the process table may still end a session it watched**
   (2026-09-05). Once a hook has spoken, the weaker signals fill gaps only — the transcript
   path, so ⌘⇧L works whether it was named by a hook or discovered — and never change the

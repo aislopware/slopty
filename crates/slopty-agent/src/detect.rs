@@ -45,6 +45,9 @@ impl Program {
 /// One of these counts only when its arguments name the agent.
 const RUNTIMES: [&str; 8] = ["node", "bun", "deno", "sh", "bash", "zsh", "fish", "dash"];
 
+/// The runtimes that take a command to run as the argument of a `-c` flag.
+const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "fish", "dash"];
+
 /// Whether a process with this executable name and command line is Claude Code.
 #[must_use]
 pub fn is_claude(name: &str, argv: &[String]) -> bool {
@@ -58,9 +61,27 @@ pub fn is_claude(name: &str, argv: &[String]) -> bool {
     if !RUNTIMES.contains(&program) {
         return false;
     }
-    // `node <script>`: only the script decides, never a flag value, so `argv[0]` (the runtime)
-    // and anything after a `--` argument that is not a path are looked at the same way.
-    argv.iter().skip(1).any(|arg| is_claude_script(arg))
+    let shell = SHELLS.contains(&program);
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(flags) = arg.strip_prefix('-') {
+            // `sh -c '<command>'`: the command word decides, and only it.
+            if shell && flags.contains('c') {
+                return args.next().is_some_and(|command| is_claude_command(command));
+            }
+            continue;
+        }
+        // The first argument that is not a flag is the script the runtime runs, and it alone
+        // says what this process is: `node server.js --model claude` runs a server.
+        return is_claude_script(arg);
+    }
+    false
+}
+
+/// Whether the command a shell was handed (`sh -c '<command>'`) starts the agent: its first
+/// word, so `sh -c 'echo claude'` is an echo.
+fn is_claude_command(command: &str) -> bool {
+    command.split_whitespace().next().is_some_and(|word| base(word) == "claude")
 }
 
 /// Whether a script path is Claude Code's entry point.
@@ -122,9 +143,21 @@ mod tests {
         // A login shell started to run a `claude` the daemon could not find on its own PATH
         // (see `slopty_pty::pty`) is that agent's session too.
         assert!(is_claude("zsh", &argv(&["/bin/zsh", "-lic", "claude"])));
-        // A plain login shell is not.
+        assert!(is_claude("zsh", &argv(&["/bin/zsh", "-lic", "claude --resume"])));
+        // A plain login shell is not, and neither is a command that only mentions the agent.
         assert!(!is_claude("zsh", &argv(&["-zsh"])));
         assert!(!is_claude("bash", &argv(&["/bin/sh", "-c", "echo claude"])));
+        assert!(!is_claude("bash", &argv(&["/bin/sh", "-c", "ls ~/.claude/local/claude"])));
+    }
+
+    #[test]
+    fn only_the_script_a_runtime_runs_counts_never_a_later_argument() {
+        // The agent's own name as the value of somebody else's flag proves nothing.
+        assert!(!is_claude("node", &argv(&["node", "server.js", "--model", "claude"])));
+        assert!(!is_claude("node", &argv(&["node", "server.js", "/usr/bin/claude"])));
+        assert!(!is_claude("bun", &argv(&["bun", "run", "--", "claude"])), "`run` is the script");
+        // Flags before the script are stepped over, so the script is still found.
+        assert!(is_claude("node", &argv(&["node", "--enable-source-maps", "/usr/bin/claude"])));
     }
 
     #[test]

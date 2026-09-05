@@ -248,15 +248,18 @@ conversation view as a hooked one.
 
 **The three signals below the hooks** are read by `slopty-hostd`'s own tick (`agents::watch`,
 every 750 ms) and merged by `slopty_agent::Tracker::observe`, which never lets a weaker signal
-overwrite what a stronger one said. `slopty_host`'s session actor answers a `Probe` with the
+overwrite what a stronger one said. The tick broadcasts what it found before it reads any file
+and drops anything the table has moved past (`AgentTable::is_current`), so a hook arriving
+while it works is never overwritten by the older poll. `slopty_host`'s session actor answers a `Probe` with the
 title, the OSC 7 cwd and the tty's foreground process; `slopty_pty::process` names that
 process (`tcgetpgrp` for the foreground group, then `proc_pidinfo PROC_PIDTBSDINFO` for the
 name and start time, the `KERN_PROCARGS2` sysctl for `argv` and `PROC_PIDVNODEPATHINFO` for
 its cwd), and `slopty_agent::detect` decides from the name and `argv` alone whether it is
-Claude Code — the native launcher, a `node`/`bun`/`deno` running the npm `cli.js`, or a shell
-running either (the kernel rewrites `argv` for a `#!` script, and `slopty_pty::pty` itself
-starts an unfound `claude` as `zsh -lic claude`). Present → `Idle`; gone → the agent is
-cleared. `slopty_agent::title` maps the OSC 0/2 title to working-vs-idle from two tables: the
+Claude Code — the native launcher, a `node`/`bun`/`deno` whose *script* is the npm `cli.js`,
+or a shell running either (the kernel rewrites `argv` for a `#!` script, and `slopty_pty::pty`
+itself starts an unfound `claude` as `zsh -lic claude`). Present → `Idle`; gone → the agent is
+cleared; replaced by another process → attributed again from scratch, since a tracker follows
+a pid and its start time, not a terminal. `slopty_agent::title` maps the OSC 0/2 title to working-vs-idle from two tables: the
 spinning circle Claude Code paints while a turn runs (`◐◑◒◓`) and the sparkle it paints in
 front of the conversation's summary between turns (`✳`, or the bare name before there is a
 summary) — the frames in the pane itself (`·✢∗✻✽`) never reach the title and mean nothing

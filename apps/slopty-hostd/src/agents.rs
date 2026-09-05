@@ -22,13 +22,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use slopty_agent::detect::Program;
 use slopty_agent::transcript::Tail;
 use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
 use slopty_proto::HostMsg;
+use slopty_proto::agent::AgentEvent;
 
 use crate::Daemon;
 
@@ -50,9 +51,13 @@ pub async fn watch(daemon: Daemon) -> ! {
     loop {
         tick.tick().await;
         let live = daemon.host.probe().await;
-        let mut events = Vec::new();
+        // Sessions the host no longer runs are gone whatever their last signal said: an agent
+        // whose terminal exited never reports a `SessionEnd` hook.
+        let ids: Vec<SessionId> = live.iter().map(|(id, _probe)| *id).collect();
+        tails.retain(|session, _tail| ids.contains(session));
         {
             let mut agents = daemon.agents.lock();
+            let mut events = Vec::new();
             for (session, probe) in &live {
                 let observation = Observation {
                     program: probe
@@ -67,38 +72,44 @@ pub async fn watch(daemon: Daemon) -> ! {
                         .as_ref()
                         .and_then(|fg| fg.cwd.clone())
                         .or_else(|| probe.cwd.clone().map(PathBuf::from)),
+                    pid: probe.foreground.as_ref().map(|fg| fg.pid),
+                    started: probe.foreground.as_ref().and_then(|fg| fg.started),
                 };
-                let started = probe
-                    .foreground
-                    .as_ref()
-                    .and_then(|fg| fg.started)
-                    .unwrap_or_else(SystemTime::now);
-                events.extend(agents.observe(*session, &observation, started));
+                events.extend(agents.observe(*session, &observation));
             }
+            events.extend(agents.retain(&ids));
+            // Sent before anything is awaited: a hook arriving on the control socket while we
+            // read files has already broadcast something newer.
+            broadcast(&daemon, &agents, events);
+            drop(agents);
         }
-        // Sessions the host no longer runs are gone whatever their last signal said: an agent
-        // whose terminal exited never reports a `SessionEnd` hook.
-        let ids: Vec<SessionId> = live.iter().map(|(id, _probe)| *id).collect();
-        tails.retain(|session, _tail| ids.contains(session));
-        events.extend(daemon.agents.lock().retain(&ids));
 
         ticks = ticks.wrapping_add(1);
-        for (session, path) in discover(&daemon, &home, ticks % REDISCOVER_EVERY == 0).await {
+        for (session, path) in
+            discover(&daemon, &home, ticks.is_multiple_of(REDISCOVER_EVERY)).await
+        {
             if daemon.agents.lock().set_transcript_path(session, &path) {
                 // A conversation the human cleared or resumed: read the new file from its top.
                 tails.remove(&session);
             }
         }
-        events.extend(follow(&daemon, &mut tails).await);
-        for event in events {
-            tracing::debug!(
-                session = %event.session,
-                status = ?event.status,
-                source = ?event.source,
-                "agent (no hooks)"
-            );
-            let _sent = daemon.events.send(HostMsg::Agent(event));
+        follow(&daemon, &mut tails).await;
+    }
+}
+
+/// Send what the poll found, dropping anything a hook has already overtaken.
+fn broadcast(daemon: &Daemon, agents: &slopty_agent::AgentTable, events: Vec<AgentEvent>) {
+    for event in events {
+        if !agents.is_current(&event) {
+            continue;
         }
+        tracing::debug!(
+            session = %event.session,
+            status = ?event.status,
+            source = ?event.source,
+            "agent (no hooks)"
+        );
+        let _sent = daemon.events.send(HostMsg::Agent(event));
     }
 }
 
@@ -135,11 +146,10 @@ async fn discover(
     found.unwrap_or_default()
 }
 
-/// Read what is new in every unhooked agent's transcript and turn it into status.
-async fn follow(
-    daemon: &Daemon,
-    tails: &mut HashMap<SessionId, Tail>,
-) -> Vec<slopty_proto::agent::AgentEvent> {
+/// Read what is new in every unhooked agent's transcript, turn it into status and broadcast
+/// it. Each session's event is sent before the next file is read, so a hook that arrives in
+/// between is never overwritten.
+async fn follow(daemon: &Daemon, tails: &mut HashMap<SessionId, Tail>) {
     let paths: Vec<(SessionId, PathBuf)> = {
         let agents = daemon.agents.lock();
         agents
@@ -148,7 +158,6 @@ async fn follow(
             .filter_map(|session| Some((session, agents.transcript_path(session)?)))
             .collect()
     };
-    let mut events = Vec::new();
     for (session, path) in paths {
         let mut tail = tails.remove(&session).unwrap_or_default();
         let Ok((tail, read)) = tokio::task::spawn_blocking(move || {
@@ -168,8 +177,10 @@ async fn follow(
             }
         };
         if let Some(progress) = progress {
-            events.extend(daemon.agents.lock().observe_progress(session, &progress));
+            let mut agents = daemon.agents.lock();
+            let events = agents.observe_progress(session, &progress).into_iter().collect();
+            broadcast(daemon, &agents, events);
+            drop(agents);
         }
     }
-    events
 }
