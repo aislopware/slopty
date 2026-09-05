@@ -301,6 +301,24 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Congestion controller**: noq default (Cubic); BBR3 measured 2026-09-05 (MEASUREMENTS.md),
   revisit once noq marks it stable. The media path runs its own bitrate controller on top
   (see Video, "Adaptive bitrate").
+- ✅ **ACKs within 2 ms, not QUIC's 25** (2026-09-05, `slopty_net::endpoint::MAX_ACK_DELAY`
+  via `AckFrequencyConfig`, both roles). Media leaves the host as one burst per frame; BBR
+  sizes the congestion window from bandwidth × min RTT, which on loopback is one or two
+  frames (9–43 KB seen, 5.8 KB in `ProbeRTT`), so the tail of a frame waits for the ACK of
+  its head. The receiver ACKs every second ack-eliciting packet at once and an odd last
+  packet only when `max_ack_delay` expires: 25 ms by default, longer than a frame interval.
+  Measured on loopback ("start-up on a cold connection" in MEASUREMENTS.md): the hostd pump
+  logs every stretch in which the QUIC send buffer is not empty, and every frame ended with
+  1.5 KB held for 5–7 ms, a 68 KB frame was held 105 ms at a 38 KB window, and the receiver
+  NACKed the tails (6 NACKs in 3 s at the 5.8 KB window). With 2 ms the same run shows no
+  hold over 5 ms and no NACK. Cost: an ACK per 2 ms of traffic at most, ~50 bytes each.
+- ✅ **Initial congestion window 32 packets** (2026-09-05,
+  `slopty_net::endpoint::INITIAL_WINDOW_PACKETS`, `SLOPTY_QUIC_IW` overrides it for
+  experiments). RFC 9002's 10 packets is for an unknown peer on the open Internet; a paired
+  host and client on a LAN or a mesh can start with the burst Chromium's QUIC uses. The
+  first keyframe is tens to hundreds of KB and each window's worth costs a round trip, so
+  the start-up cost of the default is 1–2 extra round trips per stream on a 10 ms path
+  (numbers in "start-up over the mesh", MEASUREMENTS.md). Invisible on loopback.
 
 - ✅ **QUIC datagrams, not raw UDP over a WireGuard mesh** (re-examined 2026-09-04 when the
   status bar showed ~100 ms). A QUIC datagram is one UDP packet plus ~30 bytes of header and one
@@ -543,6 +561,55 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   sampler (already ticking at 120 Hz) pushes a beat whenever that is `HEARTBEAT_AFTER` =
   25 ms old, half the receiver's 50 ms `STALL_GAP`, so one lost beat still does not read as a
   stall. Counted in `ScreenStats::heartbeats`. The client ignores `Ingest::Heartbeat`.
+- ✅ **The start-up stall was the client, not QUIC** (2026-09-05, corrects the reading in
+  the capture-heartbeat entry above and its MEASUREMENTS.md section). The new e2e test
+  `screen_start_up_over_iroh` (five cold connections to one hostd, direct-only loopback,
+  each opening the first display at the app's default quality) stamps four instants on the
+  client: `Open` sent, first datagram, first frame complete, first decoded picture. Before
+  the fixes: opened at 353 ms on a fresh hostd (176–191 ms after), first frame complete
+  5 ms later, first picture **168 ms** after that, and a 145–151 ms "stall" in the first
+  decision window. The 168 ms is `VTDecompressionSessionCreate` for the first session in a
+  process (3 ms for every later one); it ran inside the stream worker, which read no
+  datagram meanwhile, so when it caught up the reassembler saw 150 ms of silence and charged
+  it as a link stall, freezing the first rate window (the "QUIC send-side hold" the heartbeat
+  section blamed). Rules that follow, each measured in the same test:
+  * `slopty_codec::warm_up` builds one HEVC session from canned 64×64 parameter sets;
+    `slopty_client::warm_up_decoder` runs it once per process on its own thread and is
+    called at app launch (`open_workspace`), on the CLI's connect, and by the test — not
+    in `HostLink::start`, which comes too late for a client that opens right after
+    connecting. First picture 526 → 319 ms on the first open in a process.
+  * `slopty_host::screen::warm_up` builds and drops a 64×64 HEVC encoder, then starts and
+    stops a 64×64 capture of the first display, when hostd comes online. The capture-only
+    version did not move the first `Opened` (270–295 ms); the encoder did (→ 127–140 ms):
+    VideoToolbox's first compression session in a process is ~170 ms, the later ones ~10.
+    `shareable()` keeps its last enumeration for 2 s (`SHAREABLE_TTL`) because a client
+    lists, picks and opens within seconds and each enumeration is 60–75 ms.
+    `Opened` 176–191 → 113–138 ms, first open included.
+  * The datagram pump publishes how many bytes QUIC is holding (`DatagramBudget::held`,
+    4 MiB buffer minus `datagram_send_buffer_space`) and logs every episode; the capture
+    callback drops a frame, flagged for an LTR refresh, while more than two frames' worth at
+    the current target (32 KiB floor) is held (`frame_fits`), and a NACK is answered only
+    under the same condition. Over the mesh at a 4800-byte window the pump had held 275–365 KB
+    for 4–7 s — every frame delivered stale — and 851 NACK answers piled 64 221 datagrams
+    behind 12 frames. Stale frames and stale retransmits are worth nothing; a fresh keyframe
+    after the drop is. (`a_frame_fits_unless_the_queue_or_quic_holds_too_much`)
+  * The client router stamps every datagram with the instant the connection handed it over
+    and the worker ingests with that instant; the worker drains everything already queued
+    (a burst, or the backlog from before the stream was attached) before the timers look at
+    frame ages. A slow worker can no longer read as a stalled link or as a lost tail.
+  * The bitrate controller's cwnd cap is taken from the widest path sample in the decision
+    window, not the last: BBR's `ProbeRTT` shrinks the window to four packets for 200 ms
+    every 5 s and a cap read then cut a loopback stream to 6.4 Mbit/s for a window
+    (`a_probe_rtt_dip_inside_the_window_does_not_cap_the_target`).
+  * The ⌘⇧I overlay is two lines built by the pure `hud_lines`: picture (size, fps, Mb/s,
+    rtt, age of the frame on screen) and path (jitter, hold p50/p95, queue, fec/lost/nack/
+    refresh, stalls, the host's verdict, audio). `ScreenStats` carries the report's hold
+    and jitter figures and the four start-up instants; `slopty bench screen` prints them.
+  Loopback after all of the above, machine quiet: 0 NACKs, 0 stalls, 0 holds ≥ 5 ms in
+  5 × 3 s under BBR3 and under Cubic (tables in MEASUREMENTS.md). Not ruled: the stalls
+  and NACKs seen when the machine was under another agent's builds (no QUIC hold behind
+  them), and the mesh run, whose link lost a quarter of its packets — the held-frame drop
+  is the one ruling from it.
 - ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
   length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
   same even size ≤ 1184 B, so padding ≤ 2 B per fragment and the RS shard size is inferred from

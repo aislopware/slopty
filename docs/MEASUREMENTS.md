@@ -488,6 +488,8 @@ above (display 6, a Ghostty window scrolling `seq`, 20 s, private daemons on por
 
 What the beat log says:
 
+* (Read on 2026-09-05 evening, "start-up on a cold connection" below: the hold was the
+  client's first decoder session, not QUIC; the reading in this bullet is superseded.)
 * The start-up hold did not disappear, and the heartbeat is not the reason. In run 2 the
   stream opened at 30.333 s, the first decision at 30.879 s reported `stalled 81 ms, stalls
   1`, and the first beat went out at 31.087 s: the host's queue was never quiet for 25 ms in
@@ -517,6 +519,125 @@ open -na Ghostty --args -e seq 1 300000000
 SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug \
   target/debug/slopty bench screen --display 6 --seconds 20
 grep -E 'heartbeat|rate decision|stream closed' $SLOPTY_DATA_DIR/hostd6.log   # beats, verdicts, ScreenStats { heartbeats }
+```
+
+## 2026-09-05 — start-up on a cold connection, loopback, debug build
+
+`screen_start_up_over_iroh` (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`):
+one private ptyd + hostd (`--direct-only`, any free port) in a temp dir, then five samples,
+each a fresh pairing ticket over hostd's control socket, a fresh endpoint and key, a cold QUIC
+connection, and the first display opened at the app's default quality (native scale, 60 fps,
+30 Mbit/s ceiling) for 3 s. The client stamps `Open` sent → first datagram → first frame
+complete → first decoded picture; the host logs `capture started` (enumeration and encoder
+build inside), `keyframe encoded` (bytes) and, from the datagram pump, every stretch in which
+QUIC's send buffer was not empty (`held_ms`, `max_bytes`, `cwnd`). mac-studio, the desktop
+mostly still (the gap columns are the desktop, not the transport). The machine was shared with
+another agent's builds during the later runs; the start-up columns did not move with that,
+the stall and NACK columns did.
+
+Before (main at df59235; the first sample is the first stream in both processes):
+
+| sample | opened | first datagram | first frame | first decoded | hold max | stalls (stalled) | nack / refresh / lost | host target |
+| ------ | ------ | -------------- | ----------- | ------------- | -------- | ---------------- | --------------------- | ----------- |
+| 0      | 353 ms | 353 ms         | 358 ms      | **526 ms**    | 2 ms     | 1 (151 ms)       | 0 / 0 / 0             | 12.0 hold → 13.5 … 19.2 grow |
+| 1      | 176 ms | 176 ms         | 176 ms      | 184 ms        | 12 ms    | 0                | **6** / 0 / 0         | 13.5 … 24.3 grow |
+| 2–4    | 182–191 ms | 182–191 ms | 182–191 ms  | 190–200 ms    | 0 ms     | 0                | 0 / 0 / 0             | 13.5 … 24.3 grow |
+
+What the logs said: `decoder session configured ms=150` on the first stream in the client
+process (3 ms on every later one), inside the stream worker; the reassembler then charged
+the 150 ms it had not read datagrams for as a link stall (`stalled 145–151 ms, stalls 1`,
+verdict `Stall` for the first window — the "QUIC send-side hold" the heartbeat section above
+had blamed). hostd's first `capture started` took 351 ms (`enumerate 60`), later ones 175–190
+(`enumerate 62–75`). Sample 1's six NACKs were frame tails held by a 5808-byte congestion
+window (BBR3's `ProbeRTT` floor) whose ACK waited on the receiver's 25 ms `max_ack_delay`;
+the pump saw every frame end with ~1.5 KB held for 5–7 ms and one 68 KB frame held 105 ms at
+a 38 KB window.
+
+After (this branch: decoder warm-up at launch, encoder + capture warm-up when hostd comes
+online, 2 s enumeration cache, arrival stamps and backlog drain on the client, 2 ms
+`max_ack_delay`, 32-packet initial window, widest-sample cwnd cap; one run per row, five
+samples each):
+
+| run                              | opened      | first datagram | first frame  | first decoded | hold max | stalls (stalled)   | nack / refresh / lost | holds ≥ 5 ms (host) |
+| -------------------------------- | ----------- | -------------- | ------------ | ------------- | -------- | ------------------ | --------------------- | ------------------- |
+| BBR3, machine quiet, sample 0    | 295 ms      | 290 ms         | 295 ms       | 319 ms        | 1 ms     | 0                  | 0 / 0 / 0             | 0                   |
+| BBR3, machine quiet, samples 1–4 | 115–121 ms  | 106–114 ms     | 115–121 ms   | 123–129 ms    | 1–2 ms   | 1 of 4 (59 ms)     | 0 / 0 / 0             | 0                   |
+| Cubic (`SLOPTY_CC=cubic`), quiet | 112–298 ms  | 100–299 ms     | 112–305 ms   | 120–329 ms    | 2–3 ms   | 0                  | 0 / 0 / 0             | 0                   |
+| + encoder warm-up, machine loaded, sample 0 | 129 ms | 134 ms   | 154 ms       | 184 ms        | 3 ms     | 1 (139 ms)         | 3 / 0 / 0             | 0                   |
+| same run, samples 1–4            | 127–138 ms  | 123–131 ms     | 127–138 ms   | 140–149 ms    | 3–42 ms  | 0–2 (0–186 ms)     | 0–5 / 0 / 0           | 0                   |
+
+* First picture on the first stream in both processes: 526 → 319 ms with the decoder warm-up
+  alone, → 184 ms once hostd also warms the encoder (the first `Encoder::new` in a process is
+  ~170 ms; the capture-only warm-up did not move `opened` — 270–295 ms with it — the encoder
+  was the cold part). Later streams: 184–200 → 123–149 ms.
+* `opened` 176–191 → 115–138 ms: the enumeration the client had just done for its listing is
+  reused (`enumerate_ms=0`).
+* With ACKs within 2 ms the host never held a datagram for 5 ms or more in any run (0 of ~350
+  hold episodes per run, all ≤ 3 ms), and the quiet-machine runs had no NACK and no stall
+  under either controller. The stalls and NACKs in the loaded runs did not coincide with a
+  QUIC hold; the warm-ups took 630–680 ms in those runs instead of 170–190, i.e. the
+  processes were not being scheduled, and the arrival stamps put the silence at the client's
+  reader. Not a transport finding; re-measure on a quiet machine before ruling on it.
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_codec=debug,slopty_client=debug \
+  cargo nextest run -p slopty-hostd --no-capture screen_start_up 2>&1 | tee /tmp/startup.log
+grep -E '^\| [0-9]' /tmp/startup.log                         # the table
+grep -E 'capture started|keyframe encoded|decoder session|warmed up' /tmp/startup.log
+grep -o 'held_ms=[0-9]* max_bytes=[0-9]*' /tmp/startup.log   # the pump's hold episodes
+SLOPTY_CC=cubic … / SLOPTY_QUIC_IW=10 …                     # controller / initial window overrides
+```
+
+## 2026-09-05 — start-up over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
+
+Same private hostd on mac-studio (port 45560, own data dir under `target/e2e-data/startup`),
+`slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, a
+Ghostty window scrolling `seq` on the display. The link was in its worst state yet: idle
+`slopty ping` 7.7 / 9.2 / 32 ms before the first run, 24 / 41 / 107 ms before the third; the
+host's QUIC path lost 640–1571 packets per 20 s (25–30 % of what it sent) with 248–1205
+congestion events and the window pinned at its 4800-byte floor. Every run cut to the 1 Mbit/s
+floor within 5 s. The numbers describe that link; no start-up before/after can be read from
+them and none is claimed. Two runs per build.
+
+| build                         | first datagram / frame / decoded | keyframe (host) | keyframe spread | fps        | stalls (stalled)      | nack / refresh / lost | host QUIC lost / held at close |
+| ----------------------------- | -------------------------------- | --------------- | --------------- | ---------- | --------------------- | --------------------- | ------------------------------ |
+| IW 32 (this branch)           | 498 / 534 / 580 ms, 213 / 370 / 404 ms | 58.5 KB   | 72 / 88 ms      | 28.6 / 17.4 | 39 (5.0 s) / 52 (5.8 s) | 490/104/97, 357/115/90 | 1314 pkts / 2.6 KB, — |
+| IW 10 (`SLOPTY_QUIC_IW=10`)   | 376 / 449 / 493 ms, 211 / 244 / 277 ms | 58.8 KB   | 75 / 57 ms      | 4.9 / 9.9  | 85 (9.4 s) / 56 (6.1 s) | 341/145/105, 475/194/155 | 640 pkts / 2.0 MB, 1016 pkts / 1.3 MB |
+| IW 32 + held-frame drop       | 507 / 552 / 585 ms, 329 / – / –        | —         | 38 ms / —       | 4.5 / 0    | 88 (10.3 s) / 31 (4.1 s) | 334/171/155, 851/444/428 | 405 pkts / 1.1 MB, 1571 pkts / 4.2 MB |
+
+What the runs did show, and what changed because of them:
+
+* **QUIC held frames for seconds.** With the window at 4800 bytes the pump logged
+  `held_ms=4149 max_bytes=365258` and `held_ms=7120 max_bytes=275586`: 4–7 s of frames sat
+  in the 4 MiB datagram send buffer and were delivered stale, which the receiver counted as
+  one stall after another. The pump now publishes the held byte count (`DatagramBudget::held`)
+  and the capture callback drops a frame instead of encoding it while more than two frames'
+  worth at the current target waits there (`frame_fits`, 32 KB floor; the datagram queue's
+  low-water rule still applies). On this link that dropped 1016 of 1149 captured frames and
+  delivered the rest fresh, against every frame delivered late before.
+* **NACK answers stacked up.** The second drop run: 12 frames encoded, 64 221 datagrams sent
+  — the receiver's 851 NACKs were each answered with a retransmit into a buffer that was
+  already full (`space 9890` of 4 MiB). A NACK is now answered only when `frame_fits`; the
+  stale answers were never going to arrive in time.
+* **Initial window:** the 58 KB keyframe's spread was 57–88 ms under both windows, inside the
+  noise of a path losing a quarter of its packets. The 32-packet ruling stands on arithmetic
+  (one round trip fewer for a keyframe up to ~40 KB, two up to ~110 KB); the mesh
+  measurement of it is still owed a day with a working link.
+
+```sh
+# mac-studio: private daemons (this worktree's target/e2e-data/startup)
+export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
+target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
+RUST_LOG=info,slopty_host=debug,slopty_hostd=debug SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/hostd.log 2>&1 &
+SLOPTY_HOSTD_SOCKET=$SLOPTY_DATA_DIR/hostd.sock target/debug/slopty host ticket
+open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
+gzip -1 -c target/debug/slopty | ssh macbook-pro 'mkdir -p /tmp/slopty-bench/startup && gunzip -c > /tmp/slopty-bench/startup/slopty && chmod +x /tmp/slopty-bench/startup/slopty'
+# macbook-pro
+export SLOPTY_DATA_DIR=/tmp/slopty-bench/startup/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
+/tmp/slopty-bench/startup/slopty pair <ticket>
+/tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20   # "after Open: …", "keyframe spread", stalls, trajectory
+# host side: grep -E 'keyframe encoded|held_ms=[0-9]{3,}|screen closing|stream closed' $SLOPTY_DATA_DIR/hostd.log
 ```
 
 ## 2026-09-05 — gate wall time after the speed-up (mac-studio, 10 cores, warm caches)

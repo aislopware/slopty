@@ -176,12 +176,21 @@ for the stats overlay and the bench; pure, no clocks, tested; `heartbeat_datagra
 `Kind::Heartbeat` header the host sends after `HEARTBEAT_AFTER` of silence so a still screen
 or a capture gap does not read as a link stall at the receiver), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
-path's datagram limit; cursor sampler, which also sends the heartbeats; input injection), `slopty-input` (client
+path's datagram limit and how many bytes QUIC is holding in its send buffer, and a captured
+frame is dropped rather than encoded while more than two frames' worth wait there
+(`frame_fits`); `warm_up` runs one throwaway capture when hostd comes online and `shareable()`
+keeps its enumeration for 2 s; cursor sampler, which also sends the heartbeats; input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the
 active app). `slopty-hostd` owns one datagram pump
-per connection and maps `ScreenRequest`s onto the streams it opened for that client.
+per connection (it also measures the QUIC hold and logs every stretch of it) and maps
+`ScreenRequest`s onto the streams it opened for that client. Client side, `HostLink::start`
+warms VideoToolbox's decoder up once per process, the router stamps each datagram with its
+arrival, and the stream worker drains what is queued before running the reassembler's timers;
+`ScreenStats` carries hold, jitter and the start-up instants for the ⌘⇧I overlay
+(`hud_lines`) and `slopty bench screen`. Transport: ACKs within 2 ms and a 32-packet initial
+window (`slopty-net::endpoint`).
 
 ## 4. Canvas
 
