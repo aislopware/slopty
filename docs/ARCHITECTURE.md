@@ -341,7 +341,27 @@ resize the window; the canvas re-fits on resize like any window);
 the fork's `gpui_ios` draws the scene offscreen through the shared Metal renderer at the
 layer's drawable size, and the tests diff it against per-device goldens (`ios-phone-*.png`,
 `ios-pad-*.png` under `crates/slopty-e2e/golden`).
-Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
+**Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
+"Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
+`overlay`), one hairline (`border`), three text levels, one accent with its foreground, and
+three status tones (`success`, `warn`, `error`) that the chrome uses only where state carries
+meaning (host dot, agent badge and outline, "N need you", failed result, failed-command
+separator). Geometry comes from `radii` (xs 4 / sm 6 / md 8), the 4/8 pt `spacing` scale
+(2 / 4 / 8 / 12 / 16 / 24) and a type scale hanging off `ui_size` (`caption` −3, `small` −1,
+`title` +2), so the settings' font size moves every label together; alphas for tints, hover
+washes, the scrim and the separators are the `alpha` constants. Hairlines carry the elevation,
+shadows are `shadow_sm` on floating layers only (picker, host switcher, search bar, "↓ latest").
+Focus is one accent hairline: the active item's frame, the search bar and the composer while
+they hold the caret. Pills (title bar, badge, "N need you") are `small()` text on a `TINT`
+fill of their tone with the tone as text; buttons are `radii.sm` with `raised` → `overlay`
+hover/pressed, and the one primary action on a surface is an accent fill with `accent_fg`.
+gpui-kit's widgets (inputs, the composer, Markdown `TextView`) read gpui-kit's own theme, which
+`slopty_ui::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
+the conversation gets `markdown_line_height`, paragraph gaps of one base unit, headings
+stepping down from `title()` and code in the terminal mono at `small()` on `raised`. Headless
+tests read the tokens back through `painted_quads()`: the accent vs hairline item frame, the
+`warn` outline of a blocked agent in both variants, the `error` separator tone, the composer's
+focus ring and the warn-tinted attention row, and gpui-kit's colours after a sync.
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
 and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and asks the host for
