@@ -18,7 +18,9 @@ use parking_lot::Mutex;
 use slopty_codec::audio::{OpusDecoder, Player};
 use slopty_codec::{DecodedFrame, Decoder};
 use slopty_core::StreamId;
-use slopty_media::{Action, Config, Ingest, Reassembler, ReassemblerStats};
+use slopty_media::{
+    Action, Config, Ingest, Reassembler, ReassemblerStats, STALL_GAP, StallAttribution,
+};
 use slopty_proto::ClientMsg;
 use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
 use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
@@ -35,8 +37,11 @@ const PENDING_DEPTH: usize = 512;
 const REPORT_EVERY: Duration = Duration::from_millis(50);
 /// Reassembler timer resolution while frames are pending.
 const TICK: Duration = Duration::from_millis(2);
-/// Timer period while nothing is pending (only refresh repeats depend on it).
-const IDLE_TICK: Duration = Duration::from_millis(50);
+/// Timer period while nothing is pending: refresh repeats depend on it, and so does the stall
+/// detector, which subtracts silence this loop slept through from what it charges to the link.
+/// Half the stall gap, for the same reason the host heartbeats at half it — a receiver that
+/// looks exactly as often as a stall is long cannot tell one it watched from one it missed.
+const IDLE_TICK: Duration = Duration::from_millis(25);
 /// RTT assumed before the transport has measured one.
 const DEFAULT_RTT: Duration = Duration::from_millis(20);
 
@@ -269,6 +274,16 @@ pub struct ScreenStats {
     pub stalled_ms: u64,
     /// The link is stalled right now (as of the last report).
     pub stalled: bool,
+    /// Where every silence past the stall gap went — the stall count broken down by what the
+    /// host's send stamps made of it.
+    pub silences: StallAttribution,
+    /// Worst delay between the connection's reader stamping a datagram's arrival and this
+    /// worker feeding it to the reassembler. The reassembler measures gaps on the arrival
+    /// stamps, so this delay cannot invent a stall by itself; it says whether the runtime was
+    /// being starved at all, which is the one thing that would make the stamps late too.
+    pub reader_lag_max: Duration,
+    /// Datagrams this worker read a stall gap or more after they arrived.
+    pub reader_lag_over_gap: u64,
     /// When the first datagram of the stream arrived.
     pub first_datagram_at: Option<Instant>,
     /// When the first frame was complete and handed to the decoder.
@@ -443,7 +458,14 @@ pub fn spawn_screen(
     let worker = Worker {
         stream,
         datagrams,
-        reassembler: Reassembler::new(stream, Config::default(), Instant::now()),
+        // The loop below ticks after every branch, so the longest it goes without one is the
+        // idle sleep; the reassembler needs that number to tell a link that held datagrams
+        // from a runtime that did not run this task.
+        reassembler: Reassembler::new(
+            stream,
+            Config { tick_period: IDLE_TICK, ..Config::default() },
+            Instant::now(),
+        ),
         decoder,
         arrivals,
         out: uplink.control,
@@ -564,6 +586,13 @@ impl Worker {
         let len = u64::try_from(datagram.len()).unwrap_or(u64::MAX);
         self.counters.bytes = self.counters.bytes.saturating_add(len);
         self.counters.first_datagram_at.get_or_insert(now);
+        let lag = Instant::now().saturating_duration_since(now);
+        if lag > self.counters.reader_lag_max {
+            self.counters.reader_lag_max = lag;
+        }
+        if lag >= STALL_GAP {
+            self.counters.reader_lag_over_gap = self.counters.reader_lag_over_gap.saturating_add(1);
+        }
         match self.reassembler.ingest(datagram, now) {
             Ingest::Video => self.deliver(),
             Ingest::Cursor { seq, update } => {
@@ -653,6 +682,7 @@ impl Worker {
         self.counters.parity_shards = stats.parity_shards;
         self.counters.stalls = stats.stalls;
         self.counters.stalled_ms = stats.stalled_ms;
+        self.counters.silences = stats.silences;
         self.counters.stalled = self.reassembler.stalled(now);
         self.counters.hold_p50 = report.hold_p50.to_std();
         self.counters.hold_p95 = report.hold_p95.to_std();
