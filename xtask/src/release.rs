@@ -66,7 +66,7 @@ pub fn run(sh: &Shell, opts: &Options) -> Result<()> {
 }
 
 /// `[workspace.package].version` in the root manifest.
-fn current_version(sh: &Shell) -> Result<String> {
+pub fn current_version(sh: &Shell) -> Result<String> {
     let manifest = sh.read_file("Cargo.toml")?;
     workspace_version_line(&manifest)
         .and_then(|line| line.split('"').nth(1))

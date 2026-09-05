@@ -5,6 +5,7 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
+mod bundle;
 mod gate;
 mod ime;
 mod ios;
@@ -86,6 +87,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: run::RunCmd,
     },
+    /// macOS: build `Slopty.app` (app + host daemons + CLI inside) and sign it.
+    Bundle(bundle::BundleOpts),
     /// iOS: build the static library, package the xcframework, generate and build the Xcode
     /// project.
     Ios {
@@ -111,6 +114,7 @@ fn main() -> Result<()> {
         }
         Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
         Cmd::Run { cmd } => run::run(&sh, &cmd),
+        Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
     }
 }
