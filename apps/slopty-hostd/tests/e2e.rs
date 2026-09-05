@@ -1496,42 +1496,248 @@ mod tests {
     /// place, so the one ordered in second covers the first exactly.
     const CROP_ORIGIN: &str = "40,40";
 
-    /// What a stream must never show: a window on the display-crop path that is hidden stops
-    /// being served from that rectangle at once, so the viewer sees the picture stop rather than
-    /// the desktop behind it.
+    /// Wrap `binary` in a minimal application bundle under `dir` and return the executable
+    /// inside it.
     ///
-    /// The target is this test's own window, visible and unobstructed so the host takes the crop
-    /// path, then ordered out. A second window of the same kind sits directly behind it, at the
-    /// same origin, repainting: while the target covers it the crop is a picture of the target,
-    /// and the moment the target is ordered out the same rectangle is a window that keeps
-    /// changing. That backdrop is what gives the test its teeth — without it ScreenCaptureKit has
-    /// nothing new to deliver for the rectangle once the target goes, so a stream that never
-    /// stopped looking at the crop would be indistinguishable from one that did.
-    /// Gated on `SLOPTY_SCREEN_E2E`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_hidden_window_stops_being_served_from_its_crop() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
-            return;
+    /// The crop filter is built with
+    /// `initWithDisplay:includingApplications:exceptingWindows:` on the target's owning
+    /// application, so what it can show depends on what ScreenCaptureKit counts as a *different*
+    /// application. A second copy of a bare executable is not one: it has no bundle identifier,
+    /// and the framework treats it as the same application as the first. This gives the fixture
+    /// its own identifier and signature, which is the only way to ask the question honestly.
+    fn bundled(dir: &std::path::Path, binary: &std::path::Path, id: &str, name: &str) -> PathBuf {
+        let app = dir.join(format!("{name}.app"));
+        let macos = app.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).expect("the bundle directories");
+        let executable = binary.file_name().expect("the helper's name");
+        std::fs::copy(binary, macos.join(executable)).expect("copy the helper into the bundle");
+        std::fs::write(
+            app.join("Contents").join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>{}</string>
+	<key>CFBundleIdentifier</key>
+	<string>{id}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>{name}</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
+"#,
+                executable.to_string_lossy()
+            ),
+        )
+        .expect("the bundle's Info.plist");
+        std::fs::write(app.join("Contents").join("PkgInfo"), "APPL????").expect("PkgInfo");
+        // Ad hoc, like `cargo xtask bundle` without an identity: enough for the window server
+        // and ScreenCaptureKit to treat this as its own application.
+        let signed = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&app)
+            .status()
+            .expect("run codesign");
+        assert!(signed.success(), "codesign {app:?}");
+        macos.join(executable)
+    }
+
+    /// `datagrams` per hundred frames, 0 when no frame was sent.
+    fn per_hundred(datagrams: u64, frames: u64) -> u64 {
+        datagrams.saturating_mul(100).checked_div(frames).unwrap_or(0)
+    }
+
+    /// Mean brightness of a decoded picture: the average of its luma plane, 0-255.
+    ///
+    /// This is the only thing in these tests that looks at what was actually sent, and it looks
+    /// at it as one number. A window repainting inside the crop moves it every tick; a
+    /// rectangle holding nothing but the desktop does not move it at all.
+    fn mean_luma(image: &slopty_codec::PixelBuffer) -> f64 {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+            CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidthOfPlane,
+            CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+
+        let buffer = image.as_cv();
+        // SAFETY: the buffer came from the decoder and is not locked; the flags are the
+        // documented read-only lock (CoreVideo, `CVPixelBufferLockBaseAddress`).
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
+        assert_eq!(locked, 0, "lock the decoded frame");
+        let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0).cast::<u8>();
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
+        let width = CVPixelBufferGetWidthOfPlane(buffer, 0);
+        let height = CVPixelBufferGetHeightOfPlane(buffer, 0);
+        let mut sum = 0_u64;
+        for y in 0..height {
+            for x in 0..width {
+                // SAFETY: plane 0 is locked and mapped, `y < height` and `x < width <= stride`,
+                // so the offset is inside it.
+                sum += u64::from(unsafe { base.add(y * stride + x).read() });
+            }
         }
+        // SAFETY: the same buffer and flags this function locked above.
+        let unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
+        assert_eq!(unlocked, 0, "unlock the decoded frame");
+        let pixels = width.saturating_mul(height);
+        if pixels == 0 { 0.0 } else { sum as f64 / pixels as f64 }
+    }
+
+    /// Watch decoded frames and record when each arrived and how bright it was, until the
+    /// returned sender is dropped.
+    fn watch_luma(
+        handle: &slopty_client::ScreenHandle,
+    ) -> (tokio::task::JoinHandle<Vec<(std::time::Instant, f64)>>, tokio::sync::oneshot::Sender<()>)
+    {
+        let mut frames = handle.frames();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            loop {
+                tokio::select! {
+                    _stop = &mut stopped => break,
+                    changed = frames.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let picture = frames.borrow_and_update().clone();
+                        if let Some(picture) = picture {
+                            seen.push((
+                                std::time::Instant::now(),
+                                mean_luma(&picture.frame.image),
+                            ));
+                        }
+                    }
+                }
+            }
+            seen
+        });
+        (task, stop)
+    }
+
+    /// Mean brightness over `samples`, 0 when there are none.
+    fn luma_level(samples: &[(std::time::Instant, f64)]) -> f64 {
+        let total: f64 = samples.iter().map(|&(_at, luma)| luma).sum();
+        if samples.is_empty() { 0.0 } else { total / samples.len() as f64 }
+    }
+
+    /// How much the picture moved over `samples`: the difference between the brightest and the
+    /// dimmest of them, 0 when there are fewer than two.
+    fn luma_spread(samples: &[(std::time::Instant, f64)]) -> f64 {
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for &(_at, luma) in samples {
+            lo = lo.min(luma);
+            hi = hi.max(luma);
+        }
+        if samples.len() < 2 { 0.0 } else { hi - lo }
+    }
+
+    /// What sits in the rectangle behind the target while the crop test runs.
+    #[derive(Clone, Copy, Debug)]
+    enum Behind {
+        /// The desktop, and nothing else. The control: whatever the counters do here is what
+        /// they do without any window in the rectangle at all.
+        Nothing,
+        /// A second window of the same executable. ScreenCaptureKit gives a bare binary no
+        /// bundle identifier, so both processes are one application to the crop filter.
+        SameApplication,
+        /// The same binary inside its own signed bundle, which the framework does count as
+        /// another application — the case the filter is supposed to exclude.
+        AnotherApplication,
+    }
+
+    /// What one hide looked like, all of it read from the host's own counters.
+    #[derive(Debug)]
+    struct HideRun {
+        /// Marker written → AppKit reports the window ordered out.
+        order_ms: u128,
+        /// Ordered out → the host has left the crop path.
+        swap_ms: u128,
+        /// Crop frames sent after the window was ordered out: how many pictures of the
+        /// rectangle the client could have seen. It says nothing about what was in them —
+        /// ScreenCaptureKit delivers the crop at the configured rate whether the rectangle
+        /// changed or not, which the `Nothing` control shows.
+        after_order: u64,
+        /// Datagrams per hundred crop frames while the target is up and repainting: what a
+        /// rectangle with a flashing window in it costs to encode.
+        bits_visible: u64,
+        /// The same over the frames sent after the window was ordered out. A rectangle holding
+        /// only wallpaper is the same picture every time and encodes to almost nothing, so this
+        /// is what says whether anything was still being drawn in the crop.
+        bits_after_order: u64,
+        /// Frames encoded in the two seconds after the swap, with the window still away.
+        while_away: u64,
+        /// Frames the guard threw away over the whole hide.
+        withheld: u64,
+        /// How far the decoded picture's brightness moved while the target was up and drawing:
+        /// what a window repainting inside the crop looks like from the client, as one number.
+        luma_visible: f64,
+        /// The same over the pictures decoded between the window being ordered out and the host
+        /// leaving the crop. The window vanishing is itself the largest change in that window,
+        /// so this is large in every case and says nothing on its own.
+        luma_after_order: f64,
+        /// The spread over the *last* pictures of that window, once the target has gone from the
+        /// rectangle. This is the one that answers the question: near zero means the crop then
+        /// held something that never changed — the desktop — and not a window still being drawn.
+        luma_tail: f64,
+        /// How bright those last pictures were. The control run's value is what the desktop
+        /// behind the target looks like, so a case whose value matches it was showing the
+        /// desktop and not the window behind.
+        luma_tail_level: f64,
+        /// How many of those pictures there were, so a spread of zero can be told from no data.
+        samples_after_order: usize,
+        /// Whether the picture came back when the window did.
+        recovered: bool,
+    }
+
+    /// Drive one window onto the display-crop path, hide it with `behind` in the rectangle, and
+    /// report what the host did. The assertions belong to the callers, which differ only in what
+    /// is behind the target.
+    async fn crop_hide(behind: Behind) -> HideRun {
         let dir = tempfile::tempdir().unwrap();
         let helper_bin = bin_of("slopty-e2e", "slopty-idle-window");
-        // The thing that must never reach the client, in the rectangle the crop covers.
+        // The thing that must never reach the client, in the rectangle the crop covers. It
+        // repaints throughout: without something changing there, ScreenCaptureKit has no new
+        // frame for the rectangle once the target goes, and every assertion below about what is
+        // not sent would pass for free.
         let backdrop_markers = dir.path().join("backdrop");
         std::fs::create_dir_all(&backdrop_markers).unwrap();
-        // A copy at another path, so ScreenCaptureKit sees a different application: the crop
-        // filter includes the target's own application only, and a second instance of the same
-        // executable would be that same application.
-        let backdrop_bin = dir.path().join("slopty-backdrop-window");
-        std::fs::copy(&helper_bin, &backdrop_bin).expect("copy the helper");
-        let mut backdrop = Command::new(&backdrop_bin)
-            .arg(&backdrop_markers)
-            .arg(format!("slopty backdrop {}", std::process::id()))
-            .arg(CROP_ORIGIN)
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn the backdrop window");
-        wait_for_marker(&backdrop_markers.join("ready"), "the backdrop window").await;
+        let backdrop_bin = match behind {
+            Behind::Nothing => None,
+            Behind::SameApplication => Some({
+                let copy = dir.path().join("slopty-backdrop-window");
+                std::fs::copy(&helper_bin, &copy).expect("copy the helper");
+                copy
+            }),
+            Behind::AnotherApplication => {
+                Some(bundled(dir.path(), &helper_bin, "dev.slopty.test.backdrop", "SloptyBackdrop"))
+            }
+        };
+        let mut backdrop = match &backdrop_bin {
+            None => None,
+            Some(path) => {
+                let child = Command::new(path)
+                    .arg(&backdrop_markers)
+                    .arg(format!("slopty backdrop {}", std::process::id()))
+                    .arg(CROP_ORIGIN)
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("spawn the backdrop window");
+                wait_for_marker(&backdrop_markers.join("ready"), "the backdrop window").await;
+                Some(child)
+            }
+        };
 
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
@@ -1580,12 +1786,24 @@ mod tests {
         let screen = link.screen(stream, codec);
 
         // Visible and unobstructed, so the host serves it as a crop of its display.
-        let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop).await;
-        let cropping = cropping.expect("the host never took the display-crop path");
+        let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop)
+            .await
+            .expect("the host never took the display-crop path");
 
-        // Hide it. From the tick that notices, the crop holds something the viewer never asked
-        // for, so the stream must leave it — and nothing may be served from it afterwards.
-        let asked = cropping.cropped;
+        // What a crop with a window drawing in it costs, measured on this run rather than
+        // assumed: the scale everything after the hide is read against.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let drawing = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+            .await
+            .expect("the stream is still live");
+        let bits_visible = per_hundred(
+            drawing.datagrams.saturating_sub(cropping.datagrams),
+            drawing.cropped.saturating_sub(cropping.cropped),
+        );
+        let (luma, stop_luma) = watch_luma(&screen);
+        let watching_from = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         std::fs::write(markers.join("hide"), b"").unwrap();
         let hidden_at = std::time::Instant::now();
         // When the window was really ordered out, as AppKit saw it: the marker is only a
@@ -1602,25 +1820,96 @@ mod tests {
         let at_order = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
             .await
             .expect("the stream is still live");
-        let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop).await;
-        let swap_ms = hidden_at.elapsed().as_millis();
-        let swapped = swapped
-            .expect("a hidden window stayed on the crop path: it streams the desktop behind it");
-        // An upper bound on what could have been of the desktop: every crop frame sent between
-        // asking the window to go and the swap, most of which are still of the visible window
-        // (the helper takes up to its own tick to order out, and the WindowServer a moment more).
-        let between = swapped.cropped.saturating_sub(asked);
-        // What the client could conceivably have seen of the backdrop: crop frames sent after
-        // AppKit says the window was ordered out. Everything before that is a picture of the
-        // window, which is what the client asked for.
-        let after_order = swapped.cropped.saturating_sub(at_order.cropped);
-        eprintln!(
-            "hide: ordered out after {} ms, filter {} ms later, {between} cropped frames in \
-             between and {after_order} of them after the order, {} withheld",
-            (ordered_out - hidden_at).as_millis(),
-            swap_ms.saturating_sub((ordered_out - hidden_at).as_millis()),
-            swapped.withheld.saturating_sub(cropping.withheld),
-        );
+        let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop)
+            .await
+            .expect("a hidden window stayed on the crop path: it streams what is behind it");
+        let left_crop_at = std::time::Instant::now();
+        let swap_ms = left_crop_at.saturating_duration_since(ordered_out).as_millis();
+        let order_ms = ordered_out.saturating_duration_since(hidden_at).as_millis();
+
+        // Give the client time to decode what the host sent before the swap, then read the
+        // pictures. The window that matters runs from the order to the swap; frames decoded
+        // after that are the same ones, arriving late, so the cut is by arrival with a margin
+        // and the three cases are compared against each other rather than a threshold.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let _stopped = stop_luma.send(());
+        let seen = luma.await.expect("the luma watcher");
+        let visible: Vec<_> = seen
+            .iter()
+            .filter(|(at, _l)| *at > watching_from && *at < ordered_out)
+            .copied()
+            .collect();
+        let during: Vec<_> = seen
+            .iter()
+            .filter(|(at, _l)| {
+                *at > ordered_out
+                    && *at
+                        < left_crop_at
+                            .checked_add(Duration::from_millis(500))
+                            .expect("a deadline inside the clock")
+            })
+            .copied()
+            .collect();
+
+        // Nothing more is captured while the window is away: not from the crop (the rectangle
+        // holds the backdrop, which is still repainting) and not from the window filter (there
+        // is no window). The count is the host's, so it does not race the client decoding the
+        // frames that were legitimately sent while the window was still up.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let after = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+            .await
+            .expect("the stream is still live");
+        assert!(!after.on_crop, "a hidden window went back onto the crop path: {after:?}");
+
+        // Showing it again brings the picture back, with no help from the client.
+        let quiet = after.encoded;
+        std::fs::write(markers.join("show"), b"").unwrap();
+        let back = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.encoded > quiet).await;
+
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+        if let Some(child) = &mut backdrop {
+            std::fs::write(backdrop_markers.join("quit"), b"").unwrap();
+            let _backdrop_stopped = child.wait().await;
+        }
+        drop(screen);
+        link.close();
+        endpoint.close().await;
+
+        let run = HideRun {
+            order_ms,
+            swap_ms,
+            after_order: swapped.cropped.saturating_sub(at_order.cropped),
+            bits_visible,
+            bits_after_order: per_hundred(
+                swapped.datagrams.saturating_sub(at_order.datagrams),
+                swapped.cropped.saturating_sub(at_order.cropped),
+            ),
+            while_away: after.encoded.saturating_sub(swapped.encoded),
+            luma_visible: luma_spread(&visible),
+            luma_after_order: luma_spread(&during),
+            luma_tail: luma_spread(during.get(during.len().saturating_sub(4)..).unwrap_or(&[])),
+            luma_tail_level: luma_level(
+                during.get(during.len().saturating_sub(4)..).unwrap_or(&[]),
+            ),
+            samples_after_order: during.len(),
+            withheld: swapped.withheld.saturating_sub(cropping.withheld),
+            recovered: back.is_some(),
+        };
+        eprintln!("{behind:?}: {run:?}");
+        run
+    }
+
+    /// What a stream must never show: a window on the display-crop path that is hidden stops
+    /// being served from that rectangle, so the viewer sees the picture stop rather than what
+    /// was behind it. Gated on `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hidden_window_stops_being_served_from_its_crop() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let run = crop_hide(Behind::SameApplication).await;
 
         // A ceiling on a gap this layer cannot close, not the rule. Every way of asking the
         // WindowServer whether a window is on screen keeps saying yes for ~270 ms after AppKit
@@ -1630,39 +1919,61 @@ mod tests {
         // through once the host does know is the unit test
         // (`a_frame_captured_while_the_target_is_hidden_is_withheld`), not this.
         assert!(
-            after_order <= 30,
-            "{after_order} crop frames were sent after the window was ordered out: {swapped:?}"
+            run.after_order <= 30,
+            "crop frames sent after the window was ordered out: {run:?}"
         );
+        assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
+        assert!(run.recovered, "no picture after the window came back: {run:?}");
+        assert_dark_and_still(&run);
+    }
 
-        // Nothing more is captured for the client while the window is away: not from the crop
-        // (the rectangle now holds the backdrop, which is repainting throughout, so a stream
-        // still on the crop would have plenty to send) and not from the window filter (there is
-        // no window). The count is the host's, so it does not race the client decoding the
-        // frames that were legitimately sent while the window was still up.
-        let settled = swapped;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let after = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
-            .await
-            .expect("the stream is still live");
-        assert!(!after.on_crop, "a hidden window went back onto the crop path: {after:?}");
-        assert_eq!(
-            after.encoded, settled.encoded,
-            "frames were still being made for a hidden window: {after:?}"
+    /// The control for the two tests around it: the same hide with nothing behind the target.
+    /// Whatever the counters do here they do for an empty rectangle, so it is the only thing
+    /// that makes a number from the other two mean anything. Gated on `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_a_crop_shows_of_an_empty_rectangle() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let run = crop_hide(Behind::Nothing).await;
+        assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
+        assert!(run.recovered, "no picture after the window came back: {run:?}");
+        assert_dark_and_still(&run);
+    }
+
+    /// What the crop is sending by the time the window has gone from it, whatever is behind:
+    /// pictures that are black and that stop changing. The three cases differ only in what sits
+    /// in the rectangle, so this holding in all of them is the answer to what the crop can show.
+    fn assert_dark_and_still(run: &HideRun) {
+        assert!(run.samples_after_order >= 4, "too few pictures decoded to say anything: {run:?}");
+        assert!(
+            run.luma_tail < 5.0,
+            "the crop was still changing once the window had gone from it: {run:?}"
         );
+        assert!(
+            run.luma_tail_level < 5.0,
+            "the crop was showing something once the window had gone from it: {run:?}"
+        );
+    }
 
-        // Showing it again brings the picture back, with no help from the client.
-        let quiet = after.encoded;
-        std::fs::write(markers.join("show"), b"").unwrap();
-        let back = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.encoded > quiet).await;
-        assert!(back.is_some(), "no picture after the window came back");
-
-        std::fs::write(markers.join("quit"), b"").unwrap();
-        let _stopped = helper.wait().await;
-        std::fs::write(backdrop_markers.join("quit"), b"").unwrap();
-        let _backdrop_stopped = backdrop.wait().await;
-        drop(screen);
-        link.close();
-        endpoint.close().await;
+    /// The same hide with **another application** behind the target. The crop filter is
+    /// `initWithDisplay:includingApplications:exceptingWindows:` on the target's owning
+    /// application, so the question this answers is whether that scope is real: during the
+    /// ~270 ms in which nobody can tell the window has gone, does the crop carry the other
+    /// application's window or not? Gated on `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_a_crop_shows_of_another_application() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let run = crop_hide(Behind::AnotherApplication).await;
+        assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
+        assert!(run.recovered, "no picture after the window came back: {run:?}");
+        // The ruling: the other application's window is repainting in that rectangle for the
+        // whole of the gap, and none of it reaches the client. What does is black.
+        assert_dark_and_still(&run);
     }
 
     /// Poll hostd's control socket until one live stream's counters satisfy `want`.
