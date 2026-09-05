@@ -1464,9 +1464,11 @@ impl CanvasView {
         let active = self.active == Some(item.id);
         let id = item.id;
         let card = zoom < CARD_ZOOM;
-        let title_h = if card { TITLE_H } else { TITLE_H * zoom };
-        let base_ui = self.theme.typography.ui_size - 1.0;
-        let ui_size = if card { base_ui } else { base_ui * zoom };
+        // Cards keep full-size chrome; otherwise the title bar and everything in it (text,
+        // pills, the badge and its answers) scale with the item so nothing spills or clips.
+        let k = if card { 1.0 } else { zoom };
+        let title_h = TITLE_H * k;
+        let ui_size = (self.theme.typography.ui_size - 1.0) * k;
 
         let (title, focused) = match item.kind {
             ItemKind::Terminal { session } => {
@@ -1499,12 +1501,12 @@ impl CanvasView {
             ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
             _ => None,
         };
-        let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, ui_size, cx));
+        let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, k, cx));
         // A session with an agent offers its conversation in place of the grid.
         let chat = agent.and_then(|(session, _)| {
             let view = self.terminals.get(&session)?;
             let on = view.read(cx).conversation().is_some();
-            Some(chat_button(id, view.clone(), on, theme, cx))
+            Some(chat_button(id, view.clone(), on, theme, k, cx))
         });
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
@@ -1513,7 +1515,7 @@ impl CanvasView {
                 .terminals
                 .get(&session)
                 .filter(|v| !v.read(cx).driving())
-                .map(|_| take_button(id, theme, cx)),
+                .map(|_| take_button(id, theme, k, cx)),
             // A window with sound offers mute; a muted one always shows it, so a silenced item
             // is never mistaken for one whose sound simply stopped.
             ItemKind::Window { .. } | ItemKind::Display { .. } => self
@@ -1521,7 +1523,7 @@ impl CanvasView {
                 .get(&id)
                 .map(|v| v.read(cx))
                 .filter(|v| v.muted() || (active && v.has_audio()))
-                .map(|v| mute_button(id, v.muted(), theme, cx)),
+                .map(|v| mute_button(id, v.muted(), theme, k, cx)),
             _ => None,
         };
         let needs_human = agent
@@ -1536,12 +1538,13 @@ impl CanvasView {
 
         let title_bar = div()
             .id(element_id("title", id))
+            .debug_selector(|| format!("title-{}", id.as_uuid()))
             .h(px(title_h))
             .w_full()
             .flex()
             .items_center()
-            .px(px(theme.spacing.sm * if card { 1.0 } else { zoom }))
-            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.sm * k))
+            .gap(px(theme.spacing.sm * k))
             .bg(hsla(theme.surfaces.panel))
             .border_b_1()
             .border_color(hsla(theme.surfaces.border))
@@ -1553,11 +1556,11 @@ impl CanvasView {
                 MouseButton::Left,
                 cx.listener(move |this, ev, _w, cx| this.begin_move(id, ev, cx)),
             )
-            .child(
-                div().size(px(theme.spacing.sm * if card { 1.0 } else { zoom })).rounded_full().bg(
-                    hsla(if focused { theme.surfaces.accent } else { theme.surfaces.text_muted }),
-                ),
-            )
+            .child(div().size(px(theme.spacing.sm * k)).rounded_full().bg(hsla(if focused {
+                theme.surfaces.accent
+            } else {
+                theme.surfaces.text_muted
+            })))
             // "take" sits left of the title so it stays reachable on a phone when the item is
             // wider than the screen.
             .when_some(take, gpui::ParentElement::child)
@@ -1662,7 +1665,7 @@ impl CanvasView {
             .absolute()
             .right_0()
             .bottom_0()
-            .size(px(GRIP * if card { 1.0 } else { zoom }))
+            .size(px(GRIP * k))
             .cursor_nwse_resize()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1680,7 +1683,7 @@ impl CanvasView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(theme.radii.md * if card { 1.0 } else { zoom }))
+            .rounded(px(theme.radii.md * k))
             .border_1()
             .border_color(hsla(border))
             .bg(hsla(theme.terminal.bg))
@@ -1868,11 +1871,12 @@ fn mute_button(
     id: ItemId,
     muted: bool,
     theme: &Theme,
+    k: f32,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let (label, tone) =
         if muted { ("muted", theme.surfaces.warn) } else { ("mute", theme.surfaces.accent) };
-    pill(element_id("mute", id), label, tone, theme)
+    pill("mute", id, label, tone, theme, k)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _ev, _w, cx| {
@@ -1887,8 +1891,8 @@ fn mute_button(
 }
 
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
-fn take_button(id: ItemId, theme: &Theme, cx: &Context<CanvasView>) -> gpui::AnyElement {
-    pill(element_id("take", id), "take", theme.surfaces.accent, theme)
+fn take_button(id: ItemId, theme: &Theme, k: f32, cx: &Context<CanvasView>) -> gpui::AnyElement {
+    pill("take", id, "take", theme.surfaces.accent, theme, k)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _ev, _w, cx| {
@@ -1905,10 +1909,11 @@ fn chat_button(
     view: Entity<TerminalView>,
     on: bool,
     theme: &Theme,
+    k: f32,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let tone = if on { theme.surfaces.accent } else { theme.surfaces.text_secondary };
-    pill(element_id("chat", id), "chat", tone, theme)
+    pill("chat", id, "chat", tone, theme, k)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_this, _ev, window, cx| {
@@ -1920,21 +1925,24 @@ fn chat_button(
 }
 
 /// A title-bar pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
-/// hover deepens the fill.
+/// hover deepens the fill. Everything is scaled by `k`, the title bar's zoom factor.
 fn pill(
-    id: ElementId,
+    part: &'static str,
+    item: ItemId,
     label: &'static str,
     tone: slopty_theme::Rgb,
     theme: &Theme,
+    k: f32,
 ) -> gpui::Stateful<gpui::Div> {
     div()
-        .id(id)
+        .id(element_id(part, item))
+        .debug_selector(move || format!("{part}-{}", item.as_uuid()))
         .flex_none()
-        .px(px(theme.spacing.sm))
-        .py(px(theme.spacing.xxs))
-        .rounded(px(theme.radii.xs))
+        .px(px(theme.spacing.sm * k))
+        .py(px(theme.spacing.xxs * k))
+        .rounded(px(theme.radii.xs * k))
         .bg(hsla_alpha(tone, alpha::TINT))
-        .text_size(px(theme.typography.small()))
+        .text_size(px(theme.typography.small() * k))
         .text_color(hsla(tone))
         .cursor_pointer()
         .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
@@ -1980,10 +1988,11 @@ impl CanvasView {
         item: ItemId,
         session: SessionId,
         agent: &AgentEvent,
-        ui_size: f32,
+        k: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
+        let ui_size = (theme.typography.ui_size - 1.0) * k;
         let answered = self.answered.get(&session).copied();
         let (label, color) = match (&agent.status, answered) {
             (AgentStatus::None, _) => return div().into_any_element(),
@@ -2005,16 +2014,18 @@ impl CanvasView {
         };
         let button = |part: &'static str, text: &'static str, accent: bool| {
             let tone = if accent { theme.surfaces.accent } else { theme.surfaces.text_secondary };
+            let pad = if cfg!(target_os = "ios") { theme.spacing.md } else { theme.spacing.sm };
             div()
                 .id(element_id(part, item))
+                .debug_selector(move || format!("{part}-{}", item.as_uuid()))
                 .flex_none()
                 .flex()
                 .items_center()
-                .px(px(if cfg!(target_os = "ios") { theme.spacing.md } else { theme.spacing.sm }))
-                .py(px(theme.spacing.xs))
-                .rounded(px(theme.radii.xs))
+                .px(px(pad * k))
+                .py(px(theme.spacing.xs * k))
+                .rounded(px(theme.radii.xs * k))
                 .bg(hsla_alpha(tone, alpha::TINT_STRONG))
-                .text_size(px(theme.typography.small()))
+                .text_size(px(theme.typography.small() * k))
                 .text_color(hsla(theme.surfaces.text))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
@@ -2060,26 +2071,28 @@ impl CanvasView {
             .flex_none()
             .max_w(px(ui_size * if buttons.is_empty() { 22.0 } else { 14.0 }))
             .overflow_hidden()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.sm))
-            .py(px(theme.spacing.xxs))
-            .rounded(px(theme.radii.xs))
+            .gap(px(theme.spacing.xs * k))
+            .px(px(theme.spacing.sm * k))
+            .py(px(theme.spacing.xxs * k))
+            .rounded(px(theme.radii.xs * k))
             .bg(hsla_alpha(color, alpha::TINT))
-            .text_size(px(theme.typography.small()))
+            .text_size(px(theme.typography.small() * k))
             .text_color(hsla(color))
             .child(
                 div()
                     .flex_none()
-                    .size(px(theme.spacing.xs + theme.spacing.xxs))
+                    .size(px((theme.spacing.xs + theme.spacing.xxs) * k))
                     .rounded_full()
                     .bg(hsla(color)),
             )
             .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)));
         div()
+            .id(element_id("badge", item))
+            .debug_selector(move || format!("badge-{}", item.as_uuid()))
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(theme.spacing.xs))
+            .gap(px(theme.spacing.xs * k))
             .child(pill)
             .children(buttons)
             .into_any_element()
@@ -2391,5 +2404,55 @@ mod tests {
         view.update(cx, |v, cx| v.agent_event(working, cx));
         cx.run_until_parked();
         assert_eq!(border_of(cx, item), Some(hsla(light.surfaces.accent)));
+    }
+
+    /// `inner` lies within `outer` (a pixel of slack for rounding).
+    fn within(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
+        let slack = px(1.0);
+        inner.origin.x + slack >= outer.origin.x
+            && inner.origin.y + slack >= outer.origin.y
+            && inner.origin.x + inner.size.width <= outer.origin.x + outer.size.width + slack
+            && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height + slack
+    }
+
+    #[gpui::test]
+    fn title_bar_pills_shrink_with_the_zoom_and_stay_inside_the_bar(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let a = SessionId::new();
+        let item = host_opens(&view, cx, a, me, SHELL, 1);
+        let blocked = AgentEvent {
+            session: a,
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+            agent_session: None,
+            detail: None,
+            attention: true,
+        };
+        view.update(cx, |v, cx| v.agent_event(blocked, cx));
+        cx.run_until_parked();
+
+        let parts = ["chat", "badge", "allow", "deny"];
+        let title_full = cx.debug_bounds(selector("title", item)).expect("title bar drawn");
+        assert_eq!(title_full.size.height, px(TITLE_H));
+        let full: Vec<_> =
+            parts.iter().map(|p| cx.debug_bounds(selector(p, item)).expect(p)).collect();
+        for (part, b) in parts.iter().zip(&full) {
+            assert!(within(*b, title_full), "{part} at zoom 1: {b:?} in {title_full:?}");
+        }
+
+        // Zoom 0.6 is the last zoom before cards: the bar is 16.8 pt and every control scales
+        // with it instead of keeping full-size text and padding.
+        view.update(cx, |v, cx| v.zoom_by(0.6, cx));
+        cx.run_until_parked();
+        let zoom = view.read_with(cx, |c, _| c.zoom());
+        assert!((CARD_ZOOM..0.61).contains(&zoom), "{zoom}");
+        let title = cx.debug_bounds(selector("title", item)).expect("title bar drawn");
+        // Layout rounds to whole pixels: 16.8 pt draws as 17.
+        assert!(TITLE_H.mul_add(-0.6, f32::from(title.size.height)).abs() <= 1.0, "{title:?}");
+        for (part, before) in parts.iter().zip(&full) {
+            let b = cx.debug_bounds(selector(part, item)).expect(part);
+            assert!(within(b, title), "{part} at zoom 0.6: {b:?} in {title:?}");
+            assert!(b.size.height < before.size.height, "{part} shrank: {b:?} < {before:?}");
+        }
     }
 }
