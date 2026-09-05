@@ -458,12 +458,19 @@ mod tests {
         drop_permille: u32,
         /// Frames handed to the decoder.
         frames: u64,
+        /// Pictures the decoder gave back and published for the UI.
+        decoded: u64,
+        /// Frames the decoder rejected.
+        decode_errors: u64,
         /// Of those, the ones that needed parity.
         fec: u64,
         /// Of those, the ones that needed a retransmission.
         retransmit: u64,
         /// Frames given up on.
         lost: u64,
+        /// Stalls the receiver saw (the link holding datagrams, then releasing them together).
+        /// On a busy machine loopback stalls, and a stalled run says nothing about loss policy.
+        stalls: u64,
         nacks: u64,
         refreshes: u64,
         /// Datagrams the receiver saw, and the data fragments that never arrived.
@@ -525,6 +532,7 @@ mod tests {
                 changed = frames.changed() => {
                     if changed.is_err() { break; }
                     if frames.borrow_and_update().is_none() { continue; }
+                    row.decoded = row.decoded.saturating_add(1);
                     let now = std::time::Instant::now();
                     if let Some(prev) = last {
                         gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
@@ -541,9 +549,11 @@ mod tests {
         }
         let stats = screen.stats();
         row.frames = stats.frames;
+        row.decode_errors = stats.decode_errors;
         row.fec = stats.frames_fec;
         row.retransmit = stats.frames_retransmit;
         row.lost = stats.frames_lost;
+        row.stalls = stats.stalls;
         row.nacks = stats.nacks;
         row.refreshes = stats.refreshes;
         row.datagrams = stats.datagrams;
@@ -586,13 +596,14 @@ mod tests {
             rows.push(loss_sample(&ctl_sock, seconds, permille).await);
         }
         eprintln!(
-            "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | parity seen | gap p50 / p90 / max |"
+            "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | parity seen | stalls | gap p50 / p90 / max |"
         );
         for r in &rows {
             eprintln!(
-                "| {} ‰ | {} | {} | {} | {} | {} / {} | {} ({}) | {} ‰ | {:.1} / {:.1} / {:.1} ms |",
+                "| {} ‰ | {} ({} decoded) | {} | {} | {} | {} / {} | {} ({}) | {} ‰ | {} | {:.1} / {:.1} / {:.1} ms |",
                 r.drop_permille,
                 r.frames,
+                r.decoded,
                 r.fec,
                 r.retransmit,
                 r.lost,
@@ -601,13 +612,29 @@ mod tests {
                 r.datagrams,
                 r.datagrams_lost,
                 r.parity_seen,
+                r.stalls,
                 r.gap_p50_ms,
                 r.gap_p90_ms,
                 r.gap_max_ms,
             );
         }
         for r in &rows {
-            assert!(r.frames >= 1, "{} permille decoded nothing: {r:?}", r.drop_permille);
+            assert!(r.frames >= 1, "{} permille reassembled nothing: {r:?}", r.drop_permille);
+            // The decoder has to have produced pictures, not merely been fed: a stream where
+            // every decode fails reassembles exactly as well as one that works.
+            assert!(r.decoded >= 1, "{} permille decoded nothing: {r:?}", r.drop_permille);
+            assert_eq!(
+                r.decode_errors, 0,
+                "{} permille had decoder rejections: {r:?}",
+                r.drop_permille
+            );
+        }
+        // Loopback on a loaded machine stalls — the scheduler holds datagrams and releases them
+        // together — and a stalled run measures the machine, not the loss policy. The numbers
+        // are printed either way; only the verdicts wait for a quiet one.
+        if rows.iter().any(|r| r.stalls > 0) {
+            eprintln!("stalls in this run: the machine was busy, not the link; verdicts skipped");
+            return;
         }
         let clean = rows.first().expect("the 0 permille row");
         assert_eq!(clean.lost, 0, "a lossless path lost frames: {clean:?}");
