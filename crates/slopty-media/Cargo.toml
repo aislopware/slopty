@@ -11,6 +11,7 @@ description = "Media transport policy: datagram packetizer, Reed–Solomon FEC, 
 workspace = true
 
 [dependencies]
+tracing.workspace = true
 bytes.workspace = true
 reed-solomon-simd.workspace = true
 slopty-core.workspace = true

@@ -6,7 +6,13 @@
 //! * **Need keyframe** (start): only an IDR starts delivery.
 //! * **Need frame *n***: frames leave in order. A frame with missing fragments gets a NACK after a
 //!   short silence, retried at most [`Config::nack_retries`] times, and declared lost after the
-//!   deadline those retries imply.
+//!   deadline those retries imply — but only while the link is *flowing*: a retry needs something
+//!   to have arrived since the last NACK, and the deadline only counts when newer datagrams are
+//!   still coming in. A path that stalls outright (Wi-Fi delay bursts of 100–300 ms hold every
+//!   packet and then release them all) is waited out up to [`Config::max_hold`], because a refresh
+//!   could not get through it either and everything usually arrives once it clears. When it clears,
+//!   every pending frame's NACK clock restarts: the NACK sent into the stall only left with the
+//!   release, so its answer is a round trip away from *now*, not from when it was written.
 //! * **Need refresh** (after a loss): the host is asked for a refresh from the last good frame; the
 //!   next IDR or LTR-refresh frame restarts delivery and everything older is dropped.
 //!
@@ -40,6 +46,13 @@ pub struct Config {
     pub max_pending: usize,
     /// How often a refresh request is repeated while no refresh frame arrives (plus two RTTs).
     pub refresh_repeat: Duration,
+    /// Longest an incomplete frame is held while nothing at all arrives on the stream (a
+    /// stalled link); past this it is lost even though the deadline logic would keep waiting.
+    pub max_hold: Duration,
+    /// Shortest silence on the stream that counts as a stall when it ends (the effective gap is
+    /// the larger of this and one NACK round trip). Must exceed a normal inter-frame gap, or
+    /// every frame would restart the pending deadlines.
+    pub stall_gap: Duration,
 }
 
 impl Default for Config {
@@ -50,6 +63,8 @@ impl Default for Config {
             grace: Duration::from_millis(10),
             max_pending: 64,
             refresh_repeat: Duration::from_millis(100),
+            max_hold: Duration::from_millis(500),
+            stall_gap: Duration::from_millis(50),
         }
     }
 }
@@ -262,6 +277,10 @@ pub struct Reassembler {
     window: Window,
     jitter_us: i64,
     last_arrival: Option<(u64, u32)>,
+    /// When the last datagram of this stream (of any kind) came in.
+    arrived_at: Instant,
+    /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
+    last_rtt: Duration,
     last_host_ts_us: u32,
     ltr_acks: VecDeque<u64>,
 }
@@ -297,6 +316,8 @@ impl Reassembler {
             window: Window::default(),
             jitter_us: 0,
             last_arrival: None,
+            arrived_at: now,
+            last_rtt: Duration::from_millis(20),
             last_host_ts_us: 0,
             ltr_acks: VecDeque::new(),
         }
@@ -341,6 +362,11 @@ impl Reassembler {
         if header.stream.get() != self.stream.0 {
             return Ingest::Ignored(Ignored::Foreign);
         }
+        let gap = now.saturating_duration_since(self.arrived_at);
+        if gap >= self.last_rtt.saturating_add(self.cfg.nack_delay).max(self.cfg.stall_gap) {
+            self.resume(now, gap);
+        }
+        self.arrived_at = now;
         let header = *header;
         let payload = datagram.slice(HEADER_BYTES..);
         match header.kind() {
@@ -557,9 +583,33 @@ impl Reassembler {
         }
     }
 
+    /// The link moved again after a `gap` with nothing on it: restart every pending frame's
+    /// NACK clock, so the answer to a NACK that was stuck in the stall gets its round trip.
+    fn resume(&mut self, now: Instant, gap: Duration) {
+        if self.frames.values().all(|slot| matches!(slot, Slot::Complete { .. })) {
+            return;
+        }
+        tracing::debug!(?gap, pending = self.frames.len(), "link resumed; deadlines restart");
+        let fresh = now.checked_sub(self.cfg.nack_delay).unwrap_or(now);
+        for slot in self.frames.values_mut() {
+            match slot {
+                Slot::Complete { .. } => {}
+                Slot::Unknown { first_seen, nacks, nacked_at } => {
+                    *first_seen = fresh;
+                    *nacked_at = (*nacks > 0).then_some(now);
+                }
+                Slot::Partial(p) => {
+                    p.first_seen = fresh;
+                    p.nacked_at = (p.nacks > 0).then_some(now);
+                }
+            }
+        }
+    }
+
     /// Time-driven policy: NACKs, loss deadlines, refresh repeats. Call every few milliseconds
     /// and after ingesting a batch. `rtt` is the current round-trip estimate.
     pub fn tick(&mut self, now: Instant, rtt: Duration) -> Vec<Action> {
+        self.last_rtt = rtt;
         let retry_gap = rtt.saturating_add(self.cfg.nack_delay);
         let deadline = self
             .cfg
@@ -570,6 +620,14 @@ impl Reassembler {
         let accept_refresh = matches!(self.need, Need::Refresh);
         let retries = self.cfg.nack_retries;
         let nack_delay = self.cfg.nack_delay;
+        let max_hold = self.cfg.max_hold;
+        let arrived_at = self.arrived_at;
+        // Newer datagrams still coming in: a fragment that is missing was dropped, not delayed.
+        let flowing = now.saturating_duration_since(arrived_at) < deadline;
+        let retry_due = |nacked_at: Option<Instant>| {
+            nacked_at
+                .is_none_or(|t| now.saturating_duration_since(t) >= retry_gap && arrived_at > t)
+        };
 
         let mut lost: Vec<(u32, u64)> = Vec::new();
         let mut nacks: Vec<Action> = Vec::new();
@@ -577,27 +635,59 @@ impl Reassembler {
             match slot {
                 Slot::Complete { .. } => {}
                 Slot::Unknown { first_seen, nacks: tries, nacked_at } => {
-                    if now.saturating_duration_since(*first_seen) >= deadline {
+                    let age = now.saturating_duration_since(*first_seen);
+                    if age >= max_hold || (age >= deadline && flowing) {
+                        tracing::debug!(
+                            frame,
+                            ?age,
+                            tries,
+                            ?rtt,
+                            flowing,
+                            "frame lost: nothing arrived"
+                        );
                         lost.push((frame, 1));
                     } else if in_order
                         && *tries < retries
-                        && now.saturating_duration_since(*first_seen) >= nack_delay
-                        && nacked_at.is_none_or(|t| now.saturating_duration_since(t) >= retry_gap)
+                        && age >= nack_delay
+                        && retry_due(*nacked_at)
                     {
+                        tracing::debug!(frame, ?age, try_ = *tries, "nack whole frame");
                         nacks.push(Action::Nack { frame, fragments: Vec::new() });
                         *tries = tries.saturating_add(1);
                         *nacked_at = Some(now);
                     }
                 }
                 Slot::Partial(p) => {
-                    if now.saturating_duration_since(p.first_seen) >= deadline {
+                    let age = now.saturating_duration_since(p.first_seen);
+                    if age >= max_hold || (age >= deadline && flowing) {
+                        tracing::debug!(
+                            frame,
+                            ?age,
+                            tries = p.nacks,
+                            missing = p.missing_data_count(),
+                            of = p.data_count,
+                            parity = p.parity_count,
+                            retransmitted = p.retransmitted,
+                            ?rtt,
+                            flowing,
+                            "frame lost"
+                        );
                         lost.push((frame, p.missing_data_count()));
                     } else if (in_order || p.restartable(accept_refresh))
                         && p.nacks < retries
                         && now.saturating_duration_since(p.last_seen) >= nack_delay
-                        && p.nacked_at.is_none_or(|t| now.saturating_duration_since(t) >= retry_gap)
+                        && retry_due(p.nacked_at)
                     {
-                        nacks.push(Action::Nack { frame, fragments: p.missing_data() });
+                        let fragments = p.missing_data();
+                        tracing::debug!(
+                            frame,
+                            ?age,
+                            try_ = p.nacks,
+                            missing = fragments.len(),
+                            of = p.data_count,
+                            "nack"
+                        );
+                        nacks.push(Action::Nack { frame, fragments });
                         p.nacks = p.nacks.saturating_add(1);
                         p.nacked_at = Some(now);
                     }

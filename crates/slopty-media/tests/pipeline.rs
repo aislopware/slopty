@@ -210,18 +210,16 @@ mod tests {
 
         h.advance(cfg().nack_delay);
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }]);
+        // The link keeps flowing (a later frame lands), so the retry and the deadline apply.
         h.advance(RTT + cfg().nack_delay);
+        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
+        h.deliver(&s3.datagrams);
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }], "second try");
         h.advance(RTT + cfg().nack_delay + cfg().grace);
         let actions = h.tick();
         assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0 }]);
         assert!(h.rx.awaiting_refresh());
-        assert!(h.drain().is_empty(), "frame 2 is dropped: it depended on frame 1");
-
-        // Ordinary P-frames keep coming and are not delivered.
-        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
-        h.deliver(&s3.datagrams);
-        assert!(h.drain().is_empty());
+        assert!(h.drain().is_empty(), "frames 2 and 3 are dropped: they depended on frame 1");
         // The host answers with an LTR refresh; everything after it flows again.
         let refresh = frame_bytes(5, 4_000);
         let s4 = h.send(&refresh, false, true);
@@ -236,6 +234,78 @@ mod tests {
         assert_eq!(h.rx.stats().frames_lost, 1);
         // A straggler from the dropped frame is stale.
         assert_eq!(h.rx.ingest(&s1.datagrams[0], h.now), Ingest::Ignored(Ignored::Stale));
+    }
+
+    #[test]
+    fn a_stalled_link_holds_the_frame_until_it_moves_again() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let p = frame_bytes(2, 6_000);
+        let s1 = h.send(&p, false, false);
+        // 6 data + 2 parity; the tail of the frame is delayed, not dropped.
+        h.deliver(&s1.datagrams[..3]);
+        h.advance(cfg().nack_delay);
+        assert_eq!(h.tick().len(), 1, "first NACK goes out on silence");
+        // Nothing arrives for 200 ms: no retry, no refresh.
+        for _ in 0..20 {
+            h.advance(Duration::from_millis(10));
+            assert!(h.tick().is_empty(), "stalled link: wait, do not give up");
+        }
+        assert!(!h.rx.awaiting_refresh());
+        // The burst clears and the rest of the frame lands: delivered, nothing lost.
+        h.deliver(&s1.datagrams[3..]);
+        let out = h.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data, p);
+        assert_eq!(h.rx.stats().frames_lost, 0);
+    }
+
+    #[test]
+    fn a_stall_restarts_the_nack_clock_when_the_link_resumes() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let p = frame_bytes(2, 6_000);
+        let s1 = h.send(&p, false, false);
+        // Drop 3 of 6 data fragments (beyond the 2 parity); the NACK goes out, then the link
+        // stalls for 120 ms — longer than the whole loss deadline.
+        h.deliver_except(&s1, &[0, 1, 2, 6, 7]);
+        h.advance(cfg().nack_delay);
+        let nack = h.tick();
+        assert_eq!(nack.len(), 1);
+        h.advance(Duration::from_millis(120));
+        // The stall clears with a *later* frame first: frame 1 is not lost on the spot.
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        assert!(h.tick().is_empty(), "fresh deadline: no loss, no retry yet");
+        assert!(h.drain().is_empty(), "frame 2 waits for frame 1");
+        // One round trip later the retransmission (stuck behind the stall) lands.
+        h.advance(RTT);
+        let resent = h.tx.retransmit(1, &[0, 1, 2]);
+        h.deliver(&resent);
+        let out = h.drain();
+        assert_eq!(out.iter().map(|f| f.info.frame).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(out[0].data, p);
+        assert_eq!(h.rx.stats().frames_lost, 0);
+        assert!(!h.rx.awaiting_refresh());
+    }
+
+    #[test]
+    fn a_stall_longer_than_max_hold_gives_up() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 6_000), false, false);
+        h.deliver(&s1.datagrams[..3]);
+        h.advance(cfg().nack_delay);
+        assert_eq!(h.tick().len(), 1);
+        h.advance(cfg().max_hold);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert!(h.rx.awaiting_refresh());
     }
 
     #[test]
