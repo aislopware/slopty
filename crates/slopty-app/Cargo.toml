@@ -14,7 +14,7 @@ workspace = true
 default = [  ]
 # `Window::render_to_image` for the self-test socket (`cargo xtask e2e app`): GPUI's
 # test-support on the platform crate. Off in the bundle.
-e2e = [ "gpui/test-support", "gpui_platform/test-support" ]
+e2e = [ "gpui/test-support", "gpui_platform/test-support", "slopty-ui/e2e" ]
 
 [package.metadata.cargo-shear]
 # Only named so the `e2e` feature can reach its `test-support`; the code goes through gpui-kit.

@@ -11,6 +11,7 @@ pub mod hosts;
 pub mod net;
 pub mod settings;
 
+use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
@@ -28,6 +29,7 @@ use slopty_net::EndpointId;
 use slopty_proto::HostMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Theme, alpha};
+use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::canvas::{
     AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
     NextAttention,
@@ -73,10 +75,11 @@ fn hardware_keyboard_attached() -> bool {
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys).
-const BAR_KEYS: [(&str, &str, Option<&str>); 11] = [
+const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
     ("esc", "escape", None),
     ("tab", "tab", None),
     ("⌃", "", None),
+    ("⌘", "cmd", None),
     ("←", "left", None),
     ("↑", "up", None),
     ("↓", "down", None),
@@ -648,8 +651,10 @@ impl Workspace {
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
         let button = move |id: &'static str, text: &'static str, accent: bool| {
-            div()
+            let pill = div()
                 .id(id)
+                .role(Role::Button)
+                .aria_label(text)
                 .px(px(spacing.md))
                 .py(px(spacing.xs))
                 .rounded(px(radii.sm))
@@ -658,7 +663,8 @@ impl Workspace {
                 .bg(hsla(if accent { s.accent } else { s.raised }))
                 .when(!accent, |el| el.hover(move |el| el.bg(hsla(s.overlay))))
                 .cursor_pointer()
-                .child(text)
+                .child(text);
+            tab_stop(pill, s.accent)
         };
         div()
             .flex()
@@ -673,6 +679,9 @@ impl Workspace {
             .border_color(hsla(s.border))
             .child(
                 div()
+                    .id("pairing-title")
+                    .role(Role::Heading)
+                    .aria_label("Pair with a host")
                     .text_size(px(theme.typography.title()))
                     .text_color(hsla(s.text))
                     .child("Pair with a host"),
@@ -683,7 +692,7 @@ impl Workspace {
                     .text_color(hsla(s.text_muted))
                     .child("On the host Mac run `slopty host ticket`, then paste the ticket here."),
             )
-            .child(Input::new(&pairing.ticket))
+            .child(Input::new(&pairing.ticket).aria_label("Pairing ticket"))
             .child(
                 div()
                     .flex()
@@ -755,9 +764,13 @@ impl Workspace {
         lit: bool,
         on_click: impl Fn(&mut Window, &mut App) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
-        self.key_cap(id, lit, self.theme.typography.ui_size)
-            .child(SharedString::from(label))
-            .on_click(move |_ev, window, cx| on_click(window, cx))
+        let accent = self.theme.surfaces.accent;
+        let key = self
+            .key_cap(id, lit, self.theme.typography.ui_size)
+            .role(Role::Button)
+            .aria_label(SharedString::from(key_label(label, lit)))
+            .child(SharedString::from(label));
+        tab_stop(key, accent).on_click(move |_ev, window, cx| on_click(window, cx))
     }
 
     /// The bar over a remote window: chords and arrows, copy and paste through the host.
@@ -822,6 +835,7 @@ impl Workspace {
     ) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let armed = terminal.read(cx).sticky_control();
+        let armed_command = terminal.read(cx).sticky_command();
         let has_selection = terminal.read(cx).selection().is_some();
         let mut bar = div()
             .h(px(KEY_BAR_H))
@@ -839,62 +853,70 @@ impl Workspace {
         let small = self.theme.typography.small();
         for (label, key, typed) in BAR_KEYS {
             let is_control = key.is_empty();
-            let lit = is_control && armed;
+            let is_command = key == "cmd";
+            let lit = (is_control && armed) || (is_command && armed_command);
             let target = terminal.clone();
-            bar = bar.child(
-                self.key_cap(format!("key-{label}"), lit, ui)
-                    .child(SharedString::from(label))
-                    .on_click(move |_ev, _window, cx| {
-                        target.update(cx, |t, cx| {
-                            if is_control {
-                                let on = !t.sticky_control();
-                                t.set_sticky_control(on, cx);
-                            } else {
-                                t.press(
-                                    gpui::Keystroke {
-                                        modifiers: gpui::Modifiers::default(),
-                                        key: key.to_owned(),
-                                        key_char: typed.map(str::to_owned),
-                                    },
-                                    cx,
-                                );
-                            }
-                        });
-                    }),
-            );
+            let key_el = self
+                .key_cap(format!("key-{label}"), lit, ui)
+                .role(Role::Button)
+                .aria_label(SharedString::from(key_label(label, lit)))
+                .child(SharedString::from(label));
+            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
+                target.update(cx, |t, cx| {
+                    if is_control {
+                        let on = !t.sticky_control();
+                        t.set_sticky_control(on, cx);
+                    } else if is_command {
+                        let on = !t.sticky_command();
+                        t.set_sticky_command(on, cx);
+                    } else {
+                        t.press(
+                            gpui::Keystroke {
+                                modifiers: gpui::Modifiers::default(),
+                                key: key.to_owned(),
+                                key_char: typed.map(str::to_owned),
+                            },
+                            cx,
+                        );
+                    }
+                });
+            }));
         }
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
-        bar = bar.child(
-            self.key_cap("key-clipboard".to_owned(), has_selection, small)
-                .child(if has_selection { "copy" } else { "paste" })
-                .on_click(move |_ev, window, cx| {
-                    target.update(cx, |t, cx| {
-                        if has_selection {
-                            // Copy, then the key reads "paste" again.
-                            t.copy(&slopty_ui::terminal::Copy, window, cx);
-                            t.clear_selection(cx);
-                        } else {
-                            t.paste_clipboard(&slopty_ui::terminal::Paste, window, cx);
-                        }
-                    });
-                }),
-        );
+        let clipboard = self
+            .key_cap("key-clipboard".to_owned(), has_selection, small)
+            .role(Role::Button)
+            .aria_label(if has_selection { "Copy" } else { "Paste" })
+            .child(if has_selection { "copy" } else { "paste" });
+        bar = bar.child(tab_stop(clipboard, s.accent).on_click(move |_ev, window, cx| {
+            target.update(cx, |t, cx| {
+                if has_selection {
+                    // Copy, then the key reads "paste" again.
+                    t.copy(&slopty_ui::terminal::Copy, window, cx);
+                    t.clear_selection(cx);
+                } else {
+                    t.paste_clipboard(&slopty_ui::terminal::Paste, window, cx);
+                }
+            });
+        }));
         // No ⌘F either: "find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
         let finding = terminal.read(cx).finding();
-        bar =
-            bar.child(self.key_cap("key-find".to_owned(), finding, small).child("find").on_click(
-                move |_ev, window, cx| {
-                    target.update(cx, |t, cx| {
-                        if finding {
-                            t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
-                        } else {
-                            t.find(&slopty_ui::terminal::Find, window, cx);
-                        }
-                    });
-                },
-            ));
+        let find = self
+            .key_cap("key-find".to_owned(), finding, small)
+            .role(Role::Button)
+            .aria_label(if finding { "Close find" } else { "Find" })
+            .child("find");
+        bar = bar.child(tab_stop(find, s.accent).on_click(move |_ev, window, cx| {
+            target.update(cx, |t, cx| {
+                if finding {
+                    t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
+                } else {
+                    t.find(&slopty_ui::terminal::Find, window, cx);
+                }
+            });
+        }));
         bar.into_any_element()
     }
 
@@ -924,8 +946,10 @@ impl Workspace {
                 .child(SharedString::from(text))
         };
         let button = move |id: &'static str, text: &'static str, hint: &'static str| {
-            div()
+            let pill = div()
                 .id(id)
+                .role(Role::Button)
+                .aria_label(text.trim_start_matches("+ "))
                 .flex_none()
                 .px(px(if narrow { spacing.xs } else { spacing.sm }))
                 .py(px(spacing.xs))
@@ -939,7 +963,8 @@ impl Workspace {
                     format!("{text}  {hint}")
                 } else {
                     text.to_owned()
-                }))
+                }));
+            tab_stop(pill, s.accent)
         };
         let new_button = button("new-terminal", "+ shell", "⌘T").on_click(cx.listener(
             |this, _ev, window, cx| {
@@ -980,8 +1005,10 @@ impl Workspace {
             let warm = s.warn;
             let text =
                 if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") };
-            div()
+            let pill = div()
                 .id("needs-you")
+                .role(Role::Button)
+                .aria_label(SharedString::from(text.clone()))
                 .flex_none()
                 .px(px(spacing.sm))
                 .py(px(spacing.xxs))
@@ -995,13 +1022,21 @@ impl Workspace {
                     format!("{text}  ⌘⇧A")
                 } else {
                     text
-                }))
+                }));
+            tab_stop(pill, s.accent)
                 .on_click(cx.listener(|this, _ev, window, cx| this.next_attention(window, cx)))
         });
         // The host on show, with its status dot; a click opens the switcher.
         let dot = active.map_or(s.text_muted, |h| status_color(&self.theme, &h.status));
+        let host_name = active.map_or_else(|| "Slopty".to_owned(), |h| h.name.clone());
+        let host_label = active.map_or_else(
+            || "Hosts".to_owned(),
+            |h| format!("Host {}, {}", h.name, h.status.text()),
+        );
         let host_button = div()
             .id("host-switcher")
+            .role(Role::Button)
+            .aria_label(SharedString::from(host_label))
             .flex_shrink(1.0)
             // A phone's bar keeps the tap target even when the buttons crowd it.
             .min_w(px(if narrow { 96.0 } else { 0.0 }))
@@ -1023,9 +1058,7 @@ impl Workspace {
                     .text_ellipsis()
                     .text_size(px(theme.typography.ui_size))
                     .text_color(hsla(s.text))
-                    .child(SharedString::from(
-                        active.map_or_else(|| "Slopty".to_owned(), |h| h.name.clone()),
-                    )),
+                    .child(SharedString::from(host_name)),
             )
             .when(!self.hosts.is_empty(), |el| {
                 el.child(
@@ -1040,6 +1073,7 @@ impl Workspace {
                 this.switcher = !this.switcher;
                 cx.notify();
             }));
+        let host_button = tab_stop(host_button, s.accent);
         div()
             .h(px(TOP_BAR) + safe_top)
             .pt(safe_top)
@@ -1113,6 +1147,8 @@ impl Workspace {
             let color = status_color(&self.theme, &host.status);
             let row = div()
                 .id(SharedString::from(format!("host-{id}")))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("{}, {}", host.name, host.status.text())))
                 .flex()
                 .items_center()
                 .gap(px(spacing.sm))
@@ -1151,6 +1187,8 @@ impl Workspace {
                 .child(
                     div()
                         .id(SharedString::from(format!("forget-{id}")))
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("Forget {}", host.name)))
                         .flex_none()
                         .px(px(spacing.xs))
                         .py(px(spacing.xxs))
@@ -1165,26 +1203,28 @@ impl Workspace {
                         })),
                 )
                 .on_click(cx.listener(move |this, _ev, window, cx| this.activate(id, window, cx)));
-            panel = panel.child(row);
+            panel = panel.child(tab_stop(row, s.accent));
         }
+        let add_host = div()
+            .id("add-host")
+            .role(Role::Button)
+            .aria_label("Add host")
+            .px(px(spacing.md))
+            .py(px(spacing.sm))
+            .text_size(px(ui))
+            .text_color(hsla(s.accent))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .child(SharedString::from(if SHORTCUT_HINTS {
+                "Add host…  ⌘⇧H".to_owned()
+            } else {
+                "Add host…".to_owned()
+            }));
         panel = panel.child(div().h(px(1.0)).my(px(spacing.xs)).bg(hsla(s.border))).child(
-            div()
-                .id("add-host")
-                .px(px(spacing.md))
-                .py(px(spacing.sm))
-                .text_size(px(ui))
-                .text_color(hsla(s.accent))
-                .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
-                .child(SharedString::from(if SHORTCUT_HINTS {
-                    "Add host…  ⌘⇧H".to_owned()
-                } else {
-                    "Add host…".to_owned()
-                }))
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.switcher = false;
-                    this.show_pairing(window, cx);
-                })),
+            tab_stop(add_host, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
+                this.switcher = false;
+                this.show_pairing(window, cx);
+            })),
         );
         div()
             .id("host-switcher-backdrop")
@@ -1201,6 +1241,12 @@ impl Workspace {
             )
             .child(panel)
     }
+}
+
+/// A key-bar key as a screen reader names it; an armed modifier says so.
+fn key_label(label: &str, lit: bool) -> String {
+    let name = key_name(label);
+    if lit { format!("{name}, armed") } else { name.to_owned() }
 }
 
 /// The dot colour for a host's link state.
@@ -1379,6 +1425,10 @@ pub fn open_workspace(
     })?;
     // The self-test socket, for `cargo xtask e2e app`; never set for a normal launch.
     if let Some(socket) = std::env::var_os(slopty_e2e::SOCKET_ENV) {
+        // The accessibility tree is built only while a screen reader asks for it; a test
+        // asks up front so `dump.a11y` has it.
+        #[cfg(feature = "e2e")]
+        window.update(cx, |_root, window, _cx| window.set_a11y_active(true))?;
         let runtime = workspace.read(cx).runtime.clone();
         e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
     }

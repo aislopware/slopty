@@ -12,18 +12,20 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, list, px,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
+    px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry, TranscriptUpdate};
 use slopty_theme::{Theme, alpha};
 
+use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::terminal::view::TerminalView;
 
@@ -187,6 +189,8 @@ impl Conversation {
         div()
             .id("conversation")
             .debug_selector(|| "conversation".to_owned())
+            .role(Role::Group)
+            .aria_label("Conversation")
             .size_full()
             .flex()
             .flex_col()
@@ -223,29 +227,31 @@ impl Conversation {
                         )
                     })
                     .when(!empty && !self.pinned(), |el| {
-                        el.child(
-                            div()
-                                .id("conversation-latest")
-                                .debug_selector(|| "conversation-latest".to_owned())
-                                .absolute()
-                                .bottom(px(spacing.sm))
-                                .right(px(spacing.md))
-                                .px(px(spacing.sm))
-                                .py(px(spacing.xxs))
-                                .rounded(px(theme.radii.sm))
-                                .bg(hsla(s.accent))
-                                .text_color(hsla(s.accent_fg))
-                                .text_size(px(theme.typography.small()))
-                                .shadow_sm()
-                                .cursor_pointer()
-                                .child("↓ latest")
-                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    if let Some(c) = this.conversation() {
-                                        c.pin();
-                                    }
-                                    cx.notify();
-                                })),
-                        )
+                        let latest = div()
+                            .id("conversation-latest")
+                            .debug_selector(|| "conversation-latest".to_owned())
+                            .role(Role::Button)
+                            .aria_label("Jump to latest")
+                            .absolute()
+                            .bottom(px(spacing.sm))
+                            .right(px(spacing.md))
+                            .px(px(spacing.sm))
+                            .py(px(spacing.xxs))
+                            .rounded(px(theme.radii.sm))
+                            .bg(hsla(s.accent))
+                            .text_color(hsla(s.accent_fg))
+                            .text_size(px(theme.typography.small()))
+                            .shadow_sm()
+                            .cursor_pointer()
+                            .child("↓ latest");
+                        el.child(tab_stop(latest, s.accent).on_click(cx.listener(
+                            |this, _ev, _window, cx| {
+                                if let Some(c) = this.conversation() {
+                                    c.pin();
+                                }
+                                cx.notify();
+                            },
+                        )))
                     }),
             )
             .when_some(attention, |el, attention| el.child(attention_row(attention, &theme, cx)))
@@ -262,6 +268,8 @@ impl Conversation {
         div()
             .id("composer")
             .debug_selector(|| "composer".to_owned())
+            .role(Role::Group)
+            .aria_label("Composer")
             .w_full()
             .flex_none()
             .flex()
@@ -284,12 +292,19 @@ impl Conversation {
                     .border_1()
                     .border_color(hsla(if focused { s.accent } else { s.border }))
                     .bg(hsla(s.raised))
-                    .child(Textarea::new(&self.composer).appearance(false).bordered(false)),
+                    .child(
+                        Textarea::new(&self.composer)
+                            .appearance(false)
+                            .bordered(false)
+                            .aria_label("Message to Claude"),
+                    ),
             )
-            .child(
-                div()
+            .child({
+                let send = div()
                     .id("composer-send")
                     .debug_selector(|| "composer-send".to_owned())
+                    .role(Role::Button)
+                    .aria_label("Send")
                     .flex_none()
                     .w(px(send))
                     .h(px(send))
@@ -300,12 +315,10 @@ impl Conversation {
                     .bg(hsla(s.accent))
                     .text_color(hsla(s.accent_fg))
                     .cursor_pointer()
-                    .child("↑")
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    .on_click(
-                        cx.listener(|this, _ev, window, cx| this.submit_composer(window, cx)),
-                    ),
-            )
+                    .child("↑");
+                tab_stop(send, s.accent)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.submit_composer(window, cx)))
+            })
             .into_any_element()
     }
 }
@@ -315,9 +328,17 @@ impl Conversation {
 fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
     let s = &theme.surfaces;
     let spacing = theme.spacing;
+    let status = match attention {
+        Attention::Permission { tool, answered: None } => format!("Claude wants to use {tool}"),
+        Attention::Permission { tool, answered: Some(true) } => format!("{tool}: allowed"),
+        Attention::Permission { tool, answered: Some(false) } => format!("{tool}: denied"),
+        Attention::Prompt => "Claude is waiting for your answer".to_owned(),
+    };
     let row = div()
         .id("conversation-attention")
         .debug_selector(|| "conversation-attention".to_owned())
+        .role(Role::Status)
+        .aria_label(SharedString::from(status))
         .w_full()
         .flex_none()
         .flex()
@@ -331,9 +352,11 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
         .text_size(px(theme.typography.small()));
     let button = |id: &'static str, label: &'static str, accent: bool| {
         let tone = if accent { s.accent } else { s.text_secondary };
-        div()
+        let pill = div()
             .id(id)
             .debug_selector(move || id.to_owned())
+            .role(Role::Button)
+            .aria_label(label)
             .px(px(spacing.sm))
             .py(px(spacing.xs))
             .rounded(px(theme.radii.xs))
@@ -341,8 +364,8 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
             .text_color(hsla(s.text))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
-            .child(label)
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .child(label);
+        tab_stop(pill, s.accent)
     };
     match attention {
         Attention::Permission { tool, answered: None } => row
@@ -388,6 +411,8 @@ fn entry(
     let row = div()
         .id(ElementId::NamedInteger("conversation-entry".into(), u64::try_from(ix).unwrap_or(0)))
         .debug_selector(move || format!("conversation-entry-{ix}"))
+        .role(Role::ListItem)
+        .aria_label(SharedString::from(entry_label(entry)))
         .w_full()
         .px(px(spacing.md))
         .py(px(spacing.xs));
@@ -504,6 +529,24 @@ fn entry(
                 .when(!shown.text.is_empty(), |el| el.child(clipped_block(&shown, &mono, theme)))
                 .into_any_element()
         }
+    }
+}
+
+/// One entry as a screen reader hears it: who, then the first line.
+#[must_use]
+pub fn entry_label(entry: &TranscriptEntry) -> String {
+    let first = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_owned();
+    match &entry.body {
+        TranscriptBody::User { text } => format!("You: {}", first(text)),
+        TranscriptBody::Assistant { markdown } => format!("Claude: {}", first(markdown)),
+        TranscriptBody::Thinking { .. } => "Claude thinking".to_owned(),
+        TranscriptBody::ToolUse { name, summary, .. } => format!("Tool {name}: {summary}"),
+        TranscriptBody::ToolResult { tool, output, is_error } => format!(
+            "Result of {}{}: {}",
+            tool.as_deref().unwrap_or("a tool"),
+            if *is_error { " failed" } else { "" },
+            first(&output.text)
+        ),
     }
 }
 

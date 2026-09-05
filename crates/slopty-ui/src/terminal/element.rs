@@ -118,13 +118,23 @@ pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
     zoom: f32,
+    /// What a screen reader hears: the program's title and the cursor row's text. Filled by
+    /// the view only while the accessibility tree is being built.
+    a11y: Option<(SharedString, SharedString)>,
 }
 
 impl TerminalElement {
     /// Paint `view`.
     #[must_use]
     pub const fn new(view: Entity<TerminalView>, focused: bool) -> Self {
-        Self { view, focused, zoom: 1.0 }
+        Self { view, focused, zoom: 1.0, a11y: None }
+    }
+
+    /// The accessible label (the title) and value (the cursor row's text).
+    #[must_use]
+    pub fn a11y(mut self, label: SharedString, value: SharedString) -> Self {
+        self.a11y = Some((label, value));
+        self
     }
 
     /// Scale everything (font, cells, padding) by `zoom` while keeping the grid size that the
@@ -284,7 +294,18 @@ impl Element for TerminalElement {
     type RequestLayoutState = ();
 
     fn id(&self) -> Option<ElementId> {
-        None
+        Some(ElementId::Name("terminal-grid".into()))
+    }
+
+    fn a11y_role(&self) -> Option<gpui::accesskit::Role> {
+        Some(gpui::accesskit::Role::Terminal)
+    }
+
+    fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
+        if let Some((label, value)) = &self.a11y {
+            node.set_label(label.to_string());
+            node.set_value(value.to_string());
+        }
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {

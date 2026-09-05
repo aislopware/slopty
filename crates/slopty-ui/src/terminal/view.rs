@@ -176,6 +176,8 @@ pub struct TerminalView {
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
+    /// The next tap opens the link under it, as ⌘-click does: the phone key bar's ⌘ toggle.
+    sticky_command: bool,
     /// Text selected with the mouse.
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
@@ -246,6 +248,7 @@ impl TerminalView {
             predictor: Predictor::new(policy_from_env()),
             marked: None,
             sticky_control: false,
+            sticky_command: false,
             selection: None,
             selecting: false,
             hover: None,
@@ -867,6 +870,19 @@ impl TerminalView {
         self.sticky_control
     }
 
+    /// Arm or disarm ⌘ for the next tap: it opens the link under the finger, as ⌘-click
+    /// does with a mouse (a phone has no ⌘ to hold).
+    pub fn set_sticky_command(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.sticky_command = on;
+        cx.notify();
+    }
+
+    /// Whether the next tap opens a link.
+    #[must_use]
+    pub const fn sticky_command(&self) -> bool {
+        self.sticky_command
+    }
+
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.sticky_control) {
@@ -904,6 +920,18 @@ impl TerminalView {
     #[must_use]
     pub fn title(&self) -> Option<&str> {
         self.state.title()
+    }
+
+    /// The cursor row's text, trailing spaces trimmed: what a screen reader reads as the
+    /// grid's value (the whole grid would be noise).
+    #[must_use]
+    pub fn cursor_row_text(&self) -> String {
+        let row = usize::from(self.state.cursor().row);
+        self.state
+            .view()
+            .get(row)
+            .and_then(|r| r.line.map(|l| l.text().trim_end().to_owned()))
+            .unwrap_or_default()
     }
 
     /// Grid size.
@@ -1114,8 +1142,12 @@ impl TerminalView {
             return;
         };
         // ⌘-click opens the link under the pointer, as in every terminal: the program's OSC 8
-        // target when there is one, else the URL in the text.
-        if event.button == MouseButton::Left && event.modifiers.platform {
+        // target when there is one, else the URL in the text. The key bar's ⌘ arms one tap.
+        let armed = event.button == MouseButton::Left && std::mem::take(&mut self.sticky_command);
+        if armed {
+            cx.notify();
+        }
+        if event.button == MouseButton::Left && (event.modifiers.platform || armed) {
             let index = self.state.index_at_row(row);
             if let Some(span) = self.state.line(index).and_then(|line| url::link_at_col(line, col))
             {
@@ -1381,9 +1413,13 @@ impl TerminalView {
             .font_family(self.theme.typography.ui_family.clone())
             .on_action(cx.listener(Self::close_find))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .child(div().w(px(180.0)).child(Input::new(&search.input)))
+            .role(gpui::accesskit::Role::Group)
+            .aria_label("Find")
+            .child(div().w(px(180.0)).child(Input::new(&search.input).aria_label("Find")))
             .child(
                 bare("terminal-search-regex")
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label(if search.regex { "Plain text" } else { "Regular expression" })
                     .when(search.regex, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
@@ -1391,19 +1427,27 @@ impl TerminalView {
             .child(div().min_w(px(40.0)).text_color(hsla(s.text_secondary)).child(count))
             .child(
                 bare("terminal-search-prev")
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label("Previous match")
                     .child("↑")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(-1, cx))),
             )
             .child(
                 bare("terminal-search-next")
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label("Next match")
                     .child("↓")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(1, cx))),
             )
-            .child(bare("terminal-search-close").child("✕").on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.close_find(&CloseFind, window, cx);
-                },
-            )))
+            .child(
+                bare("terminal-search-close")
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label("Close find")
+                    .child("✕")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_find(&CloseFind, window, cx);
+                    })),
+            )
             .into_any_element()
     }
 }
@@ -1435,6 +1479,7 @@ impl Render for TerminalView {
             .debug_selector(|| "terminal".to_owned())
             .key_context("Terminal")
             .track_focus(&self.focus)
+            .role(gpui::accesskit::Role::Group)
             .relative()
             .size_full()
             .on_action(cx.listener(Self::copy))
@@ -1454,9 +1499,16 @@ impl Render for TerminalView {
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .map(|el| match conversation {
-                Some(conversation) => el.child(conversation),
-                None => el.child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom)),
+            .map(|el| {
+                if let Some(conversation) = conversation {
+                    return el.child(conversation);
+                }
+                let mut grid = TerminalElement::new(cx.entity(), focused).zoom(self.zoom);
+                if window.is_a11y_active() {
+                    let label = self.title().unwrap_or("shell").to_owned();
+                    grid = grid.a11y(label.into(), self.cursor_row_text().into());
+                }
+                el.child(grid)
             })
             .children(search)
     }
@@ -2162,5 +2214,142 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
         assert!(!sent[1].mods.contains(slopty_proto::input::Mods::CTRL));
+    }
+
+    /// The conversation's attention row and composer are read with roles and labels, in
+    /// reading order; Allow and Deny sit in the Tab ring and Enter answers.
+    #[gpui::test]
+    fn the_attention_row_and_the_composer_are_read_and_tabbed(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&answers);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::Answered { allowed } = event {
+                    seen.borrow_mut().push(*allowed);
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("cmd-shift-l");
+        view.update(cx, |v, cx| {
+            let session = v.session;
+            let update = TranscriptUpdate {
+                session,
+                reset: true,
+                entries: vec![user("hello"), assistant("hi")],
+            };
+            v.transcript_update(update, cx);
+            let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+            v.set_agent_status(Some(blocked), cx);
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let at = |role: &str, label: &str| {
+            tree.iter()
+                .position(|n| n.is(role, Some(label)))
+                .unwrap_or_else(|| panic!("{role} {label:?} in {tree:#?}"))
+        };
+        assert!(at("Group", "Conversation") < at("ListItem", "You: hello"));
+        assert!(at("ListItem", "You: hello") < at("ListItem", "Claude: hi"));
+        assert!(at("ListItem", "Claude: hi") < at("Status", "Claude wants to use Bash"));
+        assert!(at("Status", "Claude wants to use Bash") < at("Button", "Allow"));
+        assert!(at("Button", "Allow") < at("Button", "Deny"));
+        assert!(at("Button", "Deny") < at("Group", "Composer"));
+        assert!(at("Group", "Composer") < at("MultilineTextInput", "Message to Claude"));
+        assert!(at("MultilineTextInput", "Message to Claude") < at("Button", "Send"));
+
+        // From the grid, the first stop is Allow, then Deny; Enter on Deny answers.
+        cx.update(|window, cx| {
+            let grid = view.read(cx).focus.clone();
+            window.focus(&grid, cx);
+            window.focus_next(cx);
+        });
+        cx.run_until_parked();
+        let focused_label = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| crate::a11y::tree(window))
+                .into_iter()
+                .find(|n| n.focused)
+                .and_then(|n| n.label)
+        };
+        assert_eq!(focused_label(cx).as_deref(), Some("Allow"));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(focused_label(cx).as_deref(), Some("Deny"));
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: Keystroke::parse("enter").unwrap() });
+        cx.run_until_parked();
+        assert_eq!(*answers.borrow(), [false]);
+    }
+
+    /// The key bar's ⌘ arms exactly one tap: the next left press opens the link under it and
+    /// disarms; a press with nothing under it disarms too and selects as usual.
+    #[gpui::test]
+    fn sticky_command_opens_the_link_under_the_next_tap(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![
+                        RowUpdate {
+                            row: 0,
+                            line: Line::from_text("http://a.b", 10, Style::DEFAULT),
+                        },
+                        RowUpdate {
+                            row: 1,
+                            line: Line::from_text("http://c.d", 10, Style::DEFAULT),
+                        },
+                    ],
+                }),
+                cx,
+            );
+            view.set_sticky_command(true, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url(), None);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = |col: u16, row: u16| {
+            metrics.origin
+                + point(
+                    metrics.cell_width * (f32::from(col) + 0.5),
+                    metrics.line_height * (f32::from(row) + 0.5),
+                )
+        };
+        cx.simulate_click(cell(2, 0), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"));
+        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
+        // Disarmed, a press on the other link is a plain click: nothing opens.
+        cx.simulate_click(cell(2, 1), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"), "one tap, one link");
+    }
+
+    /// The grid is a terminal to a screen reader: its title as the label, the cursor row as
+    /// the value, never the whole screen.
+    #[gpui::test]
+    fn the_grid_reads_its_cursor_row(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let grid =
+            tree.iter().find(|n| n.role == "Terminal").unwrap_or_else(|| panic!("{tree:#?}"));
+        assert_eq!(grid.label.as_deref(), Some("shell"));
+        assert_eq!(grid.value.as_deref(), Some("2"), "row 0 holds the cursor: {grid:?}");
+        assert_eq!(view.read_with(cx, |v, _| v.cursor_row_text()), "2");
     }
 }

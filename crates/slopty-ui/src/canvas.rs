@@ -10,14 +10,15 @@
 
 use std::collections::HashMap;
 
+use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _,
-    SystemNotification, SystemNotificationAction, Window, canvas, div, fill, outline, point, px,
-    size,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Size, StatefulInteractiveElement as _, Styled as _, SystemNotification,
+    SystemNotificationAction, Window, canvas, div, fill, outline, point, px, size,
 };
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
@@ -31,6 +32,7 @@ use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
+use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -72,12 +74,17 @@ pub mod actions {
             ToggleMute,
             /// Show or hide the stream stats overlay on every remote window.
             ToggleStats,
+            /// Move the keyboard focus to the next control (title-bar pills, badges, the
+            /// composer's buttons), from anywhere, a terminal included.
+            FocusNext,
+            /// Move the keyboard focus to the previous control.
+            FocusPrev,
         ]
     );
 }
 pub use actions::{
-    AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ToggleMute,
-    ToggleStats, ZoomIn, ZoomOut, ZoomReset,
+    AddWindow, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewNote, NewTerminal,
+    NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -109,6 +116,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
         KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
+        // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
+        KeyBinding::new("ctrl-tab", FocusNext, CTX),
+        KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
     ]
 }
 
@@ -1301,6 +1311,14 @@ impl CanvasView {
         p - self.viewport.0
     }
 
+    /// Tab from the canvas itself (nothing else focused) enters the keyboard ring; inside a
+    /// terminal or a text field Tab is theirs.
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.is_focused(window) && crate::a11y::cycle(ev, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
     fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let delta = match ev.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
@@ -1470,6 +1488,12 @@ impl CanvasView {
         let title_h = TITLE_H * k;
         let ui_size = (self.theme.typography.ui_size - 1.0) * k;
 
+        let kind = match item.kind {
+            ItemKind::Terminal { .. } => "terminal",
+            ItemKind::Window { .. } => "window",
+            ItemKind::Display { .. } => "display",
+            ItemKind::Note { .. } => "note",
+        };
         let (title, focused) = match item.kind {
             ItemKind::Terminal { session } => {
                 let view = self.terminals.get(&session);
@@ -1536,9 +1560,16 @@ impl CanvasView {
             theme.surfaces.border
         };
 
+        let heading = SharedString::from(if kind == title {
+            title.clone()
+        } else {
+            format!("{kind} {title}")
+        });
         let title_bar = div()
             .id(element_id("title", id))
             .debug_selector(|| format!("title-{}", id.as_uuid()))
+            .role(Role::Heading)
+            .aria_label(heading)
             .h(px(title_h))
             .w_full()
             .flex()
@@ -1675,6 +1706,7 @@ impl CanvasView {
         div()
             .id(element_id("item", id))
             .debug_selector(|| format!("item-{}", id.as_uuid()))
+            .role(Role::Group)
             .absolute()
             .left(px(s.x))
             .top(px(s.y))
@@ -1716,7 +1748,7 @@ impl CanvasView {
             self.doc.items().map(|i| (i.rect, self.active == Some(i.id))).collect();
         let entity = cx.entity();
         let rects: Vec<Rect> = items.iter().map(|(r, _)| *r).collect();
-        canvas(
+        let map = canvas(
             move |bounds, _window, cx| {
                 let rects = rects.into_iter().chain(std::iter::once(viewport));
                 let map = MinimapMap::new(bounds.origin, rects);
@@ -1747,12 +1779,18 @@ impl CanvasView {
                 ));
             },
         )
-        .absolute()
-        .right(px(MINIMAP_MARGIN))
-        .bottom(px(MINIMAP_MARGIN))
-        .w(px(MINIMAP.0))
-        .h(px(MINIMAP.1))
-        .into_any_element()
+        .size_full();
+        div()
+            .id("minimap")
+            .role(Role::Image)
+            .aria_label("Canvas overview")
+            .absolute()
+            .right(px(MINIMAP_MARGIN))
+            .bottom(px(MINIMAP_MARGIN))
+            .w(px(MINIMAP.0))
+            .h(px(MINIMAP.1))
+            .child(map)
+            .into_any_element()
     }
 }
 
@@ -1816,6 +1854,9 @@ impl Render for CanvasView {
             .debug_selector(|| "canvas".to_owned())
             .key_context("Canvas")
             .track_focus(&self.focus)
+            .role(Role::Group)
+            .aria_label("Canvas")
+            .on_key_down(cx.listener(Self::key_down))
             .relative()
             .size_full()
             .overflow_hidden()
@@ -1833,6 +1874,8 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::find_in_active))
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_pan))
@@ -1876,30 +1919,28 @@ fn mute_button(
 ) -> gpui::AnyElement {
     let (label, tone) =
         if muted { ("muted", theme.surfaces.warn) } else { ("mute", theme.surfaces.accent) };
-    pill("mute", id, label, tone, theme, k)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                if let Some(view) = this.screens.get(&id) {
-                    view.read(cx).toggle_mute();
-                    cx.notify();
-                }
-            }),
-        )
+    let pill = pill("mute", id, label, tone, theme, k).role(Role::Button).aria_label(if muted {
+        "unmute"
+    } else {
+        "mute"
+    });
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            if let Some(view) = this.screens.get(&id) {
+                view.read(cx).toggle_mute();
+                cx.notify();
+            }
+        }))
         .into_any_element()
 }
 
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
 fn take_button(id: ItemId, theme: &Theme, k: f32, cx: &Context<CanvasView>) -> gpui::AnyElement {
-    pill("take", id, "take", theme.surfaces.accent, theme, k)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                this.take_over(id, cx);
-            }),
-        )
+    let pill = pill("take", id, "take", theme.surfaces.accent, theme, k)
+        .role(Role::Button)
+        .aria_label("take over");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.take_over(id, cx)))
         .into_any_element()
 }
 
@@ -1913,14 +1954,15 @@ fn chat_button(
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let tone = if on { theme.surfaces.accent } else { theme.surfaces.text_secondary };
-    pill("chat", id, "chat", tone, theme, k)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |_this, _ev, window, cx| {
-                cx.stop_propagation();
-                view.update(cx, |v, cx| v.toggle_conversation(window, cx));
-            }),
-        )
+    let pill = pill("chat", id, "chat", tone, theme, k).role(Role::Button).aria_label(if on {
+        "show terminal"
+    } else {
+        "show chat"
+    });
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |_this, _ev, window, cx| {
+            view.update(cx, |v, cx| v.toggle_conversation(window, cx));
+        }))
         .into_any_element()
 }
 
@@ -2015,9 +2057,11 @@ impl CanvasView {
         let button = |part: &'static str, text: &'static str, accent: bool| {
             let tone = if accent { theme.surfaces.accent } else { theme.surfaces.text_secondary };
             let pad = if cfg!(target_os = "ios") { theme.spacing.md } else { theme.spacing.sm };
-            div()
+            let pill = div()
                 .id(element_id(part, item))
                 .debug_selector(move || format!("{part}-{}", item.as_uuid()))
+                .role(Role::Button)
+                .aria_label(text)
                 .flex_none()
                 .flex()
                 .items_center()
@@ -2029,43 +2073,31 @@ impl CanvasView {
                 .text_color(hsla(theme.surfaces.text))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
-                .child(text)
+                .child(text);
+            tab_stop(pill, theme.surfaces.accent)
         };
         let buttons: Vec<gpui::AnyElement> = match (&agent.status, answered) {
             (AgentStatus::Blocked(BlockReason::Permission { .. }), None) => vec![
                 button("allow", "allow", true)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, _w, cx| {
-                            cx.stop_propagation();
-                            this.allow_agent(session, cx);
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.allow_agent(session, cx)))
                     .into_any_element(),
                 button("deny", "deny", false)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, _w, cx| {
-                            cx.stop_propagation();
-                            this.deny_agent(session, cx);
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.deny_agent(session, cx)))
                     .into_any_element(),
             ],
             (AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation), None) => vec![
                 button("answer", "answer", true)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, _w, cx| {
-                            cx.stop_propagation();
-                            this.reveal_session(session, cx);
-                        }),
+                    .on_click(
+                        cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)),
                     )
                     .into_any_element(),
             ],
             _ => Vec::new(),
         };
         let pill = div()
+            .id(element_id("agent", item))
+            .role(Role::Status)
+            .aria_label(SharedString::from(label.clone()))
             .flex()
             .items_center()
             .flex_none()
@@ -2454,5 +2486,90 @@ mod tests {
             assert!(within(b, title), "{part} at zoom 0.6: {b:?} in {title:?}");
             assert!(b.size.height < before.size.height, "{part} shrank: {b:?} < {before:?}");
         }
+    }
+
+    /// Every control in an item's title bar has a role and a label a screen reader can say,
+    /// in reading order; Tab from the canvas walks the ring in that order, Enter clicks, and
+    /// the focused pill wears the accent ring.
+    #[gpui::test]
+    fn the_title_bar_is_read_and_tabbed_in_reading_order(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let _item = host_opens(&view, cx, session, me, SHELL, 1);
+        view.update(cx, |c, cx| {
+            c.agent_event(
+                AgentEvent {
+                    session,
+                    kind: AgentKind::ClaudeCode,
+                    status: AgentStatus::Blocked(BlockReason::Permission {
+                        tool: "Bash".to_owned(),
+                    }),
+                    agent_session: None,
+                    detail: None,
+                    attention: false,
+                },
+                cx,
+            );
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let at = |role: &str, label: &str| {
+            tree.iter()
+                .position(|n| n.is(role, Some(label)))
+                .unwrap_or_else(|| panic!("{role} {label:?} in {tree:#?}"))
+        };
+        assert!(at("Group", "Canvas") < at("Heading", "terminal shell"), "the canvas first");
+        assert!(at("Heading", "terminal shell") < at("Button", "show chat"));
+        assert!(at("Button", "show chat") < at("Status", "allow? Bash"));
+        assert!(at("Status", "allow? Bash") < at("Button", "allow"));
+        assert!(at("Button", "allow") < at("Button", "deny"));
+        assert!(at("Button", "deny") < at("Terminal", "shell"), "the grid after its title bar");
+        assert!(at("Terminal", "shell") < at("Image", "Canvas overview"));
+
+        // The terminal holds the keyboard (Tab is the shell's); ⌃Tab enters the ring, then
+        // Tab walks it in reading order.
+        assert!(terminal_focused(&view, cx, session), "the new shell has the keyboard");
+        drain(&mut rx);
+        let mut order = Vec::new();
+        for step in 0..4 {
+            cx.simulate_keystrokes(if step == 0 { "ctrl-tab" } else { "tab" });
+            cx.run_until_parked();
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            let focused = tree.iter().find(|n| n.focused).expect("a focused node");
+            order.push(focused.label.clone().unwrap_or_default());
+            if focused.label.as_deref() == Some("deny") {
+                // The ring: an accent hairline around the focused pill.
+                let (scale, quads) =
+                    cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+                let accent = hsla(Theme::default().surfaces.accent);
+                let [x, y, ..] = focused.bounds;
+                assert!(
+                    quads.iter().any(|q| q.border_color == accent
+                        && q.border_widths.top.0 > 0.0
+                        && x.mul_add(-scale, q.bounds.origin.x.0).abs() < 1.0
+                        && y.mul_add(-scale, q.bounds.origin.y.0).abs() < 1.0),
+                    "a focus ring around deny at {x},{y}"
+                );
+                break;
+            }
+        }
+        order.retain(|l| l != "take over");
+        assert_eq!(order, ["show chat", "allow", "deny"], "Tab order");
+
+        // Enter (down, then up) on "deny" is the click: Esc goes to the prompt.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: Keystroke::parse("enter").unwrap() });
+        cx.run_until_parked();
+        let keys: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { req: TermRequest::Key(key), .. } => Some(key.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, [slopty_proto::input::KeyCode::Escape], "{keys:?}");
+        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        assert!(!tree.iter().any(|n| n.is("Button", Some("deny"))), "answered: {tree:#?}");
     }
 }

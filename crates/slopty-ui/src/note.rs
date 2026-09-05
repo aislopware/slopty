@@ -153,7 +153,11 @@ impl Render for NoteView {
             .p(px(self.pad * self.zoom))
             .text_size(px(self.text_size * self.zoom))
             .child(
-                Textarea::new(&self.text).appearance(false).bordered(false).h(gpui::relative(1.0)),
+                Textarea::new(&self.text)
+                    .appearance(false)
+                    .bordered(false)
+                    .aria_label("Note")
+                    .h(gpui::relative(1.0)),
             )
     }
 }

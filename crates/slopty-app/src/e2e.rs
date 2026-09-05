@@ -277,7 +277,7 @@ const fn mouse_button(button: Button) -> MouseButton {
 }
 
 #[cfg(feature = "e2e")]
-fn render(window: &mut Window, path: &str) -> Reply {
+fn render(window: &Window, path: &str) -> Reply {
     match window.render_to_image() {
         Ok(image) => {
             let (width, height) = image.dimensions();
@@ -291,8 +291,28 @@ fn render(window: &mut Window, path: &str) -> Reply {
 }
 
 #[cfg(not(feature = "e2e"))]
-fn render(_window: &mut Window, _path: &str) -> Reply {
+fn render(_window: &Window, _path: &str) -> Reply {
     Reply::Error { message: "built without the `e2e` feature; no renderer access".into() }
+}
+
+/// The accessibility tree of the last frame, trimmed for the dump.
+#[cfg(feature = "e2e")]
+fn a11y_nodes(window: &Window) -> Vec<slopty_e2e::A11yNode> {
+    slopty_ui::a11y::tree(window)
+        .into_iter()
+        .map(|n| slopty_e2e::A11yNode {
+            role: n.role,
+            label: n.label,
+            value: n.value,
+            focused: n.focused,
+            bounds: n.bounds,
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "e2e"))]
+const fn a11y_nodes(_window: &Window) -> Vec<slopty_e2e::A11yNode> {
+    Vec::new()
 }
 
 /// The agent's state as one word, as the dump lists it.
@@ -367,6 +387,7 @@ impl Workspace {
             })
             .collect();
         let mut dump = Dump {
+            a11y: a11y_nodes(window),
             window: WindowInfo {
                 width: f32::from(viewport.width),
                 height: f32::from(viewport.height),

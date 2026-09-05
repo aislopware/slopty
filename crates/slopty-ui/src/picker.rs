@@ -15,6 +15,7 @@ use slopty_core::SessionId;
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_theme::{Theme, alpha};
 
+use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 
 /// What the user chose.
@@ -131,8 +132,12 @@ impl WindowPicker {
         let Line { primary, secondary, hot } = line;
         let secondary_color = if hot { theme.surfaces.warn } else { theme.surfaces.text_muted };
         let (raised, overlay) = (theme.surfaces.raised, theme.surfaces.overlay);
-        div()
+        let label =
+            if secondary.is_empty() { primary.clone() } else { format!("{primary}, {secondary}") };
+        let row = div()
             .id(id)
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(SharedString::from(label))
             .w_full()
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.sm))
@@ -143,10 +148,6 @@ impl WindowPicker {
             .cursor_pointer()
             .hover(move |s| s.bg(hsla(raised)))
             .active(move |s| s.bg(hsla(overlay)))
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |_this, _ev, _w, cx| {
-                cx.emit(on_pick.clone());
-            }))
             .child(div().text_color(hsla(theme.surfaces.text)).child(SharedString::from(primary)))
             .child(
                 div()
@@ -155,7 +156,10 @@ impl WindowPicker {
                     .text_ellipsis()
                     .text_color(hsla(secondary_color))
                     .child(SharedString::from(secondary)),
-            )
+            );
+        tab_stop(row, theme.surfaces.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+            cx.emit(on_pick.clone());
+        }))
     }
 
     /// A muted heading between the picker's sections.
@@ -230,6 +234,8 @@ impl Render for WindowPicker {
             .child(
                 div()
                     .id("picker")
+                    .role(gpui::accesskit::Role::Dialog)
+                    .aria_label("Jump to a session, or add a window from the host")
                     .w(px(560.0))
                     .max_h(px(520.0))
                     .flex()

@@ -26,5 +26,9 @@ slopty-theme.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# `a11y::tree` for the self-test socket (`slopty/e2e`); tests get it through `cfg(test)`.
+e2e = [ "gpui/test-support" ]
+
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }

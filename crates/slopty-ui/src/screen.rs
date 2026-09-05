@@ -23,8 +23,8 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
     Keystroke, LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase,
-    UTF16Selection, Window, canvas, div, point, px, surface,
+    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextInputAction,
+    TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div, point, px, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -343,6 +343,14 @@ impl ScreenView {
     #[must_use]
     pub const fn target(&self) -> CaptureTarget {
         self.target
+    }
+
+    /// The picture's accessible label.
+    fn a11y_label(&self) -> String {
+        match self.target {
+            CaptureTarget::Display(id) => format!("Remote display {id}"),
+            CaptureTarget::Window(id) => format!("Remote window {}", id.0),
+        }
     }
 
     /// Frames painted so far.
@@ -850,6 +858,8 @@ impl Render for ScreenView {
         });
         div()
             .id("screen")
+            .role(gpui::accesskit::Role::Image)
+            .aria_label(gpui::SharedString::from(self.a11y_label()))
             .track_focus(&self.focus)
             .relative()
             .size_full()
