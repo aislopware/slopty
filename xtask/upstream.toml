@@ -1,0 +1,25 @@
+# Where each fork branch sits on its upstream. `cargo xtask upstream check` reads this (and the
+# gate warns when a base is older than seven days); `cargo xtask upstream sync` rebases the fork,
+# pushes it, moves the workspace pins and rewrites the `base` / `base_date` lines here, so drift
+# shows up in git history. `checkout` is relative to the main checkout of this repository (shared
+# by every worktree) and is cloned on first use.
+
+[zed]
+upstream = "https://github.com/zed-industries/zed.git"
+upstream_branch = "main"
+fork = "https://github.com/aislopware/zed.git"
+fork_branch = "slopty"
+checkout = ".research/zed-main"
+local_branch = "slopty-ios"
+base = "5a9b9558db01a6b906cec2fb70a797affdc58cdd"
+base_date = "2026-09-04"
+
+[gpui-kit]
+upstream = "https://github.com/longbridge/gpui-kit.git"
+upstream_branch = "main"
+fork = "https://github.com/aislopware/gpui-kit.git"
+fork_branch = "slopty"
+checkout = ".research/gpui-kit"
+local_branch = "slopty"
+base = "d59d1a16bfb1de85b0a52dbd472e90509478d064"
+base_date = "2026-09-05"

@@ -16,6 +16,7 @@ pub struct Options {
 
 pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     let started = std::time::Instant::now();
+    crate::upstream::warn_if_stale();
     fmt(sh, opts.fix)?;
     // The tools that never touch `target/` run beside the cargo steps (which serialise on the
     // build lock anyway); each captures its output and prints it whole when it is done.

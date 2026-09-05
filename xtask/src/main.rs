@@ -15,6 +15,7 @@ mod release;
 mod run;
 mod setup;
 mod tools;
+mod upstream;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -105,6 +106,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ios::IosCmd,
     },
+    /// Keep the GPUI and gpui-kit forks current with upstream (`check` the drift, `sync` them).
+    Upstream {
+        #[command(subcommand)]
+        cmd: upstream::UpstreamCmd,
+    },
 }
 
 fn main() -> Result<()> {
@@ -128,5 +134,6 @@ fn main() -> Result<()> {
         Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
         Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
+        Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
     }
 }

@@ -18,3 +18,5 @@ objc2-core-foundation.workspace = true
 xshell.workspace = true
 resvg.workspace = true
 icns.workspace = true
+serde.workspace = true
+toml.workspace = true
