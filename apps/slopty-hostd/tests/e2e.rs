@@ -1583,7 +1583,10 @@ mod tests {
             for x in 0..width {
                 // SAFETY: plane 0 is locked and mapped, `y < height` and `x < width <= stride`,
                 // so the offset is inside it.
-                sum += u64::from(unsafe { base.add(y * stride + x).read() });
+                let cell = unsafe { base.add(y.saturating_mul(stride).saturating_add(x)) };
+                // SAFETY: as above; the byte is initialised, this is the decoded picture.
+                let luma = unsafe { cell.read() };
+                sum = sum.saturating_add(u64::from(luma));
             }
         }
         // SAFETY: the same buffer and flags this function locked above.
@@ -1591,7 +1594,12 @@ mod tests {
             unsafe { CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
         assert_eq!(unlocked, 0, "unlock the decoded frame");
         let pixels = width.saturating_mul(height);
-        if pixels == 0 { 0.0 } else { sum as f64 / pixels as f64 }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a sum of bytes over one small picture, far below 2^53"
+        )]
+        let mean = sum as f64 / pixels as f64;
+        if pixels == 0 { 0.0 } else { mean }
     }
 
     /// Watch decoded frames and record when each arrived and how bright it was, until the
@@ -1629,7 +1637,9 @@ mod tests {
     /// Mean brightness over `samples`, 0 when there are none.
     fn luma_level(samples: &[(std::time::Instant, f64)]) -> f64 {
         let total: f64 = samples.iter().map(|&(_at, luma)| luma).sum();
-        if samples.is_empty() { 0.0 } else { total / samples.len() as f64 }
+        #[expect(clippy::cast_precision_loss, reason = "a handful of samples")]
+        let count = samples.len() as f64;
+        if samples.is_empty() { 0.0 } else { total / count }
     }
 
     /// How much the picture moved over `samples`: the difference between the brightest and the
@@ -1667,10 +1677,10 @@ mod tests {
             return None;
         }
         let value = std::ptr::NonNull::new(value.cast_mut())?;
-        // SAFETY: the call above returned success, so it stored a +1 reference here, and
-        // `AXWindows` is documented to be an array.
-        let windows: CFRetained<CFArray> =
-            unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(value)) };
+        // SAFETY: the call above returned success, so it stored a +1 reference here.
+        let value = unsafe { CFRetained::from_raw(value) };
+        // SAFETY: `AXWindows` is documented to be an array of elements.
+        let windows: CFRetained<CFArray> = unsafe { CFRetained::cast_unchecked(value) };
         Some(windows.count().try_into().unwrap_or(usize::MAX))
     }
 
@@ -1688,8 +1698,11 @@ mod tests {
         AnotherApplication,
     }
 
-    /// What one hide looked like, all of it read from the host's own counters.
+    /// What one hide looked like, all of it read from the host's own counters and the client's
+    /// own pictures. Every field is printed with the run and belongs to the record in
+    /// MEASUREMENTS.md; the assertions use the few that carry a rule.
     #[derive(Debug)]
+    #[expect(dead_code, reason = "the whole record is printed, and read from the test output")]
     struct HideRun {
         /// Marker written → AppKit reports the window ordered out.
         order_ms: u128,
@@ -2013,7 +2026,7 @@ mod tests {
                 break std::time::Instant::now();
             }
             assert!(asked.elapsed() < Duration::from_secs(5), "the helper never hid");
-            std::thread::sleep(Duration::from_millis(2));
+            tokio::time::sleep(Duration::from_millis(2)).await;
         };
 
         // Both polled as fast as they can be answered, from the same thread, so neither is
@@ -2031,7 +2044,7 @@ mod tests {
             if ordered_out.elapsed() > Duration::from_secs(3) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
         eprintln!(
             "late: accessibility {ax_ms:?} ms, core graphics {cg_ms:?} ms after the order \
