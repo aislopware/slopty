@@ -188,7 +188,11 @@ one key. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals 
 next waiting terminal in reading order, cycling from the active item; the top bar shows an
 "N need you" pill with the count that does the same on a click or a tap (the phone's way in).
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`.
-Later: ACP (`agent-client-protocol`) for structured control.
+On macOS the count is also the Dock badge, an attention event bounces the Dock icon when the
+app is not active, and (bundled app only) a notification-centre banner with Allow/Deny buttons
+is posted; clicking it activates the app and reveals the session
+(`CanvasView::notification_response`). Later: ACP (`agent-client-protocol`) for structured
+control.
 
 ## 6. UI
 

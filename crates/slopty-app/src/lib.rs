@@ -16,6 +16,7 @@ use gpui::{
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::LinkEvent;
+use slopty_core::SessionId;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
 use slopty_ui::canvas::{
@@ -689,6 +690,19 @@ pub fn open_workspace(
     let root_view = workspace.clone();
     let window =
         cx.open_window(options, move |window, cx| cx.new(|cx| Root::new(root_view, window, cx)))?;
+    // A tap on an agent banner brings the app and that session forward; its buttons answer.
+    let for_notifications = workspace.clone();
+    cx.on_system_notification_response(move |response, cx| {
+        let Ok(session) = response.tag.parse::<SessionId>() else { return };
+        cx.activate(true);
+        for_notifications.update(cx, |ws, cx| {
+            if let Some(canvas) = &ws.canvas {
+                canvas.update(cx, |c, cx| {
+                    c.notification_response(session, response.action_id.as_deref(), cx);
+                });
+            }
+        });
+    });
 
     // Connect on the tokio side; hand the link's channels to GPUI. Runs forever: a lost
     // connection (host restart, network change) is retried with a capped backoff.

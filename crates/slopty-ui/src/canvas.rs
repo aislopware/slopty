@@ -15,8 +15,9 @@ use gpui::{
     App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _, Window,
-    canvas, div, fill, outline, point, px, size,
+    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _,
+    SystemNotification, SystemNotificationAction, Window, canvas, div, fill, outline, point, px,
+    size,
 };
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
@@ -520,6 +521,12 @@ impl CanvasView {
             self.agents.remove(&session);
         } else {
             let attention = event.attention;
+            let needs_human = needs_human(&event);
+            if attention {
+                Self::notify_system(&event, cx);
+            } else if !needs_human {
+                cx.dismiss_system_notification(&session.to_string());
+            }
             self.agents.insert(session, event);
             if attention {
                 cx.emit(CanvasEvent::Attention(session));
@@ -527,6 +534,58 @@ impl CanvasView {
         }
         self.count_needs_you(cx);
         cx.notify();
+    }
+
+    /// A banner through the notification centre when the human is not looking at the app:
+    /// the badge text as title, the detail as body, allow/deny buttons for a permission.
+    /// GPUI drops it silently outside a bundle or when the user declined notifications.
+    fn notify_system(event: &AgentEvent, cx: &Context<Self>) {
+        let active = cx.active_window().is_some();
+        tracing::debug!(active, session = %event.session, "agent banner");
+        if active {
+            return;
+        }
+        let actions = match &event.status {
+            AgentStatus::Blocked(BlockReason::Permission { .. }) => vec![
+                SystemNotificationAction { id: "allow".into(), label: "Allow".into() },
+                SystemNotificationAction { id: "deny".into(), label: "Deny".into() },
+            ],
+            _ => Vec::new(),
+        };
+        let title = match &event.status {
+            AgentStatus::Blocked(BlockReason::Permission { tool }) if tool.is_empty() => {
+                "Claude needs permission".to_owned()
+            }
+            AgentStatus::Blocked(BlockReason::Permission { tool }) => {
+                format!("Claude wants to use {tool}")
+            }
+            AgentStatus::Blocked(BlockReason::Question) => "Claude has a question".to_owned(),
+            AgentStatus::Blocked(BlockReason::Elicitation) => "Claude needs input".to_owned(),
+            AgentStatus::Done => "Claude finished".to_owned(),
+            _ => agent_status_text(event),
+        };
+        let body = event.detail.clone().filter(|d| !d.is_empty()).unwrap_or_default();
+        cx.show_system_notification(SystemNotification {
+            tag: event.session.to_string().into(),
+            title: title.into(),
+            body: body.into(),
+            actions,
+        });
+    }
+
+    /// The user activated a notification: the body reveals the session, the buttons answer
+    /// the permission prompt. Called from the app's response handler with the tag parsed.
+    pub fn notification_response(
+        &mut self,
+        session: SessionId,
+        action: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            Some("allow") => self.allow_agent(session, cx),
+            Some("deny") => self.deny_agent(session, cx),
+            _ => self.reveal_session(session, cx),
+        }
     }
 
     /// Sessions whose agent is waiting on the human and has not been answered from the
@@ -614,6 +673,7 @@ impl CanvasView {
             view.press(keystroke, cx);
         });
         self.answered.insert(session, answer);
+        cx.dismiss_system_notification(&session.to_string());
         self.count_needs_you(cx);
         cx.notify();
     }
