@@ -150,10 +150,20 @@ impl ShapeCache {
     }
 }
 
-fn row_hash(line: &Line, focused: bool, font_size: Pixels) -> u64 {
+/// Key of a shaped row: everything the shaped runs bake in (text, styles, size, family and
+/// the palette the styles were resolved through), so a theme swap never replays old colours.
+fn row_hash(
+    line: &Line,
+    focused: bool,
+    font_size: Pixels,
+    family: &str,
+    palette: &TerminalPalette,
+) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     focused.hash(&mut h);
     f32::from(font_size).to_bits().hash(&mut h);
+    family.hash(&mut h);
+    palette.hash(&mut h);
     for cell in &line.cells {
         cell.text.as_str().hash(&mut h);
         cell.style.hash(&mut h);
@@ -376,7 +386,7 @@ impl Element for TerminalElement {
                     });
                     continue;
                 };
-                let key = row_hash(line, focused, font_size);
+                let key = row_hash(line, focused, font_size, &family, palette);
                 cache.touched.insert(key, cache.generation);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 for (col, cell) in line.cells.iter().enumerate() {

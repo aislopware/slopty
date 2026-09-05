@@ -29,7 +29,7 @@ impl Rgb {
 }
 
 /// Terminal colours.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct TerminalPalette {
     /// Default text.
     pub fg: Rgb,
@@ -77,6 +77,35 @@ impl TerminalPalette {
             Rgb::hex(0xD68AEE),
             Rgb::hex(0x66C7D4),
             Rgb::hex(0xFFFFFF),
+        ],
+    };
+    /// The default light palette (GitHub-light hues: legible on white without glare).
+    #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+    pub const LIGHT: Self = Self {
+        fg: Rgb::hex(0x1F2328),
+        bg: Rgb::hex(0xFFFFFF),
+        cursor: Rgb::hex(0x2F6FDB),
+        cursor_text: Rgb::hex(0xFFFFFF),
+        selection: Rgb::hex(0xC9DDFB),
+        search_match: Rgb::hex(0xFFE9A8),
+        search_current: Rgb::hex(0xF5B942),
+        ansi: [
+            Rgb::hex(0x24292F),
+            Rgb::hex(0xCF222E),
+            Rgb::hex(0x116329),
+            Rgb::hex(0x9A6700),
+            Rgb::hex(0x0969DA),
+            Rgb::hex(0x8250DF),
+            Rgb::hex(0x1B7C83),
+            Rgb::hex(0x6E7781),
+            Rgb::hex(0x57606A),
+            Rgb::hex(0xA40E26),
+            Rgb::hex(0x1A7F37),
+            Rgb::hex(0xBF8700),
+            Rgb::hex(0x218BFF),
+            Rgb::hex(0xA475F9),
+            Rgb::hex(0x3192AA),
+            Rgb::hex(0x8C959F),
         ],
     };
 
@@ -172,6 +201,26 @@ impl Surfaces {
         text_muted: Rgb::hex(0x8B919C),
         accent: Rgb::hex(0x8AB4F8),
     };
+    /// Light.
+    #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
+    pub const LIGHT: Self = Self {
+        canvas: Rgb::hex(0xF4F5F7),
+        panel: Rgb::hex(0xFFFFFF),
+        border: Rgb::hex(0xD8DBE1),
+        text: Rgb::hex(0x1D1D1F),
+        text_muted: Rgb::hex(0x6E6E73),
+        accent: Rgb::hex(0x2F6FDB),
+    };
+}
+
+/// Dark or light.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum Variant {
+    /// Near-black surfaces, light text.
+    #[default]
+    Dark,
+    /// White surfaces, dark text.
+    Light,
 }
 
 /// The whole theme.
@@ -191,13 +240,25 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            terminal: TerminalPalette::DARK,
-            surfaces: Surfaces::DARK,
-            typography: Typography::default(),
-            radius: 8.0,
-            space: 8.0,
-        }
+        Self::new(Variant::Dark)
+    }
+}
+
+impl Theme {
+    /// The theme for `variant` with default typography.
+    #[must_use]
+    pub fn new(variant: Variant) -> Self {
+        let (terminal, surfaces) = match variant {
+            Variant::Dark => (TerminalPalette::DARK, Surfaces::DARK),
+            Variant::Light => (TerminalPalette::LIGHT, Surfaces::LIGHT),
+        };
+        Self { terminal, surfaces, typography: Typography::default(), radius: 8.0, space: 8.0 }
+    }
+
+    /// Which variant the colours are (by the terminal background).
+    #[must_use]
+    pub fn variant(&self) -> Variant {
+        if self.terminal.bg == TerminalPalette::LIGHT.bg { Variant::Light } else { Variant::Dark }
     }
 }
 
@@ -216,5 +277,15 @@ mod tests {
         assert_eq!(p.palette(1), p.ansi[1]);
         assert_eq!(p.resolve(Color::Default, true), p.bg);
         assert_eq!(p.resolve(Color::Rgb(1, 2, 3), false), Rgb { r: 1, g: 2, b: 3 });
+    }
+
+    #[test]
+    fn variants() {
+        assert_eq!(Theme::default().variant(), Variant::Dark);
+        let light = Theme::new(Variant::Light);
+        assert_eq!(light.variant(), Variant::Light);
+        assert_eq!(light.surfaces, Surfaces::LIGHT);
+        assert_eq!(light.typography, Typography::default());
+        assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
     }
 }
