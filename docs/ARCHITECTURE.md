@@ -43,8 +43,15 @@ Three kinds of traffic, one QUIC connection per (client, host):
 The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, not bytes
 (mosh / zellij / wezterm-mux model). Consequences:
 
-- Reconnect and multi-client are cheap: a joining client receives the current screen plus a
-  scrollback window; nothing is replayed.
+- Reconnect and multi-client are proven, not just cheap (`crates/slopty-e2e/tests/pair.rs`,
+  `cargo xtask e2e pair`): a joining client receives the current screen plus a scrollback window,
+  nothing is replayed. Two clients share one host and one canvas at once. A terminal opened on one
+  is on the other within a round trip; both type into the same session and the actor serialises
+  their keys in arrival order (nothing lost or reordered); one client is the size **driver** (§2,
+  the "take" pill) while the rest are viewers; an agent's attention badges every client; a client
+  that dies leaves the others streaming and reattaches on relaunch (its dead connection's cleanup
+  detaches only its own sinks, `Sender::same_channel`). See DECISIONS "Multi-client" for the
+  state-ownership and input-contention rulings.
 - A slow link never falls behind a fast program: the host coalesces to one diff per tick.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
@@ -328,9 +335,10 @@ One infinite 2D plane per workspace (kolu model). Items: terminal, remote window
 note (`ItemKind` in `crates/slopty-proto/src/canvas.rs`). Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
 at ≥ 0.6×, summary card (title, last lines, agent state) below. Off-screen terminals keep their
 line cache and stop painting; off-screen video pauses decode (kind-aware culling). Layout is a
-document synced through the host so every client sees the same canvas (`slopty-host::canvas`
-owns it, `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws
-it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
+document synced through the host so every client sees the same canvas — item geometry, z, sleep
+and note text are host state; the camera `{x, y, zoom}` is per client, so panning and zoom on one
+client do not move another (`slopty-host::canvas` owns the document,
+`slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
 grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A are the keyboard surface; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document. The picker (⌘O) lists the

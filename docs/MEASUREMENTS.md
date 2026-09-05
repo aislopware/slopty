@@ -1475,3 +1475,40 @@ So the pacer is not clumping and there is nothing here to fix at that layer. Wha
 receiver that charges the link ~0.3 stalls a second on a quiet loopback stream whatever the
 machine is doing, which is a question about the stall detector's own pessimism rules — a gap it
 cannot attribute is charged to the link by design — and not about pacing. That is its own track.
+
+## 2026-09-06 — two clients on one host (mac-studio, e2e pair build, loopback)
+
+Two `slopty-app` processes paired with one ptyd + hostd, each driven through its own test socket
+(`crates/slopty-e2e/tests/pair.rs`, `cargo xtask e2e pair`; the display row also needs
+`SLOPTY_SCREEN_E2E=1`). Debug build, loopback iroh, machine shared with other sessions' builds.
+The `dump` round trip is one socket message gated on the app's next frame, so it resolves time to
+about one frame (~130 ms under a full-screen flood); the propagation and stall numbers are read at
+that granularity and the guards sit well clear of it.
+
+Behaviours (each a `MEASURE` line the test prints):
+
+| behaviour | number |
+|---|---|
+| (a) shell opened on A, shown on B | 0 ms after A (both from the one `SessionOpened`/`Canvas` broadcast) |
+| (b) both clients type into one session | keys interleaved and complete: `a0b1c2d3e4f5g6h7i8j9`, none lost or reordered |
+| (b) opener drives | A drives, B wears the "take" pill; B's "take" hands the PTY size over |
+| (c) permission badge (hook played to hostd) | on both clients within one poll (≤ 250 ms); "1 needs you" on both |
+| (f) B's flood while A is killed | longest pause 150-176 ms, against a 131-133 ms baseline with A alive (dump-poll floor); guard 600 ms |
+| (f) A's abandoned connection idles out | 44.1 s after relaunch (QUIC `IDLE_TIMEOUT` 45 s); both live clients keep their viewers |
+
+Display fanned out to both clients (first display, native 1920×1080, `SLOPTY_SCREEN_E2E=1`):
+
+| viewer | presented | arrival → present p50 / p95 | skipped | late |
+|---|---|---|---|---|
+| A | 35 | 4.3 / 57.1 ms | 0 | 0 |
+| B | 45 | 4.3 / 21.5 ms | 0 | 0 |
+
+Host-side fan-out (from `slopty host screens` and `ps` CPU time over 4 s windows):
+
+| viewers of the one display | live streams | hostd CPU |
+|---|---|---|
+| two | 2 | 0.15 cores |
+| one | 1 | 0.09 cores |
+
+The host encodes once per viewer: the second viewer of the display costs about 0.06 of a core.
+See DECISIONS "Multi-client" for why per-viewer encode is kept.

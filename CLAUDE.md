@@ -62,6 +62,13 @@ hypothesis until DECISIONS.md marks it verified.
    `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet.
+   `cargo xtask e2e pair` (gate `SLOPTY_PAIR_E2E`, serial) runs two app processes on one host,
+   each on its own socket and data dir, to prove many-clients-one-server: a terminal opened on
+   one shows on the other, typing on both is serialised, attention badges both, a client dying
+   leaves the other streaming and reattaches on relaunch, closing and notes propagate. The
+   display scenario also needs `SLOPTY_SCREEN_E2E`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
+   (gate `SLOPTY_PAIR_IOS_E2E`) puts the second client in the simulator: the Mac and the phone
+   on one host.
 4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.
