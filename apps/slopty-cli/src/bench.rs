@@ -57,7 +57,7 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
             _other => {}
         }
     };
-    let Session { conn, endpoint } = session;
+    let Session { conn, endpoint, .. } = session;
     let mut link = HostLink::start(conn);
     let mut events = link.events().context("events")?;
 
@@ -126,7 +126,7 @@ pub struct ScreenBench {
 /// Print the host's windows and displays.
 pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
     let session = connect_to(data_dir, needle).await?;
-    let Session { conn, endpoint } = session;
+    let Session { conn, endpoint, .. } = session;
     let mut link = HostLink::start(conn);
     let mut events = link.events().context("events")?;
     link.sender().send(ClientMsg::Screen(ScreenRequest::List)).await?;
@@ -157,7 +157,7 @@ pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
 /// Stream for `bench.seconds` and print the numbers.
 pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -> Result<()> {
     let session = connect_to(data_dir, needle).await?;
-    let Session { conn, endpoint } = session;
+    let Session { conn, endpoint, .. } = session;
     let mut link = HostLink::start(conn);
     let mut events = link.events().context("events")?;
     let out = link.sender();
@@ -328,7 +328,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
     println!("  quic path (client side): {}", link.health());
-    print_host_side(stream).await;
+    print_host_side(session.client, stream).await;
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
     drop(handle);
@@ -340,14 +340,16 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
 
 /// The host's own view of the stream (capture and encode latency, the capture path) when a
 /// hostd answers on this machine's control socket; nothing when there is none (a remote
-/// host) or the stream is not its.
-async fn print_host_side(stream: slopty_core::StreamId) {
+/// host) or the stream is not its. Stream ids are per connection, so the match is on our
+/// client id too: another client's stream 1 is not ours.
+async fn print_host_side(client: slopty_core::ClientId, stream: slopty_core::StreamId) {
     use slopty_host::ctl::{CtlReply, CtlRequest};
     let Ok(CtlReply::Screens { live, .. }) = crate::hostctl::call(CtlRequest::Screens).await else {
         println!("  host side: no local hostd answered (remote host, or not the one streaming)");
         return;
     };
-    let Some(s) = live.iter().find(|s| s.stream == stream.0) else {
+    let client = client.to_string();
+    let Some(s) = live.iter().find(|s| s.client == client && s.stream == stream.0) else {
         println!("  host side: local hostd is not the one streaming to us");
         return;
     };

@@ -25,9 +25,10 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
-    SCCaptureDynamicRange, SCContentFilter, SCDisplay, SCFrameStatus, SCStream,
-    SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfo, SCStreamFrameInfoDisplayTime,
-    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCCaptureDynamicRange, SCContentFilter, SCDisplay, SCFrameStatus, SCRunningApplication,
+    SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfo,
+    SCStreamFrameInfoDisplayTime, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
+    SCWindow,
 };
 use parking_lot::Mutex;
 use slopty_codec::PixelBuffer;
@@ -184,13 +185,16 @@ impl Target {
         }
     }
 
-    /// Resolve a window as a crop of the display it sits on: the display filter (which
-    /// ScreenCaptureKit serves from the composited frame, without the per-window pass) with
-    /// `sourceRect` at the window's frame. `Ok(None)` when the window is not entirely on one
-    /// display; the caller keeps the window filter then.
+    /// Resolve a window as a crop of the display it sits on: a display filter *including only
+    /// the window's application* (which ScreenCaptureKit serves from the composited frame,
+    /// without the per-window pass, and whose audio is that application's alone: `sourceRect`
+    /// scopes pixels, not sound) with `sourceRect` at the window's frame. `Ok(None)` when the
+    /// window is not entirely on one display or has no owning application; the caller keeps
+    /// the window filter then.
     pub fn resolve_crop(content: &Shareable, id: WindowId) -> Result<Option<Self>, CaptureError> {
         crate::ensure_core_graphics();
         let kind = CaptureTarget::Window(id);
+        let window = content.window(id).ok_or(CaptureError::NotFound(kind))?;
         let Some(bounds) = crate::geometry::window_bounds(id) else {
             return Err(CaptureError::NotFound(kind));
         };
@@ -198,7 +202,11 @@ impl Target {
             return Ok(None);
         };
         let display = content.display(display_id).ok_or(CaptureError::NotFound(kind))?;
-        let mut target = Self::display(kind, &display);
+        // SAFETY: plain getter on a valid object.
+        let Some(app) = (unsafe { window.owningApplication() }) else {
+            return Ok(None);
+        };
+        let mut target = Self::display_of_app(kind, &display, &app);
         let display_rect = crate::geometry::display_bounds(display_id);
         let Some((crop, pixel_size)) =
             crate::geometry::crop_for(&bounds, &display_rect, f64::from(target.point_scale))
@@ -232,6 +240,42 @@ impl Target {
         };
         let (pixel_size, point_scale) = filter_pixel_size(&filter);
         Self { kind, filter, pixel_size, point_scale, crop: None, display: None }
+    }
+
+    /// The display filter restricted to one application: its windows, its audio.
+    fn display_of_app(
+        kind: CaptureTarget,
+        display: &SCDisplay,
+        app: &SCRunningApplication,
+    ) -> Self {
+        let apps: Retained<NSArray<SCRunningApplication>> = NSArray::from_slice(&[app]);
+        let none: Retained<NSArray<SCWindow>> = NSArray::from_slice(&[]);
+        // SAFETY: as above.
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+                SCContentFilter::alloc(),
+                display,
+                &apps,
+                &none,
+            )
+        };
+        let (pixel_size, point_scale) = filter_pixel_size(&filter);
+        Self { kind, filter, pixel_size, point_scale, crop: None, display: None }
+    }
+
+    /// Bundle ids of the applications the filter is restricted to: the window's owner on the
+    /// display-crop path (whose audio is the only audio the stream carries), none for a plain
+    /// display or window filter.
+    #[must_use]
+    pub fn included_applications(&self) -> Vec<String> {
+        // SAFETY: plain getter on a valid filter object.
+        let apps = unsafe { self.filter.includedApplications() };
+        apps.iter()
+            .map(|a| {
+                // SAFETY: plain getter on a valid object.
+                unsafe { a.bundleIdentifier() }.to_string()
+            })
+            .collect()
     }
 
     /// The window's place on its display when this is the display-crop path.

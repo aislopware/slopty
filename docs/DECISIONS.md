@@ -701,6 +701,49 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (100 ms, was 250) plus the update, during which one edge shows the desktop the window left.
   `SLOPTY_WINDOW_CAPTURE=window|crop` forces a path. Guard: `slopty-capture/tests/latency.rs`
   (gated) fails when the window filter's capture p95 exceeds 1 ms + 3 ms margin.
+- ✅ **Rulings of the crop path: when it is allowed, what it must never show** (2026-09-06,
+  after the Codex review of the first cut). The crop path is an optimisation of the window
+  filter and must be indistinguishable from it to the viewer; wherever it cannot be, the
+  window filter serves. `slopty_host::screen::crop_allowed(on_screen, crop, occluded)` is
+  the rule, unit-tested; `wanted_crop` / `resolve` feed it from the window server.
+  1. *Allowed only for an on-screen window* (`kCGWindowIsOnscreen`, `window_on_screen`): a
+     minimised window or one on another Space has a frame but nothing at it; the crop would
+     show whatever sits there now. The window filter shows the window wherever it is.
+  2. *Allowed only when nothing counts as covering it*, and "covering" is per window, not
+     per process: a sibling window of the same app in front is an occluder like any other
+     (`counts_as_occluder`, unit-tested with two siblings); only the target's own
+     child, sheet, popup and menu windows (same pid, level above normal) are not, since they
+     belong to the picture the window filter shows too. Other processes count at levels 0–8;
+     the Dock's full-screen hit region (20), the menu bar (24), status items (25) and the
+     cursor do not. First cut had excluded the whole pid; a second Ghostty window dragged over
+     the target went unnoticed.
+  3. *It must never show the desktop after the window closed.* Through the window filter
+     ScreenCaptureKit ends the stream itself and the connection reports `Closed`; a display
+     stream never ends by itself, so `check_geometry` treats "no bounds for the window" on the
+     crop path as the window gone: stops the capture and fires `on_stop`
+     (`CaptureError::Stopped("window closed")`) once, the same event the filter path raises.
+     Gated test `closing_the_window_under_a_display_crop_ends_the_stream` (`slopty-host`)
+     kills the Ghostty window and waits for it. First cut returned "no change" and kept
+     streaming the old rectangle.
+  4. *Audio is the window's application's only.* `sourceRect` scopes the picture, not the
+     sound: a `display:excludingWindows:` filter carries every app's audio. The crop filter is
+     `display:includingApplications:exceptingWindows:` with the window's owning app
+     (`Target::resolve_crop`; `included_applications()` reads it back), which is what the
+     window filter carries. Gated test `display_crop_scopes_audio_to_the_windows_app`
+     asserts the filter's app list is exactly Ghostty's bundle id on the crop path, empty for
+     a display and for the window filter (no measuring: the configuration is the contract).
+  5. *A switch is committed only when ScreenCaptureKit has committed it.* `updateContentFilter`
+     and `updateConfiguration` complete asynchronously and can fail; the first cut wrote
+     `path` / crop as soon as it had asked. Now `follow_window` opens a `Transition` (path,
+     crop, number of outstanding callbacks) shared with the completion blocks and does nothing
+     while one is in flight; the next tick settles it: every callback ok → path and crop
+     become the stream's state; any failure → nothing changes and the tick asks again, since
+     the window server still says the same thing. Unit-tested with a failing result. Order
+     is unchanged: crop cleared before the swap to the window filter, filter swapped before
+     the crop is set.
+  6. *Host-side stats are matched on (client, stream)*: stream ids are per connection, so
+     `slopty bench screen` looks its own stream up by its client id too, not the first
+     connection that happens to have a stream of that number.
 - ✅ **`queueDepth` stays 2** (2026-09-05). Measured 2 / 3 / 5 / 8 on the window filter
   (MEASUREMENTS.md, "capture floor"): p50 is flat (0.46 → 0.49 ms) and p95/max grow with the
   depth; no drops at any depth on a 60 Hz source. The default 8 buys nothing here since the

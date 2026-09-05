@@ -13,8 +13,9 @@ mod stream;
 
 pub use content::{Shareable, enumerate};
 pub use geometry::{
-    Crop, Rect, can_capture, crop_for, display_bounds, display_enclosing, occluded,
-    pointer_location, target_bounds, window_bounds, window_owner_pid,
+    Above, Crop, Rect, can_capture, counts_as_occluder, crop_for, display_bounds,
+    display_enclosing, occluded, occluders, pointer_location, target_bounds, window_bounds,
+    window_on_screen, window_owner_pid,
 };
 pub use stream::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, Capture, CaptureConfig, CapturedAudio, CapturedFrame,

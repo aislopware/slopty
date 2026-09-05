@@ -101,6 +101,8 @@ fn pick(me: &Identity, needle: Option<&str>) -> Result<(EndpointId, KnownHost)> 
 pub struct Session {
     /// The connection.
     pub conn: HostConn,
+    /// Who we are to the host (the key of its per-client registries).
+    pub client: ClientId,
     /// Our endpoint (closed with the session).
     pub endpoint: slopty_net::Endpoint,
 }
@@ -120,8 +122,9 @@ pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session
     let reach = Reach::from_env();
     let endpoint = bind_client(me.secret().clone(), reach).await?;
     let addr: EndpointAddr = known.addr;
-    let conn = connect(&endpoint, reach, addr, hello(me.client())).await?;
-    Ok(Session { conn, endpoint })
+    let client = me.client();
+    let conn = connect(&endpoint, reach, addr, hello(client)).await?;
+    Ok(Session { conn, client, endpoint })
 }
 
 pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {

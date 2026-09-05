@@ -267,6 +267,28 @@ mod tests {
     }
 
     /// The window filter and the display crop must show the same picture of an unobscured
+    /// The crop path's filter is the display *with the window's application only*: a
+    /// `sourceRect` scopes the picture, not the audio, so the display filter has to be
+    /// built from the app for the stream to carry that app's sound and nobody else's. A
+    /// display target carries every app (no application list).
+    #[test]
+    fn display_crop_scopes_audio_to_the_windows_app() {
+        if !gated() {
+            return;
+        }
+        let (_sleeper, id, content) = launch(&["sleep", "600"]);
+        assert!(slopty_capture::window_on_screen(id), "a fresh window is on screen");
+        let crop =
+            Target::resolve_crop(&content, id).expect("crop resolve").expect("on one display");
+        assert_eq!(crop.included_applications(), vec!["com.mitchellh.ghostty".to_owned()]);
+        let display = content.displays().first().expect("a display").id;
+        let display = Target::resolve(&content, CaptureTarget::Display(display)).expect("display");
+        assert!(display.included_applications().is_empty(), "a display carries every app");
+        let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window");
+        assert!(window.included_applications().is_empty(), "the window filter names no app");
+    }
+
+    /// Same picture on both paths: the crop against the independent-window filter of the same
     /// window: mean absolute luma difference under 2/255 (the corners differ: the window
     /// filter leaves them transparent, the crop shows what is behind them).
     #[test]

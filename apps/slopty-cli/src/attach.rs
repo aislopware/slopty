@@ -110,7 +110,7 @@ fn enter_raw() -> Result<RawGuard> {
 }
 
 async fn run(session: Session, id: SessionId) -> Result<()> {
-    let Session { conn, endpoint } = session;
+    let Session { conn, endpoint, .. } = session;
     let size = local_size()?;
     let mut link = HostLink::start(conn);
     let mut events = link.events().context("events taken")?;

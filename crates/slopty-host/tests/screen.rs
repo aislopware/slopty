@@ -76,42 +76,34 @@ mod tests {
     }
 }
 
-/// Encoder rate control on real content, gated by `SLOPTY_SCREEN_E2E=1`: the low-latency
-/// mode the host runs (`EnableLowLatencyRateControl` + `AverageBitRate` + `DataRateLimits`)
-/// against macOS 26's `VariableBitRate` + VBV keys, on a Ghostty window this test launches
-/// running `yes` (scrolling) and one running `sleep` (static). Same window size, same
-/// bitrate; prints encode latency, keyframe size and frame-size spikes. Numbers go to
-/// MEASUREMENTS.md, the ruling to DECISIONS.md.
+/// A Ghostty window the tests launch and kill themselves.
 #[cfg(test)]
-#[expect(
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    reason = "measurement arithmetic on small counts and byte sizes"
-)]
-mod encoder_rate_control {
+mod ghostty {
     use std::process::{Child, Command, Stdio};
-    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use objc2_core_foundation::CFType;
-    use slopty_capture::{Capture, CaptureConfig, PixelFormat, Target, host_now_us};
-    use slopty_codec::{Encoder, EncoderConfig, FrameOptions, RateControl};
     use slopty_core::WindowId;
-    use slopty_host::screen::{Quantiles, shareable};
-    use slopty_proto::screen::{CaptureTarget, VideoCodec};
+    use slopty_host::screen::shareable;
 
     const GHOSTTY: &str = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
 
-    struct Window(Child);
+    pub struct Window(Child);
 
-    impl Drop for Window {
-        fn drop(&mut self) {
+    impl Window {
+        /// Close it now (what `Drop` does anyway).
+        pub fn kill(&mut self) {
             let _killed = self.0.kill();
             let _reaped = self.0.wait();
         }
     }
 
-    async fn launch(command: &[&str]) -> (Window, WindowId) {
+    impl Drop for Window {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    pub async fn launch(command: &[&str]) -> (Window, WindowId) {
         let child = Command::new(GHOSTTY)
             .arg("-e")
             .args(command)
@@ -139,6 +131,120 @@ mod encoder_rate_control {
             assert!(started.elapsed() < Duration::from_secs(20), "no Ghostty window for pid {pid}");
         }
     }
+}
+
+/// The crop path's rulings against a real window, gated by `SLOPTY_SCREEN_E2E=1`.
+#[cfg(test)]
+mod crop_path {
+    use std::time::Duration;
+
+    use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, WindowPath};
+    use slopty_proto::screen::{CaptureTarget, Quality};
+    use tokio::sync::mpsc;
+
+    /// A window served as a crop of its display that closes must end the stream the way the
+    /// window filter does (`on_stop`, which the connection turns into `Closed`), not keep
+    /// streaming the desktop where the window was.
+    #[tokio::test]
+    async fn closing_the_window_under_a_display_crop_ends_the_stream() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let (mut window, id) = super::ghostty::launch(&["sleep", "600"]).await;
+        assert!(slopty_capture::window_on_screen(id));
+        let (tx, mut rx) = mpsc::channel(DATAGRAM_QUEUE);
+        let (stopped_tx, mut stopped_rx) = mpsc::channel(1);
+        let quality = Quality { fps: 60, bitrate_bps: 8_000_000, scale: 0.5, ..Quality::default() };
+        let (mut stream, opened) = ScreenStream::open(
+            slopty_core::StreamId(9),
+            CaptureTarget::Window(id),
+            quality,
+            tx,
+            DatagramBudget::new(),
+            move |e| {
+                let _receiver_gone = stopped_tx.try_send(e.to_string());
+            },
+        )
+        .await
+        .unwrap();
+        eprintln!("{opened:?}");
+        // Frames flow.
+        tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.expect("a datagram");
+        // A window the previous test just closed may still be fading out over this one;
+        // give the crop path a moment to take over. A dialog of some other app sitting
+        // where the window opened is the desktop's business, not this test's: say so and
+        // stop, since the rule under test needs the crop path.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while stream.path() != WindowPath::DisplayCrop {
+            let bounds = slopty_capture::window_bounds(id);
+            let owner = slopty_capture::window_owner_pid(id);
+            let occluders = bounds.zip(owner).map(|(b, o)| slopty_capture::occluders(id, &b, o));
+            if tokio::time::Instant::now() >= deadline {
+                if let Some(occluders) = occluders.filter(|o| !o.is_empty()) {
+                    eprintln!("skipped: another window covers the test window: {occluders:?}");
+                    stream.close().await;
+                    return;
+                }
+                panic!(
+                    "a fresh, uncovered window is cropped: on screen {} bounds {bounds:?} on \
+                     display {:?}",
+                    slopty_capture::window_on_screen(id),
+                    bounds.and_then(|b| slopty_capture::display_enclosing(&b)),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _event = stream.check_geometry().unwrap();
+        }
+
+        window.kill();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let reason = loop {
+            let _event = stream.check_geometry().unwrap();
+            if let Ok(Some(reason)) =
+                tokio::time::timeout(Duration::from_millis(100), stopped_rx.recv()).await
+            {
+                break reason;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "on_stop never fired after the window closed"
+            );
+        };
+        eprintln!("stopped: {reason}");
+        assert!(reason.contains("window closed"), "{reason}");
+        assert!(!slopty_capture::window_on_screen(id), "the window is gone");
+        // Once: further ticks stay quiet.
+        let _event = stream.check_geometry().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.is_err());
+        stream.close().await;
+    }
+}
+
+/// Encoder rate control on real content, gated by `SLOPTY_SCREEN_E2E=1`: the low-latency
+/// mode the host runs (`EnableLowLatencyRateControl` + `AverageBitRate` + `DataRateLimits`)
+/// against macOS 26's `VariableBitRate` + VBV keys, on a Ghostty window this test launches
+/// running `yes` (scrolling) and one running `sleep` (static). Same window size, same
+/// bitrate; prints encode latency, keyframe size and frame-size spikes. Numbers go to
+/// MEASUREMENTS.md, the ruling to DECISIONS.md.
+#[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    reason = "measurement arithmetic on small counts and byte sizes"
+)]
+mod encoder_rate_control {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use objc2_core_foundation::CFType;
+    use slopty_capture::{Capture, CaptureConfig, PixelFormat, Target, host_now_us};
+    use slopty_codec::{Encoder, EncoderConfig, FrameOptions, RateControl};
+    use slopty_core::WindowId;
+    use slopty_host::screen::{Quantiles, shareable};
+    use slopty_proto::screen::{CaptureTarget, VideoCodec};
+
+    use super::ghostty::launch;
 
     /// One encoder variant: the rate-control mode plus public properties layered on top.
     #[derive(Clone, Copy)]

@@ -197,19 +197,25 @@ never overwrites what the stream itself proved).
 **Host capture path.** A display target is one `SCContentFilter(display:)`. A window target
 is served two ways, and the host switches between them on the live stream
 (`updateContentFilter` + `updateConfiguration`, no restart, no new encoder): while the window
-sits entirely on one display with no other process's window (levels 0–8; the Dock's
-full-screen hit region, the menu bar and status items do not count) on top of it, the stream
-is the *display* filter with `sourceRect` at the window's frame (`Target::resolve_crop`,
+is on screen, sits entirely on one display and no window counts as covering it
+(`crop_allowed`; other processes at levels 0–8 and sibling windows of the same app count,
+the window's own menus and sheets, the Dock's full-screen hit region, the menu bar and
+status items do not: `counts_as_occluder`), the stream is the *display* filter restricted
+to the window's application (`display:includingApplications:`, so the audio is that app's
+only) with `sourceRect` at the window's frame (`Target::resolve_crop`,
 `WindowPath::DisplayCrop`), which ScreenCaptureKit serves from the frame it already
-composited; when the window is covered, partly off-screen or straddling displays it is the
-independent-window filter (`WindowPath::Filter`), which composites the window on its own
-and costs a few milliseconds more per frame (MEASUREMENTS.md, "capture floor").
-`check_geometry` (10 Hz) follows moves by updating the crop, resizes by rebuilding the encoder,
-and occlusion by swapping the filter (the swap keeps the stream and its frame counter, so the
-`Source` hint above never flips on it); the pure crop geometry (`slopty_capture::crop_for`:
-window frame → display-relative points, pixels at the display's scale, `None` when not
-entirely on that display) is unit-tested. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd
-forces a path. Every frame carries the window server's display time
+composited; otherwise it is the independent-window filter (`WindowPath::Filter`), which
+composites the window on its own and costs a few milliseconds more per frame
+(MEASUREMENTS.md, "capture floor"). `check_geometry` (10 Hz) follows moves by updating the
+crop, resizes by rebuilding the encoder, and occlusion by swapping the filter (the swap keeps
+the stream and its frame counter, so the `Source` hint above never flips on it); each switch
+is a `Transition` that becomes the stream's state only when every ScreenCaptureKit completion
+callback has succeeded, a failed one is asked again next tick. A window that closes under a
+crop ends the stream the way the window filter does (`on_stop` → `Closed`), never showing the
+desktop where it was. The pure crop geometry (`slopty_capture::crop_for`: window frame →
+display-relative points, pixels at the display's scale, `None` when not entirely on that
+display) and the occluder rule are unit-tested; DECISIONS.md "Rulings of the crop path" has
+the list. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd forces a path. Every frame carries the window server's display time
 (`SCStreamFrameInfoDisplayTime`, equal to the sample's pts) and the host keeps two latency
 rings per stream — display time → SCK callback (`ScreenStats::capture`) and encoder submit →
 VideoToolbox callback (`ScreenStats::encode`), p50/p95/max over the last 600 frames — read

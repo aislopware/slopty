@@ -771,15 +771,26 @@ fn crop_windows() -> bool {
     }
 }
 
-/// The crop a window on the display-crop path wants right now, or `None` when it must go
-/// through the window filter (off one display, partly off-screen, or something of another
-/// process on top of it).
+/// The rule of the display-crop path.
+///
+/// A window is served as a crop of its display only while it is on screen (not minimised,
+/// not on another Space), entirely on one display (`crop` is the geometry's answer) and
+/// nothing counts as covering it. Anything else is the window filter, which shows the
+/// window and nothing but the window wherever it is.
+#[must_use]
+pub const fn crop_allowed(on_screen: bool, crop: Option<Crop>, occluded: bool) -> Option<Crop> {
+    if on_screen && !occluded { crop } else { None }
+}
+
+/// The crop a window wants right now, or `None` when it must go through the window filter.
 fn wanted_crop(id: slopty_core::WindowId, bounds: &Rect, point_scale: f64) -> Option<Crop> {
-    let display = slopty_capture::display_enclosing(bounds)?;
-    let display = slopty_capture::display_bounds(display);
-    let (crop, _pixels) = slopty_capture::crop_for(bounds, &display, point_scale)?;
+    let crop = slopty_capture::display_enclosing(bounds).and_then(|display| {
+        let display = slopty_capture::display_bounds(display);
+        slopty_capture::crop_for(bounds, &display, point_scale).map(|(crop, _pixels)| crop)
+    });
     let owner = slopty_capture::window_owner_pid(id)?;
-    (!slopty_capture::occluded(id, bounds, owner)).then_some(crop)
+    let occluded = slopty_capture::occluded(id, bounds, owner);
+    crop_allowed(slopty_capture::window_on_screen(id), crop, occluded)
 }
 
 /// Resolve a target, choosing the path for a window.
@@ -790,13 +801,85 @@ fn resolve(
     if let CaptureTarget::Window(id) = target
         && crop_windows()
         && let Some(bounds) = slopty_capture::window_bounds(id)
-        && let Some(crop) = Target::resolve_crop(content, id)?
         && let Some(owner) = slopty_capture::window_owner_pid(id)
-        && !slopty_capture::occluded(id, &bounds, owner)
+        && let Some(candidate) = Target::resolve_crop(content, id)?
     {
-        return Ok((crop, WindowPath::DisplayCrop));
+        let on_screen = slopty_capture::window_on_screen(id);
+        let occluded = slopty_capture::occluded(id, &bounds, owner);
+        if crop_allowed(on_screen, candidate.crop(), occluded).is_some() {
+            return Ok((candidate, WindowPath::DisplayCrop));
+        }
+        tracing::debug!(%id, on_screen, occluded, crop = ?candidate.crop(), "window filter");
     }
     Ok((Target::resolve(content, target)?, WindowPath::Filter))
+}
+
+/// What the stream is asking ScreenCaptureKit to become: a path and crop that are committed
+/// only once every asynchronous call for them has completed without error. Shared with the
+/// completion callbacks.
+#[derive(Debug)]
+struct Transition {
+    path: WindowPath,
+    crop: Option<Crop>,
+    /// Completion callbacks still to come.
+    outstanding: u8,
+    failed: bool,
+}
+
+/// What [`Transitions::settle`] found.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Settled {
+    /// Nothing in flight.
+    Idle,
+    /// Callbacks still to come: leave the stream alone this tick.
+    Busy,
+    /// Every call completed; the stream is now on this path and crop.
+    Commit(WindowPath, Option<Crop>),
+    /// A call failed: the stream is wherever it was; the next tick asks again.
+    Failed(WindowPath, Option<Crop>),
+}
+
+/// The in-flight transition, if any, behind a lock the callbacks can take.
+#[derive(Clone, Default, Debug)]
+struct Transitions(Arc<Mutex<Option<Transition>>>);
+
+impl Transitions {
+    /// Start a transition that `calls` completion callbacks will finish. False (and nothing
+    /// started) while one is still in flight.
+    fn begin(&self, path: WindowPath, crop: Option<Crop>, calls: u8) -> bool {
+        let mut slot = self.0.lock();
+        if slot.as_ref().is_some_and(|t| t.outstanding > 0) {
+            return false;
+        }
+        *slot = Some(Transition { path, crop, outstanding: calls, failed: false });
+        true
+    }
+
+    /// One call completed.
+    fn on_result(&self, ok: bool) {
+        if let Some(t) = self.0.lock().as_mut() {
+            t.outstanding = t.outstanding.saturating_sub(1);
+            t.failed |= !ok;
+        }
+    }
+
+    /// Take the outcome once every call has completed.
+    fn settle(&self) -> Settled {
+        let mut slot = self.0.lock();
+        match slot.as_ref() {
+            None => Settled::Idle,
+            Some(t) if t.outstanding > 0 => Settled::Busy,
+            Some(t) => {
+                let outcome = if t.failed {
+                    Settled::Failed(t.path, t.crop)
+                } else {
+                    Settled::Commit(t.path, t.crop)
+                };
+                *slot = None;
+                outcome
+            }
+        }
+    }
 }
 
 /// Capture and encoder settings for a target at a requested quality.
@@ -848,10 +931,15 @@ pub struct ScreenStream {
     source_reported: Option<SourceState>,
     /// The enumeration the target was resolved from; filters for a path switch come from it.
     content: Arc<Shareable>,
-    /// How a window is served right now.
+    /// How a window is served right now (committed; see `transitions`).
     path: WindowPath,
-    /// Last known bounds of the target, global points.
-    bounds: Option<Rect>,
+    /// The path switch or crop move waiting for ScreenCaptureKit's completion callbacks.
+    transitions: Transitions,
+    /// What tells the connection the stream ended; the crop path calls it when its window
+    /// closes, since a display stream does not stop by itself.
+    on_stop: Arc<dyn Fn(CaptureError) + Send + Sync>,
+    /// `on_stop` has been called.
+    stopped: bool,
 }
 
 /// How long a stream may produce no frame at all before the client is told the target is idle.
@@ -883,6 +971,7 @@ impl ScreenStream {
         budget: DatagramBudget,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
+        let on_stop: Arc<dyn Fn(CaptureError) + Send + Sync> = Arc::new(on_stop);
         let t0 = Instant::now();
         let content = shareable().await?;
         let enumerated = t0.elapsed();
@@ -921,7 +1010,10 @@ impl ScreenStream {
             &capture_config,
             move |frame| sink.on_frame(&frame),
             Some(Box::new(move |chunk| audio_sink.on_audio(&chunk))),
-            on_stop,
+            {
+                let on_stop = Arc::clone(&on_stop);
+                move |e| on_stop(e)
+            },
             move |result| {
                 let _receiver_gone = started_tx.send(result);
             },
@@ -969,7 +1061,9 @@ impl ScreenStream {
             source_reported: None,
             content,
             path,
-            bounds: slopty_capture::target_bounds(target),
+            transitions: Transitions::default(),
+            on_stop,
+            stopped: false,
         };
         Ok((stream, opened))
     }
@@ -1034,9 +1128,10 @@ impl ScreenStream {
     /// its display) falls back to the window filter until it is clear again. Cheap when
     /// nothing changed (a WindowServer query or three); call it a few times a second.
     pub fn check_geometry(&mut self) -> Result<Option<ScreenEvent>, ScreenError> {
-        let Some(rect) = slopty_capture::target_bounds(self.target) else { return Ok(None) };
-        let moved = self.bounds != Some(rect);
-        self.bounds = Some(rect);
+        let Some(rect) = slopty_capture::target_bounds(self.target) else {
+            self.window_gone();
+            return Ok(None);
+        };
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let px = |points: f64| (points * self.point_scale).round().clamp(2.0, 16_384.0) as u32;
         let native = (px(rect.w), px(rect.h));
@@ -1044,7 +1139,7 @@ impl ScreenStream {
         if let CaptureTarget::Window(id) = self.target
             && crop_windows()
         {
-            self.follow_window(id, &rect, moved || resized);
+            self.follow_window(id, &rect);
         }
         if !resized {
             return Ok(None);
@@ -1086,16 +1181,58 @@ impl ScreenStream {
         Some(ScreenEvent::Source { stream: self.id, state })
     }
 
+    /// The window list no longer knows the target. Through the window filter ScreenCaptureKit
+    /// stops the stream itself and `on_stop` fires from its delegate; a display crop would keep
+    /// streaming the desktop where the window was, so the stream stops itself and says so
+    /// the same way, once.
+    fn window_gone(&mut self) {
+        if self.stopped || !matches!(self.target, CaptureTarget::Window(_)) {
+            return;
+        }
+        if self.path != WindowPath::DisplayCrop {
+            return;
+        }
+        self.stopped = true;
+        tracing::info!(stream = %self.id, "window closed under a display crop: stopping");
+        let id = self.id;
+        self.capture.stop(move |result| {
+            if let Err(e) = result {
+                tracing::debug!(stream = %id, error = %e, "capture stop");
+            }
+        });
+        (self.on_stop)(CaptureError::Stopped("window closed".to_owned()));
+    }
+
     /// Keep a window on the right path: crop where it is now, or the window filter while
-    /// something covers it. `changed` says the bounds differ from last time (a move or a
-    /// resize); occlusion is checked every time since other windows move too.
-    fn follow_window(&mut self, id: slopty_core::WindowId, rect: &Rect, changed: bool) {
+    /// something covers it. On-screen state and occlusion are checked every time since other
+    /// windows move too. Nothing is committed here: the completion callbacks of the
+    /// ScreenCaptureKit calls settle the transition on a later tick, and a failed one is simply
+    /// asked again.
+    fn follow_window(&mut self, id: slopty_core::WindowId, rect: &Rect) {
+        match self.transitions.settle() {
+            Settled::Busy => return,
+            Settled::Idle => {}
+            Settled::Commit(path, crop) => {
+                self.path = path;
+                self.capture_config.crop = crop;
+                self.shared.cropped.store(path == WindowPath::DisplayCrop, Ordering::Relaxed);
+                tracing::debug!(stream = %self.id, ?path, ?crop, "capture path settled");
+            }
+            Settled::Failed(path, crop) => {
+                tracing::warn!(stream = %self.id, ?path, ?crop, "capture path change failed; retrying");
+            }
+        }
         let wanted = wanted_crop(id, rect, self.point_scale);
+        let wanted_path =
+            if wanted.is_some() { WindowPath::DisplayCrop } else { WindowPath::Filter };
+        if wanted_path == self.path && wanted == self.capture_config.crop {
+            return;
+        }
         match (self.path, wanted) {
             (WindowPath::DisplayCrop, Some(crop)) => {
-                if changed && self.capture_config.crop != Some(crop) {
-                    self.capture_config.crop = Some(crop);
-                    self.update_capture();
+                // A move: one configuration update carries the new rectangle.
+                if self.transitions.begin(WindowPath::DisplayCrop, Some(crop), 1) {
+                    self.update_capture(Some(crop));
                 }
             }
             (WindowPath::DisplayCrop, None) => {
@@ -1108,12 +1245,11 @@ impl ScreenStream {
                         return;
                     }
                 };
-                tracing::info!(stream = %self.id, "window covered or off its display: window filter");
-                self.path = WindowPath::Filter;
-                self.shared.cropped.store(false, Ordering::Relaxed);
-                self.capture_config.crop = None;
-                self.update_capture();
-                self.retarget(&target);
+                if self.transitions.begin(WindowPath::Filter, None, 2) {
+                    tracing::info!(stream = %self.id, "window covered, hidden or off its display: window filter");
+                    self.update_capture(None);
+                    self.retarget(&target);
+                }
             }
             (WindowPath::Filter, Some(crop)) => {
                 let target = match Target::resolve_crop(&self.content, id) {
@@ -1124,34 +1260,39 @@ impl ScreenStream {
                         return;
                     }
                 };
-                tracing::info!(stream = %self.id, ?crop, "window clear: display crop");
-                self.path = WindowPath::DisplayCrop;
-                self.shared.cropped.store(true, Ordering::Relaxed);
-                self.retarget(&target);
-                self.capture_config.crop = Some(crop);
-                self.update_capture();
+                if self.transitions.begin(WindowPath::DisplayCrop, Some(crop), 2) {
+                    tracing::info!(stream = %self.id, ?crop, "window clear: display crop");
+                    self.retarget(&target);
+                    self.update_capture(Some(crop));
+                }
             }
             (WindowPath::Filter, None) => {}
         }
     }
 
-    /// Push `capture_config` to the live stream.
-    fn update_capture(&self) {
+    /// Push the current configuration with `crop` to the live stream; the completion lands
+    /// in the transition.
+    fn update_capture(&self, crop: Option<Crop>) {
         let id = self.id;
-        self.capture.update(&self.capture_config, move |result| {
-            if let Err(e) = result {
+        let transitions = self.transitions.clone();
+        let config = CaptureConfig { crop, ..self.capture_config };
+        self.capture.update(&config, move |result| {
+            if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture update failed");
             }
+            transitions.on_result(result.is_ok());
         });
     }
 
-    /// Swap the live stream's filter.
+    /// Swap the live stream's filter; the completion lands in the transition.
     fn retarget(&self, target: &Target) {
         let id = self.id;
+        let transitions = self.transitions.clone();
         self.capture.retarget(target, move |result| {
-            if let Err(e) = result {
+            if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture retarget failed");
             }
+            transitions.on_result(result.is_ok());
         });
     }
 
@@ -1335,6 +1476,42 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
+
+    #[test]
+    fn a_crop_is_allowed_only_on_screen_on_one_display_and_uncovered() {
+        assert_eq!(crop_allowed(true, Some(CROP), false), Some(CROP));
+        assert_eq!(crop_allowed(false, Some(CROP), false), None, "minimised or another Space");
+        assert_eq!(crop_allowed(true, None, false), None, "partly off screen");
+        assert_eq!(crop_allowed(true, Some(CROP), true), None, "covered");
+    }
+
+    #[test]
+    fn a_transition_commits_only_when_every_call_succeeded() {
+        let t = Transitions::default();
+        assert_eq!(t.settle(), Settled::Idle);
+        assert!(t.begin(WindowPath::DisplayCrop, Some(CROP), 2));
+        assert_eq!(t.settle(), Settled::Busy);
+        assert!(!t.begin(WindowPath::Filter, None, 1), "one at a time");
+        t.on_result(true);
+        assert_eq!(t.settle(), Settled::Busy, "one callback still to come");
+        t.on_result(true);
+        assert_eq!(t.settle(), Settled::Commit(WindowPath::DisplayCrop, Some(CROP)));
+        assert_eq!(t.settle(), Settled::Idle, "taken once");
+    }
+
+    #[test]
+    fn a_failed_call_leaves_the_stream_where_it_was_and_the_next_tick_retries() {
+        let t = Transitions::default();
+        assert!(t.begin(WindowPath::Filter, None, 2));
+        t.on_result(true);
+        t.on_result(false);
+        assert_eq!(t.settle(), Settled::Failed(WindowPath::Filter, None));
+        // Nothing committed, nothing in flight: the next tick may ask again.
+        assert_eq!(t.settle(), Settled::Idle);
+        assert!(t.begin(WindowPath::Filter, None, 2));
+    }
 
     #[test]
     fn a_frame_fits_unless_the_queue_or_quic_holds_too_much() {
