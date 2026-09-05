@@ -314,7 +314,7 @@ mod tests {
             .map(|t| t.session.clone())
             .expect("the agent's session");
 
-        // It paints the sparkle title: the cheapest heartbeat there is says a turn started.
+        // It paints the spinning title: the cheapest heartbeat there is says a turn started.
         stack.fake_claude_stage("working").unwrap();
         stack
             .driver

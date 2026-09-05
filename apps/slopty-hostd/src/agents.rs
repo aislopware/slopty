@@ -8,11 +8,12 @@
 //! 1. **Foreground process.** `slopty_host` reads the foreground process of each session's tty;
 //!    when `slopty_agent::detect` says it is Claude Code, the session gets an agent at
 //!    `AgentStatus::Idle`, and when it goes the agent goes with it.
-//! 2. **Title.** The sparkle Claude Code paints into the terminal title separates a running turn
-//!    from an idle prompt (`slopty_agent::title`).
+//! 2. **Title.** The spinning circle Claude Code paints into the terminal title separates a running
+//!    turn from an idle prompt (`slopty_agent::title`).
 //! 3. **Transcript.** The JSONL file the agent writes is found from its working directory
 //!    (`slopty_agent::discover`) and tailed off the blocking pool; its newest record says whether
-//!    the turn is thinking, running a tool, or finished, and names it.
+//!    the turn is thinking, running a tool, or finished, and names it. The lookup is repeated every
+//!    `REDISCOVER_EVERY` ticks, because `/clear` and `/resume` start a new file.
 //!
 //! Hooks outrank all three: once one has spoken for a session, this tick only fills gaps (the
 //! transcript path a hook would have named, so ⌘⇧L works either way) and never touches the
@@ -23,9 +24,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use slopty_agent::Observation;
 use slopty_agent::detect::Program;
 use slopty_agent::transcript::Tail;
+use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
 use slopty_proto::HostMsg;
 
@@ -34,10 +35,16 @@ use crate::Daemon;
 /// How often every session's foreground process and title are read.
 const TICK: Duration = Duration::from_millis(750);
 
+/// Every how many ticks an agent whose transcript is already known is looked up again:
+/// `/clear` and `/resume` start a new file, and the tail has to move with it. Finding one for
+/// the first time happens on every tick; this is the cost of a `read_dir` per known agent.
+const REDISCOVER_EVERY: u64 = 8;
+
 /// Watch every session for an agent nobody told us about, until the daemon stops.
 pub async fn watch(daemon: Daemon) -> ! {
     let home = slopty_agent::hooks::home_dir();
     let mut tails: HashMap<SessionId, Tail> = HashMap::new();
+    let mut ticks: u64 = 0;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -75,8 +82,12 @@ pub async fn watch(daemon: Daemon) -> ! {
         tails.retain(|session, _tail| ids.contains(session));
         events.extend(daemon.agents.lock().retain(&ids));
 
-        for (session, path) in discover(&daemon, &home).await {
-            daemon.agents.lock().set_transcript_path(session, &path);
+        ticks = ticks.wrapping_add(1);
+        for (session, path) in discover(&daemon, &home, ticks % REDISCOVER_EVERY == 0).await {
+            if daemon.agents.lock().set_transcript_path(session, &path) {
+                // A conversation the human cleared or resumed: read the new file from its top.
+                tails.remove(&session);
+            }
         }
         events.extend(follow(&daemon, &mut tails).await);
         for event in events {
@@ -91,9 +102,21 @@ pub async fn watch(daemon: Daemon) -> ! {
     }
 }
 
-/// Look for the transcript of every agent whose file is still unknown.
-async fn discover(daemon: &Daemon, home: &std::path::Path) -> Vec<(SessionId, PathBuf)> {
-    let wanted = daemon.agents.lock().undiscovered();
+/// Look for the transcript of every agent whose file is still unknown, and — when `again` —
+/// of those that have one, in case the human cleared the conversation and Claude Code started
+/// a new file. Only paths that differ from what is being read come back.
+async fn discover(
+    daemon: &Daemon,
+    home: &std::path::Path,
+    again: bool,
+) -> Vec<(SessionId, PathBuf)> {
+    let wanted: Vec<Discovery> = daemon
+        .agents
+        .lock()
+        .discoveries()
+        .into_iter()
+        .filter(|d| again || d.current.is_none())
+        .collect();
     if wanted.is_empty() {
         return Vec::new();
     }
@@ -101,9 +124,10 @@ async fn discover(daemon: &Daemon, home: &std::path::Path) -> Vec<(SessionId, Pa
     let found = tokio::task::spawn_blocking(move || {
         wanted
             .into_iter()
-            .filter_map(|(session, cwd, since)| {
-                let path = slopty_agent::discover::transcript_for(&home, &cwd, since)?;
-                Some((session, path))
+            .filter_map(|d| {
+                let path = slopty_agent::discover::transcript_for(&home, &d.cwd, d.since)?;
+                (d.current.as_deref() != Some(path.to_string_lossy().as_ref()))
+                    .then_some((d.session, path))
             })
             .collect::<Vec<_>>()
     })

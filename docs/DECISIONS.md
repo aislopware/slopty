@@ -1502,14 +1502,22 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
     and start time, the `KERN_PROCARGS2` sysctl for `argv`, `PROC_PIDVNODEPATHINFO` for the
     cwd) and `slopty_agent::detect` decides, as a pure function over name and `argv`, whether
     that is Claude Code. Present → `Idle`, gone → the agent is cleared.
-  - **Title.** The sparkle Claude Code paints into OSC 0/2 (`·✢✳∗✻✽`, a table in
-    `slopty_agent::title`) separates a running turn from an idle prompt. Nothing finer is
-    readable from a title, and that is all it is used for.
+  - **Title.** What Claude Code paints into OSC 0/2 separates a running turn from an idle
+    prompt. Nothing finer is readable from a title, and that is all it is used for.
   - **Transcript.** `slopty_agent::discover` finds the JSONL from the session's own working
     directory and `transcript::progress` reads `Working` / `Tool` / `Done` out of the newest
     record. It can never report `Blocked`: a permission prompt is not written to the
     transcript until it has been answered. Blocking is what hooks are for, which is why the
     app still offers to install them.
+- ✅ **The title's tables are `◐◑◒◓` for a running turn and `✳` for an idle one — not the
+  in-pane spinner** (2026-09-05, from live `terminal_title` data on this machine: `◐ Claude
+  Code` while working, `✳ GPUI and gpui-kit upstream sync track` when done). Claude Code
+  paints a spinning half circle in front of the title while a turn runs and, between turns, a
+  sparkle in front of the conversation's summary (the bare name before there is one). The
+  `·✢✳∗✻✽` frames are the spinner it draws in its own output; they never reach the title, so
+  a *title* that starts with one of them is some other program and is read as nothing. An
+  earlier revision of `slopty_agent::title` had the two sets swapped, which read every idle
+  agent as working and every working one as idle.
 - ✅ **`detect::is_claude` reads both the executable name and `argv[0]`, and treats shells and
   JS runtimes as launchers** (2026-09-05, measured). The two disagree often: `/bin/sh` on
   macOS is `bash` by executable and `/bin/sh` by `argv[0]` (`slopty-pty`'s
@@ -1527,13 +1535,29 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   inside it, because the live session is the one still being written and a resumed
   conversation moves its old file's mtime forward. The start time comes from the process
   table, so a hostd restart does not make an old conversation look new. Only that one
-  directory is ever read.
-- ✅ **Hooks stay authoritative in both directions** (2026-09-05). Once a hook has spoken for
-  a session, the weaker signals fill gaps only — the transcript path, so ⌘⇧L works whether it
-  was named by a hook or discovered — and can neither change the status nor end the agent:
-  the relay is a separate process, so a hooked session's tty foreground is not the agent's,
-  and the `SessionEnd` hook is what ends it. This is also what keeps the played-hook
-  self-tests honest, since those play hooks into a plain shell.
+  directory is ever read. Two `claude`s started in the same directory in the same window
+  resolve to the same newest file, and the second one to write wins; the terminals are told
+  apart by their sessions but their transcripts are not, which is a limit of the discovery
+  and a reason the app offers the hooks.
+- ✅ **The lookup is repeated, because `/clear` starts a new file** (2026-09-05). A tracker
+  that already has a transcript keeps asking (`AgentTable::discoveries` carries the file
+  being read, `Tracker::discovery` only stops for a hooked session whose hook named one), and
+  hostd re-runs it every eighth tick (6 s); when the newest file in the project directory is
+  not the one being tailed — `/clear`, `/resume <other>`, a compaction — the path moves and
+  the `Tail` is dropped so the new conversation is read from its top. Without this the status
+  froze on the old file's last record, so a cleared session sat on `Done` through its next
+  turn.
+- ✅ **Hooks decide the status; the process table may still end a session it watched**
+  (2026-09-05). Once a hook has spoken, the weaker signals fill gaps only — the transcript
+  path, so ⌘⇧L works whether it was named by a hook or discovered — and never change the
+  status. Ending is nearly as strict: a hooked agent goes when `SessionEnd` says so, or when
+  a `claude` that was actually seen in the tty's foreground has been absent for four probes
+  (3 s). One probe is not enough because the relay (`slopty hook`) is itself briefly the
+  foreground process of the terminal it reports on, and a session that only ever spoke
+  through hooks (never seen as a process) is never ended this way at all — which is what
+  keeps the played-hook self-tests honest, since those play hooks into a plain shell. The
+  case this buys: a `claude` killed with `SIGKILL` sends no `SessionEnd` and would otherwise
+  keep its pill until the terminal exited.
 - ✅ **A first transcript read never raises attention** (2026-09-05). `Done` alerts only when
   the previous status was `Working` or `Tool`: the first read of a discovered file is usually
   a conversation that ended hours ago, and a Dock bounce for it would be a lie.
@@ -1547,8 +1571,8 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **The self-test plays the agent with a fake `claude` on ptyd's `PATH`, never by typing**
   (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and hostd a `HOME` and a `PATH` of
   their own and writes a small `claude` script into the run's temp directory; "+ agent"
-  (⌘⇧T) starts it. It paints the sparkle title and writes the fixture JSONL into
-  `$HOME/.claude/projects/<escaped cwd>` exactly where the real one would, and steps from
+  (⌘⇧T) starts it. It paints the spinning title, then the sparkle one, and writes the fixture
+  JSONL into `$HOME/.claude/projects/<escaped cwd>` where the real one would, stepping from
   stage to stage when the test creates a marker file, so nothing depends on a sleep. This
   keeps the rule from the played-hook ruling above: the test drives the app's own UI and the
   harness's own environment, and never types a command into the shell under test. Not covered

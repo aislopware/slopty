@@ -122,4 +122,30 @@ mod tests {
             Some(dir.join("newer.jsonl").as_path())
         );
     }
+
+    #[test]
+    fn a_cleared_session_is_found_again_as_the_file_it_writes_now() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/tmp/project");
+        let dir = project_dir(home.path(), cwd);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let at = |secs: u64| {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)).expect("in range")
+        };
+        let started = at(1_000_000);
+
+        touch(&dir.join("before.jsonl"), at(1_000_005));
+        assert_eq!(
+            transcript_for(home.path(), cwd, started).as_deref(),
+            Some(dir.join("before.jsonl").as_path())
+        );
+
+        // `/clear` starts a new file in the same project; the same lookup moves to it, so the
+        // daemon stops tailing a conversation the human has left behind.
+        touch(&dir.join("after.jsonl"), at(1_000_090));
+        assert_eq!(
+            transcript_for(home.path(), cwd, started).as_deref(),
+            Some(dir.join("after.jsonl").as_path())
+        );
+    }
 }

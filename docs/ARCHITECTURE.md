@@ -256,15 +256,23 @@ its cwd), and `slopty_agent::detect` decides from the name and `argv` alone whet
 Claude Code — the native launcher, a `node`/`bun`/`deno` running the npm `cli.js`, or a shell
 running either (the kernel rewrites `argv` for a `#!` script, and `slopty_pty::pty` itself
 starts an unfound `claude` as `zsh -lic claude`). Present → `Idle`; gone → the agent is
-cleared. `slopty_agent::title` maps Claude Code's sparkle frames (`·✢✳∗✻✽`) in the OSC 0/2
-title to working-vs-idle. `slopty_agent::discover` finds the conversation from the session's
-own working directory — Claude Code writes `~/.claude/projects/<cwd with every non-alphanumeric
-character replaced by `-`>/<session uuid>.jsonl`, and the live file is the newest one modified
-at or after the process started — and `transcript::progress` reads `Working` / `Tool` / `Done`
-out of its newest record. The transcript can never report `Blocked`: a permission prompt is
-only written once it has been answered, so blocking stays a hook-only signal. Once a hook has
-spoken for a session, the tick fills gaps only (the transcript path, so ⌘⇧L works either way)
-and neither changes the status nor ends the agent. A session attributed without hooks shows an
+cleared. `slopty_agent::title` maps the OSC 0/2 title to working-vs-idle from two tables: the
+spinning circle Claude Code paints while a turn runs (`◐◑◒◓`) and the sparkle it paints in
+front of the conversation's summary between turns (`✳`, or the bare name before there is a
+summary) — the frames in the pane itself (`·✢∗✻✽`) never reach the title and mean nothing
+there. `slopty_agent::discover` finds the conversation from the session's own working
+directory — Claude Code writes `~/.claude/projects/<cwd with every non-alphanumeric character
+replaced by `-`>/<session uuid>.jsonl`, and the live file is the newest one modified at or
+after the process started — and `transcript::progress` reads `Working` / `Tool` / `Done` out
+of its newest record. That lookup is repeated every eighth tick (`AgentTable::discoveries`
+carries the file being read): `/clear` and `/resume` start a new file, and the tail moves to
+it and starts over rather than freezing on the old conversation's last record. The transcript
+can never report `Blocked`: a permission prompt is only written once it has been answered, so
+blocking stays a hook-only signal. Once a hook has spoken for a session, the tick fills gaps
+only (the transcript path, so ⌘⇧L works either way) and never changes the status; it ends the
+agent only when a `claude` the host actually watched in the foreground has been gone for four
+probes, which is how a killed agent loses its pill without a `SessionEnd`. A session
+attributed without hooks shows an
 "install hooks" pill beside its agent pill, once per run: `ClientMsg::InstallHooks` asks the
 host to register the relay (`slopty_agent::hooks`, the same code `slopty hook install` runs)
 and `HostMsg::HooksInstalled` comes back as a notice, because the human reading the pill may
@@ -343,8 +351,9 @@ the attention row (`ConversationInfo`) and the agent's state and signal
 (`TerminalInfo.agent`, `TerminalInfo.agent_source`).
 
 **Attribution tests.** Unit: `slopty_agent::detect` (the executable name, `argv[0]`, runtimes
-and shells), `slopty_agent::title` (every sparkle frame), `slopty_agent::discover` (the
-escaped project directory and the newest recent `.jsonl` in a temp home),
+and shells), `slopty_agent::title` (every frame of both tables, and the in-pane spinner
+reading as nothing), `slopty_agent::discover` (the escaped project directory, the newest
+recent `.jsonl` in a temp home, and the file moving after a `/clear`),
 `transcript::progress` (which record means what), and the precedence merge itself
 (`a_hand_started_claude_is_attributed_from_the_process_and_the_title`,
 `hooks_outrank_everything_and_decide_when_the_agent_ends`,

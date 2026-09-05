@@ -209,26 +209,27 @@ async fn daemons(
 /// A stand-in for the `claude` binary, written into a run's own directory and put first on
 /// ptyd's `PATH` so "+ agent" starts it instead of a real agent.
 ///
-/// It behaves like Claude Code where Slopty looks: it paints the sparkle title while a turn
-/// runs and writes its conversation as JSONL under `$HOME/.claude/projects/<escaped cwd>`,
-/// with the same escaping the real one uses. It moves from stage to stage when the test
-/// creates the marker file it is waiting for, so the run never depends on a sleep, and it
-/// registers no hooks at all — which is the whole point.
+/// It behaves like Claude Code where Slopty looks: it paints the spinning title while a turn
+/// runs, the sparkle and a summary when it ends, and writes its conversation as JSONL under
+/// `$HOME/.claude/projects/<escaped cwd>`, with the same escaping the real one uses. It moves from
+/// stage to stage when the test creates the marker file it is waiting for, so the run never depends
+/// on a sleep, and it registers no hooks at all — which is the whole point.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 set -e
 stage() { while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do sleep 0.05; done; }
 echo "fake claude in $PWD"
 stage working
-# OSC 2 with U+2733 EIGHT SPOKED ASTERISK, one of the frames Claude Code paints
-# while a turn runs (`slopty_agent::title::SPINNER`).
-printf '\033]2;\342\234\263 Claude Code\007'
+# OSC 2 with U+25D0 CIRCLE WITH LEFT HALF BLACK, one of the frames Claude Code paints into
+# the title while a turn runs (`slopty_agent::title::WORKING`).
+printf '\033]2;\342\227\220 Claude Code\007'
 stage transcript
 project="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
 mkdir -p "$project"
 cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript.jsonl" > "$project/fake-session.jsonl"
 stage done
 cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript-done.jsonl" >> "$project/fake-session.jsonl"
-printf '\033]2;claude\007'
+# U+2733 EIGHT SPOKED ASTERISK and the conversation's summary: the title between turns.
+printf '\033]2;\342\234\263 fix the tests\007'
 stage quit
 "#;
 
