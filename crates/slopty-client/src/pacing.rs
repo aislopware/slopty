@@ -43,12 +43,62 @@ impl Clock for SystemClock {
 /// How a decoded frame got here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FrameStamp {
-    /// Presentation timestamp, from the host's capture clock; also the frame's identity.
+    /// Presentation timestamp, from the host's capture clock, widened past the wire's 32-bit
+    /// wrap by [`CaptureClock`]; also the frame's identity and its order.
     pub pts_us: u64,
+    /// Which picture this is out of the decoder, counted from the first. The pacer reads the
+    /// gaps: a frame that never reached it (the newest-only channel between the decoder and
+    /// the element overwrote it) leaves a hole here and nowhere else.
+    pub decode_seq: u64,
     /// When the datagram that completed the frame arrived.
     pub arrived: Instant,
     /// When the decoder handed the picture back.
     pub decoded: Instant,
+}
+
+/// Widens the wire's 32-bit capture timestamp into a monotonic one.
+///
+/// `FrameInfo::capture_ts_us` carries the low 32 bits of the host's microsecond clock, which
+/// wraps every ~71.6 minutes. Widening it with `u64::from` would make the first frame after a
+/// wrap compare *older* than the last one before it, and every ordering test downstream — the
+/// pacer's, the decoder's parked arrivals — would reject fresh pictures until the truncated
+/// value climbed back past the pre-wrap one, up to another ~71 minutes of frozen screen. This
+/// counts the wraps instead: a step backwards of more than half the range is a wrap forward, a
+/// step forwards of more than half is a straggler from before one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct CaptureClock {
+    /// Raw value of the last sample.
+    last: Option<u32>,
+    /// Whole wraps counted so far, already multiplied out.
+    epoch: u64,
+}
+
+/// One turn of the 32-bit capture clock.
+const WRAP: u64 = 1_u64 << 32;
+/// Half of it: the largest step that still reads as "the same turn".
+const HALF_WRAP: u32 = 1_u32 << 31;
+
+impl CaptureClock {
+    /// A clock that has seen nothing yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { last: None, epoch: 0 }
+    }
+
+    /// Widen one raw timestamp. Call once per frame, in arrival order.
+    pub fn widen(&mut self, raw: u32) -> u64 {
+        if let Some(last) = self.last {
+            if raw < last && last.wrapping_sub(raw) > HALF_WRAP {
+                // Forward across the boundary.
+                self.epoch = self.epoch.saturating_add(WRAP);
+            } else if raw > last && raw.wrapping_sub(last) > HALF_WRAP {
+                // A straggler from before the last wrap; put it back in its own turn.
+                self.epoch = self.epoch.saturating_sub(WRAP);
+            }
+        }
+        self.last = Some(raw);
+        self.epoch.saturating_add(u64::from(raw))
+    }
 }
 
 /// What to do with a frame the decoder just produced.
@@ -76,7 +126,11 @@ struct Sample {
 pub struct PacingStats {
     /// Frames put on screen, for the lifetime of the stream.
     pub presented: u64,
-    /// Frames replaced before they were ever painted: the decoder ran ahead of the display.
+    /// Decoded frames the display never saw, because the decoder ran ahead of it: both the ones
+    /// the pacer replaced while they waited for a paint and the ones the newest-only channel
+    /// between the decoder and the element overwrote before the pacer was ever offered them
+    /// (counted from the gaps in [`FrameStamp::decode_seq`], which is the only place they leave
+    /// a trace).
     pub skipped: u64,
     /// Paints that showed the picture already up, because no new frame was ready.
     pub repeats: u64,
@@ -110,6 +164,8 @@ pub struct Pacer<C: Clock = SystemClock> {
     shown: Option<u64>,
     /// When the picture on screen went up.
     shown_at: Option<Instant>,
+    /// Decode sequence of the newest frame offered, whether it was taken or dropped.
+    last_seq: Option<u64>,
     ring: VecDeque<Sample>,
     stats: PacingStats,
 }
@@ -129,6 +185,7 @@ impl<C: Clock> Pacer<C> {
             pending: None,
             shown: None,
             shown_at: None,
+            last_seq: None,
             ring: VecDeque::with_capacity(RING),
             stats: PacingStats::default(),
         }
@@ -136,7 +193,19 @@ impl<C: Clock> Pacer<C> {
 
     /// A decoded frame is available. `Present` means install it now and ask for a redraw;
     /// nothing is ever held back for a later paint.
+    ///
+    /// Frames the decoder produced but that never got here — the channel from the decoder keeps
+    /// only the newest, so a burst finishing between two paints leaves only its last member —
+    /// are counted from the gap in [`FrameStamp::decode_seq`]. They are skips like any other:
+    /// the display never saw them.
     pub fn offer(&mut self, stamp: FrameStamp) -> Pace {
+        if let Some(last) = self.last_seq {
+            let lost_in_transit = stamp.decode_seq.saturating_sub(last).saturating_sub(1);
+            self.stats.skipped = self.stats.skipped.saturating_add(lost_in_transit);
+        }
+        // Even a frame that is dropped as late advances the sequence, or the frames the channel
+        // swallowed behind it would be counted twice.
+        self.last_seq = Some(stamp.decode_seq.max(self.last_seq.unwrap_or(0)));
         let newest = self.pending.map_or(self.shown, |p| Some(p.pts_us));
         if newest.is_some_and(|last| stamp.pts_us <= last) {
             self.stats.late = self.stats.late.saturating_add(1);
@@ -229,15 +298,33 @@ mod tests {
     struct FakeClock {
         epoch: Instant,
         offset: Cell<Duration>,
+        /// One per `stamp` call: every stamp stands for one decoder callback.
+        seq: Cell<u64>,
     }
 
     impl FakeClock {
         fn new() -> Self {
-            Self { epoch: Instant::now(), offset: Cell::new(Duration::ZERO) }
+            Self { epoch: Instant::now(), offset: Cell::new(Duration::ZERO), seq: Cell::new(0) }
+        }
+
+        /// The decode sequence of the next callback.
+        fn next_seq(&self) -> u64 {
+            let seq = self.seq.get();
+            self.seq.set(seq.saturating_add(1));
+            seq
+        }
+
+        /// Skip `count` callbacks, as the newest-only channel does when it overwrites them.
+        fn swallow(&self, count: u64) {
+            self.seq.set(self.seq.get().saturating_add(count));
         }
 
         fn advance(&self, by: Duration) {
             self.offset.set(self.offset.get().saturating_add(by));
+        }
+
+        fn now_instant(&self) -> Instant {
+            self.at(self.offset.get())
         }
 
         fn at(&self, offset: Duration) -> Instant {
@@ -258,6 +345,7 @@ mod tests {
     fn stamp(clock: &FakeClock, index: u32, arrived: Duration, decode: Duration) -> FrameStamp {
         FrameStamp {
             pts_us: u64::from(index).saturating_mul(16_667),
+            decode_seq: clock.next_seq(),
             arrived: clock.at(arrived),
             decoded: clock.at(arrived.saturating_add(decode)),
         }
@@ -363,6 +451,94 @@ mod tests {
             "{:?} is not about {eighth:?}",
             stats.interval_jitter
         );
+    }
+
+    /// Pictures the newest-only channel swallowed before the element looked are skips too:
+    /// the pacer reads them out of the gap in the decode sequence, which is the only trace
+    /// they leave.
+    #[test]
+    fn frames_the_channel_overwrote_are_counted_as_skips() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        clock.advance(FRAME);
+        assert_eq!(pacer.offer(stamp(&clock, 0, Duration::ZERO, MS)), Pace::Present);
+        pacer.presented();
+
+        // Three decoder callbacks finished between paints; the channel kept only the last.
+        clock.swallow(3);
+        clock.advance(FRAME);
+        assert_eq!(pacer.offer(stamp(&clock, 4, 3 * FRAME, MS)), Pace::Present);
+        pacer.presented();
+
+        let stats = pacer.stats();
+        assert_eq!((stats.presented, stats.skipped, stats.repeats), (2, 3, 0));
+        assert_eq!(stats.window, 2, "only the two that were painted are in the ring");
+
+        // A frame dropped as late still advances the sequence, so the ones swallowed behind it
+        // are not counted a second time by the frame after.
+        clock.swallow(2);
+        assert_eq!(pacer.offer(stamp(&clock, 1, 4 * FRAME, MS)), Pace::Drop);
+        clock.advance(FRAME);
+        assert_eq!(pacer.offer(stamp(&clock, 5, 4 * FRAME, MS)), Pace::Present);
+        pacer.presented();
+        let stats = pacer.stats();
+        assert_eq!((stats.presented, stats.skipped, stats.late), (3, 5, 1));
+    }
+
+    /// The host's capture clock is 32 bits of microseconds and wraps every ~71.6 minutes. The
+    /// widened stamp keeps climbing through it, so the pacer never mistakes the first frame of
+    /// the new turn for a straggler and freeze the screen until the raw value catches up.
+    #[test]
+    fn the_capture_clock_survives_its_wrap() {
+        let mut clock = CaptureClock::new();
+        // A few frames before the boundary, 16 667 µs apart.
+        let last_before = u32::MAX - 10_000;
+        let before = clock.widen(last_before);
+        assert_eq!(before, u64::from(last_before), "no wrap seen yet");
+
+        // The next frame's raw stamp has wrapped past zero.
+        let first_after = last_before.wrapping_add(16_667);
+        assert!(first_after < last_before, "the raw stamp went backwards");
+        let after = clock.widen(first_after);
+        assert!(after > before, "{after} is not newer than {before}");
+        assert_eq!(after.saturating_sub(before), 16_667);
+
+        // It keeps counting from there, and a second wrap works the same.
+        let mut raw = first_after;
+        let mut widened = after;
+        for _ in 0..600_000 {
+            raw = raw.wrapping_add(16_667);
+            let next = clock.widen(raw);
+            assert_eq!(next.saturating_sub(widened), 16_667, "raw {raw}");
+            widened = next;
+        }
+        assert!(widened > WRAP.saturating_mul(2), "two turns of the clock: {widened}");
+
+        // A straggler from before the boundary lands back in its own turn, below the frames
+        // after it, which is what makes the pacer drop it as late rather than jump forward.
+        let straggler = clock.widen(raw.wrapping_sub(50_000));
+        assert!(straggler < widened, "{straggler} should be older than {widened}");
+
+        // The pacer built on it never freezes across the wrap.
+        let fake = FakeClock::new();
+        let mut pacer = Pacer::new(&fake);
+        let mut clock = CaptureClock::new();
+        let mut raw = u32::MAX - 33_334;
+        for _ in 0..8 {
+            fake.advance(FRAME);
+            let pts = clock.widen(raw);
+            let s = FrameStamp {
+                pts_us: pts,
+                decode_seq: fake.next_seq(),
+                arrived: fake.now_instant(),
+                decoded: fake.now_instant(),
+            };
+            assert_eq!(pacer.offer(s), Pace::Present, "raw {raw} was refused");
+            pacer.presented();
+            raw = raw.wrapping_add(16_667);
+        }
+        assert_eq!(pacer.stats().late, 0);
+        assert_eq!(pacer.stats().presented, 8);
     }
 
     /// The ring forgets: only the last `RING` frames are in the percentiles.

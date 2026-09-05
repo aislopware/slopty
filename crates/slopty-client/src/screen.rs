@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -25,7 +25,7 @@ use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::pacing::FrameStamp;
+use crate::pacing::{CaptureClock, FrameStamp};
 
 /// Datagrams buffered per attached stream before the task must drain them.
 const STREAM_DEPTH: usize = 2048;
@@ -47,7 +47,7 @@ pub struct ScreenRouter {
     /// Diagnostic loss injection: drop this many datagrams per thousand, from
     /// `SLOPTY_DROP_PERMILLE`. Zero in normal use.
     drop_permille: u32,
-    lcg: Arc<std::sync::atomic::AtomicU64>,
+    lcg: Arc<AtomicU64>,
 }
 
 /// A datagram and when the connection handed it over: the stream worker may be busy (a decode,
@@ -358,13 +358,22 @@ pub fn spawn_screen(
     let decoded_at = Arc::clone(&first_decoded);
     let arrivals = Arc::new(Mutex::new(Arrivals::default()));
     let parked = Arc::clone(&arrivals);
+    // Counted here, on the decoder's side of the newest-only channel, so the element can tell
+    // how many pictures the channel swallowed before it looked.
+    let decode_seq = Arc::new(AtomicU64::new(0));
+    let seq = Arc::clone(&decode_seq);
     let decoder = Decoder::new(codec, move |frame| {
         let decoded = Instant::now();
         decoded_at.lock().get_or_insert(decoded);
         // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
         // that outlived the ring) is still shown; its timing simply does not enter the ring.
         let arrived = parked.lock().take(frame.pts_us).unwrap_or(decoded);
-        let stamp = FrameStamp { pts_us: frame.pts_us, arrived, decoded };
+        let stamp = FrameStamp {
+            pts_us: frame.pts_us,
+            decode_seq: seq.fetch_add(1, Ordering::Relaxed),
+            arrived,
+            decoded,
+        };
         let _no_receiver = frames_tx.send(Some(Arc::new(Presentable { frame, stamp })));
     });
     let worker = Worker {
@@ -383,6 +392,7 @@ pub fn spawn_screen(
         audio: AudioSlot::Unopened,
         muted: Arc::clone(&muted),
         first_decoded,
+        capture_clock: CaptureClock::new(),
     };
     let task = runtime.spawn(worker.run());
     ScreenHandle { stream, frames, cursor, stats, muted, router: router.clone(), task }
@@ -407,6 +417,8 @@ struct Worker {
     muted: Arc<AtomicBool>,
     /// Set by the decoder callback when the first picture comes back.
     first_decoded: Arc<Mutex<Option<Instant>>>,
+    /// Widens the wire's 32-bit capture timestamp, so ordering survives its ~71-minute wrap.
+    capture_clock: CaptureClock,
 }
 
 impl Worker {
@@ -508,7 +520,10 @@ impl Worker {
             if frame.hold > self.counters.hold_max {
                 self.counters.hold_max = frame.hold;
             }
-            let pts = u64::from(frame.info.capture_ts_us);
+            // Widened here, at the one place the wire's 32-bit stamp becomes a u64: the decoder
+            // echoes whatever it is given back to the callback, so the parked arrivals and the
+            // pacer's ordering both inherit a timestamp that survives the wrap.
+            let pts = self.capture_clock.widen(frame.info.capture_ts_us);
             // Park the arrival before submitting: VideoToolbox may call back on another thread
             // before `decode` returns.
             self.arrivals.lock().park(pts, frame.arrived);

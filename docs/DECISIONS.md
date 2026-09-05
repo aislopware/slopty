@@ -722,6 +722,18 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   present-on-arrival predicts p50 ≈ decode + half an interval and p95 ≈ decode + a whole one;
   both land there, and a single frame of playout buffering would have added 16.7 ms to each.
   There is no room in the numbers for a buffer, which is the ruling's evidence.
+  *Two things the ordering rests on, both found in review.* The wire carries the low 32 bits of
+  the host's microsecond capture clock, which wraps every ~71.6 minutes; widening it with
+  `u64::from` would make the first frame of the new turn compare older than the last of the old
+  one and freeze the picture until the raw value climbed back past it — up to another 71
+  minutes. `pacing::CaptureClock` counts the wraps instead (a step back of more than half the
+  range is a wrap forward, a step forward of more than half is a straggler from before one) and
+  is applied at the single point where the stamp becomes a `u64`, so the decoder echoes the
+  widened value back and the parked arrivals inherit it. And `skipped` has to be counted on the
+  decoder's side of the channel: the `watch` between the worker and the element keeps only the
+  newest frame, so a burst finishing between two paints reaches `offer` as its last member
+  alone and the counter would read zero while the display missed three. Each callback stamps a
+  `decode_seq`, and the pacer reads the gaps — the only trace those frames leave.
   Not built: a jitter-adaptive delay. It would only earn its latency on a link whose delivery
   jitter exceeds a frame interval, and the same overlay now says whether that is happening.
 - ✅ **NACK delay from the round trip, floor 1 ms, ceiling 20 ms** (2026-09-05). The delay was a
