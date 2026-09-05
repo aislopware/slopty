@@ -19,6 +19,8 @@ mod tests {
     use tokio::process::{Child, Command};
 
     const STEP: Duration = Duration::from_secs(20);
+    /// `slopty_media::Config::max_hold`, the longest an incomplete frame is held.
+    const MAX_HOLD_MS: f64 = 500.0;
 
     /// A sibling binary from the same build. `cargo test -p slopty-hostd` on its own does not
     /// build ptyd, so build it on demand.
@@ -476,11 +478,18 @@ mod tests {
         /// Datagrams the receiver saw, and the data fragments that never arrived.
         datagrams: u64,
         datagrams_lost: u64,
-        /// Parity fragments per thousand data fragments, as seen on the wire. Not the
-        /// controller's ratio: the packetizer rounds up to at least one parity fragment, so a
-        /// stream of small frames reads high whatever the ratio is. What matters is how it
-        /// moves between rows.
+        /// Bytes those datagrams carried, parity included: what the parity policy costs.
+        bytes: u64,
+        /// Parity fragments per thousand data fragments, as seen on the wire: what the
+        /// packetizer's rounding actually costs at the ratio the controller settled on.
         parity_seen: u16,
+        /// The frame layouts behind that ratio. `data_shards / frames` is how many fragments a
+        /// frame took, and `1000 * frames / data_shards` is what the old rule — at least one
+        /// parity fragment per frame, whatever the ratio — would have put on the wire for the
+        /// very same frames, which is the only fair before/after when the desktop's content is
+        /// not under the test's control.
+        data_shards: u64,
+        parity_shards: u64,
         /// Gaps between decoded frames.
         gap_p50_ms: f64,
         gap_p90_ms: f64,
@@ -558,7 +567,10 @@ mod tests {
         row.refreshes = stats.refreshes;
         row.datagrams = stats.datagrams;
         row.datagrams_lost = stats.datagrams_lost;
+        row.bytes = stats.bytes;
         row.parity_seen = stats.parity_permille;
+        row.data_shards = stats.data_shards;
+        row.parity_shards = stats.parity_shards;
         (row.gap_p50_ms, row.gap_p90_ms, row.gap_max_ms) = quantiles(&mut gaps);
         drop(screen);
         link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
@@ -596,11 +608,11 @@ mod tests {
             rows.push(loss_sample(&ctl_sock, seconds, permille).await);
         }
         eprintln!(
-            "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | parity seen | stalls | gap p50 / p90 / max |"
+            "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | kB (B/frame) | fragments/frame | parity seen (one-per-frame would be) | stalls | gap p50 / p90 / max |"
         );
         for r in &rows {
             eprintln!(
-                "| {} ‰ | {} ({} decoded) | {} | {} | {} | {} / {} | {} ({}) | {} ‰ | {} | {:.1} / {:.1} / {:.1} ms |",
+                "| {} ‰ | {} ({} decoded) | {} | {} | {} | {} / {} | {} ({}) | {} ({}) | {} | {} ‰ ({} ‰) | {} | {:.1} / {:.1} / {:.1} ms |",
                 r.drop_permille,
                 r.frames,
                 r.decoded,
@@ -611,7 +623,11 @@ mod tests {
                 r.refreshes,
                 r.datagrams,
                 r.datagrams_lost,
+                r.bytes / 1000,
+                r.bytes / r.frames.max(1),
+                r.data_shards / r.frames.max(1),
                 r.parity_seen,
+                1000 * r.frames / r.data_shards.max(1),
                 r.stalls,
                 r.gap_p50_ms,
                 r.gap_p90_ms,
@@ -629,14 +645,25 @@ mod tests {
                 r.drop_permille
             );
         }
-        // Loopback on a loaded machine stalls — the scheduler holds datagrams and releases them
-        // together — and a stalled run measures the machine, not the loss policy. The numbers
-        // are printed either way; only the verdicts wait for a quiet one.
-        if rows.iter().any(|r| r.stalls > 0) {
-            eprintln!("stalls in this run: the machine was busy, not the link; verdicts skipped");
+        // The verdicts are about the loss policy, so the run has to be one where the machine
+        // kept up. Under another session's build the capture starves: frames arrive hundreds of
+        // milliseconds apart, die of `max_hold` before any retransmission can land, and the row
+        // measures the scheduler. Idle, this path delivers 50–60 fps; a third of that is the
+        // floor for believing a row.
+        let starved: Vec<u64> =
+            rows.iter().map(|r| r.frames).filter(|f| *f < seconds.saturating_mul(15)).collect();
+        if !starved.is_empty() {
+            eprintln!(
+                "only {starved:?} frames in {seconds} s: the machine was busy, not the link; \
+                 verdicts skipped"
+            );
             return;
         }
         let clean = rows.first().expect("the 0 permille row");
+        // A quiet source no longer reads as a stalled link (the send stamp says whose silence
+        // it was), so a stall on loopback now means what it says: something held datagrams the
+        // host had already sent.
+        assert_eq!(clean.stalls, 0, "a lossless loopback path stalled: {clean:?}");
         assert_eq!(clean.lost, 0, "a lossless path lost frames: {clean:?}");
         assert_eq!(clean.refreshes, 0, "a lossless path needed a refresh: {clean:?}");
         assert_eq!(clean.nacks, 0, "a lossless path asked for a retransmission: {clean:?}");
