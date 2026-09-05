@@ -53,6 +53,14 @@ mod tests {
 
     /// Start ptyd and hostd in `dir`, pair a client, return the daemons and the connection.
     async fn connect(dir: &std::path::Path) -> (Guard, HostConn) {
+        let (mut guard, ticket) = daemons(dir, Reach::Anywhere).await;
+        let (endpoint, host) = dial(&ticket, Reach::Anywhere).await;
+        guard.1 = Some(endpoint);
+        (guard, host)
+    }
+
+    /// Start ptyd and hostd in `dir` and read the pairing ticket hostd prints.
+    async fn daemons(dir: &std::path::Path, reach: Reach) -> (Guard, PairTicket) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("hostd.sock");
         let ptyd = Command::new(bin("slopty-ptyd"))
@@ -64,7 +72,11 @@ mod tests {
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let mut hostd = Command::new(bin("slopty-hostd"))
+        let mut hostd = Command::new(bin("slopty-hostd"));
+        if reach.is_direct_only() {
+            hostd.arg("--direct-only");
+        }
+        let mut hostd = hostd
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -81,15 +93,19 @@ mod tests {
             .spawn()
             .unwrap();
         let stdout = hostd.stdout.take().unwrap();
-        let mut guard = Guard(vec![ptyd, hostd], None);
+        let guard = Guard(vec![ptyd, hostd], None);
         let mut line = String::new();
         tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line))
             .await
             .expect("hostd prints a ticket")
             .unwrap();
         let ticket: PairTicket = line.trim().parse().unwrap();
+        (guard, ticket)
+    }
 
-        let endpoint = bind_client(SecretKey::generate(), Reach::Anywhere).await.unwrap();
+    /// A fresh endpoint (new key, new client id) dialing `ticket`: a cold QUIC connection.
+    async fn dial(ticket: &PairTicket, reach: Reach) -> (slopty_net::Endpoint, HostConn) {
+        let endpoint = bind_client(SecretKey::generate(), reach).await.unwrap();
         let hello = Hello {
             protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
@@ -99,15 +115,28 @@ mod tests {
             caps: Caps::empty(),
             pair_token: None,
         };
-        let host = tokio::time::timeout(
-            STEP,
-            connect_with_ticket(&endpoint, Reach::Anywhere, &ticket, hello),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        guard.1 = Some(endpoint);
-        (guard, host)
+        let host = tokio::time::timeout(STEP, connect_with_ticket(&endpoint, reach, ticket, hello))
+            .await
+            .unwrap()
+            .unwrap();
+        (endpoint, host)
+    }
+
+    /// Mint a fresh pairing ticket over hostd's control socket (tokens are single-use).
+    async fn mint(ctl_sock: &std::path::Path) -> PairTicket {
+        use tokio::io::AsyncWriteExt as _;
+        let stream = tokio::net::UnixStream::connect(ctl_sock).await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut line = serde_json::to_vec(&slopty_host::ctl::CtlRequest::Ticket).unwrap();
+        line.push(b'\n');
+        wr.write_all(&line).await.unwrap();
+        wr.shutdown().await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(rd).read_line(&mut reply).await.unwrap();
+        match serde_json::from_str(reply.trim()).unwrap() {
+            slopty_host::ctl::CtlReply::Ticket { ticket } => ticket.parse().unwrap(),
+            other => panic!("unexpected ctl reply: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -265,5 +294,227 @@ mod tests {
             }
         }
         link.close();
+    }
+
+    /// One start-up sample: what the first seconds of a stream on a cold connection looked like.
+    #[derive(Debug, Default)]
+    struct StartUp {
+        /// `Open` sent → `Opened` received.
+        opened_ms: f64,
+        /// `Open` sent → first datagram of the stream.
+        first_datagram_ms: f64,
+        /// `Open` sent → first frame complete (reassembled, handed to the decoder).
+        first_frame_ms: f64,
+        /// `Open` sent → first decoded picture.
+        first_decoded_ms: f64,
+        /// Longest first-fragment → complete wait of any frame (the keyframe's wire spread).
+        hold_max_ms: f64,
+        decoded: u32,
+        gap_p50_ms: f64,
+        gap_p90_ms: f64,
+        gap_max_ms: f64,
+        stalls: u64,
+        stalled_ms: u64,
+        nacks: u64,
+        refreshes: u64,
+        lost: u64,
+        /// The host's bitrate decisions: `target(verdict)`.
+        rate: String,
+    }
+
+    /// `min / p50 / p90 / max` of `samples`, in milliseconds.
+    fn quantiles(samples: &mut [f64]) -> (f64, f64, f64) {
+        samples.sort_by(f64::total_cmp);
+        let at = |q: f64| {
+            let last = samples.len().saturating_sub(1);
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "an index below 2^53"
+            )]
+            let i = ((last as f64) * q).round() as usize;
+            samples.get(i.min(last)).copied().unwrap_or(0.0)
+        };
+        (at(0.5), at(0.9), at(1.0))
+    }
+
+    fn ms(from: std::time::Instant, to: Option<std::time::Instant>) -> f64 {
+        to.map_or(f64::NAN, |t| t.saturating_duration_since(from).as_secs_f64() * 1e3)
+    }
+
+    /// Stream the first display on a cold connection for `seconds` and measure the start.
+    async fn start_up_sample(ctl_sock: &std::path::Path, seconds: u64) -> StartUp {
+        let ticket = mint(ctl_sock).await;
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let display = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
+                    break displays.first().expect("a display").id;
+                }
+                _other => {}
+            }
+        };
+        let target = CaptureTarget::Display(display);
+        let quality = Quality::default();
+        let sent_at = std::time::Instant::now();
+        link.send(ClientMsg::Screen(ScreenRequest::Open { target, quality })).await.unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => {
+                    break (stream, codec);
+                }
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let mut sample = StartUp {
+            opened_ms: ms(sent_at, Some(std::time::Instant::now())),
+            ..StartUp::default()
+        };
+        let screen = link.screen(stream, codec);
+        let mut frames = screen.frames();
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
+        let mut gaps: Vec<f64> = Vec::new();
+        let mut last: Option<std::time::Instant> = None;
+        let mut rate: Vec<String> = Vec::new();
+        loop {
+            tokio::select! {
+                changed = frames.changed() => {
+                    if changed.is_err() { break; }
+                    if frames.borrow_and_update().is_none() { continue; }
+                    let now = std::time::Instant::now();
+                    if let Some(prev) = last {
+                        gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
+                    }
+                    last = Some(now);
+                    sample.decoded = sample.decoded.saturating_add(1);
+                }
+                () = tokio::time::sleep_until(deadline) => break,
+                ev = events.recv() => match ev {
+                    Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Rate { target_bps, verdict, capped, .. }))) => {
+                        rate.push(format!("{:.1}({verdict:?}{})", f64::from(target_bps) / 1e6, if capped { "/cwnd" } else { "" }));
+                    }
+                    Some(LinkEvent::Disconnected(why)) => panic!("disconnected: {why}"),
+                    Some(_other) => {}
+                    None => break,
+                },
+            }
+        }
+        let stats = screen.stats();
+        sample.first_datagram_ms = ms(sent_at, stats.first_datagram_at);
+        sample.first_frame_ms = ms(sent_at, stats.first_frame_at);
+        sample.first_decoded_ms = ms(sent_at, stats.first_decoded_at);
+        sample.hold_max_ms = stats.hold_max.as_secs_f64() * 1e3;
+        (sample.gap_p50_ms, sample.gap_p90_ms, sample.gap_max_ms) = quantiles(&mut gaps);
+        sample.stalls = stats.stalls;
+        sample.stalled_ms = stats.stalled_ms;
+        sample.nacks = stats.nacks;
+        sample.refreshes = stats.refreshes;
+        sample.lost = stats.frames_lost;
+        sample.rate = rate.join(" ");
+        assert_eq!(stats.decode_errors, 0, "{stats:?}");
+        drop(screen);
+        link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
+        loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { stream: s, .. }))
+                    if s == stream =>
+                {
+                    break;
+                }
+                _other => {}
+            }
+        }
+        link.close();
+        endpoint.close().await;
+        sample
+    }
+
+    /// Start-up on a cold connection, several samples in one run: how long the first frame
+    /// takes and whether the first seconds stall. `SLOPTY_E2E_SAMPLES` (default 5) samples of
+    /// `SLOPTY_E2E_SECONDS` (default 3) each, every one on a fresh QUIC connection to the same
+    /// hostd, native scale at the default quality (what the app opens). Prints a table; the
+    /// numbers go to `docs/MEASUREMENTS.md`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn screen_start_up_over_iroh() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let samples: u32 =
+            std::env::var("SLOPTY_E2E_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let seconds: u64 =
+            std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let dir = tempfile::tempdir().unwrap();
+        let _logs = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+        // The app warms the decoder up at launch, long before it dials a host.
+        slopty_client::warm_up_decoder();
+        let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        // The daemon warms ScreenCaptureKit up right after it is online; by the time a user
+        // opens a window that has long finished, so let it finish here too.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let ctl_sock = dir.path().join("hostd.sock");
+        let mut rows = Vec::new();
+        for i in 0..samples {
+            let s = start_up_sample(&ctl_sock, seconds).await;
+            eprintln!(
+                "| {i} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} | {:.1} / {:.1} / {:.1} | {} ({} ms) | {} / {} / {} | {} |",
+                s.opened_ms,
+                s.first_datagram_ms,
+                s.first_frame_ms,
+                s.first_decoded_ms,
+                s.hold_max_ms,
+                s.decoded,
+                s.gap_p50_ms,
+                s.gap_p90_ms,
+                s.gap_max_ms,
+                s.stalls,
+                s.stalled_ms,
+                s.nacks,
+                s.refreshes,
+                s.lost,
+                s.rate
+            );
+            rows.push(s);
+        }
+        eprintln!(
+            "| sample | opened | first datagram | first frame | first decoded | hold max | decoded | gap p50 / p90 / max | stalls (stalled) | nack / refresh / lost | host target |"
+        );
+        for (i, s) in rows.iter().enumerate() {
+            eprintln!(
+                "| {i} | {:.0} ms | {:.0} ms | {:.0} ms | {:.0} ms | {:.0} ms | {} | {:.1} / {:.1} / {:.1} ms | {} ({} ms) | {} / {} / {} | {} |",
+                s.opened_ms,
+                s.first_datagram_ms,
+                s.first_frame_ms,
+                s.first_decoded_ms,
+                s.hold_max_ms,
+                s.decoded,
+                s.gap_p50_ms,
+                s.gap_p90_ms,
+                s.gap_max_ms,
+                s.stalls,
+                s.stalled_ms,
+                s.nacks,
+                s.refreshes,
+                s.lost,
+                s.rate
+            );
+        }
+        for (i, s) in rows.iter().enumerate() {
+            assert!(s.decoded >= 1, "sample {i} decoded nothing: {s:?}");
+            assert_eq!(s.lost, 0, "sample {i} lost frames: {s:?}");
+        }
     }
 }
