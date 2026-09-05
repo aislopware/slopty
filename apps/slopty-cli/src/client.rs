@@ -13,11 +13,7 @@ use slopty_proto::handshake::{Caps, ClientKind, Hello};
 
 /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SLOPTY_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    home.join("Library").join("Application Support").join("Slopty")
+    slopty_settings::data_dir()
 }
 
 fn identity(data_dir: &Path) -> Result<Identity> {

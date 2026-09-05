@@ -8023,8 +8023,10 @@ dependencies = [
  "slopty-net",
  "slopty-platform",
  "slopty-proto",
+ "slopty-settings",
  "slopty-theme",
  "slopty-ui",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -8068,6 +8070,7 @@ dependencies = [
  "slopty-host",
  "slopty-net",
  "slopty-proto",
+ "slopty-settings",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8325,6 +8328,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "slopty-settings"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml 1.1.5+spec-1.1.0",
 ]
 
 [[package]]

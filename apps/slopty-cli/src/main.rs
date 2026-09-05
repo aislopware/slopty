@@ -44,6 +44,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<hook::HookCmd>,
     },
+    /// The app's `settings.toml`.
+    Settings {
+        #[command(subcommand)]
+        cmd: SettingsCmd,
+    },
     /// Pair with a host using the ticket it printed.
     Pair {
         /// The ticket (`sloptypair…`).
@@ -99,6 +104,14 @@ enum Cmd {
 }
 
 /// Benchmarks.
+#[derive(Subcommand, Debug)]
+enum SettingsCmd {
+    /// Print where the app reads its settings from.
+    Path,
+    /// Write a commented default file there unless one exists.
+    Init,
+}
+
 #[derive(Subcommand, Debug)]
 enum BenchCmd {
     /// Keystroke round trip: a byte to a `cat` session on the host, timed to the first frame back.
@@ -157,6 +170,20 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd),
+        Cmd::Settings { cmd } => {
+            let path = slopty_settings::path_in(&data_dir);
+            match cmd {
+                SettingsCmd::Path => println!("{}", path.display()),
+                SettingsCmd::Init => {
+                    if slopty_settings::Settings::init(&path)? {
+                        println!("wrote {}", path.display());
+                    } else {
+                        println!("{} already exists; left as is", path.display());
+                    }
+                }
+            }
+            Ok(())
+        }
         Cmd::Pair { ticket } => client::pair(&data_dir, &ticket).await,
         Cmd::Hosts => client::hosts(&data_dir),
         Cmd::Forget { host } => client::forget(&data_dir, &host),
