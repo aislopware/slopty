@@ -623,6 +623,26 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   now keeps the request's tool and detail when the notification names none. After Esc on the
   menu no `Stop` fires (the turn is interrupted; the next hook is whatever the user does), so
   the badge keeps saying "denied" until then — acceptable, since the outline is already off.
+- ✅ "+ agent" (⌘⇧T, "New Agent" menu item) sends `OpenSession { command: ["claude"], title:
+  "claude" }`; nothing else is special about the session, so the hook relay, badges and
+  attention all apply as they do to a `claude` typed into a shell. The daemon's `PATH` is
+  launchd's under a LaunchAgent, and `claude` is often a shell alias (`~/.claude/local`), so
+  `slopty-pty::resolve_command` runs a bare name it cannot find on `PATH` through
+  `$SHELL -lic '<quoted words>'` (interactive login shell: rc files, aliases, job control);
+  a path or a name found on `PATH` still execs directly. Covered by
+  `unknown_bare_program_goes_through_the_login_shell`.
+- ✅ Links: no OSC 8 yet (the engine would need `ghostty_grid_ref_hyperlink_uri` per cell on
+  every frame); ⌘-click detects the URL in the cached row text on the client
+  (`slopty_ui::terminal::url::url_at`: known schemes, ends at whitespace/quote, trailing prose
+  punctuation and unbalanced closing brackets trimmed) and calls `cx.open_url`, which
+  `gpui_ios` implements with `UIApplication.openURL`. No wire change.
+- ✅ Deployment is two LaunchAgents written by `slopty host install` (`plist` crate, XML):
+  `KeepAlive` + `RunAtLoad` + `ThrottleInterval 2` so a crash comes back in 2 s and login
+  starts both; `ProcessType Interactive` and `LimitLoadToSessionType Aqua` because hostd
+  needs the window server and ScreenCaptureKit and must not be App-Napped; sockets under
+  `<data dir>/run/` (not `$TMPDIR`, which launchd children may not share) and the CLI's
+  socket lookup falls back to that path when it exists. `install` re-bootstraps (bootout
+  first, so a stale socket file never wedges the bind) and waits up to 10 s for a ticket.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.

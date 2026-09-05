@@ -14,6 +14,7 @@ mod bench;
 mod client;
 mod hook;
 mod hostctl;
+mod service;
 
 use std::path::PathBuf;
 

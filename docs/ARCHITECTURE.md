@@ -49,7 +49,8 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport. Mouse selection is client-side too
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, double/triple click,
-  or long-press on touch); nothing reaches the host.
+  or long-press on touch); nothing reaches the host. ⌘-click opens the URL under the pointer,
+found in the cached row text (`slopty-ui::terminal::url`).
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (the one that opened the session, else the
@@ -72,7 +73,15 @@ whole 50k-line history is searchable without the client ever holding it.
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
 (handshake through a `watch` pair so the fd is never read by two parties), ships the ring
 contents plus the master over `SCM_RIGHTS`, and hostd reads the fd directly from then on —
-no relay hop. Losing the hostd connection resumes draining; the child never blocks.
+no relay hop. Losing the hostd connection resumes draining; the child never blocks. A bare
+program name the daemon cannot find on its own `PATH` runs through the user's login shell,
+interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
+
+**Deployment.** `slopty host install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
+`dev.aislopware.slopty.hostd`; `KeepAlive`, `RunAtLoad`, `ProcessType Interactive`) with the
+sockets under `<data dir>/run/` and logs in `~/Library/Logs/Slopty`, bootstraps them, and
+prints a pairing ticket; `uninstall` and `service` undo and report. The CLI finds the
+installed socket by itself, so `slopty host ticket` works without launchd's environment.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -127,7 +136,8 @@ the source of truth for what is being streamed.
 
 ## 5. Agents
 
-Claude Code only, for now. Signals in precedence order: hooks (delivered to `slopty-hostd` over
+Claude Code only, for now. "+ agent" / ⌘⇧T opens a terminal running `claude` (a bare name,
+resolved on the host through the login shell). Signals in precedence order: hooks (delivered to `slopty-hostd` over
 its control socket by `slopty hook`, the relay Claude Code runs for each event) → JSONL
 transcript tail → terminal title/OSC → foreground-process presence. Only the first is built.
 
