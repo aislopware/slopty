@@ -529,8 +529,13 @@ interpolates two cameras over 180 ms with a cubic ease-out — zoom geometricall
 centre in a straight line — and the canvas element's prepaint advances it by the time since the
 last frame. The render loop is the only clock, and a landed flight stops asking for frames. The
 arrangement itself is pure (`slopty_client::arrange`): items in, origins and a `Heading` per
-block out, grouped by the repository their session's working directory belongs to (from OSC 7,
-already on the wire as `SessionSummary.cwd`) and ordered by the z the canvas already keeps.
+block out, grouped by their session's **repository** and ordered by the z the canvas already
+keeps. The repository is the host's answer, not a guess from the path: `slopty_host::repo`
+walks up from the working directory OSC 7 reported to the nearest `.git` entry (a directory for
+a checkout, a file for a worktree, whose `gitdir:` link is not followed, so a worktree is its
+own repository), caches it per session and sends it as `SessionSummary.repo` and
+`TermEvent::Cwd { path, repo }`. A host that sends none, or a directory in no repository at
+all, falls back to the client's containment heuristic over the working directories.
 Headings draw in canvas coordinates with role `Heading`, so they pan, zoom and read aloud.
 
 **Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph

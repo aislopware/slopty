@@ -1418,25 +1418,44 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   items fill a square-ish grid, most recent first, ties broken on the item id. Gutters are
   `GAP` inside a block and `3 × GAP` between blocks; the heading is a 28-pt band above each one,
   drawn in canvas coordinates with role `Heading` so it pans, zooms and reads aloud.
-  **No wire change**: the repo key is derived on the client from `SessionSummary.cwd`, which
-  the host already sends from OSC 7 — *and kept current*: `TermEvent::Cwd` was being dropped by
-  the terminal view, so it now reaches the canvas (`TerminalViewEvent::Cwd` →
-  `CanvasView::session_moved`) and a shell that `cd`s into another checkout arranges under the
-  new one instead of the directory it opened in. Each `Heading` carries the ids of its block, so
-  a block whose items have all closed loses its heading on the next reconcile: otherwise ⌘1
-  would keep fitting an empty rectangle and a screen reader would keep reading a label for
-  nothing. Two shells share a repository when one's directory
-  contains the other's — right for a shell at a checkout's root plus shells in its
-  subdirectories, wrong for a set of shells that are all in sibling subdirectories with none at
-  the root. The exact answer is the git root, which only the host can resolve; that needs a
-  field on `SessionSummary` and `PROTOCOL_VERSION` 13 → 14, deliberately not taken here because
-  `claude/parity` may want 14 for media. `CanvasItem.group` stays unused and available for it.
+  The key is the **repository root the host resolved** (see the protocol 14 ruling below), kept
+  current as the shell moves: `TermEvent::Cwd` was being dropped by the terminal view, so it now
+  reaches the canvas (`TerminalViewEvent::Cwd` → `CanvasView::session_moved`) and a shell that
+  `cd`s into another checkout arranges under the new one instead of the directory it opened in.
+  Each `Heading` carries the ids of its block, so a block whose items have all closed loses its
+  heading on the next reconcile: otherwise ⌘1 would keep fitting an empty rectangle and a screen
+  reader would keep reading a label for nothing. `CanvasItem.group` stays unused: it is the
+  server's field for server-side groups, and this layout is a client view.
   Arranging is **not undoable**: the canvas has no undo stack, for this or for a drag.
   Goldens: `arrange-by-repo` is new and `note` was re-accepted for ⌘0's new centre (2.19 % of
   pixels, a pan). The four **iOS** goldens were re-accepted too — they predate the ghostty
   metrics ruling above, and `ios-phone-terminal` had drifted to 0.9–1.1 % against a 1 %
   tolerance, i.e. it was failing on some runs and passing on others before this branch touched
   anything. Refreshed they are all 0.000 %.
+- ✅ **The repository root comes from the host, protocol 14** (2026-09-06). Only the machine a
+  shell runs on can see its `.git`, so `slopty_host::repo::root_of` resolves it there: walk up
+  from the working directory to the nearest ancestor holding a `.git` **entry**, and stop.
+  No `git` subprocess and no libgit — a handful of `stat` calls per `cd`, on the session actor's
+  own thread, cached in the actor and recomputed only when OSC 7 says the directory changed.
+  The entry is a directory in an ordinary checkout and a *file* in a worktree or a submodule;
+  the `gitdir:` link inside that file is deliberately **not** followed, so a worktree is its own
+  repository and not the checkout it was made from — two worktrees of one project are two places
+  to work. A repository nested inside another wins, because the walk stops at the first entry.
+  The path is canonicalised first, so two shells that reached one checkout through different
+  symlinks land in the same block; a directory that has since been removed answers `None` rather
+  than guessing from the stale string. Wire: `SessionSummary.repo` and `TermEvent::Cwd` becoming
+  `{ path, repo }`, both `Option<String>`; goldens `host_session_opened`, `host_term_cwd` and
+  `host_term_cwd_no_repo` (new) and `client_hello` re-accepted, `PROTOCOL_VERSION` 13 → 14.
+  `slopty_client::arrange` keys on the root when it is there and keeps the old containment
+  heuristic only for the items a host gave no root for, so a mixed canvas (a shell outside any
+  repository next to shells inside one) still groups sensibly and an older host still arranges.
+  This replaces the deferral in the ruling above: sibling subdirectories with nothing checked
+  out at the root are now one block, which the heuristic could never see. Tests:
+  `slopty_host::repo` over a temp tree (checkout, nested subdirectory, worktree `.git` file,
+  repository inside a repository, no repository, directory that is gone),
+  `sibling_directories_of_one_repository_are_one_block` and
+  `a_rootless_shell_does_not_join_a_rooted_block` in `slopty_client::arrange`, and
+  `the_hosts_repository_root_decides_the_blocks` headlessly.
 - ✅ Kind-aware culling: terminals keep state and stop painting off-screen; video pauses decode.
 - ✅ **Host-authoritative document, optimistic client.** `slopty-host::CanvasStore` owns the
   document (JSON at `<data>/canvas.json`, atomic rename, serialised writers), validates every
@@ -1640,9 +1659,16 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the card is already the unit the canvas lays out and zooms; the grid is one ⌘⇧L away.
   Verified by `slopty_agent::transcript` unit tests (13: tail across appends, truncation,
   partial lines, every tool summary) and the headless
-  `the_conversation_replaces_the_grid_and_follows_the_transcript`. Not done: rendering
-  `tool_result` bodies, thinking blocks, and typing into the conversation (keys still go to
-  the terminal underneath).
+  `the_conversation_replaces_the_grid_and_follows_the_transcript`.
+  **Correction (2026-09-06):** an earlier version of this ruling said `tool_result` bodies,
+  thinking blocks and typing into the conversation were not done. All three are:
+  `crates/slopty-ui/src/terminal/conversation.rs` renders `TranscriptBody::Thinking` and
+  `TranscriptBody::ToolResult` as folds — a header with the line count, opening on a click, a
+  tool result carrying its error state — and the composer under the list types its text into
+  the session followed by Enter (↩ sends, ⇧↩ is a newline). Covered by `folds_open_on_a_click`,
+  `the_composer_types_into_the_session`, `the_composer_wears_a_focus_ring_only_while_focused`
+  and `the_attention_row_and_the_composer_are_read_and_tabbed` headlessly, and by
+  `the_conversation_view_reads_and_answers_the_agent` in the app self-test.
 - ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
   linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
   flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the
