@@ -246,6 +246,13 @@ struct ShapeCache {
     /// The derived grid per (family, font size, scale, line-height multiplier): deriving it
     /// walked the font system every frame for nothing.
     grids: HashMap<(String, u32, u32, u32), Derived>,
+    /// The monospace family resolved per theme list: the first installed candidate. Listing
+    /// the installed fonts is a trip to the font server (tens of milliseconds), so it happens
+    /// once per list for the whole app, not once per view.
+    families: HashMap<Vec<String>, String>,
+    /// How many times the installed fonts were listed (tests).
+    #[cfg(test)]
+    picks: usize,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -272,6 +279,20 @@ impl ShapeCache {
         let (grid, derived, _font_id, face) = measure(window, font, font_size, height_mult);
         self.grids.insert(key, (grid, derived, face));
         (grid, derived, face)
+    }
+
+    /// The first of `candidates` that is installed, resolved once per list (see [`pick_family`]).
+    fn family(&mut self, window: &Window, candidates: &[String]) -> String {
+        if let Some(family) = self.families.get(candidates) {
+            return family.clone();
+        }
+        #[cfg(test)]
+        {
+            self.picks = self.picks.saturating_add(1);
+        }
+        let picked = pick_family(window, candidates);
+        self.families.insert(candidates.to_vec(), picked.clone());
+        picked
     }
 
     /// Drop entries not used in the last two generations. A generation is a frame when the
@@ -595,17 +616,19 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepared {
-        // Resolving the family walks every installed font; do it once per view.
-        let known_family = self.view.read(cx).font_family().map(str::to_owned);
-        let family = known_family.unwrap_or_else(|| {
-            let candidates = self.view.read(cx).theme().typography.mono_families.clone();
-            let picked = pick_family(window, &candidates);
-            self.view.update(cx, |view, _cx| view.set_font_family(picked.clone()));
-            picked
-        });
         if !cx.has_global::<ShapeCache>() {
             cx.set_global(ShapeCache::default());
         }
+        // Resolving the family walks every installed font: once per app for a theme's list
+        // (the cache), remembered per view so a frame costs neither the walk nor the lookup.
+        let known_family = self.view.read(cx).font_family().map(str::to_owned);
+        let family = known_family.unwrap_or_else(|| {
+            let candidates = self.view.read(cx).theme().typography.mono_families.clone();
+            let picked =
+                cx.update_global::<ShapeCache, _>(|cache, _| cache.family(window, &candidates));
+            self.view.update(cx, |view, _cx| view.set_font_family(picked.clone()));
+            picked
+        });
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
         let (base_size, height_mult, base_pad) = {
             let theme = self.view.read(cx).theme();
@@ -1023,6 +1046,12 @@ impl Element for TerminalElement {
 #[cfg(test)]
 pub fn cached_words(cx: &App) -> usize {
     cx.try_global::<ShapeCache>().map_or(0, |cache| cache.lines.len())
+}
+
+/// How many times the installed fonts were listed (tests: once for every view of the app).
+#[cfg(test)]
+pub fn family_picks(cx: &App) -> usize {
+    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.picks)
 }
 
 #[cfg(test)]

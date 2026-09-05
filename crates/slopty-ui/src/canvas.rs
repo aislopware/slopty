@@ -3444,4 +3444,24 @@ mod tests {
             );
         }
     }
+
+    /// Resolving the monospace family lists the installed fonts, a trip to the font server that
+    /// costs tens of milliseconds: three shells drawn on the canvas list them once, not once per
+    /// view (the card → grid flip drew twenty first frames at once and paid twenty walks).
+    #[gpui::test]
+    fn the_installed_fonts_are_listed_once_for_every_shell(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let mut ids = Vec::new();
+        for (i, x) in [0.0, 320.0, 640.0].into_iter().enumerate() {
+            let rect = Rect { x, y: 0.0, w: 300.0, h: 200.0 };
+            let version = u64::try_from(i).unwrap().saturating_add(1);
+            ids.push(host_opens(&view, cx, SessionId::new(), me, rect, version));
+        }
+        cx.run_until_parked();
+        for id in ids {
+            assert!(cx.debug_bounds(selector("item", id)).is_some(), "every shell is drawn");
+        }
+        let picks = cx.update(|_window, cx| crate::terminal::family_picks(cx));
+        assert_eq!(picks, 1, "one walk of the installed fonts for the whole app");
+    }
 }
