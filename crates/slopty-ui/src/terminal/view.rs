@@ -147,6 +147,9 @@ impl Selection {
 pub enum TerminalViewEvent {
     /// Title changed.
     Title(String),
+    /// The working directory changed (OSC 7). What arrange-by-repo groups on, so it has to
+    /// follow a `cd` and not stay at whatever the session opened in.
+    Cwd(String),
     /// Bell.
     Bell,
     /// The child exited.
@@ -1032,7 +1035,7 @@ impl TerminalView {
                 Effect::ClipboardWrite(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
-                Effect::Cwd(_) => {}
+                Effect::Cwd(cwd) => cx.emit(TerminalViewEvent::Cwd(cwd)),
                 Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "host"),
                 Effect::Matches { needle, total, matches } => {
                     self.matches_arrived(&needle, total, matches, cx);

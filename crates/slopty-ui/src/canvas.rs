@@ -515,6 +515,14 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// A session changed directory (OSC 7). The opening summary is only where the shell
+    /// *started*; arrange-by-repo groups on where it is now.
+    pub fn session_moved(&mut self, session: SessionId, cwd: String) {
+        if let Some(summary) = self.sessions.get_mut(&session) {
+            summary.cwd = Some(cwd);
+        }
+    }
+
     /// A session is gone.
     pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.sessions.remove(&session);
@@ -1103,6 +1111,7 @@ impl CanvasView {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
                     TerminalViewEvent::Title(_) => cx.notify(),
+                    TerminalViewEvent::Cwd(cwd) => this.session_moved(sid, cwd.clone()),
                     TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
                     TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
                 },
@@ -1132,6 +1141,14 @@ impl CanvasView {
         {
             self.active = self.doc.by_z().last().map(|i| i.id);
         }
+        self.prune_headings();
+    }
+
+    /// Drop the headings whose block has lost every item. An emptied repository must not keep
+    /// a label on the canvas, nor a rectangle ⌘1 would fit around nothing.
+    fn prune_headings(&mut self) {
+        let doc = &self.doc;
+        self.headings.retain(|h| h.items.iter().any(|id| doc.get(*id).is_some()));
     }
 
     /// Open streams for window/display items that lack one; drop views whose item is gone.
@@ -1346,6 +1363,7 @@ impl CanvasView {
     }
 
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        self.take_camera();
         let (_, vp) = self.viewport;
         self.camera.zoom_at(factor, f32::from(vp.width) / 2.0, f32::from(vp.height) / 2.0);
         cx.emit(CanvasEvent::Zoom(self.camera.zoom));
@@ -1419,6 +1437,13 @@ impl CanvasView {
     #[must_use]
     pub fn headings(&self) -> &[Heading] {
         &self.headings
+    }
+
+    /// The human took the camera: any pan, zoom, pinch or minimap scrub abandons a flight,
+    /// so the 180 ms of an animation are never 180 ms of ignored input.
+    const fn take_camera(&mut self) {
+        self.flight = None;
+        self.frame_at = None;
     }
 
     /// Move the camera to `target`, over [`FLIGHT`] seconds unless animation is off.
@@ -1537,6 +1562,7 @@ impl CanvasView {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(l) => (l.x * 20.0, l.y * 20.0),
         };
+        self.take_camera();
         if ev.modifiers.platform {
             let local = self.local(ev.position);
             let factor = (-delta.1 * 0.01).exp();
@@ -1549,6 +1575,7 @@ impl CanvasView {
     }
 
     fn pinch(&mut self, ev: &PinchEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.take_camera();
         let local = self.local(ev.position);
         let factor = (1.0 + ev.delta).max(0.05);
         self.camera.zoom_at(factor, f32::from(local.x), f32::from(local.y));
@@ -1570,6 +1597,7 @@ impl CanvasView {
     /// Centre the camera on the canvas point under `p` in the minimap.
     fn scrub_minimap(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(map) = self.minimap else { return };
+        self.take_camera();
         let (cx_, cy_) = map.to_canvas(p);
         let (_, vp) = self.viewport;
         self.camera.x = cx_ - f32::from(vp.width) / self.camera.zoom / 2.0;
@@ -1666,6 +1694,7 @@ impl CanvasView {
         let zoom = self.camera.zoom;
         match drag {
             Drag::Pan { last } => {
+                self.take_camera();
                 let d = ev.position - last;
                 self.camera.pan(f32::from(d.x), f32::from(d.y));
                 self.drag = Some(Drag::Pan { last: ev.position });
@@ -3158,5 +3187,133 @@ mod tests {
                 "a heading a screen reader can read: {tree:?}"
             );
         }
+    }
+
+    /// A shell that `cd`s into another repository arranges under the new one. The opening
+    /// summary only says where it started; OSC 7 says where it is.
+    #[gpui::test]
+    fn a_shell_that_changes_directory_changes_block(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        let stay = SessionId::new();
+        let moves = SessionId::new();
+        host_opens_in(&view, cx, stay, host, SHELL, 1, Some("/w/app"));
+        let wanderer = host_opens_in(
+            &view,
+            cx,
+            moves,
+            host,
+            Rect { x: 900.0, y: 40.0, w: 300.0, h: 200.0 },
+            2,
+            Some("/w/app/src"),
+        );
+
+        cx.simulate_keystrokes("cmd-shift-r");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |c, _| c.headings().len()),
+            1,
+            "one repository while both are in it"
+        );
+
+        // The shell announces its new directory the way the host relays OSC 7.
+        view.update_in(cx, |c, _window, cx| {
+            c.term_event(moves, TermEvent::Cwd("/w/tools".into()), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-r");
+        cx.run_until_parked();
+
+        let headings = view.read_with(cx, |c, _| c.headings().to_vec());
+        let labels: Vec<&str> = headings.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["tools", "app"], "it left the repository it started in: {labels:?}");
+        let tools = headings.iter().find(|h| h.label == "tools").expect("the new block");
+        assert_eq!(tools.items, vec![wanderer], "and took only itself: {:?}", tools.items);
+    }
+
+    /// A flight is the camera's *default* move, never a lock: panning during one keeps the pan.
+    #[gpui::test]
+    fn panning_during_a_flight_takes_the_camera(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        host_opens(&view, cx, SessionId::new(), host, SHELL, 1);
+        host_opens(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            Rect { x: 4000.0, y: 2500.0, w: 300.0, h: 200.0 },
+            2,
+        );
+        view.update_in(cx, |c, _window, cx| {
+            c.set_animation(true);
+            cx.notify();
+        });
+
+        cx.simulate_keystrokes("cmd-1");
+        assert!(view.read_with(cx, |c, _| c.flying_to().is_some()), "a flight is in progress");
+
+        // One scroll step, the way a trackpad sends it.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(200.0), px(200.0)),
+            delta: ScrollDelta::Pixels(point(px(30.0), px(-40.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        assert!(view.read_with(cx, |c, _| c.flying_to().is_none()), "the pan took the camera");
+        let panned = view.read_with(cx, |c, _| c.camera());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.camera()), panned, "and no frame took it back");
+    }
+
+    /// Closing every item of a repository takes its heading with it: ⌘1 must not keep fitting
+    /// an empty block, and a screen reader must not keep reading a label for nothing.
+    #[gpui::test]
+    fn an_emptied_repository_loses_its_heading(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        let stays = host_opens_in(&view, cx, SessionId::new(), host, SHELL, 1, Some("/w/app"));
+        let goes = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            Rect { x: 2200.0, y: 400.0, w: 300.0, h: 200.0 },
+            2,
+            Some("/w/tools"),
+        );
+
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-r");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.headings().len()), 2);
+
+        // The host removes the other repository's only shell.
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(
+                CanvasSync::Delta { version: 3, by: host, op: CanvasOp::Remove(goes) },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let headings = view.read_with(cx, |c, _| c.headings().to_vec());
+        assert_eq!(
+            headings.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            ["app"],
+            "the emptied block is gone"
+        );
+
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            !tree.iter().any(|n| n.role == "Heading" && n.label.as_deref() == Some("tools")),
+            "and nothing reads it out: {tree:?}"
+        );
+
+        // ⌘1 now fits the remaining item, not the space the empty block used to hold.
+        cx.simulate_keystrokes("cmd-1");
+        cx.run_until_parked();
+        let on_screen = view.read_with(cx, |c, _| {
+            c.camera().to_screen(c.doc.get(stays).expect("still there").rect)
+        });
+        assert!(on_screen.w > VIEWPORT.0 / 2.0, "the survivor fills the view: {on_screen:?}");
     }
 }

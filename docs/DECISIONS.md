@@ -1403,6 +1403,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   zoom-out and pan reads as one movement instead of a swing. The self-test turns animation off
   (`CanvasView::set_animation`, `#[cfg(feature = "e2e")]`): there a frame is a step, not a
   moment, and a dump taken mid-flight would report where the camera was passing through.
+  A flight is the camera's default move, never a lock: pan, wheel, pinch, ⌘=/⌘- and a minimap
+  scrub all abandon it (`CanvasView::take_camera`), so the 180 ms of an animation are never
+  180 ms of ignored input.
   Tested with a clock of its own in `slopty-client` (ease, exact landing, straight centre) and
   through the actions headlessly.
 - ✅ **Arrange by repository is a pure layout function, keyed on the working directory**
@@ -1415,7 +1418,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `GAP` inside a block and `3 × GAP` between blocks; the heading is a 28-pt band above each one,
   drawn in canvas coordinates with role `Heading` so it pans, zooms and reads aloud.
   **No wire change**: the repo key is derived on the client from `SessionSummary.cwd`, which
-  the host already sends from OSC 7. Two shells share a repository when one's directory
+  the host already sends from OSC 7 — *and kept current*: `TermEvent::Cwd` was being dropped by
+  the terminal view, so it now reaches the canvas (`TerminalViewEvent::Cwd` →
+  `CanvasView::session_moved`) and a shell that `cd`s into another checkout arranges under the
+  new one instead of the directory it opened in. Each `Heading` carries the ids of its block, so
+  a block whose items have all closed loses its heading on the next reconcile: otherwise ⌘1
+  would keep fitting an empty rectangle and a screen reader would keep reading a label for
+  nothing. Two shells share a repository when one's directory
   contains the other's — right for a shell at a checkout's root plus shells in its
   subdirectories, wrong for a set of shells that are all in sibling subdirectories with none at
   the root. The exact answer is the git root, which only the host can resolve; that needs a

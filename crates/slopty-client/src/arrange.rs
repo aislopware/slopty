@@ -44,6 +44,8 @@ pub struct Heading {
     pub label: String,
     /// The heading's own rect, directly above the block.
     pub rect: Rect,
+    /// The items in the block, so a caller can drop a heading whose items are all gone.
+    pub items: Vec<ItemId>,
 }
 
 /// What [`arrange_by_repo`] decided.
@@ -144,6 +146,7 @@ pub fn arrange_by_repo(items: &[Arrangeable], origin: (f32, f32)) -> Arrangement
             key: key.clone(),
             label: label_for(key),
             rect: Rect { x, y: snap(origin.1), w: width.max(1.0), h: HEADING_HEIGHT },
+            items: block.iter().map(|item| item.id).collect(),
         });
         x = snap(x + width + BLOCK_GAP);
     }
