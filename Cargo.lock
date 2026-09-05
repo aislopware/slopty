@@ -8068,6 +8068,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "slopty-pty",
  "tempfile",
  "tokio",
 ]
@@ -8256,12 +8257,14 @@ name = "slopty-pty"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "insta",
  "libc",
  "nix",
  "rustix",
  "serde",
  "slopty-core",
  "slopty-proto",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

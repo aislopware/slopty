@@ -307,23 +307,12 @@ fn home_dir() -> PathBuf {
 
 /// `xterm-ghostty` when its terminfo is installed (ghostty's entry is the most complete), else
 /// `xterm-256color`.
+///
+/// Read per spawn, not cached: [`crate::terminfo::install`] runs alongside the first shells, so
+/// a shell that starts a moment later gets the better answer.
 #[must_use]
 pub fn default_term() -> &'static str {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".terminfo"));
-    }
-    if let Some(list) = std::env::var_os("TERMINFO_DIRS") {
-        dirs.extend(std::env::split_paths(&list));
-    }
-    dirs.extend(
-        ["/usr/share/terminfo", "/opt/homebrew/share/terminfo", "/usr/local/share/terminfo"]
-            .map(PathBuf::from),
-    );
-    let installed = dirs
-        .iter()
-        .any(|d| d.join("78/xterm-ghostty").exists() || d.join("x/xterm-ghostty").exists());
-    if installed { "xterm-ghostty" } else { "xterm-256color" }
+    if crate::terminfo::installed() { crate::terminfo::NAMES[0] } else { "xterm-256color" }
 }
 
 impl AsRawFd for PtyMaster {

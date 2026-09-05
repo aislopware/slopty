@@ -34,6 +34,7 @@ mod tests {
         }
         let mut stack = Stack::launch("e2e-host").await.unwrap();
         let render_path = stack.path("terminal.png");
+        let terminfo_db = stack.path("terminfo");
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
 
@@ -50,6 +51,17 @@ mod tests {
             .unwrap();
         assert_eq!(dump.hosts.len(), 1, "{dump:#?}");
         assert_eq!(dump.hosts[0].name, "e2e-host");
+        // ptyd compiled ghostty's terminfo into the stack's own database while it came up, so
+        // the shells it spawns can be told `TERM=xterm-ghostty` (the dump does not carry a
+        // session's environment, and asking the shell would mean typing at it).
+        let db = &terminfo_db;
+        let compiled =
+            || db.join("78/xterm-ghostty").exists() || db.join("x/xterm-ghostty").exists();
+        let deadline = std::time::Instant::now() + STEP;
+        while !compiled() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(compiled(), "ptyd installs ghostty's terminfo into {}", db.display());
         assert_eq!(dump.items.len(), 1, "{dump:#?}");
         let term = dump.item("terminal").unwrap().clone();
         assert!(term.active, "{dump:#?}");

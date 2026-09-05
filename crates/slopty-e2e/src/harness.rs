@@ -163,10 +163,17 @@ async fn daemons(
     env: &[(String, String)],
 ) -> Result<(Vec<Child>, String)> {
     let ptyd_sock = root.join("ptyd.sock");
+    // ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
+    // `~/.terminfo` and let the shells it spawns read it back from here. The trailing
+    // separator is ncurses' way of saying "then the system database".
+    let terminfo = root.join("terminfo");
+    let terminfo_dirs = format!("{}:", terminfo.display());
     let mut ptyd = Command::new(bin("slopty-ptyd")?)
         .arg("--socket")
         .arg(&ptyd_sock)
         .envs(env.iter().map(|(k, v)| (k, v)))
+        .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
+        .env("TERMINFO_DIRS", &terminfo_dirs)
         .env("RUST_LOG", log)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -188,6 +195,8 @@ async fn daemons(
         .arg("--port")
         .arg("0")
         .envs(env.iter().map(|(k, v)| (k, v)))
+        .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
+        .env("TERMINFO_DIRS", &terminfo_dirs)
         .env("RUST_LOG", log)
         .env("SLOPTY_HOST_NAME", host_name)
         .stdin(Stdio::null())

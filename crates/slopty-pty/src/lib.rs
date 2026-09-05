@@ -6,6 +6,7 @@
 //! * [`fdpass`] — `SCM_RIGHTS` transfer of the master over the Unix socket.
 //! * [`client`] — the hostd side of the ptyd socket.
 //! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
+//! * [`terminfo`] — ghostty's terminfo entry, compiled on start-up so `TERM=xterm-ghostty`.
 //! * [`process`] — the foreground process of a tty, for attributing agent sessions.
 
 pub mod client;
@@ -15,6 +16,7 @@ pub mod protocol;
 pub mod pty;
 pub mod ring;
 pub mod shell_integration;
+pub mod terminfo;
 
 pub use client::PtydClient;
 pub use pty::{Pty, PtyMaster, SpawnSpec};

@@ -44,6 +44,23 @@ pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Resul
             None
         }
     };
+    // ghostty's terminfo, so the shells we spawn can be told `TERM=xterm-ghostty`. Off the
+    // critical path: `tic` takes a moment, and `default_term` reads the database per spawn, so
+    // a shell that starts before this lands simply gets `xterm-256color`.
+    let database = slopty_pty::terminfo::user_database();
+    tokio::spawn(async move {
+        match slopty_pty::terminfo::install(&database).await {
+            Ok(slopty_pty::terminfo::Installed::Already) => {
+                tracing::debug!(db = %database.display(), "terminfo already installed");
+            }
+            Ok(slopty_pty::terminfo::Installed::Compiled) => {
+                tracing::info!(db = %database.display(), "terminfo installed");
+            }
+            Err(e) => {
+                tracing::warn!(db = %database.display(), error = %e, "terminfo not installed");
+            }
+        }
+    });
     let (events, _) = broadcast::channel(256);
     let state = Arc::new(State {
         sessions: Mutex::new(HashMap::new()),

@@ -1,6 +1,13 @@
 [default]
 # Hex colours quoted in the docs' token tables (`D8DBE1`) are not words.
-extend-ignore-re = [ "(?i)objc", "\\b[0-9a-f]{7,40}\\b", "\\bBA\\b", "`[0-9A-Fa-f]{6}`" ]
+extend-ignore-re = [
+    "(?i)objc",
+    "\\b[0-9a-f]{7,40}\\b",
+    "\\bBA\\b",
+    "`[0-9A-Fa-f]{6}`",
+    # terminfo names ghostty's entry uses: shifted Home and its modifier variants.
+    "kHOM[0-9]?",
+]
 
 [default.extend-words]
 # terminal / VT jargon that typos flags
@@ -10,6 +17,9 @@ sav = "sav"
 LOD = "LOD"     # level of detail
 flate = "flate" # DEFLATE
 udid = "udid"   # Apple device identifier (simctl/devicectl)
+# terminfo capability names (`crates/slopty-pty/src/terminfo.rs`)
+rin = "rin"   # scroll back n lines
+kend = "kend" # the End key
 
 [files]
 extend-exclude = [
