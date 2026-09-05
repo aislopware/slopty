@@ -113,7 +113,7 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   drives the app in the simulator over its socket (`crates/slopty-e2e/tests/ios.rs`); the
   UIKit delivery has its own injection layer (next ruling).
 - ✅ **The simulator self-test delivers at the UIKit boundary, from descriptions (2026-09-06,
-  fork commit `53b763a9`).** `Command::Keys` / `Click` enter GPUI's dispatch, so nothing in
+  fork commit `2360f99d`).** `Command::Keys` / `Click` enter GPUI's dispatch, so nothing in
   the fork's UIKit plumbing (`pressesBegan:` on the metal view, `touchesBegan:` phases, the
   pinch recognizer, `insertText:` / `deleteBackward` on the text input view) was under test.
   UIKit's objects cannot be made: `UIPress`, `UITouch` and `UIKey` have no public
@@ -164,8 +164,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   recognizer); (4) a finger that keeps reporting after it stops (`UITouchPhaseStationary`
   events, which the fork maps to `Moved`) makes gpui core's quadratic velocity fit bend
   backwards and fling the content the wrong way; a real still finger sends nothing, and the
-  40 ms silence is what the recognizer reads as "stopped", so the test rests 100 ms before
-  lifting instead of sending stationary reports. Not modelled: `UITextInput` marked text (the fork's text input
+  40 ms silence is what the recognizer reads as "stopped", so the driver's `ui_pan` and the
+  finger test rest 100 ms before lifting instead of sending stationary reports (chosen over
+  changing the fit in gpui core: the device never produces the input that trips it);
+  (5) the US stand-in combined Caps Lock and Shift with OR; a keyboard reverses one with the
+  other on letters (`capslock-shift-a` is `a`), fixed with its unit test in fork `2360f99d`.
+  Not modelled: `UITextInput` marked text (the fork's text input
   view is `UIKeyInput` only, so iOS composes by delete + insert, which is what the test
   plays), touch force and prediction (a described touch has none), non-US layouts.
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
