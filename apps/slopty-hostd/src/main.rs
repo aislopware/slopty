@@ -159,6 +159,13 @@ async fn main() -> Result<()> {
         reach = ?daemon.listener.reach(),
         "online"
     );
+    // ScreenCaptureKit's first start in a process is slow; pay it now, not on the first window.
+    tokio::spawn(async {
+        match slopty_host::screen::warm_up().await {
+            Ok(took) => tracing::debug!(ms = took.as_millis(), "capture warmed up"),
+            Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
+        }
+    });
     if !slopty_input::can_post() {
         tracing::warn!(
             "no post-event (Accessibility) access: remote-window input will be dropped; \

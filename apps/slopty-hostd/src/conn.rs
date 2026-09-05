@@ -174,10 +174,67 @@ async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
     }
 }
 
+/// How long the pump waits for the next datagram before checking whether QUIC has let go of
+/// the ones it was holding (only while a hold is on).
+const HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// One stretch during which QUIC held datagrams in its send buffer (congestion window or
+/// pacing), for the debug log: when it began, the most it held, the window at that moment.
+struct Hold {
+    since: std::time::Instant,
+    max_bytes: usize,
+    cwnd_at_max: u64,
+}
+
 /// Drain the media queue into QUIC datagrams, tracking what the path can carry.
+///
+/// Logs every stretch during which QUIC held datagrams back (the send buffer was not empty):
+/// media that waits there is latency the receiver sees as a stall, and the length and size
+/// of those holds is what start-up and bitrate steps are judged by.
 async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget: DatagramBudget) {
     let mut last_budget = 0;
-    while let Some(datagram) = rx.recv().await {
+    let mut hold: Option<Hold> = None;
+    loop {
+        let datagram = if hold.is_some() {
+            match tokio::time::timeout(HOLD_POLL, rx.recv()).await {
+                Ok(Some(d)) => Some(d),
+                Ok(None) => break,
+                Err(_elapsed) => None,
+            }
+        } else {
+            rx.recv().await
+        };
+        let held =
+            slopty_net::endpoint::DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
+        budget.set_held(held);
+        match (&mut hold, held) {
+            (None, 0) => {}
+            (None, bytes) => {
+                let (_rtt, cwnd) = slopty_net::endpoint::selected_path(&conn).unwrap_or_default();
+                hold = Some(Hold {
+                    since: std::time::Instant::now(),
+                    max_bytes: bytes,
+                    cwnd_at_max: cwnd,
+                });
+            }
+            (Some(h), 0) => {
+                tracing::debug!(
+                    held_ms = h.since.elapsed().as_millis(),
+                    max_bytes = h.max_bytes,
+                    cwnd = h.cwnd_at_max,
+                    "quic released the datagrams it held"
+                );
+                hold = None;
+            }
+            (Some(h), bytes) => {
+                if bytes > h.max_bytes {
+                    h.max_bytes = bytes;
+                    h.cwnd_at_max =
+                        slopty_net::endpoint::selected_path(&conn).map_or(0, |(_rtt, cwnd)| cwnd);
+                }
+            }
+        }
+        let Some(datagram) = datagram else { continue };
         if let Some(max) = conn.max_datagram_size() {
             if max != last_budget {
                 tracing::debug!(max, "datagram budget");

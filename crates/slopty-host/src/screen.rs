@@ -67,11 +67,16 @@ pub enum ScreenError {
     Closed,
 }
 
-/// Bytes the transport can carry in one datagram right now, shared by every stream on one
-/// connection. Starts at the protocol maximum; the transport lowers it while QUIC's path MTU is
-/// still 1200 bytes.
+/// What the transport reports about the connection, shared by every stream on it.
+///
+/// The bytes one datagram may carry (starts at the protocol maximum; lowered while QUIC's
+/// path MTU is still 1200 bytes) and how many bytes of datagrams QUIC is holding in its send
+/// buffer, waiting for the congestion window.
 #[derive(Clone, Debug)]
-pub struct DatagramBudget(Arc<AtomicUsize>);
+pub struct DatagramBudget {
+    max_datagram: Arc<AtomicUsize>,
+    held: Arc<AtomicUsize>,
+}
 
 impl Default for DatagramBudget {
     fn default() -> Self {
@@ -80,22 +85,64 @@ impl Default for DatagramBudget {
 }
 
 impl DatagramBudget {
-    /// Protocol maximum.
+    /// Protocol maximum, nothing held.
     #[must_use]
     pub fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(MAX_DATAGRAM)))
+        Self {
+            max_datagram: Arc::new(AtomicUsize::new(MAX_DATAGRAM)),
+            held: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Record what the path carries.
     pub fn set(&self, bytes: usize) {
-        self.0.store(bytes, Ordering::Relaxed);
+        self.max_datagram.store(bytes, Ordering::Relaxed);
     }
 
     /// Current budget.
     #[must_use]
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
+        self.max_datagram.load(Ordering::Relaxed)
     }
+
+    /// Record how many bytes QUIC is holding back right now.
+    pub fn set_held(&self, bytes: usize) {
+        self.held.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Bytes QUIC is holding back, as last reported.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.held.load(Ordering::Relaxed)
+    }
+}
+
+/// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
+/// is dropped instead of encoded.
+///
+/// The datagram send buffer is 4 MiB; a link whose window collapsed held 275–365 KB of
+/// frames for 4–7 s and delivered every one of them stale (MEASUREMENTS.md, "start-up over
+/// the mesh"). Two frames keep a keyframe's tail flowing and stop the queue there: the next
+/// capture is fresher than anything that would wait behind it.
+const HELD_FRAMES: u64 = 2;
+/// Floor for the held-bytes limit, so a low target does not drop every frame behind a beat.
+const HELD_FLOOR: u64 = 32 * 1024;
+
+/// Whether a captured frame should be encoded given what is queued ahead of it: `free` slots
+/// in the datagram queue, `held` bytes in QUIC's send buffer, at `target_bps` and `fps`.
+#[must_use]
+pub const fn frame_fits(free: usize, held: usize, target_bps: u64, fps: u16) -> bool {
+    if free < LOW_WATER {
+        return false;
+    }
+    let fps = if fps == 0 { 1 } else { fps as u64 };
+    let per_frame = match (target_bps / 8).checked_div(fps) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    let limit = per_frame.saturating_mul(HELD_FRAMES);
+    let limit = if limit < HELD_FLOOR { HELD_FLOOR } else { limit };
+    (held as u64) <= limit
 }
 
 /// Counters for logs and telemetry.
@@ -123,13 +170,77 @@ pub struct ScreenStats {
     pub bitrate_bps: u64,
 }
 
-/// Enumerate shareable content.
-pub async fn shareable() -> Result<Shareable, ScreenError> {
+/// How long an enumeration of shareable content is reused. A client lists, picks and opens
+/// within a few seconds, and `SCShareableContent` costs 60–75 ms per call (MEASUREMENTS.md,
+/// "start-up on a cold connection"); the second call would return the same objects.
+const SHAREABLE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The last enumeration and when it was taken.
+static SHAREABLE: Mutex<Option<(std::time::Instant, Arc<Shareable>)>> = Mutex::new(None);
+
+/// Enumerate shareable content, reusing an enumeration younger than [`SHAREABLE_TTL`].
+pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
+    if let Some((taken, content)) = SHAREABLE.lock().as_ref()
+        && taken.elapsed() < SHAREABLE_TTL
+    {
+        return Ok(Arc::clone(content));
+    }
     let (tx, rx) = oneshot::channel();
     slopty_capture::enumerate(move |result| {
         let _receiver_gone = tx.send(result);
     });
-    rx.await.map_err(|_dropped| ScreenError::Closed)?.map_err(ScreenError::from)
+    let content = Arc::new(rx.await.map_err(|_dropped| ScreenError::Closed)??);
+    *SHAREABLE.lock() = Some((std::time::Instant::now(), Arc::clone(&content)));
+    Ok(content)
+}
+
+/// Start and stop one small capture of the first display; returns how long that took.
+///
+/// The first stream a client opens then does not pay ScreenCaptureKit's first start in this
+/// process: ~300 ms cold against ~115 ms warm (MEASUREMENTS.md, "start-up on a cold
+/// connection").
+pub async fn warm_up() -> Result<std::time::Duration, ScreenError> {
+    let started = std::time::Instant::now();
+    let encoder = Encoder::new(
+        EncoderConfig {
+            width: 64,
+            height: 64,
+            codec: VideoCodec::Hevc,
+            fps: 1,
+            bitrate_bps: 100_000,
+        },
+        |_packet| {},
+    )?;
+    drop(encoder);
+    let content = shareable().await?;
+    let display = content.displays().into_iter().next().ok_or(ScreenError::Closed)?;
+    let resolved = Target::resolve(&content, CaptureTarget::Display(display.id))?;
+    let config = CaptureConfig {
+        width: 64,
+        height: 64,
+        fps: 1,
+        format: PixelFormat::Nv12,
+        queue_depth: 1,
+        audio: true,
+    };
+    let (tx, rx) = oneshot::channel();
+    let capture = Capture::start(
+        &resolved,
+        &config,
+        |_frame| {},
+        Some(Box::new(|_chunk| {})),
+        |_stopped| {},
+        move |result| {
+            let _receiver_gone = tx.send(result);
+        },
+    )?;
+    rx.await.map_err(|_dropped| ScreenError::Closed)??;
+    let (tx, rx) = oneshot::channel();
+    capture.stop(move |result| {
+        let _receiver_gone = tx.send(result);
+    });
+    let _stopped = rx.await;
+    Ok(started.elapsed())
 }
 
 /// The `Listing` event for the current windows and displays.
@@ -217,6 +328,8 @@ struct Shared {
     sent_at_report: AtomicU64,
     /// `host_now_us()` when the last datagram was queued; the heartbeat clock.
     last_push_us: AtomicU64,
+    /// Capture frame rate, for the held-bytes limit.
+    fps: std::sync::atomic::AtomicU16,
     out: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     counters: Counters,
@@ -254,7 +367,13 @@ impl Shared {
     /// ScreenCaptureKit delivered a frame.
     fn on_frame(&self, frame: &CapturedFrame) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
-        if self.out.capacity() < LOW_WATER {
+        let fits = frame_fits(
+            self.out.capacity(),
+            self.budget.held(),
+            self.counters.bitrate_bps.load(Ordering::Relaxed),
+            self.fps.load(Ordering::Relaxed),
+        );
+        if !fits {
             self.counters.dropped.fetch_add(1, Ordering::Relaxed);
             // The client will see a hole; make the next frame decodable on its own.
             self.pending.lock().refresh = true;
@@ -335,7 +454,17 @@ impl Shared {
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = host_now_us();
         let latency = now.saturating_sub(packet.pts_us);
-        self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+        let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+        if encoded == 0 || packet.keyframe {
+            tracing::debug!(
+                stream = %self.id,
+                frame = encoded,
+                bytes = packet.data.len(),
+                keyframe = packet.keyframe,
+                encode_ms = latency / 1000,
+                "keyframe encoded"
+            );
+        }
         self.counters.latency_max_us.fetch_max(latency, Ordering::Relaxed);
         self.counters.latency_sum_us.fetch_add(latency, Ordering::Relaxed);
         #[expect(clippy::cast_possible_truncation, reason = "low bits by design")]
@@ -438,7 +567,9 @@ impl ScreenStream {
         budget: DatagramBudget,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
+        let t0 = std::time::Instant::now();
         let content = shareable().await?;
+        let enumerated = t0.elapsed();
         let resolved = Target::resolve(&content, target)?;
         let (capture_config, encoder_config) = configs(resolved.pixel_size(), &quality);
 
@@ -452,11 +583,14 @@ impl ScreenStream {
             rate: Mutex::new(RateController::new(encoder_config.bitrate_bps)),
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(host_now_us()),
+            fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             out,
             budget,
             counters: Counters::new(),
         });
+        let t_encoder = std::time::Instant::now();
         let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
+        let encoder_built = t_encoder.elapsed();
         *shared.encoder.write() = Some(encoder);
         let start = shared.rate.lock().target_bps();
         shared.apply_bitrate(start);
@@ -475,6 +609,13 @@ impl ScreenStream {
             },
         )?;
         started_rx.await.map_err(|_dropped| ScreenError::Closed)??;
+        tracing::debug!(
+            stream = %id,
+            enumerate_ms = enumerated.as_millis(),
+            encoder_ms = encoder_built.as_millis(),
+            total_ms = t0.elapsed().as_millis(),
+            "capture started"
+        );
 
         let native = resolved.pixel_size();
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
@@ -586,6 +727,7 @@ impl ScreenStream {
             rate.target_bps()
         };
         self.shared.apply_bitrate(target);
+        self.shared.fps.store(capture_config.fps, Ordering::Relaxed);
         self.shared.pending.lock().keyframe = true;
         let id = self.id;
         self.capture.update(&capture_config, move |result| {
@@ -652,8 +794,22 @@ impl ScreenStream {
         self.shared.pending.lock().refresh = true;
     }
 
-    /// Retransmit fragments of a recent frame.
+    /// Retransmit fragments of a recent frame, unless QUIC is already holding more than the
+    /// frame budget: an answer that leaves behind seconds of queued frames arrives after the
+    /// receiver has given up, and on a collapsed link every NACK answered that way stacked
+    /// another copy of the frame into the queue (64 000 datagrams for 12 frames,
+    /// MEASUREMENTS.md "start-up over the mesh").
     pub fn nack(&self, frame: u32, fragments: &[u16]) {
+        let fits = frame_fits(
+            self.shared.out.capacity(),
+            self.shared.budget.held(),
+            self.shared.counters.bitrate_bps.load(Ordering::Relaxed),
+            self.shared.fps.load(Ordering::Relaxed),
+        );
+        if !fits {
+            tracing::debug!(stream = %self.id, frame, held = self.shared.budget.held(), "nack not answered: transport is holding frames");
+            return;
+        }
         let datagrams = self.shared.packetizer.lock().retransmit(frame, fragments);
         if datagrams.is_empty() {
             tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
@@ -730,5 +886,25 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
             sample.2,
         );
         shared.push(datagram);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_fits_unless_the_queue_or_quic_holds_too_much() {
+        // 30 Mbit/s at 60 fps: 62.5 KB per frame, two frames may be held.
+        assert!(frame_fits(DATAGRAM_QUEUE, 0, 30_000_000, 60));
+        assert!(frame_fits(DATAGRAM_QUEUE, 125_000, 30_000_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 125_001, 30_000_000, 60));
+        // The datagram queue's low-water mark still applies.
+        assert!(!frame_fits(LOW_WATER - 1, 0, 30_000_000, 60));
+        // At the 1 Mbit/s floor two frames are 4 KB; the 32 KB floor keeps beats and a
+        // small keyframe from dropping everything behind them.
+        assert!(frame_fits(DATAGRAM_QUEUE, 32 * 1024, 1_000_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 32 * 1024 + 1, 1_000_000, 60));
+        assert!(frame_fits(DATAGRAM_QUEUE, 0, 0, 0), "no rate known: the floor");
     }
 }
