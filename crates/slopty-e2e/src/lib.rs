@@ -421,6 +421,10 @@ pub struct ScreenInfo {
     pub interval_jitter_us: u64,
     /// Frames the pacer's ring holds.
     pub window: usize,
+    /// What the host last said about the capture target: `live` (it is drawing, or has drawn)
+    /// or `idle` (it has produced no frame at all, so no refresh can help).
+    #[serde(default)]
+    pub source: String,
 }
 
 /// A terminal's conversation view.

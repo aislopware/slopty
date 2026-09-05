@@ -18,6 +18,11 @@ mod tests {
     const WINDOW: (f32, f32) = (900.0, 600.0);
     /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
     const TOLERANCE: f64 = 0.01;
+    /// Refresh requests the receiver may send for a target that produces no frame, checked
+    /// against the host's own count of what it was asked for.
+    fn refresh_cap() -> u64 {
+        u64::from(slopty_media::Config::default().refresh_max_repeats)
+    }
 
     fn gated() -> bool {
         if std::env::var_os("SLOPTY_APP_E2E").is_none() {
@@ -427,6 +432,99 @@ mod tests {
 
         let frame = drv.render(&render_path).await.unwrap();
         assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        stack.shutdown().await;
+    }
+
+    /// A remote window whose target never draws: ⌘O picks it while it is still on screen, the
+    /// helper takes it away before the stream opens, and the item says so instead of asking the
+    /// host for refreshes no refresh can answer. Then the window draws again and the picture
+    /// arrives without the client doing anything.
+    #[tokio::test]
+    async fn a_remote_window_that_never_draws_waits_instead_of_asking_forever() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-host").await.unwrap();
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        let idle = stack.start_idle_window().await.unwrap();
+        stack
+            .driver
+            .wait_for("the first shell", STEP, |d| {
+                d.status == "connected" && d.item("terminal").is_some()
+            })
+            .await
+            .unwrap();
+
+        // ⌘O lists the host's windows. The picker shows on-screen windows only, which is why the
+        // helper is still on screen here.
+        stack.driver.keys("cmd-o").await.unwrap();
+        let row = format!(", {}", idle.title());
+        let dump = stack
+            .driver
+            .wait_for("the idle window in the picker", STEP, |d| {
+                d.a11y.iter().any(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row))
+                })
+            })
+            .await
+            .unwrap();
+        let button = dump
+            .a11y
+            .iter()
+            .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&row)))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y))
+            .clone();
+
+        // Off screen before the stream opens: the host can still capture it, and captures
+        // nothing.
+        idle.hide().unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let [x, y, w, h] = button.bounds;
+        stack.driver.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+
+        // The host says the target is idle; the item says which end everyone is waiting on, and
+        // a screen reader is told the same thing.
+        let dump = stack
+            .driver
+            .wait_for("the item to say the window is not drawing", STEP, |d| {
+                d.screens.iter().any(|s| s.source == "idle")
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.screens.len(), 1, "{dump:#?}");
+        assert_eq!(dump.screens[0].frames, 0, "an off-screen window produced pictures");
+        assert!(
+            dump.a11y_node("Status", Some("waiting for the window to draw…")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+
+        // What the host was asked for over the whole time: a handful of refreshes, then silence.
+        // The cap is the receiver's, and this is the only place it can be seen from outside.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let screens = stack.host_screens().await.unwrap();
+        let refreshes: u64 =
+            screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
+        let cap = refresh_cap();
+        assert!(
+            refreshes <= cap,
+            "{refreshes} refresh requests for a window that cannot answer one (cap {cap})"
+        );
+
+        // Drawing again is enough: no refresh, no reopen, the picture just starts.
+        idle.show().unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the picture once the window draws", STEP, |d| {
+                d.screens.iter().any(|s| s.source == "live" && s.frames > 0)
+            })
+            .await
+            .unwrap();
+        assert!(
+            dump.a11y_node("Status", Some("waiting for the window to draw…")).is_none(),
+            "{:#?}",
+            dump.a11y
+        );
         stack.shutdown().await;
     }
 }

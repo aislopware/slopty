@@ -359,7 +359,12 @@ fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     let pacing = view.pacing();
     let size = view.size();
+    let source = match view.source_state() {
+        slopty_proto::screen::SourceState::Idle => "idle",
+        slopty_proto::screen::SourceState::Live => "live",
+    };
     ScreenInfo {
+        source: source.to_owned(),
         item: item.to_string(),
         stream: view.stream().0,
         size: size.into(),

@@ -200,6 +200,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     };
 
     // Build every binary a suite may spawn up front, so a test never shells out to cargo.
+    // `slopty-e2e` is in there for its own helper binaries (the idle window).
     // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
     // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
     // the daemons stale.
@@ -207,7 +208,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         "build daemons and app",
         &cmd!(
             sh,
-            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty --bins --features slopty/e2e"
+            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty -p slopty-e2e --bins --features slopty/e2e"
         ),
     )?;
 

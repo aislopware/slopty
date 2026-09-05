@@ -24,8 +24,15 @@ slopty-pty = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [ "process" ] }
 
+# The idle-window helper (`src/bin/slopty-idle-window.rs`): AppKit, macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+
 [dev-dependencies]
 anyhow.workspace = true
+slopty-media.workspace = true
 slopty-pty.workspace = true
 image.workspace = true
 tempfile.workspace = true

@@ -66,6 +66,43 @@ pub struct Stack {
     pub simulator: Option<Simulator>,
 }
 
+/// The window [`Stack::start_idle_window`] opened: a target that draws nothing until it is
+/// told to.
+#[derive(Debug, Clone)]
+pub struct IdleWindow {
+    markers: PathBuf,
+    title: String,
+}
+
+impl IdleWindow {
+    /// Its window title, which is how the app's picker lists it.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Take the window off screen. It stays in the host's window list (the host enumerates with
+    /// `onScreenWindowsOnly: false`), so a stream opened on it captures nothing at all.
+    ///
+    /// # Errors
+    ///
+    /// When the marker cannot be written.
+    pub fn hide(&self) -> Result<()> {
+        std::fs::write(self.markers.join("hide"), b"")?;
+        Ok(())
+    }
+
+    /// Put it back and keep repainting it, which is what makes the host call the source live.
+    ///
+    /// # Errors
+    ///
+    /// When the marker cannot be written.
+    pub fn show(&self) -> Result<()> {
+        std::fs::write(self.markers.join("show"), b"")?;
+        Ok(())
+    }
+}
+
 /// A booted iOS simulator and the app installed in it.
 #[derive(Debug, Clone)]
 pub struct Simulator {
@@ -438,6 +475,49 @@ impl Stack {
             "hostd refused the hook: {reply}"
         );
         Ok(())
+    }
+
+    /// Open a window on this machine that never draws, for the refresh-storm guard: the helper
+    /// ([`crate`]'s `slopty-idle-window` binary) owns it, so no window belonging to anything else
+    /// is touched. It is on screen when it returns — the app's picker lists on-screen windows
+    /// only — and [`IdleWindow::hide`] takes it away again.
+    ///
+    /// # Errors
+    ///
+    /// When the helper is not built or its window does not open.
+    pub async fn start_idle_window(&mut self) -> Result<IdleWindow> {
+        let markers = self.path("idle-window");
+        std::fs::create_dir_all(&markers)?;
+        let title = format!("slopty idle {}", std::process::id());
+        let child = Command::new(bin("slopty-idle-window")?)
+            .arg(&markers)
+            .arg(&title)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn slopty-idle-window")?;
+        self.children.push(child);
+        let ready = markers.join("ready");
+        let deadline = std::time::Instant::now()
+            .checked_add(STARTUP)
+            .ok_or_else(|| anyhow::anyhow!("a deadline inside the clock"))?;
+        while !ready.exists() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "the idle window never opened");
+            tokio::time::sleep(POLL).await;
+        }
+        Ok(IdleWindow { markers, title })
+    }
+
+    /// The host's live screen streams as `slopty host screens` reads them, straight off hostd's
+    /// control socket.
+    ///
+    /// # Errors
+    ///
+    /// When the socket is not there or hostd answers something else.
+    pub async fn host_screens(&self) -> Result<Vec<Value>> {
+        let reply = ctl(&self.path("hostd.sock"), &json!({ "cmd": "screens" })).await?;
+        let live = reply.get("live").and_then(Value::as_array).cloned();
+        live.ok_or_else(|| anyhow::anyhow!("hostd did not list its screens: {reply}"))
     }
 
     /// Ask the app to quit, then kill whatever is left.

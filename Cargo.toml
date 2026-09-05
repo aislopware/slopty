@@ -117,6 +117,9 @@ objc2 = "=0.6.4"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSArray",
+    "NSDate",
+    "NSGeometry",
+    "NSRunLoop",
     "NSError",
     "NSString",
     "NSObject",
@@ -192,6 +195,9 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "NSColor",
+    "NSGraphics",
+    "NSWindow",
     "NSRunningApplication",
     "NSPasteboard",
     "NSApplication",
