@@ -131,7 +131,8 @@ retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `
 `Redundancy` → parity ratio; pure, no clocks, property tested), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
 path's datagram limit; cursor sampler; input injection), `slopty-input` (client
-`ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays;
+`ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
+right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the
 active app). `slopty-hostd` owns one datagram pump
 per connection and maps `ScreenRequest`s onto the streams it opened for that client.
@@ -197,7 +198,11 @@ Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, on
 and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and asks the host for
 a stream scale matching its painted width. When the host window changes size, hostd notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the canvas re-aspects
-the item.
+the item. It is also a text input (`EntityInputHandler`): on iOS a tap raises the soft
+keyboard and committed text goes to the host one key per character through
+`ScreenView::press` (press + release, armed ⌃/⌘ from the phone key bar applied); the bar over
+a window is esc, tab, ⌃, ⌘, arrows, `/`, copy, paste (⌘C/⌘V on the host, so the host's
+pasteboard flows back through clipboard sync).
 
 **Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
 ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,

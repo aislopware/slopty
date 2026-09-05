@@ -138,6 +138,23 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   only renders while a terminal is the canvas's active item. Its last key is the clipboard:
   "copy" while the terminal has a selection (long-press selects; a plain drag pans the
   canvas), "paste" otherwise, since the phone has no ⌘C/⌘V.
+  A remote window gets its own bar (`SCREEN_BAR_KEYS`, `CanvasView::active_key_target`):
+  esc, tab, sticky ⌃ and ⌘, arrows, `/`, copy, paste. `ScreenView` implements
+  `EntityInputHandler` too, so the soft keyboard rises over a window; each committed character
+  becomes a press + release `ScreenInput::Key` carrying the character as `text` (a modified key
+  carries none, or the host would insert the letter as well as run the chord). Composition
+  (marked text) is held and only the committed string is sent. Windows on a phone were
+  view-and-touch only before this (2026-09-05). Found on the way: a press on a window never
+  made it the *active* item, because `ScreenView::mouse_down` stops propagation (so the canvas
+  does not pan) before the item container's activate handler runs; the view now emits
+  `ScreenViewEvent::Pressed` and the canvas activates from that. The workspace also observes
+  the canvas entity, since the key bar follows the active item and nothing else re-rendered
+  the chrome when it changed. A long press on a window is a right click on the host, which
+  exposed a second host bug: a right click posted with `CGEventPostToPid` reaches
+  `rightMouseDown` but AppKit's context-menu tracking never opens the menu (Ghostty, macOS
+  26.5; a real click opens it). Right-button events now go through the HID tap even for
+  window streams — the host pointer moves for those, the price of a menu — and Ghostty's
+  menu opens from the Mac app and from a phone long press (verified 2026-09-05).
 
 - ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
   document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).

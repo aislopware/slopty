@@ -260,7 +260,16 @@ impl Injector {
                 clicks,
             );
         }
-        self.post(&event);
+        // A context menu is tracked by AppKit against the window server's own event stream:
+        // a right click posted to the pid reaches `rightMouseDown` but the menu never opens
+        // (observed with Ghostty, macOS 26.5). So right-button events go through the HID tap
+        // even for window streams; the host's pointer does move for those, which is the
+        // price of a menu.
+        if button == CGMouseButton::Right {
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+        } else {
+            self.post(&event);
+        }
         Ok(())
     }
 

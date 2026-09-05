@@ -16,16 +16,18 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType as _;
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
-    Bounds, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    ParentElement as _, PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    Styled as _, Task, TouchPhase, Window, canvas, div, point, px, surface,
+    Autocapitalize, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
+    Keystroke, LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase,
+    UTF16Selection, Window, canvas, div, point, px, surface,
 };
 use slopty_client::{CursorState, ScreenHandle};
 use slopty_codec::DecodedFrame;
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
-use slopty_proto::input::{KeyAction, KeyCode, MouseButton as ProtoButton};
+use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
     CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, ScreenInput, ScreenRequest, ScrollPhase,
     VideoCodec,
@@ -49,6 +51,9 @@ const MIN_SCALE: f32 = 0.25;
 pub enum ScreenViewEvent {
     /// First frame painted.
     Ready,
+    /// Pressed: the canvas should make this item active. (The view stops the mouse event so
+    /// the canvas does not pan, which also keeps it from the item's own activate handler.)
+    Pressed,
 }
 
 /// What the host answered to `Open`, plus what we asked for.
@@ -89,7 +94,20 @@ pub struct ScreenView {
     /// The text last known to be on the host's pasteboard (received from it, or pushed by
     /// this view ahead of a paste); a paste chord only pushes when the clipboard differs.
     host_clipboard: Option<String>,
+    /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
+    sticky: Modifiers,
+    /// Input-method composition in progress (nothing is sent until it commits).
+    marked: Option<String>,
     _pump: Task<()>,
+}
+
+/// A modifier the phone key bar can arm for the next key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sticky {
+    /// ⌃.
+    Control,
+    /// ⌘.
+    Command,
 }
 
 impl std::fmt::Debug for ScreenView {
@@ -175,6 +193,8 @@ impl ScreenView {
             frames: 0,
             held: Vec::new(),
             host_clipboard: None,
+            sticky: Modifiers::default(),
+            marked: None,
             _pump: pump,
         }
     }
@@ -313,6 +333,7 @@ impl ScreenView {
             self.send(ScreenRequest::Focus(self.stream));
         }
         self.focus.focus(window, cx);
+        cx.emit(ScreenViewEvent::Pressed);
         let button = proto_button(ev.button);
         let (x, y) = self.to_stream(ev.position);
         self.input(ScreenInput::Button {
@@ -415,6 +436,75 @@ impl ScreenView {
         self.host_clipboard = Some(text.to_owned());
     }
 
+    /// Whether `which` is armed for the next key.
+    #[must_use]
+    pub const fn sticky(&self, which: Sticky) -> bool {
+        match which {
+            Sticky::Control => self.sticky.control,
+            Sticky::Command => self.sticky.platform,
+        }
+    }
+
+    /// Arm or disarm a modifier for the next key (the phone key bar's ⌃ and ⌘).
+    pub fn set_sticky(&mut self, which: Sticky, on: bool, cx: &mut Context<Self>) {
+        match which {
+            Sticky::Control => self.sticky.control = on,
+            Sticky::Command => self.sticky.platform = on,
+        }
+        cx.notify();
+    }
+
+    /// Press and release one key on the host: the phone key bar and the soft keyboard, which
+    /// have no key-up of their own. Armed modifiers apply and clear.
+    pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
+        let armed = std::mem::take(&mut self.sticky);
+        keystroke.modifiers.control |= armed.control;
+        keystroke.modifiers.platform |= armed.platform;
+        if is_paste_chord(&keystroke) {
+            self.push_clipboard(cx);
+        }
+        let code = keys::key_code(&keystroke.key);
+        let mods = keys::mods(keystroke.modifiers);
+        // A modified key is a chord, not typing: no text, or the host would insert it too.
+        let text = keystroke
+            .key_char
+            .filter(|t| !t.is_empty() && !mods.intersects(Mods::CTRL | Mods::SUPER));
+        self.input(ScreenInput::Key { code, action: KeyAction::Press, mods, text });
+        self.input(ScreenInput::Key { code, action: KeyAction::Release, mods, text: None });
+        cx.notify();
+    }
+
+    /// Touch: a long press over the picture is a right click on the host (context menus);
+    /// a plain drag stays a canvas pan. Returns whether the gesture was claimed.
+    fn long_press(&self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
+        if ev.phase != TouchPhase::Started || !self.inside(ev.start_position) {
+            return false;
+        }
+        let (x, y) = self.to_stream(ev.start_position);
+        for down in [true, false] {
+            self.input(ScreenInput::Button {
+                button: ProtoButton::Right,
+                down,
+                x,
+                y,
+                clicks: 1,
+                mods: keys::mods(Modifiers::default()),
+            });
+        }
+        cx.notify();
+        true
+    }
+
+    /// The phone's "paste" key: ⌘V on the host, this client's clipboard pushed first.
+    pub fn paste_key(&mut self, cx: &mut Context<Self>) {
+        self.press(chord("v"), cx);
+    }
+
+    /// The phone's "copy" key: ⌘C on the host; the host's pasteboard then flows back here.
+    pub fn copy_key(&mut self, cx: &mut Context<Self>) {
+        self.press(chord("c"), cx);
+    }
+
     /// The host's pointer as an arrow, in view coordinates.
     fn cursor_overlay(&self) -> Option<impl IntoElement + use<>> {
         if !self.cursor.visible || self.latest.is_none() {
@@ -484,11 +574,26 @@ const fn proto_button(button: MouseButton) -> ProtoButton {
 impl Render for ScreenView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let handler = cx.entity();
+        let focus = self.focus.clone();
         let record_bounds = canvas(
             move |bounds, _window, cx| {
                 entity.update(cx, |this, _| this.bounds = bounds);
             },
-            |_bounds, (), _window, _cx| {},
+            // Registering as a text input is what raises the soft keyboard on iOS and lets an
+            // input method compose; typed text arrives in `replace_text_in_range`.
+            move |bounds, (), window, cx| {
+                window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
+                window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    if handler.update(cx, |view, cx| view.long_press(event, cx)) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                });
+            },
         )
         // `inset_0` matters: an absolute element without insets sits at its static position,
         // which for a later sibling is *below* the picture, one body-height off.
@@ -536,8 +641,125 @@ impl Render for ScreenView {
     }
 }
 
+/// ⌘ + `key`.
+fn chord(key: &str) -> Keystroke {
+    Keystroke {
+        modifiers: Modifiers { platform: true, ..Modifiers::default() },
+        key: key.to_owned(),
+        key_char: None,
+    }
+}
+
+impl EntityInputHandler for ScreenView {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.marked.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Committed text: one key per character so the host sees ordinary typing (a single
+    /// event carrying a whole string trips apps that read the key code, not the string).
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = None;
+        for c in text.chars() {
+            let key = match c {
+                '\n' | '\r' => "enter".to_owned(),
+                '\t' => "tab".to_owned(),
+                ' ' => "space".to_owned(),
+                _ => c.to_string(),
+            };
+            let key_char = (!c.is_control()).then(|| c.to_string());
+            self.press(Keystroke { modifiers: Modifiers::default(), key, key_char }, cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The host's pointer stands in for a caret: candidate windows hang there.
+        let (w, h) = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let (sw, sh) = ((self.size.0 as f32).max(1.0), (self.size.1 as f32).max(1.0));
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let (x, y) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
+        let origin = point(self.bounds.origin.x + px(x), self.bounds.origin.y + px(y));
+        Some(Bounds::new(origin, gpui::size(px(1.0), px(16.0))))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn text_input_configuration(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> TextInputConfiguration {
+        TextInputConfiguration {
+            autocorrect: false,
+            autocapitalize: Autocapitalize::None,
+            suggestions: false,
+            input_action: TextInputAction::Enter,
+        }
+    }
+}
+
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
-fn is_paste_chord(keystroke: &gpui::Keystroke) -> bool {
+fn is_paste_chord(keystroke: &Keystroke) -> bool {
     let m = keystroke.modifiers;
     m.platform && !m.control && !m.alt && keystroke.key == "v"
 }
@@ -546,8 +768,8 @@ fn is_paste_chord(keystroke: &gpui::Keystroke) -> bool {
 mod tests {
     use super::*;
 
-    fn chord(s: &str) -> gpui::Keystroke {
-        gpui::Keystroke::parse(s).expect("keystroke")
+    fn chord(s: &str) -> Keystroke {
+        Keystroke::parse(s).expect("keystroke")
     }
 
     #[test]

@@ -19,9 +19,11 @@ use slopty_client::LinkEvent;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
 use slopty_ui::canvas::{
-    AddWindow, CanvasEvent, CanvasView, FitAll, NewAgent, NewNote, NewTerminal, NextAttention,
+    AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
+    NextAttention,
 };
 use slopty_ui::colors::hsla;
+use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::terminal::TerminalView;
 
 /// Height of the top bar (the titlebar area; traffic lights sit at its left on macOS).
@@ -55,6 +57,19 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 11] = [
     ("/", "/", Some("/")),
     ("|", "|", Some("|")),
     ("~", "~", Some("~")),
+];
+/// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
+/// punctuation goes.
+const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
+    ("esc", "escape", None),
+    ("tab", "tab", None),
+    ("⌃", "", None),
+    ("⌘", "cmd", None),
+    ("←", "left", None),
+    ("↑", "up", None),
+    ("↓", "down", None),
+    ("→", "right", None),
+    ("/", "/", Some("/")),
 ];
 /// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
 const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
@@ -235,7 +250,98 @@ impl Workspace {
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
     /// above the keyboard inset while a terminal is active.
-    fn key_bar(&self, terminal: &Entity<TerminalView>, cx: &Context<Self>) -> gpui::AnyElement {
+    fn key_bar(&self, target: &KeyTarget, cx: &Context<Self>) -> gpui::AnyElement {
+        match target {
+            KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, cx),
+            KeyTarget::Screen(screen) => self.screen_key_bar(screen, cx),
+        }
+    }
+
+    /// One key of the bar; `lit` draws it armed.
+    fn bar_key(
+        &self,
+        id: String,
+        label: &'static str,
+        lit: bool,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        let s = &self.theme.surfaces;
+        div()
+            .id(SharedString::from(id))
+            .flex_1()
+            .h(px(KEY_BAR_H - 10.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .text_size(px(13.0))
+            .text_color(hsla(if lit { s.canvas } else { s.text }))
+            .bg(hsla(if lit { s.accent } else { s.canvas }))
+            .active(|el| el.opacity(0.7))
+            .child(SharedString::from(label))
+            .on_click(move |_ev, window, cx| on_click(window, cx))
+    }
+
+    /// The bar over a remote window: chords and arrows, copy and paste through the host.
+    fn screen_key_bar(&self, screen: &Entity<ScreenView>, cx: &Context<Self>) -> gpui::AnyElement {
+        let s = &self.theme.surfaces;
+        let view = screen.read(cx);
+        let (control, command) = (view.sticky(Sticky::Control), view.sticky(Sticky::Command));
+        let mut bar = div()
+            .h(px(KEY_BAR_H))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(6.0))
+            .gap(px(4.0))
+            .bg(hsla(s.panel))
+            .border_t_1()
+            .border_color(hsla(s.border))
+            .font_family(self.theme.typography.ui_family.clone());
+        for (label, key, typed) in SCREEN_BAR_KEYS {
+            let sticky = match key {
+                "" => Some(Sticky::Control),
+                "cmd" => Some(Sticky::Command),
+                _ => None,
+            };
+            let lit = matches!(sticky, Some(Sticky::Control) if control)
+                || matches!(sticky, Some(Sticky::Command) if command);
+            let target = screen.clone();
+            bar =
+                bar.child(self.bar_key(format!("skey-{label}"), label, lit, move |_window, cx| {
+                    target.update(cx, |v, cx| match sticky {
+                        Some(which) => {
+                            let on = !v.sticky(which);
+                            v.set_sticky(which, on, cx);
+                        }
+                        None => v.press(
+                            gpui::Keystroke {
+                                modifiers: gpui::Modifiers::default(),
+                                key: key.to_owned(),
+                                key_char: typed.map(str::to_owned),
+                            },
+                            cx,
+                        ),
+                    });
+                }));
+        }
+        let target = screen.clone();
+        bar = bar.child(self.bar_key("skey-copy".to_owned(), "copy", false, move |_w, cx| {
+            target.update(cx, ScreenView::copy_key);
+        }));
+        let target = screen.clone();
+        bar = bar.child(self.bar_key("skey-paste".to_owned(), "paste", false, move |_w, cx| {
+            target.update(cx, ScreenView::paste_key);
+        }));
+        bar.into_any_element()
+    }
+
+    fn terminal_key_bar(
+        &self,
+        terminal: &Entity<TerminalView>,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let armed = terminal.read(cx).sticky_control();
         let has_selection = terminal.read(cx).selection().is_some();
@@ -521,9 +627,9 @@ impl Render for Workspace {
                 .child(SharedString::from(self.status.clone())),
         };
         let key_bar = KEY_BAR
-            .then(|| self.canvas.as_ref()?.read(cx).active_terminal())
+            .then(|| self.canvas.as_ref()?.read(cx).active_key_target())
             .flatten()
-            .map(|terminal| self.key_bar(&terminal, cx));
+            .map(|target| self.key_bar(&target, cx));
         div()
             .size_full()
             .flex()
@@ -644,6 +750,9 @@ pub fn open_workspace(
                         CanvasEvent::Bell(_session) => {}
                     },
                 ));
+                // The chrome follows the active item (key bar target), so every canvas
+                // change re-renders it; the workspace is a few labels, so this is cheap.
+                ws.subscriptions.push(cx.observe(&canvas, |_ws, _canvas, cx| cx.notify()));
                 ws.canvas = Some(canvas.clone());
                 ws.needs_you = 0;
                 ws.host_name.clone_from(&ack.name);

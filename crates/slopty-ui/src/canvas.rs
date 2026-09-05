@@ -77,6 +77,15 @@ pub use actions::{
     ZoomIn, ZoomOut, ZoomReset,
 };
 
+/// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
+#[derive(Clone, Debug)]
+pub enum KeyTarget {
+    /// A terminal: keys go through the grid and the predictor.
+    Terminal(Entity<TerminalView>),
+    /// A remote window: keys are injected on the host.
+    Screen(Entity<ScreenView>),
+}
+
 /// Key bindings for the canvas context.
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -465,6 +474,15 @@ impl CanvasView {
         }
     }
 
+    /// What the phone key bar drives: the active terminal, or the active remote window.
+    #[must_use]
+    pub fn active_key_target(&self) -> Option<KeyTarget> {
+        if let Some(t) = self.active_terminal() {
+            return Some(KeyTarget::Terminal(t));
+        }
+        self.active_screen().map(KeyTarget::Screen)
+    }
+
     /// The terminal of the active item, if the active item is a terminal.
     #[must_use]
     pub fn active_terminal(&self) -> Option<Entity<TerminalView>> {
@@ -622,8 +640,12 @@ impl CanvasView {
                 let opened =
                     crate::screen::Opened { stream, target, size: (width, height), quality };
                 let view = cx.new(|cx| ScreenView::new(opened, handle, out, theme, cx));
-                self.subscriptions
-                    .push(cx.subscribe(&view, |_this, _view, _event, cx| cx.notify()));
+                self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+                    match event {
+                        crate::screen::ScreenViewEvent::Pressed => this.activate(id, cx),
+                        crate::screen::ScreenViewEvent::Ready => cx.notify(),
+                    }
+                }));
                 self.screens.insert(id, view);
             }
             ScreenEvent::Closed { stream, reason } => {
