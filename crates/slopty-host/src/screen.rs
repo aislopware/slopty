@@ -258,6 +258,19 @@ pub struct ScreenStats {
     pub capture: Quantiles,
     /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
     pub encode: Quantiles,
+    /// Time between two heartbeats, over the last [`LATENCY_WINDOW`] of them. The beat is what
+    /// tells the receiver the host is alive while nothing is being drawn, and the receiver calls
+    /// a silence of `STALL_GAP` a stall, so this is the number that says whether the host is
+    /// keeping its own promise.
+    pub beat_gap: Quantiles,
+    /// How long the window-geometry call in the cursor loop took, over the last
+    /// [`LATENCY_WINDOW`] of them: the work the beat used to wait behind.
+    pub bounds: Quantiles,
+    /// The longest gap between two beats since the stream opened, microseconds. The quantiles
+    /// above are over a sliding window of [`LATENCY_WINDOW`] beats — about twenty seconds — so
+    /// a single late beat early in a long stream would be gone from them by the end. This is
+    /// the one that cannot forget, and it is what a rule about the beat has to be written on.
+    pub beat_gap_worst_us: u64,
     /// Frames sent from the display-crop path (a window served as a `sourceRect` of its display
     /// rather than through the window filter). Frames the crop delivered after it stopped holding
     /// the target are not among them — those are [`Self::withheld`].
@@ -513,6 +526,9 @@ struct Counters {
     cropped: AtomicU64,
     capture: Mutex<LatencyRing>,
     encode: Mutex<LatencyRing>,
+    beat_gap: Mutex<LatencyRing>,
+    beat_gap_worst_us: AtomicU64,
+    bounds: Mutex<LatencyRing>,
     /// `(pts, submitted at)` of frames inside the encoder, oldest first.
     in_flight: Mutex<VecDeque<(u64, u64)>>,
 }
@@ -540,6 +556,9 @@ impl Counters {
             cropped: AtomicU64::new(0),
             capture: Mutex::new(LatencyRing::default()),
             encode: Mutex::new(LatencyRing::default()),
+            beat_gap: Mutex::new(LatencyRing::default()),
+            beat_gap_worst_us: AtomicU64::new(0),
+            bounds: Mutex::new(LatencyRing::default()),
             in_flight: Mutex::new(VecDeque::with_capacity(IN_FLIGHT_MAX)),
         }
     }
@@ -583,6 +602,9 @@ impl Counters {
             bitrate_bps: self.bitrate_bps.load(Ordering::Relaxed),
             capture: self.capture.lock().quantiles(),
             encode: self.encode.lock().quantiles(),
+            beat_gap: self.beat_gap.lock().quantiles(),
+            beat_gap_worst_us: self.beat_gap_worst_us.load(Ordering::Relaxed),
+            bounds: self.bounds.lock().quantiles(),
             cropped: self.cropped.load(Ordering::Relaxed),
             // Which path is live is the stream's state, not a counter: `Shared::stats` fills it,
             // and nothing else may hand this snapshot out (it would claim the window filter).
@@ -1025,6 +1047,7 @@ pub struct ScreenStream {
     capture_config: CaptureConfig,
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
+    beat: JoinHandle<()>,
     /// Client input aimed at this stream, in its pixel coordinates.
     injector: Injector,
     point_scale: f64,
@@ -1136,6 +1159,10 @@ impl ScreenStream {
         let native = resolved.pixel_size();
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
         let point_scale = f64::from(resolved.point_scale());
+        // Two tasks, not one. The beat is a promise about time and must never be behind work
+        // that takes any: the geometry and pointer calls in the cursor loop are window-server
+        // round trips that have been measured at 90 ms, three beats' worth.
+        let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), target, zoom, point_scale));
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
@@ -1158,6 +1185,7 @@ impl ScreenStream {
             capture_config,
             encoder_config,
             cursor,
+            beat,
             injector,
             point_scale,
             quality,
@@ -1515,6 +1543,7 @@ impl ScreenStream {
     /// Stop capturing and tear down.
     pub async fn close(self) {
         self.cursor.abort();
+        self.beat.abort();
         let (tx, rx) = oneshot::channel();
         self.capture.stop(move |result| {
             let _receiver_gone = tx.send(result);
@@ -1531,31 +1560,70 @@ impl ScreenStream {
 /// heartbeat whenever nothing at all left for [`HEARTBEAT_AFTER`] (a quiet source must not
 /// read as a stalled link). Runs until the task is aborted by [`ScreenStream::close`] or the
 /// transport queue closes.
+async fn beat_loop(shared: Arc<Shared>) {
+    let mut ticks = tokio::time::interval(CURSOR_PERIOD);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut beats: u32 = 0;
+    let mut last_beat_us: Option<u64> = None;
+    let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
+    // Four times the promise, which is twice the gap the receiver already calls a stall: past
+    // this the beat has not merely slipped, it has failed at the one thing it is for.
+    let late_beat_us = heartbeat_after_us.saturating_mul(4);
+    while !shared.out.is_closed() {
+        ticks.tick().await;
+        let now = host_now_us();
+        let silence_us = now.saturating_sub(shared.last_push_us.load(Ordering::Relaxed));
+        if silence_us < heartbeat_after_us {
+            continue;
+        }
+        beats = beats.wrapping_add(1);
+        tracing::trace!(stream = %shared.id, beats, silence_us, "heartbeat");
+        shared.counters.heartbeats.fetch_add(1, Ordering::Relaxed);
+        if let Some(previous) = last_beat_us {
+            let gap = now.saturating_sub(previous);
+            shared.counters.beat_gap.lock().push(gap);
+            shared.counters.beat_gap_worst_us.fetch_max(gap, Ordering::Relaxed);
+            if gap >= late_beat_us {
+                tracing::info!(stream = %shared.id, gap_us = gap, beats, "late heartbeat");
+            }
+        }
+        last_beat_us = Some(now);
+        shared.push(heartbeat_datagram(shared.id, beats, send_ms_lo(now)));
+    }
+}
+
+/// Where the pointer is over the target, sent when it moves.
+///
+/// Every call in here is a window-server round trip, so all of them run on the blocking pool:
+/// what this loop must not do is occupy a runtime worker, because [`beat_loop`] needs one on
+/// time (MEASUREMENTS.md, "the beat behind the geometry call").
 async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut bounds: Option<Rect> = None;
     let mut last: Option<(i32, i32, bool)> = None;
     let mut seq: u32 = 0;
-    let mut beats: u32 = 0;
     let mut tick: u64 = 0;
-    let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
     while !shared.out.is_closed() {
         ticks.tick().await;
-        let now = host_now_us();
-        let silence_us = now.saturating_sub(shared.last_push_us.load(Ordering::Relaxed));
-        if silence_us >= heartbeat_after_us {
-            beats = beats.wrapping_add(1);
-            tracing::trace!(stream = %shared.id, beats, silence_us, "heartbeat");
-            shared.counters.heartbeats.fetch_add(1, Ordering::Relaxed);
-            shared.push(heartbeat_datagram(shared.id, beats, send_ms_lo(now)));
-        }
         if tick.is_multiple_of(BOUNDS_EVERY) {
-            bounds = slopty_capture::target_bounds(target);
+            let counters = Arc::clone(&shared);
+            let measured = tokio::task::spawn_blocking(move || {
+                let started = host_now_us();
+                let rect = slopty_capture::target_bounds(target);
+                counters.counters.bounds.lock().push(host_now_us().saturating_sub(started));
+                rect
+            })
+            .await;
+            let Ok(rect) = measured else { return };
+            bounds = rect;
         }
         tick = tick.wrapping_add(1);
         let Some(rect) = bounds else { continue };
-        let (px, py) = slopty_capture::pointer_location();
+        let Ok((px, py)) = tokio::task::spawn_blocking(slopty_capture::pointer_location).await
+        else {
+            return;
+        };
         let visible = rect.contains(px, py);
         let to_pixels = |v: f64| -> i32 {
             #[expect(clippy::cast_possible_truncation, reason = "clamped")]
@@ -1640,6 +1708,45 @@ mod tests {
             age_us: 0,
             latency_us: 0,
         }
+    }
+
+    /// The beat is a promise about time, so the thing that must be true of it is that nothing
+    /// else the stream does can make it late. Geometry work that takes 300 ms — six times a
+    /// stall gap, and three times the worst window-server round trip measured — runs beside it
+    /// here, and the beats keep their cadence because they are no longer on that task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_geometry_call_does_not_make_the_beat_late() {
+        let (shared, mut rx) = shared_for_frames();
+        let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
+        // Whatever the cursor loop does, it does it like this: off the runtime's workers. It
+        // spins rather than sleeps because a sleeping thread is not what a window-server round
+        // trip does to one — and because sleeping in this project is what the lint forbids.
+        let slow = tokio::task::spawn_blocking(|| {
+            let until = Instant::now()
+                .checked_add(Duration::from_millis(300))
+                .expect("a deadline inside the clock");
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        slow.await.expect("the slow call");
+        beat.abort();
+
+        let seen = shared.stats();
+        assert!(seen.heartbeats >= 10, "a beat every 25 ms over half a second: {seen:?}");
+        assert!(
+            seen.beat_gap_worst_us <= 100_000,
+            "the beat fell behind the geometry call: {} µs",
+            seen.beat_gap_worst_us
+        );
+        // The beats really went out, rather than only being counted.
+        let mut sent: u64 = 0;
+        while rx.try_recv().is_ok() {
+            sent = sent.saturating_add(1_u64);
+        }
+        assert!(sent >= 8, "only {sent} datagrams for {} beats", seen.heartbeats);
     }
 
     /// What the crop must never hand on. The path is decided on the geometry tick, but the

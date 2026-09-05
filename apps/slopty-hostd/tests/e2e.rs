@@ -1971,6 +1971,114 @@ mod tests {
         assert_dark_and_still(&run);
     }
 
+    /// How long the beat measurement watches a quiet stream.
+    const QUIET_FOR: Duration = Duration::from_secs(60);
+
+    /// The heartbeat is what a receiver has to go on while nothing is being drawn: it must
+    /// arrive inside `STALL_GAP` (50 ms) or the receiver calls the silence a stall, and the host
+    /// promises one every `HEARTBEAT_AFTER` (25 ms). This watches a stream whose target draws
+    /// nothing for a minute and reads, from the host's own counters, how far apart the beats
+    /// actually were and how long the window-geometry call in the same loop took.
+    /// Gated on `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_heartbeat_keeps_its_cadence_on_a_quiet_stream() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let markers = dir.path().join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let title = format!("slopty quiet {}", std::process::id());
+        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+            .arg(&markers)
+            .arg(&title)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the idle window");
+        wait_for_marker(&markers.join("ready"), "the idle window").await;
+
+        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let ctl = dir.path().join("hostd.sock");
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let target = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { windows, .. })) => {
+                    let found = windows.iter().find(|w| w.title == title);
+                    break found.expect("the window in the listing").id;
+                }
+                _other => {}
+            }
+        };
+        // Order it out *before* the stream opens, so the minute that follows is the steady
+        // state: a stream carrying beats and nothing else, with no path swap in it. This is the
+        // case the beat exists for, and the one claude/stalls found the host going quiet in.
+        std::fs::write(markers.join("hide"), b"").unwrap();
+        wait_for_marker(&markers.join("state"), "the window to go").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        link.send(ClientMsg::Screen(ScreenRequest::Open {
+            target: CaptureTarget::Window(target),
+            quality: Quality::default(),
+        }))
+        .await
+        .unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => break (stream, codec),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let screen = link.screen(stream, codec);
+
+        tokio::time::sleep(QUIET_FOR).await;
+        let stats = wait_for_stats(&ctl, Duration::from_secs(2), |_s| true)
+            .await
+            .expect("the stream is still live");
+        let client = screen.stats();
+        eprintln!(
+            "beat: gap p50 {} / p95 {} / max {} µs, worst ever {} µs over {} beats; bounds \
+             p50 {} / p95 {} / max {} µs over {}; client saw {} stalls, {} ms stalled",
+            stats.beat_gap.p50_us,
+            stats.beat_gap.p95_us,
+            stats.beat_gap.max_us,
+            stats.beat_gap_worst_us,
+            stats.heartbeats,
+            stats.bounds.p50_us,
+            stats.bounds.p95_us,
+            stats.bounds.max_us,
+            stats.bounds.n,
+            client.stalls,
+            client.stalled_ms,
+        );
+
+        // What the beat promises the receiver: typically well inside the gap it would otherwise
+        // call a stall, and no stall actually counted over the minute. The worst single gap is
+        // deliberately not asserted — it is still about 75 ms once a minute, and the cause is
+        // other window-server work on the runtime rather than this loop (MEASUREMENTS.md, "the
+        // beat behind the geometry call").
+        let gap = Duration::from_micros(stats.beat_gap.p95_us);
+        assert!(
+            gap < slopty_media::STALL_GAP,
+            "the beat's p95 is past the gap the receiver calls a stall: {stats:?}"
+        );
+        assert_eq!(client.stalls, 0, "the receiver counted a stall on a quiet loopback stream");
+
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+        drop(screen);
+        link.close();
+        endpoint.close().await;
+    }
+
     /// How late each way of noticing a hide is, measured against the same order-out.
     ///
     /// The display-crop path leaves a window in the crop until it learns the window has gone,
