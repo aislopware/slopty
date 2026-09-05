@@ -52,38 +52,6 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `any(macos, ios)` (`core-video` 0.5 builds for both), so the phone paints the decoder's
   `CVPixelBuffer` the same zero-copy way. Checked on macOS, `aarch64-apple-ios-sim` and
   `aarch64-apple-ios`.
-- ✅ **Hardware keyboards and pointers on iOS live in the fork, not the app** (2026-09-05,
-  fork commit `dfc149e`). `gpui_ios` only implemented `UIKeyInput` (`insertText:` /
-  `deleteBackward`), so an iPad with a Magic Keyboard had no arrows, escape, ⌃C or ⌘ chords:
-  UIKit delivers physical keys as `pressesBegan:`/`pressesEnded:` on the responder chain and
-  nothing handled them. Ruling: the metal view handles presses (and is first responder whenever
-  the text input view is not, so canvas-level shortcuts work with nothing focused); the
-  `UIKey` → `Keystroke` mapping (`hardware_keyboard.rs`) copies `gpui_macos`' rules — a shifted
-  letter is `shift-a`, a shifted symbol is `!` with shift dropped, chords carry no `key_char`,
-  `charactersIgnoringModifiers` falls back to the HID usage's ASCII name for non-Latin
-  layouts — so Slopty's keymaps and `slopty_ui::keys` need nothing iOS-specific. Plain text
-  while a text input is first responder is forwarded to `super` (UIKit's text system types it,
-  IME and marked text intact); everything else is consumed so the text system does not also
-  insert "\n" for Enter. UIKit does not auto-repeat presses (verified: no repeated
-  `pressesBegan` for a held arrow), so the window runs its own repeat (400 ms / 50 ms, GCD
-  main-queue timer, generation-checked so a release cancels it) and delivers `is_held`, which
-  `TerminalView::key_down` already turns into repeat key events. Modifier keys (HID
-  `0xE0..=0xE7`) update `Window::modifiers()` and emit `ModifiersChanged`; caps lock is tracked
-  from `alphaShift`. Pointer: `UIHoverGestureRecognizer` → `MouseMove`,
-  `UIPanGestureRecognizer` with `allowedScrollTypesMask = all` and `maximumNumberOfTouches = 0`
-  (indirect scrolls only, so gpui core's touch recognizer keeps one-finger drags) →
-  `ScrollWheel` with pixel deltas and phases; `UIApplicationSupportsIndirectInputEvents` in
-  the plist so trackpad clicks are pointer touches. Bundle: `TARGETED_DEVICE_FAMILY 1,2`, all
-  iPad orientations (`UIRequiresFullScreen` is deprecated and ignored from iOS 26, so nothing
-  opts out of Split View / Stage Manager). Verified: the mapping's unit tests (letters
-  keep shift, symbols drop it, chords have no `key_char`, named keys, modifiers ignored) run on
-  the host through a shim crate because `gpui_ios` is `cfg(target_os = "ios")`; the app builds
-  for `aarch64-apple-ios-sim` against the new pin. The app hides the key bar while
-  `slopty_platform::hardware_keyboard_attached()` (GameController's coalesced keyboard, polled
-  on the settings tick — GameController posts connect/disconnect notifications, but a poll that
-  already runs costs nothing and needs no observer lifetime) is true; `key_bar_visible` is the
-  pure rule with its table test. Not verified by a test: the UIKit delivery
-  itself (no simulator-driven layer exists yet; the iOS self-test socket is the next step).
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
   things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`
   on iOS), and stand-ins for three CGL symbols (`CGLErrorString`, `CGLGetCurrentContext`,
@@ -499,9 +467,32 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `ScreenStats.bitrate_bps` shows the last target in the close log. First mesh run in
   MEASUREMENTS.md: the cap took the start from 12 to 9 Mbit/s and a stalling afternoon link
   drove the target to the floor.
-- ⏸ Stall-aware bitrate: a Wi-Fi stall looks like loss to the controller and gets a cut it
-  does not deserve. Carry the reassembler's `flowing` flag in `ReceiverReport` (protocol bump)
-  and freeze the controller while the path is stalled.
+- ✅ **Stall-aware bitrate** (2026-09-05). A Wi-Fi stall (packets held 100–300 ms, then
+  released together; the host dropped nothing, see "stalls, not drops" in MEASUREMENTS.md)
+  looked like loss to the controller and got a cut it did not deserve: sending less does not
+  clear a stall. *Wire:* `ReceiverReport` carries `stalled_ms` (silence past the reassembler's
+  stall gap charged to the report window, a stall still on at report time included up to now)
+  and `stalls` (releases in the window). Two fields, not one `flowing` flag, because a report
+  is a 50 ms point sample and a stall of 150 ms can start and release between two of them;
+  the count alone would miss a stall still on, the time alone cannot show two short ones. A
+  third `stalled_ms` per stall was not needed: the policy only asks "was there a stall in this
+  window". `ScreenEvent::Rate { target_bps, verdict }` goes back to the client on every
+  decision so the ⌘⇧I overlay and `slopty bench screen` show the host's target and whether it
+  is holding; before, the target lived only in hostd's log on another machine.
+  `PROTOCOL_VERSION` 7 → 8, goldens `client_screen_report` and `host_screen_rate`.
+  *Policy:* `slopty_media::judge` is a pure function of the decision window
+  (`RateWindow`): any stall in the window → `Stall`, freeze (no cut, no grow, the cooldown
+  neither restarts nor ticks, the window's loss is discarded — it is the receiver giving up on
+  frames the link still holds); else the overuse / clean rules as before → `Cut` / `Grow` /
+  `Steady`. The two reports after a stall (`SETTLE_REPORTS`) contribute loss but not queue or
+  hold: the release fills the present queue for a moment and that burst must not be judged.
+  Loss in those reports still counts, so a stall followed by real loss cuts once. The cwnd cap
+  applies in every state, a stall included. Table of report sequences → target trajectory in
+  `report_sequences_and_their_target_trajectories` (clean → grow; loss → cut then cooldown;
+  stall → hold then grow; stall then loss → one cut; a stall inside a cooldown neither cuts
+  nor ends it), the burst rule in `the_release_burst_after_a_stall_is_not_judged`, the
+  reassembler's charging in `reports_carry_the_stall_time_and_count`. Evidence from the mesh
+  in MEASUREMENTS.md ("stall-aware bitrate").
 - ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
   length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
   same even size ≤ 1184 B, so padding ≤ 2 B per fragment and the RS shard size is inferred from

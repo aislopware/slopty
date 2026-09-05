@@ -387,6 +387,81 @@ wrong one for a stalled one (sending less does not clear a Wi-Fi stall). Follow-
 reassembler's `flowing` state ride in the `ReceiverReport` so a stall freezes the controller
 instead of cutting it (protocol change; not done here).
 
+## 2026-09-05 — stall-aware bitrate on the mesh path (Wi-Fi MacBook Pro → Mac Studio), debug build
+
+The follow-up above: `ReceiverReport` now carries `stalled_ms` / `stalls`, a window with a
+stall freezes the controller (`RateVerdict::Stall`), the policy's value is separate from the
+cwnd-capped target, and every decision comes back to the client as `ScreenEvent::Rate`, so
+the trajectory below is what `slopty bench screen` printed, not a grep of hostd's log on the
+other machine. Display 6 (1920×1080, a Ghostty window scrolling `seq` on it), 20 s, two runs
+per build, private daemons on port 45560 with their own data dir.
+
+The mesh was in a worse state than the afternoon run: this time the host's QUIC path *did*
+lose packets (230–335 per 20 s, cwnd 4.8 KB at close, `congestion 229–264`), so the cuts in
+the first five seconds are real overuse and the controller took them; and the link stalled
+40–50 % of the time (57–104 stalls, 6–10 s of silence per 20 s run), so once at the floor
+every window held. The premise of the follow-up (stalls with nothing lost) did not hold
+tonight; what the runs show is the two verdicts telling loss from stalls per window.
+
+| run | build                   | fps  | gap p50 / p90 / max     | FEC / lost / NACK / refresh | stalls (stalled) | host QUIC lost / cwnd | host target over time (Mbit/s)                                                                        |
+| --- | ----------------------- | ---- | ----------------------- | --------------------------- | ---------------- | --------------------- | ----------------------------------------------------------------------------------------------------- |
+| 1   | stall verdict           | 24.7 | 16.5 / 34.3 / 6616.8 ms | 116 / 47 / 206 / 89         | 91 (8.1 s)       | — / —                 | 12 hold → 9.0 cut → 4.8 → 3.6 → 2.7 → 2.0 → 1.5 → 1.1 (cuts, no stall in those windows) → 1.0 hold ×25 |
+| 2   | stall verdict           | 26.3 | 9.9 / 81.2 / 1735.9 ms  | 98 / 47 / 206 / 71          | 94 (9.9 s)       | 230 / 4 800 B         | 12 hold → 9.0 cut → 6.8 → 5.1 → 4.8 hold → 2.8 hold ×2 → 1.0 hold ×3 → 1.0 cut → 1.0 hold ×27          |
+| 3   | + wanted/target split   | 29.2 | 17.0 / 27.1 / 622.9 ms  | 133 / 42 / 183 / 77         | 57 (6.0 s)       | 335 / 4 920 B         | 9.1 hold/cwnd → 6.8 cut → 3.3 hold/cwnd → 2.4 → 1.8 → 1.4 → 1.0 (cuts) → 1.0 hold ×19                  |
+| 4   | + wanted/target split   | 16.6 | 17.0 / 29.8 / 187.8 ms  | 122 / 50 / 140 / 115        | 104 (10.2 s)     | 313 / 4 800 B         | 12 hold → 7.9 cut/cwnd → 6.0 → 4.5 → 3.4 → 2.5 → 1.9 → 1.4 → 1.1 → 1.0 (cuts) → 1.0 hold ×28           |
+| —   | loopback control        | 57.3 | 17.3 / 19.4 / 33.4 ms   | 0 / 0 / 4 / 0               | 2 (0.14 s)       | 0 / —                 | 12 hold → 13.5 → 15.2 → 17.1 → 19.2 → 21.6 → 24.3 → 27.4 → 30.0 (grow ×8, 4 s) → 30.0                  |
+
+Host-side decision lines (`rate decision`, window sums) from run 3, the first seven:
+
+```
+Stall  target 9.1  capped  loss 53‰ queue 2 hold 35 ms  stalled 100 ms stalls 1
+Cut    target 6.8          loss 37‰ queue 1 hold 29 ms  stalled 0
+Stall  target 3.3  capped  loss 77‰ queue 2 hold 15 ms  stalled 80 ms  stalls 1
+Cut    target 2.4          loss 39‰ queue 1 hold 34 ms  stalled 0
+Cut    target 1.8          loss 48‰ …
+Cut    target 1.4          loss 38‰ …
+Cut    target 1.0          loss 49‰ …
+```
+
+What the runs say:
+
+* A window with a stall holds and discards its loss (`Stall`, 5–8 % counted loss thrown
+  away); a window without one and with 4–5 % loss cuts. Both verdicts fire on this link,
+  which is why the target still reaches the floor: the loss is real (host QUIC counters),
+  not a stall artefact, and the floor is where a link dropping 300 packets per 20 s belongs.
+* In runs 1–2 the cwnd cap dragged the target down *inside* held windows (4.8 → 2.8 → 1.0,
+  all `hold`) and it would have had to grow back an eighth at a time. Since run 3 the cap only
+  shadows the policy's value (`hold/cwnd` in the trajectory, `(cwnd)` in the ⌘⇧I overlay):
+  the value survives the stall and the target springs back when the window recovers. On this
+  link the window never recovered, so the split changed the bookkeeping, not the outcome.
+* The loopback control grows 12 → 30 Mbit/s in eight clean windows (4 s) at 57 fps, as
+  before. Its two "stalls" are the host's own capture gaps (ScreenCaptureKit's warm-up after
+  the first frame, one 55 ms hole mid-run): silence is silence to the receiver, and each costs
+  one frozen window. At the start that is 0.5 s of growth; not worth a host-side heartbeat
+  yet.
+* Delivered fps on the mesh (17–29) is the link, not the controller: the same display
+  streams at 57 fps on loopback and at 58 fps over the mesh on a good morning (BBR3 table
+  above).
+
+Not looped: two runs per build were taken back to back and the link was visibly in the
+same bad state for all four; a re-measurement belongs to a day when the mesh does not lose
+packets, which is the case the stall verdict was built for.
+
+```sh
+# on mac-studio: private daemons, own data dir and port
+export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
+target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
+RUST_LOG=info,slopty_host=debug SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock --print-ticket
+open -na Ghostty --args -e seq 1 300000000          # motion on display 6, no synthetic keys
+# on macbook-pro (binary copied with gzip -1 -c target/debug/slopty | ssh macbook-pro 'gunzip -c > /tmp/slopty-bench/stall/slopty')
+export SLOPTY_DATA_DIR=/tmp/slopty-bench/stall/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
+/tmp/slopty-bench/stall/slopty pair <ticket>
+/tmp/slopty-bench/stall/slopty bench screen --display 6 --seconds 20   # prints stalls and the target trajectory
+# host side: grep 'rate decision\|screen closing' $SLOPTY_DATA_DIR/hostd.log
+# loopback control: the same bench on mac-studio with SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client
+```
+
 A window that does not change on screen (`--window 1880`, an idle Ghostty) produced
 `captured 0` for 20 s: ScreenCaptureKit delivers nothing while the content is static, which
 the client reports as refresh requests. Not a regression; bench a moving window or the display.

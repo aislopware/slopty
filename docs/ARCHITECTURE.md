@@ -162,7 +162,10 @@ Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;
 `Redundancy` → parity ratio; `RateController` → encoder bitrate from the reports and the QUIC
-path's cwnd/rtt; pure, no clocks, tested), `slopty-host::screen`
+path's cwnd/rtt, `judge` the pure policy over one decision window: a stall the reassembler
+reported (`stalled_ms` / `stalls` in the report) freezes the target, loss while flowing cuts
+it, a clean window grows it; every decision goes back to the client as `ScreenEvent::Rate`
+for the stats overlay and the bench; pure, no clocks, tested), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
 path's datagram limit; cursor sampler; input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
@@ -227,23 +230,9 @@ control.
 GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit tracks) plus
 gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). The iOS backend is zed PR
 #63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
-video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
-pointers; one finger taps and pans through gpui core's touch recognizer, two fingers
-pinch-zoom, both landing in the same canvas handlers the Mac uses. A keyboard attached to an
-iPad or iPhone arrives as `pressesBegan`/`pressesEnded` on the metal view (the first responder
-whenever no text input is): every key that is not plain text (arrows, escape, function keys,
-enter, tab, backspace, ⌃/⌥/⌘ chords) becomes the same `Keystroke` the Mac backend would build,
-so the Mac keymaps and the terminal's key encoder work unchanged; plain characters keep going
-through the text system (`insertText:`, IME) while a text input has focus. UIKit does not
-repeat presses, so the window repeats a held key itself (400 ms, then every 50 ms, delivered
-as `is_held`). A trackpad or mouse hovers as `MouseMove` and scrolls as `ScrollWheel` with
-phases (a `UIPanGestureRecognizer` limited to indirect scrolls, so direct drags stay with the
-touch recognizer); while a keyboard is attached (`GCKeyboard.coalescedKeyboard`, polled once a
-second with the settings) the key bar hides, since every key on it is under the fingers; `UIApplicationSupportsIndirectInputEvents` is set so clicks are pointer
-events rather than synthesised touches. The bundle targets iPhone and iPad
-(`TARGETED_DEVICE_FAMILY 1,2`, every iPad orientation, so Split View and Stage Manager can
-resize the window; the canvas re-fits on resize like any window);
-`cargo xtask ios sim --sim ipad` boots an iPad Pro 13-inch simulator beside the iPhone one.
+video), `Window::insets()` (safe area, keyboard) and a native pinch recognizer; one finger
+taps and pans through gpui core's touch recognizer, two fingers pinch-zoom, both landing in the
+same canvas handlers the Mac uses.
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
@@ -325,7 +314,7 @@ way the CLI does and the host's connect loop starts.
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
-| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
+| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim\|device` generates the Xcode project | client |
 | `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
 | `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|host|screen|input|all` for the self-test and the gated live tests) | dev |
 
