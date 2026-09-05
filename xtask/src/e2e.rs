@@ -85,6 +85,12 @@ const SCREEN: &[Suite] = &[
         test: "geometry",
         filter: "",
     },
+    Suite {
+        gate: Some("SLOPTY_SCREEN_E2E"),
+        package: "slopty-capture",
+        test: "latency",
+        filter: "",
+    },
     Suite { gate: Some("SLOPTY_SCREEN_E2E"), package: "slopty-host", test: "screen", filter: "" },
     Suite {
         gate: Some("SLOPTY_SCREEN_E2E"),
