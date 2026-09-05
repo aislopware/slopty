@@ -121,6 +121,9 @@ pub struct Prepared {
     /// Painted size over the shaped (base) size, and the font size to paint the words at.
     zoom: f32,
     font_size: Pixels,
+    /// The size the glyphs are rasterised at: `font_size`, or the nearest rung of the size
+    /// ladder while the zoom is in motion (the raster is stretched to `font_size`).
+    raster_size: Pixels,
 }
 
 #[derive(Debug)]
@@ -193,6 +196,9 @@ pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
     zoom: f32,
+    /// The zoom is changing frame to frame (a pinch, a flight): glyphs come from the raster
+    /// ladder, stretched, instead of a fresh raster per size.
+    zooming: bool,
     /// What a screen reader hears: the program's title and the cursor row's text. Filled by
     /// the view only while the accessibility tree is being built.
     a11y: Option<(SharedString, SharedString)>,
@@ -202,7 +208,7 @@ impl TerminalElement {
     /// Paint `view`.
     #[must_use]
     pub const fn new(view: Entity<TerminalView>, focused: bool) -> Self {
-        Self { view, focused, zoom: 1.0, a11y: None }
+        Self { view, focused, zoom: 1.0, zooming: false, a11y: None }
     }
 
     /// The accessible label (the title) and value (the cursor row's text).
@@ -218,6 +224,14 @@ impl TerminalElement {
     #[must_use]
     pub const fn zoom(mut self, zoom: f32) -> Self {
         self.zoom = zoom;
+        self
+    }
+
+    /// The zoom is in motion this frame: paint from the raster ladder (see
+    /// [`fonts::raster_rung`]); the settled frame paints at the exact size again.
+    #[must_use]
+    pub const fn zooming(mut self, on: bool) -> Self {
+        self.zooming = on;
         self
     }
 }
@@ -659,6 +673,7 @@ impl Element for TerminalElement {
         // unzoomed cell, so scaling is what keeps `cols × cell_width` inside the item's content
         // width. Re-deriving at the zoomed size would round the cell up and clip the last column.
         let font_size = base_size * zoom;
+        let raster_size = if self.zooming { fonts::raster_rung(font_size) } else { font_size };
         let grid = base_grid.scaled(zoom);
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad * zoom;
@@ -903,6 +918,7 @@ impl Element for TerminalElement {
                 grid,
                 zoom,
                 font_size,
+                raster_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
                 background: hsla(palette.bg),
@@ -989,7 +1005,7 @@ impl Element for TerminalElement {
         // layer for all of them: a primitive outside a layer costs a bounds-tree insert of its
         // own (GPUI gives each line it paints a layer for the same reason), and the glyphs
         // still land above the quads painted before and below what is painted after.
-        let (zoom, font_size) = (prepared.zoom, prepared.font_size);
+        let (zoom, font_size, raster) = (prepared.zoom, prepared.font_size, prepared.raster_size);
         window.paint_layer(bounds, |window| {
             for row in &prepared.rows {
                 let baseline = row.y + grid.baseline;
@@ -1000,9 +1016,14 @@ impl Element for TerminalElement {
                             let at = glyph_origin(origin, glyph.position, zoom);
                             let painted = if glyph.is_emoji {
                                 window.paint_emoji(at, run.font_id, glyph.id, font_size)
-                            } else {
+                            } else if raster == font_size {
                                 let color = word.color_at(glyph.index);
                                 window.paint_glyph(at, run.font_id, glyph.id, font_size, color)
+                            } else {
+                                // In motion: the nearest rung's raster, stretched (the fork).
+                                let color = word.color_at(glyph.index);
+                                let (f, g) = (run.font_id, glyph.id);
+                                window.paint_glyph_scaled(at, f, g, raster, font_size, color)
                             };
                             if let Err(e) = painted {
                                 tracing::debug!(error = %e, "paint glyph");

@@ -11,7 +11,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use gpui::{App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight};
+use gpui::{App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Pixels, px};
 
 /// The bundled monospace family.
 pub const MONO_FAMILY: &str = "JetBrains Mono";
@@ -58,5 +58,35 @@ pub fn terminal_font(family: &str, bold: bool, italic: bool) -> Font {
         fallbacks: Some(terminal_fallbacks()),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
+    }
+}
+
+/// The rung of the raster ladder nearest to `size`: the sizes text in motion is drawn from.
+///
+/// Eight rungs per octave. A zoom step lands within ±4.5 % of a rung, so a pinch from 30 % to
+/// 200 % rasterises a glyph at ~22 sizes instead of one per step, and the atlas stops growing
+/// with the number of steps.
+#[must_use]
+pub fn raster_rung(size: Pixels) -> Pixels {
+    let size = f32::from(size).max(1.0);
+    px(((size.log2() * 8.0).round() / 8.0).exp2())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ladder_has_eight_rungs_an_octave_and_sizes_snap_to_the_nearest() {
+        let rung = |s: f32| f32::from(raster_rung(px(s)));
+        assert!((rung(16.0) - 16.0).abs() < 1e-4, "{}", rung(16.0));
+        assert!((rung(32.0) - 32.0).abs() < 1e-4);
+        // Between rungs a size moves to the nearest, never further than half a rung (4.4 %).
+        for s in [13.0_f32, 13.4, 5.3, 27.9, 41.0, 100.0] {
+            let r = rung(s);
+            assert!((r / s).ln().abs() <= (2.0_f32).ln() / 16.0 + 1e-6, "{s} → {r}");
+        }
+        assert_eq!(rung(13.0).to_bits(), rung(13.4).to_bits(), "a 3 % zoom step keeps the rung");
+        assert_eq!(rung(1.0).to_bits(), rung(0.2).to_bits(), "nothing below one pixel");
     }
 }

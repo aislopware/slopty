@@ -36,6 +36,7 @@ use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::a11y::tab_stop;
+use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -143,6 +144,9 @@ fn element_id(part: &str, id: ItemId) -> ElementId {
 const TITLE_H: f32 = 28.0;
 /// Resize grip size at zoom 1.
 const GRIP: f32 = 14.0;
+/// How long after the last zoom change the settled frame (exact rasters) is asked for. A
+/// gesture reports every few milliseconds; a frame per report and one more after the pause.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(80);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
@@ -288,6 +292,19 @@ pub struct CanvasView {
     fit_pending: bool,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
+    /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
+    /// flight): terminals and chrome text then paint from the raster ladder, and one more
+    /// frame is asked for so the settled zoom paints exact.
+    zoom_drawn: Option<f32>,
+    zooming: bool,
+    /// Bumped by every frame in motion; the settle timer that finds it unchanged notifies.
+    settle_generation: u64,
+    /// A settle frame is owed: the zoom changed and `SETTLE` has not passed since. Frames the
+    /// flood asks for in between stay in motion, so they paint from the ladder too.
+    settle_pending: bool,
+    /// Frames rendered while the zoom was in motion (tests).
+    #[cfg(test)]
+    zooming_frames: u32,
     /// When the last frame ran, so a flight advances by real elapsed time.
     frame_at: Option<std::time::Instant>,
     /// Whether camera moves are animated. Off under the self-test, where a frame is a step.
@@ -364,6 +381,12 @@ impl CanvasView {
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
             flight: None,
+            zoom_drawn: None,
+            zooming: false,
+            settle_generation: 0,
+            settle_pending: false,
+            #[cfg(test)]
+            zooming_frames: 0,
             frame_at: None,
             animate: true,
             headings: Vec::new(),
@@ -1777,8 +1800,10 @@ impl CanvasView {
         // Cards keep full-size chrome; otherwise the title bar and everything in it (text,
         // pills, the badge and its answers) scale with the item so nothing spills or clips.
         let k = if card { 1.0 } else { zoom };
+        let chrome = Chrome { k, zooming: self.zooming };
         let title_h = TITLE_H * k;
-        let ui_size = (self.theme.typography.ui_size - 1.0) * k;
+        let ui_base = self.theme.typography.ui_size - 1.0;
+        let ui_size = ui_base * k;
 
         let kind = match item.kind {
             ItemKind::Terminal { .. } => "terminal",
@@ -1817,17 +1842,17 @@ impl CanvasView {
             ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
             _ => None,
         };
-        let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, k, cx));
+        let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, chrome, cx));
         // A session with an agent offers its conversation in place of the grid.
         let chat = agent.and_then(|(session, _)| {
             let view = self.terminals.get(&session)?;
             let on = view.read(cx).conversation().is_some();
-            Some(chat_button(id, view.clone(), on, theme, k, cx))
+            Some(chat_button(id, view.clone(), on, theme, chrome, cx))
         });
         // An agent the host had to guess at: offer the hooks that would make it precise.
         let hooks = agent
             .filter(|(_session, a)| a.source != AgentSource::Hook && !self.hooks_offered)
-            .map(|_agent| hooks_button(id, theme, k, cx));
+            .map(|_agent| hooks_button(id, theme, chrome, cx));
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
         let take = match item.kind {
@@ -1835,7 +1860,7 @@ impl CanvasView {
                 .terminals
                 .get(&session)
                 .filter(|v| !v.read(cx).driving())
-                .map(|_| take_button(id, theme, k, cx)),
+                .map(|_| take_button(id, theme, chrome, cx)),
             // A window with sound offers mute; a muted one always shows it, so a silenced item
             // is never mistaken for one whose sound simply stopped.
             ItemKind::Window { .. } | ItemKind::Display { .. } => self
@@ -1843,7 +1868,7 @@ impl CanvasView {
                 .get(&id)
                 .map(|v| v.read(cx))
                 .filter(|v| v.muted() || (active && v.has_audio()))
-                .map(|v| mute_button(id, v.muted(), theme, k, cx)),
+                .map(|v| mute_button(id, v.muted(), theme, chrome, cx)),
             _ => None,
         };
         let needs_human = agent
@@ -1892,7 +1917,10 @@ impl CanvasView {
             // wider than the screen.
             .when_some(take, gpui::ParentElement::child)
             .child(
-                div().flex_1().overflow_hidden().text_ellipsis().child(SharedString::from(title)),
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming)),
             )
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
@@ -1901,7 +1929,10 @@ impl CanvasView {
         let body: gpui::AnyElement = match &item.kind {
             ItemKind::Terminal { session } => match (card, self.terminals.get(session)) {
                 (false, Some(view)) => {
-                    view.update(cx, |v, _| v.set_zoom(zoom));
+                    view.update(cx, |v, _| {
+                        v.set_zoom(zoom);
+                        v.set_zooming(chrome.zooming);
+                    });
                     div().flex_1().w_full().overflow_hidden().child(view.clone()).into_any_element()
                 }
                 (true, Some(view)) => {
@@ -2055,7 +2086,10 @@ impl CanvasView {
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(theme.surfaces.text_muted))
             .font_family(theme.typography.ui_family.clone())
-            .child(heading.label.clone())
+            .child(
+                ChromeText::new(heading.label.clone(), px(theme.typography.small()), k)
+                    .zooming(self.zooming),
+            )
             .into_any_element()
     }
 
@@ -2138,6 +2172,33 @@ impl Render for CanvasView {
         }
         self.keep_focus_rendered(window, cx);
         self.reconcile_notes(window, cx);
+        // A zoom that differs from the one drawn last frame is in motion. Once the changes
+        // pause for `SETTLE`, one more frame is asked for so the final zoom paints exact;
+        // asking right away doubled the frames of a gesture (a settle frame per step, each
+        // rasterising every glyph at its intermediate size).
+        let zoom = self.camera.zoom;
+        let changed = self.zoom_drawn.is_some_and(|drawn| drawn.to_bits() != zoom.to_bits());
+        self.zoom_drawn = Some(zoom);
+        if changed {
+            self.settle_pending = true;
+            self.settle_generation = self.settle_generation.wrapping_add(1);
+            let generation = self.settle_generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SETTLE).await;
+                let _gone = this.update(cx, |this, cx| {
+                    if this.settle_generation == generation {
+                        this.settle_pending = false;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        self.zooming = self.settle_pending;
+        #[cfg(test)]
+        if self.zooming {
+            self.zooming_frames = self.zooming_frames.saturating_add(1);
+        }
         if let Some(id) = self.pending_focus_note.take()
             && let Some(view) = self.notes.get(&id)
         {
@@ -2269,16 +2330,14 @@ fn mute_button(
     id: ItemId,
     muted: bool,
     theme: &Theme,
-    k: f32,
+    chrome: Chrome,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let (label, tone) =
         if muted { ("muted", theme.surfaces.warn) } else { ("mute", theme.surfaces.accent) };
-    let pill = pill("mute", id, label, tone, theme, k).role(Role::Button).aria_label(if muted {
-        "unmute"
-    } else {
-        "mute"
-    });
+    let pill = pill("mute", id, label, tone, theme, chrome)
+        .role(Role::Button)
+        .aria_label(if muted { "unmute" } else { "mute" });
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             if let Some(view) = this.screens.get(&id) {
@@ -2290,8 +2349,13 @@ fn mute_button(
 }
 
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
-fn take_button(id: ItemId, theme: &Theme, k: f32, cx: &Context<CanvasView>) -> gpui::AnyElement {
-    let pill = pill("take", id, "take", theme.surfaces.accent, theme, k)
+fn take_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("take", id, "take", theme.surfaces.accent, theme, chrome)
         .role(Role::Button)
         .aria_label("take over");
     tab_stop(pill, theme.surfaces.accent)
@@ -2305,11 +2369,11 @@ fn chat_button(
     view: Entity<TerminalView>,
     on: bool,
     theme: &Theme,
-    k: f32,
+    chrome: Chrome,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let tone = if on { theme.surfaces.accent } else { theme.surfaces.text_secondary };
-    let pill = pill("chat", id, "chat", tone, theme, k).role(Role::Button).aria_label(if on {
+    let pill = pill("chat", id, "chat", tone, theme, chrome).role(Role::Button).aria_label(if on {
         "show terminal"
     } else {
         "show chat"
@@ -2321,6 +2385,14 @@ fn chat_button(
         .into_any_element()
 }
 
+/// How the item chrome is scaled this frame: `k`, the title bar's zoom factor, and whether the
+/// zoom is in motion (chrome text then paints from the raster ladder).
+#[derive(Clone, Copy, Debug)]
+struct Chrome {
+    k: f32,
+    zooming: bool,
+}
+
 /// A title-bar pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
 /// hover deepens the fill. Everything is scaled by `k`, the title bar's zoom factor.
 fn pill(
@@ -2329,8 +2401,9 @@ fn pill(
     label: &'static str,
     tone: slopty_theme::Rgb,
     theme: &Theme,
-    k: f32,
+    chrome: Chrome,
 ) -> gpui::Stateful<gpui::Div> {
+    let k = chrome.k;
     div()
         .id(element_id(part, item))
         .debug_selector(move || format!("{part}-{}", item.as_uuid()))
@@ -2343,13 +2416,18 @@ fn pill(
         .text_color(hsla(tone))
         .cursor_pointer()
         .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
-        .child(label)
+        .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
 /// The "hooks" pill on an agent the host had to guess at: `slopty hook install` on the host,
 /// so the pill stops being a guess. Shown once, on the first such session.
-fn hooks_button(id: ItemId, theme: &Theme, k: f32, cx: &Context<CanvasView>) -> gpui::AnyElement {
-    let pill = pill("hooks", id, "hooks", theme.surfaces.warn, theme, k)
+fn hooks_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("hooks", id, "hooks", theme.surfaces.warn, theme, chrome)
         .role(Role::Button)
         .aria_label("install hooks");
     tab_stop(pill, theme.surfaces.accent)
@@ -2396,10 +2474,11 @@ impl CanvasView {
         item: ItemId,
         session: SessionId,
         agent: &AgentEvent,
-        k: f32,
+        chrome: Chrome,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
+        let k = chrome.k;
         let ui_size = (theme.typography.ui_size - 1.0) * k;
         let answered = self.answered.get(&session).copied();
         let (label, color) = match (&agent.status, answered) {
@@ -2439,7 +2518,9 @@ impl CanvasView {
                 .text_color(hsla(theme.surfaces.text))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
-                .child(text);
+                .child(
+                    ChromeText::new(text, px(theme.typography.small()), k).zooming(chrome.zooming),
+                );
             tab_stop(pill, theme.surfaces.accent)
         };
         let buttons: Vec<gpui::AnyElement> = match (&agent.status, answered) {
@@ -2484,7 +2565,13 @@ impl CanvasView {
                     .rounded_full()
                     .bg(hsla(color)),
             )
-            .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)));
+            .child(
+                div().overflow_hidden().child(
+                    ChromeText::new(label, px(theme.typography.small()), k)
+                        .fill()
+                        .zooming(chrome.zooming),
+                ),
+            );
         div()
             .id(element_id("badge", item))
             .debug_selector(move || format!("badge-{}", item.as_uuid()))
@@ -3500,5 +3587,62 @@ mod tests {
         let rows = grid_rows(&view, cx, low).expect("laid out");
         let prepared = rows_prepared(cx);
         assert!(prepared >= 1 && prepared < usize::from(rows) / 2, "{prepared} of {rows}");
+    }
+
+    /// A zoom step is one frame in motion (terminals and chrome paint from the raster ladder)
+    /// followed by one settled frame the canvas asks for itself, so the final zoom is painted
+    /// exact without waiting for anything else to redraw.
+    #[gpui::test]
+    fn a_zoom_step_is_one_frame_in_motion_then_one_settled(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        host_opens(&view, cx, session, me, SHELL, 1);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.zooming_frames), 0, "opening is not a zoom");
+        let motion = |view: &Entity<CanvasView>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, cx| c.terminals[&session].read(cx).motion_frames())
+        };
+        assert_eq!(motion(&view, cx), 0);
+
+        cx.simulate_keystrokes("cmd-=");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.zooming_frames), 1, "one frame in motion");
+        assert_eq!(motion(&view, cx), 1, "the terminal saw that frame");
+        assert!(view.read_with(cx, |c, _| c.zooming), "no settle frame before the pause");
+        // A second step inside the pause is another frame in motion, not a settle.
+        cx.simulate_keystrokes("cmd-=");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.zooming_frames), 2);
+        assert_eq!(motion(&view, cx), 2);
+        assert!(view.read_with(cx, |c, _| c.zooming));
+
+        cx.executor().advance_clock(SETTLE);
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |c, _| c.zooming), "the settled frame paints exact");
+        assert_eq!(view.read_with(cx, |c, _| c.zooming_frames), 2, "and is not in motion");
+        assert!(view.read_with(cx, |c, _| c.zoom_drawn.is_some_and(|z| z > 1.0)));
+    }
+
+    /// Chrome labels are shaped once at their base size: three shells titled alike share one
+    /// entry, and a zoom step shapes nothing new (the words are painted at the zoom).
+    #[gpui::test]
+    fn chrome_labels_are_shaped_once_across_items_and_zoom_steps(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        for (i, x) in [0.0, 320.0, 640.0].into_iter().enumerate() {
+            let rect = Rect { x, y: 0.0, w: 300.0, h: 200.0 };
+            let version = u64::try_from(i).unwrap().saturating_add(1);
+            host_opens(&view, cx, SessionId::new(), me, rect, version);
+        }
+        cx.run_until_parked();
+        let labels = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::chrome_text::cached_labels(cx))
+        };
+        // Three title bars share `shell`; the active item alone offers the `take` pill.
+        assert_eq!(labels(cx), 2, "`shell` and `take`");
+        cx.simulate_keystrokes("cmd-=");
+        cx.executor().advance_clock(SETTLE);
+        cx.run_until_parked();
+        assert_eq!(labels(cx), 2, "a zoom step and its settled frame shape nothing");
+        assert!(view.read_with(cx, |c, _| c.camera.zoom > 1.0));
     }
 }

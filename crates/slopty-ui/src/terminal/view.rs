@@ -180,6 +180,11 @@ pub struct TerminalView {
     pending_size: Option<TermSize>,
     font_family: Option<String>,
     zoom: f32,
+    /// The canvas zoom is in motion this frame (set by the canvas before each frame).
+    zooming: bool,
+    /// Frames drawn while zooming (tests).
+    #[cfg(test)]
+    motion_frames: u32,
     predictor: Predictor,
     /// Keystroke → paint, predicted and echoed (see [`latency`]).
     latency: latency::KeyLatency,
@@ -256,6 +261,9 @@ impl TerminalView {
             pending_size: None,
             font_family: None,
             zoom: 1.0,
+            zooming: false,
+            #[cfg(test)]
+            motion_frames: 0,
             predictor: Predictor::new(policy_from_env()),
             latency: latency::KeyLatency::default(),
             marked: None,
@@ -847,6 +855,18 @@ impl TerminalView {
     /// Paint scale (set by the canvas before each frame).
     pub const fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom;
+    }
+
+    /// Whether the zoom is in motion this frame (set by the canvas before each frame): the
+    /// grid paints from the raster ladder instead of rasterising every glyph at a new size.
+    pub const fn set_zooming(&mut self, on: bool) {
+        self.zooming = on;
+    }
+
+    /// How many frames this view drew while the zoom was in motion.
+    #[cfg(test)]
+    pub const fn motion_frames(&self) -> u32 {
+        self.motion_frames
     }
 
     /// Link RTT, for the prediction policy.
@@ -1481,6 +1501,11 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
+        let zooming = self.zooming;
+        #[cfg(test)]
+        if zooming {
+            self.motion_frames = self.motion_frames.saturating_add(1);
+        }
         if std::mem::take(&mut self.focus_composer) && self.conversation.is_some() {
             // Focus moves after this update, not from inside the render.
             cx.defer_in(window, |this, window, cx| {
@@ -1529,7 +1554,8 @@ impl Render for TerminalView {
                 if let Some(conversation) = conversation {
                     return el.child(conversation);
                 }
-                let mut grid = TerminalElement::new(cx.entity(), focused).zoom(self.zoom);
+                let mut grid =
+                    TerminalElement::new(cx.entity(), focused).zoom(self.zoom).zooming(zooming);
                 if window.is_a11y_active() {
                     let label = self.title().unwrap_or("shell").to_owned();
                     grid = grid.a11y(label.into(), self.cursor_row_text().into());
