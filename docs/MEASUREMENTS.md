@@ -1438,6 +1438,53 @@ bundle identifier, and the leak measured above says ScreenCaptureKit did not tre
 second path as a second application. Whether a genuinely different bundled app can appear in the
 crop is still open.
 
+## 2026-09-06 — what the crop shows, and which signal knows a hide first
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e -E 'test(what_a_crop_shows) or test(a_hidden_window_stops) \
+  or test(how_late_each_way)' --no-capture
+```
+
+### What reaches the client while nobody knows the window has gone
+
+The section above counted *frames*. That number cannot answer what the crop shows, and the
+control here says why: ScreenCaptureKit delivers the rectangle at the frame rate whether or not
+anything in it changed, so an empty rectangle produces as many frames as a busy one. The
+pictures themselves are read instead — the client's decoded frames, averaged to one number,
+brightness 0–255 — over the same hide, driven three ways:
+
+| behind the target                              | frames after the order | brightness swing, last frames | brightness level, last frames |
+| ----------------------------------------------- | ---------------------: | ----------------------------: | ----------------------------: |
+| nothing (the control)                          |                  11–15 |                     0.0 – 2.0 |                   0.00 – 0.02 |
+| a second window of the same executable          |                  13–16 |                     0.0 – 0.9 |                   0.00 – 0.24 |
+| the same binary in its own signed `.app` bundle |                  13–16 |                     0.0 – 0.2 |                   0.00 – 0.02 |
+
+The backdrop is a window repainting between two colours for the whole of the gap: while the
+target is up, that same measure reads **136** (the target flashing in the crop). After the
+target is ordered out it reads **zero, in all three cases** — the crop carries black that stops
+changing. Nothing of the window behind reaches the client, and that holds whether the framework
+counts it as the target's own application or another one.
+
+So the ⏳ from the crop ruling is answered: the crop cannot be made to show another application,
+and the frames sent during the gap are black, not the desktop. The fixture that answers it is a
+real second application — the helper binary inside a minimal `.app` with its own
+`CFBundleIdentifier`, ad-hoc signed — because a copy of a bare executable at a second path is
+still the same application to ScreenCaptureKit.
+
+### Which signal knows first
+
+Both polled every 2 ms from one thread, timed from AppKit's own report that the window was
+ordered out, four runs:
+
+| signal                                                            | knows after |
+| ------------------------------------------------------------------ | ----------- |
+| accessibility (`AXUIElementCopyAttributeValue`, the app's windows) | **0 ms**    |
+| core graphics (`kCGWindowIsOnscreen` / the on-screen list)         | 256–266 ms  |
+
+`AXIsProcessTrusted` was true for the test process. The accessibility API knows the moment
+AppKit does; core graphics is a quarter of a second behind, which is the whole of the gap.
+
 ## 2026-09-06 — stalls are not made by load
 
 ```sh

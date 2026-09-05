@@ -249,8 +249,10 @@ holds the desktop; `ScreenStats::on_crop` says which path a stream is on right n
 `cropped`, which counts the frames that came that way, and both readers go through
 `Shared::stats` so neither can publish the counters' placeholder. It does *not* close the larger
 one before it: CoreGraphics keeps reporting a window on screen for ~270 ms after it is ordered
-out, whichever way it is asked, and the crop covers that rectangle throughout — kept, with the
-reasons and the two open questions, in DECISIONS.md "A hide is ~270 ms late". The pure crop geometry (`slopty_capture::crop_for`: window frame →
+out, whichever way it is asked, and the crop covers that rectangle throughout. What it carries
+then is black rather than what is behind the window, in every case that has been measured
+including another application's window: DECISIONS.md "A hide is ~270 ms late" and "A crop cannot
+be made to show another application" have the reasons and the numbers. The pure crop geometry (`slopty_capture::crop_for`: window frame →
 display-relative points, pixels at the display's scale, `None` when not entirely on that
 display) and the occluder rule are unit-tested; DECISIONS.md "Rulings of the crop path" has
 the list. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd forces a path. Every frame carries the window server's display time

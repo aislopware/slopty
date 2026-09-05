@@ -2310,16 +2310,49 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   target's own application. Against it stand the guard, which closes the part this side owns, and
   the e2e's ceiling of 30 frames, which makes a regression in detection visible. Recorded so the
   trade is re-openable rather than rediscovered.
-  Still open, as follow-up tracks rather than part of this one:
-  * **A faster hide signal than `CGWindowList`.** Worth trying an accessibility observer on the
-    target application (`kAXUIElementDestroyed`, `kAXWindowMiniaturized`,
-    `kAXFocusedWindowChanged`) or `SCShareableContent` change notifications, and measuring
-    order-out → host-knows against the 267–279 ms above. Anything materially under that shrinks
-    the window for free.
-  * **The cross-application fixture.** The filter's application scope is a property of how it is
-    constructed, not something measured here; confirming it needs a second helper that is a real
-    bundle with its own identifier, because a bare executable copied to another path is not a
-    second application to ScreenCaptureKit.
+  Both of the questions this entry left open are answered in the two entries below.
+- ✅ **A crop cannot be made to show another application** (2026-09-06). The open question from
+  the entry above, answered with a fixture that is a real second application: the idle-window
+  helper inside a minimal `.app` with its own `CFBundleIdentifier`, ad-hoc signed, because a copy
+  of a bare executable at another path is still the same application to ScreenCaptureKit.
+  It also replaces the instrument. Frame *counts* cannot answer this — the framework delivers the
+  crop rectangle at the frame rate whether anything in it changed or not, so an empty rectangle
+  produces as many frames as a busy one, which is what the control run shows. The pictures are
+  read instead, as one number: the mean brightness of the client's decoded frames. With the
+  target up and flashing in the crop that measure swings by 136; once the target is ordered out
+  it goes to **zero in all three cases** — nothing behind, a window of the same executable, and a
+  window of another application. The crop carries black, and none of the window behind reaches
+  the client (MEASUREMENTS.md, "what the crop shows"). So the ~270 ms gap costs the client a
+  black rectangle, not somebody's content, and the default in the entry above stands on firmer
+  ground than when it was taken.
+  Tests: `what_a_crop_shows_of_another_application`, `what_a_crop_shows_of_an_empty_rectangle`
+  and `a_hidden_window_stops_being_served_from_its_crop` share one driver and differ only in what
+  is behind the target; the empty rectangle is kept as the control that makes the other two mean
+  anything.
+- ⏳ **The accessibility API knows about a hide 260 ms before core graphics does** (2026-09-06,
+  measured, not wired). Polled every 2 ms from one thread against the same order-out:
+  accessibility answers in **0 ms**, `kCGWindowIsOnscreen` and the on-screen list in
+  **256–266 ms**. The signal that would close the gap exists and is public.
+  It is not wired up, for two reasons that are worth writing down rather than rediscovering.
+  * **It cannot name the window.** The public accessibility API exposes no window number for an
+    `AXUIElement`; the call that does, `_AXUIElementGetWindow`, is private and out under the
+    no-private-API rule. So accessibility can say "a window of that application went" but not
+    "*the* window went", and wiring it means treating any change in the target application's
+    window set as *suspicion*: hold frames at once, let core graphics confirm or deny ~260 ms
+    later. That makes the privacy answer exact and turns a false suspicion into a freeze of up to
+    ~260 ms rather than a leak — but the false-suspicion rate on a real multi-window application
+    is not measured, and it is the number that decides whether this is worth it.
+  * **The constants are string literals.** `kAXWindowsAttribute` and the `kAX*Notification`
+    names are `#define … CFSTR("…")` macros in the SDK headers: no symbol is exported, so no
+    objc2 binding offers a static, and every caller spells them out. That is against the
+    project's "Apple framework keys and constants come from the objc2 statics, never string
+    literals" — a rule written for keys that *do* have statics. The spelling is kept inside the
+    measurement in `apps/slopty-hostd/tests/e2e.rs` so nothing in a library depends on it until
+    that is ruled on.
+  Also considered and not measured: `SCShareableContent` and the stream delegate are the same
+  window-server data core graphics reads, so they cannot be earlier than it; window-server
+  notifications are private API and out for that reason; and deciding a hide from the frames
+  themselves (the crop going black) is a guess about content that a dark window would trip.
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
   closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops
