@@ -830,14 +830,41 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `cargo xtask e2e ios [--sim iphone|ipad]` builds the app with the `e2e` feature, boots the
   simulator (created on first use), installs the bundle and runs `crates/slopty-e2e/tests/ios.rs`
   (gate `SLOPTY_IOS_E2E`): ptyd and hostd start on the Mac as for `e2e app`, the app is
-  launched with `simctl launch` and `SIMCTL_CHILD_*` variables for its socket, data dir and
-  `SLOPTY_PREDICT`, and binds the socket on the shared file system (a simulator process is a
+  launched with `simctl launch` and `SIMCTL_CHILD_*` variables for its socket, data dir,
+  `SLOPTY_PREDICT` and `SLOPTY_HARDWARE_KEYBOARD`, and binds the socket on the shared file system (a simulator process is a
   Mac process; the sandbox does not stop it). `Stack::launch_on_simulator` shares the daemon
   code with `launch`; shutdown sends `quit` and `simctl terminate`. The test pins the one
   behaviour that differs by screen: the host places a desktop-sized terminal and the client
   fits it — a phone shrinks it to the viewport, an iPad keeps 720 pt — then types, reads the
   echo, ⌘N/⌘W. UIKit's own delivery (touches, presses) is still outside the test: the socket
   dispatches keystrokes at GPUI's level, so a fork bug in `pressesBegan` would not show here.
+- ✅ **The simulator renders goldens too: `render_to_image` on iOS draws offscreen**
+  (2026-09-05, fork commit `9463bf6`). `gpui_ios` had no `render_to_image`, so the simulator
+  tests checked only dumps. The fork gives `gpui_ios` a `test-support` feature (wired into
+  `gpui_platform`'s, which `slopty-app`'s `e2e` feature already turns on, so nothing changed
+  in the app) whose `render_to_image` calls `gpui_apple`'s existing
+  `render_scene_to_image` with the layer's `drawableSize`: the current scene drawn through
+  the same Metal pipeline into a private BGRA8 texture, read back as `RgbaImage`. Offscreen
+  rather than the macOS path's `nextDrawable`: the layer's three drawables belong to the
+  display link and a simulator app that UIKit has throttled or backgrounded may have none
+  to hand out, while a private target is always available and never disturbs presentation;
+  iOS is unified memory, so `getBytes` reads the shared texture without a blit. Pixel size is
+  the drawable's (points × screen scale, the same truncation the layout uses), so a golden is
+  the full screen at 3× on the iPhone 17 Pro and 2× on the iPad Pro 13": several hundred KB of
+  flat UI each, compressed well by PNG. Tolerance is the app self-test's 1 % of pixels with
+  the 24-value channel slack (hinting, the cursor, the RTT readout); goldens are per device,
+  `ios-phone-*.png` and `ios-pad-*.png`, chosen by the viewport width the dump reports
+  (`device()` in `tests/ios.rs`, the same threshold that decides the terminal's fit). Both
+  scenarios render: the fitted shell after its echo and the conversation view with the
+  composer above the key bar. `foreground_fraction` moved into `slopty_e2e::snapshot` so the
+  blank-frame guard is shared by the Mac and simulator tests (threshold 0.2 % on iOS: a fitted
+  terminal's few lines are under 1 % of an iPad's 2064×2752). First finding: the phone's
+  terminal golden differed by 1.7 % between two runs — one 140-pt band at the bottom and every
+  text row. GameController reports the Mac's keyboard to the simulator about a second after
+  launch, the poll hides the key bar and the terminal is refitted, so the frame depended on
+  which side of that poll the render landed. The e2e build reads `SLOPTY_HARDWARE_KEYBOARD`
+  (`0|1`) before asking the platform and the harness launches the simulator app with `0`:
+  goldens are the glass-only layout, key bar in frame, whatever the simulator has attached.
 - ✅ **Headless UI tests read the scene like a DOM** (2026-09-05). Item roots carry
   `.debug_selector("item-<uuid>")` and the canvas root `"canvas"`; `cx.debug_bounds` gives
   their laid-out bounds, `window.painted_quads()` the borders and colours the frame actually

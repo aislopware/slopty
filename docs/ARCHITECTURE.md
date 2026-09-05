@@ -284,8 +284,9 @@ transcript); headless `the_conversation_replaces_the_grid_and_follows_the_transc
 self-test `the_conversation_view_reads_and_answers_the_agent` (a fixture transcript named by
 `Stop` and `PermissionRequest` hooks the test hands to hostd over its control socket, never
 typed into the shell; goldens `conversation.png` and `conversation-permission.png`) and the
-simulator's `the_conversation_view_on_the_simulator` (dump only: the fork's iOS platform has
-no `render_to_image`, so there are no simulator goldens); the dump lists the entries, the composer, its focus, the pin and
+simulator's `the_conversation_view_on_the_simulator` (dump plus the goldens
+`ios-phone-conversation.png` / `ios-pad-conversation.png`, rendered by the fork's iOS
+`render_to_image`); the dump lists the entries, the composer, its focus, the pin and
 the attention row (`ConversationInfo`) and the agent's state (`TerminalInfo.agent`).
 
 ## 6. UI
@@ -312,7 +313,10 @@ events rather than synthesised touches. The bundle targets iPhone and iPad
 (`TARGETED_DEVICE_FAMILY 1,2`, every iPad orientation, so Split View and Stage Manager can
 resize the window; the canvas re-fits on resize like any window);
 `cargo xtask ios sim --sim ipad` boots an iPad Pro 13-inch simulator beside the iPhone one, and
-`cargo xtask e2e ios --sim ipad` drives the app there over its test socket.
+`cargo xtask e2e ios --sim ipad` drives the app there over its test socket, including `render`:
+the fork's `gpui_ios` draws the scene offscreen through the shared Metal renderer at the
+layer's drawable size, and the tests diff it against per-device goldens (`ios-phone-*.png`,
+`ios-pad-*.png` under `crates/slopty-e2e/golden`).
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
