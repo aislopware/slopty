@@ -22,6 +22,11 @@ mod tests {
         Config::default()
     }
 
+    /// The NACK delay the policy derives for this harness's round trip.
+    fn nack_delay() -> Duration {
+        cfg().nack_delay.for_rtt(RTT)
+    }
+
     fn frame_bytes(seed: u32, len: usize) -> Vec<u8> {
         let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
         (0..len)
@@ -174,7 +179,7 @@ mod tests {
         h.deliver_except(&s1, &dropped);
         assert!(h.drain().is_empty());
         assert!(h.tick().is_empty(), "too early to NACK");
-        h.advance(cfg().nack_delay);
+        h.advance(nack_delay());
         let actions = h.tick();
         let expected: Vec<u16> = dropped.iter().map(|&i| u16::try_from(i).unwrap()).collect();
         assert_eq!(actions, vec![Action::Nack { frame: 1, fragments: expected.clone() }]);
@@ -191,7 +196,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, p);
         assert!(out[0].info.recovered);
-        assert!(out[0].hold >= cfg().nack_delay + RTT);
+        assert!(out[0].hold >= nack_delay() + RTT);
         let stats = h.rx.stats();
         assert_eq!(
             (stats.frames_ok, stats.frames_fec, stats.frames_retransmit, stats.nacks),
@@ -210,14 +215,14 @@ mod tests {
         h.deliver(&s2.datagrams);
         assert!(h.drain().is_empty(), "frame 2 waits for the missing frame 1");
 
-        h.advance(cfg().nack_delay);
+        h.advance(nack_delay());
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }]);
         // The link keeps flowing (a later frame lands), so the retry and the deadline apply.
-        h.advance(RTT + cfg().nack_delay);
+        h.advance(RTT + nack_delay());
         let s3 = h.send(&frame_bytes(4, 2_000), false, false);
         h.deliver(&s3.datagrams);
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }], "second try");
-        h.advance(RTT + cfg().nack_delay + cfg().grace);
+        h.advance(RTT + nack_delay() + cfg().grace);
         let actions = h.tick();
         assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0 }]);
         assert!(h.rx.awaiting_refresh());
@@ -248,7 +253,7 @@ mod tests {
         let s1 = h.send(&p, false, false);
         // 6 data + 2 parity; the tail of the frame is delayed, not dropped.
         h.deliver(&s1.datagrams[..3]);
-        h.advance(cfg().nack_delay);
+        h.advance(nack_delay());
         assert_eq!(h.tick().len(), 1, "first NACK goes out on silence");
         // Nothing arrives for 200 ms: no retry, no refresh.
         for _ in 0..20 {
@@ -275,7 +280,7 @@ mod tests {
         // Drop 3 of 6 data fragments (beyond the 2 parity); the NACK goes out, then the link
         // stalls for 120 ms — longer than the whole loss deadline.
         h.deliver_except(&s1, &[0, 1, 2, 6, 7]);
-        h.advance(cfg().nack_delay);
+        h.advance(nack_delay());
         let nack = h.tick();
         assert_eq!(nack.len(), 1);
         h.advance(Duration::from_millis(120));
@@ -381,7 +386,7 @@ mod tests {
         h.drain();
         let s1 = h.send(&frame_bytes(2, 6_000), false, false);
         h.deliver(&s1.datagrams[..3]);
-        h.advance(cfg().nack_delay);
+        h.advance(nack_delay());
         assert_eq!(h.tick().len(), 1);
         h.advance(cfg().max_hold);
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);

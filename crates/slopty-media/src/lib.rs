@@ -27,7 +27,8 @@ pub use packetize::{
 };
 pub use rate::{Decision, PathSample, RateController, Window as RateWindow, judge};
 pub use reassemble::{
-    Action, Config, FrameInfo, FrameOut, Ignored, Ingest, Reassembler, ReassemblerStats, STALL_GAP,
+    Action, Config, FrameInfo, FrameOut, Ignored, Ingest, NackDelay, Reassembler, ReassemblerStats,
+    STALL_GAP,
 };
 pub use redundancy::Redundancy;
 

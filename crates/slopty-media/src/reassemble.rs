@@ -36,12 +36,46 @@ use crate::cursor::parse_cursor;
 /// heartbeats at half this while its source is quiet.
 pub const STALL_GAP: Duration = Duration::from_millis(50);
 
+/// How long to wait on an incomplete frame before asking for its missing fragments, as a
+/// function of the round trip.
+///
+/// The delay only has to outlast the spread of one frame's fragments on the wire: they leave the
+/// host back to back, so silence after them means loss rather than pacing. That spread tracks the
+/// path's own delay variation, which in turn tracks its round trip, so the delay is a fraction of
+/// the RTT — the same reordering tolerance TCP RACK uses (`min_rtt / 4`). The bounds matter more
+/// than the fraction: without the floor a loopback link (RTT ≈ 0.5 ms) would NACK on scheduling
+/// noise, and without the ceiling a slow path would hold a repairable frame far past the point
+/// where the retransmission could still be shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NackDelay {
+    /// Never shorter than this, whatever the round trip.
+    pub min: Duration,
+    /// Never longer than this.
+    pub max: Duration,
+    /// The delay is `rtt / divisor` before the bounds apply. Zero means "always [`Self::min`]".
+    pub divisor: u32,
+}
+
+impl NackDelay {
+    /// The delay for a measured round trip.
+    #[must_use]
+    pub fn for_rtt(self, rtt: Duration) -> Duration {
+        rtt.checked_div(self.divisor).unwrap_or(self.min).clamp(self.min, self.max)
+    }
+}
+
+impl Default for NackDelay {
+    fn default() -> Self {
+        Self { min: Duration::from_millis(1), max: Duration::from_millis(20), divisor: 4 }
+    }
+}
+
 /// Timing and bounds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Config {
-    /// Silence after the last fragment of an incomplete frame before a NACK goes out. Fragments of
-    /// one frame leave the host back to back, so a few milliseconds of silence means loss.
-    pub nack_delay: Duration,
+    /// Silence after the last fragment of an incomplete frame before a NACK goes out, derived
+    /// from the round trip (see [`NackDelay`]).
+    pub nack_delay: NackDelay,
     /// NACK attempts per frame before it is given up.
     pub nack_retries: u8,
     /// Slack added to the loss deadline on top of the NACK round trips.
@@ -66,7 +100,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            nack_delay: Duration::from_millis(3),
+            nack_delay: NackDelay::default(),
             nack_retries: 2,
             grace: Duration::from_millis(10),
             max_pending: 64,
@@ -104,6 +138,10 @@ pub struct FrameOut {
     pub data: Vec<u8>,
     /// Time from the first fragment's arrival to delivery.
     pub hold: Duration,
+    /// When the fragment that completed the frame arrived. This, not the delivery instant, is
+    /// where the client's arrival → present clock starts: everything after it is the receiver's
+    /// own doing.
+    pub arrived: Instant,
 }
 
 /// Why a datagram was dropped.
@@ -307,6 +345,9 @@ pub struct Reassembler {
     any_arrived: bool,
     /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
     last_rtt: Duration,
+    /// [`Config::nack_delay`] evaluated for `last_rtt`, so `stalled` and `resume` (which have no
+    /// round trip to hand) use the same number `tick` does.
+    nack_delay: Duration,
     last_host_ts_us: u32,
     ltr_acks: VecDeque<u64>,
 }
@@ -327,6 +368,7 @@ impl Reassembler {
     /// A reassembler for one stream. `now` anchors relative timestamps.
     #[must_use]
     pub fn new(stream: StreamId, cfg: Config, now: Instant) -> Self {
+        let last_rtt = Duration::from_millis(20);
         Self {
             stream,
             cfg,
@@ -346,7 +388,8 @@ impl Reassembler {
             arrived_at: now,
             stall_charged_to: now,
             any_arrived: false,
-            last_rtt: Duration::from_millis(20),
+            last_rtt,
+            nack_delay: cfg.nack_delay.for_rtt(last_rtt),
             last_host_ts_us: 0,
             ltr_acks: VecDeque::new(),
         }
@@ -500,7 +543,7 @@ impl Reassembler {
         };
         let first_seen = partial.first_seen;
         let missing = partial.missing_data_count();
-        match assemble(&mut self.decoder, frame, &partial) {
+        match assemble(&mut self.decoder, frame, &partial, now) {
             Some(out) => {
                 if out.info.recovered {
                     self.window.frames_fec = self.window.frames_fec.saturating_add(1);
@@ -621,7 +664,13 @@ impl Reassembler {
     /// Silence on the stream that counts as a stall: one NACK round trip, at least
     /// [`Config::stall_gap`].
     fn stall_threshold(&self) -> Duration {
-        self.last_rtt.saturating_add(self.cfg.nack_delay).max(self.cfg.stall_gap)
+        self.last_rtt.saturating_add(self.nack_delay).max(self.cfg.stall_gap)
+    }
+
+    /// The NACK delay in force, as derived from the last round trip the policy was given.
+    #[must_use]
+    pub const fn nack_delay(&self) -> Duration {
+        self.nack_delay
     }
 
     /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the
@@ -649,7 +698,7 @@ impl Reassembler {
             return;
         }
         tracing::debug!(?gap, pending = self.frames.len(), "link resumed; deadlines restart");
-        let fresh = now.checked_sub(self.cfg.nack_delay).unwrap_or(now);
+        let fresh = now.checked_sub(self.nack_delay).unwrap_or(now);
         for slot in self.frames.values_mut() {
             match slot {
                 Slot::Complete { .. } => {}
@@ -669,16 +718,15 @@ impl Reassembler {
     /// and after ingesting a batch. `rtt` is the current round-trip estimate.
     pub fn tick(&mut self, now: Instant, rtt: Duration) -> Vec<Action> {
         self.last_rtt = rtt;
-        let retry_gap = rtt.saturating_add(self.cfg.nack_delay);
-        let deadline = self
-            .cfg
-            .nack_delay
+        self.nack_delay = self.cfg.nack_delay.for_rtt(rtt);
+        let nack_delay = self.nack_delay;
+        let retry_gap = rtt.saturating_add(nack_delay);
+        let deadline = nack_delay
             .saturating_add(retry_gap.saturating_mul(u32::from(self.cfg.nack_retries)))
             .saturating_add(self.cfg.grace);
         let in_order = matches!(self.need, Need::Frame(_));
         let accept_refresh = matches!(self.need, Need::Refresh);
         let retries = self.cfg.nack_retries;
-        let nack_delay = self.cfg.nack_delay;
         let max_hold = self.cfg.max_hold;
         let arrived_at = self.arrived_at;
         // Newer datagrams still coming in: a fragment that is missing was dropped, not delayed.
@@ -824,6 +872,7 @@ fn assemble(
     decoder: &mut Option<ReedSolomonDecoder>,
     frame: u32,
     partial: &Partial,
+    arrived: Instant,
 ) -> Option<FrameOut> {
     let data_count = partial.data_count;
     let mut body = Vec::with_capacity(data_count.saturating_mul(partial.shard_bytes));
@@ -874,5 +923,78 @@ fn assemble(
         },
         data,
         hold: Duration::ZERO,
+        arrived,
     })
+}
+
+#[cfg(test)]
+mod nack_delay_tests {
+    use super::*;
+
+    /// A fake RTT source: what the transport would have reported on each of these links.
+    fn links() -> [(&'static str, Duration); 5] {
+        [
+            ("loopback", Duration::from_micros(500)),
+            ("lan", Duration::from_millis(2)),
+            ("wifi", Duration::from_millis(12)),
+            ("mesh", Duration::from_millis(40)),
+            ("satellite", Duration::from_millis(600)),
+        ]
+    }
+
+    /// The delay follows the round trip between its bounds: a loopback link repairs in a
+    /// millisecond, a 40 ms link waits 10 ms rather than asking again for fragments that are
+    /// still in flight, and nothing waits longer than the ceiling.
+    #[test]
+    fn the_delay_tracks_the_round_trip_between_its_bounds() {
+        let policy = NackDelay::default();
+        let got: Vec<(&str, u64)> = links()
+            .into_iter()
+            .map(|(name, rtt)| {
+                let delay = policy.for_rtt(rtt);
+                (name, u64::try_from(delay.as_micros()).unwrap_or(u64::MAX))
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("loopback", 1_000),
+                ("lan", 1_000),
+                ("wifi", 3_000),
+                ("mesh", 10_000),
+                ("satellite", 20_000),
+            ]
+        );
+        // Monotonic, and always inside the bounds.
+        let mut previous = Duration::ZERO;
+        for ms in 0..1_000 {
+            let delay = policy.for_rtt(Duration::from_millis(ms));
+            assert!(delay >= policy.min && delay <= policy.max, "{ms} ms → {delay:?}");
+            assert!(delay >= previous, "{ms} ms went backwards");
+            previous = delay;
+        }
+        // A divisor of zero degenerates to the floor rather than dividing by zero.
+        assert_eq!(
+            NackDelay { divisor: 0, ..policy }.for_rtt(Duration::from_millis(40)),
+            policy.min
+        );
+    }
+
+    /// `tick` re-derives the delay from the round trip it is given, and everything that reads it
+    /// without one (the stall threshold) sees the same number.
+    #[test]
+    fn a_tick_moves_the_delay_and_the_stall_threshold_with_it() {
+        let now = Instant::now();
+        let mut rx = Reassembler::new(StreamId(1), Config::default(), now);
+        assert_eq!(rx.nack_delay(), Duration::from_millis(5), "assumed 20 ms round trip");
+
+        let _quiet = rx.tick(now, Duration::from_micros(600));
+        assert_eq!(rx.nack_delay(), Duration::from_millis(1));
+        // Nothing has arrived yet, so the stall floor still governs.
+        assert_eq!(rx.stall_threshold(), STALL_GAP);
+
+        let _quiet = rx.tick(now, Duration::from_millis(120));
+        assert_eq!(rx.nack_delay(), Duration::from_millis(20));
+        assert_eq!(rx.stall_threshold(), Duration::from_millis(140));
+    }
 }
