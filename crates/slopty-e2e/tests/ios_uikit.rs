@@ -24,6 +24,9 @@ mod tests {
     const BOTTOM_BARS: f32 = 160.0;
     /// How long a finger rests before lifting, so the release carries no velocity.
     const STILL: Duration = Duration::from_millis(100);
+    /// Longer than the view's key repeat delay (400 ms) plus a few repeat ticks: a held key
+    /// would have repeated by then.
+    const REPEAT_WINDOW: Duration = Duration::from_millis(800);
 
     fn simulator() -> Option<Simulator> {
         if std::env::var_os("SLOPTY_IOS_E2E").is_none() {
@@ -137,6 +140,30 @@ mod tests {
             })
             .await
             .unwrap();
+        // A cancelled press releases the key: the view repeats a held key itself after 400 ms,
+        // so a `left` that begins and is cancelled prints its sequence once and never again.
+        // (Read before any other key: a later press would release it too.)
+        let left_arrows = |d: &Dump| -> usize {
+            d.terminals.iter().flat_map(|t| t.rows.iter()).map(|r| r.matches("^[[D").count()).sum()
+        };
+        drv.ok(&slopty_e2e::Command::UiKeyPress {
+            usage: slopty_e2e::hid::usage("left").unwrap(),
+            modifiers: String::new(),
+            phase: slopty_e2e::UiPressPhase::Began,
+        })
+        .await
+        .unwrap();
+        drv.wait_for("the left arrow once", STEP, |d| left_arrows(d) == 1).await.unwrap();
+        drv.ok(&slopty_e2e::Command::UiKeyPress {
+            usage: slopty_e2e::hid::usage("left").unwrap(),
+            modifiers: String::new(),
+            phase: slopty_e2e::UiPressPhase::Cancelled,
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(REPEAT_WINDOW).await;
+        let later = drv.dump().await.unwrap();
+        assert_eq!(left_arrows(&later), 1, "a cancelled key does not repeat: {later:#?}");
         // ⌃C is a chord (no key_char): consumed, encoded, and cat exits.
         drv.ui_key("ctrl-c").await.unwrap();
         drv.wait_for("cat to exit", STEP, |d| !d.rows_containing("^C").is_empty()).await.unwrap();
@@ -156,7 +183,7 @@ mod tests {
         drv.wait_for("the grid back", STEP, |d| d.terminals[0].conversation.is_none())
             .await
             .unwrap();
-        // A cancelled press releases the key too: no repeat, no stuck modifier.
+        // A cancelled chord leaves no stuck modifier: the next plain key types plainly.
         drv.ok(&slopty_e2e::Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("a").unwrap(),
             modifiers: "cmd".into(),

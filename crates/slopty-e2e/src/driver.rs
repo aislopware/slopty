@@ -17,6 +17,9 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// How long one command may take to be answered (a frame, or a pairing round trip).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a described finger rests before it lifts: longer than the 40 ms of silence after
+/// which gpui's touch recognizer takes a finger for stopped.
+const REST: Duration = Duration::from_millis(100);
 
 /// One connection to a running app.
 #[derive(Debug)]
@@ -155,8 +158,9 @@ impl Driver {
         self.ui_touch(&finger, UiTouchPhase::Ended).await
     }
 
-    /// One finger down at `from`, moved to `to` in `steps`, held still for a few frames (no
-    /// fling) and lifted (iOS): a pan once GPUI recognizes it.
+    /// One finger down at `from`, moved to `to` in `steps`, resting [`REST`] before it lifts
+    /// so the release carries no velocity (no fling), and lifted (iOS): a pan once GPUI
+    /// recognizes it.
     ///
     /// # Errors
     ///
@@ -172,9 +176,10 @@ impl Driver {
             let (x, y) = ((to.0 - from.0).mul_add(t, from.0), (to.1 - from.1).mul_add(t, from.1));
             self.ui_touch(&at(x, y), UiTouchPhase::Moved).await?;
         }
-        for _ in 0..4 {
-            self.ui_touch(&at(to.0, to.1), UiTouchPhase::Stationary).await?;
-        }
+        // A finger that stops reports nothing until it lifts (UIKit sends no `touchesMoved:`
+        // for a still touch), and that silence is what gpui's recognizer reads as stopped:
+        // stationary reports would keep its velocity fit alive and fling the content.
+        tokio::time::sleep(REST).await;
         self.ui_touch(&at(to.0, to.1), UiTouchPhase::Ended).await
     }
 
