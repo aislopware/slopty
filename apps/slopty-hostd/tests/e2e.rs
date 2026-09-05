@@ -1336,6 +1336,7 @@ mod tests {
             .checked_add(Duration::from_secs(10))
             .expect("a deadline inside the clock");
         let mut listed = None;
+        let mut idle_again = false;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(500)).await;
             link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -1345,6 +1346,12 @@ mod tests {
                         windows, ..
                     })) => {
                         break windows;
+                    }
+                    // The host reports the source within a tick of the hide, which is while this
+                    // poll is still running; taking it here is the difference between seeing it
+                    // and throwing it away.
+                    LinkEvent::Control(HostMsg::Screen(ScreenEvent::Source { state, .. })) => {
+                        idle_again |= state == SourceState::Idle;
                     }
                     _other => {}
                 }
@@ -1357,6 +1364,13 @@ mod tests {
         let listed = listed.expect("the idle window still in the list");
         let state = std::fs::read_to_string(markers.join("state")).unwrap_or_default();
         assert!(!listed.on_screen, "the second hide did not stick: {listed:?}; helper: {state}");
+
+        // And the host says so again. The old rule latched on "has ever encoded a frame", so a
+        // window that drew and then went away stayed `Live` for the rest of the stream and the
+        // receiver had only its refresh cap to protect it.
+        idle_again |=
+            wait_for_source(&mut events, SourceState::Idle, Duration::from_secs(10)).await;
+        assert!(idle_again, "a window that drew and then hid was still reported live");
 
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
@@ -1539,5 +1553,28 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "{what} never came up");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Wait for the host to report `want` about a stream's capture source.
+    async fn wait_for_source(
+        events: &mut tokio::sync::mpsc::Receiver<LinkEvent>,
+        want: SourceState,
+        within: Duration,
+    ) -> bool {
+        let deadline =
+            tokio::time::Instant::now().checked_add(within).expect("a deadline inside the clock");
+        while tokio::time::Instant::now() < deadline {
+            let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+            else {
+                continue;
+            };
+            if let LinkEvent::Control(HostMsg::Screen(ScreenEvent::Source { state, .. })) = event
+                && state == want
+            {
+                return true;
+            }
+        }
+        false
     }
 }

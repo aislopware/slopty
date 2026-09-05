@@ -268,6 +268,68 @@ pub struct ScreenStats {
     pub on_crop: bool,
 }
 
+/// How long a stream that has drawn may go without a frame before the client is told the source
+/// is idle again.
+///
+/// Longer than [`SOURCE_IDLE_AFTER`] on purpose: a target that draws slowly (a clock, a log that
+/// scrolls once a second) would otherwise flap between the two states and spend a control message
+/// on every change, and the receiver only needs to know before it starts asking for refreshes.
+pub const SOURCE_QUIET_AFTER: Duration = Duration::from_secs(2);
+
+/// What the client is told about the capture source, decided from the frames it has actually
+/// produced lately rather than from whether it ever produced one.
+///
+/// The distinction matters because the receiver acts on it: while the source is idle it stops
+/// asking for refreshes no refresh can answer, and it does not charge the silence to the link.
+/// A latch on "has ever encoded a frame" gets the first answer right and every later one wrong —
+/// a window that draws once and then hides, or is closed and left up, stays `Live` for the rest
+/// of the stream.
+#[derive(Debug)]
+pub struct SourceTracker {
+    /// The last state the client was told.
+    reported: Option<SourceState>,
+    /// `encoded` when a frame was last seen, and when that was.
+    seen: u64,
+    last_frame: Option<Instant>,
+    opened_at: Instant,
+}
+
+impl SourceTracker {
+    /// A tracker for a stream opened at `now`.
+    #[must_use]
+    pub const fn new(now: Instant) -> Self {
+        Self { reported: None, seen: 0, last_frame: None, opened_at: now }
+    }
+
+    /// The state to report, or `None` when it has not changed (or is not yet knowable).
+    ///
+    /// `hidden` is the geometry tick's verdict on the target: a window that is not on screen
+    /// cannot be drawing, whatever the frame counter says, and saying so at once is better than
+    /// waiting out the quiet period.
+    pub fn poll(&mut self, encoded: u64, hidden: bool, now: Instant) -> Option<SourceState> {
+        if encoded > self.seen {
+            self.seen = encoded;
+            self.last_frame = Some(now);
+        }
+        let state = match self.last_frame {
+            _ if hidden => SourceState::Idle,
+            None if now.saturating_duration_since(self.opened_at) < SOURCE_IDLE_AFTER => {
+                // Still inside the grace: say nothing rather than call a slow start idle.
+                return None;
+            }
+            None => SourceState::Idle,
+            Some(at) if now.saturating_duration_since(at) >= SOURCE_QUIET_AFTER => {
+                SourceState::Idle
+            }
+            Some(_drew) => SourceState::Live,
+        };
+        (self.reported != Some(state)).then(|| {
+            self.reported = Some(state);
+            state
+        })
+    }
+}
+
 /// One stream as the control socket lists it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ScreenSummary {
@@ -963,11 +1025,8 @@ pub struct ScreenStream {
     point_scale: f64,
     /// Last requested quality; re-applied when the target changes size.
     quality: Quality,
-    /// When capture started, so a target that has drawn nothing can be told apart from one
-    /// that is merely still starting up.
-    opened_at: Instant,
-    /// The last [`SourceState`] the client was told, so only changes are sent.
-    source_reported: Option<SourceState>,
+    /// What the client has been told about the source, and the frame history it follows.
+    source: SourceTracker,
     /// The enumeration the target was resolved from; filters for a path switch come from it.
     content: Arc<Shareable>,
     /// How a window is served right now (committed; see `transitions`).
@@ -1097,8 +1156,7 @@ impl ScreenStream {
             injector,
             point_scale,
             quality,
-            opened_at: Instant::now(),
-            source_reported: None,
+            source: SourceTracker::new(Instant::now()),
             content,
             path,
             transitions: Transitions::default(),
@@ -1204,20 +1262,10 @@ impl ScreenStream {
     /// and asks again every backoff period, forever, for something no refresh can produce
     /// (MEASUREMENTS.md, "a target that never produces a frame"). Saying so once stops it.
     pub fn check_source(&mut self) -> Option<ScreenEvent> {
-        let live = self.shared.counters.encoded.load(Ordering::Relaxed) > 0;
-        let state = if live {
-            SourceState::Live
-        } else if self.opened_at.elapsed() >= SOURCE_IDLE_AFTER {
-            SourceState::Idle
-        } else {
-            // Still inside the grace: say nothing rather than call a slow start idle.
-            return None;
-        };
-        if self.source_reported == Some(state) {
-            return None;
-        }
+        let encoded = self.shared.counters.encoded.load(Ordering::Relaxed);
+        let hidden = self.shared.target_hidden.load(Ordering::Relaxed);
+        let state = self.source.poll(encoded, hidden, Instant::now())?;
         tracing::debug!(stream = %self.id, ?state, "capture source state");
-        self.source_reported = Some(state);
         Some(ScreenEvent::Source { stream: self.id, state })
     }
 
@@ -1530,6 +1578,65 @@ mod tests {
     use super::*;
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
+
+    /// The clock the tracker is told about, so these run in no time and never flake.
+    fn at(base: Instant, ms: u64) -> Instant {
+        base.checked_add(Duration::from_millis(ms)).expect("inside the clock")
+    }
+
+    #[test]
+    fn a_source_that_never_draws_is_idle_after_the_grace_and_not_before() {
+        let base = Instant::now();
+        let mut t = SourceTracker::new(base);
+        assert_eq!(t.poll(0, false, at(base, 100)), None, "inside the grace, say nothing");
+        assert_eq!(t.poll(0, false, at(base, 399)), None);
+        assert_eq!(t.poll(0, false, at(base, 400)), Some(SourceState::Idle));
+        assert_eq!(t.poll(0, false, at(base, 900)), None, "only changes are sent");
+    }
+
+    #[test]
+    fn the_first_frame_makes_it_live_whenever_it_comes() {
+        let base = Instant::now();
+        let mut t = SourceTracker::new(base);
+        assert_eq!(t.poll(0, false, at(base, 500)), Some(SourceState::Idle));
+        assert_eq!(t.poll(1, false, at(base, 600)), Some(SourceState::Live));
+        assert_eq!(t.poll(2, false, at(base, 700)), None);
+    }
+
+    #[test]
+    fn a_source_that_drew_once_and_stopped_goes_idle_again() {
+        // The latch this replaces reported `Live` for the rest of the stream, so a window that
+        // drew a frame and was then hidden left the receiver asking for refreshes.
+        let base = Instant::now();
+        let mut t = SourceTracker::new(base);
+        assert_eq!(t.poll(1, false, at(base, 100)), Some(SourceState::Live));
+        assert_eq!(t.poll(1, false, at(base, 1_000)), None, "quiet, but not for long enough");
+        assert_eq!(t.poll(1, false, at(base, 2_100)), Some(SourceState::Idle));
+        assert_eq!(t.poll(2, false, at(base, 2_200)), Some(SourceState::Live), "it drew again");
+    }
+
+    #[test]
+    fn a_slow_target_does_not_flap_between_the_two() {
+        // One frame a second: quiet by the 400 ms rule, live by the one that matters.
+        let base = Instant::now();
+        let mut t = SourceTracker::new(base);
+        assert_eq!(t.poll(1, false, at(base, 0)), Some(SourceState::Live));
+        for second in 1..10 {
+            let now = at(base, second * 1_000);
+            assert_eq!(t.poll(second, false, now), None, "no change at {second} s");
+        }
+    }
+
+    #[test]
+    fn a_hidden_target_is_idle_at_once_however_much_it_drew() {
+        let base = Instant::now();
+        let mut t = SourceTracker::new(base);
+        assert_eq!(t.poll(10, false, at(base, 100)), Some(SourceState::Live));
+        assert_eq!(t.poll(10, true, at(base, 150)), Some(SourceState::Idle), "no grace for this");
+        // And the frames that were already in flight when it went do not undo it.
+        assert_eq!(t.poll(11, true, at(base, 200)), None);
+        assert_eq!(t.poll(12, false, at(base, 250)), Some(SourceState::Live), "back on screen");
+    }
 
     #[test]
     fn a_crop_is_allowed_only_on_screen_on_one_display_and_uncovered() {

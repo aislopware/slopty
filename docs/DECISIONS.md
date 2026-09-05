@@ -2223,3 +2223,23 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   helper and reads the host's counters over the control socket. The client's own frame count is
   *not* the evidence: frames sent legitimately while the window was still up are still being
   decoded seconds later, and asserting on them fails for the wrong reason.
+- ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
+  decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
+  closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops
+  asking for refreshes only while the source is idle — had nothing but its cap of 12 to protect
+  it. It now follows recent history, in a `SourceTracker` that takes the clock as an argument so
+  the rule is unit-tested rather than slept through:
+  * a stream that has produced nothing says nothing for `SOURCE_IDLE_AFTER` (400 ms), then `Idle`
+    — unchanged, and still the answer to "is it just starting up";
+  * any new frame is `Live` at once;
+  * `SOURCE_QUIET_AFTER` (2 s) without one is `Idle` again. Deliberately longer than the 400 ms:
+    a target that draws once a second would otherwise flap and spend a control message on each
+    change, and the receiver only needs to know before it starts asking;
+  * a target the geometry tick reports off screen is `Idle` immediately, with no quiet period —
+    a window that is not on screen cannot be drawing, whatever the counter says, and that is the
+    same evidence the crop guard acts on.
+  Tests: five in `crates/slopty-host/src/screen.rs` (never drew, first frame, drew-then-stopped,
+  a slow target that must not flap, hidden), and the hostd e2e now drives hide → show → hide and
+  asserts the host reports `Idle` the second time — which under the latch it never did. No wire
+  change: the states are the ones `SourceState` already had.
+
