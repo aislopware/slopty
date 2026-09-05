@@ -129,6 +129,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   non-empty line. Verified on macOS and the iOS simulator 2026-09-05 (text persisted in
   `canvas.json`).
 
+- ✅ **Minimap is a painted overlay, not elements.** A 160×100 box in the bottom-right
+  corner (`render_minimap`) fits the union of every item rect and the viewport, paints each
+  item as a block (`fill`, accent for the active one) and the viewport as an `outline`, all in
+  one GPUI `canvas` element: zero layout cost per item, and it scales to hundreds of items.
+  Mouse-down/drag inside it centres the camera on the pointer (`Drag::Minimap`); the box's
+  mapping from the last prepaint is kept for hit-testing. Hidden while the canvas is empty.
+  Verified on macOS 2026-09-05.
+
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 - ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font

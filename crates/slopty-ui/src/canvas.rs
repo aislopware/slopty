@@ -12,10 +12,11 @@ use std::collections::HashMap;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div, point, px, size,
+    App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div,
+    fill, outline, point, px, size,
 };
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
@@ -98,6 +99,10 @@ const GRIP: f32 = 14.0;
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
 const NOTE_SIZE: (f32, f32) = (320.0, 240.0);
+/// Minimap box (points) and its distance from the viewport's bottom-right corner.
+const MINIMAP: (f32, f32) = (160.0, 100.0);
+const MINIMAP_MARGIN: f32 = 12.0;
+const MINIMAP_PAD: f32 = 6.0;
 /// Zoom step for ⌘= / ⌘-.
 const ZOOM_STEP: f32 = 1.25;
 /// Largest item a picked window gets on the canvas, in points.
@@ -116,9 +121,72 @@ pub enum CanvasEvent {
 
 #[derive(Clone, Copy, Debug)]
 enum Drag {
-    Move { id: ItemId, grab: Point<Pixels>, start: Rect },
-    Resize { id: ItemId, grab: Point<Pixels>, start: Rect },
-    Pan { last: Point<Pixels> },
+    Move {
+        id: ItemId,
+        grab: Point<Pixels>,
+        start: Rect,
+    },
+    Resize {
+        id: ItemId,
+        grab: Point<Pixels>,
+        start: Rect,
+    },
+    Pan {
+        last: Point<Pixels>,
+    },
+    /// Scrubbing the minimap: the camera centres on the pointer.
+    Minimap,
+}
+
+/// How the minimap maps canvas units to its box: `screen = origin + (canvas - world_origin) *
+/// scale`.
+#[derive(Clone, Copy, Debug)]
+struct MinimapMap {
+    /// Box origin in window coordinates.
+    origin: Point<Pixels>,
+    /// Box size.
+    size: Size<Pixels>,
+    /// Canvas point drawn at the box's padded top-left.
+    world: (f32, f32),
+    scale: f32,
+}
+
+impl MinimapMap {
+    /// Fit the union of `rects` (items and viewport) into the box.
+    fn new(origin: Point<Pixels>, rects: impl IntoIterator<Item = Rect>) -> Self {
+        let mut b: Option<(f32, f32, f32, f32)> = None;
+        for r in rects {
+            let e = b.get_or_insert((r.x, r.y, r.x + r.w, r.y + r.h));
+            e.0 = e.0.min(r.x);
+            e.1 = e.1.min(r.y);
+            e.2 = e.2.max(r.x + r.w);
+            e.3 = e.3.max(r.y + r.h);
+        }
+        let (x0, y0, x1, y1) = b.unwrap_or((0.0, 0.0, 1.0, 1.0));
+        let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+        let inner = (MINIMAP.0 - MINIMAP_PAD - MINIMAP_PAD, MINIMAP.1 - MINIMAP_PAD - MINIMAP_PAD);
+        let scale = (inner.0 / w).min(inner.1 / h);
+        // Centre the drawing in the box.
+        let world = (x0 - (inner.0 / scale - w) / 2.0, y0 - (inner.1 / scale - h) / 2.0);
+        Self { origin, size: size(px(MINIMAP.0), px(MINIMAP.1)), world, scale }
+    }
+
+    fn to_box(self, r: Rect) -> Bounds<Pixels> {
+        let x = (r.x - self.world.0).mul_add(self.scale, f32::from(self.origin.x) + MINIMAP_PAD);
+        let y = (r.y - self.world.1).mul_add(self.scale, f32::from(self.origin.y) + MINIMAP_PAD);
+        Bounds::new(point(px(x), px(y)), size(px(r.w * self.scale), px(r.h * self.scale)))
+    }
+
+    fn to_canvas(self, p: Point<Pixels>) -> (f32, f32) {
+        (
+            (f32::from(p.x) - f32::from(self.origin.x) - MINIMAP_PAD) / self.scale + self.world.0,
+            (f32::from(p.y) - f32::from(self.origin.y) - MINIMAP_PAD) / self.scale + self.world.1,
+        )
+    }
+
+    fn contains(self, p: Point<Pixels>) -> bool {
+        Bounds::new(self.origin, self.size).contains(&p)
+    }
 }
 
 /// The plane.
@@ -151,6 +219,8 @@ pub struct CanvasView {
     /// Bring this item into view on the next frame (one we just created).
     reveal_pending: Option<ItemId>,
     drag: Option<Drag>,
+    /// The minimap's mapping as of the last paint (for hit-testing and scrubbing).
+    minimap: Option<MinimapMap>,
     active: Option<ItemId>,
     /// A terminal to focus on the next frame (one we just opened).
     pending_focus: Option<SessionId>,
@@ -212,6 +282,7 @@ impl CanvasView {
             fit_pending: false,
             reveal_pending: None,
             drag: None,
+            minimap: None,
             active: None,
             pending_focus: None,
             pending_focus_note: None,
@@ -824,7 +895,22 @@ impl CanvasView {
 
     fn begin_pan(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
-        self.drag = Some(Drag::Pan { last: ev.position });
+        if self.minimap.is_some_and(|m| m.contains(ev.position)) {
+            self.drag = Some(Drag::Minimap);
+            self.scrub_minimap(ev.position, cx);
+        } else {
+            self.drag = Some(Drag::Pan { last: ev.position });
+        }
+        cx.notify();
+    }
+
+    /// Centre the camera on the canvas point under `p` in the minimap.
+    fn scrub_minimap(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(map) = self.minimap else { return };
+        let (cx_, cy_) = map.to_canvas(p);
+        let (_, vp) = self.viewport;
+        self.camera.x = cx_ - f32::from(vp.width) / self.camera.zoom / 2.0;
+        self.camera.y = cy_ - f32::from(vp.height) / self.camera.zoom / 2.0;
         cx.notify();
     }
 
@@ -871,6 +957,7 @@ impl CanvasView {
                 self.camera.pan(f32::from(d.x), f32::from(d.y));
                 self.drag = Some(Drag::Pan { last: ev.position });
             }
+            Drag::Minimap => self.scrub_minimap(ev.position, cx),
             Drag::Move { id, grab, start } => {
                 let d = ev.position - grab;
                 let rect = Rect {
@@ -896,7 +983,7 @@ impl CanvasView {
     fn mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
         match drag {
-            Drag::Pan { .. } => {}
+            Drag::Pan { .. } | Drag::Minimap => {}
             Drag::Move { id, .. } | Drag::Resize { id, .. } => {
                 if let Some(item) = self.doc.get(id) {
                     let r = item.rect;
@@ -1143,6 +1230,61 @@ impl CanvasView {
     }
 }
 
+impl CanvasView {
+    /// The overview in the bottom-right corner: every item as a block, the viewport as an
+    /// outline. Painted straight from the document each frame; the mapping is kept for
+    /// hit-testing.
+    fn render_minimap(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let camera = self.camera;
+        let (_, vp) = self.viewport;
+        let viewport = Rect {
+            x: camera.x,
+            y: camera.y,
+            w: f32::from(vp.width) / camera.zoom,
+            h: f32::from(vp.height) / camera.zoom,
+        };
+        let items: Vec<(Rect, bool)> =
+            self.doc.items().map(|i| (i.rect, self.active == Some(i.id))).collect();
+        let entity = cx.entity();
+        let rects: Vec<Rect> = items.iter().map(|(r, _)| *r).collect();
+        canvas(
+            move |bounds, _window, cx| {
+                let rects = rects.into_iter().chain(std::iter::once(viewport));
+                let map = MinimapMap::new(bounds.origin, rects);
+                entity.update(cx, |this, _| this.minimap = Some(map));
+                map
+            },
+            move |bounds, map: MinimapMap, window, _cx| {
+                window.paint_quad(gpui::quad(
+                    bounds,
+                    px(theme.radius),
+                    hsla_alpha(theme.surfaces.panel, 0.92),
+                    px(1.0),
+                    hsla(theme.surfaces.border),
+                    BorderStyle::Solid,
+                ));
+                for (rect, active) in &items {
+                    let color =
+                        if *active { theme.surfaces.accent } else { theme.surfaces.text_muted };
+                    window.paint_quad(fill(map.to_box(*rect), hsla_alpha(color, 0.7)));
+                }
+                window.paint_quad(outline(
+                    map.to_box(viewport),
+                    hsla(theme.surfaces.accent),
+                    BorderStyle::Solid,
+                ));
+            },
+        )
+        .absolute()
+        .right(px(MINIMAP_MARGIN))
+        .bottom(px(MINIMAP_MARGIN))
+        .w(px(MINIMAP.0))
+        .h(px(MINIMAP.1))
+        .into_any_element()
+    }
+}
+
 impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(session) = self.pending_focus.take()
@@ -1196,6 +1338,7 @@ impl Render for CanvasView {
         let empty = self.is_empty();
         let rendered: Vec<gpui::AnyElement> =
             items.iter().map(|item| self.render_item(item, window, cx)).collect();
+        let minimap = (!empty).then(|| self.render_minimap(cx));
         div()
             .id("canvas")
             .key_context("Canvas")
@@ -1220,6 +1363,7 @@ impl Render for CanvasView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(record_bounds)
             .children(rendered)
+            .children(minimap)
             .children(picker)
             .when(empty, |el| {
                 el.child(
