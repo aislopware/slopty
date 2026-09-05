@@ -584,7 +584,8 @@ impl Counters {
             capture: self.capture.lock().quantiles(),
             encode: self.encode.lock().quantiles(),
             cropped: self.cropped.load(Ordering::Relaxed),
-            // Filled by `StatsHandle::stats`, which can see the stream's shared state.
+            // Which path is live is the stream's state, not a counter: `Shared::stats` fills it,
+            // and nothing else may hand this snapshot out (it would claim the window filter).
             on_crop: false,
         }
     }
@@ -611,10 +612,7 @@ impl StatsHandle {
     /// Counters right now.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
-        ScreenStats {
-            on_crop: self.0.cropped.load(Ordering::Relaxed),
-            ..self.0.counters.snapshot()
-        }
+        self.0.stats()
     }
 }
 
@@ -658,6 +656,13 @@ struct Shared {
 }
 
 impl Shared {
+    /// The counters plus the state only the stream knows: whether the display crop is what is
+    /// being served right now. Every reader goes through here, so no caller can publish the
+    /// snapshot's placeholder and report the window filter for a stream on the crop.
+    fn stats(&self) -> ScreenStats {
+        ScreenStats { on_crop: self.cropped.load(Ordering::Relaxed), ..self.counters.snapshot() }
+    }
+
     /// Point the live encoder at `bps` (a rebuild picks the controller's target up again).
     fn apply_bitrate(&self, bps: u32) {
         let result = self.encoder.read().as_ref().map(|e| e.set_bitrate(bps));
@@ -1187,7 +1192,7 @@ impl ScreenStream {
     /// Counters.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
-        self.shared.counters.snapshot()
+        self.shared.stats()
     }
 
     /// A handle on the counters for the daemon's registry.
@@ -1304,7 +1309,9 @@ impl ScreenStream {
         // as it keeps failing, and those are exactly the ticks where the crop is still running
         // over a window that is no longer there.
         let on_screen = slopty_capture::window_on_screen(id);
-        self.shared.target_hidden.store(!on_screen, Ordering::Relaxed);
+        if self.shared.target_hidden.swap(!on_screen, Ordering::Relaxed) == on_screen {
+            tracing::info!(stream = %self.id, on_screen, "target visibility");
+        }
         match self.transitions.settle() {
             Settled::Busy => return,
             Settled::Idle => {}
@@ -1345,7 +1352,7 @@ impl ScreenStream {
                     }
                 };
                 if self.transitions.begin(WindowPath::Filter, None, 2) {
-                    tracing::info!(stream = %self.id, "window covered, hidden or off its display: window filter");
+                    tracing::info!(stream = %self.id, on_screen, "window covered, hidden or off its display: window filter");
                     self.update_capture(None);
                     self.retarget(&target);
                 }
@@ -1578,6 +1585,89 @@ mod tests {
     use super::*;
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
+
+    /// A stream's shared state with no encoder and nowhere to send: enough to drive
+    /// [`Shared::on_frame`] and read what it counted.
+    fn shared_for_frames() -> (Arc<Shared>, mpsc::Receiver<Bytes>) {
+        let (out, rx) = mpsc::channel(8);
+        let shared = Arc::new(Shared {
+            id: StreamId(1),
+            encoder: RwLock::new(None),
+            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
+            pending: Mutex::new(Pending::default()),
+            packetizer: Mutex::new(Packetizer::new(StreamId(1))),
+            redundancy: Mutex::new(Redundancy::new()),
+            rate: Mutex::new(RateController::new(8_000_000)),
+            sent_at_report: AtomicU64::new(0),
+            last_push_us: AtomicU64::new(0),
+            fps: std::sync::atomic::AtomicU16::new(60),
+            cropped: std::sync::atomic::AtomicBool::new(true),
+            target_hidden: std::sync::atomic::AtomicBool::new(false),
+            out,
+            budget: DatagramBudget::new(),
+            counters: Counters::new(),
+        });
+        (shared, rx)
+    }
+
+    /// One 16x16 frame. The contents do not matter: with no encoder nothing reads them, and
+    /// what is being tested is whether `on_frame` gets that far at all.
+    fn a_frame() -> CapturedFrame {
+        use std::ptr::{self, NonNull};
+
+        let mut raw: *mut objc2_core_video::CVPixelBuffer = ptr::null_mut();
+        // SAFETY: the out-pointer is valid and no attributes dictionary is passed
+        // (CoreVideo, `CVPixelBufferCreate`).
+        let status = unsafe {
+            objc2_core_video::CVPixelBufferCreate(
+                None,
+                16,
+                16,
+                objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                None,
+                NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0, "CVPixelBufferCreate");
+        // SAFETY: `CVPixelBufferCreate` returned a +1 reference, which this takes over.
+        let buffer = unsafe {
+            objc2_core_foundation::CFRetained::from_raw(NonNull::new(raw).expect("a buffer"))
+        };
+        CapturedFrame {
+            image: slopty_codec::PixelBuffer::from_retained(buffer),
+            capture_ts_us: 1,
+            display_ts_us: None,
+            age_us: 0,
+            latency_us: 0,
+        }
+    }
+
+    /// What the crop must never hand on. The path is decided on the geometry tick, but the
+    /// frames keep coming while ScreenCaptureKit works through the swap, so the decision is
+    /// applied again where a frame arrives: while the target is off screen the frame is counted
+    /// as withheld and goes no further — it is not a picture of the target, and under a display
+    /// crop it is a picture of whatever is behind it.
+    #[test]
+    fn a_frame_captured_while_the_target_is_hidden_is_withheld() {
+        let (shared, _rx) = shared_for_frames();
+
+        shared.on_frame(&a_frame());
+        let seen = shared.stats();
+        assert_eq!((seen.captured, seen.withheld, seen.cropped), (1, 0, 1));
+
+        shared.target_hidden.store(true, Ordering::Relaxed);
+        shared.on_frame(&a_frame());
+        let hidden = shared.stats();
+        assert_eq!(
+            (hidden.captured, hidden.withheld, hidden.cropped),
+            (2, 1, 1),
+            "a frame captured while the window was off screen was served from the crop"
+        );
+
+        // And the counter that says which path is live is the stream's, not the snapshot's
+        // default: a reader of an active crop must not be told it is on the window filter.
+        assert!(hidden.on_crop, "a stream on the display crop reported the window filter");
+    }
 
     /// The clock the tracker is told about, so these run in no time and never flake.
     fn at(base: Instant, ms: u64) -> Instant {
