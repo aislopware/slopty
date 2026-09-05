@@ -623,6 +623,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   window) left the receiver in "need refresh", re-asking every `refresh_repeat` + 2 rtt — 79
   requests in 10 s. Each unanswered repeat now doubles the wait up to `refresh_repeat_max`
   (2 s); any video datagram resets it, so a live stream still recovers at the fast cadence.
+  Settled by the ruling below: backoff is retained as a fallback cap, but an idle target is
+  silenced by the host source hint ("The host says when its capture target is idle; the
+  receiver stops asking, protocol 13").
 
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
@@ -875,9 +878,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
     refresh, stalls, the host's verdict, audio). `ScreenStats` carries the report's hold
     and jitter figures and the four start-up instants; `slopty bench screen` prints them.
   Loopback after all of the above, machine quiet: 0 NACKs, 0 stalls, 0 holds ≥ 5 ms in
-  5 × 3 s under BBR3 and under Cubic (tables in MEASUREMENTS.md). Not ruled: the stalls
-  and NACKs seen when the machine was under another agent's builds (no QUIC hold behind
-  them), and the mesh run, whose link lost a quarter of its packets — the held-frame drop
+  5 × 3 s under BBR3 and under Cubic (tables in MEASUREMENTS.md). Settled on a quiet machine
+  (MEASUREMENTS.md, "start-up over iroh on a quiet machine"): 0 stalls and 0 NACKs across all
+  samples, confirming the loaded-run stalls were the scheduler; the mesh run's held-frame drop
   is the one ruling from it.
 - ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
   length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
@@ -890,10 +893,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   frame that never showed up at all is NACKed whole (`fragments = []`); give up after
   `3 ms + 2·(RTT + 3 ms) + 10 ms`, then `RequestRefresh{last_good}` and ignore everything until
   an IDR or LTR-refresh frame. Parity is decoded only when data fragments are missing. Late
-  parity for an already complete frame is dropped unread. 🔬 Timings are first guesses; tune
-  against `docs/MEASUREMENTS.md` once the capture path exists.
+  parity for an already complete frame is dropped unread. Settled by the rulings below: initial
+  NACK delay derives from round trip ("NACK delay from the round trip"), deadlines pause during
+  stalls ("Loss deadlines only run while the link is flowing"), and the give-up deadline is kept
+  ("The NACK give-up deadline stays where it is").
 - ✅ **Redundancy control** (`Redundancy`): parity permille = clamp(2 × EWMA(datagram loss) +
-  50, 50, 500), ×1.5 bump when a report shows a frame lost outright. 🔬 Heuristic; measure.
+  50, 50, 500), ×1.5 bump when a report shows a frame lost outright. Settled by the ruling
+  below: "Parity tracks loss asymmetrically, with a deadband" (asymmetric rise ½ / fall ⅛,
+  2 % deadband, stalled windows excluded from the estimate).
 - ✅ **Host pipeline** (`slopty-host::screen`, verified on hardware 2026-09-04): one
   `ScreenStream` per open stream: SCK frame → `Encoder::encode` on the SCK queue → packetize in
   the VideoToolbox output callback → bounded datagram queue (4096) → one pump task per
