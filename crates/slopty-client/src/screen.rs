@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -204,6 +204,8 @@ pub struct ScreenHandle {
     frames: watch::Receiver<Option<Arc<DecodedFrame>>>,
     cursor: watch::Receiver<CursorState>,
     stats: watch::Receiver<ScreenStats>,
+    /// Audio is decoded but not played while set (shared with the worker).
+    muted: Arc<AtomicBool>,
     router: ScreenRouter,
     task: JoinHandle<()>,
 }
@@ -231,6 +233,18 @@ impl ScreenHandle {
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
         *self.stats.borrow()
+    }
+
+    /// Whether audio is silenced on this client. Packets keep arriving and are still decoded
+    /// (the Opus state stays continuous), only playback stops; other clients are unaffected.
+    #[must_use]
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    /// Silence or resume audio playback for this stream on this client.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
     }
 }
 
@@ -270,6 +284,7 @@ pub fn spawn_screen(
     let (frames_tx, frames) = watch::channel(None);
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
+    let muted = Arc::new(AtomicBool::new(false));
     let decoder = Decoder::new(codec, move |frame| {
         let _no_receiver = frames_tx.send(Some(Arc::new(frame)));
     });
@@ -286,9 +301,10 @@ pub fn spawn_screen(
         cursor_seq: None,
         counters: ScreenStats::default(),
         audio: AudioSlot::Unopened,
+        muted: Arc::clone(&muted),
     };
     let task = runtime.spawn(worker.run());
-    ScreenHandle { stream, frames, cursor, stats, router: router.clone(), task }
+    ScreenHandle { stream, frames, cursor, stats, muted, router: router.clone(), task }
 }
 
 struct Worker {
@@ -304,6 +320,8 @@ struct Worker {
     cursor_seq: Option<u32>,
     counters: ScreenStats,
     audio: AudioSlot,
+    /// Decode but do not play while set.
+    muted: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -331,7 +349,9 @@ impl Worker {
         audio.seq = seq;
         match audio.decoder.decode(payload) {
             Ok(pcm) => {
-                audio.player.push(pcm);
+                if !self.muted.load(Ordering::Relaxed) {
+                    audio.player.push(pcm);
+                }
                 self.counters.audio_packets = self.counters.audio_packets.saturating_add(1);
             }
             Err(e) => tracing::debug!(stream = %self.stream, error = %e, "opus decode"),

@@ -111,6 +111,9 @@ The host stops sending 300 ms after the last non-silent sample, so silent apps c
 The client decodes with `AudioConverter` and plays through an `AudioQueue` fed from a 200 ms
 ring that pads silence on underrun and drops the oldest on overrun (`slopty-codec::audio`);
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
+Mute is per item and per client (the "mute" pill, ⌘⇧M, Canvas ▸ Mute Window): packets still
+arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
+different.
 
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +

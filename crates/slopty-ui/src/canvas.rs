@@ -67,12 +67,14 @@ pub mod actions {
             FitAll,
             /// Reveal the next terminal whose agent is waiting on the human.
             NextAttention,
+            /// Silence or resume the active remote window's audio on this client.
+            ToggleMute,
         ]
     );
 }
 pub use actions::{
-    AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ZoomIn, ZoomOut,
-    ZoomReset,
+    AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ToggleMute,
+    ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Key bindings for the canvas context.
@@ -92,6 +94,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-0", ZoomReset, CTX),
         KeyBinding::new("cmd-1", FitAll, CTX),
         KeyBinding::new("cmd-shift-a", NextAttention, CTX),
+        KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
     ]
 }
@@ -440,6 +443,26 @@ impl CanvasView {
         self.reconcile(cx);
         self.count_needs_you(cx);
         cx.notify();
+    }
+
+    /// The stream view of the active item, if the active item is a window or display.
+    #[must_use]
+    pub fn active_screen(&self) -> Option<Entity<ScreenView>> {
+        let item = self.doc.get(self.active?)?;
+        match item.kind {
+            ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                self.screens.get(&item.id).cloned()
+            }
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+        }
+    }
+
+    /// ⌘⇧M: silence or resume the active remote window's audio (this client only).
+    pub fn toggle_mute(&mut self, _: &ToggleMute, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_screen() {
+            view.read(cx).toggle_mute();
+            cx.notify();
+        }
     }
 
     /// The terminal of the active item, if the active item is a terminal.
@@ -1257,6 +1280,14 @@ impl CanvasView {
                 .get(&session)
                 .filter(|v| !v.read(cx).driving())
                 .map(|_| take_button(id, theme, ui_size, cx)),
+            // A window with sound offers mute; a muted one always shows it, so a silenced item
+            // is never mistaken for one whose sound simply stopped.
+            ItemKind::Window { .. } | ItemKind::Display { .. } => self
+                .screens
+                .get(&id)
+                .map(|v| v.read(cx))
+                .filter(|v| v.muted() || (active && v.has_audio()))
+                .map(|v| mute_button(id, v.muted(), theme, ui_size, cx)),
             _ => None,
         };
         let needs_human = agent
@@ -1556,6 +1587,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::fit_all))
             .on_action(cx.listener(Self::next_attention))
+            .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::find_in_active))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))
@@ -1588,6 +1620,39 @@ impl Render for CanvasView {
 fn note_summary(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("empty note");
     line.chars().take(48).collect()
+}
+
+/// The "mute"/"muted" pill in a remote window's title bar (see [`CanvasView::toggle_mute`]).
+fn mute_button(
+    id: ItemId,
+    muted: bool,
+    theme: &Theme,
+    ui_size: f32,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let (label, tint) =
+        if muted { ("muted", theme.terminal.palette(3)) } else { ("mute", theme.surfaces.accent) };
+    div()
+        .id(element_id("mute", id))
+        .flex_none()
+        .px(px(ui_size * 0.5))
+        .py(px(ui_size * 0.1))
+        .rounded(px(ui_size * 0.35))
+        .bg(hsla_alpha(tint, 0.25))
+        .text_color(hsla(theme.surfaces.text))
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                if let Some(view) = this.screens.get(&id) {
+                    view.read(cx).toggle_mute();
+                    cx.notify();
+                }
+            }),
+        )
+        .into_any_element()
 }
 
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).

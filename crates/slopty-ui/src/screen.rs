@@ -198,6 +198,25 @@ impl ScreenView {
         self.handle.stats()
     }
 
+    /// Whether the host has sent any audio for this stream (the mute control is pointless
+    /// before that).
+    #[must_use]
+    pub fn has_audio(&self) -> bool {
+        self.handle.stats().audio_packets > 0
+    }
+
+    /// Whether audio playback is silenced on this client.
+    #[must_use]
+    pub fn muted(&self) -> bool {
+        self.handle.muted()
+    }
+
+    /// Silence or resume this stream's audio on this client only.
+    /// The pill lives in the canvas title bar, so the caller notifies its own entity.
+    pub fn toggle_mute(&self) {
+        self.handle.set_muted(!self.handle.muted());
+    }
+
     /// The canvas reports how wide the view is painted (device pixels) so the stream can be
     /// downscaled at the host when zoomed out. Quantised to quarter steps and rate limited.
     pub fn set_painted_width(&mut self, device_px: f32) {

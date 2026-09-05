@@ -34,8 +34,8 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 /// shown next to them come from the keymap and the two can never disagree.
 fn menus() -> Vec<Menu> {
     use slopty_ui::canvas::{
-        AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ZoomIn,
-        ZoomOut, ZoomReset,
+        AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ToggleMute,
+        ZoomIn, ZoomOut, ZoomReset,
     };
     use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
     vec![
@@ -63,6 +63,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Add Window…", AddWindow),
             MenuItem::separator(),
             MenuItem::action("Next Agent Needing You", NextAttention),
+            MenuItem::action("Mute Window", ToggleMute),
             MenuItem::separator(),
             MenuItem::action("Close Item", CloseItem),
         ]),

@@ -488,13 +488,20 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `kCMSampleBufferError_ArrayTooSmall` (-12737) unless the list is sized by a first call with
   a null list, so the code asks for the size, allocates 8-byte-aligned words, then fetches;
   ScreenCaptureKit delivers float32 non-interleaved, which `interleave` folds to L/R.
+- ✅ **Mute is client-side, decode-but-don't-play** (2026-09-05). `ScreenHandle::set_muted`
+  flips an `AtomicBool` the worker reads per packet; the Opus decoder keeps running so its
+  state stays continuous and unmuting resumes on the next 20 ms packet. Nothing goes to the
+  host: a host-side stop would need a protocol change and would also silence the other
+  clients, and the muted stream costs ~12 kB/s, less than one video frame. The pill shows on
+  the active window once audio has arrived, and on every muted window regardless, so a
+  silenced item is never mistaken for one whose sound stopped.
 - ✅ Transport: one `Kind::Audio` datagram per packet (~240 B), sequence in the frame field,
   no parity and no retransmit; the client counts gaps as `audio_lost` and the ring pads. Host
   gate: after 300 ms without a sample above -80 dBFS no packets go out, so the many silent
   windows on a canvas cost nothing; the first loud chunk reopens it (the 300 ms hold keeps
   natural pauses from chattering). Measured 2026-09-05 on loopback (display 6, `afplay`
   Glass.aiff ×3, 5 s): 249 packets sent, 246 received, 0 lost, bench player audible.
-- ⏸ Per-item mute in the UI, a real jitter estimator, and PLC (Apple's decoder takes no
+- ⏸ A real jitter estimator and PLC (Apple's decoder takes no
   empty packet for concealment as far as the test showed; not tried). No `Quality` field for
   audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes
   "on" free.
