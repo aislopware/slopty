@@ -240,10 +240,22 @@ and pushes it down `CanvasView::set_theme` → every terminal, window and the pi
 terminal element re-measures its cell grid from the new size on the next frame and `fitted`
 resizes the session. iOS reads the same path (in its sandbox) but has no editor entry.
 
+**Hosts.** The app holds every paired host at once: one `HostLink` (own iroh endpoint,
+own reconnect loop, own silence check) and one `CanvasView` per host (`slopty_app::hosts`),
+because each host owns its canvas document. One canvas is on show; the host name in the top
+bar is the switcher (status dot: green connected, amber connecting / reconnecting, red needs
+pairing; rows list every host with "forget", then "Add host…"), ⌘⌥→ / ⌘⌥← and the Host menu
+step through them, and on a phone the same tap on the name opens it. The "N need you" pill
+and the Dock badge count agents across all hosts; a tap jumps to the next one, switching host
+when the one on show has none. A banner names only a session, so its response finds the host
+whose canvas holds it, switches, then answers or reveals. The pairing store is the map in
+`client.json` (`slopty_net::identity`); the panel appears with no host paired, or on "Add
+host…" (with a Cancel), and a fresh pairing joins the switcher without touching the others.
+
 **Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
 ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,
 which is the only practical path on a phone). `slopty_app::net::pair_host` redeems it the same
-way the CLI does and the connect loop resumes.
+way the CLI does and the host's connect loop starts.
 
 ## 7. Crate map
 
@@ -266,7 +278,7 @@ way the CLI does and the connect loop resumes.
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views | client |
-| `slopty-app` | the app shell shared by macOS and iOS: workspace window, pairing panel, host link loop | client |
+| `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |

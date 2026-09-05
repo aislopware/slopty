@@ -707,6 +707,12 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// Whether `session` is a terminal on this canvas (which host a banner belongs to).
+    #[must_use]
+    pub fn has_session(&self, session: SessionId) -> bool {
+        self.terminals.contains_key(&session)
+    }
+
     /// Link RTT (fanned out to every terminal's predictor and every window's overlay).
     pub fn set_rtt(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
         self.rtt = rtt;

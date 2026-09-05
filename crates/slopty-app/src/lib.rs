@@ -1,10 +1,12 @@
 //! The Slopty app shell, shared by the macOS and iOS apps.
 //!
-//! Connects to the paired host, then shows its canvas: every terminal the host knows about, on
-//! one plane shared by all clients. Networking runs on a tokio runtime thread; GPUI owns the
-//! main thread. The two talk through channels only. The platform binaries set up logging, the
-//! runtime and the GPUI application, then call [`open_workspace`].
+//! Connects to every paired host at once and shows one host's canvas at a time (the switcher
+//! in the top bar, ⌘⌥→/←): every terminal that host knows about, on one plane shared by all its
+//! clients. Networking runs on a tokio runtime thread; GPUI owns the main thread. The two talk
+//! through channels only. The platform binaries set up logging, the runtime and the GPUI
+//! application, then call [`open_workspace`].
 
+pub mod hosts;
 pub mod net;
 pub mod settings;
 
@@ -16,9 +18,12 @@ use gpui::{
 };
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+pub use hosts::actions::{AddHost, ForgetHost, NextHost, PrevHost};
+use hosts::{HostSlot, HostStatus};
 pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
 use slopty_core::SessionId;
+use slopty_net::EndpointId;
 use slopty_proto::HostMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::Theme;
@@ -84,7 +89,7 @@ const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 /// Three missed keep-alives, the same bar noq uses to abandon a path.
 const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The pairing panel: shown until this installation knows a host.
+/// The pairing panel: shown until this installation knows a host, and on "Add host…".
 #[derive(Debug)]
 struct Pairing {
     /// Where the ticket is typed or pasted.
@@ -98,16 +103,12 @@ struct Pairing {
 /// The window's root view.
 #[derive(Debug)]
 pub struct Workspace {
-    canvas: Option<Entity<CanvasView>>,
-    status: String,
-    host_name: String,
-    zoom: f32,
-    /// Agents waiting on the human (the "N need you" pill; ⌘⇧A / a tap jumps to the next).
-    needs_you: usize,
-    rtt: Option<std::time::Duration>,
-    relayed: Option<bool>,
-    /// How long the host has sent nothing at all, once past [`SILENCE_WARN`].
-    silent: Option<std::time::Duration>,
+    /// Every paired host, each with its own link and canvas, in switcher order.
+    hosts: Vec<HostSlot>,
+    /// The host whose canvas is shown.
+    active: Option<EndpointId>,
+    /// The host switcher is open.
+    switcher: bool,
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
@@ -118,10 +119,10 @@ pub struct Workspace {
     notice_seq: u64,
     subscriptions: Vec<gpui::Subscription>,
     pairing: Option<Pairing>,
-    /// Networking runtime; pairing runs there.
+    /// Networking runtime; connects and pairing run there.
     runtime: tokio::runtime::Handle,
-    /// Fires once a pairing succeeds; the connect loop waits on it while unpaired.
-    paired: tokio::sync::mpsc::UnboundedSender<()>,
+    /// The window, for focusing a canvas from a task or a banner.
+    window: Option<gpui::AnyWindowHandle>,
 }
 
 impl Workspace {
@@ -167,7 +168,8 @@ impl Workspace {
         };
         // gpui-kit widgets (the pairing input) follow their own theme.
         gpui_kit::component::Theme::change(mode, None, cx);
-        if let Some(canvas) = &self.canvas {
+        let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
+        for canvas in canvases {
             canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
         }
         self.theme = theme;
@@ -193,6 +195,341 @@ impl Workspace {
         .detach();
     }
 
+    fn slot(&self, id: EndpointId) -> Option<&HostSlot> {
+        self.hosts.iter().find(|h| h.id == id)
+    }
+
+    fn slot_mut(&mut self, id: EndpointId) -> Option<&mut HostSlot> {
+        self.hosts.iter_mut().find(|h| h.id == id)
+    }
+
+    fn active_slot(&self) -> Option<&HostSlot> {
+        self.active.and_then(|id| self.slot(id))
+    }
+
+    /// The canvas on show, if its host is connected.
+    fn active_canvas(&self) -> Option<Entity<CanvasView>> {
+        self.active_slot().and_then(|h| h.canvas.clone())
+    }
+
+    /// Agents waiting on the human across every host (the pill and the Dock badge).
+    fn needs_you_total(&self) -> usize {
+        self.hosts.iter().fold(0, |n, h| n.saturating_add(h.needs_you))
+    }
+
+    fn refresh_badge(&self) {
+        slopty_platform::set_badge(self.needs_you_total());
+    }
+
+    /// What the bar says about the host on show.
+    fn status_text(&self) -> String {
+        match self.active_slot() {
+            Some(host) => host.status.text(),
+            None if self.hosts.is_empty() => "not paired".to_owned(),
+            None => String::new(),
+        }
+    }
+
+    /// The host whose canvas holds `session` (a banner names only the session).
+    fn host_of_session(&self, session: SessionId, cx: &App) -> Option<EndpointId> {
+        self.hosts
+            .iter()
+            .find(|h| h.canvas.as_ref().is_some_and(|c| c.read(cx).has_session(session)))
+            .map(|h| h.id)
+    }
+
+    /// Start (or refresh) a host: a slot in the switcher and a connect loop of its own.
+    fn add_host(&mut self, id: EndpointId, name: String, cx: &mut Context<Self>) {
+        if let Some(slot) = self.slot_mut(id) {
+            slot.name = name;
+            if slot.status == HostStatus::NeedsPairing {
+                slot.status = HostStatus::Connecting;
+            }
+            cx.notify();
+            return;
+        }
+        self.hosts.push(HostSlot::new(id, name));
+        if self.active.is_none() {
+            self.active = Some(id);
+        }
+        self.spawn_host_loop(id, cx);
+        cx.notify();
+    }
+
+    /// Show `id`'s canvas and give it the keyboard.
+    fn activate(&mut self, id: EndpointId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slot(id).is_none() {
+            return;
+        }
+        self.active = Some(id);
+        self.switcher = false;
+        if let Some(canvas) = self.active_canvas() {
+            let handle = canvas.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// Show the host `steps` places after the current one, wrapping.
+    fn step_host(&mut self, steps: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.hosts.len();
+        if n == 0 {
+            return;
+        }
+        let current =
+            self.active.and_then(|id| self.hosts.iter().position(|h| h.id == id)).unwrap_or(0);
+        let len = isize::try_from(n).unwrap_or(isize::MAX);
+        let at = isize::try_from(current).unwrap_or(0);
+        let next = at.saturating_add(steps).rem_euclid(len);
+        if let Some(id) = usize::try_from(next).ok().and_then(|i| self.hosts.get(i)).map(|h| h.id) {
+            self.activate(id, window, cx);
+        }
+    }
+
+    /// Drop a host: the pairing, the link and the slot. The next host takes the stage; with
+    /// none left the pairing panel returns.
+    fn forget_host(&mut self, id: EndpointId, window: &mut Window, cx: &mut Context<Self>) {
+        match net::forget_host(id) {
+            Ok(_removed) => {}
+            Err(e) => {
+                self.show_notice(format!("forget host: {e:#}"), cx);
+                return;
+            }
+        }
+        let Some(at) = self.hosts.iter().position(|h| h.id == id) else { return };
+        let slot = self.hosts.remove(at);
+        if let Some(link) = slot.link.as_ref().and_then(std::sync::Weak::upgrade) {
+            link.abandon("host forgotten");
+        }
+        self.switcher = false;
+        if self.active == Some(id) {
+            self.active = None;
+            if let Some(next) = self.hosts.get(at.min(self.hosts.len().saturating_sub(1))) {
+                let next = next.id;
+                self.activate(next, window, cx);
+            }
+        }
+        if self.hosts.is_empty() {
+            self.show_pairing(window, cx);
+        }
+        self.refresh_badge();
+        cx.notify();
+    }
+
+    /// Jump to the next agent needing the human: on the host on show if it has one, else on
+    /// the first host that does.
+    fn next_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_show = self.active_slot().filter(|h| h.needs_you > 0).map(|h| h.id);
+        let target = on_show.or_else(|| self.hosts.iter().find(|h| h.needs_you > 0).map(|h| h.id));
+        let Some(id) = target else { return };
+        if self.active != Some(id) {
+            self.activate(id, window, cx);
+        }
+        if let Some(canvas) = self.active_canvas() {
+            canvas.update(cx, |c, cx| c.next_attention(&NextAttention, window, cx));
+        }
+    }
+
+    /// Connect to `id` and keep it connected: each drop (host restart, network change,
+    /// silence) is retried with a capped backoff; the loop ends when the host is forgotten.
+    fn spawn_host_loop(&self, id: EndpointId, cx: &Context<Self>) {
+        let handle = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let mut failures: u32 = 0;
+            loop {
+                let Ok(true) = this.update(cx, |ws, _cx| ws.slot(id).is_some()) else { break };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                handle.spawn(async move {
+                    let _sent = ready_tx.send(net::connect_to(id).await);
+                });
+                let outcome = ready_rx.await;
+                let Ok(Ok(connected)) = outcome else {
+                    let status = match outcome {
+                        Ok(Err(net::ConnectError::NotPaired)) => HostStatus::NeedsPairing,
+                        Ok(Err(e)) => HostStatus::Reconnecting(e.to_string()),
+                        Ok(Ok(_)) | Err(_) => {
+                            HostStatus::Reconnecting("connection task died".to_owned())
+                        }
+                    };
+                    failures = failures.saturating_add(1);
+                    let delay = retry_delay(failures);
+                    let _set = this.update(cx, |ws, cx| {
+                        if let Some(slot) = ws.slot_mut(id) {
+                            slot.status = status;
+                        }
+                        cx.notify();
+                    });
+                    cx.background_executor().timer(delay).await;
+                    continue;
+                };
+                failures = 0;
+                let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
+                let link = std::sync::Arc::new(link);
+                let screen_link = std::sync::Arc::clone(&link);
+                let open_screen: slopty_ui::screen::ScreenFactory =
+                    std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
+                let weak_link = std::sync::Arc::downgrade(&link);
+                let Ok(Some(canvas)) = this.update(cx, |ws, cx| {
+                    let theme = ws.theme.clone();
+                    let sessions = ack.sessions.clone();
+                    let canvas =
+                        cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
+                    let events = cx.subscribe(&canvas, move |ws, _canvas, event, cx| match event {
+                        CanvasEvent::Zoom(z) => {
+                            if let Some(slot) = ws.slot_mut(id) {
+                                slot.zoom = *z;
+                            }
+                            cx.notify();
+                        }
+                        CanvasEvent::NeedsYou(n) => {
+                            if let Some(slot) = ws.slot_mut(id) {
+                                slot.needs_you = *n;
+                            }
+                            ws.refresh_badge();
+                            cx.notify();
+                        }
+                        CanvasEvent::Attention(_session) => {
+                            slopty_platform::attention();
+                            slopty_platform::bounce();
+                        }
+                        CanvasEvent::Bell(_session) => {}
+                    });
+                    // The chrome follows the active item (key bar target), so every canvas
+                    // change re-renders it; the workspace is a few labels, so this is cheap.
+                    let changes = cx.observe(&canvas, |_ws, _canvas, cx| cx.notify());
+                    let slot = ws.slot_mut(id)?;
+                    slot.subscriptions = vec![events, changes];
+                    slot.canvas = Some(canvas.clone());
+                    slot.needs_you = 0;
+                    slot.link = Some(weak_link);
+                    slot.name.clone_from(&ack.name);
+                    slot.status = HostStatus::Connected;
+                    ws.refresh_badge();
+                    let on_show = ws.active == Some(id);
+                    if let (true, Some(window)) = (on_show, ws.window) {
+                        let focus = canvas.clone();
+                        cx.defer(move |cx| {
+                            let _focused = window.update(cx, move |_root, window, cx| {
+                                let handle = focus.read(cx).focus_handle(cx);
+                                window.focus(&handle, cx);
+                            });
+                        });
+                    }
+                    cx.notify();
+                    Some(canvas)
+                }) else {
+                    break;
+                };
+                // Once a second: RTT for the top bar and the predictors, and a liveness
+                // check. QUIC keep-alives make the host send something every few seconds;
+                // when the received datagram count stops moving the host is gone or
+                // unreachable, and the bar says so long before the transport's idle timeout
+                // drops the connection.
+                let rtt_link = std::sync::Arc::downgrade(&link);
+                let rtt_canvas = canvas.clone();
+                let rtt_workspace = this.clone();
+                cx.spawn(async move |cx| {
+                    let mut heard = (0_u64, std::time::Instant::now());
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                        let Some(link) = rtt_link.upgrade() else { break };
+                        let rtt = link.rtt();
+                        let relayed = link.relayed();
+                        let received = link.received_datagrams();
+                        if received != heard.0 {
+                            heard = (received, std::time::Instant::now());
+                        }
+                        let gap = heard.1.elapsed();
+                        let silent = (gap >= SILENCE_WARN).then_some(gap);
+                        tracing::debug!(host = %id.fmt_short(), paths = %link.paths(), received, "link paths");
+                        if gap >= SILENCE_DROP {
+                            tracing::warn!(host = %id.fmt_short(), ?gap, paths = %link.paths(), "host silent; reconnecting");
+                            link.abandon("host silent");
+                            break;
+                        }
+                        rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
+                        let _set = rtt_workspace.update(cx, |ws, cx| {
+                            if let Some(slot) = ws.slot_mut(id) {
+                                slot.rtt = rtt;
+                                slot.relayed = relayed;
+                                slot.silent = silent;
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+                let mut first_snapshot = true;
+                tracing::debug!(host = %id.fmt_short(), sessions = ack.sessions.len(), "link up; pumping events");
+                while let Some(event) = events.recv().await {
+                    tracing::trace!(?event, "link event");
+                    match event {
+                        LinkEvent::Term { session, event } => {
+                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Canvas(sync)) => {
+                            let is_snapshot =
+                                matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
+                            canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
+                            if is_snapshot && first_snapshot {
+                                first_snapshot = false;
+                                // First run: an empty canvas gets one shell so there is
+                                // something to type into. Otherwise bring the existing
+                                // layout into view.
+                                let window = this.update(cx, |ws, _cx| ws.window).ok().flatten();
+                                if let Some(window) = window {
+                                    let _opened = window.update(cx, |_root, window, cx| {
+                                        canvas.update(cx, |c, cx| {
+                                            if c.is_empty() {
+                                                c.new_terminal(&NewTerminal, window, cx);
+                                            } else {
+                                                c.fit_when_painted();
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
+                            canvas.update(cx, |c, cx| c.session_opened(summary, cx));
+                        }
+                        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+                            canvas.update(cx, |c, cx| c.session_closed(session, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Term { session, event }) => {
+                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Screen(event)) => {
+                            canvas.update(cx, |c, cx| c.screen_event(event, cx));
+                        }
+                        LinkEvent::Control(HostMsg::Agent(event)) => {
+                            canvas.update(cx, |c, cx| c.agent_event(event, cx));
+                        }
+                        LinkEvent::Control(_) => {}
+                        LinkEvent::Disconnected(why) => {
+                            let _set = this.update(cx, |ws, cx| {
+                                if let Some(slot) = ws.slot_mut(id) {
+                                    slot.disconnect(HostStatus::Reconnecting(format!(
+                                        "disconnected: {why}"
+                                    )));
+                                }
+                                ws.refresh_badge();
+                                cx.notify();
+                            });
+                            break;
+                        }
+                    }
+                }
+                drop(link);
+                // iroh's close uses tokio timers, which need a runtime context this GPUI task
+                // does not have; run it on the runtime and wait for the join.
+                let _closed = handle.spawn(async move { endpoint.close().await }).await;
+                cx.background_executor().timer(retry_delay(0)).await;
+            }
+        })
+        .detach();
+    }
+
     /// Show the pairing panel (idempotent).
     fn show_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pairing.is_some() {
@@ -208,7 +545,19 @@ impl Workspace {
         }));
         ticket.update(cx, |input, cx| input.focus(window, cx));
         self.pairing = Some(Pairing { ticket, busy: false, error: None });
-        "not paired".clone_into(&mut self.status);
+        self.switcher = false;
+        cx.notify();
+    }
+
+    /// Close the pairing panel (only offered while some host is paired).
+    fn cancel_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hosts.is_empty() {
+            return;
+        }
+        self.pairing = None;
+        if let Some(id) = self.active {
+            self.activate(id, window, cx);
+        }
         cx.notify();
     }
 
@@ -241,10 +590,11 @@ impl Workspace {
             let outcome = rx.await;
             let _updated = this.update(cx, |ws, cx| {
                 match outcome {
-                    Ok(Ok(name)) => {
+                    Ok(Ok(net::Paired { id, name })) => {
                         ws.pairing = None;
-                        ws.status = format!("paired with {name}; connecting…");
-                        let _woken = ws.paired.send(());
+                        ws.show_notice(format!("paired with {name}"), cx);
+                        ws.add_host(id, name, cx);
+                        ws.active = Some(id);
                     }
                     Ok(Err(e)) => {
                         if let Some(p) = &mut ws.pairing {
@@ -311,6 +661,11 @@ impl Workspace {
                     .child(button("paste-ticket", "Paste & pair", false).on_click(
                         cx.listener(|this, _ev, window, cx| this.paste_ticket(window, cx)),
                     ))
+                    .when(!self.hosts.is_empty(), |row| {
+                        row.child(button("cancel-pairing", "Cancel", false).on_click(
+                            cx.listener(|this, _ev, window, cx| this.cancel_pairing(window, cx)),
+                        ))
+                    })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -543,8 +898,12 @@ impl Workspace {
         let s = &self.theme.surfaces;
         // Bar text sits one point under the UI size (12 at the default 13).
         let ui = self.theme.typography.ui_size - 1.0;
+        let active = self.active_slot();
+        let zoom = active.map_or(1.0, |h| h.zoom);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
-        let zoom_pct = (self.zoom * 100.0).round().max(0.0) as u32;
+        let zoom_pct = (zoom * 100.0).round().max(0.0) as u32;
+        let (rtt, relayed, silent) =
+            active.map_or((None, None, None), |h| (h.rtt, h.relayed, h.silent));
         let label = move |text: String| {
             div()
                 .flex_none()
@@ -571,44 +930,43 @@ impl Workspace {
         };
         let new_button = button("new-terminal", "+ shell", "⌘T").on_click(cx.listener(
             |this, _ev, window, cx| {
-                if let Some(canvas) = &this.canvas {
+                if let Some(canvas) = this.active_canvas() {
                     canvas.update(cx, |c, cx| c.new_terminal(&NewTerminal, window, cx));
                 }
             },
         ));
         let agent_button =
             button("new-agent", "+ agent", "⌘⇧T").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = &this.canvas {
+                if let Some(canvas) = this.active_canvas() {
                     canvas.update(cx, |c, cx| c.new_agent(&NewAgent, window, cx));
                 }
             }));
         let note_button =
             button("new-note", "+ note", "⌘⇧N").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = &this.canvas {
+                if let Some(canvas) = this.active_canvas() {
                     canvas.update(cx, |c, cx| c.new_note(&NewNote, window, cx));
                 }
             }));
         let window_button = button("add-window", "+ window", "⌘O").on_click(cx.listener(
             |this, _ev, window, cx| {
-                if let Some(canvas) = &this.canvas {
+                if let Some(canvas) = this.active_canvas() {
                     canvas.update(cx, |c, cx| c.add_window(&AddWindow, window, cx));
                 }
             },
         ));
         let fit_button =
             button("fit-all", "fit", "⌘1").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = &this.canvas {
+                if let Some(canvas) = this.active_canvas() {
                     canvas.update(cx, |c, cx| c.fit_all(&FitAll, window, cx));
                 }
             }));
-        // Agents waiting on the human: a warm pill with the count; a tap goes to the next one.
-        let needs_you = (self.needs_you > 0).then(|| {
+        // Agents waiting on the human, on any host: a warm pill with the count; a tap goes to
+        // the next one (switching host when the one on show has none).
+        let total = self.needs_you_total();
+        let needs_you = (total > 0).then(|| {
             let warm = self.theme.terminal.palette(3);
-            let text = if self.needs_you == 1 {
-                "1 needs you".to_owned()
-            } else {
-                format!("{} need you", self.needs_you)
-            };
+            let text =
+                if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") };
             div()
                 .id("needs-you")
                 .flex_none()
@@ -625,12 +983,49 @@ impl Workspace {
                 } else {
                     text
                 }))
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    if let Some(canvas) = &this.canvas {
-                        canvas.update(cx, |c, cx| c.next_attention(&NextAttention, window, cx));
-                    }
-                }))
+                .on_click(cx.listener(|this, _ev, window, cx| this.next_attention(window, cx)))
         });
+        // The host on show, with its status dot; a click opens the switcher.
+        let dot = active.map_or(s.text_muted, |h| status_color(&self.theme, &h.status));
+        let host_button = div()
+            .id("host-switcher")
+            .flex_shrink(1.0)
+            // A phone's bar keeps the tap target even when the buttons crowd it.
+            .min_w(px(if narrow { 96.0 } else { 0.0 }))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(6.0))
+            .py(px(3.0))
+            .rounded(px(5.0))
+            .hover(|el| el.bg(hsla(s.panel)))
+            .cursor_pointer()
+            .child(div().flex_none().size(px(7.0)).rounded_full().bg(hsla(dot)))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(ui + 0.5))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(
+                        active.map_or_else(|| "Slopty".to_owned(), |h| h.name.clone()),
+                    )),
+            )
+            .when(!self.hosts.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(ui - 3.0))
+                        .text_color(hsla(s.text_muted))
+                        .child("▾"),
+                )
+            })
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                this.switcher = !this.switcher;
+                cx.notify();
+            }));
         div()
             .h(px(TOP_BAR) + safe_top)
             .pt(safe_top)
@@ -645,29 +1040,17 @@ impl Workspace {
             .border_color(hsla(s.border))
             .font_family(self.theme.typography.ui_family.clone())
             // The host name gives way first: a phone's bar must keep every button.
-            .child(
-                div()
-                    .flex_shrink(1.0)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(ui + 0.5))
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(if self.host_name.is_empty() {
-                        "Slopty".to_owned()
-                    } else {
-                        self.host_name.clone()
-                    })),
-            )
+            .child(host_button)
+            // Narrow: the status lives in the switcher rows; only a notice claims bar space.
             .child(match &self.notice {
                 Some((_, text)) => {
                     label(text.clone()).text_color(hsla(self.theme.terminal.palette(3)))
                 }
-                None => label(self.status.clone()),
+                None if narrow => label(String::new()),
+                None => label(self.status_text()),
             })
             .child(div().flex_1())
-            .child(match (self.silent, self.rtt, self.relayed) {
+            .child(match (silent, rtt, relayed) {
                 (Some(gap), _, _) => label(format!("host silent {}s", gap.as_secs()))
                     .text_color(hsla(self.theme.terminal.palette(3))),
                 (None, _, _) if narrow => label(String::new()),
@@ -687,6 +1070,131 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// The host switcher: one row per host (status dot, name, state, "forget"), then
+    /// "Add host…". Anchored under the host name; a click anywhere else closes it.
+    fn switcher(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
+        let s = &self.theme.surfaces;
+        let ui = self.theme.typography.ui_size;
+        let mut panel = div()
+            .id("host-switcher-panel")
+            .occlude()
+            .w(px(320.0))
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .py(px(6.0))
+            .rounded(px(self.theme.radius))
+            .bg(hsla(s.panel))
+            .border_1()
+            .border_color(hsla(s.border))
+            .shadow_md()
+            .font_family(self.theme.typography.ui_family.clone())
+            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation());
+        for host in &self.hosts {
+            let id = host.id;
+            let on_show = self.active == Some(id);
+            let color = status_color(&self.theme, &host.status);
+            let row = div()
+                .id(SharedString::from(format!("host-{id}")))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .py(px(6.0))
+                .cursor_pointer()
+                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.12)))
+                .when(on_show, |el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.08)))
+                .child(div().flex_none().size(px(8.0)).rounded_full().bg(hsla(color)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(ui))
+                                .text_color(hsla(s.text))
+                                .child(SharedString::from(host.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(ui - 2.0))
+                                .text_color(hsla(s.text_muted))
+                                .child(SharedString::from(host.status.text())),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("forget-{id}")))
+                        .flex_none()
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .text_size(px(ui - 2.0))
+                        .text_color(hsla(s.text_muted))
+                        .hover(|el| el.text_color(hsla(self.theme.terminal.palette(1))))
+                        .child("forget")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            cx.stop_propagation();
+                            this.forget_host(id, window, cx);
+                        })),
+                )
+                .on_click(cx.listener(move |this, _ev, window, cx| this.activate(id, window, cx)));
+            panel = panel.child(row);
+        }
+        panel = panel.child(div().h(px(1.0)).my(px(4.0)).bg(hsla(s.border))).child(
+            div()
+                .id("add-host")
+                .px(px(12.0))
+                .py(px(6.0))
+                .text_size(px(ui))
+                .text_color(hsla(s.accent))
+                .cursor_pointer()
+                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.12)))
+                .child(SharedString::from(if SHORTCUT_HINTS {
+                    "Add host…  ⌘⇧H".to_owned()
+                } else {
+                    "Add host…".to_owned()
+                }))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.switcher = false;
+                    this.show_pairing(window, cx);
+                })),
+        );
+        div()
+            .id("host-switcher-backdrop")
+            .absolute()
+            .inset_0()
+            .pt(px(TOP_BAR) + safe_top)
+            .pl(px(LEADING_INSET - 6.0))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.switcher = false;
+                    cx.notify();
+                }),
+            )
+            .child(panel)
+    }
+}
+
+/// The dot colour for a host's link state.
+fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
+    match status {
+        HostStatus::Connected => theme.terminal.palette(2),
+        HostStatus::Connecting | HostStatus::Reconnecting(_) => theme.terminal.palette(3),
+        HostStatus::NeedsPairing => theme.terminal.palette(1),
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let surfaces = &self.theme.surfaces;
@@ -694,9 +1202,9 @@ impl Render for Workspace {
         let insets = window.insets().effective();
         // A phone in portrait; the bar drops its readouts so every button stays reachable.
         let narrow = window.viewport_size().width < px(NARROW_BAR);
-        let body = match (&self.canvas, &self.pairing) {
-            (Some(canvas), _) => div().flex_1().w_full().child(canvas.clone()),
-            (None, Some(pairing)) => div()
+        let canvas = self.active_canvas();
+        let body = match (canvas, &self.pairing) {
+            (_, Some(pairing)) => div()
                 .flex_1()
                 .w_full()
                 .flex()
@@ -704,6 +1212,7 @@ impl Render for Workspace {
                 .justify_center()
                 .p(px(16.0))
                 .child(self.pairing_panel(pairing, cx)),
+            (Some(canvas), None) => div().flex_1().w_full().child(canvas),
             (None, None) => div()
                 .flex_1()
                 .w_full()
@@ -712,17 +1221,26 @@ impl Render for Workspace {
                 .justify_center()
                 .text_size(px(13.0))
                 .text_color(hsla(surfaces.text_muted))
-                .child(SharedString::from(self.status.clone())),
+                .child(SharedString::from(self.status_text())),
         };
         let key_bar = KEY_BAR
-            .then(|| self.canvas.as_ref()?.read(cx).active_key_target())
+            .then(|| self.active_canvas()?.read(cx).active_key_target())
             .flatten()
             .map(|target| self.key_bar(&target, cx));
+        let switcher = self.switcher.then(|| self.switcher(insets.top, cx));
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(hsla(surfaces.canvas))
+            .on_action(cx.listener(|this, _: &NextHost, window, cx| this.step_host(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevHost, window, cx| this.step_host(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &AddHost, window, cx| this.show_pairing(window, cx)))
+            .on_action(cx.listener(|this, _: &ForgetHost, window, cx| {
+                if let Some(id) = this.active {
+                    this.forget_host(id, window, cx);
+                }
+            }))
             .child(self.top_bar(insets.top, narrow, cx))
             .child(
                 div()
@@ -736,6 +1254,7 @@ impl Render for Workspace {
                     .child(body)
                     .when_some(key_bar, gpui::ParentElement::child),
             )
+            .when_some(switcher, gpui::ParentElement::child)
     }
 }
 
@@ -755,23 +1274,22 @@ pub fn open_workspace(
     }
     cx.bind_keys(slopty_ui::canvas::key_bindings());
     cx.bind_keys(slopty_ui::terminal::key_bindings());
-    cx.bind_keys([gpui::KeyBinding::new("cmd-,", OpenSettings, None)]);
+    cx.bind_keys([
+        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
+        gpui::KeyBinding::new("cmd-alt-right", NextHost, None),
+        gpui::KeyBinding::new("cmd-alt-left", PrevHost, None),
+        gpui::KeyBinding::new("cmd-shift-h", AddHost, None),
+    ]);
     cx.on_action(|_: &OpenSettings, cx| open_settings_file(cx));
     // gpui-kit widgets (the pairing input) follow their own theme; the real one is set once the
     // window's appearance is known, below.
     gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     let settings_path = slopty_settings::path();
     let loaded = Settings::load(&settings_path);
-    let (paired_tx, mut paired_rx) = tokio::sync::mpsc::unbounded_channel();
     let workspace = cx.new(|_cx| Workspace {
-        canvas: None,
-        status: "connecting…".to_owned(),
-        host_name: String::new(),
-        zoom: 1.0,
-        needs_you: 0,
-        rtt: None,
-        relayed: None,
-        silent: None,
+        hosts: Vec::new(),
+        active: None,
+        switcher: false,
         theme: Theme::default(),
         settings: Settings::default(),
         window_dark: true,
@@ -779,8 +1297,8 @@ pub fn open_workspace(
         notice_seq: 0,
         subscriptions: Vec::new(),
         pairing: None,
-        runtime: handle.clone(),
-        paired: paired_tx,
+        runtime: handle,
+        window: None,
     });
     let root_view = workspace.clone();
     let window = cx.open_window(options, move |window, cx| {
@@ -799,197 +1317,46 @@ pub fn open_workspace(
         cx.new(|cx| Root::new(root_view, window, cx))
     })?;
     watch_settings(settings_path, workspace.clone(), cx);
-    // A tap on an agent banner brings the app and that session forward; its buttons answer.
+    // A tap on an agent banner brings the app and that session forward, on whichever host
+    // the session lives; its buttons answer.
     let for_notifications = workspace.clone();
     cx.on_system_notification_response(move |response, cx| {
         let Ok(session) = response.tag.parse::<SessionId>() else { return };
         cx.activate(true);
-        for_notifications.update(cx, |ws, cx| {
-            if let Some(canvas) = &ws.canvas {
-                canvas.update(cx, |c, cx| {
-                    c.notification_response(session, response.action_id.as_deref(), cx);
-                });
-            }
-        });
-    });
-
-    // Connect on the tokio side; hand the link's channels to GPUI. Runs forever: a lost
-    // connection (host restart, network change) is retried with a capped backoff.
-    cx.spawn(async move |cx| {
-        let mut failures: u32 = 0;
-        loop {
-            // Unpaired: show the pairing panel and wait for it to succeed.
-            if !net::is_paired().unwrap_or(false) {
-                let _shown = window.update(cx, |_root, window, cx| {
-                    workspace.update(cx, |ws, cx| ws.show_pairing(window, cx));
-                });
-                if paired_rx.recv().await.is_none() {
-                    break;
+        let action = response.action_id;
+        let _handled = window.update(cx, |_root, window, cx| {
+            for_notifications.update(cx, |ws, cx| {
+                let Some(host) = ws.host_of_session(session, cx) else { return };
+                if ws.active != Some(host) {
+                    ws.activate(host, window, cx);
                 }
-                failures = 0;
-            }
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            handle.spawn(async move {
-                let _sent = ready_tx.send(net::connect_host().await);
-            });
-            let outcome = ready_rx.await;
-            let Ok(Ok(connected)) = outcome else {
-                let why = match outcome {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    _ => "connection task died".to_owned(),
-                };
-                failures = failures.saturating_add(1);
-                let delay = retry_delay(failures);
-                workspace.update(cx, |ws, cx| {
-                    ws.status = format!("{why}; retrying in {}s", delay.as_secs());
-                    cx.notify();
-                });
-                cx.background_executor().timer(delay).await;
-                continue;
-            };
-            failures = 0;
-            let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
-            let link = std::sync::Arc::new(link);
-            let screen_link = std::sync::Arc::clone(&link);
-            let open_screen: slopty_ui::screen::ScreenFactory =
-                std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
-            let canvas = workspace.update(cx, |ws, cx| {
-                let theme = ws.theme.clone();
-                let sessions = ack.sessions.clone();
-                let canvas =
-                    cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
-                ws.subscriptions.push(cx.subscribe(
-                    &canvas,
-                    |ws, _canvas, event, cx| match event {
-                        CanvasEvent::Zoom(z) => {
-                            ws.zoom = *z;
-                            cx.notify();
-                        }
-                        CanvasEvent::NeedsYou(n) => {
-                            ws.needs_you = *n;
-                            slopty_platform::set_badge(*n);
-                            cx.notify();
-                        }
-                        CanvasEvent::Attention(_session) => {
-                            slopty_platform::attention();
-                            slopty_platform::bounce();
-                        }
-                        CanvasEvent::Bell(_session) => {}
-                    },
-                ));
-                // The chrome follows the active item (key bar target), so every canvas
-                // change re-renders it; the workspace is a few labels, so this is cheap.
-                ws.subscriptions.push(cx.observe(&canvas, |_ws, _canvas, cx| cx.notify()));
-                ws.canvas = Some(canvas.clone());
-                ws.needs_you = 0;
-                slopty_platform::set_badge(0);
-                ws.host_name.clone_from(&ack.name);
-                "connected".clone_into(&mut ws.status);
-                cx.notify();
-                canvas
-            });
-            let focus_canvas = canvas.clone();
-            let _focused = window.update(cx, move |_root, window, cx| {
-                let handle = focus_canvas.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            });
-            // Once a second: RTT for the top bar and the predictors, and a liveness check. QUIC
-            // keep-alives make the host send something every few seconds; when the received
-            // datagram count stops moving the host is gone or unreachable, and the bar says so
-            // long before the transport's idle timeout drops the connection.
-            let rtt_link = std::sync::Arc::downgrade(&link);
-            let rtt_canvas = canvas.clone();
-            let rtt_workspace = workspace.clone();
-            cx.spawn(async move |cx| {
-                let mut heard = (0_u64, std::time::Instant::now());
-                loop {
-                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                    let Some(link) = rtt_link.upgrade() else { break };
-                    let rtt = link.rtt();
-                    let relayed = link.relayed();
-                    let received = link.received_datagrams();
-                    if received != heard.0 {
-                        heard = (received, std::time::Instant::now());
-                    }
-                    let gap = heard.1.elapsed();
-                    let silent = (gap >= SILENCE_WARN).then_some(gap);
-                    tracing::debug!(paths = %link.paths(), received, "link paths");
-                    if gap >= SILENCE_DROP {
-                        tracing::warn!(?gap, paths = %link.paths(), "host silent; reconnecting");
-                        link.abandon("host silent");
-                        break;
-                    }
-                    rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
-                    rtt_workspace.update(cx, |ws, cx| {
-                        ws.rtt = rtt;
-                        ws.relayed = relayed;
-                        ws.silent = silent;
-                        cx.notify();
+                if let Some(canvas) = ws.active_canvas() {
+                    canvas.update(cx, |c, cx| {
+                        c.notification_response(session, action.as_deref(), cx);
                     });
                 }
-            })
-            .detach();
-            let mut first_snapshot = true;
-            tracing::debug!(sessions = ack.sessions.len(), "link up; pumping events");
-            while let Some(event) = events.recv().await {
-                tracing::trace!(?event, "link event");
-                match event {
-                    LinkEvent::Term { session, event } => {
-                        canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Canvas(sync)) => {
-                        let is_snapshot =
-                            matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
-                        canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
-                        if is_snapshot && first_snapshot {
-                            first_snapshot = false;
-                            // First run: an empty canvas gets one shell so there is something
-                            // to type into. Otherwise bring the existing layout into view.
-                            let _opened = window.update(cx, |_root, window, cx| {
-                                canvas.update(cx, |c, cx| {
-                                    if c.is_empty() {
-                                        c.new_terminal(&NewTerminal, window, cx);
-                                    } else {
-                                        c.fit_when_painted();
-                                    }
-                                });
-                            });
-                        }
-                    }
-                    LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
-                        canvas.update(cx, |c, cx| c.session_opened(summary, cx));
-                    }
-                    LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
-                        canvas.update(cx, |c, cx| c.session_closed(session, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Term { session, event }) => {
-                        canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Screen(event)) => {
-                        canvas.update(cx, |c, cx| c.screen_event(event, cx));
-                    }
-                    LinkEvent::Control(HostMsg::Agent(event)) => {
-                        canvas.update(cx, |c, cx| c.agent_event(event, cx));
-                    }
-                    LinkEvent::Control(_) => {}
-                    LinkEvent::Disconnected(why) => {
-                        workspace.update(cx, |ws, cx| {
-                            ws.canvas = None;
-                            ws.status = format!("disconnected: {why}; reconnecting…");
-                            cx.notify();
-                        });
-                        break;
-                    }
-                }
-            }
-            drop(link);
-            // iroh's close uses tokio timers, which need a runtime context this GPUI task
-            // does not have; run it on the runtime and wait for the join.
-            let _closed = handle.spawn(async move { endpoint.close().await }).await;
-            cx.background_executor().timer(retry_delay(0)).await;
+            });
+        });
+    });
+    // Every paired host gets a link now; with none, the pairing panel.
+    let known = match net::known_hosts() {
+        Ok(known) => known,
+        Err(e) => {
+            tracing::error!(error = %e, "pairing store");
+            Vec::new()
         }
-    })
-    .detach();
+    };
+    window.update(cx, |_root, window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.window = Some(window.window_handle());
+            for (id, host) in known {
+                ws.add_host(id, host.name, cx);
+            }
+            if ws.hosts.is_empty() {
+                ws.show_pairing(window, cx);
+            }
+        });
+    })?;
     Ok(())
 }
 

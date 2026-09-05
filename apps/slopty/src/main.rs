@@ -70,6 +70,13 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Close Item", CloseItem),
         ]),
+        Menu::new("Host").items([
+            MenuItem::action("Next Host", slopty_app::NextHost),
+            MenuItem::action("Previous Host", slopty_app::PrevHost),
+            MenuItem::separator(),
+            MenuItem::action("Add Host…", slopty_app::AddHost),
+            MenuItem::action("Forget Host", slopty_app::ForgetHost),
+        ]),
         Menu::new("View").items([
             MenuItem::action("Zoom In", ZoomIn),
             MenuItem::action("Zoom Out", ZoomOut),

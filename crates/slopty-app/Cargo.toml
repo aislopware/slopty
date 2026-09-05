@@ -22,6 +22,7 @@ slopty-proto.workspace = true
 slopty-settings.workspace = true
 slopty-theme.workspace = true
 slopty-ui.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

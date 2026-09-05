@@ -710,6 +710,43 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   press has a file to edit. Verified: the menu item opened `settings.toml` in VS Code. iOS has
   no entry: the defaults apply there and the file, if present in the sandbox, is still read.
 
+## Hosts
+
+- ✅ **The pairing store was already a list** (2026-09-05): `slopty_net::identity::Identity`
+  keeps `hosts: BTreeMap<EndpointId, KnownHost>` in `client.json`; only the app's
+  `connect_host` picked the first entry. So there is no second file and no migration:
+  `net::known_hosts` reads the map (sorted by name), `net::forget_host` removes one, and a
+  pairing on the panel is `Identity::remember` as before. The stored name is refreshed from
+  each `HelloAck` so the switcher does not show a stale one before the link is up.
+- ✅ **One link, one canvas, one loop per host; one canvas on show** (2026-09-05):
+  `Workspace::spawn_host_loop` is the old connect loop with a host id: its own endpoint,
+  backoff, silence check (`SILENCE_DROP` abandons the link after 15 s without a datagram) and
+  event pump, writing into a `HostSlot` (status, canvas, zoom, needs-you, RTT). The loop ends
+  when its slot is gone (forget). Each host owns its `canvas.json`, so one `CanvasView` per
+  host and the workspace shows `active`'s; switching is a field change plus a focus, nothing
+  is torn down. `Rejection::NotPaired` maps to `HostStatus::NeedsPairing` (red dot) and keeps
+  retrying at the capped backoff so a fresh pairing of the same host resumes by itself.
+  Verified with two daemons on this Mac (`SLOPTY_PORT` 45570/45571, `SLOPTY_HOST_NAME`
+  "Studio One" / "Studio Two", the new env override in `slopty-hostd::paths`): "Add host…"
+  paired the second while the first stayed connected; each host had its own shell (`echo
+  two` on one, a new shell on the other); ⌘⌥←/→ and the switcher rows swapped canvases;
+  killing one daemon turned its row amber with "disconnected … reconnecting" within ~16 s
+  while the other stayed green, and restarting it turned the row green again; "forget"
+  removed the row and the `client.json` entry (`slopty hosts` listed one host).
+- ✅ **Switcher is a hand-rolled overlay, not gpui-kit's popover** (2026-09-05): a
+  full-window backdrop that closes on click with an occluding panel anchored under the host
+  name, the same pattern as the window picker. It needs no focus handling and lays out the
+  same on a 520-pt window (the host button keeps a 96-pt minimum there and the status label
+  yields; verified) as on the desktop. ⌘1…⌘9 are the fit shortcuts, so hosts step with
+  ⌘⌥→ / ⌘⌥← (and ⌘⇧H adds one); the Host menu names the same actions.
+- ✅ **Cross-host attention** (2026-09-05): the pill and `set_badge` use the sum of every
+  slot's `needs_you` (each canvas still reports its own count through `CanvasEvent::NeedsYou`);
+  a tap prefers the host on show, else the first with a waiting agent, switching first. A
+  banner's tag stays the session UUID (unique across hosts); `on_system_notification_response`
+  asks each canvas `has_session` to find the host, activates it, then calls
+  `notification_response` as before. Code-verified only: no Claude Code session was driven on
+  the second host in the manual run.
+
 ## Claude Code
 
 - ✅ Hooks are the authoritative signal (33 events as of 2026-09; we register the status-bearing
