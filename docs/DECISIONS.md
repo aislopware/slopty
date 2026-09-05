@@ -415,7 +415,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   **no size quantisation** (the brief's fallback of shaping at the nearest whole-pixel cell
   is not needed and would blur less than it would cost in code). What the main thread does
   during the zoom cycle now (`sample`, MEASUREMENTS "zoom hitch"): shaping 2.5 % (was 41–48 %),
-  `paint_glyph` 12 % (all scene insertion), prepaint's per-cell loops 26 %, applying the
+  `paint_glyph` 12 % (all scene insertion), "prepaint's per-cell loops" 26 % (a misread of
+  mangled symbols: the demangled sample of the next ruling puts the per-cell loop under
+  0.5 % and that share on the font walk), applying the
   flood 33 %. Draw numbers before / after in MEASUREMENTS: p50 pan 1.2–1.4 → 1.0–1.1 ms,
   zoom 1.1–1.5 → 1.1–1.3 ms; the p99 / max of the zoom cycle stayed over 16.7 ms on every tree
   (prepaint over twenty visible grids plus the flood, on a machine that was never idle), so
@@ -441,11 +443,39 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (the live tail and a history range the user scrolled to and fetched), and a single contiguous
   ring has to re-base and drop one of them. `missing()` exists precisely because the cache is
   sparse.
-- 🔬 **Not done, with the numbers that would justify it**: size-independent glyph painting (shape
 - 🔬 **What is left of the apply path** (2026-09-06): freeing an evicted line, ~4 % of the main
   thread under a 20-shell flood; a line-buffer pool would be the next step and is not worth it
   at that size. The two earlier 🔬 items here (the shared line, size-independent glyph
   painting) are the ✅ rulings above.
+- ✅ **The installed fonts are listed once per app, and prepaint builds only the rows the clip
+  shows** (2026-09-06, `e4613cf` + `f0e7007`). The zoom cycle's worst frame was not the
+  element's row loop at all. The canvas culls off-screen items, so at zoom 1 only the
+  viewport's few grids ever draw; ⌘1 drops everything below `CARD_ZOOM`; the first step back
+  over it draws twenty grids for the first time in one frame, and each first frame resolved
+  the monospace family by listing every installed font (`TextSystem::all_font_names`, a
+  synchronous XPC round trip to fontd, ~36 ms): 32 % of the main thread in a demangled
+  `sample` of scenario (b), the 700–1300 ms max frames of every zoom run so far, and a 36 ms
+  hitch on every ⌘N. The resolved family is now memoised per theme list on the `ShapeCache`
+  global (the per-view memo stays, so a frame costs neither the walk nor the lookup); a
+  headless test opens three shells and counts one walk. Rows a grid has below or above the
+  window's content mask are not built (no quads, no words, no hashes; paint walks only the
+  prepared rows); a headless test counts every row of a grid on screen and under half of one
+  hanging off the bottom edge. Numbers (MEASUREMENTS "the zoom hitch, second look"): the zoom
+  max 356 / 1006 ms on main → 109 / 91 ms, p99 75 / 280 → 86 / 34, on a machine other sessions
+  were building on (noise 5–120 processes); `TerminalElement::prepaint` 38 % → 4 % of the main
+  thread. Not done, with the number that rules it out: a per-row cache of quads and
+  decorations and skipping link/overlay work during a flight — the per-cell loop they would
+  save is ≈ 0.4 % of the thread.
+- 🔬 **What the zoom p99 is now, and whose**: with the element at 4 % (prepaint) + 12 % (paint,
+  all `paint_glyph`), the after-sample's draw is 48 % paint (terminal glyphs 28 %, the items'
+  titles and pills 7 %), 29 % GPUI layout (`Div::request_layout` and taffy over twenty item
+  trees whose every size changes per zoom step) and 7 % scene + Metal; between draws the
+  flood's apply takes 19 % of the thread (claude/applyfast's `Vec<Cell>` copies 8 %). A zoom
+  frame that follows an apply is the p99. The element has no more to give on the main thread;
+  the next cuts are the item chrome's layout at zoom (a fixed-size card whose contents scale
+  as one transform instead of a re-laid-out tree) and the apply. No zoom guard: B1 and B2 ran
+  at 120 and 42 build processes and still beat main's quiet runs, which is the load telling
+  the guard what it would flap on.
 
 ## Terminal
 

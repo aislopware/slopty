@@ -563,8 +563,11 @@ for the conversation view (§5), whose composer takes the typing.
 canvas (`CanvasView::render`), which lays out only the items whose screen rectangle meets the
 viewport (`draws`; the active and any dragged item always), each as a card below `CARD_ZOOM`
 or as its view above it, then the minimap from every item's rectangle, the overlays and the
-`frames::probe()` element last. The terminal element's prepaint reads the view's rows in place,
-splits each into words (plain spaces and digits are the boundaries) and looks every word up in
+`frames::probe()` element last. The terminal element's prepaint resolves the monospace family
+once per app (the `ShapeCache` global memoises the theme's list; listing the installed fonts
+is a synchronous trip to the font server), reads the view's rows in place — only the rows
+inside the window's content mask, so a grid hanging off the viewport builds nothing for the
+rest — splits each into words (plain spaces and digits are the boundaries) and looks every word up in
 the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plus its per-byte
 colours) per (text, styles, family, palette, focus), never per zoom, swept once per frame — so
 a frame of streaming output shapes only the words it has never seen and a zoom step shapes

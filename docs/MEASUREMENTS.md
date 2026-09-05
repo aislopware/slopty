@@ -1320,3 +1320,51 @@ sccache cannot cache incremental workspace crates, and Cargo serialises concurre
 the target directory lock.
 
 
+
+## 2026-09-06 — the zoom hitch, second look: the font walk at the flip, rows outside the clip
+
+`sample <pid> 4` on the app's main thread while scenario (b) runs, demangled with `rustfilt`
+this time (`/tmp/sample-prepaint-before.txt`, main 24b9e67, 1 cargo process alongside, 2283
+samples; `/tmp/sample-prepaint-after.txt`, `f0e7007`, 8 alongside, 2088 samples). Inclusive
+share of the main thread. The `sample` stops the process at every tick, so the MEASURE rows of
+a sampled run are not numbers (its own pan p95 was 58 ms on a tree that pans at 3 ms).
+
+| what | before (main) | after (f0e7007) |
+| --- | --- | --- |
+| `TerminalElement::prepaint` | **37.8 %** | 4.3 % |
+| of which `TextSystem::all_font_names` (`pick_family`, a view's first frame) | 31.9 % | 0 |
+| of which the words (segments → cache; `shape_cells` for the flood's new text 3.4 %) | 5.1 % | 3.0 % |
+| of which the per-cell loop (quads, decorations, keys) | ≈ 0.4 % | ≈ 0.4 % |
+| `TerminalElement::paint` (all `paint_glyph`) | 10.6 % | 12.4 % |
+| GPUI layout (`Div::request_layout`, taffy, `compute_layout`) | ≈ 12 % | ≈ 13 % of the thread, 29 % of a draw |
+| `TermState::apply` (the flood; `Vec<Cell>::clone` 11 % → 8 %) | 18.8 % | 18.1 % |
+
+The "prepaint per-cell loops 26 %" of the previous section was this font walk read through
+mangled names. It is a per-view startup cost that the zoom scenario pays twenty times in one
+frame: the canvas culls off-screen items, so at zoom 1 only the viewport's grids ever drew;
+⌘1 puts everything below `CARD_ZOOM`; the first step back over it draws twenty first frames,
+each listing the installed fonts (a synchronous XPC round trip to fontd, ~36 ms).
+
+Draw ms p50 / p95 / p99 / max · frames over 16.7 ms · dropped, `cargo xtask e2e smooth`, main
+24b9e67 (A) against `f0e7007` (B), alternated, `/tmp/prepaint-ab.log`; `noise` is
+`pgrep -fl "cargo|rustc|xcodebuild|clang" | wc -l` when the run started (other sessions built
+throughout; A2 failed the pan guard at 5 processes, B1 passed at 120):
+
+| run | tree | noise | (a) pan | (b) zoom |
+| --- | --- | --- | --- | --- |
+| A1 | 24b9e67 | 6 | 0.9 / 3.0 / 19.3 / 39.2 · 5 · 7 | 1.3 / 14.3 / 75.2 / **356.1** · 12 · 48 |
+| A2 | 24b9e67 | 5 | 1.3 / 38.7 / 72.8 / 293.8 · 18 · 53 | 1.8 / 51.3 / 280.3 / **1006.2** · 20 · 119 |
+| B1 | f0e7007 | 120 | 0.9 / 4.5 / 14.3 / 34.0 · 2 · 3 | 1.4 / 21.9 / 86.4 / **108.6** · 16 · 43 |
+| B2 | f0e7007 | 42 | 1.0 / 4.6 / 11.5 / 26.0 · 2 · 2 | 1.4 / 14.1 / 33.7 / **91.3** · 14 · 22 |
+
+The max is the column that moved: the flip's frame went from 356–1006 ms to 91–109 ms on a
+busier machine, and the zoom's dropped frames from 48–119 to 22–43. p50 is unchanged (the
+element's per-frame work was never the cost); p99 is 34–86 ms and is now layout + paint of
+twenty items plus the apply between frames (DECISIONS "What the zoom p99 is now").
+
+```sh
+pgrep -fl "cargo|rustc|xcodebuild|clang" | wc -l
+zsh /tmp/prepaint-ab.sh                 # A, B, A, B then the after-sample
+python3 /tmp/sample-attrib.py /tmp/sample-prepaint-after.txt "TerminalElement as gpui::element::Element>::prepaint" "all_font_names"
+python3 /tmp/sample-children.py /tmp/sample-prepaint-after.txt "Window>::draw"
+```
