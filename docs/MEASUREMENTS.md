@@ -435,10 +435,10 @@ What the runs say:
   the value survives the stall and the target springs back when the window recovers. On this
   link the window never recovered, so the split changed the bookkeeping, not the outcome.
 * The loopback control grows 12 → 30 Mbit/s in eight clean windows (4 s) at 57 fps, as
-  before. Its two "stalls" are the host's own capture gaps (ScreenCaptureKit's warm-up after
-  the first frame, one 55 ms hole mid-run): silence is silence to the receiver, and each costs
-  one frozen window. At the start that is 0.5 s of growth; not worth a host-side heartbeat
-  yet.
+  before. Its two "stalls" were read here as the host's own capture gaps (ScreenCaptureKit's
+  warm-up after the first frame, one 55 ms hole mid-run) and judged not worth a host-side
+  heartbeat yet. The heartbeat section below measured that reading and found it wrong: the
+  host was pushing the whole time, the silence was QUIC's send side.
 * Delivered fps on the mesh (17–29) is the link, not the controller: the same display
   streams at 57 fps on loopback and at 58 fps over the mesh on a good morning (BBR3 table
   above).
@@ -471,6 +471,52 @@ the client reports as refresh requests. Not a regression; bench a moving window 
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
 # on the host: RUST_LOG=info,slopty_host=debug hostd → grep 'bitrate\|stream closed'
+```
+
+## 2026-09-05 — capture heartbeat, loopback, debug build
+
+The host now sends a bare `Kind::Heartbeat` header whenever nothing left its queue for 25 ms
+(`HEARTBEAT_AFTER`, half the receiver's 50 ms stall gap), so a still screen or a capture gap
+no longer reads as a link stall at the receiver. Measured on loopback against the control
+above (display 6, a Ghostty window scrolling `seq`, 20 s, private daemons on port 45560,
+`slopty_host=trace` so every beat is logged with the silence that triggered it).
+
+| run | fps  | first frame | gap p50 / p90 / max     | stalls (stalled) | beats | host target over time (Mbit/s)                                     |
+| --- | ---- | ----------- | ----------------------- | ---------------- | ----- | ------------------------------------------------------------------ |
+| 1   | 57.9 | 650 ms      | 17.2 / 20.7 / 424.8 ms  | 2 (486 ms)       | 12    | 12 hold → 13.5 … 27.4 (grow ×7) → 14.3 grow/cwnd → 30 hold → 30 grow |
+| 2   | 57.3 | 503 ms      | 17.3 / 20.4 / 262.7 ms  | 3 (254 ms)       | 14    | 12 hold → 13.5 … 30 (grow ×8) → 30 hold → 30 grow                  |
+
+What the beat log says:
+
+* The start-up hold did not disappear, and the heartbeat is not the reason. In run 2 the
+  stream opened at 30.333 s, the first decision at 30.879 s reported `stalled 81 ms, stalls
+  1`, and the first beat went out at 31.087 s: the host's queue was never quiet for 25 ms in
+  between. The silence the receiver saw was on QUIC's send side, not the capture: a fresh
+  connection paces the first keyframe out of its initial window (`space 4147282` of the
+  4 MiB datagram buffer still held at 35.18 s in the same run, with the target just raised
+  to 30 Mbit/s). That is a link hold and the stall verdict is right to freeze on it.
+* The mid-run stalls are the same thing: two beats at 34.79–34.82 s (a 50 ms capture gap,
+  covered), then a receiver-side `link resumed gap=58.7 ms` at 35.03 s with the host pushing
+  throughout, and the host's cwnd at the 5808 B floor with NACKs at 43.6 s. Loopback QUIC
+  holds bursts after a bitrate step; the receiver cannot tell that from Wi-Fi.
+* What the heartbeat does cover, it covers: 12–14 beats per run, each after 25–43 ms of
+  source silence, none of which reached the receiver as a stall. The still-screen case
+  (`captured 0` for 20 s, above) is the one it was built for and is verified by the
+  pipeline test `heartbeats_keep_a_quiet_source_from_reading_as_a_stall` rather than here.
+
+Not looped: two runs, back to back; the numbers above are within the earlier control's
+spread except the stall attribution, which the beat log settles.
+
+```sh
+# on mac-studio: private daemons, own data dir and port (same as the stall section)
+export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
+target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
+RUST_LOG=info,slopty_host=trace SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock > $SLOPTY_DATA_DIR/hostd6.log 2>&1 &
+open -na Ghostty --args -e seq 1 300000000
+SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug \
+  target/debug/slopty bench screen --display 6 --seconds 20
+grep -E 'heartbeat|rate decision|stream closed' $SLOPTY_DATA_DIR/hostd6.log   # beats, verdicts, ScreenStats { heartbeats }
 ```
 
 ## 2026-09-05 — gate wall time after the speed-up (mac-studio, 10 cores, warm caches)
