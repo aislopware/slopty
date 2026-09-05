@@ -413,8 +413,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   diff instead of a silent change in what programs are told. **ptyd compiles it on start-up**
   (2026-09-05): `tokio::spawn` right after `bind`, `/usr/bin/tic -x -o <db> -` with the source
   on stdin — the absolute path, never a `tic` from `PATH`. The database is `$HOME/.terminfo`,
-  or `$SLOPTY_TERMINFO_DIR` when a test or a sandboxed run names one (the app self-test points
-  both it and `TERMINFO_DIRS` at the stack's temp dir, so no run touches the developer's home).
+  or `$SLOPTY_TERMINFO_DIR` when a test or a sandboxed run names one — and when it is set it is
+  the *only* database consulted, so such a run answers from its own and not from whatever the
+  machine happens to have (the app self-test points both it and `TERMINFO_DIRS` at the stack's
+  temp dir, so no run touches the developer's home).
   Idempotent: `installed()` looks for `78/xterm-ghostty` or `x/xterm-ghostty` under the same
   directories the lookup searches, and does nothing when it is there. Nothing blocks on it —
   `default_term()` is read per spawn, so a shell that starts before `tic` finishes simply gets

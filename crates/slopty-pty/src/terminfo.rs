@@ -337,12 +337,16 @@ pub fn source() -> String {
 pub const DIR_ENV: &str = "SLOPTY_TERMINFO_DIR";
 
 /// The terminfo databases a program started by a shell would search, most specific first.
+///
+/// `$SLOPTY_TERMINFO_DIR` *names* the database rather than adding to the search: when it is
+/// set it is the only directory consulted, so a sandboxed run — the app self-test above all —
+/// answers from its own database and never from whatever the machine happens to have.
 #[must_use]
 pub fn dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(dir) = std::env::var_os(DIR_ENV) {
-        dirs.push(PathBuf::from(dir));
+        return vec![PathBuf::from(dir)];
     }
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".terminfo"));
     }
