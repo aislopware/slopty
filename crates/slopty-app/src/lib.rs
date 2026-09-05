@@ -19,7 +19,7 @@ use slopty_client::LinkEvent;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
 use slopty_ui::canvas::{
-    CanvasEvent, CanvasView, FitAll, NewAgent, NewNote, NewTerminal, NextAttention,
+    AddWindow, CanvasEvent, CanvasView, FitAll, NewAgent, NewNote, NewTerminal, NextAttention,
 };
 use slopty_ui::colors::hsla;
 use slopty_ui::terminal::TerminalView;
@@ -34,6 +34,8 @@ const LEADING_INSET: f32 = 78.0;
 const LEADING_INSET: f32 = 12.0;
 /// Keyboard shortcut hints make sense where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
+/// Below this window width (points) the top bar is laid out for a phone.
+const NARROW_BAR: f32 = 600.0;
 /// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
 const KEY_BAR: bool = cfg!(target_os = "ios");
 /// Key bar height in points.
@@ -344,7 +346,13 @@ impl Workspace {
         bar.into_any_element()
     }
 
-    fn top_bar(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
+    /// `narrow`: a phone-width window; the readouts (RTT, zoom) go so every button fits.
+    fn top_bar(
+        &self,
+        safe_top: gpui::Pixels,
+        narrow: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let s = &self.theme.surfaces;
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
         let zoom_pct = (self.zoom * 100.0).round().max(0.0) as u32;
@@ -359,7 +367,7 @@ impl Workspace {
             div()
                 .id(id)
                 .flex_none()
-                .px(px(8.0))
+                .px(px(if narrow { 5.0 } else { 8.0 }))
                 .py(px(3.0))
                 .rounded(px(5.0))
                 .text_size(px(12.0))
@@ -391,6 +399,13 @@ impl Workspace {
                     canvas.update(cx, |c, cx| c.new_note(&NewNote, window, cx));
                 }
             }));
+        let window_button = button("add-window", "+ window", "⌘O").on_click(cx.listener(
+            |this, _ev, window, cx| {
+                if let Some(canvas) = &this.canvas {
+                    canvas.update(cx, |c, cx| c.add_window(&AddWindow, window, cx));
+                }
+            },
+        ));
         let fit_button =
             button("fit-all", "fit", "⌘1").on_click(cx.listener(|this, _ev, window, cx| {
                 if let Some(canvas) = &this.canvas {
@@ -433,7 +448,7 @@ impl Workspace {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(if narrow { 6.0 } else { 12.0 }))
             .pl(px(LEADING_INSET))
             .pr(px(12.0))
             .bg(hsla(s.canvas))
@@ -461,6 +476,7 @@ impl Workspace {
             .child(match (self.silent, self.rtt, self.relayed) {
                 (Some(gap), _, _) => label(format!("host silent {}s", gap.as_secs()))
                     .text_color(hsla(self.theme.terminal.palette(3))),
+                (None, _, _) if narrow => label(String::new()),
                 (None, Some(d), Some(true)) => {
                     label(format!("{:.1} ms via relay", d.as_secs_f64() * 1e3))
                 }
@@ -468,11 +484,12 @@ impl Workspace {
                 (None, None, _) => label(String::new()),
             })
             .when_some(needs_you, gpui::ParentElement::child)
-            .child(label(format!("{zoom_pct}%")))
+            .when(!narrow, |bar| bar.child(label(format!("{zoom_pct}%"))))
             .child(fit_button)
             .child(new_button)
             .child(agent_button)
             .child(note_button)
+            .child(window_button)
     }
 }
 
@@ -481,6 +498,8 @@ impl Render for Workspace {
         let surfaces = &self.theme.surfaces;
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         let insets = window.insets().effective();
+        // A phone in portrait; the bar drops its readouts so every button stays reachable.
+        let narrow = window.viewport_size().width < px(NARROW_BAR);
         let body = match (&self.canvas, &self.pairing) {
             (Some(canvas), _) => div().flex_1().w_full().child(canvas.clone()),
             (None, Some(pairing)) => div()
@@ -510,7 +529,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .bg(hsla(surfaces.canvas))
-            .child(self.top_bar(insets.top, cx))
+            .child(self.top_bar(insets.top, narrow, cx))
             .child(
                 div()
                     .flex_1()
