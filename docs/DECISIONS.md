@@ -650,8 +650,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   - `AverageBitRate` in **bits per second** (header verified — slop-desk said bytes; wrong) plus
     `DataRateLimits` `[bytes, seconds]`. `ConstantBitRate` is incompatible with both and pads
     frames; not used. macOS 26 adds `VariableBitRate` + `VBVMaxBitRate` + `VBVBufferDuration`
-    (header verified) — 🔬 evaluate against AverageBitRate+DataRateLimits.
-  - `MaxAllowedFrameQP` / `MinAllowedFrameQP` may return `kVTPropertyNotSupportedErr`; probe.
+    (header verified) — ✅ evaluated 2026-09-05, rejected; see "Encoder rate control" below.
+  - `MaxAllowedFrameQP` / `MinAllowedFrameQP`: ✅ probed 2026-09-05, both accepted (status 0)
+    by the low-latency and the VBV encoder; unused (see below).
   - `SpatialAdaptiveQPLevel` must be disabled under low-latency RC (header says so).
   - LTR: `EnableLTR` = true; per frame `ForceLTRRefresh` (CFBoolean) and `AcknowledgedLTRTokens`
     (CFArray<CFNumber>); output attachment `RequireLTRAcknowledgementToken`. Header verified.
@@ -660,8 +661,70 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Capture** — verified against `SCStream.h` (macOS 26.5 SDK): `minimumFrameInterval`,
   `queueDepth`, `pixelFormat`, `showsCursor`, `captureResolution`, `ignoreShadowsSingleWindow`,
   `includeChildWindows` (14.2+), `captureDynamicRange` (15+), `capturesAudio` +
-  `excludesCurrentProcessAudio`. 🔬 slop-desk claims default `queueDepth` is 8 and that macOS 15+
-  defaults `minimumFrameInterval` to 1/60 — measure.
+  `excludesCurrentProcessAudio`. ✅ Defaults read back from a fresh `SCStreamConfiguration`
+  (`slopty_capture::sck_defaults`, macOS 26.5, 2026-09-05): `queueDepth` **8**,
+  `minimumFrameInterval` **1/60 s** — slop-desk was right on both. Ruling on the depth below.
+- ✅ **Capture latency is measured per frame, host side, and the window's "8 ms floor" was the
+  encoder** (2026-09-05). Every ScreenCaptureKit sample carries `SCStreamFrameInfoDisplayTime`
+  (mach absolute time when the window server displayed the frame); read through
+  `CMClockMakeHostTimeFromSystemUnits` it equals the sample's presentation timestamp to the
+  microsecond on both the window and the display path (offset p50 0.00 ms over 285 frames each),
+  so `CapturedFrame::latency_us` (display time → our callback) is what SCK adds. Measured
+  (MEASUREMENTS.md, "capture floor"): the window filter delivers a scrolling 900×500 terminal
+  at **0.46 ms p50 / 0.95–2.35 ms p95**, the display filter at 0.00 / 0.46 ms
+  — SCK's own cost is under a millisecond either way, and the "window floor of ~8 ms" recorded
+  earlier was the *encode* step: submit → VideoToolbox callback is **6.7 ms p50** for that
+  window whatever the capture path and whatever the content (a scrolling and a static window
+  encode in the same time), i.e. the hardware encoder's fixed pipeline, not rate control. The
+  host keeps both as p50/p95/max rings per stream (`ScreenStats::capture` / `::encode`, 600
+  frames) and exposes them on the local control socket (`CtlRequest::Screens`, `slopty host
+  screens`); `slopty bench screen` appends them on loopback. Not on the wire: the client has no
+  use for the host's internal split, and the protocol number stays with the tracks that need it.
+- ✅ **Windows are served as a crop of their display when nothing covers them** (2026-09-05).
+  `SCContentFilter(display:excludingWindows:)` + `sourceRect` at the window's frame (points in
+  the display's space; `crop_for` is the pure geometry, `Target::resolve_crop` the SCK side)
+  delivers the same picture as the window filter (interior mean |Δluma| 0.05/255 on a static
+  window; only the corners differ, the window filter leaves them transparent) at the display
+  path's latency: end to end (capture → decoded on loopback, `slopty bench screen`)
+  **1.7 ms p50 against 9.0 ms** for the window filter in a debug build
+  (release: 2.6 ms vs 9.0 ms), the ≥ 3 ms the brief asked for. Rules, in
+  `slopty_host::screen::resolve` / `check_geometry`: crop only while the window is entirely on
+  one display (`CGGetDisplaysWithRect` + `encloses`) and no on-screen window of another process
+  at levels 0–8 overlaps it (`occluded`, from `kCGWindowListOptionOnScreenAboveWindow`); the
+  Dock's window is a transparent full-screen hit region at level 20, the menu bar is 24 and
+  status items 25, none of which counts. A move is one `updateConfiguration` with the new
+  `sourceRect` (~20 ms to complete, frames keep flowing, measured), a resize rebuilds the
+  encoder as before, and a window that gets covered or dragged off its display swaps to the
+  window filter on the live stream (`updateContentFilter`) and back when clear; the crop is
+  cleared *before* the filter swap because a `sourceRect` on a window stream is read in the
+  window's own space. Known cost: on the crop path a drag lags by the geometry poll
+  (100 ms, was 250) plus the update, during which one edge shows the desktop the window left.
+  `SLOPTY_WINDOW_CAPTURE=window|crop` forces a path. Guard: `slopty-capture/tests/latency.rs`
+  (gated) fails when the window filter's capture p95 exceeds 1 ms + 3 ms margin.
+- ✅ **`queueDepth` stays 2** (2026-09-05). Measured 2 / 3 / 5 / 8 on the window filter
+  (MEASUREMENTS.md, "capture floor"): p50 is flat (0.46 → 0.49 ms) and p95/max grow with the
+  depth; no drops at any depth on a 60 Hz source. The default 8 buys nothing here since the
+  callback hands the surface straight to the encoder.
+- ✅ **Encoder rate control: keep `EnableLowLatencyRateControl` + `AverageBitRate` +
+  `DataRateLimits`; the macOS 26 VBV keys are out** (2026-09-05). The VBV keys
+  (`VariableBitRate`, `VBVMaxBitRate`, `VBVBufferDuration`) are documented incompatible with
+  low-latency rate control and the probe agrees: the low-latency session is a *different*
+  encoder whose `VTSessionCopySupportedPropertyDictionary` does not list them (it lists
+  `EnableLTR`, `DataRateLimits`, `AverageBitRate`, no `MaxFrameDelayCount`, no
+  `PrioritizeEncodingSpeedOverQuality`), while a session created without the specification
+  lists them plus `LookAheadFrames`, `MCTFLatencyMode`, `AllowOpenGOP` — and loses LTR
+  (`EnableLTR` rejected, `ltr false`), which is Slopty's loss recovery. Measured head to head on
+  the same 900×500 Ghostty window at 8 Mbit/s (MEASUREMENTS.md, "encoder rate control"):
+  encode p50 6.70 vs 6.59 ms — identical; frame-size spikes max/p50 **2.0×
+  vs 5.6×** and 64 vs 163 kbit/s for the same picture — the VBV encoder
+  spends more and spikes more. Nothing to adopt. Also tried on the low-latency encoder
+  (`Encoder::set_property`, public for benches): `MaximizePowerEfficiency=false` (6.69 ms
+  p50), `ExpectedFrameRate=120` (6.73 ms), H.264 instead of HEVC (6.45 ms): all within run-to-run noise of the 6.70 ms baseline (H.264 buys 0.25 ms p50 and loses 0.3 ms at p95 on the static window), so none is adopted.
+  `MaxAllowedFrameQP` / `MinAllowedFrameQP` are accepted by both encoders (status 0) but stay
+  unset: they trade frame drops for a QP bound, and a dropped frame is a hole the client asks
+  a refresh for. The ~7 ms is the encoder's pipeline; the remaining glass-to-wire budget is
+  there, behind keys the SDK does not export (`RequestedMaxEncoderLatency` shows in the
+  low-latency encoder's supported list but is not in the 26.5 headers, so it is not used).
 - ✅ **FEC**: `reed-solomon-simd` 3.1.0 (NEON), systematic RS per frame, redundancy adaptive
   (~20 % default, Sunshine's number). NACK inside the playout window before LTR refresh.
 - ✅ **Adaptive bitrate** (`slopty_media::RateController`, 2026-09-05). The client's

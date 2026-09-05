@@ -134,12 +134,120 @@ SLOPTY_DROP_PERMILLE=20 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_
 Takeaways: ~10 ms from capture to a decoded frame on the client at native scale, one frame of
 arrival jitter; the first frame after `Open` takes ~250 ms (SCK start + encoder warm-up, also the
 max latency outlier). 2 % loss is absorbed entirely by parity: no NACK, no refresh, no lost
-frame. Window capture has a floor of ~8 ms where display capture goes down to <1 ms — SCK's
-window path composites separately; worth a look if the budget ever needs it. The 60 fps cap
-yields ~50–53 delivered fps on a 60 Hz display.
+frame. Window capture has a floor of ~8 ms where display capture goes down to <1 ms — *this
+turned out to be the encoder, not SCK's window path; see "capture floor" below (2026-09-05),
+which also moves windows onto the display-crop path.* The 60 fps cap yields ~50–53 delivered
+fps on a 60 Hz display.
 
 Not yet measured here: a real lossy/jittery path (Wi-Fi, LTE) and a release build. Arrival →
 present is measured in "start-up over iroh on a quiet machine, and arrival → present" below.
+
+## 2026-09-05 — capture floor: display vs window vs display-crop, queueDepth, encode (debug + release)
+
+Setup: mac-studio, macOS 26.5, main display 1920×1080 @1x 60 Hz, quiet machine (0 `cargo`/`rustc`
+processes during every run below; the first survey run, on a machine with 200+ rustc processes,
+is quoted where it differs). Source: a Ghostty window 900×500 running `yes` (a scrolling
+terminal), launched by the test or by hand. Loopback: `slopty-ptyd` + `slopty-hostd` in
+`/tmp/slopty-glass`, `--direct-only --port 45599`, the CLI paired with `SLOPTY_DIRECT_ONLY=1`.
+
+**Per-frame host instrumentation.** `SCStreamFrameInfoDisplayTime` (mach absolute time, through
+`CMClockMakeHostTimeFromSystemUnits`) equals the sample's presentation timestamp on every
+frame of every path (offset p50 0.00 ms, n=285 per row), so *capture latency* below is display
+time → ScreenCaptureKit callback and *encode* is `VTCompressionSessionEncodeFrame` →
+output callback (`ScreenStats::capture` / `::encode`, `slopty host screens`).
+
+### ScreenCaptureKit alone (`slopty-capture/tests/latency.rs`, 5 s per row)
+
+`SCStreamConfiguration` defaults read back: `queueDepth` 8, `minimumFrameInterval` 1/60 s.
+
+| path           | queueDepth | frames (fps) | capture p50 / p95 / max | gaps > 25 ms |
+| -------------- | ---------- | ------------ | ----------------------- | ------------ |
+| window filter  | 2          | 259 (51.8)   | 0.46 / 2.35 / 27.07 ms  | 18           |
+| window filter  | 3          | 257 (51.4)   | 0.49 / 1.48 / 16.07 ms  | 25           |
+| window filter  | 5          | 287 (57.4)   | 0.50 / 4.42 / 10.55 ms  | 4            |
+| window filter  | 8          | 286 (57.2)   | 0.49 / 3.52 / 12.77 ms  | 2            |
+| display        | 2          | 284 (56.8)   | 0.00 / 0.46 / 20.92 ms  | 4            |
+| display        | 8          | 284 (56.8)   | 0.00 / 0.57 / 1.92 ms   | 3            |
+| display-crop   | 2          | 287 (57.4)   | 0.00 / 0.00 / 0.46 ms   | 0            |
+| display-crop   | 8          | 287 (57.4)   | 0.00 / 0.00 / 0.48 ms   | 0            |
+
+The loaded-machine run of the same survey: window 2 / 3 / 5 / 8 → 0.48 / 0.49 / 0.52 / 0.51 ms
+p50, 0.85 / 0.94 / 1.05 / 1.10 ms p95, 288 / 288 / 286 / 285 frames, 0–1 gaps; display 2 → 0.00 /
+0.11 ms; display-crop 2 → 0.00 / 0.57 ms. p50 is flat across depths in both runs; the p95 and the
+gap count move between runs more than between depths. `0.00` on the display paths is a
+clamp: ScreenCaptureKit hands the composited display frame *before* the window server shows
+it (its display time is the coming scan-out), which the end-to-end rows below confirm.
+
+Crop correctness (`display_crop_shows_the_window_filter_picture`): window filter vs display
+crop of a static window, mean |Δluma| 0.366/255 whole frame, **0.054/255 interior** (the
+corners: the window filter leaves them transparent, the crop shows what is behind). Crop move
+(`moving_the_crop_is_one_configuration_update`): `updateConfiguration` with a shifted
+`sourceRect` completes in 17.8–22.5 ms (5 moves), the next frame arrives with the completion.
+
+### End to end on loopback (`slopty bench screen`, 5 s, 60 fps cap, 30 Mbit/s ceiling)
+
+| build   | target                     | capture→decoded p50 / p90 | host capture p50 / p95 | host encode p50 / p95 | fps  |
+| ------- | -------------------------- | ------------------------- | ---------------------- | --------------------- | ---- |
+| debug   | display 1920×1080          | 4.1 / 10.0 ms             | 0.00 / 0.00 ms         | 7.99 / 8.95 ms        | 57.4 |
+| debug   | window, window filter      | 9.0 / 9.5 ms              | 0.42 / 0.51 ms         | 6.71 / 7.96 ms        | 58.4 |
+| debug   | window, display-crop       | **1.7 / 7.9 ms**          | 0.00 / 0.00 ms         | 6.76 / 7.84 ms        | 58.6 |
+| release | display 1920×1080          | 4.1 / 9.8 ms              | 0.00 / 0.00 ms         | 8.02 / 9.07 ms        | 58.2 |
+| release | window, window filter      | 9.0 / 9.3 ms              | 0.42 / 0.49 ms         | 6.70 / 7.08 ms        | 58.4 |
+| release | window, display-crop       | **2.6 / 7.8 ms**          | 0.00 / 0.00 ms         | 6.73 / 7.92 ms        | 58.0 |
+
+No drops, no queue-full, no loss in any row (n = 287–293). Release changes nothing: the
+pipeline is framework time. The window filter's "8 ms floor" is the encoder: 6.7 ms p50 whatever
+the capture path; the crop path wins the ≥ 3 ms the ruling asked for because the display
+frame reaches us ~5 ms *before* its display time (encode 6.7 ms, yet capture→decoded 1.7 ms
+measured from that time) where the window filter hands the window ~0.4 ms *after* its own
+composite. Both rows show the same picture (above).
+
+Commands:
+
+```sh
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --test latency --no-capture
+# hostd on the crop / window path, then the bench (release: target/release/…):
+SLOPTY_WINDOW_CAPTURE=crop target/debug/slopty-hostd --direct-only --ptyd-socket /tmp/slopty-glass/ptyd.sock \
+  --ctl-socket /tmp/slopty-glass/hostd.sock --data-dir /tmp/slopty-glass/data --port 45599
+SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_HOSTD_SOCKET=/tmp/slopty-glass/hostd.sock \
+  target/debug/slopty bench screen --window 3411 --seconds 5
+SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_HOSTD_SOCKET=/tmp/slopty-glass/hostd.sock \
+  target/debug/slopty bench screen --display 6 --seconds 5
+```
+
+## 2026-09-05 — encoder rate control: low-latency vs VBV keys, and three variants (debug build)
+
+Command: `SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-host --test screen low_latency_versus_vbv --no-capture`
+(the test launches Ghostty running `yes`, then `top -s 1`; 900×500, HEVC unless stated, 60 fps,
+8 Mbit/s, 5 s per row, quiet machine). `keyframe` is the first IDR; `spike` is max/p50 of the
+frames after it.
+
+Probe: `MaxAllowedFrameQP` and `MinAllowedFrameQP` → status 0 on both sessions. The
+low-latency session's supported-property list has no `VariableBitRate` / `VBVMaxBitRate` /
+`VBVBufferDuration`, no `MaxFrameDelayCount`, no `PrioritizeEncodingSpeedOverQuality`; the
+plain session lists all of those plus `LookAheadFrames`, `MCTFLatencyMode`, `AllowOpenGOP`,
+and rejects `EnableLTR`.
+
+| variant                          | content   | frames | encode p50 / p95 / max | keyframe | p50 frame | max frame (spike) | rate        | LTR |
+| -------------------------------- | --------- | ------ | ---------------------- | -------- | --------- | ----------------- | ----------- | --- |
+| LowLatency (the host's)          | scrolling | 289    | 6.70 / 7.15 / 55.3 ms  | 2995 B   | 127 B     | 248 B (2.0×)      | 64 kbit/s   | yes |
+| Vbv                              | scrolling | 288    | 6.59 / 6.87 / 36.0 ms  | 2861 B   | 312 B     | 1742 B (5.6×)     | 163 kbit/s  | no  |
+| LL + MaximizePowerEfficiency=off | scrolling | 289    | 6.69 / 6.93 / 39.2 ms  | 2995 B   | 127 B     | 257 B (2.0×)      | 65 kbit/s   | yes |
+| LL + ExpectedFrameRate=120       | scrolling | 290    | 6.73 / 7.09 / 38.5 ms  | 2377 B   | 121 B     | 520 B (4.3×)      | 62 kbit/s   | yes |
+| LL, H.264                        | scrolling | 287    | 6.45 / 7.41 / 31.3 ms  | 2835 B   | 52 B      | 219 B (4.2×)      | 29 kbit/s   | yes |
+| LowLatency (the host's)          | top 1 Hz  | 287    | 6.66 / 6.92 / 36.3 ms  | 1233 B   | 327 B     | 81683 B (250×)    | 358 kbit/s  | yes |
+| Vbv                              | top 1 Hz  | 288    | 6.62 / 8.03 / 36.0 ms  | 68179 B  | 632 B     | 47314 B (75×)     | 1423 kbit/s | no  |
+| LL + MaximizePowerEfficiency=off | top 1 Hz  | 277    | 6.96 / 14.21 / 48.8 ms | 86759 B  | 327 B     | 9492 B (29×)      | 337 kbit/s  | yes |
+| LL + ExpectedFrameRate=120       | top 1 Hz  | 280    | 6.77 / 8.08 / 61.7 ms  | 65703 B  | 331 B     | 23495 B (71×)     | 376 kbit/s  | yes |
+| LL, H.264                        | top 1 Hz  | 273    | 6.39 / 10.23 / 39.5 ms | 94817 B  | 170 B     | 15366 B (90×)     | 323 kbit/s  | yes |
+
+Takeaways: encode latency is 6.4–7.0 ms p50 in every row — the hardware pipeline, independent
+of rate control, content and codec. VBV spends 2.5–4× the bytes for the same picture, spikes
+more on the scroller and loses LTR; nothing to adopt. The `top` rows' keyframe sizes vary with
+where in `top`'s redraw the IDR landed; the 81 KB "spike" of the host's mode is one full
+`top` redraw as a P-frame, the price of 64 kbit/s the rest of the time. A "static" Ghostty
+window still delivers ~57 frames/s to the window filter (its blinking cursor redraws), each
+one a 120–330 B P-frame. Also: `top` runs 1 Hz, so the 5 s rows saw 5 redraws.
 
 ## 2026-09-05 — libghostty plain-text formatter for terminal search, debug build
 

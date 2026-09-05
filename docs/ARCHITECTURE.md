@@ -153,7 +153,7 @@ Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame mo
 ## 3. Remote windows: Parsec-class pipeline
 
 ```
-SCStream(window | display, 420v/P010, minimumFrameInterval, queueDepth=2, showsCursor=false)
+SCStream(display | window-as-display-crop | window, 420v/P010, minimumFrameInterval, queueDepth=2, showsCursor=false)
   → VTCompressionSession(HEVC, EnableLowLatencyRateControl @ creation, RealTime,
                          AllowFrameReordering=false, AllowOpenGOP=false, MaxFrameDelayCount=0,
                          EnableLTR, MaxKeyFrameInterval=∞, AverageBitRate + DataRateLimits)
@@ -193,6 +193,28 @@ The two are cleared by different evidence: *any* datagram on the stream — a he
 restarts the cap, because it proves the host is still there, while only a video fragment lifts the
 idle suppression, because only a picture proves the source is drawing (a hint that has not changed
 never overwrites what the stream itself proved).
+
+**Host capture path.** A display target is one `SCContentFilter(display:)`. A window target
+is served two ways, and the host switches between them on the live stream
+(`updateContentFilter` + `updateConfiguration`, no restart, no new encoder): while the window
+sits entirely on one display with no other process's window (levels 0–8; the Dock's
+full-screen hit region, the menu bar and status items do not count) on top of it, the stream
+is the *display* filter with `sourceRect` at the window's frame (`Target::resolve_crop`,
+`WindowPath::DisplayCrop`), which ScreenCaptureKit serves from the frame it already
+composited; when the window is covered, partly off-screen or straddling displays it is the
+independent-window filter (`WindowPath::Filter`), which composites the window on its own
+and costs a few milliseconds more per frame (MEASUREMENTS.md, "capture floor").
+`check_geometry` (10 Hz) follows moves by updating the crop, resizes by rebuilding the encoder,
+and occlusion by swapping the filter (the swap keeps the stream and its frame counter, so the
+`Source` hint above never flips on it); the pure crop geometry (`slopty_capture::crop_for`:
+window frame → display-relative points, pixels at the display's scale, `None` when not
+entirely on that display) is unit-tested. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd
+forces a path. Every frame carries the window server's display time
+(`SCStreamFrameInfoDisplayTime`, equal to the sample's pts) and the host keeps two latency
+rings per stream — display time → SCK callback (`ScreenStats::capture`) and encoder submit →
+VideoToolbox callback (`ScreenStats::encode`), p50/p95/max over the last 600 frames — read
+locally over the control socket (`slopty host screens`; `slopty bench screen` appends them on
+loopback). Nothing of this crosses the wire.
 
 **Presentation path.** The reassembler stamps every complete frame with the arrival of the
 datagram that finished it (`FrameOut::arrived`); the stream worker parks that instant under the
