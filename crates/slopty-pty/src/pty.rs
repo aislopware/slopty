@@ -98,6 +98,11 @@ impl Pty {
     ) -> Result<tokio::process::Child, PtyError> {
         let slave = self.slave.try_clone().map_err(|e| PtyError::os("dup slave", e))?;
         let (program, args, arg0) = resolve_command(&spec.command);
+        let injection = integration.map(|si| si.apply(&program, &args, arg0.as_deref(), &spec.env));
+        let (args, arg0, extra_env) = match injection {
+            Some(inj) => (inj.args, inj.arg0, inj.env),
+            None => (args, arg0, Vec::new()),
+        };
 
         let mut cmd = std::process::Command::new(&program);
         cmd.args(&args);
@@ -110,10 +115,8 @@ impl Pty {
         cmd.env("TERM_PROGRAM", "slopty");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env_remove("TERMINFO");
-        if let Some(integration) = integration {
-            for (k, v) in integration.env_for(&program, &spec.env) {
-                cmd.env(k, v);
-            }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
         }
         for (k, v) in &spec.env {
             cmd.env(k, v);

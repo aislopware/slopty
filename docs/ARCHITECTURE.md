@@ -83,14 +83,20 @@ Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, cappe
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
 for a read reply.
 
-**Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh: at every start
-it writes the bundled scripts (`slopty-pty/assets/shell/zsh`, compiled in with `include_str!`,
-so nothing reads the source tree at runtime) under `<data dir>/shell/zsh` and spawns zsh with
-`ZDOTDIR` pointing there; the bootstrap `.zshenv` hands `ZDOTDIR` back to the user, sources
-their own `.zshenv`, and for interactive shells adds precmd/preexec hooks that emit `133;A`
-(in `PS1`), `B`, `C` and `D;<status>`. `SLOPTY_NO_SHELL_INTEGRATION=1` in the daemon's or the
-session's environment opts out (`ShellIntegration::env_for` is then empty); other shells run
-untouched. The engine takes libghostty's per-row prompt flag for the row kind and, because
+**Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh, bash and fish:
+at every start it writes the bundled scripts (`slopty-pty/assets/shell`, compiled in with
+`include_str!`, so nothing reads the source tree at runtime) under `<data dir>/shell` and
+`ShellIntegration::apply` rewrites the spawn per shell. zsh gets `ZDOTDIR` pointing at the
+bootstrap `.zshenv`, which hands `ZDOTDIR` back to the user, sources their own `.zshenv`, and
+for interactive shells adds precmd/preexec hooks. bash gets `--rcfile <shell>/bash/slopty.bash`
+in front of its arguments (its `-l` and leading-dash arg0 travel as `SLOPTY_BASH_LOGIN=1`,
+because bash ignores `--rcfile` for login shells); the rcfile sources the user's profile or
+`.bashrc` as bash would have, then adds prompt hooks and a `DEBUG` trap for preexec (or
+registers with bash-preexec when the user loads it). fish gets `<shell>/fish` in front of
+`XDG_DATA_DIRS` so its `vendor_conf.d/slopty.fish` loads before the user's `config.fish`;
+fish ≥ 4 emits the marks itself and the snippet steps aside. All three emit `133;A` (in the
+prompt), `B`, `C` and `D;<status>`. `SLOPTY_NO_SHELL_INTEGRATION=1` in the daemon's or the
+session's environment opts out (`apply` then changes nothing); other programs run untouched. The engine takes libghostty's per-row prompt flag for the row kind and, because
 the library exposes neither which row an `A` landed on nor the status a `D` carries, scans the
 PTY bytes for those two marks itself (`slopty_engine::osc133::Scanner`, state kept across
 reads so a mark split over two PTY reads is still found) and notes the cursor's absolute line
@@ -165,9 +171,11 @@ retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `
 path's cwnd/rtt, `judge` the pure policy over one decision window: a stall the reassembler
 reported (`stalled_ms` / `stalls` in the report) freezes the target, loss while flowing cuts
 it, a clean window grows it; every decision goes back to the client as `ScreenEvent::Rate`
-for the stats overlay and the bench; pure, no clocks, tested), `slopty-host::screen`
+for the stats overlay and the bench; pure, no clocks, tested; `heartbeat_datagram` → a bare
+`Kind::Heartbeat` header the host sends after `HEARTBEAT_AFTER` of silence so a still screen
+or a capture gap does not read as a link stall at the receiver), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
-path's datagram limit; cursor sampler; input injection), `slopty-input` (client
+path's datagram limit; cursor sampler, which also sends the heartbeats; input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the

@@ -1011,17 +1011,53 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   scripts (compiled in with `include_str!`) under `$SLOPTY_DATA_DIR/shell` (else `shell/`
   beside the socket) on every daemon start, rewriting an edited or stale file, so a running
   install never reads the source tree; it also reads the daemon's environment once into a
-  `ShellIntegration` (`enabled`, the daemon's own `ZDOTDIR`) so the per-spawn decision
-  `env_for` is pure. `Pty::spawn_with` adds the variables only when the resolved program's
-  basename is `zsh` (the login shell, an explicit `zsh`, and the `$SHELL -lic` path from
-  52725da all qualify; `-c` shells load the hooks but never reach precmd, so they print no
-  marks). Opt-out `SLOPTY_NO_SHELL_INTEGRATION=1` (anything but empty or `0`) in the
-  daemon's environment or the session's. bash/fish: not done (bash needs a `--rcfile`
-  wrapper plus `bash-preexec`, fish needs `XDG_DATA_DIRS`; neither is "cheap"). Verified by
-  `an_interactive_zsh_emits_prompt_marks` (real `/bin/zsh -i` on a PTY: A/B/C, `D;1` after
-  `false`, `ZDOTDIR` empty again, the user's `.zshenv` ran),
-  `install_writes_the_bundled_scripts_and_is_idempotent` and
+  `ShellIntegration` (`enabled`, the daemon's own `ZDOTDIR` and `XDG_DATA_DIRS`) so the
+  per-spawn decision `apply` is pure: it takes the program, argv, arg0 and the session's
+  environment and returns an `Injection` (argv, arg0, extra variables) that `Pty::spawn_with`
+  applies. zsh: only when the resolved program's basename is `zsh` (the login shell, an
+  explicit `zsh`, and the `$SHELL -lic` path from 52725da all qualify; `-c` shells load the
+  hooks but never reach precmd, so they print no marks). Opt-out
+  `SLOPTY_NO_SHELL_INTEGRATION=1` (anything but empty or `0`) in the daemon's environment or
+  the session's, for all three shells. Verified by `an_interactive_zsh_emits_prompt_marks`
+  (real `/bin/zsh -i` on a PTY: A/B/C, `D;1` after `false`, `ZDOTDIR` empty again, the
+  user's `.zshenv` ran), `install_writes_the_bundled_scripts_and_is_idempotent` and
   `opt_out_from_the_daemon_or_the_session`.
+  *bash* (2026-09-05): bash has no `ZDOTDIR`; the only hook that leaves the user's files
+  alone is `--rcfile`, which bash reads *instead of* `~/.bashrc`, and which it ignores for
+  login shells. So `apply` puts `--rcfile <shell>/bash/slopty.bash` at the front of argv
+  (GNU long options must precede the short ones or bash says `--: invalid option`), strips
+  `-l`/`--login` and the leading dash of arg0 and hands that fact over as
+  `SLOPTY_BASH_LOGIN=1` (likewise `--noprofile`/`--norc` → `SLOPTY_BASH_NOPROFILE`/`NORC`);
+  the rcfile then does what bash would have done (`/etc/profile`, the first of
+  `.bash_profile`/`.bash_login`/`.profile` for a login shell, else `.bashrc`), unsets the
+  variables, and returns unless interactive. Shells given a script, `-`, `-c`, `-o`,
+  `--posix` or their own `--rcfile`/`--init-file` are left untouched. Marks: `A`/`B` inside
+  `PS1` (`\[…\]`) and `A;k=s` in `PS2`, wrapped by the *last* `PROMPT_COMMAND` entry so a
+  prompt theme that rebuilds `PS1` in its own entry still gets them; `D;$?` by the *first*
+  entry (bash 5's `PROMPT_COMMAND` array and bash 3.2's string both handled). `C` needs
+  preexec, which bash lacks: a `DEBUG` trap of Slopty's own (MIT-clean, not bash-preexec's
+  code) fires once per prompt, armed by the prompt hook and disarmed by the first command it
+  sees, so a prompt with a five-command `PROMPT_COMMAND` prints one `C`, not five. If the
+  user already loads bash-preexec (`__bp_imported`), Slopty registers with its
+  `preexec_functions`/`precmd_functions` instead; if some other `DEBUG` trap is installed,
+  Slopty keeps its hands off it and emits prompt marks only (no `C`/`D`). Works on the
+  system bash 3.2 and Homebrew's 5.3. Verified on both by
+  `an_interactive_bash_emits_prompt_marks_and_runs_the_users_bashrc` (A/B/C, `D;1` after
+  `false`, `.bashrc` ran, `.bash_profile` did not, the `SLOPTY_BASH_*` variables gone) and
+  `a_login_bash_reads_its_profile_and_still_marks` (arg0 `-bash`: the profile ran, `.bashrc`
+  did not, still marks).
+  *fish* (2026-09-05): fish sources every `<dir>/fish/vendor_conf.d/*.fish` for each entry of
+  `XDG_DATA_DIRS`, so `apply` prepends `<shell>/fish` to the session's (else the daemon's,
+  else the `/usr/local/share:/usr/share` default) `XDG_DATA_DIRS`; the user's `config.fish`
+  loads as before, after the vendor files. fish ≥ 4.0 prints OSC 133 itself (ST-terminated,
+  `A;click_events=1`, `C;cmdline_url=…`; the engine's scanner accepts both terminators and
+  ignores the parameters), so on 4.x the snippet only sets `__slopty_integrated 1` and steps
+  aside; on 3.x it wraps `fish_prompt` once (`functions --copy`) with `A`/`B` and hooks
+  `fish_preexec`/`fish_postexec` for `C`/`D;$status`. Verified with the installed fish by
+  `an_interactive_fish_emits_prompt_marks_and_runs_the_users_config` (skipped with a note
+  when no fish is on the machine). Learned: fish answers `DA1`/`CPR` queries at start and
+  waits up to 10 s for the reply, so a PTY test must answer them; and it walks `cwd` for
+  `mise` configs, so the test chroots its `cwd` to the temp home.
   *Engine:* libghostty-vt's per-row `semantic_prompt` flag says "prompt row" but cannot
   separate two prompts on adjacent rows (a command with no output), and the `D` status is
   not exposed at all. `slopty_engine::osc133::Scanner` watches the bytes (state kept across
