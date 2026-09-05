@@ -13,7 +13,7 @@ mod tests {
     use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
-    use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -790,5 +790,555 @@ mod tests {
                 s.pacing
             );
         }
+    }
+
+    // ---- the path-flap harness ------------------------------------------------------------
+    //
+    // DECISIONS "Path flap under investigation": a connection went direct → relay-only for 43 s
+    // → direct while the machine was compiling, which is a 50× latency cliff. iroh always
+    // prefers a live direct path, so the direct path must have been *closed*. This drives the
+    // load a `cargo build` applies — all-core CPU, the same at a raised thread QoS, and memory
+    // plus I/O — at a real connection that holds both a direct and a relay path, and reads back
+    // what the transport did.
+
+    /// A load shape applied while the harness watches the connection.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Shape {
+        /// Every core spinning at the default quality of service.
+        Cpu,
+        /// The same, at `USER_INITIATED`: threads that outrank a default-QoS worker.
+        CpuUserInitiated,
+        /// Gigabytes written and read back, plus many small files: what a linker does.
+        MemoryIo,
+    }
+
+    impl Shape {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::Cpu => "cpu",
+                Self::CpuUserInitiated => "cpu-user-initiated",
+                Self::MemoryIo => "memory-io",
+            }
+        }
+    }
+
+    /// Threads applying a [`Shape`]; they stop when this is dropped.
+    struct Load {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        threads: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl Load {
+        fn start(shape: Shape, scratch: &std::path::Path) -> Self {
+            use std::sync::atomic::AtomicBool;
+
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
+            let mut threads = Vec::new();
+            for worker in 0..cores {
+                let stop = std::sync::Arc::clone(&stop);
+                let scratch = scratch.to_path_buf();
+                threads.push(std::thread::spawn(move || match shape {
+                    Shape::Cpu => burn(&stop, false),
+                    Shape::CpuUserInitiated => burn(&stop, true),
+                    Shape::MemoryIo => churn(&stop, &scratch, worker),
+                }));
+            }
+            Self { stop, threads }
+        }
+    }
+
+    impl Drop for Load {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for t in self.threads.drain(..) {
+                let _joined = t.join();
+            }
+        }
+    }
+
+    /// Spin until told to stop, optionally after asking the scheduler to treat this thread as
+    /// user-initiated work — the class Xcode's and cargo's build threads run at.
+    fn burn(stop: &std::sync::atomic::AtomicBool, user_initiated: bool) {
+        if user_initiated {
+            // SAFETY: `pthread_set_qos_class_self_np` takes a QoS class and a relative priority
+            // and only ever affects the calling thread (Apple's Energy Efficiency Guide, "Set
+            // Quality of Service"); it borrows nothing.
+            let set = unsafe {
+                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+            };
+            assert_eq!(set, 0, "pthread_set_qos_class_self_np");
+        }
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            for _ in 0..4_096 {
+                x = x
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                std::hint::black_box(x);
+            }
+        }
+    }
+
+    /// Write and read back gigabytes, and churn many small files, until told to stop.
+    fn churn(stop: &std::sync::atomic::AtomicBool, scratch: &std::path::Path, worker: usize) {
+        use std::io::{Read as _, Write as _};
+
+        let dir = scratch.join(format!("churn-{worker}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let block = vec![0x5A_u8; 8 << 20];
+        let mut round = 0_u64;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let big = dir.join(format!("big-{round}"));
+            if let Ok(mut f) = std::fs::File::create(&big) {
+                // 512 MB a round, so a 90 s run moves several gigabytes per thread.
+                for _ in 0..64 {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let _written = f.write_all(&block);
+                }
+                let _flushed = f.sync_all();
+            }
+            if let Ok(mut f) = std::fs::File::open(&big) {
+                let mut sink = vec![0_u8; 8 << 20];
+                while let Ok(n) = f.read(&mut sink) {
+                    if n == 0 || stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
+            let _removed = std::fs::remove_file(&big);
+            // The many-small-files half: metadata pressure, not throughput.
+            for i in 0..2_000 {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let small = dir.join(format!("small-{i}"));
+                let _written = std::fs::write(&small, b"slopty");
+                let _removed = std::fs::remove_file(&small);
+            }
+            // A few hundred megabytes touched and dropped: memory pressure on top of the I/O.
+            let mut hot = vec![0_u8; 256 << 20];
+            for page in hot.chunks_mut(4_096) {
+                if let Some(first) = page.first_mut() {
+                    *first = 1;
+                }
+            }
+            std::hint::black_box(&hot);
+            drop(hot);
+            round = round.wrapping_add(1);
+        }
+        let _cleaned = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tees the test's own log to stderr and to a buffer, so the harness can read back what
+    /// noq said about a path it abandoned (`iroh::_events::path`, which carries the reason).
+    #[derive(Clone)]
+    struct Tee(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Tee {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            std::io::stderr().write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::stderr().flush()
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for Tee {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// What one load shape did to the connection.
+    #[derive(Debug)]
+    struct FlapRow {
+        shape: &'static str,
+        /// Times the selected path went from direct to relayed.
+        to_relay: u32,
+        /// Longest unbroken stretch on a relayed path, seconds.
+        relay_max_s: f64,
+        /// Seconds on a relayed path in total.
+        relay_total_s: f64,
+        /// Worst round trip seen on the selected path.
+        rtt_max_ms: f64,
+        /// Round trip at the end, for scale.
+        rtt_last_ms: f64,
+        /// Lines the transport logged about a closed path (the abandon reason lives here).
+        closed: Vec<String>,
+        /// Receiver stalls on the display stream over the run.
+        stalls: u64,
+        /// Frames the display stream delivered.
+        frames: u64,
+        samples: u32,
+    }
+
+    /// Drive a real connection that holds both a direct and a relay path under the load a build
+    /// applies, and read back whether the direct path is ever closed.
+    ///
+    /// Gated on `SLOPTY_FLAP_E2E`, `SLOPTY_FLAP_SECONDS` for the length of the load (default 90).
+    /// Needs the default relay map: with no relay path there is nothing to flap onto, and the
+    /// case says so and skips. One case per load shape, and nextest is told to give each of them
+    /// every thread — a shape saturates the machine, so two at once would measure each other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn path_flap_under_cpu_load() {
+        flap_case(Shape::Cpu).await;
+    }
+
+    /// The same saturation from threads that asked the scheduler to be treated as interactive,
+    /// which is what a build's own workers do.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn path_flap_under_user_initiated_cpu_load() {
+        flap_case(Shape::CpuUserInitiated).await;
+    }
+
+    /// Memory and I/O rather than CPU: the other half of what a build does to a machine.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn path_flap_under_memory_io_load() {
+        flap_case(Shape::MemoryIo).await;
+    }
+
+    /// Run one shape end to end and print its verdict line.
+    async fn flap_case(shape: Shape) {
+        if std::env::var_os("SLOPTY_FLAP_E2E").is_none() {
+            eprintln!("SLOPTY_FLAP_E2E unset; skipping");
+            return;
+        }
+        let seconds: u64 =
+            std::env::var("SLOPTY_FLAP_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(90);
+        let log = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let _logs = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+                |_unset| {
+                    // noq's own path events carry the abandon reason.
+                    tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
+                },
+            ))
+            .with_writer(Tee(std::sync::Arc::clone(&log)))
+            .try_init();
+        let dir = tempfile::tempdir().unwrap();
+        // Relays on: both ends must hold a relay path as well as the loopback direct one.
+        let (_guard, ticket) = daemons(dir.path(), Reach::Anywhere).await;
+        let started = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let Some(r) = flap_sample(&ticket, dir.path(), shape, seconds, &log).await else {
+            eprintln!("{}: no relay path (relay unreachable?); skipping", shape.name());
+            return;
+        };
+        eprintln!(
+            "flap {} ran {started} .. {}",
+            shape.name(),
+            chrono::Local::now().format("%H:%M:%S")
+        );
+        eprintln!(
+            "| {} | {} to relay | relay {:.1} s longest, {:.1} s total | rtt {:.1} ms worst, {:.1} ms last | {} closed | {} stalls | {} frames | {} samples |",
+            r.shape,
+            if r.to_relay == 0 { "none".to_owned() } else { r.to_relay.to_string() },
+            r.relay_max_s,
+            r.relay_total_s,
+            r.rtt_max_ms,
+            r.rtt_last_ms,
+            if r.closed.is_empty() { "none".to_owned() } else { r.closed.len().to_string() },
+            r.stalls,
+            r.frames,
+            r.samples,
+        );
+        for line in &r.closed {
+            eprintln!("    {line}");
+        }
+        assert!(r.samples > 0, "{} sampled nothing: {r:?}", r.shape);
+        assert!(r.frames > 0, "{} streamed nothing: {r:?}", r.shape);
+        // The verdict this harness exists for. A direct path that closes under load is the flap;
+        // the reason lines above say why, and the ruling follows them.
+        assert_eq!(r.to_relay, 0, "{} pushed the connection onto a relay: {r:?}", r.shape);
+    }
+
+    /// One shape: a fresh connection, a terminal and a display stream, the load, and a sample
+    /// of the selected path every 250 ms. `None` when the connection never held a relay path,
+    /// which means there was nothing to flap onto.
+    async fn flap_sample(
+        ticket: &PairTicket,
+        scratch: &std::path::Path,
+        shape: Shape,
+        seconds: u64,
+        log: &std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
+    ) -> Option<FlapRow> {
+        let (endpoint, host) = dial(ticket, Reach::Anywhere).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        // A terminal, so the control and session streams carry traffic too.
+        link.send(ClientMsg::OpenSession(OpenSession {
+            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+            cwd: None,
+            command: vec!["/bin/sh".to_owned()],
+            env: vec![("PS1".to_owned(), "$ ".to_owned())],
+            title: None,
+            attach: true,
+        }))
+        .await
+        .unwrap();
+        // A display stream, so datagrams flow the whole time.
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let display = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
+                    break displays.first().expect("a display").id;
+                }
+                _other => {}
+            }
+        };
+        link.send(ClientMsg::Screen(ScreenRequest::Open {
+            target: CaptureTarget::Display(display),
+            quality: Quality::default(),
+        }))
+        .await
+        .unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => break (stream, codec),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let screen = link.screen(stream, codec);
+        // Hole punching and the relay handshake both need a moment before the picture is fair.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if !link.paths().contains("relay") {
+            drop(screen);
+            link.close();
+            endpoint.close().await;
+            return None;
+        }
+        eprintln!("flap {}: paths before load: {}", shape.name(), link.paths());
+        let mark = log.lock().len();
+        let load = Load::start(shape, scratch);
+
+        let step = Duration::from_millis(250);
+        let mut ticks = tokio::time::interval(step);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(seconds))
+            .expect("a deadline inside the clock");
+        let mut row = FlapRow {
+            shape: shape.name(),
+            to_relay: 0,
+            relay_max_s: 0.0,
+            relay_total_s: 0.0,
+            rtt_max_ms: 0.0,
+            rtt_last_ms: 0.0,
+            closed: Vec::new(),
+            stalls: 0,
+            frames: 0,
+            samples: 0,
+        };
+        let mut on_relay = false;
+        let mut stretch = 0.0_f64;
+        while tokio::time::Instant::now() < deadline {
+            ticks.tick().await;
+            row.samples = row.samples.saturating_add(1);
+            if let Some(rtt) = link.rtt() {
+                let ms = rtt.as_secs_f64() * 1e3;
+                row.rtt_last_ms = ms;
+                row.rtt_max_ms = row.rtt_max_ms.max(ms);
+            }
+            match link.relayed() {
+                Some(true) => {
+                    if !on_relay {
+                        on_relay = true;
+                        stretch = 0.0;
+                        row.to_relay = row.to_relay.saturating_add(1);
+                        eprintln!("flap {}: on a relay; paths: {}", shape.name(), link.paths());
+                    }
+                    stretch += step.as_secs_f64();
+                    row.relay_total_s += step.as_secs_f64();
+                    row.relay_max_s = row.relay_max_s.max(stretch);
+                }
+                Some(false) if on_relay => {
+                    on_relay = false;
+                    eprintln!("flap {}: back on a direct path after {stretch:.1} s", shape.name());
+                }
+                // Direct all along, or no path reported yet.
+                Some(false) | None => {}
+            }
+        }
+        drop(load);
+        let stats = screen.stats();
+        row.stalls = stats.stalls;
+        row.frames = stats.frames;
+        // What the transport said while the load ran: the closed-path lines carry noq's reason.
+        let text = String::from_utf8_lossy(log.lock().get(mark..).unwrap_or_default()).into_owned();
+        row.closed = text
+            .lines()
+            .filter(|line| line.contains("path closed") || line.contains("abandon"))
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect();
+        eprintln!("flap {}: paths after load: {}", shape.name(), link.paths());
+        drop(screen);
+        link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
+        link.close();
+        endpoint.close().await;
+        Some(row)
+    }
+
+    /// A capture target that produces no frame at all: the host says so, and the receiver stops
+    /// asking for refreshes no refresh can answer.
+    ///
+    /// The target is this test's own window ([`slopty-idle-window`]), on screen while the host
+    /// lists it and ordered out before the stream opens, so ScreenCaptureKit has nothing to
+    /// deliver. Gated on `SLOPTY_SCREEN_E2E`: it needs the screen-recording permission.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_that_never_draws_is_reported_idle_and_stops_the_asking() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let markers = dir.path().join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let title = format!("slopty idle {}", std::process::id());
+        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+            .arg(&markers)
+            .arg(&title)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the idle window");
+        let ready = markers.join("ready");
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(20))
+            .expect("a deadline inside the clock");
+        while !ready.exists() {
+            assert!(tokio::time::Instant::now() < deadline, "the idle window never opened");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let target = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { windows, .. })) => {
+                    let found = windows.iter().find(|w| w.title == title);
+                    break found.expect("the idle window in the listing").id;
+                }
+                _other => {}
+            }
+        };
+        // Off screen before the stream opens: listed (the host enumerates with
+        // `onScreenWindowsOnly: false`), captured, and never drawing.
+        std::fs::write(markers.join("hide"), b"").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        link.send(ClientMsg::Screen(ScreenRequest::Open {
+            target: CaptureTarget::Window(target),
+            quality: Quality::default(),
+        }))
+        .await
+        .unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => break (stream, codec),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let screen = link.screen(stream, codec);
+
+        // The host notices there is nothing to capture and says so, exactly as the app's canvas
+        // would hear it.
+        let mut states = Vec::new();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("a deadline inside the clock");
+        while tokio::time::Instant::now() < deadline {
+            let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+            else {
+                continue;
+            };
+            if let LinkEvent::Control(HostMsg::Screen(ScreenEvent::Source { state, .. })) = event {
+                states.push(state);
+                screen.set_source_live(state == SourceState::Live);
+                if state == SourceState::Idle {
+                    break;
+                }
+            }
+        }
+        assert_eq!(states.last(), Some(&SourceState::Idle), "the host never called it idle");
+
+        // Told that, the receiver gives up asking: whatever it sent before the hint, it sends no
+        // more of them over the next stretch, and the count is inside the cap either way.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let quiet = screen.stats();
+        let cap = u64::from(slopty_media::Config::default().refresh_max_repeats);
+        eprintln!("idle window: {} refreshes, cap {cap}", quiet.refreshes);
+        assert!(
+            quiet.refreshes <= cap,
+            "{} refresh requests for a source that cannot answer one (cap {cap})",
+            quiet.refreshes
+        );
+        assert_eq!(quiet.frames, 0, "an ordered-out window produced pictures");
+
+        // Drawing again brings the stream back with no help from the client.
+        std::fs::write(markers.join("show"), b"").unwrap();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(15))
+            .expect("a deadline inside the clock");
+        let mut live = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Source {
+                state,
+                ..
+            })))) = tokio::time::timeout(Duration::from_millis(250), events.recv()).await
+            {
+                live |= state == SourceState::Live;
+                screen.set_source_live(state == SourceState::Live);
+            }
+            if live && screen.stats().frames > 0 {
+                break;
+            }
+        }
+        let back = screen.stats();
+        assert!(live, "the host never took the idle hint back");
+        assert!(back.frames > 0, "no picture after the window drew again: {back:?}");
+
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+        drop(screen);
+        link.close();
+        endpoint.close().await;
+    }
+
+    /// [`bin`] for a binary whose package is not named after it.
+    fn bin_of(package: &str, name: &str) -> PathBuf {
+        let hostd = PathBuf::from(env!("CARGO_BIN_EXE_slopty-hostd"));
+        let path = hostd.with_file_name(name);
+        if !path.exists() {
+            let release = hostd.parent().is_some_and(|dir| dir.ends_with("release"));
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut build = std::process::Command::new(cargo);
+            build.args(["build", "-p", package, "--bin", name]);
+            if release {
+                build.arg("--release");
+            }
+            let status = build.status().expect("run cargo");
+            assert!(status.success(), "build {name}");
+        }
+        path
     }
 }
