@@ -452,6 +452,175 @@ mod tests {
         sample
     }
 
+    /// One row of the loss table: what a run at a given injected drop rate delivered.
+    #[derive(Debug, Default)]
+    struct LossRow {
+        drop_permille: u32,
+        /// Frames handed to the decoder.
+        frames: u64,
+        /// Of those, the ones that needed parity.
+        fec: u64,
+        /// Of those, the ones that needed a retransmission.
+        retransmit: u64,
+        /// Frames given up on.
+        lost: u64,
+        nacks: u64,
+        refreshes: u64,
+        /// Datagrams the receiver saw, and the data fragments that never arrived.
+        datagrams: u64,
+        datagrams_lost: u64,
+        /// Parity fragments per thousand data fragments, as seen on the wire. Not the
+        /// controller's ratio: the packetizer rounds up to at least one parity fragment, so a
+        /// stream of small frames reads high whatever the ratio is. What matters is how it
+        /// moves between rows.
+        parity_seen: u16,
+        /// Gaps between decoded frames.
+        gap_p50_ms: f64,
+        gap_p90_ms: f64,
+        gap_max_ms: f64,
+    }
+
+    /// Stream the first display for `seconds` with `drop_permille` of the client's datagrams
+    /// thrown away before the router sees them, and report what got through.
+    async fn loss_sample(ctl_sock: &std::path::Path, seconds: u64, drop_permille: u32) -> LossRow {
+        let ticket = mint(ctl_sock).await;
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        // Deterministic: the same rate always drops the same datagrams of the sequence.
+        link.screens().set_loss(drop_permille);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let display = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
+                    break displays.first().expect("a display").id;
+                }
+                _other => {}
+            }
+        };
+        let target = CaptureTarget::Display(display);
+        link.send(ClientMsg::Screen(ScreenRequest::Open { target, quality: Quality::default() }))
+            .await
+            .unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => break (stream, codec),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let screen = link.screen(stream, codec);
+        let mut frames = screen.frames();
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
+        let mut gaps: Vec<f64> = Vec::new();
+        let mut last: Option<std::time::Instant> = None;
+        let mut row = LossRow { drop_permille, ..LossRow::default() };
+        loop {
+            tokio::select! {
+                changed = frames.changed() => {
+                    if changed.is_err() { break; }
+                    if frames.borrow_and_update().is_none() { continue; }
+                    let now = std::time::Instant::now();
+                    if let Some(prev) = last {
+                        gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
+                    }
+                    last = Some(now);
+                }
+                () = tokio::time::sleep_until(deadline) => break,
+                ev = events.recv() => match ev {
+                    Some(LinkEvent::Disconnected(why)) => panic!("disconnected: {why}"),
+                    Some(_other) => {}
+                    None => break,
+                },
+            }
+        }
+        let stats = screen.stats();
+        row.frames = stats.frames;
+        row.fec = stats.frames_fec;
+        row.retransmit = stats.frames_retransmit;
+        row.lost = stats.frames_lost;
+        row.nacks = stats.nacks;
+        row.refreshes = stats.refreshes;
+        row.datagrams = stats.datagrams;
+        row.datagrams_lost = stats.datagrams_lost;
+        row.parity_seen = stats.parity_permille;
+        (row.gap_p50_ms, row.gap_p90_ms, row.gap_max_ms) = quantiles(&mut gaps);
+        drop(screen);
+        link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
+        link.close();
+        endpoint.close().await;
+        row
+    }
+
+    /// What parity, NACK and refresh recover on a path that drops datagrams, at three rates.
+    /// Loopback carries everything, so the loss is injected on the client's receive path with a
+    /// fixed seed: the same rate always drops the same datagrams, and two builds compare on the
+    /// same losses. `SLOPTY_E2E_SECONDS` (default 5) per rate. Prints a table for
+    /// `docs/MEASUREMENTS.md`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn screen_under_injected_loss() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let seconds: u64 =
+            std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let dir = tempfile::tempdir().unwrap();
+        let _logs = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+        slopty_client::warm_up_decoder();
+        let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let ctl_sock = dir.path().join("hostd.sock");
+        let mut rows = Vec::new();
+        // 0/20/50 ‰ are the rates the ruling is about; 100 ‰ is the stress row that shows
+        // what happens once parity alone cannot cover the loss.
+        for permille in [0_u32, 20, 50, 100] {
+            rows.push(loss_sample(&ctl_sock, seconds, permille).await);
+        }
+        eprintln!(
+            "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | parity seen | gap p50 / p90 / max |"
+        );
+        for r in &rows {
+            eprintln!(
+                "| {} ‰ | {} | {} | {} | {} | {} / {} | {} ({}) | {} ‰ | {:.1} / {:.1} / {:.1} ms |",
+                r.drop_permille,
+                r.frames,
+                r.fec,
+                r.retransmit,
+                r.lost,
+                r.nacks,
+                r.refreshes,
+                r.datagrams,
+                r.datagrams_lost,
+                r.parity_seen,
+                r.gap_p50_ms,
+                r.gap_p90_ms,
+                r.gap_max_ms,
+            );
+        }
+        for r in &rows {
+            assert!(r.frames >= 1, "{} permille decoded nothing: {r:?}", r.drop_permille);
+        }
+        let clean = rows.first().expect("the 0 permille row");
+        assert_eq!(clean.lost, 0, "a lossless path lost frames: {clean:?}");
+        assert_eq!(clean.refreshes, 0, "a lossless path needed a refresh: {clean:?}");
+        assert_eq!(clean.nacks, 0, "a lossless path asked for a retransmission: {clean:?}");
+        // Parity has to answer the loss: on a lossy path it must be repairing frames, and
+        // between them parity, NACK and refresh must not leave a frame behind at these rates.
+        for r in rows.iter().skip(1) {
+            assert!(r.fec > 0, "{} permille loss repaired nothing: {r:?}", r.drop_permille);
+            assert_eq!(r.lost, 0, "{} permille loss lost a frame: {r:?}", r.drop_permille);
+        }
+    }
+
     /// Start-up on a cold connection, several samples in one run: how long the first frame
     /// takes and whether the first seconds stall. `SLOPTY_E2E_SAMPLES` (default 5) samples of
     /// `SLOPTY_E2E_SECONDS` (default 3) each, every one on a fresh QUIC connection to the same

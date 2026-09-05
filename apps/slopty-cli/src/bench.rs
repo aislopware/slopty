@@ -5,8 +5,10 @@
 //!
 //! Frame latency is capture timestamp → decoded frame available, on the host time clock, so it
 //! is only meaningful when client and host share a clock (loopback). Everything else (fps,
-//! arrival jitter, loss, FEC, NACKs) holds over any path. `SLOPTY_DROP_PERMILLE` on this
-//! process drops incoming media datagrams to simulate a lossy path.
+//! arrival jitter, loss, FEC, NACKs) holds over any path. `SLOPTY_E2E_DROP_PERMILLE` on this
+//! process (or the older `SLOPTY_DROP_PERMILLE`) drops incoming media datagrams from a fixed
+//! seed to simulate a lossy path: the same rate always drops the same datagrams of the
+//! sequence, so two builds compare on the same losses.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
