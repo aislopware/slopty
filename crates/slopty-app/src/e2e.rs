@@ -19,12 +19,15 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
     ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
+use slopty_core::ItemId;
 use slopty_e2e::{
-    Button, Command, ConversationInfo, Dump, HostInfo, ItemInfo, Reply, TerminalInfo, WindowInfo,
+    Button, Command, ConversationInfo, Dump, HostInfo, ItemInfo, Reply, ScreenInfo, TerminalInfo,
+    WindowInfo,
 };
 use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
+use slopty_ui::screen::ScreenView;
 use slopty_ui::terminal::conversation::Attention;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
@@ -309,6 +312,30 @@ fn agent_line(status: &AgentStatus) -> String {
     }
 }
 
+/// Everything a test may want to know about one remote window, timings in microseconds.
+fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
+    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    let pacing = view.pacing();
+    let size = view.size();
+    ScreenInfo {
+        item: item.to_string(),
+        stream: view.stream().0,
+        size: size.into(),
+        frames: view.frames(),
+        presented: pacing.presented,
+        skipped: pacing.skipped,
+        repeats: pacing.repeats,
+        late: pacing.late,
+        latency_p50_us: us(pacing.latency_p50),
+        latency_p95_us: us(pacing.latency_p95),
+        latency_max_us: us(pacing.latency_max),
+        decode_p50_us: us(pacing.decode_p50),
+        interval_p50_us: us(pacing.interval_p50),
+        interval_jitter_us: us(pacing.interval_jitter),
+        window: pacing.window,
+    }
+}
+
 /// One line for a conversation entry, as the dump lists them.
 fn entry_line(entry: &TranscriptEntry) -> String {
     let first = |text: &str| text.lines().next().unwrap_or_default().to_owned();
@@ -388,6 +415,15 @@ impl Workspace {
                 active: canvas.active_item() == Some(item.id),
                 sleeping: item.sleeping,
             });
+            if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
+                && let Some(view) = canvas.screen(item.id)
+            {
+                let view = view.read(cx);
+                if view.focus_handle(cx).is_focused(window) {
+                    focused = format!("screen:{}", view.stream().0);
+                }
+                dump.screens.push(screen_info(item.id, view));
+            }
             if let ItemKind::Terminal { session } = item.kind
                 && let Some(view) = canvas.terminal(session)
             {

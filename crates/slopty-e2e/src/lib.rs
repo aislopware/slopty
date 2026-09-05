@@ -164,6 +164,8 @@ pub struct Dump {
     pub items: Vec<ItemInfo>,
     /// Terminals on the active canvas.
     pub terminals: Vec<TerminalInfo>,
+    /// Remote windows and displays on the active canvas.
+    pub screens: Vec<ScreenInfo>,
 }
 
 /// The window.
@@ -228,6 +230,47 @@ pub struct TerminalInfo {
     pub agent: Option<String>,
     /// The agent's conversation, while it is shown in place of the grid.
     pub conversation: Option<ConversationInfo>,
+}
+
+/// One remote window or display, and how its pictures reach the screen.
+///
+/// The timings are microseconds so a test can assert on them without floating point. They cover
+/// the client's own presentation path: `latency_*` starts at the arrival of the datagram that
+/// completed the frame and ends at the paint that showed it, `interval_*` is the spacing of
+/// those paints, and `skipped` / `repeats` are the two cadence faults (a frame the display never
+/// saw, a paint that showed the picture already up).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct ScreenInfo {
+    /// Canvas item id.
+    pub item: String,
+    /// Stream id.
+    pub stream: u32,
+    /// Stream pixel size.
+    pub size: [u32; 2],
+    /// Frames painted.
+    pub frames: u64,
+    /// Frames the pacer put on screen.
+    pub presented: u64,
+    /// Frames replaced before they were ever painted.
+    pub skipped: u64,
+    /// Paints that showed the picture already up.
+    pub repeats: u64,
+    /// Frames dropped as not newer than what was up.
+    pub late: u64,
+    /// Median arrival → present, microseconds.
+    pub latency_p50_us: u64,
+    /// 95th percentile of the same.
+    pub latency_p95_us: u64,
+    /// Worst in the window.
+    pub latency_max_us: u64,
+    /// Median arrival → decoded, microseconds.
+    pub decode_p50_us: u64,
+    /// Median gap between presented frames, microseconds.
+    pub interval_p50_us: u64,
+    /// Mean absolute deviation of that gap, microseconds.
+    pub interval_jitter_us: u64,
+    /// Frames the pacer's ring holds.
+    pub window: usize,
 }
 
 /// A terminal's conversation view.

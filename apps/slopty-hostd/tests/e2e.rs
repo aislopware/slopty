@@ -270,7 +270,7 @@ mod tests {
         while tokio::time::timeout_at(deadline, frames.changed()).await.is_ok_and(|r| r.is_ok()) {
             let frame = frames.borrow_and_update().clone().expect("a frame after a change");
             assert_eq!(
-                (frame.image.width(), frame.image.height()),
+                (frame.frame.image.width(), frame.frame.image.height()),
                 (width as usize, height as usize)
             );
             decoded += 1;
@@ -320,6 +320,10 @@ mod tests {
         lost: u64,
         /// The host's bitrate decisions: `target(verdict)`.
         rate: String,
+        /// What the presentation path did with the stream: the same `Pacer` the GPUI element
+        /// runs, fed the same `frames` channel and paced by a 60 Hz timer standing in for the
+        /// display link.
+        pacing: slopty_client::PacingStats,
     }
 
     /// `min / p50 / p90 / max` of `samples`, in milliseconds.
@@ -386,11 +390,19 @@ mod tests {
         let mut gaps: Vec<f64> = Vec::new();
         let mut last: Option<std::time::Instant> = None;
         let mut rate: Vec<String> = Vec::new();
+        // The app's presentation path: the element's pacer, offered every decoded frame and
+        // asked to present on a 60 Hz timer. A tokio timer is not a display link, so the
+        // interval jitter carries the timer's own; arrival -> present does not.
+        let mut pacer = slopty_client::Pacer::default();
+        let mut paint = tokio::time::interval(Duration::from_micros(16_667));
+        paint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _paint = paint.tick() => pacer.presented(),
                 changed = frames.changed() => {
                     if changed.is_err() { break; }
-                    if frames.borrow_and_update().is_none() { continue; }
+                    let Some(frame) = frames.borrow_and_update().clone() else { continue };
+                    let _pace = pacer.offer(frame.stamp);
                     let now = std::time::Instant::now();
                     if let Some(prev) = last {
                         gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
@@ -421,6 +433,7 @@ mod tests {
         sample.refreshes = stats.refreshes;
         sample.lost = stats.frames_lost;
         sample.rate = rate.join(" ");
+        sample.pacing = pacer.stats();
         assert_eq!(stats.decode_errors, 0, "{stats:?}");
         drop(screen);
         link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
@@ -512,9 +525,36 @@ mod tests {
                 s.rate
             );
         }
+        eprintln!(
+            "| sample | presented | arrival → present p50 / p95 / max | decode p50 | present every | jitter | skip / repeat / late |"
+        );
+        for (i, s) in rows.iter().enumerate() {
+            let p = &s.pacing;
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            eprintln!(
+                "| {i} | {} | {:.1} / {:.1} / {:.1} ms | {:.1} ms | {:.1} ms | ±{:.1} ms | {} / {} / {} |",
+                p.presented,
+                ms(p.latency_p50),
+                ms(p.latency_p95),
+                ms(p.latency_max),
+                ms(p.decode_p50),
+                ms(p.interval_p50),
+                ms(p.interval_jitter),
+                p.skipped,
+                p.repeats,
+                p.late,
+            );
+        }
         for (i, s) in rows.iter().enumerate() {
             assert!(s.decoded >= 1, "sample {i} decoded nothing: {s:?}");
             assert_eq!(s.lost, 0, "sample {i} lost frames: {s:?}");
+            // Present on arrival: a decoded frame is never held back for a later paint, so no
+            // frame waits longer than the decode plus one paint interval plus slack.
+            assert!(
+                s.pacing.presented > 0 && s.pacing.late == 0,
+                "sample {i} presented nothing, or presented out of order: {:?}",
+                s.pacing
+            );
         }
     }
 }
