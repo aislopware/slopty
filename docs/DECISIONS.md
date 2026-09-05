@@ -325,6 +325,46 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   in the constructor; tests `the_line_limit_governs_retained_history` (20k of 20k kept) and
   `history_is_pruned_near_the_line_limit` (page-granular, bounded).
 
+- ✅ **NACK and refresh requests are datagrams, not control-stream messages** (2026-09-05).
+  Measured on the Wi-Fi → mesh path (MEASUREMENTS.md, "screen stream over the mesh"): loss is
+  bursty (a typical gap takes 3–6 of a frame's 5–7 fragments, parity included, so FEC recovered
+  2 of 29 gaps), and the frames the receiver gave up on had two NACKs out and *nothing* back
+  within the 70–83 ms deadline while the host had the frames in its history. The control
+  stream is ordered: once the packet carrying a NACK is lost, every retry queues behind it
+  until QUIC's loss timer (a PTO, tens of ms on Wi-Fi) retransmits it, so the receiver's own
+  retries cannot help. `slopty_proto::screen::Feedback { Nack, Refresh }` now goes
+  client → host as a QUIC datagram (postcard body, no header; the host reads datagrams only
+  for this), each one standing alone; a fragment list that would not fit a datagram degrades
+  to "whole frame". Reports stay on the control stream (they are periodic and idempotent).
+  Protocol 3.
+- ✅ **Loss deadlines only run while the link is flowing** (2026-09-05). With NACKs as
+  datagrams the give-ups did not go away, and the host side explained why: hostd now logs the
+  selected path's `cwnd`/`congestion_events`/`lost_packets` and the datagram send-buffer
+  headroom on every NACK — QUIC reported **0 lost packets** for the whole run, cwnd wide
+  open, buffer empty, and the client's two NACKs for a "lost" frame reached the host 20 ms
+  *after* the client had already asked for a refresh. So the Wi-Fi/mesh path does not drop;
+  it **stalls** for 100–300 ms and then releases everything at once (both directions), and a
+  wall-clock deadline turned every stall into a refresh (IDR) plus dropped frames. Rule in
+  `Reassembler::tick`: a NACK is retried only if something arrived since the last one, and a
+  frame past its deadline is lost only if newer datagrams are still coming in
+  (`now - arrived_at < deadline`); an outright stall is waited out up to `Config::max_hold`
+  (500 ms) — a refresh could not cross it either. When the stall clears (a silence of at
+  least `Config::stall_gap`, 50 ms, or one NACK round trip if longer) every pending frame's
+  clock restarts: the NACK written into the stall only left with the release, so its answer
+  is a round trip away from *now*; the first version without this still lost a frame in the
+  very tick the burst arrived. The 50 ms floor matters: at LAN round trips the NACK gap is a
+  few ms, and without the floor every 17 ms inter-frame gap would count as a stall. Tests
+  `a_stalled_link_holds_the_frame_until_it_moves_again`,
+  `a_stall_restarts_the_nack_clock_when_the_link_resumes`,
+  `a_stall_longer_than_max_hold_gives_up`. Cost: on a *still* screen a genuinely dropped tail
+  waits the full 500 ms before the refresh (nothing newer arrives to prove the drop).
+- ✅ **hostd binds a fixed UDP port** (2026-09-05): `slopty-hostd --port` / `SLOPTY_PORT`,
+  default `slopty_net::endpoint::HOST_PORT` (45550), IPv4 required, IPv6 best effort. Found
+  when a hostd restart stranded the paired MacBook: with `--direct-only` a client on another
+  subnet knows the host only by the ticket's `ip:port` and cannot hear mDNS, so a random port
+  per launch meant re-pairing after every restart. A port in use is a hard error (a silent
+  fallback to a random port would bring the problem back); tests pass `--port 0`.
+
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report

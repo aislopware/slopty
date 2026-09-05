@@ -35,7 +35,7 @@ Three kinds of traffic, one QUIC connection per (client, host):
 |---|---|---|
 | Control | one bidirectional stream, length-prefixed `postcard` messages | hello, auth, open/close, resize, canvas doc sync, agent events |
 | Terminal | one unidirectional stream per session, host→client; input on the control stream | grid **row diffs** from the host-side VT engine, scrollback line pages on demand |
-| Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape |
+| Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape; client → host: `Feedback` (NACK, refresh), each datagram standing alone so a lost one never holds the next back |
 
 ## 2. Terminal: the VT engine lives on the host
 
@@ -86,7 +86,7 @@ SCStream(window | display, 420v/P010, minimumFrameInterval, queueDepth=2, showsC
                          AllowFrameReordering=false, AllowOpenGOP=false, MaxFrameDelayCount=0,
                          EnableLTR, MaxKeyFrameInterval=∞, AverageBitRate + DataRateLimits)
   → packetize (≤1200 B datagrams, 16 B header) → reed-solomon-simd parity per frame
-  → iroh datagrams                                      ── client acks LTR tokens, NACKs, telemetry
+  → iroh datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
 client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffer (IOSurface)
   → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (vsync off)
 ```

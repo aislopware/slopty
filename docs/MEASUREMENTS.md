@@ -205,3 +205,55 @@ Takeaways:
   stop it.
 
 Not yet measured: LTE from the phone, a release build, and the arrival→present hold in the GPUI app.
+
+## 2026-09-05 — stalls, not drops: feedback datagrams and stall-aware deadlines on the mesh path
+
+Same setup as the previous section (Ghostty window 900×500 scrolling `seq`, 15 s runs, debug
+build, macbook-pro over Wi-Fi → WireGuard mesh → mac-studio). Client run with
+`RUST_LOG=warn,slopty_media=debug,slopty_client=debug` so every NACK and give-up is logged;
+hostd with `slopty_hostd=debug` logs each NACK it receives with the selected path's QUIC
+stats (`slopty_net::endpoint::describe_health`).
+
+What the traces showed before any change:
+
+* A typical gap is the **tail** of a frame: 3–6 of 5–7 fragments missing, parity included
+  (parity trails the data). FEC recovered 2 of 29 gaps; NACKs the rest.
+* Every give-up had 2 NACKs out and nothing back, at exactly the computed deadline
+  (70–83 ms at the smoothed rtt).
+* Host side, over a whole run: `lost 0 pkts`, `congestion 0`, cwnd ~100 KB, datagram send
+  buffer empty — and the client's two NACKs for the given-up frame arrived at the host 20 ms
+  **after** the client had already asked for a refresh, 136 µs apart. The path holds packets
+  for 100–300 ms and releases them together; it rarely drops.
+
+| client build                                              | run | fps  | gap p50 / p90 / max        | FEC / lost / NACK / refresh |
+| --------------------------------------------------------- | --- | ---- | -------------------------- | --------------------------- |
+| NACK on the control stream (before)                       | 1   | 57.7 | 15.9 / 22.8 / 290.9 ms     | 2 / 5 / 29 / 5              |
+|                                                           | 2   | 57.8 | 16.7 / 20.8 / 156.9 ms     | 0 / 1 / 20 / 1              |
+|                                                           | 3   | 58.1 | 16.9 / 20.5 / 158.0 ms     | 0 / 1 / 10 / 1              |
+| NACK/refresh as datagrams (`Feedback`, protocol 3)        | 1   | 56.6 | 15.9 / 23.2 / 183.8 ms     | 0 / 2 / 23 / 2              |
+|                                                           | 2   | 57.6 | 15.4 / 22.7 / 159.1 ms     | 0 / 1 / 33 / 1              |
+|                                                           | 3   | 58.1 | 15.5 / 22.5 / 151.9 ms     | 0 / 0 / 24 / 0              |
+| + flow-aware deadline, `max_hold` 500 ms                  | 1   | 57.5 | 16.1 / 23.1 / 156.0 ms     | 6 / 1 / 35 / 1              |
+| + NACK clock restarts when a stall clears (`stall_gap`)   | 1   | 58.2 | 15.4 / 21.9 / 165.6 ms     | 3 / 0 / 23 / 0              |
+|                                                           | 2   | 58.4 | 15.6 / 22.3 / 158.2 ms     | 4 / 0 / 17 / 0              |
+|                                                           | 3   | 58.1 | 15.5 / 22.6 / 161.7 ms     | 1 / 0 / 23 / 0              |
+
+The one give-up left after the flow-aware deadline was declared in the very tick the stall
+released (`flowing=true`, one NACK out, its answer one round trip away); restarting the NACK
+clock on resume removed it. The arrival-gap max stays at ~160 ms: that is the stall itself,
+which no receiver policy can hide — but it no longer costs an IDR and a dropped run of frames.
+
+Host path stats at the end of the later runs also showed a few *real* losses (5–9 QUIC packets
+per 15 s, cwnd cut to 13–20 KB by Cubic). At 4 Mbit/s that is harmless; at the 30 Mbit/s target
+a 13 KB window over 10 ms rtt would cap the stream near 10 Mbit/s. Congestion control for the
+media datagrams (noq ships BBR3) is the next thing to measure.
+
+Commands (as in the previous section; the bench loop was
+`/tmp/slopty-manual/fbbench.sh`, typing `seq 1 20000000` into Ghostty before each run):
+
+```sh
+RUST_LOG=warn,slopty_media=debug,slopty_client=debug SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 \
+  /tmp/slopty-bench/slopty bench screen --window 927 --seconds 15
+grep 'frame lost\|nack' <client log>
+grep 'nack\|screen closing' <hostd log>      # path=rtt … cwnd … congestion … lost … space …
+```
