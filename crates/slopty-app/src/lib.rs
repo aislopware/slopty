@@ -27,12 +27,12 @@ use slopty_core::SessionId;
 use slopty_net::EndpointId;
 use slopty_proto::HostMsg;
 use slopty_settings::{Loaded, Settings};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 use slopty_ui::canvas::{
     AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
     NextAttention,
 };
-use slopty_ui::colors::hsla;
+use slopty_ui::colors::{hsla, hsla_alpha};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::terminal::TerminalView;
 
@@ -192,12 +192,9 @@ impl Workspace {
         if theme == self.theme {
             return;
         }
-        let mode = match theme.variant() {
-            slopty_theme::Variant::Dark => gpui_kit::component::ThemeMode::Dark,
-            slopty_theme::Variant::Light => gpui_kit::component::ThemeMode::Light,
-        };
-        // gpui-kit widgets (the pairing input) follow their own theme.
-        gpui_kit::component::Theme::change(mode, None, cx);
+        // gpui-kit widgets (inputs, the composer, Markdown) read gpui-kit's theme: keep it on
+        // the same tokens.
+        slopty_ui::kit::sync(&theme, cx);
         let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
         for canvas in canvases {
             canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
@@ -647,35 +644,42 @@ impl Workspace {
     }
 
     fn pairing_panel(&self, pairing: &Pairing, cx: &Context<Self>) -> impl IntoElement {
-        let s = &self.theme.surfaces;
-        let button = |id: &'static str, text: &'static str, accent: bool| {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        let button = move |id: &'static str, text: &'static str, accent: bool| {
             div()
                 .id(id)
-                .px(px(12.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .text_size(px(13.0))
-                .text_color(hsla(if accent { s.canvas } else { s.text }))
-                .bg(hsla(if accent { s.accent } else { s.canvas }))
-                .hover(|el| el.opacity(0.85))
+                .px(px(spacing.md))
+                .py(px(spacing.xs))
+                .rounded(px(radii.sm))
+                .text_size(px(theme.typography.ui_size))
+                .text_color(hsla(if accent { s.accent_fg } else { s.text }))
+                .bg(hsla(if accent { s.accent } else { s.raised }))
+                .when(!accent, |el| el.hover(move |el| el.bg(hsla(s.overlay))))
                 .cursor_pointer()
                 .child(text)
         };
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(spacing.md))
             .w(px(420.0))
             .max_w_full()
-            .p(px(20.0))
-            .rounded(px(10.0))
+            .p(px(spacing.xl))
+            .rounded(px(radii.md))
             .bg(hsla(s.panel))
             .border_1()
             .border_color(hsla(s.border))
-            .child(div().text_size(px(15.0)).text_color(hsla(s.text)).child("Pair with a host"))
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(theme.typography.title()))
+                    .text_color(hsla(s.text))
+                    .child("Pair with a host"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child("On the host Mac run `slopty host ticket`, then paste the ticket here."),
             )
@@ -683,7 +687,7 @@ impl Workspace {
             .child(
                 div()
                     .flex()
-                    .gap(px(8.0))
+                    .gap(px(spacing.sm))
                     .items_center()
                     .child(
                         button("pair", "Pair", true)
@@ -700,9 +704,9 @@ impl Workspace {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme.typography.small()))
                             .text_color(hsla(if pairing.error.is_some() {
-                                self.theme.terminal.palette(1)
+                                s.error
                             } else {
                                 s.text_muted
                             }))
@@ -724,6 +728,25 @@ impl Workspace {
         }
     }
 
+    /// A key cap of the bar: `raised` on the `panel` bar, `overlay` while pressed, the accent
+    /// with its foreground when `lit` (armed or toggled on).
+    fn key_cap(&self, id: String, lit: bool, text_size: f32) -> gpui::Stateful<gpui::Div> {
+        let s = &self.theme.surfaces;
+        let pressed = if lit { s.accent } else { s.overlay };
+        div()
+            .id(SharedString::from(id))
+            .flex_1()
+            .h(px(KEY_BAR_H - self.theme.spacing.sm))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(self.theme.radii.sm))
+            .text_size(px(text_size))
+            .text_color(hsla(if lit { s.accent_fg } else { s.text }))
+            .bg(hsla(if lit { s.accent } else { s.raised }))
+            .active(move |el| el.bg(hsla(pressed)))
+    }
+
     /// One key of the bar; `lit` draws it armed.
     fn bar_key(
         &self,
@@ -732,19 +755,7 @@ impl Workspace {
         lit: bool,
         on_click: impl Fn(&mut Window, &mut App) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
-        let s = &self.theme.surfaces;
-        div()
-            .id(SharedString::from(id))
-            .flex_1()
-            .h(px(KEY_BAR_H - 10.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .text_size(px(13.0))
-            .text_color(hsla(if lit { s.canvas } else { s.text }))
-            .bg(hsla(if lit { s.accent } else { s.canvas }))
-            .active(|el| el.opacity(0.7))
+        self.key_cap(id, lit, self.theme.typography.ui_size)
             .child(SharedString::from(label))
             .on_click(move |_ev, window, cx| on_click(window, cx))
     }
@@ -760,8 +771,8 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
-            .px(px(6.0))
-            .gap(px(4.0))
+            .px(px(self.theme.spacing.xs))
+            .gap(px(self.theme.spacing.xs))
             .bg(hsla(s.panel))
             .border_t_1()
             .border_color(hsla(s.border))
@@ -818,29 +829,20 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
-            .px(px(6.0))
-            .gap(px(4.0))
+            .px(px(self.theme.spacing.xs))
+            .gap(px(self.theme.spacing.xs))
             .bg(hsla(s.panel))
             .border_t_1()
             .border_color(hsla(s.border))
             .font_family(self.theme.typography.ui_family.clone());
+        let ui = self.theme.typography.ui_size;
+        let small = self.theme.typography.small();
         for (label, key, typed) in BAR_KEYS {
             let is_control = key.is_empty();
             let lit = is_control && armed;
             let target = terminal.clone();
             bar = bar.child(
-                div()
-                    .id(SharedString::from(format!("key-{label}")))
-                    .flex_1()
-                    .h(px(KEY_BAR_H - 10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .text_size(px(14.0))
-                    .text_color(hsla(if lit { s.canvas } else { s.text }))
-                    .bg(hsla(if lit { s.accent } else { s.canvas }))
-                    .active(|el| el.opacity(0.7))
+                self.key_cap(format!("key-{label}"), lit, ui)
                     .child(SharedString::from(label))
                     .on_click(move |_ev, _window, cx| {
                         target.update(cx, |t, cx| {
@@ -864,18 +866,7 @@ impl Workspace {
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
         bar = bar.child(
-            div()
-                .id("key-clipboard")
-                .flex_1()
-                .h(px(KEY_BAR_H - 10.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(px(12.0))
-                .text_color(hsla(if has_selection { s.canvas } else { s.text }))
-                .bg(hsla(if has_selection { s.accent } else { s.canvas }))
-                .active(|el| el.opacity(0.7))
+            self.key_cap("key-clipboard".to_owned(), has_selection, small)
                 .child(if has_selection { "copy" } else { "paste" })
                 .on_click(move |_ev, window, cx| {
                     target.update(cx, |t, cx| {
@@ -892,21 +883,9 @@ impl Workspace {
         // No ⌘F either: "find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
         let finding = terminal.read(cx).finding();
-        bar = bar.child(
-            div()
-                .id("key-find")
-                .flex_1()
-                .h(px(KEY_BAR_H - 10.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(px(12.0))
-                .text_color(hsla(if finding { s.canvas } else { s.text }))
-                .bg(hsla(if finding { s.accent } else { s.canvas }))
-                .active(|el| el.opacity(0.7))
-                .child("find")
-                .on_click(move |_ev, window, cx| {
+        bar =
+            bar.child(self.key_cap("key-find".to_owned(), finding, small).child("find").on_click(
+                move |_ev, window, cx| {
                     target.update(cx, |t, cx| {
                         if finding {
                             t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
@@ -914,8 +893,8 @@ impl Workspace {
                             t.find(&slopty_ui::terminal::Find, window, cx);
                         }
                     });
-                }),
-        );
+                },
+            ));
         bar.into_any_element()
     }
 
@@ -926,9 +905,11 @@ impl Workspace {
         narrow: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let s = &self.theme.surfaces;
-        // Bar text sits one point under the UI size (12 at the default 13).
-        let ui = self.theme.typography.ui_size - 1.0;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        // Bar text is the small step of the scale.
+        let ui = theme.typography.small();
         let active = self.active_slot();
         let zoom = active.map_or(1.0, |h| h.zoom);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
@@ -946,12 +927,13 @@ impl Workspace {
             div()
                 .id(id)
                 .flex_none()
-                .px(px(if narrow { 5.0 } else { 8.0 }))
-                .py(px(3.0))
-                .rounded(px(5.0))
+                .px(px(if narrow { spacing.xs } else { spacing.sm }))
+                .py(px(spacing.xs))
+                .rounded(px(radii.sm))
                 .text_size(px(ui))
                 .text_color(hsla(s.text))
-                .hover(|el| el.bg(hsla(s.panel)))
+                .hover(move |el| el.bg(hsla(s.panel)))
+                .active(move |el| el.bg(hsla(s.raised)))
                 .cursor_pointer()
                 .child(SharedString::from(if SHORTCUT_HINTS {
                     format!("{text}  {hint}")
@@ -995,19 +977,19 @@ impl Workspace {
         // the next one (switching host when the one on show has none).
         let total = self.needs_you_total();
         let needs_you = (total > 0).then(|| {
-            let warm = self.theme.terminal.palette(3);
+            let warm = s.warn;
             let text =
                 if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") };
             div()
                 .id("needs-you")
                 .flex_none()
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(5.0))
+                .px(px(spacing.sm))
+                .py(px(spacing.xxs))
+                .rounded(px(radii.xs))
                 .text_size(px(ui))
                 .text_color(hsla(warm))
-                .bg(slopty_ui::colors::hsla_alpha(warm, 0.15))
-                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(warm, 0.3)))
+                .bg(hsla_alpha(warm, alpha::TINT))
+                .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT_STRONG)))
                 .cursor_pointer()
                 .child(SharedString::from(if SHORTCUT_HINTS {
                     format!("{text}  ⌘⇧A")
@@ -1025,20 +1007,21 @@ impl Workspace {
             .min_w(px(if narrow { 96.0 } else { 0.0 }))
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .px(px(6.0))
-            .py(px(3.0))
-            .rounded(px(5.0))
-            .hover(|el| el.bg(hsla(s.panel)))
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
+            .py(px(spacing.xs))
+            .rounded(px(radii.sm))
+            .hover(move |el| el.bg(hsla(s.panel)))
+            .active(move |el| el.bg(hsla(s.raised)))
             .cursor_pointer()
-            .child(div().flex_none().size(px(7.0)).rounded_full().bg(hsla(dot)))
+            .child(div().flex_none().size(px(spacing.sm)).rounded_full().bg(hsla(dot)))
             .child(
                 div()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(ui + 0.5))
+                    .text_size(px(theme.typography.ui_size))
                     .text_color(hsla(s.text))
                     .child(SharedString::from(
                         active.map_or_else(|| "Slopty".to_owned(), |h| h.name.clone()),
@@ -1048,7 +1031,7 @@ impl Workspace {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(px(ui - 3.0))
+                        .text_size(px(theme.typography.caption()))
                         .text_color(hsla(s.text_muted))
                         .child("▾"),
                 )
@@ -1063,9 +1046,9 @@ impl Workspace {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(if narrow { 6.0 } else { 12.0 }))
+            .gap(px(if narrow { spacing.sm } else { spacing.md }))
             .pl(px(LEADING_INSET))
-            .pr(px(12.0))
+            .pr(px(spacing.md))
             .bg(hsla(s.canvas))
             .border_b_1()
             .border_color(hsla(s.border))
@@ -1074,16 +1057,15 @@ impl Workspace {
             .child(host_button)
             // Narrow: the status lives in the switcher rows; only a notice claims bar space.
             .child(match &self.notice {
-                Some((_, text)) => {
-                    label(text.clone()).text_color(hsla(self.theme.terminal.palette(3)))
-                }
+                Some((_, text)) => label(text.clone()).text_color(hsla(s.warn)),
                 None if narrow => label(String::new()),
                 None => label(self.status_text()),
             })
             .child(div().flex_1())
             .child(match (silent, rtt, relayed) {
-                (Some(gap), _, _) => label(format!("host silent {}s", gap.as_secs()))
-                    .text_color(hsla(self.theme.terminal.palette(3))),
+                (Some(gap), _, _) => {
+                    label(format!("host silent {}s", gap.as_secs())).text_color(hsla(s.warn))
+                }
                 (None, _, _) if narrow => label(String::new()),
                 (None, Some(d), Some(true)) => {
                     label(format!("{:.1} ms via relay", d.as_secs_f64() * 1e3))
@@ -1105,8 +1087,11 @@ impl Workspace {
     /// The host switcher: one row per host (status dot, name, state, "forget"), then
     /// "Add host…". Anchored under the host name; a click anywhere else closes it.
     fn switcher(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
-        let s = &self.theme.surfaces;
-        let ui = self.theme.typography.ui_size;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        let ui = theme.typography.ui_size;
+        let small = theme.typography.small();
         let mut panel = div()
             .id("host-switcher-panel")
             .occlude()
@@ -1114,12 +1099,12 @@ impl Workspace {
             .max_w_full()
             .flex()
             .flex_col()
-            .py(px(6.0))
-            .rounded(px(self.theme.radius))
+            .py(px(spacing.xs))
+            .rounded(px(radii.md))
             .bg(hsla(s.panel))
             .border_1()
             .border_color(hsla(s.border))
-            .shadow_md()
+            .shadow_sm()
             .font_family(self.theme.typography.ui_family.clone())
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation());
         for host in &self.hosts {
@@ -1130,13 +1115,14 @@ impl Workspace {
                 .id(SharedString::from(format!("host-{id}")))
                 .flex()
                 .items_center()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .py(px(6.0))
+                .gap(px(spacing.sm))
+                .px(px(spacing.md))
+                .py(px(spacing.sm))
                 .cursor_pointer()
-                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.12)))
-                .when(on_show, |el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.08)))
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(hsla(color)))
+                .hover(move |el| el.bg(hsla(s.raised)))
+                .active(move |el| el.bg(hsla(s.overlay)))
+                .when(on_show, |el| el.bg(hsla_alpha(s.accent, alpha::TINT_FAINT)))
+                .child(div().flex_none().size(px(spacing.sm)).rounded_full().bg(hsla(color)))
                 .child(
                     div()
                         .flex_1()
@@ -1157,7 +1143,7 @@ impl Workspace {
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .text_size(px(ui - 2.0))
+                                .text_size(px(small))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(host.status.text())),
                         ),
@@ -1166,12 +1152,12 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("forget-{id}")))
                         .flex_none()
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded(px(4.0))
-                        .text_size(px(ui - 2.0))
+                        .px(px(spacing.xs))
+                        .py(px(spacing.xxs))
+                        .rounded(px(radii.xs))
+                        .text_size(px(small))
                         .text_color(hsla(s.text_muted))
-                        .hover(|el| el.text_color(hsla(self.theme.terminal.palette(1))))
+                        .hover(move |el| el.text_color(hsla(s.error)))
                         .child("forget")
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             cx.stop_propagation();
@@ -1181,15 +1167,15 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _ev, window, cx| this.activate(id, window, cx)));
             panel = panel.child(row);
         }
-        panel = panel.child(div().h(px(1.0)).my(px(4.0)).bg(hsla(s.border))).child(
+        panel = panel.child(div().h(px(1.0)).my(px(spacing.xs)).bg(hsla(s.border))).child(
             div()
                 .id("add-host")
-                .px(px(12.0))
-                .py(px(6.0))
+                .px(px(spacing.md))
+                .py(px(spacing.sm))
                 .text_size(px(ui))
                 .text_color(hsla(s.accent))
                 .cursor_pointer()
-                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(s.accent, 0.12)))
+                .hover(move |el| el.bg(hsla(s.raised)))
                 .child(SharedString::from(if SHORTCUT_HINTS {
                     "Add host…  ⌘⇧H".to_owned()
                 } else {
@@ -1205,7 +1191,7 @@ impl Workspace {
             .absolute()
             .inset_0()
             .pt(px(TOP_BAR) + safe_top)
-            .pl(px(LEADING_INSET - 6.0))
+            .pl(px(LEADING_INSET - spacing.sm))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
@@ -1218,11 +1204,11 @@ impl Workspace {
 }
 
 /// The dot colour for a host's link state.
-fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
+const fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
     match status {
-        HostStatus::Connected => theme.terminal.palette(2),
-        HostStatus::Connecting | HostStatus::Reconnecting(_) => theme.terminal.palette(3),
-        HostStatus::NeedsPairing => theme.terminal.palette(1),
+        HostStatus::Connected => theme.surfaces.success,
+        HostStatus::Connecting | HostStatus::Reconnecting(_) => theme.surfaces.warn,
+        HostStatus::NeedsPairing => theme.surfaces.error,
     }
 }
 
@@ -1241,7 +1227,7 @@ impl Render for Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .p(px(16.0))
+                .p(px(self.theme.spacing.lg))
                 .child(self.pairing_panel(pairing, cx)),
             (Some(canvas), None) => div().flex_1().w_full().child(canvas),
             (None, None) => div()
@@ -1250,7 +1236,7 @@ impl Render for Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(13.0))
+                .text_size(px(self.theme.typography.ui_size))
                 .text_color(hsla(surfaces.text_muted))
                 .child(SharedString::from(self.status_text())),
         };
@@ -1314,9 +1300,9 @@ pub fn open_workspace(
         gpui::KeyBinding::new("cmd-shift-h", AddHost, None),
     ]);
     cx.on_action(|_: &OpenSettings, cx| open_settings_file(cx));
-    // gpui-kit widgets (the pairing input) follow their own theme; the real one is set once the
+    // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
-    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    slopty_ui::kit::sync(&Theme::default(), cx);
     let settings_path = slopty_settings::path();
     let loaded = Settings::load(&settings_path);
     let workspace = cx.new(|_cx| Workspace {

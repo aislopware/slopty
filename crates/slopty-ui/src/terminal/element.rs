@@ -14,7 +14,7 @@ use gpui::{
 };
 use slopty_grid::{CursorShape, Line, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
-use slopty_theme::TerminalPalette;
+use slopty_theme::{TerminalPalette, Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
@@ -101,14 +101,14 @@ struct PreparedRow {
     separator: Option<Hsla>,
 }
 
-/// The command-block separator for a prompt-start row: the foreground, faint, or the
-/// theme's ANSI red when the command before it reported a non-zero status.
+/// The command-block separator for a prompt-start row: the terminal foreground, faint, or
+/// the chrome's error tone when the command before it reported a non-zero status.
 #[must_use]
-pub fn separator_color(palette: &TerminalPalette, exit: Option<u8>) -> Hsla {
+pub fn separator_color(theme: &Theme, exit: Option<u8>) -> Hsla {
     if exit.is_some_and(|code| code != 0) {
-        hsla_alpha(palette.palette(1), 0.7)
+        hsla_alpha(theme.surfaces.error, alpha::SEPARATOR_ERROR)
     } else {
-        hsla_alpha(palette.fg, 0.18)
+        hsla_alpha(theme.terminal.fg, alpha::SEPARATOR)
     }
 }
 
@@ -358,7 +358,7 @@ impl Element for TerminalElement {
         let base_size = px(theme.typography.mono_size);
         let (base_cell_width, base_line_height, _font_id) =
             measure(window, &base_font, base_size, theme.typography.mono_line_height);
-        let base_pad = px(theme.space);
+        let base_pad = px(theme.spacing.sm);
         let unscaled = size(bounds.size.width / zoom, bounds.size.height / zoom);
         let inner = size(unscaled.width - base_pad * 2.0, unscaled.height - base_pad * 2.0);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≥ 1 clamped")]
@@ -503,7 +503,7 @@ impl Element for TerminalElement {
                     .map(|(_, start, end)| (start, end.min(grid_cols)));
                 // A prompt starts here: rule off the command above it, red when it failed.
                 let separator = (line.mark.starts_prompt() && index.0 > 0)
-                    .then(|| separator_color(palette, line.mark.exit()));
+                    .then(|| separator_color(&theme, line.mark.exit()));
                 prepared_rows.push(PreparedRow { y, quads, line: shaped, link, separator });
             }
         });

@@ -20,7 +20,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptFollow, TranscriptUpdate};
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
@@ -1326,8 +1326,25 @@ impl EntityInputHandler for TerminalView {
 
 impl TerminalView {
     /// The search bar: field, "n/total", close. Sits over the top-right corner of the grid.
-    fn render_search(&self, search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
-        let s = &self.theme.surfaces;
+    fn render_search(
+        &self,
+        search: &Search,
+        focused: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        let wash = hsla_alpha(s.text, alpha::HOVER);
+        let bare = move |id: &'static str| {
+            div()
+                .id(id)
+                .px(px(spacing.xs))
+                .rounded(px(radii.xs))
+                .cursor_pointer()
+                .text_color(hsla(s.text_muted))
+                .hover(move |st| st.bg(wash))
+        };
         let count: SharedString = if search.needle.is_empty() {
             SharedString::default()
         } else if search.invalid.is_some() {
@@ -1343,75 +1360,50 @@ impl TerminalView {
             .id("terminal-search")
             .key_context("TerminalSearch")
             .absolute()
-            .top(px(6.0))
+            .top(px(spacing.sm))
             // A phone-wide terminal can be wider than the screen; its left edge is the part
             // that is on screen (the "take" pill sits there for the same reason).
-            .when(cfg!(target_os = "ios"), |bar| bar.left(px(6.0)))
-            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(6.0)))
+            .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
+            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
+            .py(px(spacing.xs))
+            .rounded(px(radii.sm))
             .bg(hsla(s.panel))
             .border_1()
-            .border_color(hsla(s.accent))
-            .shadow_md()
-            .text_size(px(12.0))
+            // The focus ring: accent while the field has the caret, a hairline otherwise.
+            .border_color(hsla(if focused { s.accent } else { s.border }))
+            .shadow_sm()
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .font_family(self.theme.typography.ui_family.clone())
             .on_action(cx.listener(Self::close_find))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(div().w(px(180.0)).child(Input::new(&search.input)))
             .child(
-                div()
-                    .id("terminal-search-regex")
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_color(hsla(if search.regex { s.canvas } else { s.text_muted }))
-                    .when(search.regex, |el| el.bg(hsla(s.accent)))
-                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                bare("terminal-search-regex")
+                    .when(search.regex, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
             )
-            .child(div().min_w(px(40.0)).text_color(hsla(s.text_muted)).child(count))
+            .child(div().min_w(px(40.0)).text_color(hsla(s.text_secondary)).child(count))
             .child(
-                div()
-                    .id("terminal-search-prev")
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_color(hsla(s.text_muted))
-                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                bare("terminal-search-prev")
                     .child("↑")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(-1, cx))),
             )
             .child(
-                div()
-                    .id("terminal-search-next")
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_color(hsla(s.text_muted))
-                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                bare("terminal-search-next")
                     .child("↓")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(1, cx))),
             )
-            .child(
-                div()
-                    .id("terminal-search-close")
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_color(hsla(s.text_muted))
-                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
-                    .child("✕")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.close_find(&CloseFind, window, cx);
-                    })),
-            )
+            .child(bare("terminal-search-close").child("✕").on_click(cx.listener(
+                |this, _ev, window, cx| {
+                    this.close_find(&CloseFind, window, cx);
+                },
+            )))
             .into_any_element()
     }
 }
@@ -1428,12 +1420,16 @@ impl Render for TerminalView {
             });
         }
         let attention = self.attention();
-        let ui_size = self.theme.typography.ui_size;
+        let composer_focused = self.composer_focused(window, cx);
         let conversation = self
             .conversation
             .as_ref()
-            .map(|c| c.render(attention.as_ref(), &self.theme, ui_size, cx));
-        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
+            .map(|c| c.render(attention.as_ref(), composer_focused, &self.theme, cx));
+        let search_focused = self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
+        let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
@@ -1616,11 +1612,12 @@ mod tests {
     fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let palette = Theme::default().terminal;
-        let ok = separator_color(&palette, Some(0));
-        let failed = separator_color(&palette, Some(1));
-        let none = separator_color(&palette, None);
+        let theme = Theme::default();
+        let ok = separator_color(&theme, Some(0));
+        let failed = separator_color(&theme, Some(1));
+        let none = separator_color(&theme, None);
         assert_ne!(ok, failed);
+        assert_eq!(failed, hsla_alpha(theme.surfaces.error, alpha::SEPARATOR_ERROR));
         assert_eq!(ok, none, "no status and a zero status rule the same faint line");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
@@ -1837,6 +1834,59 @@ mod tests {
         assert!(!composer_focused(&view, cx));
         cx.simulate_keystrokes("x");
         assert!(drain_input(&mut rx).contains(&"x".to_owned()), "the grid has the keys");
+    }
+
+    /// The border painted around the element with `selector`, from the scene.
+    fn border_color_of(cx: &mut VisualTestContext, selector: &'static str) -> Option<gpui::Hsla> {
+        let bounds = cx.debug_bounds(selector)?;
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 1.0
+        };
+        quads
+            .iter()
+            .find(|q| {
+                near(q.bounds.origin.x, bounds.origin.x)
+                    && near(q.bounds.origin.y, bounds.origin.y)
+                    && near(q.bounds.size.width, bounds.size.width)
+                    && q.border_widths.top.0 > 0.0
+            })
+            .map(|q| q.border_color)
+    }
+
+    /// The composer's field wears the accent ring while it has the caret and a hairline
+    /// once the grid takes the keyboard back; the row above it is the warn tint.
+    #[gpui::test]
+    fn the_composer_wears_a_focus_ring_only_while_focused(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let theme = Theme::default();
+        cx.simulate_keystrokes("cmd-shift-l");
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx));
+        assert_eq!(border_color_of(cx, "composer-field"), Some(hsla(theme.surfaces.accent)));
+
+        cx.update(|window, cx| {
+            let grid = view.read(cx).focus.clone();
+            window.focus(&grid, cx);
+        });
+        cx.run_until_parked();
+        assert!(!composer_focused(&view, cx));
+        assert_eq!(border_color_of(cx, "composer-field"), Some(hsla(theme.surfaces.border)));
+
+        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+        view.update(cx, |v, cx| v.set_agent_status(Some(blocked), cx));
+        cx.run_until_parked();
+        let row = cx.debug_bounds("conversation-attention").expect("the attention row");
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let fill = quads
+            .iter()
+            .find(|q| {
+                f32::from(row.origin.y).mul_add(-scale, q.bounds.origin.y.0).abs() < 1.0
+                    && f32::from(row.size.height).mul_add(-scale, q.bounds.size.height.0).abs()
+                        < 1.0
+            })
+            .and_then(|q| q.background.as_solid());
+        assert_eq!(fill, Some(hsla_alpha(theme.surfaces.warn, alpha::TINT)));
     }
 
     /// A permission puts an Allow / Deny row above the composer; pressing one raises

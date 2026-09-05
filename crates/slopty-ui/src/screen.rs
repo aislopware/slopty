@@ -35,7 +35,7 @@ use slopty_proto::screen::{
     CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput, ScreenRequest,
     ScrollPhase, VideoCodec,
 };
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::hsla;
@@ -823,7 +823,7 @@ impl Render for ScreenView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
+                    .text_size(px(self.theme.typography.small()))
                     .text_color(hsla(self.theme.surfaces.text_muted))
                     .font_family(self.theme.typography.ui_family.clone())
                     .child("waiting for the first frame…")
@@ -837,14 +837,14 @@ impl Render for ScreenView {
         let hud = self.hud_text().map(|text| {
             div()
                 .absolute()
-                .top(px(4.0))
-                .right(px(4.0))
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .bg(crate::colors::hsla_alpha(self.theme.surfaces.panel, 0.85))
-                .text_size(px(10.0))
-                .text_color(hsla(self.theme.surfaces.text))
+                .top(px(self.theme.spacing.xs))
+                .right(px(self.theme.spacing.xs))
+                .px(px(self.theme.spacing.sm))
+                .py(px(self.theme.spacing.xxs))
+                .rounded(px(self.theme.radii.xs))
+                .bg(crate::colors::hsla_alpha(self.theme.surfaces.overlay, alpha::HUD))
+                .text_size(px(self.theme.typography.caption()))
+                .text_color(hsla(self.theme.surfaces.text_secondary))
                 .font_family(self.theme.typography.ui_family.clone())
                 .child(text)
         });

@@ -28,7 +28,7 @@ use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
 };
 use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest, TermSize};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
@@ -136,9 +136,6 @@ const MINIMAP_PAD: f32 = 6.0;
 const ZOOM_STEP: f32 = 1.25;
 /// Largest item a picked window gets on the canvas, in points.
 const MAX_PICKED: (f32, f32) = (1600.0, 1000.0);
-/// Horizontal padding of the badge buttons, in `ui_size` units: a finger needs more than a
-/// pointer.
-const ANSWER_PAD: f32 = if cfg!(target_os = "ios") { 1.0 } else { 0.6 };
 
 /// What the user chose on a blocked agent's badge; shown until the host reports the agent's
 /// next state, so a second tap cannot send a second key.
@@ -1507,7 +1504,7 @@ impl CanvasView {
         let chat = agent.and_then(|(session, _)| {
             let view = self.terminals.get(&session)?;
             let on = view.read(cx).conversation().is_some();
-            Some(chat_button(id, view.clone(), on, theme, ui_size, cx))
+            Some(chat_button(id, view.clone(), on, theme, cx))
         });
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
@@ -1516,7 +1513,7 @@ impl CanvasView {
                 .terminals
                 .get(&session)
                 .filter(|v| !v.read(cx).driving())
-                .map(|_| take_button(id, theme, ui_size, cx)),
+                .map(|_| take_button(id, theme, cx)),
             // A window with sound offers mute; a muted one always shows it, so a silenced item
             // is never mistaken for one whose sound simply stopped.
             ItemKind::Window { .. } | ItemKind::Display { .. } => self
@@ -1524,13 +1521,13 @@ impl CanvasView {
                 .get(&id)
                 .map(|v| v.read(cx))
                 .filter(|v| v.muted() || (active && v.has_audio()))
-                .map(|v| mute_button(id, v.muted(), theme, ui_size, cx)),
+                .map(|v| mute_button(id, v.muted(), theme, cx)),
             _ => None,
         };
         let needs_human = agent
             .is_some_and(|(session, a)| needs_human(a) && !self.answered.contains_key(&session));
         let border = if needs_human {
-            theme.terminal.palette(3)
+            theme.surfaces.warn
         } else if focused || active {
             theme.surfaces.accent
         } else {
@@ -1543,8 +1540,8 @@ impl CanvasView {
             .w_full()
             .flex()
             .items_center()
-            .px(px(10.0 * if card { 1.0 } else { zoom }))
-            .gap(px(6.0))
+            .px(px(theme.spacing.sm * if card { 1.0 } else { zoom }))
+            .gap(px(theme.spacing.sm))
             .bg(hsla(theme.surfaces.panel))
             .border_b_1()
             .border_color(hsla(theme.surfaces.border))
@@ -1556,12 +1553,11 @@ impl CanvasView {
                 MouseButton::Left,
                 cx.listener(move |this, ev, _w, cx| this.begin_move(id, ev, cx)),
             )
-            .child(div().size(px(7.0 * if card { 1.0 } else { zoom })).rounded_full().bg(
-                hsla_alpha(
-                    if focused { theme.surfaces.accent } else { theme.surfaces.text_muted },
-                    0.9,
+            .child(
+                div().size(px(theme.spacing.sm * if card { 1.0 } else { zoom })).rounded_full().bg(
+                    hsla(if focused { theme.surfaces.accent } else { theme.surfaces.text_muted }),
                 ),
-            ))
+            )
             // "take" sits left of the title so it stays reachable on a phone when the item is
             // wider than the screen.
             .when_some(take, gpui::ParentElement::child)
@@ -1585,8 +1581,8 @@ impl CanvasView {
                     div()
                         .flex_1()
                         .w_full()
-                        .p(px(10.0))
-                        .text_size(px(11.0))
+                        .p(px(theme.spacing.sm))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(theme.surfaces.text_muted))
                         .font_family(theme.typography.ui_family.clone())
                         .child(SharedString::from(format!("{cols}×{rows}")))
@@ -1637,7 +1633,8 @@ impl CanvasView {
             }
             ItemKind::Note { text: note_text } => match (card, self.notes.get(&item.id)) {
                 (false, Some(view)) => {
-                    view.update(cx, |v, _| v.set_zoom(zoom));
+                    let (pad, text_size) = (theme.spacing.sm, ui_size);
+                    view.update(cx, |v, _| v.set_layout(zoom, pad, text_size));
                     div()
                         .flex_1()
                         .w_full()
@@ -1650,9 +1647,9 @@ impl CanvasView {
                 _ => div()
                     .flex_1()
                     .w_full()
-                    .p(px(10.0))
+                    .p(px(theme.spacing.sm))
                     .overflow_hidden()
-                    .text_size(px(11.0))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(theme.surfaces.text_muted))
                     .font_family(theme.typography.ui_family.clone())
                     .child(SharedString::from(note_summary(note_text)))
@@ -1683,11 +1680,10 @@ impl CanvasView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(theme.radius * if card { 1.0 } else { zoom }))
+            .rounded(px(theme.radii.md * if card { 1.0 } else { zoom }))
             .border_1()
             .border_color(hsla(border))
             .bg(hsla(theme.terminal.bg))
-            .shadow_md()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _ev, _w, cx| this.click_item(id, cx)),
@@ -1727,8 +1723,8 @@ impl CanvasView {
             move |bounds, map: MinimapMap, window, _cx| {
                 window.paint_quad(gpui::quad(
                     bounds,
-                    px(theme.radius),
-                    hsla_alpha(theme.surfaces.panel, 0.92),
+                    px(theme.radii.md),
+                    hsla_alpha(theme.surfaces.panel, alpha::MINIMAP),
                     px(1.0),
                     hsla(theme.surfaces.border),
                     BorderStyle::Solid,
@@ -1736,7 +1732,10 @@ impl CanvasView {
                 for (rect, active) in &items {
                     let color =
                         if *active { theme.surfaces.accent } else { theme.surfaces.text_muted };
-                    window.paint_quad(fill(map.to_box(*rect), hsla_alpha(color, 0.7)));
+                    window.paint_quad(fill(
+                        map.to_box(*rect),
+                        hsla_alpha(color, alpha::MINIMAP_ITEM),
+                    ));
                 }
                 window.paint_quad(outline(
                     map.to_box(viewport),
@@ -1849,7 +1848,7 @@ impl Render for CanvasView {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(13.0))
+                        .text_size(px(self.theme.typography.ui_size))
                         .text_color(hsla(self.theme.surfaces.text_muted))
                         .font_family(self.theme.typography.ui_family.clone())
                         .child("⌘T opens a shell on the host · ⌘O adds a window"),
@@ -1869,21 +1868,11 @@ fn mute_button(
     id: ItemId,
     muted: bool,
     theme: &Theme,
-    ui_size: f32,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
-    let (label, tint) =
-        if muted { ("muted", theme.terminal.palette(3)) } else { ("mute", theme.surfaces.accent) };
-    div()
-        .id(element_id("mute", id))
-        .flex_none()
-        .px(px(ui_size * 0.5))
-        .py(px(ui_size * 0.1))
-        .rounded(px(ui_size * 0.35))
-        .bg(hsla_alpha(tint, 0.25))
-        .text_color(hsla(theme.surfaces.text))
-        .cursor_pointer()
-        .child(label)
+    let (label, tone) =
+        if muted { ("muted", theme.surfaces.warn) } else { ("mute", theme.surfaces.accent) };
+    pill(element_id("mute", id), label, tone, theme)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _ev, _w, cx| {
@@ -1898,22 +1887,8 @@ fn mute_button(
 }
 
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
-fn take_button(
-    id: ItemId,
-    theme: &Theme,
-    ui_size: f32,
-    cx: &Context<CanvasView>,
-) -> gpui::AnyElement {
-    div()
-        .id(element_id("take", id))
-        .flex_none()
-        .px(px(ui_size * 0.5))
-        .py(px(ui_size * 0.1))
-        .rounded(px(ui_size * 0.35))
-        .bg(hsla_alpha(theme.surfaces.accent, 0.25))
-        .text_color(hsla(theme.surfaces.text))
-        .cursor_pointer()
-        .child("take")
+fn take_button(id: ItemId, theme: &Theme, cx: &Context<CanvasView>) -> gpui::AnyElement {
+    pill(element_id("take", id), "take", theme.surfaces.accent, theme)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _ev, _w, cx| {
@@ -1930,19 +1905,10 @@ fn chat_button(
     view: Entity<TerminalView>,
     on: bool,
     theme: &Theme,
-    ui_size: f32,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
-    div()
-        .id(element_id("chat", id))
-        .flex_none()
-        .px(px(ui_size * 0.5))
-        .py(px(ui_size * 0.1))
-        .rounded(px(ui_size * 0.35))
-        .bg(hsla_alpha(if on { theme.surfaces.accent } else { theme.surfaces.text_muted }, 0.25))
-        .text_color(hsla(theme.surfaces.text))
-        .cursor_pointer()
-        .child("chat")
+    let tone = if on { theme.surfaces.accent } else { theme.surfaces.text_secondary };
+    pill(element_id("chat", id), "chat", tone, theme)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_this, _ev, window, cx| {
@@ -1951,6 +1917,28 @@ fn chat_button(
             }),
         )
         .into_any_element()
+}
+
+/// A title-bar pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
+/// hover deepens the fill.
+fn pill(
+    id: ElementId,
+    label: &'static str,
+    tone: slopty_theme::Rgb,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(theme.spacing.sm))
+        .py(px(theme.spacing.xxs))
+        .rounded(px(theme.radii.xs))
+        .bg(hsla_alpha(tone, alpha::TINT))
+        .text_size(px(theme.typography.small()))
+        .text_color(hsla(tone))
+        .cursor_pointer()
+        .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
+        .child(label)
 }
 
 /// Whether the agent is waiting on the human (an idle prompt is not worth an outline).
@@ -2008,29 +1996,28 @@ impl CanvasView {
             (AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt), _) => {
                 (agent_status_text(agent), theme.surfaces.text_muted)
             }
-            (AgentStatus::Working, _) => (agent_status_text(agent), theme.surfaces.accent),
-            (AgentStatus::Tool { .. }, _) => (agent_status_text(agent), theme.terminal.palette(6)),
-            (AgentStatus::Blocked(_), None) => {
-                (agent_status_text(agent), theme.terminal.palette(3))
+            // Busy states (thinking, a tool) share the accent: the label says which.
+            (AgentStatus::Working | AgentStatus::Tool { .. }, _) => {
+                (agent_status_text(agent), theme.surfaces.accent)
             }
-            (AgentStatus::Done, _) => (agent_status_text(agent), theme.terminal.palette(2)),
+            (AgentStatus::Blocked(_), None) => (agent_status_text(agent), theme.surfaces.warn),
+            (AgentStatus::Done, _) => (agent_status_text(agent), theme.surfaces.success),
         };
         let button = |part: &'static str, text: &'static str, accent: bool| {
+            let tone = if accent { theme.surfaces.accent } else { theme.surfaces.text_secondary };
             div()
                 .id(element_id(part, item))
                 .flex_none()
-                .h(px(ui_size * 1.7))
                 .flex()
                 .items_center()
-                .px(px(ui_size * ANSWER_PAD))
-                .rounded(px(ui_size * 0.35))
-                .bg(hsla_alpha(
-                    if accent { theme.surfaces.accent } else { theme.surfaces.text_muted },
-                    0.3,
-                ))
-                .text_size(px(ui_size * 0.9))
+                .px(px(if cfg!(target_os = "ios") { theme.spacing.md } else { theme.spacing.sm }))
+                .py(px(theme.spacing.xs))
+                .rounded(px(theme.radii.xs))
+                .bg(hsla_alpha(tone, alpha::TINT_STRONG))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(theme.surfaces.text))
                 .cursor_pointer()
+                .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
                 .child(text)
         };
         let buttons: Vec<gpui::AnyElement> = match (&agent.status, answered) {
@@ -2073,20 +2060,26 @@ impl CanvasView {
             .flex_none()
             .max_w(px(ui_size * if buttons.is_empty() { 22.0 } else { 14.0 }))
             .overflow_hidden()
-            .gap(px(ui_size * 0.4))
-            .px(px(ui_size * 0.5))
-            .py(px(ui_size * 0.1))
-            .rounded(px(ui_size * 0.5))
-            .bg(hsla_alpha(color, 0.12))
-            .text_size(px(ui_size * 0.9))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .py(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.xs))
+            .bg(hsla_alpha(color, alpha::TINT))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(color))
-            .child(div().flex_none().size(px(ui_size * 0.5)).rounded_full().bg(hsla(color)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(theme.spacing.xs + theme.spacing.xxs))
+                    .rounded_full()
+                    .bg(hsla(color)),
+            )
             .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)));
         div()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(ui_size * 0.4))
+            .gap(px(theme.spacing.xs))
             .child(pill)
             .children(buttons)
             .into_any_element()
@@ -2103,6 +2096,7 @@ mod tests {
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, Style, TermModes};
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
     use super::*;
@@ -2314,6 +2308,37 @@ mod tests {
         );
     }
 
+    /// The colour of the frame painted around item `id`, read from the scene, not from pixels.
+    fn border_of(cx: &mut VisualTestContext, id: ItemId) -> Option<gpui::Hsla> {
+        let bounds = cx.debug_bounds(selector("item", id))?;
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 1.0
+        };
+        quads
+            .iter()
+            .find(|q| {
+                near(q.bounds.origin.x, bounds.origin.x)
+                    && near(q.bounds.origin.y, bounds.origin.y)
+                    && near(q.bounds.size.width, bounds.size.width)
+                    && q.border_widths.top.0 > 0.0
+            })
+            .map(|q| q.border_color)
+    }
+
+    /// The solid fill painted over the whole window (the canvas surface), if any.
+    fn window_fill(cx: &mut VisualTestContext) -> Option<gpui::Hsla> {
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        quads
+            .iter()
+            .find(|q| {
+                VIEWPORT.0.mul_add(-scale, q.bounds.size.width.0).abs() < 1.0
+                    && VIEWPORT.1.mul_add(-scale, q.bounds.size.height.0).abs() < 1.0
+                    && q.border_widths.top.0 == 0.0
+            })
+            .and_then(|q| q.background.as_solid())
+    }
+
     /// The active item's frame is painted in the accent colour; the others in the border
     /// colour. Read from the scene, not from pixels.
     #[gpui::test]
@@ -2324,25 +2349,47 @@ mod tests {
         let first = host_opens(&view, cx, a, me, SHELL, 1);
         let second = host_opens(&view, cx, b, me, Rect { x: 760.0, ..SHELL }, 2);
         let theme = Theme::default();
-
-        let border_of = |cx: &mut VisualTestContext, id: ItemId| -> Option<gpui::Hsla> {
-            let bounds = cx.debug_bounds(selector("item", id))?;
-            let (scale, quads) =
-                cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-            let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-                f32::from(logical).mul_add(-scale, scaled.0).abs() < 1.0
-            };
-            quads
-                .iter()
-                .find(|q| {
-                    near(q.bounds.origin.x, bounds.origin.x)
-                        && near(q.bounds.origin.y, bounds.origin.y)
-                        && near(q.bounds.size.width, bounds.size.width)
-                        && q.border_widths.top.0 > 0.0
-                })
-                .map(|q| q.border_color)
-        };
         assert_eq!(border_of(cx, second), Some(hsla(theme.surfaces.accent)));
         assert_eq!(border_of(cx, first), Some(hsla(theme.surfaces.border)));
+    }
+
+    /// An agent waiting on the human outlines its item in the warn tone, over the accent of
+    /// the active item; a theme swap to the light variant repaints outline and canvas from the
+    /// light tokens, so both tables are wired through.
+    #[gpui::test]
+    fn a_blocked_agent_outlines_its_item_in_the_warn_tone_in_both_variants(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let a = SessionId::new();
+        let item = host_opens(&view, cx, a, me, SHELL, 1);
+        let dark = Theme::default();
+        assert_eq!(border_of(cx, item), Some(hsla(dark.surfaces.accent)), "active, no agent");
+        assert_eq!(window_fill(cx), Some(hsla(dark.surfaces.canvas)));
+
+        let blocked = AgentEvent {
+            session: a,
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+            agent_session: None,
+            detail: None,
+            attention: true,
+        };
+        view.update(cx, |v, cx| v.agent_event(blocked.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(border_of(cx, item), Some(hsla(dark.surfaces.warn)));
+
+        let light = Theme::new(slopty_theme::Variant::Light);
+        view.update(cx, |v, cx| v.set_theme(light.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(border_of(cx, item), Some(hsla(light.surfaces.warn)));
+        assert_eq!(window_fill(cx), Some(hsla(light.surfaces.canvas)));
+        assert_ne!(light.surfaces.warn, dark.surfaces.warn, "the light table has its own tone");
+
+        // Working again: the outline is the accent once more (this item is still active).
+        let working = AgentEvent { status: AgentStatus::Working, ..blocked };
+        view.update(cx, |v, cx| v.agent_event(working, cx));
+        cx.run_until_parked();
+        assert_eq!(border_of(cx, item), Some(hsla(light.surfaces.accent)));
     }
 }

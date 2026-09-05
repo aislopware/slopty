@@ -32,6 +32,10 @@ pub struct NoteView {
     /// Bumped on every change; a scheduled commit only fires if it is still current.
     generation: u64,
     zoom: f32,
+    /// Inner padding at zoom 1 (the theme's base spacing).
+    pad: f32,
+    /// Text size at zoom 1 (the theme's UI size).
+    text_size: f32,
     _subscription: gpui::Subscription,
 }
 
@@ -63,6 +67,8 @@ impl NoteView {
             synced: text.to_owned(),
             generation: 0,
             zoom: 1.0,
+            pad: 8.0,
+            text_size: 13.0,
             _subscription: subscription,
         }
     }
@@ -85,9 +91,11 @@ impl NoteView {
         self.text.read(cx).focus_handle(cx).is_focused(window)
     }
 
-    /// Paint scale (the canvas's zoom).
-    pub const fn set_zoom(&mut self, zoom: f32) {
+    /// Paint scale (the canvas's zoom) and the theme's inset and type size at scale 1.
+    pub const fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32) {
         self.zoom = zoom;
+        self.pad = pad;
+        self.text_size = text_size;
     }
 
     /// The document changed under us (another client edited the note).
@@ -140,8 +148,12 @@ impl Focusable for NoteView {
 
 impl Render for NoteView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().p(px(8.0 * self.zoom)).text_size(px(13.0 * self.zoom)).child(
-            Textarea::new(&self.text).appearance(false).bordered(false).h(gpui::relative(1.0)),
-        )
+        div()
+            .size_full()
+            .p(px(self.pad * self.zoom))
+            .text_size(px(self.text_size * self.zoom))
+            .child(
+                Textarea::new(&self.text).appearance(false).bordered(false).h(gpui::relative(1.0)),
+            )
     }
 }

@@ -13,7 +13,7 @@ use gpui::{
 };
 use slopty_core::SessionId;
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
@@ -129,19 +129,20 @@ impl WindowPicker {
     ) -> impl IntoElement {
         let theme = &self.theme;
         let Line { primary, secondary, hot } = line;
-        let secondary_color =
-            if hot { theme.terminal.palette(3) } else { theme.surfaces.text_muted };
+        let secondary_color = if hot { theme.surfaces.warn } else { theme.surfaces.text_muted };
+        let (raised, overlay) = (theme.surfaces.raised, theme.surfaces.overlay);
         div()
             .id(id)
             .w_full()
-            .px(px(12.0))
-            .py(px(6.0))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.sm))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .rounded(px(theme.radius * 0.6))
+            .gap(px(theme.spacing.sm))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .hover(|s| s.bg(hsla_alpha(theme.surfaces.accent, 0.12)))
+            .hover(move |s| s.bg(hsla(raised)))
+            .active(move |s| s.bg(hsla(overlay)))
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.emit(on_pick.clone());
@@ -160,10 +161,10 @@ impl WindowPicker {
     /// A muted heading between the picker's sections.
     fn heading(&self, text: &'static str) -> impl IntoElement {
         div()
-            .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(2.0))
-            .text_size(px(11.0))
+            .px(px(self.theme.spacing.md))
+            .pt(px(self.theme.spacing.sm))
+            .pb(px(self.theme.spacing.xxs))
+            .text_size(px(self.theme.typography.caption()))
             .text_color(hsla(self.theme.surfaces.text_muted))
             .child(text)
     }
@@ -217,7 +218,7 @@ impl Render for WindowPicker {
             .flex()
             .items_center()
             .justify_center()
-            .bg(hsla_alpha(theme.surfaces.canvas, 0.6))
+            .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(
                 MouseButton::Left,
@@ -233,18 +234,18 @@ impl Render for WindowPicker {
                     .max_h(px(520.0))
                     .flex()
                     .flex_col()
-                    .rounded(px(theme.radius))
+                    .rounded(px(theme.radii.md))
                     .border_1()
                     .border_color(hsla(theme.surfaces.border))
                     .bg(hsla(theme.surfaces.panel))
-                    .shadow_lg()
-                    .text_size(px(13.0))
+                    .shadow_sm()
+                    .text_size(px(theme.typography.ui_size))
                     .font_family(theme.typography.ui_family.clone())
                     .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                     .child(
                         div()
-                            .px(px(14.0))
-                            .py(px(10.0))
+                            .px(px(theme.spacing.md))
+                            .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
                             .text_color(hsla(theme.surfaces.text))
@@ -255,12 +256,12 @@ impl Render for WindowPicker {
                             .id("picker-list")
                             .flex_1()
                             .overflow_y_scroll()
-                            .p(px(6.0))
+                            .p(px(theme.spacing.xs))
                             .children(rows)
                             .when(empty, |el| {
                                 el.child(
                                     div()
-                                        .p(px(12.0))
+                                        .p(px(theme.spacing.md))
                                         .text_color(hsla(theme.surfaces.text_muted))
                                         .child("nothing on the canvas or shareable on the host"),
                                 )

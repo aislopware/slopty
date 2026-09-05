@@ -8,12 +8,14 @@
 //! * [`picker`] — the "add a window" chooser.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
+//! * [`kit`] — gpui-kit's theme kept on the same tokens.
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
 pub mod canvas;
 pub mod colors;
 pub mod fonts;
 pub mod keys;
+pub mod kit;
 pub mod note;
 pub mod picker;
 pub mod screen;

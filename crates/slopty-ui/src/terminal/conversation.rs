@@ -20,9 +20,9 @@ use gpui::{
     Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry, TranscriptUpdate};
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::terminal::view::TerminalView;
@@ -167,13 +167,14 @@ impl Conversation {
         }
     }
 
-    /// The chat, filling its container: the list, the attention row, the composer.
+    /// The chat, filling its container: the list, the attention row, the composer
+    /// (`composer_focused` draws its focus ring).
     #[must_use]
     pub fn render(
         &self,
         attention: Option<&Attention>,
+        composer_focused: bool,
         theme: &Theme,
-        ui_size: f32,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
         let entries = Rc::clone(&self.entries);
@@ -182,6 +183,7 @@ impl Conversation {
         let empty = entries.is_empty();
         let view = cx.entity();
         let s = theme.surfaces.clone();
+        let spacing = theme.spacing;
         div()
             .id("conversation")
             .debug_selector(|| "conversation".to_owned())
@@ -189,7 +191,7 @@ impl Conversation {
             .flex()
             .flex_col()
             .bg(hsla(s.panel))
-            .text_size(px(ui_size))
+            .text_size(px(theme.typography.ui_size))
             .text_color(hsla(s.text))
             .font_family(theme.typography.ui_family.clone())
             .child(
@@ -213,9 +215,7 @@ impl Conversation {
                                 move |ix, _window: &mut Window, _cx: &mut App| {
                                     entries.get(ix).map_or_else(
                                         || div().into_any_element(),
-                                        |e| {
-                                            entry(ix, e, open.contains(&ix), &view, &theme, ui_size)
-                                        },
+                                        |e| entry(ix, e, open.contains(&ix), &view, &theme),
                                     )
                                 },
                             )
@@ -228,15 +228,15 @@ impl Conversation {
                                 .id("conversation-latest")
                                 .debug_selector(|| "conversation-latest".to_owned())
                                 .absolute()
-                                .bottom(px(ui_size * 0.6))
-                                .right(px(ui_size * 1.2))
-                                .px(px(ui_size * 0.7))
-                                .py(px(ui_size * 0.25))
-                                .rounded(px(ui_size))
+                                .bottom(px(spacing.sm))
+                                .right(px(spacing.md))
+                                .px(px(spacing.sm))
+                                .py(px(spacing.xxs))
+                                .rounded(px(theme.radii.sm))
                                 .bg(hsla(s.accent))
-                                .text_color(hsla(s.canvas))
-                                .text_size(px(ui_size * 0.85))
-                                .shadow_md()
+                                .text_color(hsla(s.accent_fg))
+                                .text_size(px(theme.typography.small()))
+                                .shadow_sm()
                                 .cursor_pointer()
                                 .child("↓ latest")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -248,16 +248,17 @@ impl Conversation {
                         )
                     }),
             )
-            .when_some(attention, |el, attention| {
-                el.child(attention_row(attention, &theme, ui_size, cx))
-            })
-            .child(self.composer_row(&theme, ui_size, cx))
+            .when_some(attention, |el, attention| el.child(attention_row(attention, &theme, cx)))
+            .child(self.composer_row(composer_focused, &theme, cx))
             .into_any_element()
     }
 
-    /// The composer: the growing text field and a send button.
-    fn composer_row(&self, theme: &Theme, ui_size: f32, cx: &Context<TerminalView>) -> AnyElement {
+    /// The composer: the growing text field (accent ring while it has the caret) and the send
+    /// button, the one primary action on this surface.
+    fn composer_row(&self, focused: bool, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
         let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let send = theme.typography.ui_size + spacing.md;
         div()
             .id("composer")
             .debug_selector(|| "composer".to_owned())
@@ -265,22 +266,24 @@ impl Conversation {
             .flex_none()
             .flex()
             .items_end()
-            .gap(px(ui_size * 0.5))
-            .px(px(ui_size * 0.7))
-            .py(px(ui_size * 0.5))
+            .gap(px(spacing.sm))
+            .px(px(spacing.md))
+            .py(px(spacing.sm))
             .border_t_1()
             .border_color(hsla(s.border))
             .bg(hsla(s.panel))
             .child(
                 div()
+                    .id("composer-field")
+                    .debug_selector(|| "composer-field".to_owned())
                     .flex_1()
                     .min_w(px(0.0))
-                    .px(px(ui_size * 0.6))
-                    .py(px(ui_size * 0.3))
-                    .rounded(px(ui_size * 0.6))
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xs))
+                    .rounded(px(theme.radii.sm))
                     .border_1()
-                    .border_color(hsla(s.border))
-                    .bg(hsla(s.canvas))
+                    .border_color(hsla(if focused { s.accent } else { s.border }))
+                    .bg(hsla(s.raised))
                     .child(Textarea::new(&self.composer).appearance(false).bordered(false)),
             )
             .child(
@@ -288,14 +291,14 @@ impl Conversation {
                     .id("composer-send")
                     .debug_selector(|| "composer-send".to_owned())
                     .flex_none()
-                    .w(px(ui_size * 2.0))
-                    .h(px(ui_size * 2.0))
+                    .w(px(send))
+                    .h(px(send))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(ui_size))
+                    .rounded(px(theme.radii.sm))
                     .bg(hsla(s.accent))
-                    .text_color(hsla(s.canvas))
+                    .text_color(hsla(s.accent_fg))
                     .cursor_pointer()
                     .child("↑")
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
@@ -307,14 +310,11 @@ impl Conversation {
     }
 }
 
-/// What the agent waits for, with the one-tap answers, above the composer.
-fn attention_row(
-    attention: &Attention,
-    theme: &Theme,
-    ui_size: f32,
-    cx: &Context<TerminalView>,
-) -> AnyElement {
+/// What the agent waits for, with the one-tap answers, above the composer: the warn tone,
+/// faint, since the agent is blocked on the human.
+fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
     let s = &theme.surfaces;
+    let spacing = theme.spacing;
     let row = div()
         .id("conversation-attention")
         .debug_selector(|| "conversation-attention".to_owned())
@@ -322,23 +322,25 @@ fn attention_row(
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(ui_size * 0.6))
-        .px(px(ui_size))
-        .py(px(ui_size * 0.4))
+        .gap(px(spacing.sm))
+        .px(px(spacing.md))
+        .py(px(spacing.sm))
         .border_t_1()
         .border_color(hsla(s.border))
-        .bg(hsla_alpha(theme.terminal.palette(3), 0.12))
-        .text_size(px(ui_size * 0.9));
+        .bg(hsla_alpha(s.warn, alpha::TINT))
+        .text_size(px(theme.typography.small()));
     let button = |id: &'static str, label: &'static str, accent: bool| {
+        let tone = if accent { s.accent } else { s.text_secondary };
         div()
             .id(id)
             .debug_selector(move || id.to_owned())
-            .px(px(ui_size * 0.8))
-            .py(px(ui_size * 0.2))
-            .rounded(px(ui_size * 0.4))
-            .bg(hsla_alpha(if accent { s.accent } else { s.text_muted }, 0.3))
+            .px(px(spacing.sm))
+            .py(px(spacing.xs))
+            .rounded(px(theme.radii.xs))
+            .bg(hsla_alpha(tone, alpha::TINT_STRONG))
             .text_color(hsla(s.text))
             .cursor_pointer()
+            .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
             .child(label)
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
     };
@@ -376,20 +378,23 @@ fn entry(
     open: bool,
     view: &Entity<TerminalView>,
     theme: &Theme,
-    ui_size: f32,
 ) -> AnyElement {
     let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    let ui_size = theme.typography.ui_size;
+    let small = theme.typography.small();
+    let prose = gpui::relative(theme.typography.markdown_line_height);
     let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
     let row = div()
         .id(ElementId::NamedInteger("conversation-entry".into(), u64::try_from(ix).unwrap_or(0)))
         .debug_selector(move || format!("conversation-entry-{ix}"))
         .w_full()
-        .px(px(ui_size))
-        .py(px(ui_size * 0.35));
+        .px(px(spacing.md))
+        .py(px(spacing.xs));
     let time = clock(entry.at).map(|t| {
         div()
             .flex_none()
-            .text_size(px(ui_size * 0.7))
+            .text_size(px(theme.typography.caption()))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(t))
     });
@@ -404,33 +409,42 @@ fn entry(
             .flex()
             .items_end()
             .justify_end()
-            .gap(px(ui_size * 0.5))
+            .gap(px(spacing.sm))
             .children(time)
             .child(
                 div()
                     .max_w(px(ui_size * 40.0))
-                    .px(px(ui_size * 0.8))
-                    .py(px(ui_size * 0.45))
-                    .rounded(px(ui_size * 0.6))
-                    .bg(hsla_alpha(s.accent, 0.22))
+                    .px(px(spacing.md))
+                    .py(px(spacing.sm))
+                    .rounded(px(theme.radii.md))
+                    .bg(hsla_alpha(s.accent, alpha::TINT_STRONG))
+                    .line_height(prose)
                     .child(SharedString::from(text.clone())),
             )
             .into_any_element(),
         TranscriptBody::Assistant { markdown } => row
             .flex()
             .items_end()
-            .gap(px(ui_size * 0.5))
-            .child(div().flex_1().min_w(px(0.0)).child(TextView::markdown(
-                ElementId::NamedInteger("conversation-md".into(), u64::try_from(ix).unwrap_or(0)),
-                SharedString::from(markdown.clone()),
-            )))
+            .gap(px(spacing.sm))
+            .child(
+                div().flex_1().min_w(px(0.0)).line_height(prose).child(
+                    TextView::markdown(
+                        ElementId::NamedInteger(
+                            "conversation-md".into(),
+                            u64::try_from(ix).unwrap_or(0),
+                        ),
+                        SharedString::from(markdown.clone()),
+                    )
+                    .style(markdown_style(theme, &mono)),
+                ),
+            )
             .children(time)
             .into_any_element(),
         TranscriptBody::Thinking { text } => row
             .flex()
             .flex_col()
-            .gap(px(ui_size * 0.3))
-            .text_size(px(ui_size * 0.85))
+            .gap(px(spacing.xs))
+            .text_size(px(small))
             .text_color(hsla(s.text_muted))
             .child(
                 div()
@@ -439,19 +453,19 @@ fn entry(
                     .child(SharedString::from(fold_label(open, "thinking", text)))
                     .on_click(toggle),
             )
-            .when(open, |el| el.child(clipped_block(text, &mono, ui_size)))
+            .when(open, |el| el.child(clipped_block(text, &mono, theme)))
             .into_any_element(),
         TranscriptBody::ToolUse { name, summary, input } => row
             .flex()
             .flex_col()
-            .gap(px(ui_size * 0.3))
-            .text_size(px(ui_size * 0.85))
+            .gap(px(spacing.xs))
+            .text_size(px(small))
             .text_color(hsla(s.text_muted))
             .child(
                 div()
                     .id("fold")
                     .flex()
-                    .gap(px(ui_size * 0.5))
+                    .gap(px(spacing.sm))
                     .cursor_pointer()
                     .child(SharedString::from(format!("{} {name}", arrow(open))))
                     .child(
@@ -460,19 +474,20 @@ fn entry(
                             .overflow_hidden()
                             .text_ellipsis()
                             .font_family(mono.clone())
+                            .text_color(hsla(s.text_secondary))
                             .child(SharedString::from(summary.clone())),
                     )
                     .on_click(toggle),
             )
-            .when(open, |el| el.child(clipped_block(input, &mono, ui_size)))
+            .when(open, |el| el.child(clipped_block(input, &mono, theme)))
             .into_any_element(),
         TranscriptBody::ToolResult { tool, output, is_error } => {
             let (shown, hidden) = preview(output, open);
-            let color = if *is_error { theme.terminal.palette(1) } else { s.text_muted };
+            let color = if *is_error { s.error } else { s.text_muted };
             row.flex()
                 .flex_col()
-                .gap(px(ui_size * 0.3))
-                .text_size(px(ui_size * 0.85))
+                .gap(px(spacing.xs))
+                .text_size(px(small))
                 .text_color(hsla(color))
                 .child(
                     div()
@@ -486,19 +501,52 @@ fn entry(
                         )))
                         .on_click(toggle),
                 )
-                .when(!shown.text.is_empty(), |el| el.child(clipped_block(&shown, &mono, ui_size)))
+                .when(!shown.text.is_empty(), |el| el.child(clipped_block(&shown, &mono, theme)))
                 .into_any_element()
         }
     }
 }
 
-/// A clipped text as a mono block, with the count of what the host or the fold dropped.
-fn clipped_block(text: &Clipped, mono: &str, ui_size: f32) -> AnyElement {
+/// Markdown in an assistant turn: paragraphs one base unit apart, headings stepping down
+/// from the title size to the base, code in the terminal mono at `small()` on the raised
+/// surface with `radii.xs` corners. Colours come from the gpui-kit theme, which
+/// [`crate::kit::sync`] keeps on the same tokens.
+fn markdown_style(theme: &Theme, mono: &str) -> TextViewStyle {
+    let small = theme.typography.small();
+    let code_block = gpui::StyleRefinement::default()
+        .font_family(mono.to_owned())
+        .text_size(px(small))
+        .bg(hsla(theme.surfaces.raised))
+        .rounded(px(theme.radii.xs))
+        .px(px(theme.spacing.sm))
+        .py(px(theme.spacing.xs));
+    let inline_code = gpui::HighlightStyle {
+        background_color: Some(hsla(theme.surfaces.raised)),
+        color: Some(hsla(theme.surfaces.text)),
+        ..gpui::HighlightStyle::default()
+    };
+    let (title, base) = (theme.typography.title(), theme.typography.ui_size);
+    TextViewStyle {
+        paragraph_gap: gpui::rems(theme.spacing.sm / base),
+        heading_base_font_size: px(base),
+        heading_font_size: Some(std::sync::Arc::new(move |level: u8, _base| {
+            px((title - f32::from(level.saturating_sub(1))).max(base))
+        })),
+        code_block,
+        inline_code,
+        ..TextViewStyle::default()
+    }
+}
+
+/// A clipped text as a mono block at `small()`, with the count of what the host or the fold
+/// dropped.
+fn clipped_block(text: &Clipped, mono: &str, theme: &Theme) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .pl(px(ui_size * 1.2))
+        .pl(px(theme.spacing.lg))
         .font_family(mono.to_owned())
+        .text_size(px(theme.typography.small()))
         .whitespace_normal()
         .child(SharedString::from(text.text.clone()))
         .when(text.more_lines > 0, |el| {
