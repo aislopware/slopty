@@ -267,6 +267,69 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (sorted app → title) and displays from a `Listing`; Escape or a backdrop click dismisses, a row
   click picks. Bound to ⌘O because Raycast owns ⌘⇧N system-wide on the dev Mac (evidence: the
   first binding opened Raycast's clipboard history instead).
+- ✅ **Design tokens: one system for every surface (Warp-class pass, 2026-09-05).** The UI
+  grew title bars, pills, badges, separators, a composer, an attention row, a minimap, a HUD,
+  a key bar and a picker on six tokens (`canvas`, `panel`, `border`, `text`, `text_muted`,
+  `accent`, radius 8, space 8). The audit (`target/design-audit.md`, scratch) found nine
+  padding ratios, six radii, ten type sizes, four tint alphas and status colours borrowed
+  from the terminal's ANSI palette. Ruling, modelled on Warp's visible system (restrained
+  neutral ladder, one accent, 4/8 pt spacing, hairlines over shadows, quiet hover/active
+  states, status colour only where it carries meaning, mono for terminal surfaces and the
+  system sans for chrome): every element in `slopty-ui` and the app chrome draws from this
+  table and nothing else, except geometry that content dictates (cell metrics, item rects,
+  the terminal grid, canvas zoom multipliers).
+
+  | Token | Dark | Light | Used for |
+  |---|---|---|---|
+  | `surfaces.canvas` (0) | `0A0B0E` | `F4F5F7` | window, canvas, bars |
+  | `surfaces.panel` (1) | `14161B` | `FFFFFF` | title bars, panels, popovers, composer |
+  | `surfaces.raised` (2) | `1B1E25` | `EEF0F3` | key caps, inputs, hovered rows |
+  | `surfaces.overlay` (3) | `23272F` | `E4E7EC` | pressed rows, pill fills, HUD |
+  | `surfaces.border` | `24272E` | `D8DBE1` | every hairline (1 pt) |
+  | `surfaces.text` | `E6E6E6` | `1D1D1F` | primary |
+  | `surfaces.text_secondary` | `B4B9C3` | `4B4F58` | labels, tool summaries, counts |
+  | `surfaces.text_muted` | `8B919C` | `6E6E73` | hints, timestamps, folds, inactive titles |
+  | `surfaces.accent` | `8AB4F8` | `2F6FDB` | focus ring, active border, primary action, links |
+  | `surfaces.accent_fg` | `0A0B0E` | `FFFFFF` | text on an accent fill |
+  | `surfaces.success` | `98C379` | `1A7F37` | connected, agent done |
+  | `surfaces.warn` | `E5C07B` | `9A6700` | agent waiting, "N need you", muted, reconnecting |
+  | `surfaces.error` | `F06C75` | `CF222E` | failed result, failed command, pairing error |
+  | `radii.xs / sm / md` | 4 / 6 / 8 | same | pills and inline buttons / buttons, inputs, key caps / panels, items, popovers |
+  | `spacing.xxs … xl` | 2 / 4 / 8 / 12 / 16 / 24 | same | the only paddings and gaps in chrome |
+  | `typography.ui_size` + `caption()/small()/title()` | 13 → 10 / 12 / 15 | same | chrome type scale (settings move the base) |
+  | `typography.mono_size` @ `mono_line_height` | 13 @ 1.35 | same | terminal grid, code in the conversation |
+  | `typography.markdown_line_height` | 1.5 | same | assistant turns |
+  | `alpha::TINT_FAINT / TINT / TINT_STRONG / TINT_PRESSED` | 0.08 / 0.12 / 0.25 / 0.4 | same | selected row / pill fills, hover / answer buttons, the human's bubble / a strong tint under the pointer |
+  | `alpha::HOVER` | 0.08 | same | hover wash of `text` on a bare button |
+  | `alpha::SCRIM` | 0.6 | same | modal backdrop |
+  | `alpha::SEPARATOR / SEPARATOR_ERROR` | 0.18 / 0.7 | same | command-block hairline (terminal fg / `error`) |
+  | `alpha::HUD / MINIMAP / MINIMAP_ITEM` | 0.85 / 0.92 / 0.7 | same | translucent panels over video and the canvas |
+
+  Rules that follow (as shipped): status tones are chrome tokens now — the terminal palette
+  stays the terminal's; the chrome tones share its hues so nothing jars, and the light table
+  has its own set. The agent badge uses the accent for both busy states (thinking and a tool;
+  the label says which), `warn` while blocked, `success` when done. Shadows go except on
+  floating layers (picker, host switcher, search bar, "↓ latest" pill), and those use
+  `shadow_sm`. Focus is one accent hairline: the focused item's frame, the search bar while it
+  has the caret, the composer while it has the caret. Hover is a `HOVER` wash or a step up
+  the surface ladder, pressed one step further, never opacity. Pills: `radii.xs`,
+  `spacing.sm`/`spacing.xxs` padding, `small()` type, `TINT` fill of their tone with the tone
+  as text. Buttons: `radii.sm`, `spacing.md`/`spacing.xs` padding in a dialog and
+  `spacing.sm`/`spacing.xs` in a bar; the one primary action per surface is an accent fill
+  with `accent_fg` text, a secondary one is `raised` → `overlay`. Key caps are `raised` on the
+  `panel` bar, the accent when armed. Markdown in the conversation gets
+  `markdown_line_height`, paragraph gaps of one base unit, headings stepping down from
+  `title()` to the base, code in the terminal mono at `small()` on `raised`. gpui-kit's own
+  theme (what its inputs, the composer and `TextView` read) is rewritten from the same tokens
+  by `slopty_ui::kit::sync` on every theme change, instead of a second palette. The only
+  literal geometry left is content-driven: the picker's 560×520 frame, the 420 pt pairing
+  panel, the 320 pt host switcher, the 180 pt search field and its 40 pt counter, the list's
+  512 pt overdraw, and the canvas zoom multipliers. Headless tests read the tokens back
+  through `painted_quads()`: accent vs hairline item frame, the `warn` outline of a blocked
+  agent in both variants over a light-canvas fill, the `error` separator tone, the composer's
+  focus ring and the warn-tinted attention row, and gpui-kit's colours after a sync. The app
+  goldens (`terminal`, `note`, `conversation`, `conversation-permission`) were re-accepted for
+  this ruling; the track report names each with its `differing/total`.
 
 ## Terminal
 

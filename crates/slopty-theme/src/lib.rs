@@ -1,8 +1,11 @@
 //! Design tokens. Toolkit-agnostic: plain numbers and RGB so `slopty-ui` (GPUI) and any other
 //! consumer read the same values.
 //!
-//! Visual direction: Warp-like. Near-black neutral surfaces, one accent, restrained contrast,
-//! generous spacing, a monospace face with real weight variation.
+//! Visual direction: Warp-like. A neutral surface ladder, one accent, hairlines rather than
+//! shadows, a 4/8 pt spacing scale, status colour only where it carries meaning, the terminal
+//! mono for terminal surfaces and the system sans for chrome. The table and the rules are the
+//! "Design tokens" ruling in `docs/DECISIONS.md`; chrome draws from these tokens and nothing
+//! else.
 
 #![forbid(unsafe_code)]
 
@@ -143,6 +146,9 @@ impl TerminalPalette {
 }
 
 /// Type tokens.
+///
+/// The chrome scale hangs off `ui_size` ([`Self::caption`], [`Self::small`], [`Self::title`]),
+/// so a settings change moves every label together.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Typography {
     /// Monospace family for terminals; the first installed one wins.
@@ -151,10 +157,32 @@ pub struct Typography {
     pub mono_size: f32,
     /// Terminal line height as a multiple of the font size.
     pub mono_line_height: f32,
+    /// Line height of Markdown prose (assistant turns), as a multiple of the font size.
+    pub markdown_line_height: f32,
     /// UI family.
     pub ui_family: String,
     /// UI base size.
     pub ui_size: f32,
+}
+
+impl Typography {
+    /// The smallest chrome size: HUD readouts, timestamps, chevrons (base − 3).
+    #[must_use]
+    pub fn caption(&self) -> f32 {
+        (self.ui_size - 3.0).max(6.0)
+    }
+
+    /// Secondary chrome: bar labels, pills, folds, tool summaries (base − 1).
+    #[must_use]
+    pub fn small(&self) -> f32 {
+        (self.ui_size - 1.0).max(7.0)
+    }
+
+    /// Titles of panels and dialogs (base + 2).
+    #[must_use]
+    pub fn title(&self) -> f32 {
+        self.ui_size + 2.0
+    }
 }
 
 impl Default for Typography {
@@ -167,27 +195,109 @@ impl Default for Typography {
             ],
             mono_size: 13.0,
             mono_line_height: 1.35,
+            markdown_line_height: 1.5,
             ui_family: ".SystemUIFont".to_owned(),
             ui_size: 13.0,
         }
     }
 }
 
-/// Surface colours for chrome (not the terminal grid).
+/// Corner radii, in points.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Radii {
+    /// Pills and inline buttons.
+    pub xs: f32,
+    /// Buttons, inputs, key caps.
+    pub sm: f32,
+    /// Panels, canvas items, popovers.
+    pub md: f32,
+}
+
+impl Default for Radii {
+    fn default() -> Self {
+        Self { xs: 4.0, sm: 6.0, md: 8.0 }
+    }
+}
+
+/// The spacing scale, in points: the only paddings and gaps chrome uses.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Spacing {
+    /// 2: pill vertical padding, hairline-adjacent gaps.
+    pub xxs: f32,
+    /// 4: tight gaps, inline button padding.
+    pub xs: f32,
+    /// 8: the base unit — row gaps, button padding, grid inset.
+    pub sm: f32,
+    /// 12: panel horizontal padding, section gaps.
+    pub md: f32,
+    /// 16: panel padding.
+    pub lg: f32,
+    /// 24: dialog padding.
+    pub xl: f32,
+}
+
+impl Default for Spacing {
+    fn default() -> Self {
+        Self { xxs: 2.0, xs: 4.0, sm: 8.0, md: 12.0, lg: 16.0, xl: 24.0 }
+    }
+}
+
+/// Opacities for tints and washes over a surface.
+pub mod alpha {
+    /// A selected row, the faint fill of a quiet pill.
+    pub const TINT_FAINT: f32 = 0.08;
+    /// Pill fills, the hover of a row.
+    pub const TINT: f32 = 0.12;
+    /// Answer buttons, the human's bubble.
+    pub const TINT_STRONG: f32 = 0.25;
+    /// A strong tint under the pointer.
+    pub const TINT_PRESSED: f32 = 0.4;
+    /// The hover wash of `text` over a bare button.
+    pub const HOVER: f32 = 0.08;
+    /// A modal backdrop.
+    pub const SCRIM: f32 = 0.6;
+    /// The command-block separator (the terminal foreground).
+    pub const SEPARATOR: f32 = 0.18;
+    /// The separator after a failed command (the error tone).
+    pub const SEPARATOR_ERROR: f32 = 0.7;
+    /// The translucent panel behind a HUD readout over video.
+    pub const HUD: f32 = 0.85;
+    /// The minimap's panel over the canvas.
+    pub const MINIMAP: f32 = 0.92;
+    /// Minimap item blocks.
+    pub const MINIMAP_ITEM: f32 = 0.7;
+}
+
+/// Surface colours for chrome (not the terminal grid): a four-step ladder, three text
+/// levels, the accent and what sits on it, and three status tones.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Surfaces {
-    /// Window background.
+    /// Step 0: window, canvas, bars.
     pub canvas: Rgb,
-    /// Panels, cards.
+    /// Step 1: title bars, panels, popovers, the composer.
     pub panel: Rgb,
-    /// Hairlines.
+    /// Step 2: key caps, inputs, hovered rows.
+    pub raised: Rgb,
+    /// Step 3: pressed rows, pill fills, the HUD.
+    pub overlay: Rgb,
+    /// Every hairline.
     pub border: Rgb,
     /// Primary text.
     pub text: Rgb,
-    /// Secondary text.
+    /// Labels, tool summaries, counts.
+    pub text_secondary: Rgb,
+    /// Hints, timestamps, folds, inactive titles.
     pub text_muted: Rgb,
-    /// Accent.
+    /// Focus ring, active border, the primary action, links.
     pub accent: Rgb,
+    /// Text on an accent fill.
+    pub accent_fg: Rgb,
+    /// Connected, agent done.
+    pub success: Rgb,
+    /// Agent waiting, "N need you", muted, reconnecting.
+    pub warn: Rgb,
+    /// A failed result or command, a pairing error.
+    pub error: Rgb,
 }
 
 impl Surfaces {
@@ -196,20 +306,34 @@ impl Surfaces {
     pub const DARK: Self = Self {
         canvas: Rgb::hex(0x0A0B0E),
         panel: Rgb::hex(0x14161B),
+        raised: Rgb::hex(0x1B1E25),
+        overlay: Rgb::hex(0x23272F),
         border: Rgb::hex(0x24272E),
         text: Rgb::hex(0xE6E6E6),
+        text_secondary: Rgb::hex(0xB4B9C3),
         text_muted: Rgb::hex(0x8B919C),
         accent: Rgb::hex(0x8AB4F8),
+        accent_fg: Rgb::hex(0x0A0B0E),
+        success: Rgb::hex(0x98C379),
+        warn: Rgb::hex(0xE5C07B),
+        error: Rgb::hex(0xF06C75),
     };
     /// Light.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
         canvas: Rgb::hex(0xF4F5F7),
         panel: Rgb::hex(0xFFFFFF),
+        raised: Rgb::hex(0xEEF0F3),
+        overlay: Rgb::hex(0xE4E7EC),
         border: Rgb::hex(0xD8DBE1),
         text: Rgb::hex(0x1D1D1F),
+        text_secondary: Rgb::hex(0x4B4F58),
         text_muted: Rgb::hex(0x6E6E73),
         accent: Rgb::hex(0x2F6FDB),
+        accent_fg: Rgb::hex(0xFFFFFF),
+        success: Rgb::hex(0x1A7F37),
+        warn: Rgb::hex(0x9A6700),
+        error: Rgb::hex(0xCF222E),
     };
 }
 
@@ -232,10 +356,10 @@ pub struct Theme {
     pub surfaces: Surfaces,
     /// Type.
     pub typography: Typography,
-    /// Corner radius for panels, in points.
-    pub radius: f32,
-    /// Base spacing unit, in points.
-    pub space: f32,
+    /// Corner radii.
+    pub radii: Radii,
+    /// The spacing scale.
+    pub spacing: Spacing,
 }
 
 impl Default for Theme {
@@ -252,7 +376,13 @@ impl Theme {
             Variant::Dark => (TerminalPalette::DARK, Surfaces::DARK),
             Variant::Light => (TerminalPalette::LIGHT, Surfaces::LIGHT),
         };
-        Self { terminal, surfaces, typography: Typography::default(), radius: 8.0, space: 8.0 }
+        Self {
+            terminal,
+            surfaces,
+            typography: Typography::default(),
+            radii: Radii::default(),
+            spacing: Spacing::default(),
+        }
     }
 
     /// Which variant the colours are (by the terminal background).
@@ -287,5 +417,36 @@ mod tests {
         assert_eq!(light.surfaces, Surfaces::LIGHT);
         assert_eq!(light.typography, Typography::default());
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
+    }
+
+    #[test]
+    fn the_ladder_climbs_and_the_scale_follows_the_base() {
+        // Dark: each step lighter than the last; light: each step darker.
+        let luma = |c: Rgb| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
+        let dark = Surfaces::DARK;
+        assert!(luma(dark.canvas) < luma(dark.panel) && luma(dark.panel) < luma(dark.raised));
+        assert!(luma(dark.raised) < luma(dark.overlay));
+        assert!(
+            luma(dark.text_muted) < luma(dark.text_secondary)
+                && luma(dark.text_secondary) < luma(dark.text)
+        );
+        let light = Surfaces::LIGHT;
+        assert!(
+            luma(light.canvas) > luma(light.raised) && luma(light.raised) > luma(light.overlay)
+        );
+        assert!(
+            luma(light.text_muted) > luma(light.text_secondary)
+                && luma(light.text_secondary) > luma(light.text)
+        );
+        assert_ne!(dark.accent_fg, light.accent_fg, "text on the accent flips with the variant");
+
+        let mut t = Typography::default();
+        assert_eq!((t.caption(), t.small(), t.title()), (10.0, 12.0, 15.0));
+        t.ui_size = 8.0;
+        assert_eq!((t.caption(), t.small(), t.title()), (6.0, 7.0, 10.0), "clamped at the floor");
+        let s = Spacing::default();
+        assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
+        let r = Radii::default();
+        assert!(r.xs < r.sm && r.sm < r.md);
     }
 }

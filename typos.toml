@@ -1,5 +1,6 @@
 [default]
-extend-ignore-re = [ "(?i)objc", "\\b[0-9a-f]{7,40}\\b", "\\bBA\\b" ]
+# Hex colours quoted in the docs' token tables (`D8DBE1`) are not words.
+extend-ignore-re = [ "(?i)objc", "\\b[0-9a-f]{7,40}\\b", "\\bBA\\b", "`[0-9A-Fa-f]{6}`" ]
 
 [default.extend-words]
 # terminal / VT jargon that typos flags
