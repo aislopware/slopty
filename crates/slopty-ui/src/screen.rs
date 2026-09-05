@@ -100,6 +100,8 @@ pub struct ScreenView {
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
     hud: Option<Hud>,
+    /// When the frame on screen came out of the decoder (its age in the overlay).
+    taken_at: Option<Instant>,
     /// Link RTT from the canvas, for the overlay.
     rtt: Option<Duration>,
     /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
@@ -113,6 +115,75 @@ struct Hud {
     sampled_at: Instant,
     sample: ScreenStats,
     text: String,
+}
+
+/// What the overlay shows that is not in [`ScreenStats`].
+#[derive(Clone, Copy, Debug)]
+pub struct HudInput<'a> {
+    /// Stream size in pixels.
+    pub size: (u32, u32),
+    /// Capture scale.
+    pub scale: f32,
+    /// Decoded frames per second over the last sample period.
+    pub fps: f64,
+    /// Received megabits per second over the last sample period.
+    pub mbps: f64,
+    /// Link round trip.
+    pub rtt: Option<Duration>,
+    /// How long ago the frame on screen was taken from the decoder.
+    pub frame_age: Option<Duration>,
+    /// The host's last bitrate decision: target, verdict, cwnd-capped.
+    pub rate: Option<(u32, RateVerdict, bool)>,
+    /// The receiver's counters.
+    pub stats: &'a ScreenStats,
+}
+
+/// The two lines of the stats overlay: what is on screen and how it got there.
+///
+/// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
+/// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
+/// their last fragment (p50 / p95 of the last report), the in-order queue, recovery counts,
+/// stalls, the host's bitrate verdict and audio. Pure so it can be checked without a window.
+#[must_use]
+pub fn hud_lines(input: &HudInput<'_>) -> String {
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let stats = input.stats;
+    let rtt = input.rtt.map_or_else(|| "rtt –".to_owned(), |d| format!("rtt {:.1} ms", ms(d)));
+    let age =
+        input.frame_age.map_or_else(|| "age –".to_owned(), |d| format!("age {:.0} ms", ms(d)));
+    let stall = if stats.stalled { "stalled" } else { "flowing" };
+    let rate = input.rate.map_or_else(
+        || "target –".to_owned(),
+        |(bps, verdict, capped)| {
+            format!(
+                "target {:.1} Mb/s {}{}",
+                f64::from(bps) / 1e6,
+                verdict_label(verdict),
+                if capped { " (cwnd)" } else { "" }
+            )
+        },
+    );
+    format!(
+        "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
+         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}",
+        input.size.0,
+        input.size.1,
+        input.scale,
+        input.fps,
+        input.mbps,
+        ms(stats.jitter),
+        ms(stats.hold_p50),
+        ms(stats.hold_p95),
+        stats.queue_depth,
+        stats.frames_fec,
+        stats.frames_lost,
+        stats.nacks,
+        stats.refreshes,
+        stats.stalls,
+        stats.stalled_ms,
+        stats.audio_packets,
+        stats.audio_lost,
+    )
 }
 
 /// How often the overlay's rates are recomputed.
@@ -233,6 +304,7 @@ impl ScreenView {
             marked: None,
             hud: None,
             rtt: None,
+            taken_at: None,
             rate: None,
             _pump: pump,
         }
@@ -306,36 +378,16 @@ impl ScreenView {
             let fps = stats.frames.saturating_sub(hud.sample.frames) as f64 / secs;
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
             let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
-            let rtt = self.rtt.map_or_else(
-                || "rtt –".to_owned(),
-                |d| format!("rtt {:.1} ms", d.as_secs_f64() * 1e3),
-            );
-            let stall = if stats.stalled { "stalled" } else { "flowing" };
-            let rate = self.rate.map_or_else(
-                || "target –".to_owned(),
-                |(bps, verdict, capped)| {
-                    format!(
-                        "target {:.1} Mb/s {}{}",
-                        f64::from(bps) / 1e6,
-                        verdict_label(verdict),
-                        if capped { " (cwnd)" } else { "" }
-                    )
-                },
-            );
-            hud.text = format!(
-                "{}×{} @{:.2}  ·  {fps:.0} fps  ·  {mbps:.2} Mb/s  ·  {rtt}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}",
-                self.size.0,
-                self.size.1,
-                self.quality.scale,
-                stats.frames_fec,
-                stats.frames_lost,
-                stats.nacks,
-                stats.refreshes,
-                stats.stalls,
-                stats.stalled_ms,
-                stats.audio_packets,
-                stats.audio_lost,
-            );
+            hud.text = hud_lines(&HudInput {
+                size: self.size,
+                scale: self.quality.scale,
+                fps,
+                mbps,
+                rtt: self.rtt,
+                frame_age: self.taken_at.map(|t| now.saturating_duration_since(t)),
+                rate: self.rate,
+                stats: &stats,
+            });
             hud.sample = stats;
             hud.sampled_at = now;
         }
@@ -407,6 +459,7 @@ impl ScreenView {
         let size = (frame.image.width() as u32, frame.image.height() as u32);
         self.size = size;
         self.latest = Some((frame, buffer));
+        self.taken_at = Some(Instant::now());
         self.frames = self.frames.saturating_add(1);
         if self.frames == 1 {
             cx.emit(ScreenViewEvent::Ready);
@@ -904,6 +957,58 @@ mod tests {
 
     fn chord(s: &str) -> Keystroke {
         Keystroke::parse(s).expect("keystroke")
+    }
+
+    /// The overlay names every number a human needs to judge a stream: age of the picture,
+    /// jitter, how long frames wait for their tail, the queue, recovery, stalls, the verdict.
+    #[test]
+    fn hud_shows_age_jitter_hold_and_the_verdict() {
+        let stats = ScreenStats {
+            jitter: Duration::from_micros(1_250),
+            hold_p50: Duration::from_millis(2),
+            hold_p95: Duration::from_millis(9),
+            queue_depth: 1,
+            frames_fec: 3,
+            frames_lost: 1,
+            nacks: 4,
+            refreshes: 1,
+            stalls: 2,
+            stalled_ms: 140,
+            stalled: false,
+            audio_packets: 50,
+            audio_lost: 0,
+            ..ScreenStats::default()
+        };
+        let text = hud_lines(&HudInput {
+            size: (1920, 1080),
+            scale: 1.0,
+            fps: 59.6,
+            mbps: 18.25,
+            rtt: Some(Duration::from_micros(9_400)),
+            frame_age: Some(Duration::from_millis(12)),
+            rate: Some((19_200_000, RateVerdict::Stall, true)),
+            stats: &stats,
+        });
+        let (picture, path) = text.split_once('\n').expect("two lines");
+        assert_eq!(
+            picture,
+            "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms"
+        );
+        assert_eq!(
+            path,
+            "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0"
+        );
+        let blank = hud_lines(&HudInput {
+            size: (0, 0),
+            scale: 0.5,
+            fps: 0.0,
+            mbps: 0.0,
+            rtt: None,
+            frame_age: None,
+            rate: None,
+            stats: &ScreenStats::default(),
+        });
+        assert!(blank.contains("rtt –") && blank.contains("age –") && blank.contains("target –"));
     }
 
     #[test]
