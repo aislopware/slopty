@@ -2,7 +2,70 @@
 //! workspace from `slopty-app`.
 
 use anyhow::Result;
-use gpui::{Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    Bounds, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, WindowBounds, WindowOptions, px,
+    size,
+};
+
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        slopty,
+        [
+            /// Quit.
+            Quit,
+            /// Hide the app.
+            Hide,
+            /// Hide every other app.
+            HideOthers,
+            /// Show every hidden app.
+            ShowAll,
+        ]
+    );
+}
+use actions::{Hide, HideOthers, Quit, ShowAll};
+
+/// The application menu. Items name the same actions the key bindings do, so the shortcuts
+/// shown next to them come from the keymap and the two can never disagree.
+fn menus() -> Vec<Menu> {
+    use slopty_ui::canvas::{
+        AddWindow, CloseItem, FitAll, NewNote, NewTerminal, ZoomIn, ZoomOut, ZoomReset,
+    };
+    use slopty_ui::terminal::{Copy, Paste};
+    vec![
+        Menu::new("Slopty").items([
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Slopty", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
+            MenuItem::separator(),
+            MenuItem::action("Quit Slopty", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Copy", Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", Paste, OsAction::Paste),
+        ]),
+        Menu::new("Canvas").items([
+            MenuItem::action("New Shell", NewTerminal),
+            MenuItem::action("New Note", NewNote),
+            MenuItem::action("Add Window…", AddWindow),
+            MenuItem::separator(),
+            MenuItem::action("Close Item", CloseItem),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Zoom In", ZoomIn),
+            MenuItem::action("Zoom Out", ZoomOut),
+            MenuItem::action("Actual Size", ZoomReset),
+            MenuItem::action("Fit All", FitAll),
+        ]),
+    ]
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -22,6 +85,15 @@ fn main() -> Result<()> {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("cmd-alt-h", HideOthers, None),
+        ]);
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -37,6 +109,9 @@ fn main() -> Result<()> {
             cx.quit();
             return;
         }
+        // After `open_workspace`: the menu reads its shortcut labels from the keymap, which the
+        // workspace fills in.
+        cx.set_menus(menus());
         cx.activate(true);
     });
     Ok(())

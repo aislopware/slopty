@@ -7933,6 +7933,7 @@ dependencies = [
  "gpui-kit",
  "slopty-app",
  "slopty-platform",
+ "slopty-ui",
  "tokio",
  "tracing",
  "tracing-subscriber",
