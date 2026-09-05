@@ -137,11 +137,6 @@ pub enum TermRequest {
         /// How many.
         count: u32,
     },
-    /// Answer to a clipboard read the program requested (OSC 52 `?`), if the user allowed it.
-    ClipboardRead {
-        /// Contents.
-        text: String,
-    },
     /// Find `needle` in the whole retained history plus the screen. Case-insensitive unless
     /// the needle has an upper-case letter. Answered with `TermEvent::Matches`, or
     /// `TermEvent::SearchInvalid` when a regex does not compile.
@@ -214,13 +209,13 @@ pub enum TermEvent {
     Cwd(String),
     /// BEL.
     Bell,
-    /// The program wrote to the clipboard (OSC 52).
+    /// The program wrote to the system clipboard (OSC 52 / OSC 1337 Copy). Text only, at
+    /// most `MAX_CLIPBOARD_BYTES`; every attached client puts it on its own clipboard.
+    /// There is no read counterpart: an OSC 52 `?` is dropped on the host, by design.
     ClipboardWrite {
         /// Contents.
         text: String,
     },
-    /// The program asked to read the clipboard; the client may answer with `ClipboardRead`.
-    ClipboardReadRequest,
     /// Child exited.
     Exited {
         /// Status.

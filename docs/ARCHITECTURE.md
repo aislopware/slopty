@@ -49,8 +49,9 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport. Mouse selection is client-side too
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, double/triple click,
-  or long-press on touch); nothing reaches the host. ⌘-click opens the URL under the pointer,
-found in the cached row text (`slopty-ui::terminal::url`).
+  or long-press on touch); nothing reaches the host. ⌘-click opens the link under the pointer:
+the OSC 8 run the host put on the row, else the URL found in the cached row text
+(`slopty-ui::terminal::url`); ⌘-hover underlines it.
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (the one that opened the session, else the
@@ -70,6 +71,17 @@ the retained rows as plain text with libghostty's formatter and maps hits back t
 whole 50k-line history is searchable without the client ever holding it. `regex: true` runs the
 needle through the `regex` crate instead of the literal matcher; a bad pattern comes back as
 `TermEvent::SearchInvalid`.
+
+**Escapes programs rely on.** OSC 8 links ride on the rows: the engine asks libghostty for the
+URI of every linked cell (`ghostty_grid_ref_hyperlink_uri`, only on rows whose page flag says
+they may hold one) and folds them into `Line::links`, a list of `Hyperlink { col, len, uri }`
+runs, so a link-free row costs one byte and no cell carries an id. The client draws the run
+under the pointer underlined while ⌘ is held and opens the URI on ⌘-click; the OSC 8 target
+wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTerm2 OSC 1337
+Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
+`MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
+selection/primary targets and every read (`?`) are dropped on the host, and no message exists
+for a read reply.
 
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader

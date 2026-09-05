@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine};
+use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
 use slopty_proto::terminal::{TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
 use tokio::sync::{mpsc, oneshot};
@@ -290,7 +291,13 @@ impl Actor {
                     self.broadcast(&TermEvent::Cwd(c));
                 }
                 EngineEvent::ClipboardWrite { text } => {
-                    self.broadcast(&TermEvent::ClipboardWrite { text });
+                    // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
+                    // that would sit ahead of every frame on the session stream.
+                    if text.len() > MAX_CLIPBOARD_BYTES {
+                        tracing::warn!(session = %self.id, bytes = text.len(), "OSC 52 write too large; dropped");
+                    } else {
+                        self.broadcast(&TermEvent::ClipboardWrite { text });
+                    }
                 }
             }
         }
@@ -498,11 +505,6 @@ impl Actor {
                 }
                 Ok(())
             }
-            TermRequest::ClipboardRead { text } => {
-                // OSC 52 reply: base64 of the text, standard clipboard selection.
-                bytes = format!("\x1b]52;c;{}\x1b\\", base64(text.as_bytes())).into_bytes();
-                Ok(())
-            }
         };
         if let Err(e) = result {
             self.send_to(client, TermEvent::Error(e.to_string()));
@@ -514,37 +516,5 @@ impl Actor {
             tracing::warn!(session = %self.id, error = %e, "pty write failed");
             self.send_to(client, TermEvent::Error(e.to_string()));
         }
-    }
-}
-
-fn base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
-    for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk.first().copied().unwrap_or(0));
-        let b1 = u32::from(chunk.get(1).copied().unwrap_or(0));
-        let b2 = u32::from(chunk.get(2).copied().unwrap_or(0));
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        let idx = |shift: u32| usize::try_from((n >> shift) & 63).unwrap_or(0);
-        let ch = |i: usize| char::from(TABLE.get(i).copied().unwrap_or(b'='));
-        out.push(ch(idx(18)));
-        out.push(ch(idx(12)));
-        out.push(if chunk.len() > 1 { ch(idx(6)) } else { '=' });
-        out.push(if chunk.len() > 2 { ch(idx(0)) } else { '=' });
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_matches_rfc4648() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"ab"), "YWI=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
     }
 }

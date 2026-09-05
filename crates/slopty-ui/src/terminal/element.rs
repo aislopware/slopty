@@ -84,6 +84,8 @@ pub struct Prepared {
     rows: Vec<PreparedRow>,
     cursor: Option<(Bounds<Pixels>, CursorShape, Hsla)>,
     background: Hsla,
+    /// Colour of the ⌘-hover link underline.
+    link: Hsla,
     /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
 }
@@ -93,6 +95,8 @@ struct PreparedRow {
     y: Pixels,
     quads: Vec<(u16, u16, Hsla)>,
     line: ShapedLine,
+    /// Columns of the link under a ⌘-hover, underlined over the text.
+    link: Option<(u16, u16)>,
 }
 
 /// The element.
@@ -314,13 +318,19 @@ impl Element for TerminalElement {
                 view.marked().map(str::to_owned),
             )
         };
-        let (selection, top_index, grid_cols, hits) = {
+        let (selection, top_index, grid_cols, hits, link) = {
             let view = self.view.read(cx);
             let hits = view
                 .search_highlights()
                 .map(|(matches, current)| (matches.to_vec(), current))
                 .unwrap_or_default();
-            (view.selection(), view.state().index_at_row(0), view.state().size().cols, hits)
+            (
+                view.selection(),
+                view.state().index_at_row(0),
+                view.state().size().cols,
+                hits,
+                view.link_highlight(),
+            )
         };
         let palette = &theme.terminal;
         // Resolving the family walks every installed font; do it once per view.
@@ -383,6 +393,7 @@ impl Element for TerminalElement {
                             &[text_run(1, &family, &CellStyle::DEFAULT, palette)],
                             Some(cell_width),
                         ),
+                        link: None,
                     });
                     continue;
                 };
@@ -473,7 +484,10 @@ impl Element for TerminalElement {
                     cache.lines.insert(key, shaped.clone());
                     shaped
                 };
-                prepared_rows.push(PreparedRow { y, quads, line: shaped });
+                let link = link
+                    .filter(|&(at, _, _)| at == index)
+                    .map(|(_, start, end)| (start, end.min(grid_cols)));
+                prepared_rows.push(PreparedRow { y, quads, line: shaped, link });
             }
         });
 
@@ -535,6 +549,7 @@ impl Element for TerminalElement {
             rows: prepared_rows,
             cursor: cursor_prepared,
             background: hsla(palette.bg),
+            link: hsla(palette.fg),
             overlay,
         }
     }
@@ -609,6 +624,15 @@ impl Element for TerminalElement {
                 cx,
             ) {
                 tracing::debug!(error = %e, "paint row");
+            }
+        }
+        // The ⌘-hover link underline sits on the row's last pixel line, in the text colour.
+        for row in &prepared.rows {
+            if let Some((start, end)) = row.link {
+                let x = m.origin.x + m.cell_width * f32::from(start);
+                let w = m.cell_width * f32::from(end.saturating_sub(start));
+                let y = row.y + m.line_height - px(1.0);
+                window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.0))), prepared.link));
             }
         }
         for (at, line) in &prepared.overlay {

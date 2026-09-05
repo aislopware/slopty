@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod golden {
     use slopty_core::{ClientId, MonoTime, SessionId, StreamId};
-    use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
+    use slopty_grid::{Cursor, CursorShape, Hyperlink, Line, RowUpdate, Style, TermModes};
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
@@ -119,6 +119,17 @@ mod golden {
             &ClientMsg::Screen(ScreenRequest::Clipboard { text: "fox".to_owned() }),
         );
         snap("host_clipboard", &HostMsg::Screen(ScreenEvent::Clipboard { text: "fox".to_owned() }));
+        snap("host_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
+    }
+
+    #[test]
+    fn lines_with_links() {
+        let mut line = Line::from_text("see https://a.b", 16, Style::DEFAULT);
+        line.links.push(Hyperlink { col: 4, len: 11, uri: "https://a.b/".to_owned() });
+        snap(
+            "host_lines_links",
+            &TermEvent::Lines { start: slopty_grid::LineIndex(40), lines: vec![line] },
+        );
     }
 
     #[test]
@@ -148,5 +159,52 @@ mod golden {
                 updates: vec![RowUpdate { row: 0, line }],
             }),
         );
+    }
+}
+
+#[cfg(test)]
+mod size_report {
+    use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
+    use slopty_proto::codec;
+    use slopty_proto::terminal::{Frame, TermEvent};
+
+    /// Encoded size of a full, link-free frame; `cargo nextest run -p slopty-proto size_report
+    /// --no-capture` prints it (the numbers live in `docs/MEASUREMENTS.md`).
+    #[test]
+    fn size_report() {
+        for (cols, rows) in [(80_u16, 24_u16), (200, 60)] {
+            let blank: Vec<RowUpdate> =
+                (0..rows).map(|row| RowUpdate { row, line: Line::blank(cols) }).collect();
+            let text: Vec<RowUpdate> = (0..rows)
+                .map(|row| RowUpdate {
+                    row,
+                    line: Line::from_text(&"x".repeat(usize::from(cols)), cols, Style::DEFAULT),
+                })
+                .collect();
+            for (name, updates) in [("blank", blank), ("text", text)] {
+                let frame = Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols,
+                    rows,
+                    cursor: Cursor {
+                        row: 0,
+                        col: 0,
+                        shape: CursorShape::Block,
+                        visible: true,
+                        blink: true,
+                    },
+                    modes: TermModes::empty(),
+                    oldest_line: slopty_grid::LineIndex(0),
+                    first_visible_line: slopty_grid::LineIndex(0),
+                    total_lines: u64::from(rows),
+                    input_ack: 0,
+                    updates,
+                };
+                let bytes = codec::encode(&TermEvent::Frame(frame)).expect("encodes");
+                eprintln!("frame {cols}x{rows} {name}: {} bytes", bytes.len());
+            }
+        }
     }
 }

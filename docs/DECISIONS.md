@@ -789,11 +789,41 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `$SHELL -lic '<quoted words>'` (interactive login shell: rc files, aliases, job control);
   a path or a name found on `PATH` still execs directly. Covered by
   `unknown_bare_program_goes_through_the_login_shell`.
-- ✅ Links: no OSC 8 yet (the engine would need `ghostty_grid_ref_hyperlink_uri` per cell on
-  every frame); ⌘-click detects the URL in the cached row text on the client
-  (`slopty_ui::terminal::url::url_at`: known schemes, ends at whitespace/quote, trailing prose
-  punctuation and unbalanced closing brackets trimmed) and calls `cx.open_url`, which
-  `gpui_ios` implements with `UIApplication.openURL`. No wire change.
+- ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
+  linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
+  flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the
+  cell's own flag, both on the render path (`Point::Viewport`, the host never scrolls the
+  viewport) and on the scrollback fetch path (`Point::Screen`). Runs, not ids: `Line::links`
+  is `Vec<Hyperlink { col, len, uri }>` and the per-cell `Option<HyperlinkId>` that
+  `slopty-grid` had carried unused is gone. Measured (MEASUREMENTS.md, same date): a
+  link-free 80×24 full frame went from 15 477 to 13 581 bytes (−12 %), because postcard
+  spends one byte per `None` and the empty run list costs one byte per *row*. A spacer tail
+  continues its wide character's run. `PROTOCOL_VERSION` 5 → 6. Client: `url::link_at_col`
+  returns the OSC 8 run when there is one, else the plain-text URL with the columns it covers
+  (`text_link_at_col`, offsets mapped back to cells, a wide cell's spacer inside the span);
+  ⌘-click opens it, and while ⌘ is held the run under the pointer is underlined
+  (`TerminalView::link_highlight` → a 1 px quad in `TerminalElement::paint`, so the shaped-line
+  cache is untouched; `on_modifiers_changed` plus the modifiers on every move keep the state
+  right whether ⌘ goes down before or after the pointer arrives). Covered by
+  `osc8_links_become_runs_on_screen_and_in_history`, `plain_rows_carry_no_link_runs`,
+  `links_are_found_by_column_and_clipped_on_resize`, `osc8_runs_win_over_the_text_scan`,
+  `text_links_come_with_their_columns` and the `host_lines_links` golden. macOS only for now:
+  the phone key bar arms ⌘ for remote windows but not for terminals, so a tap has nothing to
+  read; long-press stays selection. `cx.open_url` is `gpui_ios`'s `UIApplication.openURL`
+  when that arrives.
+- ✅ **OSC 52: write only, system clipboard only, ≤ `MAX_CLIPBOARD_BYTES`** (2026-09-05).
+  libghostty's `clipboard_write` callback (registered in `install_callbacks` next to the bell)
+  hands over a normalised, decoded write; the engine keeps the `text/plain` representation of
+  a `Standard` write and answers `Unsupported` for selection/primary (X11 notions with no
+  client counterpart), the session drops writes over the pasteboard-sync ceiling (the same
+  256 KiB constant from `slopty_proto::screen`; a whole file pasted through OSC 52 would sit
+  ahead of every frame on the session stream) and broadcasts `TermEvent::ClipboardWrite` to
+  every attached client, whose canvas writes it with `cx.write_to_clipboard`. Reads are not
+  implemented, on purpose: libghostty never forwards a `?` request, and the dead
+  `TermEvent::ClipboardReadRequest` / `TermRequest::ClipboardRead` pair (the client used to
+  answer it with its clipboard, unprompted) is removed from the protocol so a future host
+  cannot ask. Covered by `osc52_writes_to_the_system_clipboard_only` (standard, primary,
+  selection, `?`) and the `host_term_clipboard_write` golden.
 - ✅ Deployment is two LaunchAgents written by `slopty host install` (`plist` crate, XML):
   `KeepAlive` + `RunAtLoad` + `ThrottleInterval 2` so a crash comes back in 2 s and login
   starts both; `ProcessType Interactive` and `LimitLoadToSessionType Aqua` because hostd

@@ -141,7 +141,6 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                             Effect::Title(_)
                             | Effect::Cwd(_)
                             | Effect::ClipboardWrite(_)
-                            | Effect::ClipboardReadRequest
                             | Effect::Matches { .. }
                             | Effect::SearchInvalid { .. } => {}
                         }

@@ -311,6 +311,28 @@ On a quiet link the round trip is one QUIC rtt plus ~2 ms (engine + coalescing);
 row is the same binary minutes earlier while the radio was stalling, kept to show the spread
 a Wi-Fi client sees.
 
+## 2026-09-05 — OSC 8 on the wire: link runs per row vs. an id per cell, link-free screens
+
+Command (both numbers from the same test, run before and after the change):
+
+```sh
+cargo nextest run -p slopty-proto size_report --no-capture
+```
+
+Encoded `TermEvent::Frame` (postcard, codec framing included), full frame, no links anywhere,
+default style; "text" rows are all `x`.
+
+| frame           | `Option<HyperlinkId>` per cell (before) | `Vec<Hyperlink>` per row (after) | saved           |
+| --------------- | --------------------------------------- | -------------------------------- | --------------- |
+| 80×24 blank     | 15 477 B                                | 13 581 B                         | 1 896 B (12 %)  |
+| 80×24 text      | 17 397 B                                | 15 501 B                         | 1 896 B (11 %)  |
+| 200×60 blank    | 96 322 B                                | 84 382 B                         | 11 940 B (12 %) |
+| 200×60 text     | 108 322 B                               | 96 382 B                         | 11 940 B (11 %) |
+
+postcard encodes `None` as one byte, so an id per cell costs `cols × rows` bytes on a screen
+with no links; an empty run list costs one byte per row. A linked row costs its URI once per
+run plus 3 bytes of header. Ruling in DECISIONS.md (Terminal, "Links: OSC 8 first").
+
 ## 2026-09-05 — release build, loopback
 
 `cargo build --release -p slopty-hostd -p slopty-ptyd -p slopty-cli`, hostd restarted from

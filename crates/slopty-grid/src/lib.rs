@@ -18,8 +18,8 @@ mod screen;
 mod scrollback;
 mod style;
 
-pub use cell::{Cell, CellText, CellWidth, HyperlinkId};
-pub use line::{Line, LineFlags, SemanticMark};
+pub use cell::{Cell, CellText, CellWidth};
+pub use line::{Hyperlink, Line, LineFlags, SemanticMark};
 pub use modes::TermModes;
 pub use screen::{Cursor, CursorShape, RowUpdate, Screen, ScreenError};
 pub use scrollback::{LineIndex, Scrollback, ScrollbackStats};

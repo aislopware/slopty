@@ -139,11 +139,6 @@ impl CellWidth {
     }
 }
 
-/// Session-scoped identifier for an OSC 8 hyperlink target.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct HyperlinkId(pub u32);
-
 /// One grid cell.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct Cell {
@@ -153,35 +148,29 @@ pub struct Cell {
     pub style: Style,
     /// Column span.
     pub width: CellWidth,
-    /// OSC 8 link, if the cell is inside one.
-    pub hyperlink: Option<HyperlinkId>,
 }
 
 impl Cell {
     /// A blank, unstyled cell.
-    pub const BLANK: Self = Self {
-        text: CellText::EMPTY,
-        style: Style::DEFAULT,
-        width: CellWidth::Narrow,
-        hyperlink: None,
-    };
+    pub const BLANK: Self =
+        Self { text: CellText::EMPTY, style: Style::DEFAULT, width: CellWidth::Narrow };
 
     /// A narrow cell with the given scalar and style.
     #[must_use]
     pub fn narrow(c: char, style: Style) -> Self {
-        Self { text: CellText::from_char(c), style, width: CellWidth::Narrow, hyperlink: None }
+        Self { text: CellText::from_char(c), style, width: CellWidth::Narrow }
     }
 
     /// A wide cell (the caller appends the spacer tail).
     #[must_use]
     pub fn wide(text: &str, style: Style) -> Self {
-        Self { text: CellText::from_cluster(text), style, width: CellWidth::Wide, hyperlink: None }
+        Self { text: CellText::from_cluster(text), style, width: CellWidth::Wide }
     }
 
     /// The spacer that follows a wide cell.
     #[must_use]
     pub const fn spacer_tail(style: Style) -> Self {
-        Self { text: CellText::EMPTY, style, width: CellWidth::SpacerTail, hyperlink: None }
+        Self { text: CellText::EMPTY, style, width: CellWidth::SpacerTail }
     }
 
     /// True when the cell is blank with default style: nothing to draw.

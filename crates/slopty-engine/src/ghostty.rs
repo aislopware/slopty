@@ -5,14 +5,14 @@ use std::rc::Rc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
-use libghostty_vt::screen::{Screen as VtScreen, TrackedGridRef};
+use libghostty_vt::screen::{GridRef, Screen as VtScreen, TrackedGridRef};
 use libghostty_vt::selection::Selection;
-use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
+use libghostty_vt::terminal::{ClipboardLocation, Mode, Point, PointCoordinate, PointSpace};
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
 use slopty_grid::{
-    Cell, CellText, Cursor, CursorShape, Line, LineFlags, LineIndex, RowUpdate, SemanticMark,
-    Style, TermModes,
+    Cell, CellText, CellWidth, Cursor, CursorShape, Hyperlink, Line, LineFlags, LineIndex,
+    RowUpdate, SemanticMark, Style, TermModes,
 };
 use slopty_proto::input::{KeyEvent, MouseAction, MouseEvent};
 use slopty_proto::terminal::{Frame, TermSize};
@@ -47,6 +47,8 @@ pub struct GhosttyEngine {
     sync_since: Option<MonoTime>,
     buttons_down: u8,
     scratch: String,
+    /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
+    uri_buf: Vec<u8>,
 }
 
 /// A tracked row plus its absolute index.
@@ -107,6 +109,7 @@ impl GhosttyEngine {
             sync_since: None,
             buttons_down: 0,
             scratch: String::with_capacity(16),
+            uri_buf: vec![0; 256],
         };
         engine.reanchor()?;
         Ok(engine)
@@ -262,10 +265,13 @@ impl GhosttyEngine {
                 let raw = row.raw_row()?;
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
+                // The row flag may be a false positive, but a row without it has no links.
+                let row_has_links = raw.has_hyperlink()?;
+                let mut links = LinkRuns::default();
                 let mut cell_iter = self.cells_iter.update(row)?;
-                let mut x = 0_usize;
+                let mut x: u16 = 0;
                 while let Some(cell) = cell_iter.next() {
-                    let Some(slot) = line.cells.get_mut(x) else { break };
+                    let Some(slot) = line.cells.get_mut(usize::from(x)) else { break };
                     let rc = cell.raw_cell()?;
                     if first_semantic.is_none() {
                         first_semantic = Some(rc.semantic_content()?);
@@ -283,9 +289,22 @@ impl GhosttyEngine {
                     } else {
                         CellText::EMPTY
                     };
-                    *slot = Cell { text, style, width, hyperlink: None };
+                    if row_has_links {
+                        let uri = if rc.has_hyperlink()? {
+                            let gr = self.term.grid_ref(Point::Viewport(PointCoordinate {
+                                x,
+                                y: u32::from(y),
+                            }))?;
+                            hyperlink_uri(&gr, &mut self.uri_buf)?
+                        } else {
+                            None
+                        };
+                        links.push(x, uri, width == CellWidth::SpacerTail);
+                    }
+                    *slot = Cell { text, style, width };
                     x = x.saturating_add(1);
                 }
+                line.links = links.finish(x);
                 line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
                 line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
                     convert::semantic_mark(
@@ -325,10 +344,15 @@ impl GhosttyEngine {
         let mut chars = [char::MIN; 16];
         let mut first_semantic = None;
         let mut row_info = None;
+        let mut row_has_links = false;
+        let mut links = LinkRuns::default();
+        let mut uri_buf = vec![0; 256];
         for x in 0..cols {
             let gr = self.term.grid_ref(Point::Screen(PointCoordinate { x, y: screen_y }))?;
             if row_info.is_none() {
-                row_info = Some(gr.row()?);
+                let row = gr.row()?;
+                row_has_links = row.has_hyperlink()?;
+                row_info = Some(row);
             }
             let rc = gr.cell()?;
             if first_semantic.is_none() {
@@ -337,6 +361,11 @@ impl GhosttyEngine {
             let width = convert::cell_width(rc.wide()?);
             let style =
                 if rc.has_styling()? { convert::style(&gr.style()?) } else { Style::DEFAULT };
+            if row_has_links {
+                let uri =
+                    if rc.has_hyperlink()? { hyperlink_uri(&gr, &mut uri_buf)? } else { None };
+                links.push(x, uri, width == CellWidth::SpacerTail);
+            }
             let text = if rc.has_text()? && width.draws_text() {
                 let n = match gr.graphemes(&mut chars) {
                     Ok(n) => n,
@@ -347,12 +376,7 @@ impl GhosttyEngine {
                         set_cell(
                             &mut line,
                             x,
-                            Cell {
-                                text: CellText::from_cluster(&s),
-                                style,
-                                width,
-                                hyperlink: None,
-                            },
+                            Cell { text: CellText::from_cluster(&s), style, width },
                         );
                         continue;
                     }
@@ -363,8 +387,9 @@ impl GhosttyEngine {
             } else {
                 CellText::EMPTY
             };
-            set_cell(&mut line, x, Cell { text, style, width, hyperlink: None });
+            set_cell(&mut line, x, Cell { text, style, width });
         }
+        line.links = links.finish(cols);
         if let Some(row) = row_info {
             line.flags.set(LineFlags::WRAPPED, row.is_wrap_continuation()?);
             line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
@@ -429,6 +454,61 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Collects the OSC 8 runs of one row while its cells are walked left to right.
+#[derive(Default)]
+struct LinkRuns {
+    runs: Vec<Hyperlink>,
+    /// The run in progress: first column and URI.
+    open: Option<(u16, String)>,
+}
+
+impl LinkRuns {
+    /// Cell `x` carries `uri` (`None` when it has no link). A spacer tail continues the run of
+    /// the wide character it belongs to.
+    fn push(&mut self, x: u16, uri: Option<&[u8]>, spacer_tail: bool) {
+        match (&self.open, uri) {
+            (Some((_, open)), Some(uri)) if open.as_bytes() == uri => {}
+            (Some(_), None) if spacer_tail => {}
+            _ => {
+                self.close(x);
+                if let Some(uri) = uri {
+                    self.open = Some((x, String::from_utf8_lossy(uri).into_owned()));
+                }
+            }
+        }
+    }
+
+    fn close(&mut self, end: u16) {
+        if let Some((col, uri)) = self.open.take() {
+            let len = end.saturating_sub(col);
+            if len > 0 {
+                self.runs.push(Hyperlink { col, len, uri });
+            }
+        }
+    }
+
+    fn finish(mut self, cols: u16) -> Vec<Hyperlink> {
+        self.close(cols);
+        self.runs
+    }
+}
+
+/// The OSC 8 URI of the cell at `gr`, read into `buf`; `None` when the cell has no link.
+fn hyperlink_uri<'b>(
+    gr: &GridRef<'_>,
+    buf: &'b mut Vec<u8>,
+) -> Result<Option<&'b [u8]>, EngineError> {
+    let n = match gr.hyperlink_uri(buf) {
+        Ok(n) => n,
+        Err(libghostty_vt::Error::OutOfSpace { required }) => {
+            buf.resize(required, 0);
+            gr.hyperlink_uri(buf)?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok((n > 0).then(|| buf.get(..n).unwrap_or_default()))
+}
+
 fn set_cell(line: &mut Line, x: u16, cell: Cell) {
     if let Some(slot) = line.cells.get_mut(usize::from(x)) {
         *slot = cell;
@@ -468,6 +548,12 @@ fn install_callbacks(
     })?;
     let for_clip = Rc::clone(events);
     term.on_clipboard_write(move |_, write| {
+        // Only the system clipboard; selection/primary are X11 notions with no counterpart
+        // on the clients. Reads (OSC 52 `?`) never reach this callback (libghostty drops
+        // them), and Slopty does not answer them anywhere else.
+        if write.location() != ClipboardLocation::Standard {
+            return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
+        }
         let text = write
             .contents()
             .find(|c| c.mime.starts_with("text/plain"))
@@ -900,6 +986,56 @@ mod tests {
         assert_eq!(cwd_from_osc7("file://elsewhere/tmp"), None);
         assert_eq!(cwd_from_osc7("kitty-shell-cwd:///tmp"), None);
         assert_eq!(cwd_from_osc7("file://"), None);
+    }
+
+    #[test]
+    fn osc8_links_become_runs_on_screen_and_in_history() {
+        let mut e = engine(20, 2);
+        e.write(b"a \x1b]8;;https://x.y/\x1b\\link\x1b]8;;\x1b\\ b\r\n");
+        e.write("\x1b]8;;file:///t\x1b\\字\x1b]8;;\x1b\\z".as_bytes());
+        let f = e.full_frame(0).unwrap();
+        assert_eq!(
+            f.updates[0].line.links,
+            vec![Hyperlink { col: 2, len: 4, uri: "https://x.y/".to_owned() }]
+        );
+        assert_eq!(f.updates[0].line.link_at(3).map(|l| l.uri.as_str()), Some("https://x.y/"));
+        assert_eq!(f.updates[0].line.link_at(6), None);
+        assert_eq!(
+            f.updates[1].line.links,
+            vec![Hyperlink { col: 0, len: 2, uri: "file:///t".to_owned() }],
+            "a wide character's spacer tail stays in the run"
+        );
+        // Scroll the first line into history and read it back through the grid-ref path.
+        e.write(b"\r\n\r\n");
+        let (start, lines) = e.lines(LineIndex(0), 1).unwrap();
+        assert_eq!(start, LineIndex(0));
+        assert_eq!(lines[0].links[0].uri, "https://x.y/");
+        assert_eq!((lines[0].links[0].col, lines[0].links[0].len), (2, 4));
+    }
+
+    #[test]
+    fn plain_rows_carry_no_link_runs() {
+        let mut e = engine(10, 2);
+        e.write(b"no links");
+        let f = e.full_frame(0).unwrap();
+        assert!(f.updates.iter().all(|u| u.line.links.is_empty()));
+    }
+
+    #[test]
+    fn osc52_writes_to_the_system_clipboard_only() {
+        let mut e = engine(10, 3);
+        // "hello" in base64, standard clipboard.
+        e.write(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(
+            e.drain_events(),
+            vec![EngineEvent::ClipboardWrite { text: "hello".to_owned() }]
+        );
+        // Primary and selection are ignored.
+        e.write(b"\x1b]52;p;aGVsbG8=\x07\x1b]52;s;aGVsbG8=\x07");
+        assert_eq!(e.drain_events(), vec![]);
+        // A read request ("?") produces neither an event nor a reply to the program.
+        e.write(b"\x1b]52;c;?\x07");
+        assert_eq!(e.drain_events(), vec![]);
     }
 
     #[test]

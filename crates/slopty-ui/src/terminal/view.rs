@@ -6,8 +6,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Autocapitalize, Bounds, Context, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, TextInputAction, TextInputConfiguration,
     TouchPhase, UTF16Selection, Window, div, point, px, size,
 };
@@ -158,6 +158,10 @@ pub struct TerminalView {
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
     selecting: bool,
+    /// The cell under the pointer, for the ⌘-hover link underline.
+    hover: Option<(u16, u16)>,
+    /// ⌘ is down: links under the pointer show as links.
+    cmd_held: bool,
     /// A long press claimed the touch; moving the finger extends the selection.
     touch_selecting: bool,
     /// The search bar, while open.
@@ -214,6 +218,8 @@ impl TerminalView {
             sticky_control: false,
             selection: None,
             selecting: false,
+            hover: None,
+            cmd_held: false,
             touch_selecting: false,
             search: None,
             search_regex: false,
@@ -414,6 +420,38 @@ impl TerminalView {
     #[must_use]
     pub const fn selection(&self) -> Option<Selection> {
         self.selection
+    }
+
+    /// The link to underline: the run under the pointer while ⌘ is held, as
+    /// `(line, first column, one past the last)`.
+    #[must_use]
+    pub fn link_highlight(&self) -> Option<(LineIndex, u16, u16)> {
+        if !self.cmd_held {
+            return None;
+        }
+        let (col, row) = self.hover?;
+        let index = self.state.index_at_row(row);
+        let line = self.state.line(index)?;
+        url::link_at_col(line, col).map(|span| (index, span.start, span.end))
+    }
+
+    /// Pointer position and ⌘ state changed; repaint only when the underline moves.
+    fn set_pointer(&mut self, hover: Option<(u16, u16)>, cmd: bool, cx: &mut Context<Self>) {
+        let before = self.link_highlight();
+        self.hover = hover;
+        self.cmd_held = cmd;
+        if self.link_highlight() != before {
+            cx.notify();
+        }
+    }
+
+    fn modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_pointer(self.hover, event.modifiers.platform, cx);
     }
 
     /// The word under `col` on line `index` as inclusive columns: the run of non-blank cells
@@ -724,11 +762,6 @@ impl TerminalView {
                 Effect::ClipboardWrite(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
-                Effect::ClipboardReadRequest => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-                        self.send(TermRequest::ClipboardRead { text });
-                    }
-                }
                 Effect::Cwd(_) => {}
                 Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "host"),
                 Effect::Matches { needle, total, matches } => {
@@ -833,12 +866,14 @@ impl TerminalView {
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
         };
-        // ⌘-click opens the link under the pointer, as in every terminal.
+        // ⌘-click opens the link under the pointer, as in every terminal: the program's OSC 8
+        // target when there is one, else the URL in the text.
         if event.button == MouseButton::Left && event.modifiers.platform {
             let index = self.state.index_at_row(row);
-            if let Some(url) = self.state.line(index).and_then(|line| url::url_at_col(line, col)) {
-                tracing::info!(%url, "open link");
-                cx.open_url(&url);
+            if let Some(span) = self.state.line(index).and_then(|line| url::link_at_col(line, col))
+            {
+                tracing::info!(url = %span.url, "open link");
+                cx.open_url(&span.url);
             }
             return;
         }
@@ -879,6 +914,8 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let hover = self.metrics.and_then(|m| m.cell_at(event.position));
+        self.set_pointer(hover, event.modifiers.platform, cx);
         if !self.selecting {
             return;
         }
@@ -1148,6 +1185,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom))

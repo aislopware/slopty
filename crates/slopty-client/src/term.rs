@@ -19,8 +19,6 @@ pub enum Effect {
     Cwd(String),
     /// The program wrote to the clipboard.
     ClipboardWrite(String),
-    /// The program wants to read the clipboard.
-    ClipboardReadRequest,
     /// The child exited.
     Exited(i32),
     /// The host reported an error for a request.
@@ -196,7 +194,6 @@ impl TermState {
             }
             TermEvent::Bell => vec![Effect::Bell],
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],
-            TermEvent::ClipboardReadRequest => vec![Effect::ClipboardReadRequest],
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
                 vec![Effect::Exited(status)]
