@@ -22,7 +22,11 @@
 //! The policy's value (`wanted`) and the target the encoder gets are two numbers: the target is
 //! `wanted` capped at 90 % of the selected QUIC path's `cwnd × 8 / rtt`, in every state
 //! including a stall, because datagrams are congestion-controlled and sending past the window
-//! only fills the datagram queue on the host (`queue_full` in the stats). The cap only shadows
+//! only fills the datagram queue on the host (`queue_full` in the stats). The path is sampled
+//! with every report and the window keeps the *widest* sample: BBR shrinks the congestion
+//! window to four packets for 200 ms every few seconds to re-measure the round trip
+//! (`ProbeRTT`), and a cap read in those 200 ms would cut a loopback stream to a few Mbit/s
+//! (MEASUREMENTS.md, "start-up on a cold connection"). The cap only shadows
 //! `wanted`: a stall that shrinks the window drags the target down for as long as the window
 //! is small and the target springs back when it recovers, instead of growing back an eighth
 //! at a time. A cut is taken from the target actually sent; a clean window under the cap does
@@ -88,6 +92,8 @@ pub struct Window {
     pub stalled_ms: u32,
     /// Stalls that released.
     pub stalls: u32,
+    /// The widest path sample of the window (highest `cwnd × 8 / rtt`).
+    pub path: Option<PathSample>,
 }
 
 impl Window {
@@ -103,6 +109,19 @@ impl Window {
             if report.hold_p95 > self.hold_max {
                 self.hold_max = report.hold_p95;
             }
+        }
+    }
+
+    /// Keep `sample` if it allows more than the window's current path sample.
+    pub fn add_path(&mut self, sample: Option<PathSample>) {
+        let Some(sample) = sample else { return };
+        let wider = match (self.path.and_then(PathSample::window_bps), sample.window_bps()) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(have), Some(new)) => new > have,
+        };
+        if wider {
+            self.path = Some(sample);
         }
     }
 
@@ -224,17 +243,19 @@ impl RateController {
             self.settle = SETTLE_REPORTS;
         }
         self.window.add(report, datagrams_sent, settling);
+        self.window.add_path(path);
         self.reports = self.reports.saturating_add(1);
         if self.reports < DECIDE_EVERY {
             return None;
         }
-        let decision = self.decide(path);
+        let decision = self.decide();
         self.reports = 0;
         self.window = Window::default();
         Some(decision)
     }
 
-    fn decide(&mut self, path: Option<PathSample>) -> Decision {
+    fn decide(&mut self) -> Decision {
+        let path = self.window.path;
         let verdict = judge(&self.window, self.cooldown > 0);
         let before = self.target_bps;
         let under_cap = self.target_bps < self.wanted_bps;
@@ -469,6 +490,37 @@ mod tests {
         let capped = run(&mut c, &CLEAN, 300, small).target_bps;
         let d = run(&mut c, &LOSSY, 300, big);
         assert_eq!(d.target_bps, capped / 4 * 3);
+    }
+
+    /// Four of the ten reports in a window see BBR's `ProbeRTT` window (four packets); the
+    /// other six see the real one. The cap follows the widest sample.
+    #[test]
+    fn a_probe_rtt_dip_inside_the_window_does_not_cap_the_target() {
+        let wide = Some(PathSample { rtt: Duration::from_millis(1), cwnd: 80_000 });
+        let dip = Some(PathSample { rtt: Duration::from_millis(5), cwnd: 5_808 });
+        let mut c = RateController::new(30_000_000);
+        let mut last = None;
+        for i in 0..DECIDE_EVERY {
+            let path = if (3..7).contains(&i) { dip } else { wide };
+            if let Some(d) = c.on_report(&CLEAN, 300, path) {
+                last = Some(d);
+            }
+        }
+        let d = last.expect("decision");
+        assert_eq!(
+            (d.verdict, d.capped, d.target_bps),
+            (RateVerdict::Grow, false, START_BPS + START_BPS / 8)
+        );
+        // A window that only ever saw the dip is capped by it.
+        let mut c = RateController::new(30_000_000);
+        let d = run(&mut c, &CLEAN, 300, dip);
+        assert!(d.capped && d.target_bps < START_BPS, "{d:?}");
+        let mut w = Window::default();
+        w.add_path(None);
+        assert_eq!(w.path, None);
+        w.add_path(dip);
+        w.add_path(Some(PathSample::default()));
+        assert_eq!(w.path, dip, "an empty sample never replaces a real one");
     }
 
     #[test]
