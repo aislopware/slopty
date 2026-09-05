@@ -1584,7 +1584,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   comes back as a notice. The installer moved from `slopty-cli` into `slopty_agent::hooks` so
   the CLI and the daemon run the same code; hostd registers the `slopty` binary beside itself
   (`Contents/MacOS` in a bundle, `target/<profile>` in a build tree). The offer shows once per
-  run and comes back only if the host reports it failed.
+  run and comes back only if the host reports it failed. Wire, with the `AgentSource` of the
+  attribution ruling above: `AgentEvent.source`, `ClientMsg::InstallHooks` and
+  `HostMsg::HooksInstalled`, goldens `host_agent_process`, `host_agent_hook`,
+  `client_install_hooks` and `host_hooks_installed` (all new) with `client_hello` re-accepted,
+  PROTOCOL_VERSION 11 → 12.
 - ✅ **The self-test plays the agent with a fake `claude` on ptyd's `PATH`, never by typing**
   (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and hostd a `HOME` and a `PATH` of
   their own and writes a small `claude` script into the run's temp directory; "+ agent"

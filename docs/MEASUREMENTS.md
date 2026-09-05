@@ -775,18 +775,37 @@ NACK and refresh policy:
 | 50 ‰  | 120   | 13        | 2       | 0    | 2 / 0          | 563 (15)         | 373 ‰       | 19.4 / 83.6 / 100.0 ms |
 | 100 ‰ | 117   | 23        | 3       | 0    | 3 / 0          | 540 (31)         | 385 ‰       | 25.3 / 83.8 / 98.2 ms  |
 
+Both tables above were taken while another session was building (~94 % CPU, 38 cargo/rustc
+processes), which is why the frame counts are ~17 fps: they compare two builds under the same
+load, not the machine's best. Re-run of the after build on a quiet machine (5 processes), on
+protocol 13 after the rebase, with the decoded and stall columns the test grew since:
+
+| drop | frames (decoded) | by parity | by NACK | lost | NACK / refresh | datagrams (lost) | parity seen | stalls | gap p50 / p90 / max |
+| ---- | ---------------- | --------- | ------- | ---- | -------------- | ---------------- | ----------- | ------ | ------------------- |
+| 0 ‰   | 271 (273) | 0  | 0  | 0 | 1 / 0  | 992 (0)  | 431 ‰ | 3 | 15.7 / 46.3 / 102.8 ms |
+| 20 ‰  | 270 (269) | 12 | 0  | 0 | 1 / 0  | 949 (13) | 422 ‰ | 2 | 13.8 / 49.9 / 105.6 ms |
+| 50 ‰  | 274 (273) | 29 | 6  | 0 | 7 / 0  | 977 (32) | 435 ‰ | 0 | 14.1 / 45.5 / 99.3 ms  |
+| 100 ‰ | 269 (273) | 45 | 12 | 0 | 15 / 0 | 885 (49) | 422 ‰ | 2 | 15.3 / 39.5 / 84.4 ms  |
+
+At ~54 fps the picture is the same one three times over: nothing lost, nothing refreshed, parity
+carrying most of the repairs and NACK the rest (12 at 100 ‰, up from 3 at a third of the frame
+rate). Decoded can exceed frames by one because the two counters are read a moment apart. Two or
+three windows still register as stalls even on a quiet machine — the capture's own 100 ms gaps —
+so the test skipped its per-rate verdicts; the frame, decode and decode-error assertions ran.
+
 Takeaways:
 
 * **Nothing is lost and nothing is refreshed up to 100 ‰ datagram loss on this path**, before or
-  after: parity repairs 8–24 % of the frames, one to four NACKs cover the rest, and the arrival
-  gap is the desktop's, not the link's (the 0 ‰ row's 70 ms p50 is a still screen). The NACK
+  after, loaded or quiet: parity repairs 8–24 % of the frames, a handful of NACKs cover the rest,
+  and the arrival gap is the desktop's, not the link's (the 0 ‰ row's 70 ms p50 is a still screen
+  on a busy machine, 16 ms on a quiet one). The NACK
   give-up deadline is therefore left alone — there are no refreshes to remove at 20–50 ‰, and
   changing a deadline that no measurement moves would be churn. What this path cannot show is
   the deadline's RTT-dependent half: loopback answers a NACK in ~1 ms, so a give-up needs a
   stall, which is what the mesh sections above measure.
 * **The two controllers are indistinguishable here, and that is a property of the source, not
   of the controllers**: a still desktop at ~5 Mbit/s encodes 4–8 fragments per frame, so the
-  packetizer's one-parity-fragment minimum (170–330 ‰) is always above the ratio either
+  packetizer's one-parity-fragment minimum (310–435 ‰ observed) is always above the ratio either
   controller asks for (50–200 ‰). The controller only binds on frames of tens of fragments —
   a busy screen on a lossy path — which this test cannot produce without driving the desktop.
   Its behaviour is pinned by unit tests (`crates/slopty-media/src/redundancy.rs`: where the
