@@ -49,6 +49,8 @@ pub mod actions {
         [
             /// Open a new shell on the host.
             NewTerminal,
+            /// Open a new Claude Code agent on the host.
+            NewAgent,
             /// Put an empty note on the canvas.
             NewNote,
             /// Put a host window or display on the canvas.
@@ -69,7 +71,8 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, CloseItem, FitAll, NewNote, NewTerminal, NextAttention, ZoomIn, ZoomOut, ZoomReset,
+    AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 
 /// Key bindings for the canvas context.
@@ -79,6 +82,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-t", NewTerminal, CTX),
         KeyBinding::new("cmd-n", NewTerminal, CTX),
+        KeyBinding::new("cmd-shift-t", NewAgent, CTX),
         KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
@@ -91,6 +95,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
     ]
 }
+
+/// The program a "+ agent" terminal runs.
+pub const AGENT_COMMAND: &str = "claude";
 
 /// A stable element id for `(part, item)`.
 fn element_id(part: &str, id: ItemId) -> ElementId {
@@ -907,13 +914,23 @@ impl CanvasView {
 
     /// Open a new shell; the host places it.
     pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
-        tracing::debug!("open session");
+        self.open_session(Vec::new(), None, cx);
+    }
+
+    /// ⌘⇧T: a terminal running Claude Code. The bare name resolves on the host through the
+    /// user's login shell, so `claude` is found wherever their rc files put it (or alias it).
+    pub fn new_agent(&mut self, _: &NewAgent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_session(vec![AGENT_COMMAND.to_owned()], Some(AGENT_COMMAND.to_owned()), cx);
+    }
+
+    fn open_session(&self, command: Vec<String>, title: Option<String>, cx: &mut Context<Self>) {
+        tracing::debug!(?command, "open session");
         self.send(ClientMsg::OpenSession(OpenSession {
             size: TermSize::default(),
             cwd: None,
-            command: Vec::new(),
+            command,
             env: Vec::new(),
-            title: None,
+            title,
             attach: false,
         }));
         cx.notify();
@@ -1530,6 +1547,7 @@ impl Render for CanvasView {
             .overflow_hidden()
             .bg(hsla(self.theme.surfaces.canvas))
             .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))

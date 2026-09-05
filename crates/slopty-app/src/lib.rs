@@ -18,7 +18,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::LinkEvent;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
-use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewNote, NewTerminal, NextAttention};
+use slopty_ui::canvas::{
+    CanvasEvent, CanvasView, FitAll, NewAgent, NewNote, NewTerminal, NextAttention,
+};
 use slopty_ui::colors::hsla;
 use slopty_ui::terminal::TerminalView;
 
@@ -377,6 +379,12 @@ impl Workspace {
                 }
             },
         ));
+        let agent_button =
+            button("new-agent", "+ agent", "⌘⇧T").on_click(cx.listener(|this, _ev, window, cx| {
+                if let Some(canvas) = &this.canvas {
+                    canvas.update(cx, |c, cx| c.new_agent(&NewAgent, window, cx));
+                }
+            }));
         let note_button =
             button("new-note", "+ note", "⌘⇧N").on_click(cx.listener(|this, _ev, window, cx| {
                 if let Some(canvas) = &this.canvas {
@@ -463,6 +471,7 @@ impl Workspace {
             .child(label(format!("{zoom_pct}%")))
             .child(fit_button)
             .child(new_button)
+            .child(agent_button)
             .child(note_button)
     }
 }

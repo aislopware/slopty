@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::terminal::element::{CellMetrics, TerminalElement};
+use crate::terminal::url;
 
 /// Hits asked for per search; the host counts every hit regardless.
 const SEARCH_MAX: u32 = 5_000;
@@ -776,6 +777,15 @@ impl TerminalView {
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
         };
+        // ⌘-click opens the link under the pointer, as in every terminal.
+        if event.button == MouseButton::Left && event.modifiers.platform {
+            let index = self.state.index_at_row(row);
+            if let Some(url) = self.state.line(index).and_then(|line| url::url_at_col(line, col)) {
+                tracing::info!(%url, "open link");
+                cx.open_url(&url);
+            }
+            return;
+        }
         // Left button selects unless the program asked for the mouse (⇧ overrides, as in
         // every terminal); everything else is reported to the program.
         let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);

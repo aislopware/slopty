@@ -1,6 +1,7 @@
 //! The terminal: a view entity that owns the session state and an element that paints it.
 
 mod element;
+pub mod url;
 mod view;
 
 pub use element::{CellMetrics, Prepared, TerminalElement};
