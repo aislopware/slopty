@@ -1,3 +1,8 @@
+[build]
+# Every rustc call goes through sccache: dependency compiles are shared between the main
+# checkout, the worktrees the parallel sessions build in, and the three triples' target dirs.
+rustc-wrapper = "sccache"
+
 [alias]
 xtask = "run --quiet --package xtask --"
 gate = "run --quiet --package xtask -- gate"

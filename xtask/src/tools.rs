@@ -53,8 +53,36 @@ pub fn has(sh: &Shell, name: &str) -> bool {
     cmd!(sh, "which {name}").quiet().ignore_stderr().read().is_ok()
 }
 
-/// Run a command, printing it first so the log reads like a script.
+/// Run a command, printing it first so the log reads like a script, and its wall time after.
 pub fn step(title: &str, command: &xshell::Cmd<'_>) -> Result<()> {
     println!("▶ {title}");
-    command.run().with_context(|| format!("step failed: {title}"))
+    let started = std::time::Instant::now();
+    let result = command.run().with_context(|| format!("step failed: {title}"));
+    println!("  {} {title} ({:.1?})", if result.is_ok() { "✓" } else { "✘" }, started.elapsed());
+    result
+}
+
+/// Run a command with its output captured, for steps that run beside others: the log stays
+/// readable because everything the tool printed comes out under one header when it is done.
+pub fn quiet_step(title: &str, command: xshell::Cmd<'_>) -> Result<()> {
+    use std::fmt::Write as _;
+
+    let started = std::time::Instant::now();
+    let output = command
+        .quiet()
+        .ignore_status()
+        .output()
+        .with_context(|| format!("step failed to start: {title}"))?;
+    let ok = output.status.success();
+    let mut text = format!("▶ {title}\n");
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let mark = if ok { "✓" } else { "✘" };
+    let _written = writeln!(text, "  {mark} {title} ({:.1?})", started.elapsed());
+    print!("{text}");
+    anyhow::ensure!(ok, "step failed: {title} ({})", output.status);
+    Ok(())
 }

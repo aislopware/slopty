@@ -3,7 +3,7 @@
 use anyhow::Result;
 use xshell::{Shell, cmd};
 
-use crate::tools::{TRIPLES, has, host_only_present, step};
+use crate::tools::{TRIPLES, has, host_only_present, quiet_step, step};
 
 /// Gate options.
 #[derive(Clone, Copy, Debug)]
@@ -15,19 +15,35 @@ pub struct Options {
 }
 
 pub fn run(sh: &Shell, opts: Options) -> Result<()> {
+    let started = std::time::Instant::now();
     fmt(sh, opts.fix)?;
-    lint(sh)?;
-    test(sh, &[])?;
-    if opts.quick {
-        return Ok(());
-    }
-    doc(sh, false)?;
-    deny(sh)?;
-    shear(sh, opts.fix)?;
-    typos(sh, opts.fix)?;
-    taplo(sh, opts.fix)?;
-    commits(sh)?;
-    println!("✔ gate passed");
+    // The tools that never touch `target/` run beside the cargo steps (which serialise on the
+    // build lock anyway); each captures its output and prints it whole when it is done.
+    let tools = std::thread::scope(|scope| -> Result<()> {
+        let tools = (!opts.quick).then(|| {
+            scope.spawn(move || -> Result<()> {
+                let sh = Shell::new()?;
+                deny(&sh)?;
+                shear(&sh, opts.fix)?;
+                typos(&sh, opts.fix)?;
+                taplo(&sh, opts.fix)?;
+                commits(&sh)
+            })
+        });
+        lint(sh)?;
+        test(sh, &[])?;
+        if !opts.quick {
+            doc(sh, false)?;
+        }
+        match tools {
+            Some(handle) => {
+                handle.join().map_err(|panic| anyhow::anyhow!("tool thread panicked: {panic:?}"))?
+            }
+            None => Ok(()),
+        }
+    });
+    tools?;
+    println!("✔ gate passed ({:.1?})", started.elapsed());
     Ok(())
 }
 
@@ -44,26 +60,26 @@ pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
     Ok(())
 }
 
-/// Clippy on every triple. Host-only crates are excluded from the iOS passes.
+/// Clippy on every triple: the host with every target (tests, benches, examples) in one pass,
+/// then the two iOS triples together in one invocation (cargo builds them side by side from
+/// one resolve), library and binary targets only — tests never run on iOS, and their code is
+/// the same as the host's. Host-only crates are excluded from the iOS pass.
 pub fn lint(sh: &Shell) -> Result<()> {
-    for triple in TRIPLES {
-        let excludes: Vec<String> = if triple == TRIPLES[0] {
-            Vec::new()
-        } else {
-            host_only_present()?
-                .into_iter()
-                .flat_map(|c| ["--exclude".to_owned(), c.to_owned()])
-                .collect()
-        };
-        step(
-            &format!("clippy {triple}"),
-            &cmd!(
-                sh,
-                "cargo clippy --workspace {excludes...} --all-targets --target {triple} -- -D warnings"
-            ),
-        )?;
-    }
-    Ok(())
+    let host = TRIPLES[0];
+    step(
+        &format!("clippy {host}"),
+        &cmd!(sh, "cargo clippy --workspace --all-targets --target {host} -- -D warnings"),
+    )?;
+    let excludes: Vec<String> = host_only_present()?
+        .into_iter()
+        .flat_map(|c| ["--exclude".to_owned(), c.to_owned()])
+        .collect();
+    let ios: Vec<String> =
+        TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
+    step(
+        "clippy ios + ios-sim",
+        &cmd!(sh, "cargo clippy --workspace {excludes...} {ios...} -- -D warnings"),
+    )
 }
 
 pub fn test(sh: &Shell, extra: &[String]) -> Result<()> {
@@ -78,17 +94,17 @@ pub fn doc(sh: &Shell, open: bool) -> Result<()> {
 }
 
 fn deny(sh: &Shell) -> Result<()> {
-    step("cargo deny", &cmd!(sh, "cargo deny --workspace check"))
+    quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))
 }
 
 fn shear(sh: &Shell, fix: bool) -> Result<()> {
     let fix: &[&str] = if fix { &["--fix"] } else { &[] };
-    step("cargo shear", &cmd!(sh, "cargo shear {fix...}"))
+    quiet_step("cargo shear", cmd!(sh, "cargo shear {fix...}"))
 }
 
 fn typos(sh: &Shell, fix: bool) -> Result<()> {
     let write: &[&str] = if fix { &["-w"] } else { &[] };
-    step("typos", &cmd!(sh, "typos {write...}"))
+    quiet_step("typos", cmd!(sh, "typos {write...}"))
 }
 
 /// Only the tracked TOML files: left to its own globs taplo walks `target/` and the vendored
@@ -97,12 +113,12 @@ fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     let check: &[&str] = if apply { &[] } else { &["--check"] };
     let files = cmd!(sh, "git ls-files *.toml").read()?;
     let files: Vec<&str> = files.lines().collect();
-    step("taplo", &cmd!(sh, "taplo fmt {check...} {files...}"))
+    quiet_step("taplo", cmd!(sh, "taplo fmt {check...} {files...}"))
 }
 
 /// Every commit since the last tag (or the root) follows Conventional Commits.
 fn commits(sh: &Shell) -> Result<()> {
     let last_tag = cmd!(sh, "git describe --tags --abbrev=0").quiet().ignore_stderr().read().ok();
     let range = last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}..HEAD", t.trim()));
-    step("committed", &cmd!(sh, "committed {range} --no-merge-commit"))
+    quiet_step("committed", cmd!(sh, "committed {range} --no-merge-commit"))
 }

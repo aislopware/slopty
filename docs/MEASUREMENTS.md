@@ -472,3 +472,24 @@ export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn
 /tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
 # on the host: RUST_LOG=info,slopty_host=debug hostd → grep 'bitrate\|stream closed'
 ```
+
+## 2026-09-05 — gate wall time after the speed-up (mac-studio, 10 cores, warm caches)
+
+`cargo xtask gate > /tmp/gate.log 2>&1` on a tree touching xtask, slopty-e2e and docs; every step
+prints its own wall time since this change. Before it, the same gate ran ~8–9 min with the three
+clippy passes in sequence (32 + 25 + 26 s) and deny/shear/typos/taplo/committed after the cargo
+steps.
+
+| step                          | time     | note                                                         |
+| ----------------------------- | -------- | ------------------------------------------------------------ |
+| fmt + taplo                   | 0.4 s    |                                                              |
+| deny, shear, typos, taplo, committed | 4 s | one thread beside the cargo steps; output printed whole  |
+| clippy aarch64-apple-darwin   | 54.4 s   | `--all-targets`                                              |
+| clippy ios + ios-sim          | 43.9 s   | one invocation, two `--target`s, lib + bins                  |
+| nextest                       | 148.6 s  | 245 tests run in 8 s; the rest is building the test binaries |
+| doctests                      | 9.7 s    |                                                              |
+| rustdoc                       | 25.3 s   |                                                              |
+| **total**                     | **282 s** | budget 5–10 min |
+
+nextest's build is the next target if the gate grows: it recompiles the workspace in the `test`
+profile after clippy checked it in `dev`, and sccache does not cache incremental workspace crates.
