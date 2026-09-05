@@ -1711,6 +1711,7 @@ whether the host's heartbeat is late because `cursor_loop` calls `target_bounds`
 — the stamps say the beats *were* late, but that file belongs to another branch; and why QUIC
 sits at the 5808-byte cwnd floor on loopback while the controller asks for 30 Mbit/s, which is
 what run 3's stalls are and is the next thing worth chasing.
+
 ## 2026-09-06 — the zoom hitch, third look: the chrome's share, the raster per step, text in motion
 
 `sample <pid> 4` on the main thread during scenario (b), demangled (`rustfilt`); inclusive
@@ -1830,3 +1831,136 @@ Takeaways, against the still-desktop table above:
   display target still carries the app-driven scrolling content — the point the hostd test could
   not reach — plus whatever else is on the desktop. A cleaner isolation (a dedicated scrolling
   helper window, or a second app viewing the first's window) is left for a follow-up.
+
+## 2026-09-06 — what actually holds a frame on a quiet loopback stream: BBR3's ProbeRTT
+
+Ran on mac-studio, debug binaries, `Display(6)` 1920×1080 HEVC, 60 fps cap, 30 Mbit/s target,
+direct-only on port 45571, private data dir, own ptyd + hostd killed after every sample:
+
+```sh
+D=target/e2e-data/cadence; rm -rf $D; mkdir -p $D/client
+target/debug/slopty-ptyd --socket $D/ptyd.sock &
+RUST_LOG=info,slopty_net=debug,slopty_hostd=debug,slopty_host=debug \
+  SLOPTY_PORT=45571 SLOPTY_PATH_TRACE_MS=100 SLOPTY_CC=bbr3 \
+  target/debug/slopty-hostd --direct-only --ptyd-socket $D/ptyd.sock --ctl-socket $D/hostd.sock \
+  > $D/hostd.log 2>&1 &
+TICKET=$(SLOPTY_HOSTD_SOCKET=$D/hostd.sock target/debug/slopty host ticket | tail -1)
+SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
+SLOPTY_CC=bbr3 SLOPTY_HOSTD_SOCKET=$D/hostd.sock SLOPTY_DATA_DIR=$D/client \
+  SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen \
+  --display 6 --seconds 90 --mbit 30 --max-stalls 0
+```
+
+### First, a correction
+
+The 2026-09-06 stalls section above blames the remaining stalls on `cwnd 5808` "on the host's
+send side". The number is real but it was read off the wrong connection. `slopty bench screen`
+prints `quic path (client side)`: the **client→host** connection, which carries receiver reports
+and NACKs and nothing else. BBR never gets a delivery-rate sample worth the name on it, so it
+parks that window at `min_pipe_cwnd` (4 × 1452 = 5808 B) for the whole run, every run, whatever
+the media is doing. It never described the stream's send window. The line is now labelled
+`quic path (client→host, feedback only)` and the host's own window is sampled on a timer
+(`SLOPTY_PATH_TRACE_MS`, off by default) because a congestion window is only legible as a series.
+
+The conclusion survives the correction, for a different reason than the one recorded.
+
+### BBR3 — 5 × 90 s, quiet machine
+
+| run | fps | stalls (stalled) | in-flight | QUIC holds ≥ 25 ms | worst hold | host cwnd min / p50 / max | samples at 5808 | pump behind |
+| --- | --- | ---------------- | --------- | ------------------ | ---------- | ------------------------- | --------------- | ----------- |
+| 1 | 19.9 | 4 (396 ms) | 4 | 6 | 94 ms | 5 808 / 13 261 / 131 079 | 47 / 903 | ≤ 3 ms |
+| 2 | 28.9 | 1 (77 ms) | 1 | 4 | 98 ms | 5 808 / 16 722 / 76 101 | — | 0 ms |
+| 3 | 13.0 | **0** | 0 | 1 | 49 ms | 5 808 / 12 794 / 76 048 | — | 0 ms |
+| 4 | 8.1 | 15 (1359 ms) | 15 | 19 | 129 ms | 5 808 / 11 032 / 76 092 | 73 / 902 | ≤ 1 ms |
+| 5 | 14.2 | 1 (662 ms) | 0 | 2 | 668 ms | 5 808 / 15 087 / 76 092 | 13 / 898 | ≤ 1 ms |
+
+Over the five samples: 7 547 holds in all, mean 2.4 ms — and **32 holds of 25 ms or more, 24 of
+them (75 %) with the window at exactly 5 808 bytes.** The stall count follows the long holds run
+for run. Nothing else does: `host captured N, dropped 0, encoded N, queue full 0` in every run,
+`receiver_dozed` 0 everywhere, and the datagram pump — newly instrumented — was never more than
+3 ms behind. The frames are built, they reach the pump at once, and then QUIC sits on them.
+
+5 808 B is `BBR.MinPipeCwnd`, `4 * smss`, and the window reaches it in `ProbeRTT`: every
+`probe_rtt_interval` (5 s) without a lower RTT sample, BBR3 clamps the window to
+`max(0.5 × BDP, MinPipeCwnd)` for 200 ms. On this path the BDP is ~11 kB, so half of it is below
+the floor and the floor is what applies. The floor is reached 1.4–8 % of the time and a frame that
+lands in that window waits out the rest of the 200 ms: 25–129 ms typically, 668 ms once — which
+is also the only `Stamp::Wrapped` silence any run has produced, so the 256 ms limit on
+`send_ms_lo` is no longer hypothetical.
+
+None of it is configurable. `noq_proto::congestion::Bbr3Config` has the fields
+(`probe_rtt_cwnd_gain`, `probe_bw_up_cwnd_gain`, `default_cwnd_gain`, …) but `impl Bbr3Config`
+exposes **exactly one setter, `initial_window`** (`bbr3/mod.rs:2015`), and `min_pipe_cwnd` is
+assigned `4 * self.smss` outright at `bbr3/mod.rs:1841`. 1.2.0 is the only version published, so
+there is no bump to reach for either.
+
+### Cubic — 3 × 90 s, same command with `SLOPTY_CC=cubic`
+
+| run | fps | stalls (stalled) | QUIC holds ≥ 25 ms | worst hold | host cwnd min / p50 / max |
+| --- | --- | ---------------- | ------------------ | ---------- | ------------------------- |
+| 1 | 18.4 | **0** (66 ms) | 0 | 13 ms | 38 967 / 76 818 / 76 818 |
+| 2 | 16.2 | 1 (294 ms) | 2 | 48 ms | 38 960 / 76 813 / 116 963 |
+| 3 | 18.0 | 1 (185 ms) | 2 | 37 ms | 38 971 / 86 668 / 94 096 |
+
+Cubic has no ProbeRTT, and it shows in the one place it should: **the window never goes below
+38 960 bytes**, against BBR3's 5 808. Long holds fall from 4.3 per minute to 0.9, and the worst
+hold from 668 ms to 48 ms. Stalls fall with them but not to zero, and with three samples against
+five on a machine whose own frame rate wandered between 8 and 29 fps the stall counts are the
+noisiest number on this page; the hold distribution is a property of the controller and is not.
+
+### Audio on — the cadence question, answered backwards
+
+The hypothesis this track started from was that a stream with no audio has nothing keeping its
+datagram cadence under the inter-frame gap, and that the window falls to the floor for want of
+traffic. One more 90 s sample with sound playing (`afplay` at volume 0.02 in a loop, so
+ScreenCaptureKit has an audio stream to carry) says the opposite:
+
+| | quiet (5 runs) | audio (1 run) |
+| --- | --- | --- |
+| audio packets | 0, 0, 0, 0, 18 | 2 367 |
+| fps | 8.1–28.9 | 31.3 |
+| `host_quiet` silences past the gap | 0–4 | **0** |
+| samples with cwnd at 5 808 | 1.4–8.1 % | **23.2 %** (211 / 909) |
+| holds ≥ 25 ms | 1–19 | 28, **27 of them at 5 808** |
+| stalls (stalled) | 0–15 (0–1359 ms) | 14 (1064 ms), all in-flight |
+
+Audio does what a keep-cadence datagram is supposed to do — it removes sender-side silence
+outright, `host_quiet` goes to 0 — and the stalls get *worse*, because the window is not on the
+floor for want of datagrams. It is on the floor because the flow is application-limited: a still
+desktop carries about 1 Mbit/s, BBR sizes the window from `bw × min_rtt`, and 1–3 Mbit/s over a
+1.5 ms path is a BDP of well under one packet, so `max(…, MinPipeCwnd)` is the whole answer. More
+datagrams means more bursts arriving into a four-packet window, not a bigger window. The only
+filler that would raise the estimate is filler at the target rate — 30 Mbit/s of nothing on a link
+carrying 1 Mbit/s of content, which is a cost, not a fix.
+
+Confounded, and worth saying: the audio run is also the busiest sample on the page (31.3 fps,
+reader lag max 194 ms against 82–119 ms) and it is one run against five. What it rules out is the
+mechanism, not the size of the effect.
+
+### Echo round trip — unchanged
+
+`slopty bench echo` (30 bytes into `/bin/cat`, timed to the first frame back), BBR3, same host:
+min 4.1 / p50 5.1 / p90 8.1 / max 10.0 ms, 0 timeouts, quic rtt 2.7 ms. Nothing here touches the
+keystroke path, and nothing was traded for throughput.
+
+### The self-check, tightened
+
+`slopty bench screen --max-stalls` counted only stalls that *released*. A stall still on when the
+run ends never releases, so it never reaches the counter — `stalled_ms` is its only trace, and the
+worst case there is, a link that stops and stays stopped, passed. Cubic run 1 above reports
+`stalls 0 (66 ms stalled)` and passed a `--max-stalls 0` run on the old check. It now counts an
+unreleased stall and requires zero stalled time when zero stalls are allowed. Every sample on this
+page re-scored against the stricter check: **BBR3 1 of 5 pass (run 3), Cubic 0 of 3.** The
+acceptance run the cadence brief asked for does not pass on either controller on this machine, and
+the reason is the `ProbeRTT` floor above, not the check.
+
+### Not measured
+
+The same comparison over the mesh, which is the path the BBR3 ruling rests on and the one where
+Cubic was measured to collapse — until that exists the default stays where it is. Whether the
+host's heartbeat is late because `cursor_loop` calls the blocking `slopty_capture::target_bounds`
+on its own task every 100 ms (that file belongs to another branch; the beats did go out here —
+`ended by: heartbeat` is non-zero in four of eight runs). And a moving screen: every run on this
+page is a still desktop, where ScreenCaptureKit delivers 8–29 fps of near-empty frames and the
+stream carries about 1 Mbit/s against its 30 Mbit/s target, so nothing here says what the send
+side does when there is actually 30 Mbit/s to send.

@@ -2499,3 +2499,76 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   Tests: `a_slow_geometry_call_does_not_make_the_beat_late` (unit: 300 ms of blocking work beside
   the beat, cadence kept) and `the_heartbeat_keeps_its_cadence_on_a_quiet_stream` (hostd e2e,
   `SLOPTY_SCREEN_E2E`, a minute on a stream whose target draws nothing).
+
+- ❌ **Raising BBR3's minimum congestion window, or softening `ProbeRTT`** (2026-09-06). The long
+  holds on a quiet loopback stream are `ProbeRTT`: every 5 s without a lower RTT sample BBR3
+  clamps the window to `max(0.5 × BDP, MinPipeCwnd)` for 200 ms, and on a 2 ms path the BDP is
+  ~11 kB so the floor is what applies — 24 of the 32 holds past 25 ms in 7.5 minutes of samples
+  had the window at exactly 5 808 B = `4 × smss` (MEASUREMENTS.md, "what actually holds a frame").
+  Not reachable from here: `noq_proto::congestion::Bbr3Config` carries the fields
+  (`probe_rtt_cwnd_gain`, `default_cwnd_gain`, …) as private members and `impl Bbr3Config` exposes
+  **one setter, `initial_window`** (`bbr3/mod.rs:2015`); `min_pipe_cwnd` is `4 * self.smss`
+  outright (`bbr3/mod.rs:1841`), asserted by a noq test. noq-proto 1.2.0 is the only version
+  published, so there is no bump either. The ask upstream is either a setter for
+  `probe_rtt_cwnd_gain` or skipping `ProbeRTT` for a flow that is application-limited — such a
+  flow never fills the pipe, so its minimum RTT is already an unqueued one and the 200 ms buys
+  nothing. Until then the cost is measured and named rather than worked around.
+- ❌ **Switching the default congestion controller to Cubic** (2026-09-06), ✅ **`SLOPTY_CC=cubic`
+  as the measured short-path escape hatch.** Cubic has no `ProbeRTT` and it shows exactly where it
+  should: over 3 × 90 s its window never fell below 38 960 B against BBR3's 5 808, holds past
+  25 ms fell from 4.3 per minute to 0.9 and the worst from 668 ms to 48 ms. That is not enough to
+  move the default. The BBR3 ruling above (line 634) rests on the Wi-Fi/mesh path, where Cubic cut
+  the window to 13–20 KB after a handful of real losses and capped the stream near 10 Mbit/s for
+  the rest of the session; a 200 ms hitch every few seconds is worse than nothing but it is not
+  worse than that, and no measurement of Cubic over the mesh exists to weigh against it. Two
+  controllers, two paths, one knob: the numbers for both are on the MEASUREMENTS page and
+  `SLOPTY_CC` selects either. Revisit when the mesh comparison exists, or when noq exposes the
+  `ProbeRTT` knobs.
+- ❌ **The client's `pacing.rs` is not the ACK path** (2026-09-06, checked while looking for a
+  receiver-side limiter). It is the display pacer — present-on-arrival, replace rather than queue,
+  and the percentiles that go with it. What governs ACK cadence is `slopty_net::endpoint`'s
+  `MAX_ACK_DELAY`, already at 2 ms since 2026-09-05, and the eight 90 s samples here confirm it is
+  not limiting: 0 NACKs, 0 lost packets, 0 congestion events in every run.
+- ✅ **A congestion window is read as a series, not as a final sample** (2026-09-06,
+  `slopty_net::endpoint::trace_path_health`, `SLOPTY_PATH_TRACE_MS` in milliseconds, off by
+  default). One reading at the end of a run cannot tell a window that sat on BBR's four-packet
+  floor the whole time from one that dipped there for 200 ms — and a 15 s sample missed the dips
+  entirely. Paired with a **backlog** line in hostd's datagram pump, the host-side twin of
+  `receiver_dozed`: a datagram waits either in the pump's channel, because the task did not run,
+  or in QUIC's send buffer, because the window holds it, and a receiver sees the same silence for
+  both. The pump was never more than 3 ms behind in any sample, which is what makes the window the
+  answer. The bench's `quic path (client side)` line — the feedback connection, permanently at
+  `min_pipe_cwnd` because nothing measurable flows on it — is relabelled
+  `quic path (client→host, feedback only)`; reading it as the media window is the mistake this
+  entry exists to stop.
+- ✅ **With no audio, the heartbeat is what keeps the cadence — and that is all a keep-cadence
+  datagram can do** (2026-09-06). ❌ **Beating at the inter-frame gap instead of
+  `HEARTBEAT_AFTER`.** The question was whether a stream carrying no audio loses its datagram
+  cadence and lets the congestion window fall to the floor. Measured both ways on the same host
+  (MEASUREMENTS.md, "Audio on"): with sound playing, `host_quiet` silences go to 0 — the sender is
+  never quiet — and the window is at 5 808 B for **23 % of samples against 1.4–8 % on the quiet
+  runs**, with 27 of its 28 long holds there and 14 stalls. Traffic does not lift the window; the
+  window is low because the flow is application-limited and BBR sizes it from `bw × min_rtt`, which
+  on a still desktop (~1 Mbit/s over 1.5 ms) is under a packet. More datagrams are more bursts into
+  a four-packet window. The heartbeat's job is the receiver's stall clock, not the congestion
+  controller's estimate, and at half the stall gap it already does that job: `host_quiet` silences
+  run 0–4 per 90 s with `stamp_absent` zero throughout. Raising its rate would buy nothing and cost
+  a datagram every 16.7 ms per stream. The only filler that would move the estimate is filler at
+  the target rate, which is 30 Mbit/s of nothing on a link carrying 1 Mbit/s of content.
+- ✅ **A stall still on when the run ends counts against `--max-stalls`** (2026-09-06,
+  `apps/slopty-cli/src/bench.rs`, from Codex's review of the stalls track). The check read
+  `stats.stalls`, which only counts stalls that *released* — so the worst case there is, a link
+  that stops and stays stopped, passed with zero. A run reporting `stalls 0 (66 ms stalled)` did
+  pass (MEASUREMENTS.md, 2026-09-06). It now counts an unreleased stall and requires
+  `stalled_ms == 0` when zero stalls are allowed.
+- ✅ **The receiver's doze credit survives the tick that observes it** (2026-09-06,
+  `crates/slopty-media/src/reassemble.rs`, same review). A receiver waking from a long sleep runs
+  whatever its executor polls first, and a ready timer is as likely as the socket. `tick` moved
+  `last_tick_at` to now, so an ingest a moment later found nothing slept through and charged the
+  whole gap to the link — undoing the stalls-track fix in exactly the interleaving that fix was
+  for. `tick` now banks the slept stretch in `dozed_since_arrival` and the arrival that ends the
+  silence spends it. The same edit closed a second hole the first did not name: `last_tick_at` was
+  only moved by `tick`, so a receiver that was ingesting steadily but not ticking accumulated a
+  doze it never took. An arrival is proof the loop ran, so it moves the mark too. Test:
+  `a_tick_that_wakes_first_does_not_hand_the_silence_to_the_link` — the timer fires before the
+  datagrams and the 200 ms is still not a stall, and the next silence, watched, still is one.
