@@ -1447,8 +1447,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `{ path, repo }`, both `Option<String>`; goldens `host_session_opened`, `host_term_cwd` and
   `host_term_cwd_no_repo` (new) and `client_hello` re-accepted, `PROTOCOL_VERSION` 13 → 14.
   `slopty_client::arrange` keys on the root when it is there and keeps the old containment
-  heuristic only for the items a host gave no root for, so a mixed canvas (a shell outside any
-  repository next to shells inside one) still groups sensibly and an older host still arranges.
+  heuristic only for the items the host resolved no root for — a directory outside any
+  repository, or one that has since been removed — so a mixed canvas (a shell outside any
+  repository next to shells inside one) still groups sensibly. It is **not** a compatibility
+  path: the handshake compares `PROTOCOL_VERSION` for equality and refuses a mismatch, so a
+  client that reads roots never sees session data from a host that does not send them.
   This replaces the deferral in the ruling above: sibling subdirectories with nothing checked
   out at the root are now one block, which the heuristic could never see. Tests:
   `slopty_host::repo` over a temp tree (checkout, nested subdirectory, worktree `.git` file,

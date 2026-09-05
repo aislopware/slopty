@@ -7,11 +7,13 @@
 //! (`SessionSummary.repo` / `TermEvent::Cwd { repo }`, protocol 14): only the machine the
 //! shell runs on can see its `.git`. Nothing here touches a filesystem.
 //!
-//! A host that sends no root — an older one, or a directory outside any repository — falls
-//! back to the cwd heuristic this module started with: two shells belong together when one's
-//! directory contains the other's. That is right for a shell at a checkout's root plus shells
-//! in its subdirectories, and wrong for shells in sibling subdirectories with none at the
-//! root, which is exactly why the root is on the wire now.
+//! An item whose root the host could not resolve — a directory outside any repository, or one
+//! that has since been removed — falls back to the cwd heuristic this module started with: two
+//! shells belong together when one's directory contains the other's. That is right for a shell
+//! at a checkout's root plus shells in its subdirectories, and wrong for shells in sibling
+//! subdirectories with none at the root, which is exactly why the root is on the wire now.
+//! The fallback is never about an older *host*: the handshake requires exact protocol
+//! equality, so a client that knows about roots only ever talks to a host that sends them.
 
 use slopty_core::ItemId;
 use slopty_proto::canvas::Rect;

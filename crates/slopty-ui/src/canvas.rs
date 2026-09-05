@@ -1535,7 +1535,8 @@ impl CanvasView {
     }
 
     /// The repository of an item's session, as the host resolved it. What arrange groups on;
-    /// `None` outside a repository, or from a host older than protocol 14.
+    /// `None` when the host resolved none — a directory outside any repository, or one that has
+    /// since been removed.
     fn repo_of(&self, item: &CanvasItem) -> Option<String> {
         match item.kind {
             ItemKind::Terminal { session } => {
@@ -2550,7 +2551,8 @@ mod tests {
     }
 
     /// Where a test session runs: what OSC 7 said, and the repository the host resolved it to.
-    /// Protocol 14 sends both; a host older than that sends only the first.
+    /// The root is absent when the host found none, not when the host is old — the handshake
+    /// requires exact protocol equality, so every host this client talks to sends both fields.
     #[derive(Clone, Copy, Default)]
     struct Where<'a> {
         cwd: Option<&'a str>,
