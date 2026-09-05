@@ -393,7 +393,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (`text_system/line.rs`: underline at `baseline + descent · 0.618`), leaving only the curly
   underline to GPUI (drawing a wave is its alone); the bar and underline cursors take
   `cursor_thickness` (one device pixel, as ghostty); and `TermSize.metrics` on the wire is now
-  the cell in **device** pixels, which is what `ws_xpixel`/`ws_ypixel` are supposed to carry.
+  the cell in **device** pixels, which is what `ws_xpixel`/`ws_ypixel` are supposed to carry —
+  and so is the offset in a pixel mouse report (`CellMetrics::pixel_at`), since the host divides
+  one by the other. Two more consequences of deriving rather than guessing: the glyphs are
+  painted on the derived baseline (GPUI centres a line in the box it is given, which is close to
+  but not the font's baseline, so the origin is offset by the difference — exact, and per row,
+  so a fallback font still lines up with its decorations); and a zoomed grid is the unzoomed one
+  **scaled**, never re-derived, because the columns that fit were counted with the unzoomed
+  cell — re-deriving rounds the cell up and clips the last column (at 13 pt, DPR 2, zoom 0.3 the
+  cell came out 2.5 pt against the 1.2 pt the item had room for).
 - ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to hostd by
   `SCM_RIGHTS` (`nix` `sendmsg`/`recvmsg`; `sendfd` dropped — one fewer dependency, and macOS
   has no `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a
@@ -417,6 +425,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the *only* database consulted, so such a run answers from its own and not from whatever the
   machine happens to have (the app self-test points both it and `TERMINFO_DIRS` at the stack's
   temp dir, so no run touches the developer's home).
+  A child is given `TERMINFO=<dir>` when — and only when — that override is in play: `TERM` and
+  the search path have to agree, and a database ncurses knows nothing about would otherwise
+  leave the shell advertising `xterm-ghostty` and unable to find it. Without the override the
+  inherited `TERMINFO` is cleared, since `default_term` answered from the places ncurses
+  searches by itself.
   Idempotent: `installed()` looks for `78/xterm-ghostty` or `x/xterm-ghostty` under the same
   directories the lookup searches, and does nothing when it is there. Nothing blocks on it —
   `default_term()` is read per spawn, so a shell that starts before `tic` finishes simply gets

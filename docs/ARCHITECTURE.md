@@ -110,12 +110,14 @@ multi-line prompt, `Input`, `Output`. The client side is in §6.
 function from a face — advance, ascent, descent, line gap, and the underline/strikethrough
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
 underline, the strikethrough, the overline and the cursor. The element measures the face at
-`font_size × scale`, derives once, and `Grid` divides back to logical points, so a row is
-pixel-aligned on the display it was measured for; `typography.mono_line_height` is ghostty's
+`font_size × scale`, derives once — a zoomed grid is that one scaled, so the columns that fit
+still fit — and `Grid` divides back to logical points, so a row is pixel-aligned on the display
+it was measured for; `typography.mono_line_height` is ghostty's
 `adjust-cell-height` percentage on top (1.0 = the font's own). The element paints underlines
 and strikethroughs itself, at those offsets, because GPUI puts them elsewhere — only the curly
-underline is left to GPUI. The same derived cell goes on the wire in `TermSize.metrics`, which
-becomes the PTY's `ws_xpixel`/`ws_ypixel`.
+underline is left to GPUI. Glyphs are painted on the derived baseline rather than
+GPUI's centred one. The same derived cell goes on the wire in `TermSize.metrics`, which becomes
+the PTY's `ws_xpixel`/`ws_ypixel`, and pixel mouse reports are measured in it too.
 
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
