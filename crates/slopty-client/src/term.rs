@@ -262,8 +262,11 @@ impl TermState {
         self.scrollback.set_extent(frame.oldest_line, frame.total_lines);
         for update in frame.updates {
             let index = self.first_visible.offset(u64::from(update.row));
-            self.scrollback.insert(index, update.line.clone());
-            if let Err(e) = self.screen.apply(update) {
+            // One allocation held twice: the screen row and its scrollback entry are the same
+            // line, so a row that scrolls into history is never copied.
+            let line = std::sync::Arc::new(update.line);
+            self.scrollback.insert_shared(index, std::sync::Arc::clone(&line));
+            if let Err(e) = self.screen.apply_shared(update.row, line) {
                 tracing::debug!(error = %e, "row update rejected");
             }
         }
@@ -390,7 +393,7 @@ impl TermState {
         if index >= self.first_visible {
             let row =
                 usize::try_from(index.0.saturating_sub(self.first_visible.0)).unwrap_or(usize::MAX);
-            self.screen.lines().get(row)
+            self.screen.lines().get(row).map(AsRef::as_ref)
         } else {
             self.scrollback.get(index)
         }
@@ -408,7 +411,7 @@ impl TermState {
                 .enumerate()
                 .map(|(i, line)| ViewRow {
                     index: self.first_visible.offset(u64::try_from(i).unwrap_or(u64::MAX)),
-                    line: Some(line),
+                    line: Some(line.as_ref()),
                 })
                 .collect();
         }
@@ -419,7 +422,7 @@ impl TermState {
                 let line = if index >= self.first_visible {
                     let row = usize::try_from(index.0.saturating_sub(self.first_visible.0))
                         .unwrap_or(usize::MAX);
-                    self.screen.lines().get(row)
+                    self.screen.lines().get(row).map(AsRef::as_ref)
                 } else {
                     self.scrollback.get(index)
                 };

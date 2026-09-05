@@ -6,6 +6,7 @@
 //! the user scrolls, so scrolling is local and instant once a range is cached.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::Line;
 
@@ -54,7 +55,9 @@ pub struct ScrollbackStats {
 /// Sparse, bounded cache of lines by absolute index.
 #[derive(Clone, Debug)]
 pub struct Scrollback {
-    lines: BTreeMap<LineIndex, Line>,
+    /// Shared with [`crate::Screen`]: a row that scrolls off the screen into history is one
+    /// allocation held twice, not a copy.
+    lines: BTreeMap<LineIndex, Arc<Line>>,
     capacity: usize,
     /// Number of lines the host currently has (history + visible rows).
     total: u64,
@@ -71,10 +74,16 @@ impl Scrollback {
 
     /// Record the host's current line count and oldest retained index.
     pub fn set_extent(&mut self, oldest: LineIndex, total: u64) {
-        self.oldest = oldest;
         self.total = total;
-        // Lines the host dropped are useless; drop them here too.
-        self.lines = self.lines.split_off(&oldest);
+        // Only when the host actually dropped something: this runs on every frame, and
+        // `split_off` walks and rebuilds the map whether or not anything is below `oldest`.
+        if oldest > self.oldest {
+            self.oldest = oldest;
+            // Lines the host dropped are useless; drop them here too.
+            self.lines = self.lines.split_off(&oldest);
+        } else {
+            self.oldest = oldest;
+        }
         self.trim();
     }
 
@@ -92,6 +101,11 @@ impl Scrollback {
 
     /// Insert or replace a line.
     pub fn insert(&mut self, index: LineIndex, line: Line) {
+        self.insert_shared(index, Arc::new(line));
+    }
+
+    /// Insert or replace a line the caller already shares (with the screen, in practice).
+    pub fn insert_shared(&mut self, index: LineIndex, line: Arc<Line>) {
         if index < self.oldest {
             return;
         }
@@ -112,7 +126,13 @@ impl Scrollback {
     /// A cached line.
     #[must_use]
     pub fn get(&self, index: LineIndex) -> Option<&Line> {
-        self.lines.get(&index)
+        self.lines.get(&index).map(AsRef::as_ref)
+    }
+
+    /// A cached line, shared: what the screen re-adopts when the viewport moves.
+    #[must_use]
+    pub fn shared(&self, index: LineIndex) -> Option<Arc<Line>> {
+        self.lines.get(&index).map(Arc::clone)
     }
 
     /// Sub-ranges of `[start, start + count)` that are not cached and are still retrievable, so

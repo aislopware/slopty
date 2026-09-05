@@ -1,5 +1,7 @@
 //! The visible grid plus cursor, and the row-level update protocol applied to it.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Line, TermModes};
@@ -69,7 +71,9 @@ pub enum ScreenError {
 pub struct Screen {
     cols: u16,
     rows: u16,
-    lines: Vec<Line>,
+    /// Shared with [`crate::Scrollback`]: applying a row puts the same allocation in both, so a
+    /// line that scrolls into history is never copied.
+    lines: Vec<Arc<Line>>,
     cursor: Cursor,
     modes: TermModes,
 }
@@ -81,7 +85,7 @@ impl Screen {
         Self {
             cols,
             rows,
-            lines: (0..rows).map(|_| Line::blank(cols)).collect(),
+            lines: (0..rows).map(|_| Arc::new(Line::blank(cols))).collect(),
             cursor: Cursor { visible: true, ..Cursor::default() },
             modes: TermModes::empty(),
         }
@@ -123,14 +127,14 @@ impl Screen {
 
     /// All lines, top to bottom.
     #[must_use]
-    pub fn lines(&self) -> &[Line] {
+    pub fn lines(&self) -> &[Arc<Line>] {
         &self.lines
     }
 
     /// One line.
     #[must_use]
     pub fn line(&self, row: u16) -> Option<&Line> {
-        self.lines.get(usize::from(row))
+        self.lines.get(usize::from(row)).map(AsRef::as_ref)
     }
 
     /// Resize, keeping the top-left content. Real reflow is the engine's job; this keeps the client
@@ -138,9 +142,10 @@ impl Screen {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        self.lines.resize_with(usize::from(rows), || Line::blank(cols));
+        self.lines.resize_with(usize::from(rows), || Arc::new(Line::blank(cols)));
         for line in &mut self.lines {
-            line.resize(cols);
+            // `make_mut` copies only a row the scrollback also holds, and only on a resize.
+            Arc::make_mut(line).resize(cols);
         }
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
@@ -156,7 +161,25 @@ impl Screen {
             .lines
             .get_mut(usize::from(update.row))
             .ok_or(ScreenError::RowOutOfRange { row: update.row, rows: self.rows })?;
-        *slot = update.line;
+        *slot = Arc::new(update.line);
+        Ok(())
+    }
+
+    /// [`Self::apply`] for a row the caller already shares with the scrollback.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply`]: a width mismatch or a row past the bottom.
+    pub fn apply_shared(&mut self, row: u16, line: Arc<Line>) -> Result<(), ScreenError> {
+        let got = line.cols();
+        if got != self.cols {
+            return Err(ScreenError::WidthMismatch { got, cols: self.cols });
+        }
+        let slot = self
+            .lines
+            .get_mut(usize::from(row))
+            .ok_or(ScreenError::RowOutOfRange { row, rows: self.rows })?;
+        *slot = line;
         Ok(())
     }
 
@@ -169,17 +192,17 @@ impl Screen {
         if let Some(bad) = lines.iter().find(|l| l.cols() != self.cols) {
             return Err(ScreenError::WidthMismatch { got: bad.cols(), cols: self.cols });
         }
-        self.lines = lines;
+        self.lines = lines.into_iter().map(Arc::new).collect();
         Ok(())
     }
 
     /// Scroll the visible content up by `n` rows (content moves up, blank rows enter at the
     /// bottom) and return the lines that left the top. Used by clients that maintain a local
     /// scrollback from row updates, and by the prediction engine when it speculates a newline.
-    pub fn scroll_up(&mut self, n: u16) -> Vec<Line> {
+    pub fn scroll_up(&mut self, n: u16) -> Vec<Arc<Line>> {
         let n = usize::from(n.min(self.rows));
-        let evicted: Vec<Line> = self.lines.drain(..n).collect();
-        self.lines.extend((0..n).map(|_| Line::blank(self.cols)));
+        let evicted: Vec<Arc<Line>> = self.lines.drain(..n).collect();
+        self.lines.extend((0..n).map(|_| Arc::new(Line::blank(self.cols))));
         evicted
     }
 
@@ -225,7 +248,7 @@ mod tests {
             .unwrap();
         }
         let gone = s.scroll_up(2);
-        assert_eq!(gone.iter().map(Line::text).collect::<Vec<_>>(), ["one", "two"]);
+        assert_eq!(gone.iter().map(|l| l.text()).collect::<Vec<_>>(), ["one", "two"]);
         assert_eq!(s.line(0).unwrap().text(), "three");
         assert!(s.line(1).unwrap().is_blank());
         assert!(s.line(2).unwrap().is_blank());

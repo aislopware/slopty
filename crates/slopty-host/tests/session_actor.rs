@@ -70,7 +70,7 @@ mod actor {
     }
 
     fn text(screen: &slopty_grid::Screen) -> String {
-        screen.lines().iter().map(slopty_grid::Line::text).collect::<Vec<_>>().join("\n")
+        screen.lines().iter().map(|l| l.text()).collect::<Vec<_>>().join("\n")
     }
 
     fn key(seq: u64, code: KeyCode, text: &str) -> TermRequest {
