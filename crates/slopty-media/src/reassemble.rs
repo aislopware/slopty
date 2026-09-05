@@ -350,6 +350,10 @@ pub struct Reassembler {
     /// What the host last said its capture target is doing. `false` means the target has drawn
     /// nothing at all, so no refresh can produce a frame and asking is pure noise.
     source_live: bool,
+    /// The host's last word was `Idle`. Control and video travel separately, so a fragment
+    /// captured before the target went away can arrive after the statement that it did; while
+    /// this holds, arriving video no longer contradicts the host.
+    hinted_idle: bool,
     stats: ReassemblerStats,
     window: Window,
     jitter_us: i64,
@@ -403,6 +407,7 @@ impl Reassembler {
             refresh_requested_at: Some(now),
             refresh_repeats: 0,
             source_live: true,
+            hinted_idle: false,
             stats: ReassemblerStats::default(),
             window: Window::default(),
             jitter_us: 0,
@@ -436,7 +441,14 @@ impl Reassembler {
     /// from, and asking every backoff period for as long as the item is open is the storm this
     /// exists to prevent. Going live restarts the backoff, so the first refresh after the window
     /// draws goes out immediately.
+    ///
+    /// The statement also outranks arriving video until it is taken back. The host says this
+    /// once per change, on the control stream, while frames travel as datagrams: without that
+    /// ordering a fragment sent before the window went away would put the receiver back to live
+    /// behind the host's back, and since every datagram (heartbeats included) restarts the
+    /// refresh cap, one lost frame after that would ask for a refresh forever.
     pub const fn set_source_live(&mut self, live: bool) {
+        self.hinted_idle = !live;
         if self.source_live != live {
             self.source_live = live;
             if live {
@@ -520,7 +532,9 @@ impl Reassembler {
     }
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
-        self.source_live = true;
+        // A picture proves the source is drawing — unless the host has since said it is not, in
+        // which case this one was captured before it stopped and proves nothing about now.
+        self.source_live |= !self.hinted_idle;
         self.any_arrived = true;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());

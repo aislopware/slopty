@@ -558,10 +558,14 @@ mod tests {
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
     }
 
-    /// What clears what: a heartbeat proves the host is alive, so the retry cap starts over,
-    /// but only a video fragment proves the *source* is drawing and lifts the idle suppression.
+    /// What clears what: a heartbeat proves the host is alive, so the retry cap starts over, but
+    /// nothing on the wire lifts the idle suppression while the host's word is that the source is
+    /// idle. Control and video travel separately, so a fragment captured before the target went
+    /// away arrives after the statement that it did; taking that as proof would put the receiver
+    /// back to live behind the host's back, and the host — which reports the change, not the
+    /// state — would never say it again. Only the host takes its own statement back.
     #[test]
-    fn a_heartbeat_restarts_the_cap_and_a_frame_lifts_the_idle_hint() {
+    fn a_heartbeat_restarts_the_cap_and_only_the_host_lifts_the_idle_hint() {
         let mut h = Harness::new();
         h.rx.set_source_live(false);
         let mut sent = 0;
@@ -580,15 +584,44 @@ mod tests {
         }
         assert!(!h.rx.source_live());
 
-        // A video fragment does: the target drew, whatever the host last said about it.
+        // A video fragment does not either, while that word stands: this is the frame that was
+        // already in flight when the window went away, and it says nothing about now.
         let s0 = h.send(&frame_bytes(1, 6_000), true, false);
         h.deliver(&s0.datagrams[..1]);
-        assert!(h.rx.source_live(), "a frame proves the source is live");
+        assert!(!h.rx.source_live(), "a frame in flight before the host spoke is not proof");
+        let mut asked = 0;
+        for _ in 0..600 {
+            h.advance(Duration::from_millis(10));
+            asked += h.tick().iter().filter(|a| matches!(a, Action::RequestRefresh { .. })).count();
+        }
+        // One: giving up on that half-arrived frame asks once, because a frame that really was
+        // on the wire is worth one question. What does not happen is the repeat — the backoff
+        // loop stays off, so the heartbeats above cannot restart a cap that is never reached.
+        assert_eq!(asked, 1, "an idle source is asked once for the frame it lost, then not again");
+        assert!(!h.rx.source_live());
+
+        // The host takes it back — which it does on the tick after the target draws again — and
+        // asking resumes from the shortest wait.
+        h.rx.set_source_live(true);
+        assert!(h.rx.source_live());
         h.advance(cfg().max_hold);
         assert!(
             h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }),
-            "asking resumes once the source has drawn"
+            "asking resumes once the host says the source draws again"
         );
+    }
+
+    /// The same fragment against a host that never sends the hint at all: there the receiver has
+    /// only the stream to go on, the suppression never comes on, and nothing is suppressed.
+    #[test]
+    fn a_host_that_never_sends_the_hint_keeps_asking() {
+        let mut h = Harness::new();
+        assert!(h.rx.source_live(), "live until the host says otherwise");
+        let s0 = h.send(&frame_bytes(1, 6_000), true, false);
+        h.deliver(&s0.datagrams[..1]);
+        assert!(h.rx.source_live());
+        h.advance(cfg().max_hold);
+        assert!(h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }));
     }
 
     /// Fallback for a host that never sends the hint: the repeats stop on their own. With the
