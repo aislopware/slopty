@@ -648,6 +648,57 @@ mod tests {
         assert_eq!(h.rx.stats().silences.in_flight, 1, "and it is charged to the link");
     }
 
+    /// The sleep is credited once, not once per report. A stall that stays on has to keep
+    /// reporting time, or the windows after the first read as healthy and growth resumes into
+    /// a link that is still holding everything.
+    #[test]
+    fn a_sleep_is_forgiven_once_and_a_stall_that_stays_on_keeps_reporting() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let _held = h.send(&frame_bytes(2, 2_000), false, false);
+        // Asleep for 200 ms, then awake. The first tick of the waking loop is 225 ms after the
+        // last one, so 200 ms of sleep is banked and 50 ms of the 250 ms silence is unexplained
+        // — exactly a stall gap, and the whole of the bank is spent paying for the rest.
+        h.advance(Duration::from_millis(200));
+        assert!(!h.rx.stalled(h.now), "25 ms unexplained is under the gap");
+        h.awake(Duration::from_millis(50));
+        let first = h.rx.take_report(h.now, 0);
+        assert_eq!((first.stalled_ms, first.stalls), (50, 0), "250 ms less the 200 ms slept");
+        for window in 0..3 {
+            h.awake(Duration::from_millis(50));
+            let r = h.rx.take_report(h.now, 0);
+            assert_eq!(
+                (r.stalled_ms, r.stalls),
+                (50, 0),
+                "window {window}: awake and still stalled, the sleep is already spent"
+            );
+        }
+    }
+
+    /// The host's silence and the receiver's sleep can be the same stretch of time. Forgiving
+    /// both in full excuses it twice and hides a real hold.
+    #[test]
+    fn sleep_inside_the_hosts_own_silence_is_not_forgiven_twice() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        // The receiver sleeps through the first 100 ms — which is also the host's own silence.
+        h.advance(Duration::from_millis(100));
+        let _woke = h.tick();
+        // The host builds the frame here, 100 ms in; the link then holds it for 100 ms with the
+        // receiver awake throughout.
+        let held = h.send(&frame_bytes(2, 2_000), false, false);
+        h.awake(Duration::from_millis(100));
+        h.deliver(&held.datagrams);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!(report.stalls, 1, "the link held it for 100 ms and the receiver watched");
+        let silences = h.rx.stats().silences;
+        assert_eq!((silences.in_flight, silences.receiver_dozed), (1, 0));
+    }
+
     #[test]
     fn a_stall_longer_than_max_hold_gives_up() {
         let mut h = Harness::new();

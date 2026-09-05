@@ -470,6 +470,13 @@ pub struct Reassembler {
     /// would find nothing slept through and charge the whole gap to the link. `tick` banks the
     /// stretch here instead, and the arrival that ends the silence spends it.
     dozed_since_arrival: Duration,
+    /// Where the banked sleep begins, so the part of it that could fall inside the host's own
+    /// silence can be told from the part that could not (see `doze_beyond_host`).
+    dozed_from: Option<Instant>,
+    /// How much of the bank has already been forgiven by a charge. A report every 50 ms would
+    /// otherwise spend the same sleep again in every window, and a stall that stays on would
+    /// read as healthy from the second report onwards.
+    dozed_spent: Duration,
     /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
     last_rtt: Duration,
     /// [`Config::nack_delay`] evaluated for `last_rtt`, so `stalled` and `resume` (which have no
@@ -520,6 +527,8 @@ impl Reassembler {
             last_send_ms_lo: None,
             last_tick_at: now,
             dozed_since_arrival: Duration::ZERO,
+            dozed_from: None,
+            dozed_spent: Duration::ZERO,
             last_rtt,
             nack_delay: cfg.nack_delay.for_rtt(last_rtt),
             last_host_ts_us: 0,
@@ -597,11 +606,10 @@ impl Reassembler {
         }
         let gap = now.saturating_duration_since(self.arrived_at);
         let stamp = self.read_stamp(header, gap);
-        let dozed = self.dozed(now);
         let host_gap = Self::host_share(stamp, gap);
-        let not_the_links = host_gap.saturating_add(dozed);
+        let dozed = self.doze_beyond_host(now, host_gap);
         let unexplained = gap.saturating_sub(host_gap);
-        let link_gap = gap.saturating_sub(not_the_links);
+        let link_gap = unexplained.saturating_sub(dozed);
         if self.any_arrived && gap >= self.stall_threshold() {
             self.attribute(gap, stamp, dozed, header.kind());
         }
@@ -623,7 +631,7 @@ impl Reassembler {
                 pending = self.frames.len(),
                 "stall released: the link held datagrams the host had already sent"
             );
-            self.charge_stall(now, not_the_links);
+            self.charge_stall(now, host_gap);
             self.window.stalls = self.window.stalls.saturating_add(1);
             self.stats.stalls = self.stats.stalls.saturating_add(1);
         }
@@ -636,6 +644,8 @@ impl Reassembler {
         // The silence is over and its account is settled: the next one starts from this arrival
         // with nothing banked and the loop's mark here, not wherever the last `tick` left it.
         self.dozed_since_arrival = Duration::ZERO;
+        self.dozed_from = None;
+        self.dozed_spent = Duration::ZERO;
         self.last_tick_at = self.last_tick_at.max(now);
         // Anything on the stream — a heartbeat included — proves the host is still there, so the
         // refresh cap starts over; only a video fragment proves the *source* is drawing.
@@ -930,7 +940,37 @@ impl Reassembler {
     /// nothing, then everything — so this part of a silence is evidence about the machine, not
     /// about the network, and is subtracted before anything is charged.
     fn dozed(&self, arrival: Instant) -> Duration {
-        self.dozed_since_arrival.saturating_add(self.dozed_since_tick(arrival))
+        self.doze(arrival).0
+    }
+
+    /// The sleep in this silence as of `arrival`: how much, and when the first of it began.
+    /// The banked stretches and the unbanked tail are disjoint and in order, so the total is
+    /// their sum and the start is the earliest of them.
+    fn doze(&self, arrival: Instant) -> (Duration, Option<Instant>) {
+        let tail = self.dozed_since_tick(arrival);
+        let tail_from = (!tail.is_zero()).then(|| self.doze_tail_from());
+        (self.dozed_since_arrival.saturating_add(tail), self.dozed_from.or(tail_from))
+    }
+
+    /// Where the sleep since the last `tick` begins: one cadence period after that tick, which
+    /// is the moment the loop broke its promise.
+    fn doze_tail_from(&self) -> Instant {
+        self.last_tick_at.checked_add(self.cfg.tick_period).unwrap_or(self.last_tick_at)
+    }
+
+    /// The sleep that cannot have been the host's, given the host's own share of the silence.
+    ///
+    /// The two shares are not disjoint: the host's silence runs from the last arrival for
+    /// `host_gap`, and the receiver may have slept through part of exactly that stretch.
+    /// Forgiving their sum would excuse the overlap twice and let a real hold through — a host
+    /// quiet for 100 ms, then a link holding the next datagram for 100 ms, with 75 ms of sleep
+    /// inside the host's half, would read as 25 ms of link time instead of 100. Only the sleep
+    /// past the end of the host's silence is credited.
+    fn doze_beyond_host(&self, arrival: Instant, host_gap: Duration) -> Duration {
+        let (total, from) = self.doze(arrival);
+        let Some(from) = from else { return Duration::ZERO };
+        let host_until = self.arrived_at.checked_add(host_gap).unwrap_or(self.arrived_at);
+        total.saturating_sub(host_until.saturating_duration_since(from))
     }
 
     /// The part of [`Self::dozed`] not yet banked by [`Self::tick`]: the stretch since the last
@@ -992,7 +1032,17 @@ impl Reassembler {
     /// released or is still on.
     fn charge_stall(&mut self, now: Instant, host_gap: Duration) {
         let from = self.arrived_at.max(self.stall_charged_to);
-        let silence = now.saturating_duration_since(from).saturating_sub(host_gap);
+        let stretch = now.saturating_duration_since(from);
+        // Spend the sleep as it is forgiven. The bank belongs to the whole silence, but a
+        // charge only covers the stretch since the last one, so crediting the full bank every
+        // time would forgive the same sleep in every report window and a stall that stays on
+        // would go quiet after its first one.
+        let doze = self
+            .doze_beyond_host(now, host_gap)
+            .saturating_sub(self.dozed_spent)
+            .min(stretch.saturating_sub(host_gap));
+        self.dozed_spent = self.dozed_spent.saturating_add(doze);
+        let silence = stretch.saturating_sub(host_gap).saturating_sub(doze);
         self.window.stalled = self.window.stalled.saturating_add(silence);
         self.stats.stalled_ms =
             self.stats.stalled_ms.saturating_add(u64::try_from(silence.as_millis()).unwrap_or(0));
@@ -1027,8 +1077,12 @@ impl Reassembler {
     pub fn tick(&mut self, now: Instant, rtt: Duration) -> Vec<Action> {
         // Bank the sleep before moving the mark, or the arrival that ends this silence would
         // find a tick that just ran and read the whole gap as the link's.
-        self.dozed_since_arrival =
-            self.dozed_since_arrival.saturating_add(self.dozed_since_tick(now));
+        let slept = self.dozed_since_tick(now);
+        if !slept.is_zero() {
+            let from = self.doze_tail_from();
+            self.dozed_from.get_or_insert(from);
+            self.dozed_since_arrival = self.dozed_since_arrival.saturating_add(slept);
+        }
         self.last_tick_at = self.last_tick_at.max(now);
         self.last_rtt = rtt;
         self.nack_delay = self.cfg.nack_delay.for_rtt(rtt);
@@ -1144,7 +1198,7 @@ impl Reassembler {
             // Still in it: no datagram has arrived to say how much of it was the host's, so all
             // of it is charged bar the receiver's own sleep, which needs no datagram to settle.
             // The stamp settles the rest of the account when the silence ends.
-            self.charge_stall(now, self.dozed(now));
+            self.charge_stall(now, Duration::ZERO);
         }
         let window = std::mem::take(&mut self.window);
         let mut holds = window.holds_ns;
