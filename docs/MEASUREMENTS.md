@@ -1167,9 +1167,10 @@ costs the path a few milliseconds and nothing else — no abandon, no relay samp
 event in 90 s × 3. The load hypothesis is dead (DECISIONS, "Machine load alone does not flap the
 path"); what is left untested is the network half, which needs the second machine.
 
-The stalls are the interesting leftover: 19–38 datagram stalls per 90 s under load where an idle
-machine's run has none. Those are the pacer's frames arriving in clumps, not the link dropping —
-the loss table above shows 0 stalls at every injected rate on a quiet machine.
+The stalls looked like the interesting leftover — 19–38 datagram stalls per 90 s under every
+shape — and were read here as the pacer clumping frames. That reading was wrong; see
+"stalls are not made by load" below, where the same harness with **no load at all** produces just
+as many. The loss table's 0 stalls came from 5 s windows, not from an idle machine being clean.
 
 ### The refresh guard end to end
 
@@ -1394,3 +1395,41 @@ The client's frame count is not usable as evidence here and the test does not as
 the moment the host leaves the crop the client is still decoding the frames sent while the window
 was legitimately up, so its count keeps climbing for seconds afterwards for entirely honest
 reasons. Only the host's counters can distinguish the two.
+
+## 2026-09-06 — stalls are not made by load
+
+```sh
+SLOPTY_FLAP_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e path_flap_with_no_load --no-capture
+# … and path_flap_under_{cpu,user_initiated_cpu,memory_io,external_cpu}_load
+```
+
+The flap harness now reports both ends of the same 90 s: the receiver's stalls and holds, and the
+host's own capture/encode quantiles and what it had to throw away, read off the control socket
+before the daemons go. Five shapes, one at a time, mac-studio, debug, 2026-09-06 02:06–02:16.
+
+| shape                    | stalls | stalled | hold p50/p95/max | jitter | encoded | dropped | queue-full | encode p95 / max |
+| ------------------------ | ------ | ------- | ---------------- | ------ | ------- | ------- | ---------- | ---------------- |
+| **none (baseline)**      | **31** | 3741 ms | 0 / 0 / 45 ms    | 15 ms  | 2249    | 0       | 0          | 10.5 / 15.7 ms   |
+| all-core spin, in-process| 49     | 4031 ms | 0 / 0 / 45 ms    | 34 ms  | 664     | 0       | 0          | 13.7 / 23.8 ms   |
+| the same at `USER_INITIATED` | 3  | 1189 ms | 0 / 0 / 3 ms     | 7 ms   | 430     | 21      | 0          | 19.7 / 57.7 ms   |
+| memory + I/O             | 4      | 337 ms  | 0 / 0 / 27 ms    | 6 ms   | 808     | 0       | 0          | 14.3 / 32.7 ms   |
+| all-core spin, other processes | 38 | 2722 ms | 0 / 0 / 42 ms | 5 ms   | 913     | 0       | 0          | 10.9 / 22.6 ms   |
+
+Read down the first column: **no load produces as many stalls as full load**, and the two heavier
+shapes produce fewer. There is nothing load-shaped in this number.
+
+Read across, and the host is not the one clumping under any of them: the datagram queue never
+filled (`queue-full` 0 everywhere), nothing was dropped except 21 frames in one run, and `hold`
+p50 and p95 are 0 ms — frames arrive complete, not dribbling in fragments. Encode does stretch to
+24–58 ms under load, but the receiver already forgives the host's share of a gap from the
+`send_ms_lo` stamps, so that is not what these count.
+
+The out-of-process row exists to rule out the harness competing with itself: the load threads for
+the other shapes live in the receiver's own process, which would starve it by construction.
+Moving the same all-core burn into other processes changes nothing (38 against 49 and 31).
+
+So the pacer is not clumping and there is nothing here to fix at that layer. What is left is a
+receiver that charges the link ~0.3 stalls a second on a quiet loopback stream whatever the
+machine is doing, which is a question about the stall detector's own pessimism rules — a gap it
+cannot attribute is charged to the link by design — and not about pacing. That is its own track.

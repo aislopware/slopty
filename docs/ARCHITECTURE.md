@@ -209,7 +209,11 @@ to send the hint, `Config::refresh_max_repeats` (12, ≈17 s with the backoff) i
 The two are cleared by different evidence: *any* datagram on the stream — a heartbeat included —
 restarts the cap, because it proves the host is still there, while only a video fragment lifts the
 idle suppression, because only a picture proves the source is drawing (a hint that has not changed
-never overwrites what the stream itself proved).
+never overwrites what the stream itself proved). The hint follows the *recent* frames, not the
+first one (`SourceTracker`, clock injected so the rule is unit-tested): a new frame is `Live` at
+once, `SOURCE_QUIET_AFTER` (2 s) without one is `Idle` again — longer than the start-up grace so a
+target drawing once a second does not flap — and a target the geometry tick reports off screen is
+`Idle` immediately, since a window that is not on screen cannot be drawing.
 
 **Host capture path.** A display target is one `SCContentFilter(display:)`. A window target
 is served two ways, and the host switches between them on the live stream
@@ -225,11 +229,17 @@ composited; otherwise it is the independent-window filter (`WindowPath::Filter`)
 composites the window on its own and costs a few milliseconds more per frame
 (MEASUREMENTS.md, "capture floor"). `check_geometry` (10 Hz) follows moves by updating the
 crop, resizes by rebuilding the encoder, and occlusion by swapping the filter (the swap keeps
-the stream and its frame counter, so the `Source` hint above never flips on it); each switch
+the stream and its frame counter, so the `Source` hint never flips on the swap itself); each switch
 is a `Transition` that becomes the stream's state only when every ScreenCaptureKit completion
 callback has succeeded, a failed one is asked again next tick. A window that closes under a
 crop ends the stream the way the window filter does (`on_stop` → `Closed`), never showing the
-desktop where it was. The pure crop geometry (`slopty_capture::crop_for`: window frame →
+desktop where it was. The tick's verdict on the target also reaches the frame path directly:
+`Shared::target_hidden` is set from `window_on_screen` *before* the transition machinery, which
+returns early while a swap is in flight, and `on_frame` drops anything captured while it holds
+(counted as `ScreenStats::withheld`). That closes the window between deciding the crop is wrong
+and ScreenCaptureKit acknowledging it, in which the crop is still live over a rectangle that now
+holds the desktop; `ScreenStats::on_crop` says which path a stream is on right now, as against
+`cropped`, which counts the frames that came that way. The pure crop geometry (`slopty_capture::crop_for`: window frame →
 display-relative points, pixels at the display's scale, `None` when not entirely on that
 display) and the occluder rule are unit-tested; DECISIONS.md "Rulings of the crop path" has
 the list. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd forces a path. Every frame carries the window server's display time

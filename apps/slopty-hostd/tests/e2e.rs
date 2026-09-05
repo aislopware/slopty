@@ -810,6 +810,11 @@ mod tests {
         CpuUserInitiated,
         /// Gigabytes written and read back, plus many small files: what a linker does.
         MemoryIo,
+        /// Every core spinning, but in other processes: the same machine load without the
+        /// receiver's own runtime competing with it inside one address space.
+        CpuExternal,
+        /// Nothing at all: the baseline the other rows are read against.
+        None,
     }
 
     impl Shape {
@@ -818,6 +823,8 @@ mod tests {
                 Self::Cpu => "cpu",
                 Self::CpuUserInitiated => "cpu-user-initiated",
                 Self::MemoryIo => "memory-io",
+                Self::CpuExternal => "cpu-external",
+                Self::None => "none",
             }
         }
     }
@@ -826,6 +833,8 @@ mod tests {
     struct Load {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         threads: Vec<std::thread::JoinHandle<()>>,
+        /// Load applied from outside this process.
+        others: Vec<std::process::Child>,
     }
 
     impl Load {
@@ -835,16 +844,34 @@ mod tests {
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
             let mut threads = Vec::new();
+            let mut others = Vec::new();
+            if shape == Shape::CpuExternal {
+                // `yes` is the cheapest all-core burn there is, and it burns somewhere else.
+                for _core in 0..cores {
+                    if let Ok(child) = std::process::Command::new("/usr/bin/yes")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        others.push(child);
+                    }
+                }
+                return Self { stop, threads, others };
+            }
+            if shape == Shape::None {
+                return Self { stop, threads, others };
+            }
             for worker in 0..cores {
                 let stop = std::sync::Arc::clone(&stop);
                 let scratch = scratch.to_path_buf();
                 threads.push(std::thread::spawn(move || match shape {
-                    Shape::Cpu => burn(&stop, false),
                     Shape::CpuUserInitiated => burn(&stop, true),
                     Shape::MemoryIo => churn(&stop, &scratch, worker),
+                    // `CpuExternal` and `None` returned above.
+                    Shape::Cpu | Shape::CpuExternal | Shape::None => burn(&stop, false),
                 }));
             }
-            Self { stop, threads }
+            Self { stop, threads, others }
         }
     }
 
@@ -853,6 +880,10 @@ mod tests {
             self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             for t in self.threads.drain(..) {
                 let _joined = t.join();
+            }
+            for mut child in self.others.drain(..) {
+                let _killed = child.kill();
+                let _reaped = child.wait();
             }
         }
     }
@@ -977,6 +1008,23 @@ mod tests {
         /// Frames the display stream delivered.
         frames: u64,
         samples: u32,
+        /// Milliseconds the receiver charged to the link (the stalls above, in time).
+        stalled_ms: u64,
+        /// Wait from a frame's first fragment to its completion, milliseconds.
+        hold_p50_ms: u64,
+        hold_p95_ms: u64,
+        hold_max_ms: u64,
+        /// Interarrival jitter on the host's capture clock, milliseconds.
+        jitter_ms: u64,
+        /// The host's own side of the same run: how long capture and encode took, and what it
+        /// had to throw away. This is what says whether a gap the client saw was made here.
+        host_capture_p95_us: u64,
+        host_capture_max_us: u64,
+        host_encode_p95_us: u64,
+        host_encode_max_us: u64,
+        host_dropped: u64,
+        host_queue_full: u64,
+        host_encoded: u64,
     }
 
     /// Drive a real connection that holds both a direct and a relay path under the load a build
@@ -1051,6 +1099,25 @@ mod tests {
         for line in &r.closed {
             eprintln!("    {line}");
         }
+        eprintln!(
+            "| {} | client: {} stalls, {} ms stalled, hold {}/{}/{} ms p50/p95/max, jitter {} ms \
+             | host: {} encoded, {} dropped, {} queue-full, capture p95 {} µs max {} µs, \
+             encode p95 {} µs max {} µs |",
+            r.shape,
+            r.stalls,
+            r.stalled_ms,
+            r.hold_p50_ms,
+            r.hold_p95_ms,
+            r.hold_max_ms,
+            r.jitter_ms,
+            r.host_encoded,
+            r.host_dropped,
+            r.host_queue_full,
+            r.host_capture_p95_us,
+            r.host_capture_max_us,
+            r.host_encode_p95_us,
+            r.host_encode_max_us,
+        );
         assert!(r.samples > 0, "{} sampled nothing: {r:?}", r.shape);
         assert!(r.frames > 0, "{} streamed nothing: {r:?}", r.shape);
         // The verdict this harness exists for. A direct path that closes under load is the flap;
@@ -1139,6 +1206,18 @@ mod tests {
             stalls: 0,
             frames: 0,
             samples: 0,
+            stalled_ms: 0,
+            hold_p50_ms: 0,
+            hold_p95_ms: 0,
+            hold_max_ms: 0,
+            jitter_ms: 0,
+            host_capture_p95_us: 0,
+            host_capture_max_us: 0,
+            host_encode_p95_us: 0,
+            host_encode_max_us: 0,
+            host_dropped: 0,
+            host_queue_full: 0,
+            host_encoded: 0,
         };
         let mut on_relay = false;
         let mut stretch = 0.0_f64;
@@ -1181,6 +1260,22 @@ mod tests {
         let stats = screen.stats();
         row.stalls = stats.stalls;
         row.frames = stats.frames;
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        row.stalled_ms = stats.stalled_ms;
+        row.hold_p50_ms = ms(stats.hold_p50);
+        row.hold_p95_ms = ms(stats.hold_p95);
+        row.hold_max_ms = ms(stats.hold_max);
+        row.jitter_ms = ms(stats.jitter);
+        // The host's account of the same 90 seconds, before the daemons go.
+        if let Some(host) = screens(&scratch.join("hostd.sock")).await.first() {
+            row.host_capture_p95_us = host.stats.capture.p95_us;
+            row.host_capture_max_us = host.stats.capture.max_us;
+            row.host_encode_p95_us = host.stats.encode.p95_us;
+            row.host_encode_max_us = host.stats.encode.max_us;
+            row.host_dropped = host.stats.dropped;
+            row.host_queue_full = host.stats.queue_full;
+            row.host_encoded = host.stats.encoded;
+        }
         // What the transport said while the load ran: the closed-path lines carry noq's reason.
         let text = String::from_utf8_lossy(log.lock().get(mark..).unwrap_or_default()).into_owned();
         row.closed = text
@@ -1576,5 +1671,18 @@ mod tests {
             }
         }
         false
+    }
+
+    /// The same machine load from other processes, so the receiver's own runtime is not sharing
+    /// an address space with it: the row that says whether a stall is the machine or the harness.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn path_flap_under_external_cpu_load() {
+        flap_case(Shape::CpuExternal).await;
+    }
+
+    /// No load at all: the baseline every other row is read against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn path_flap_with_no_load() {
+        flap_case(Shape::None).await;
     }
 }

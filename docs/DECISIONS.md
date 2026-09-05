@@ -2242,4 +2242,20 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   a slow target that must not flap, hidden), and the hostd e2e now drives hide → show → hide and
   asserts the host reports `Idle` the second time — which under the latch it never did. No wire
   change: the states are the ones `SourceState` already had.
+- ❌ **The pacer is not clumping frames under load** (2026-09-06), retiring the leftover the flap
+  track raised. The claim was that 19–38 datagram stalls per 90 s under every load shape, against
+  "none on an idle machine", meant frames were being released in bursts. Both halves were wrong.
+  The comparison was a 90 s window against the loss test's 5 s ones, and the flap harness with
+  **no load at all** produces 31 stalls in 90 s — as many as the loaded shapes, two of which
+  produce fewer (3 and 4). The harness now records both ends of the run, and the host is clean
+  under all five shapes: the datagram queue never fills, next to nothing is dropped, and `hold`
+  p50/p95 are 0 ms, so frames arrive whole rather than dribbling. Running the same all-core burn
+  in other processes instead of in the receiver's own (`Shape::CpuExternal`, `/usr/bin/yes` per
+  core) changes nothing either, which rules out the harness starving itself.
+  So nothing changed: no thread QoS for the capture path, no pacer burst cap, no send spreading.
+  What the numbers do leave is a different question — a quiet loopback stream charges the link
+  about a third of a stall a second whatever the machine is doing — and that is about the stall
+  detector's pessimism rules (a gap it cannot attribute is charged to the link on purpose,
+  2026-09-05), not about pacing. `Shape::None` is kept as the baseline row precisely so the next
+  reading of these numbers starts from it.
 
