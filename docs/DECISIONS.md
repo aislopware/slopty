@@ -996,8 +996,57 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   their laid-out bounds, `window.painted_quads()` the borders and colours the frame actually
   produced, and `simulate_click(bounds.center())`/`simulate_keystrokes` drive them. The fake
   host is an `mpsc` pair: the test asserts what the canvas sent and feeds back the
-  `CanvasSync` deltas and `Frame`s a host would. GPUI's `TestPlatform` has no accessibility
-  tree yet; exposing accesskit for dumps is a later fork change.
+  `CanvasSync` deltas and `Frame`s a host would. The accessibility tree is readable the same
+  way (see the accessibility ruling below).
+- ✅ **Accessibility: one accesskit tree, read by VoiceOver and by the tests** (2026-09-05).
+  *Tree exposure (fork `120daa1eef`):* GPUI builds its accesskit tree only while a screen
+  reader is attached, so `Window::set_a11y_active(true)` (test-support) forces it and
+  `Window::a11y_tree()` returns the last frame's `TreeUpdate`; the same call works on the
+  test platform, the real macOS window under `test-support`, and `gpui_ios`. The self-test
+  socket turns it on at start-up (`SLOPTY_TEST_SOCKET` set, `e2e` feature) and `dump.a11y`
+  is the tree trimmed to `{role, label, value, focused, bounds}` per node, depth first in
+  reading order, bounds in window points (GPUI stores them in device pixels; the walker
+  divides by the scale factor). Headless tests read `slopty_ui::a11y::tree(window)`, the
+  same shape.
+  *iOS bridge (`gpui_ios/src/ios/a11y.rs`):* UIKit has no accesskit adapter, so the bridge
+  mirrors the tree as `UIAccessibilityElement`s on the Metal view: one element per node
+  with a label, a value or a click action (containers only lend their order), frames in
+  the view's coordinate space, traits from the role (button, header, image, static text,
+  search field, keyboard key, selected, not enabled, updates-frequently for terminals and
+  status), `accessibilityActivate` → accesskit `Click` → GPUI's click listeners. The tree
+  turns on when VoiceOver is running at launch or the first time UIKit asks the view for
+  its elements; a `UIAccessibilityLayoutChangedNotification` follows a changed list, with
+  the focused element when the focus moved. Constants come from the objc2 statics; every
+  `unsafe` names its rule.
+  *Roles and labels:* every button-like element is a `Role::Button` with an `aria_label`
+  (title-bar pills "take over" / "mute" / "show chat", badge answers, the top bar's
+  "shell" / "agent" / "note" / "window" / "fit", "N need you", the host switcher and its
+  rows, pairing, the key bar keys by name: "Escape", "Control", "Command, armed"…); an
+  item's title bar is a `Heading` labelled "`<kind> <title>`"; the agent pill and the
+  conversation's attention row are `Status` with their text; conversation entries are
+  `ListItem`s labelled "You: …" / "Claude: …" / "Tool Bash: …"; the composer, a note and
+  the find field are the gpui-kit inputs with `aria_label`; the minimap and a remote window
+  are `Image`s. The grid is `Role::Terminal` with the program title as its label and *the
+  cursor row's text* as its value (`TerminalView::cursor_row_text`, computed only while the
+  tree is active): a screen reader should hear the line being worked on, not 24 rows.
+  *Focus order (macOS):* `slopty_ui::a11y::tab_stop` makes an element focusable at tab index
+  0, so the ring is render order, which is reading order (top bar, then items by z, each
+  title bar left to right, the conversation's attention row, the composer, its send button).
+  Tab and ⇧Tab walk the ring only while a control is focused (a terminal's Tab is the
+  shell's, a text field's is its own); `ctrl-tab` / `ctrl-shift-tab` (`FocusNext` /
+  `FocusPrev`, "Canvas" context) enter it from anywhere. Enter and Space click (GPUI's
+  keyboard click). A mouse press does not move the focus to a control (the pill's mouse-down
+  stops propagation before GPUI's focus-on-click), so a click on "allow" leaves the keyboard
+  in the terminal, as macOS buttons behave. The ring is `surfaces.accent` (the design
+  system's focus-ring token) as a 1 px border under `focus_visible`: keyboard focus only,
+  the mouse never paints it.
+  *Tests:* `the_title_bar_is_read_and_tabbed_in_reading_order` (canvas: heading, status,
+  pills in order, ⌃Tab then Tab, the ring quad, Enter answers),
+  `the_attention_row_and_the_composer_are_read_and_tabbed`, `the_grid_reads_its_cursor_row`
+  (slopty-ui); `dump.a11y` assertions in the app self-test (terminal item, top bar,
+  conversation) and in both simulator tests (grid, conversation, key bar). Left out: no
+  VoiceOver session was driven by hand (the bridge is checked by its compile and the tree it
+  mirrors); gpui's own `a11y_tree_is_readable_once_forced_active` covers the fork.
 - ✅ **`cargo xtask e2e` builds with `--bins`, never `--bin slopty-app`** (2026-09-05). A `--bin`
   filter applies to every `-p` on the command line, so the daemons and the CLI were not rebuilt
   and a stale `slopty-hostd` answered `ProtocolVersion { host: 9 }` to a protocol-11 app: every
@@ -1283,8 +1332,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `links_are_found_by_column_and_clipped_on_resize`, `osc8_runs_win_over_the_text_scan`,
   `text_links_come_with_their_columns` and the `host_lines_links` golden. macOS only for now:
   the phone key bar arms ⌘ for remote windows but not for terminals, so a tap has nothing to
-  read; long-press stays selection. `cx.open_url` is `gpui_ios`'s `UIApplication.openURL`
-  when that arrives.
+  read; long-press stays selection. On the phone (2026-09-05) the terminal key bar has a ⌘
+  key beside ⌃: it arms one tap (`TerminalView::set_sticky_command`), the next left press
+  opens the link under it through `cx.open_url` (`gpui_ios`'s `UIApplication.openURL`, in the
+  fork) and disarms; covered by `sticky_command_opens_the_link_under_the_next_tap`.
 - ✅ **Command blocks from OSC 133, shell integration injected by ptyd** (2026-09-05).
   *Injection:* the `ZDOTDIR` bootstrap every terminal uses (Kitty, Ghostty, WezTerm); the
   scripts are Slopty's own (Ghostty's zsh files are GPLv3, inherited from Kitty, so they

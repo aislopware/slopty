@@ -321,7 +321,9 @@ upstream main plus one commit re-pointing deps at the zed fork). `cargo xtask up
 shows the drift, `cargo xtask upstream sync` rebases, pushes and moves the `Cargo.lock` pins. The iOS backend is zed PR
 #63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
 video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
-pointers; one finger taps and pans through gpui core's touch recognizer, two fingers
+pointers, a VoiceOver bridge (`gpui_ios/src/ios/a11y.rs`: GPUI's accesskit tree mirrored as
+`UIAccessibilityElement`s on the Metal view) and `Window::a11y_tree()` / `set_a11y_active()` under
+`test-support` so tests read the tree on every platform; one finger taps and pans through gpui core's touch recognizer, two fingers
 pinch-zoom, both landing in the same canvas handlers the Mac uses. A keyboard attached to an
 iPad or iPhone arrives as `pressesBegan`/`pressesEnded` on the metal view (the first responder
 whenever no text input is): every key that is not plain text (arrows, escape, function keys,

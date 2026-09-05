@@ -49,12 +49,15 @@ hypothesis until DECISIONS.md marks it verified.
 2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui`: a `VisualTestContext` window with real
    layout, `simulate_keystrokes`/`simulate_click`, a channel for the host. Read the UI like
    a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
-   for colours and borders, view accessors (`rows()`, `zoom()`, `active_item()`). No pixels,
-   no process, runs under `cargo gate`. Every canvas/terminal behaviour gets a test here first.
+   for colours and borders, view accessors (`rows()`, `zoom()`, `active_item()`),
+   `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
+   the focused node. No pixels, no process, runs under `cargo gate`. Every canvas/terminal
+   behaviour gets a test here first.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`, gate `SLOPTY_APP_E2E`):
    launches ptyd + hostd + the app (built with `--features slopty/e2e`) in a temp dir, pairs
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
-   dump, render). `dump` is the structured state (items, focus, zoom, terminal rows);
+   dump, render). `dump` is the structured state (items, focus, zoom, terminal rows, and
+   `a11y`: the accessibility tree as role/label/value/focused/bounds in reading order);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
