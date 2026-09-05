@@ -240,6 +240,8 @@ pub struct ScreenStats {
     pub queue_full: u64,
     /// Heartbeats sent while the source was quiet.
     pub heartbeats: u64,
+    /// Refresh requests the client sent for this stream (what the receiver's cap bounds).
+    pub refreshes: u64,
     /// Worst capture-to-packet latency seen, microseconds.
     pub latency_max_us: u64,
     /// Sum of capture-to-packet latencies, microseconds (divide by `encoded`).
@@ -432,6 +434,8 @@ struct Counters {
     queue_full: AtomicU64,
     /// Heartbeats sent while the source was quiet.
     heartbeats: AtomicU64,
+    /// Refresh requests received from the client.
+    refreshes: AtomicU64,
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
     bitrate_bps: AtomicU64,
@@ -457,6 +461,7 @@ impl Counters {
             datagrams: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
+            refreshes: AtomicU64::new(0),
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
             bitrate_bps: AtomicU64::new(0),
@@ -498,6 +503,7 @@ impl Counters {
             datagrams: self.datagrams.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
             heartbeats: self.heartbeats.load(Ordering::Relaxed),
+            refreshes: self.refreshes.load(Ordering::Relaxed),
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
             audio_packets: self.audio_packets.load(Ordering::Relaxed),
@@ -1375,6 +1381,7 @@ impl ScreenStream {
     /// The client lost a frame it cannot recover: make the next frame stand on its own.
     pub fn request_refresh(&self, last_good_frame: u32) {
         tracing::debug!(stream = %self.id, last_good_frame, "refresh requested");
+        self.shared.counters.refreshes.fetch_add(1, Ordering::Relaxed);
         self.shared.pending.lock().refresh = true;
     }
 
