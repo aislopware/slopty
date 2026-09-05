@@ -1636,6 +1636,7 @@ impl CanvasView {
 
         div()
             .id(element_id("item", id))
+            .debug_selector(|| format!("item-{}", id.as_uuid()))
             .absolute()
             .left(px(s.x))
             .top(px(s.y))
@@ -1772,6 +1773,7 @@ impl Render for CanvasView {
         let minimap = (!empty).then(|| self.render_minimap(cx));
         div()
             .id("canvas")
+            .debug_selector(|| "canvas".to_owned())
             .key_context("Canvas")
             .track_focus(&self.focus)
             .relative()
@@ -2021,5 +2023,259 @@ impl CanvasView {
             .child(pill)
             .children(buttons)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The canvas in a headless GPUI window: real layout, real key and mouse dispatch, no
+    //! process, no permissions, no pixels. The host is a channel: the test reads what the
+    //! canvas sends and feeds back the deltas a host would.
+
+    use std::sync::Arc;
+
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
+    use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, Style, TermModes};
+    use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
+
+    use super::*;
+
+    const VIEWPORT: (f32, f32) = (1000.0, 700.0);
+    const SHELL: Rect = Rect { x: 0.0, y: 0.0, w: 720.0, h: 440.0 };
+
+    /// A focused canvas for one fake host, drawn once so the viewport is known.
+    fn canvas(
+        cx: &mut TestAppContext,
+    ) -> (Entity<CanvasView>, mpsc::Receiver<ClientMsg>, ClientId, &mut VisualTestContext) {
+        let me = ClientId::new();
+        let (tx, rx) = mpsc::channel(64);
+        cx.update(|cx| cx.bind_keys(key_bindings()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|_stream, _codec| panic!("this canvas opens no screens"));
+            let view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+        cx.run_until_parked();
+        (view, rx, me, cx)
+    }
+
+    /// `debug_bounds` wants a static selector; tests may leak a handful.
+    fn selector(part: &str, id: ItemId) -> &'static str {
+        Box::leak(format!("{part}-{}", id.as_uuid()).into_boxed_str())
+    }
+
+    /// The host opened `session` for `by` and placed it at `rect`.
+    fn host_opens(
+        view: &Entity<CanvasView>,
+        cx: &mut VisualTestContext,
+        session: SessionId,
+        by: ClientId,
+        rect: Rect,
+        version: u64,
+    ) -> ItemId {
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            rect,
+            z: u32::try_from(version).unwrap(),
+            group: None,
+            sleeping: false,
+        };
+        let id = item.id;
+        let summary = SessionSummary {
+            id: session,
+            title: "shell".into(),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            state: SessionState::Running,
+            viewers: 1,
+            command: Vec::new(),
+        };
+        view.update_in(cx, |c, _window, cx| {
+            c.session_opened(summary, cx);
+            c.apply_sync(CanvasSync::Delta { version, by, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        id
+    }
+
+    fn frame(rows: &[&str]) -> TermEvent {
+        TermEvent::Frame(Frame {
+            seq: 1,
+            full: true,
+            epoch: 0,
+            cols: 80,
+            rows: u16::try_from(rows.len()).unwrap(),
+            cursor: Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(0),
+            total_lines: rows.len() as u64,
+            input_ack: 0,
+            updates: rows
+                .iter()
+                .enumerate()
+                .map(|(row, text)| RowUpdate {
+                    row: u16::try_from(row).unwrap(),
+                    line: Line::from_text(text, 80, Style::DEFAULT),
+                })
+                .collect(),
+        })
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ClientMsg> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    fn terminal_focused(
+        view: &Entity<CanvasView>,
+        cx: &mut VisualTestContext,
+        session: SessionId,
+    ) -> bool {
+        cx.update(|window, cx| {
+            let c = view.read(cx);
+            c.terminal(session).is_some_and(|t| t.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    fn canvas_focused(view: &Entity<CanvasView>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| view.read(cx).focus.is_focused(window))
+    }
+
+    #[gpui::test]
+    fn cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        assert!(cx.debug_bounds("canvas").is_some(), "the canvas is drawn");
+        assert!(view.read_with(cx, |c, _| c.minimap.is_none()), "no minimap when empty");
+
+        cx.simulate_keystrokes("cmd-n");
+        let sent = drain(&mut rx);
+        assert!(matches!(sent.as_slice(), [ClientMsg::OpenSession(_)]), "{sent:?}");
+
+        let session = SessionId::new();
+        let id = host_opens(&view, cx, session, me, SHELL, 1);
+
+        // Our own upsert: the item is drawn at its rect, active, the terminal takes the
+        // keyboard, it attached itself to the host and the minimap appears.
+        let bounds = cx.debug_bounds(selector("item", id)).expect("item drawn");
+        assert_eq!(bounds.size, size(px(SHELL.w), px(SHELL.h)));
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id));
+        assert!(terminal_focused(&view, cx, session));
+        assert!(view.read_with(cx, |c, _| c.minimap.is_some()));
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session: s, req: TermRequest::Attach { .. } } if *s == session
+            )),
+            "{sent:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn typed_keys_reach_the_focused_terminal_and_host_frames_fill_its_rows(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        host_opens(&view, cx, session, me, SHELL, 1);
+        drain(&mut rx);
+
+        cx.simulate_keystrokes("a");
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::Term { session: s, req: TermRequest::Key(_) }] if *s == session
+            ),
+            "{sent:?}"
+        );
+
+        view.update_in(cx, |c, _window, cx| {
+            c.term_event(session, frame(&["$ echo hi", "hi", ""]), cx);
+        });
+        cx.run_until_parked();
+        let rows = view.read_with(cx, |c, cx| c.terminal(session).unwrap().read(cx).rows());
+        assert_eq!(rows, ["$ echo hi", "hi", ""]);
+    }
+
+    /// Below `CARD_ZOOM` the grids are not drawn. Focus must move to the canvas or GPUI drops
+    /// every keystroke aimed at the undrawn terminal (the app self-test found ⌘W dead after
+    /// ⌘1); ⌘0 gives the active terminal the keyboard back.
+    #[gpui::test]
+    fn zooming_out_to_cards_hands_the_keyboard_to_the_canvas_and_back(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let first = host_opens(&view, cx, a, me, SHELL, 1);
+        let second = host_opens(&view, cx, b, me, Rect { x: 1500.0, ..SHELL }, 2);
+        drain(&mut rx);
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(second));
+        assert!(terminal_focused(&view, cx, b));
+
+        cx.simulate_keystrokes("cmd-1");
+        let zoom = view.read_with(cx, |c, _| c.zoom());
+        assert!(zoom < CARD_ZOOM, "fit-all zoom {zoom} is card zoom");
+        assert!(canvas_focused(&view, cx), "the canvas holds the keyboard in card mode");
+        assert!(!terminal_focused(&view, cx, b));
+
+        let card = cx.debug_bounds(selector("item", first)).expect("card drawn");
+        cx.simulate_click(card.center(), Modifiers::default());
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(first));
+
+        cx.simulate_keystrokes("cmd-0");
+        let zoom = view.read_with(cx, |c, _| c.zoom());
+        assert!((zoom - 1.0).abs() < 1e-3, "{zoom}");
+        assert!(terminal_focused(&view, cx, a), "the active terminal took the keyboard back");
+
+        cx.simulate_keystrokes("cmd-w");
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session, req: TermRequest::Close } if *session == a
+            )),
+            "{sent:?}"
+        );
+    }
+
+    /// The active item's frame is painted in the accent colour; the others in the border
+    /// colour. Read from the scene, not from pixels.
+    #[gpui::test]
+    fn the_active_item_is_painted_with_the_accent_border(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let first = host_opens(&view, cx, a, me, SHELL, 1);
+        let second = host_opens(&view, cx, b, me, Rect { x: 760.0, ..SHELL }, 2);
+        let theme = Theme::default();
+
+        let border_of = |cx: &mut VisualTestContext, id: ItemId| -> Option<gpui::Hsla> {
+            let bounds = cx.debug_bounds(selector("item", id))?;
+            let (scale, quads) =
+                cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+            let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+                f32::from(logical).mul_add(-scale, scaled.0).abs() < 1.0
+            };
+            quads
+                .iter()
+                .find(|q| {
+                    near(q.bounds.origin.x, bounds.origin.x)
+                        && near(q.bounds.origin.y, bounds.origin.y)
+                        && near(q.bounds.size.width, bounds.size.width)
+                        && q.border_widths.top.0 > 0.0
+                })
+                .map(|q| q.border_color)
+        };
+        assert_eq!(border_of(cx, second), Some(hsla(theme.surfaces.accent)));
+        assert_eq!(border_of(cx, first), Some(hsla(theme.surfaces.border)));
     }
 }
