@@ -37,6 +37,11 @@ hypothesis until DECISIONS.md marks it verified.
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
+- `cargo xtask upstream check` shows how far the GPUI and gpui-kit forks are behind upstream
+  (bases in `xtask/upstream.toml`; the gate warns past 7 days); `cargo xtask upstream sync`
+  rebases the forks in `.research/` under the main checkout, build-checks, pushes them
+  (`SSH_AUTH_SOCK` on the signing agent first) and moves the `Cargo.lock` pins, stopping on
+  any conflict that is not `Cargo.lock`. Then gate, e2e app + ios, and a DECISIONS entry.
 
 ## Tests (four layers, fastest first)
 1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`

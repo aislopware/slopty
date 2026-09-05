@@ -290,8 +290,10 @@ the attention row (`ConversationInfo`) and the agent's state (`TerminalInfo.agen
 
 ## 6. UI
 
-GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit tracks) plus
-gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). The iOS backend is zed PR
+GPUI (fork: `aislopware/zed` branch `slopty`, our iOS commits rebased onto upstream main; the
+base commit and date live in `xtask/upstream.toml`) plus gpui-kit (fork: `aislopware/gpui-kit`,
+upstream main plus one commit re-pointing deps at the zed fork). `cargo xtask upstream check`
+shows the drift, `cargo xtask upstream sync` rebases, pushes and moves the `Cargo.lock` pins. The iOS backend is zed PR
 #63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
 video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
 pointers; one finger taps and pans through gpui core's touch recognizer, two fingers

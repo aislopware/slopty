@@ -17,8 +17,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 ## UI
 
 - ✅ **GPUI from a fork, pinned.** crates.io `gpui` 0.2.2 is 10 months stale (verified crates.io
-  2026-09-04). Fork `aislopware/zed`, branch `slopty`, base `801c087` — the commit gpui-kit 0.6.0's
-  `gpui-pre 0.3.1` snapshots (verified: crates.io description "snapshot of zed@801c087").
+  2026-09-04). Fork `aislopware/zed`, branch `slopty`, first base `801c087` — the commit gpui-kit
+  0.6.0's `gpui-pre 0.3.1` snapshots (verified: crates.io description "snapshot of zed@801c087").
+  Current base: `xtask/upstream.toml` (rebased 2026-09-05 onto upstream main `5a9b9558db` of
+  2026-09-04, 35 commits; upstream touched gpui only in `Hitbox::is_hovered_at` and the test
+  platform, so the five fork commits replayed without a conflict; fork head `d9980cc4ae`).
 - ✅ **gpui-kit from a fork.** `longbridge/gpui-kit` v0.6.0 (renamed from gpui-component; Apache-2.0,
   LICENSE file verified). It depends on `gpui-pre` from crates.io; Cargo `[patch]` cannot rename
   packages (tested 2026-09-04: a `package =` key in `[patch]` is silently ignored), so a one-commit
@@ -26,6 +29,30 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   Done 2026-09-04: `aislopware/zed` branch `slopty` = 801c087; `aislopware/gpui-kit` branch `slopty`
   = v0.6.0 + one commit (`gpui`, `gpui_platform`, `gpui_web`, `gpui_macros`, `reqwest_client`,
   `sum_tree` → git deps on the zed fork; `reqwest` → zed's `zed-reqwest` git fork).
+  2026-09-05: rebased onto gpui-kit main `d59d1a16` (v0.6.0 + 32 commits, no newer tag; upstream
+  still pins `gpui-pre 0.3.1` = zed 801c087, and nothing in gpui's API moved between 801c087 and
+  our zed base, so the pair still agrees). Only `Cargo.lock` conflicted — it always will, since
+  the fork commit rewrites every `gpui-pre-*` entry — and the resolution is mechanical: take
+  upstream's lock, `cargo update -w` re-adds the git sources against the freshly pushed zed
+  fork. `cargo xtask upstream sync` does exactly that and stops on any other conflicted file.
+- ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
+  order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
+  per fork, the upstream and fork URLs, branches, the checkout under the main clone's
+  `.research/` (shared by every worktree, cloned blobless on first use) and the `base` commit
+  + date the fork was last rebased onto, so drift is visible in git history. `check` fetches
+  both upstreams and prints commits and tags since each base and the date of the `Cargo.lock`
+  pin; the gate prints a warning line (never a failure) when a base is older than 7 days.
+  `sync` goes zed first, then gpui-kit (its lock resolves against the zed fork): fetch, refuse
+  a dirty or mid-rebase checkout, `git rebase <upstream> <local branch>`, resolve a
+  `Cargo.lock`-only conflict as above and stop with the file list on anything else (the
+  checkout stays mid-rebase for a person or an agent to read upstream's change before choosing
+  a side), build-check the fork (`cargo check -p gpui -p gpui_ios --target aarch64-apple-ios-sim`
+  and the host `gpui` + `gpui_platform`; `gpui-kit` with `component,assets`), push with
+  `--force-with-lease` against the fork head it fetched, then `cargo update -p gpui -p gpui-kit`
+  in the workspace (one git source moves as a unit: every `aislopware/zed` package follows) and
+  rewrite the base lines. What it does not do: the gate, the e2e runs and the DECISIONS entry —
+  those stay with whoever ran it. Commits in the checkouts are signed like ours, so
+  `SSH_AUTH_SOCK` must point at the signing agent before `sync`.
 - ✅ **Forks are git dependencies, not submodules.** `gpui = { git = "…/aislopware/zed", rev = … }`
   pinned by rev; cargo caches the fetch. A zed submodule would put a multi-GB checkout in every
   clone and CI run for four crates we build. To hack on the fork: clone it next to this repo and
