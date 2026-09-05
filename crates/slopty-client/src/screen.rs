@@ -450,6 +450,7 @@ pub fn spawn_screen(
         audio: AudioSlot::Unopened,
         muted: Arc::clone(&muted),
         source_live: Arc::clone(&source_live),
+        source_hint: true,
         first_decoded,
         capture_clock: CaptureClock::new(),
     };
@@ -476,6 +477,10 @@ struct Worker {
     muted: Arc<AtomicBool>,
     /// The host says its capture target is producing pictures.
     source_live: Arc<AtomicBool>,
+    /// The last hint handed to the reassembler, so a hint that has not changed does not
+    /// overwrite what the stream itself proved (a video fragment means the source is live,
+    /// whatever the host last said).
+    source_hint: bool,
     /// Set by the decoder callback when the first picture comes back.
     first_decoded: Arc<Mutex<Option<Instant>>>,
     /// Widens the wire's 32-bit capture timestamp, so ordering survives its ~71-minute wrap.
@@ -604,7 +609,11 @@ impl Worker {
 
     /// Run the reassembler's timers; `false` when the connection is gone.
     fn actions(&mut self) -> bool {
-        self.reassembler.set_source_live(self.source_live.load(Ordering::Relaxed));
+        let hint = self.source_live.load(Ordering::Relaxed);
+        if hint != self.source_hint {
+            self.source_hint = hint;
+            self.reassembler.set_source_live(hint);
+        }
         let rtt = (self.rtt)().unwrap_or(DEFAULT_RTT);
         for action in self.reassembler.tick(Instant::now(), rtt) {
             let stream = self.stream;

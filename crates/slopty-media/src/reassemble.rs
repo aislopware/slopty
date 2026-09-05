@@ -479,6 +479,9 @@ impl Reassembler {
             self.resume(now, gap);
         }
         self.arrived_at = now;
+        // Anything on the stream — a heartbeat included — proves the host is still there, so the
+        // refresh cap starts over; only a video fragment proves the *source* is drawing.
+        self.refresh_repeats = 0;
         let header = *header;
         let payload = datagram.slice(HEADER_BYTES..);
         match header.kind() {
@@ -495,7 +498,7 @@ impl Reassembler {
     }
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
-        self.refresh_repeats = 0;
+        self.source_live = true;
         self.any_arrived = true;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());

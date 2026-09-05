@@ -445,6 +445,39 @@ mod tests {
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
     }
 
+    /// What clears what: a heartbeat proves the host is alive, so the retry cap starts over,
+    /// but only a video fragment proves the *source* is drawing and lifts the idle suppression.
+    #[test]
+    fn a_heartbeat_restarts_the_cap_and_a_frame_lifts_the_idle_hint() {
+        let mut h = Harness::new();
+        h.rx.set_source_live(false);
+        let mut sent = 0;
+        for _ in 0..600 {
+            h.advance(Duration::from_millis(10));
+            sent += h.tick().len();
+        }
+        assert_eq!(sent, 0, "an idle source is not asked");
+
+        // A heartbeat: the host is there, the source still is not. The cap is fresh, but
+        // suppression holds, so still nothing goes out.
+        assert_eq!(h.rx.ingest(&heartbeat_datagram(STREAM, 0, 0), h.now), Ingest::Heartbeat);
+        for _ in 0..600 {
+            h.advance(Duration::from_millis(10));
+            assert!(h.tick().is_empty(), "a heartbeat does not make the source live");
+        }
+        assert!(!h.rx.source_live());
+
+        // A video fragment does: the target drew, whatever the host last said about it.
+        let s0 = h.send(&frame_bytes(1, 6_000), true, false);
+        h.deliver(&s0.datagrams[..1]);
+        assert!(h.rx.source_live(), "a frame proves the source is live");
+        h.advance(cfg().max_hold);
+        assert!(
+            h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }),
+            "asking resumes once the source has drawn"
+        );
+    }
+
     /// Fallback for a host that never sends the hint: the repeats stop on their own. With the
     /// doubling backoff the cap spans about 17 s of asking, then silence until the stream moves.
     #[test]
