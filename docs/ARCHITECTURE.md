@@ -115,10 +115,13 @@ line cache and stop painting; off-screen video pauses decode (kind-aware culling
 document synced through the host so every client sees the same canvas (`slopty-host::canvas`
 owns it, `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws
 it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface; a minimap in the corner
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A are the keyboard surface; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
-in place (`slopty-ui::note`) and their text lives in the document. Remote-window items are
-created from the picker (⌘O); `reconcile_screens` opens a stream for every window/display item
+in place (`slopty-ui::note`) and their text lives in the document. The picker (⌘O) lists the
+canvas's sessions first — agents waiting on the human, then other agents with their status
+line, then plain shells — and a click reveals and focuses that terminal; below them the host's
+windows and displays. Remote-window items are
+created from the picker; `reconcile_screens` opens a stream for every window/display item
 that lacks one and closes streams for items that disappeared, so the document, not the UI, is
 the source of truth for what is being streamed.
 
@@ -139,7 +142,9 @@ A permission badge carries "allow" / "deny" buttons that type Enter / Esc into t
 through the terminal view's normal key path (`TermRequest::Key`, nothing new on the wire); a
 question or elicitation badge carries "answer", which reveals and focuses the terminal. The
 pill shows "allowed" / "denied" until the host reports the agent's next state, so one tap sends
-one key.
+one key. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
+next waiting terminal in reading order, cycling from the active item; the top bar shows an
+"N need you" pill with the count that does the same on a click or a tap (the phone's way in).
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`.
 Later: ACP (`agent-client-protocol`) for structured control.
 

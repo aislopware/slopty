@@ -18,7 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::LinkEvent;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
-use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewNote, NewTerminal};
+use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewNote, NewTerminal, NextAttention};
 use slopty_ui::colors::hsla;
 use slopty_ui::terminal::TerminalView;
 
@@ -77,6 +77,8 @@ pub struct Workspace {
     status: String,
     host_name: String,
     zoom: f32,
+    /// Agents waiting on the human (the "N need you" pill; ⌘⇧A / a tap jumps to the next).
+    needs_you: usize,
     rtt: Option<std::time::Duration>,
     relayed: Option<bool>,
     /// How long the host has sent nothing at all, once past [`SILENCE_WARN`].
@@ -387,6 +389,36 @@ impl Workspace {
                     canvas.update(cx, |c, cx| c.fit_all(&FitAll, window, cx));
                 }
             }));
+        // Agents waiting on the human: a warm pill with the count; a tap goes to the next one.
+        let needs_you = (self.needs_you > 0).then(|| {
+            let warm = self.theme.terminal.palette(3);
+            let text = if self.needs_you == 1 {
+                "1 needs you".to_owned()
+            } else {
+                format!("{} need you", self.needs_you)
+            };
+            div()
+                .id("needs-you")
+                .flex_none()
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(5.0))
+                .text_size(px(12.0))
+                .text_color(hsla(warm))
+                .bg(slopty_ui::colors::hsla_alpha(warm, 0.15))
+                .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(warm, 0.3)))
+                .cursor_pointer()
+                .child(SharedString::from(if SHORTCUT_HINTS {
+                    format!("{text}  ⌘⇧A")
+                } else {
+                    text
+                }))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    if let Some(canvas) = &this.canvas {
+                        canvas.update(cx, |c, cx| c.next_attention(&NextAttention, window, cx));
+                    }
+                }))
+        });
         div()
             .h(px(TOP_BAR) + safe_top)
             .pt(safe_top)
@@ -427,6 +459,7 @@ impl Workspace {
                 (None, Some(d), _) => label(format!("{:.1} ms", d.as_secs_f64() * 1e3)),
                 (None, None, _) => label(String::new()),
             })
+            .when_some(needs_you, gpui::ParentElement::child)
             .child(label(format!("{zoom_pct}%")))
             .child(fit_button)
             .child(new_button)
@@ -509,6 +542,7 @@ pub fn open_workspace(
         status: "connecting…".to_owned(),
         host_name: String::new(),
         zoom: 1.0,
+        needs_you: 0,
         rtt: None,
         relayed: None,
         silent: None,
@@ -574,11 +608,16 @@ pub fn open_workspace(
                             ws.zoom = *z;
                             cx.notify();
                         }
+                        CanvasEvent::NeedsYou(n) => {
+                            ws.needs_you = *n;
+                            cx.notify();
+                        }
                         CanvasEvent::Attention(_session) => slopty_platform::attention(),
                         CanvasEvent::Bell(_session) => {}
                     },
                 ));
                 ws.canvas = Some(canvas.clone());
+                ws.needs_you = 0;
                 ws.host_name.clone_from(&ack.name);
                 "connected".clone_into(&mut ws.status);
                 cx.notify();

@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::note::{NoteView, NoteViewEvent};
-use crate::picker::{PickerEvent, WindowPicker};
+use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
 
@@ -63,10 +63,14 @@ pub mod actions {
             ZoomReset,
             /// Fit every item in the viewport.
             FitAll,
+            /// Reveal the next terminal whose agent is waiting on the human.
+            NextAttention,
         ]
     );
 }
-pub use actions::{AddWindow, CloseItem, FitAll, NewNote, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
+pub use actions::{
+    AddWindow, CloseItem, FitAll, NewNote, NewTerminal, NextAttention, ZoomIn, ZoomOut, ZoomReset,
+};
 
 /// Key bindings for the canvas context.
 #[must_use]
@@ -83,6 +87,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd--", ZoomOut, CTX),
         KeyBinding::new("cmd-0", ZoomReset, CTX),
         KeyBinding::new("cmd-1", FitAll, CTX),
+        KeyBinding::new("cmd-shift-a", NextAttention, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
     ]
 }
@@ -129,6 +134,8 @@ pub enum CanvasEvent {
     Bell(SessionId),
     /// A coding agent in this session needs the human (permission, question, finished turn).
     Attention(SessionId),
+    /// How many agents are waiting on the human right now (for a count in the chrome).
+    NeedsYou(usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -424,6 +431,7 @@ impl CanvasView {
         self.agents.remove(&session);
         self.answered.remove(&session);
         self.reconcile(cx);
+        self.count_needs_you(cx);
         cx.notify();
     }
 
@@ -451,7 +459,57 @@ impl CanvasView {
                 cx.emit(CanvasEvent::Attention(session));
             }
         }
+        self.count_needs_you(cx);
         cx.notify();
+    }
+
+    /// Sessions whose agent is waiting on the human and has not been answered from the
+    /// badge, in reading order (top to bottom, left to right) so ⌘⇧A walks the canvas
+    /// predictably.
+    fn needs_you(&self) -> Vec<(ItemId, SessionId)> {
+        let mut out: Vec<(Rect, ItemId, SessionId)> = self
+            .doc
+            .items()
+            .filter_map(|i| match i.kind {
+                ItemKind::Terminal { session } => Some((i.rect, i.id, session)),
+                _ => None,
+            })
+            .filter(|(_, _, s)| {
+                self.agents.get(s).is_some_and(needs_human) && !self.answered.contains_key(s)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.y.total_cmp(&b.0.y).then_with(|| a.0.x.total_cmp(&b.0.x)));
+        out.into_iter().map(|(_, id, s)| (id, s)).collect()
+    }
+
+    /// How many agents are waiting on the human.
+    #[must_use]
+    pub fn needs_you_count(&self) -> usize {
+        self.needs_you().len()
+    }
+
+    /// Tell the chrome the count (it shows a pill while it is non-zero).
+    fn count_needs_you(&self, cx: &mut Context<Self>) {
+        cx.emit(CanvasEvent::NeedsYou(self.needs_you_count()));
+    }
+
+    /// ⌘⇧A: reveal and focus the next terminal whose agent is waiting on the human, cycling
+    /// from the active item.
+    pub fn next_attention(
+        &mut self,
+        _: &NextAttention,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.needs_you();
+        let Some(&(_, first)) = waiting.first() else { return };
+        // After the active item when it is in the list, wrapping to the first; else the first.
+        let next = self
+            .active
+            .and_then(|active| waiting.iter().position(|(id, _)| *id == active))
+            .and_then(|i| waiting.iter().cycle().nth(i.saturating_add(1)))
+            .map_or(first, |(_, s)| *s);
+        self.reveal_session(next, cx);
     }
 
     /// "allow" on a permission badge. Claude Code's permission prompt is a numbered menu with
@@ -490,6 +548,7 @@ impl CanvasView {
             view.press(keystroke, cx);
         });
         self.answered.insert(session, answer);
+        self.count_needs_you(cx);
         cx.notify();
     }
 
@@ -571,20 +630,69 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         let theme = self.theme.clone();
-        let picker = cx.new(|cx| WindowPicker::new(windows, displays, theme, cx));
+        let sessions = self.session_rows(cx);
+        let picker = cx.new(|cx| WindowPicker::new(sessions, windows, displays, theme, cx));
         self.subscriptions.push(cx.subscribe(&picker, |this, _picker, event, cx| {
             match event {
                 PickerEvent::Pick { target, size, title } => {
                     this.add_screen_item(*target, *size, title.clone());
                 }
+                PickerEvent::Jump(session) => this.reveal_session(*session, cx),
                 PickerEvent::Dismiss => {}
             }
             this.picker = None;
-            this.pending_focus_self = true;
+            // The jump focuses its terminal; every other outcome hands focus back to the canvas.
+            this.pending_focus_self = !matches!(event, PickerEvent::Jump(_));
             cx.notify();
         }));
         self.pending_focus_picker = true;
         self.picker = Some(picker);
+    }
+
+    /// The terminal sessions on the canvas for the picker: agents waiting on the human first,
+    /// then other agents, then plain shells; ties in reading order.
+    fn session_rows(&self, cx: &Context<Self>) -> Vec<SessionRow> {
+        let mut rows: Vec<(u8, Rect, SessionRow)> = self
+            .doc
+            .items()
+            .filter_map(|i| match i.kind {
+                ItemKind::Terminal { session } => Some((i.rect, session)),
+                _ => None,
+            })
+            .map(|(rect, session)| {
+                let agent = self.agents.get(&session);
+                let needs_you =
+                    agent.is_some_and(needs_human) && !self.answered.contains_key(&session);
+                let rank = match agent {
+                    _ if needs_you => 0,
+                    Some(_) => 1,
+                    None => 2,
+                };
+                let row = SessionRow {
+                    session,
+                    title: self.terminal_title(session, cx),
+                    status: agent.map(agent_status_text),
+                    needs_you,
+                };
+                (rank, rect, row)
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.y.total_cmp(&b.1.y))
+                .then_with(|| a.1.x.total_cmp(&b.1.x))
+        });
+        rows.into_iter().map(|(_, _, row)| row).collect()
+    }
+
+    /// What a terminal's title bar says: the program's title, else the session's, else "shell".
+    fn terminal_title(&self, session: SessionId, cx: &Context<Self>) -> String {
+        self.terminals
+            .get(&session)
+            .and_then(|v| v.read(cx).state().title().map(str::to_owned))
+            .or_else(|| self.sessions.get(&session).map(|s| s.title.clone()))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "shell".to_owned())
     }
 
     /// The host window changed size: keep the item's width and give it the new aspect, so the
@@ -869,7 +977,8 @@ impl CanvasView {
         self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
     }
 
-    /// ⌘O: ask the host for its windows, then show the picker.
+    /// ⌘O: ask the host for its windows, then show the picker (which also lists the canvas's
+    /// sessions, agents first, to jump to).
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         self.picker_wanted = true;
         self.send(ClientMsg::Screen(ScreenRequest::List));
@@ -1095,12 +1204,7 @@ impl CanvasView {
             ItemKind::Terminal { session } => {
                 let view = self.terminals.get(&session);
                 let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
-                let title = view
-                    .and_then(|v| v.read(cx).state().title().map(str::to_owned))
-                    .or_else(|| self.sessions.get(&session).map(|s| s.title.clone()))
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| "shell".to_owned());
-                (title, focused)
+                (self.terminal_title(session, cx), focused)
             }
             ItemKind::Window { window: host_window } => {
                 let view = self.screens.get(&item.id);
@@ -1433,6 +1537,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::fit_all))
+            .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::find_in_active))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))

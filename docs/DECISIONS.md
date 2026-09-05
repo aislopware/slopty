@@ -595,6 +595,16 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   while the status is `Blocked(Permission)`, which the `PermissionRequest` hook raises after
   the menu is up. Question / elicitation badges cannot be answered with one key (the reply is
   text or a pick), so their button reveals and focuses the terminal.
+- ✅ Finding the agent that needs you: `CanvasView::needs_you` is the list of terminal items
+  whose agent is `Blocked` (not `IdlePrompt`) and not yet answered from the badge, sorted by
+  `(rect.y, rect.x)`. ⌘⇧A (`NextAttention`, Canvas key context, so it works with a terminal
+  focused since ⌘ chords fall through) picks the entry after the active item, wrapping, else
+  the first, and runs the same reveal + focus as the "answer" button. The count travels as
+  `CanvasEvent::NeedsYou(n)` to the workspace, which draws the "N need you" pill in the top
+  bar on both platforms (a tap on the phone, where there is no ⌘⇧A). Reading order rather than
+  z or arrival time because it is the one order the user can predict from what they see; the
+  picker (⌘O) uses the same order within its "needs you / other agents / shells" ranking. No
+  proto change: the count is derived from the `HostMsg::Agent` table the client already has.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.
