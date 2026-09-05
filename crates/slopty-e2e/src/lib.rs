@@ -142,6 +142,50 @@ pub enum Command {
         /// Height in points.
         height: f32,
     },
+    /// A hardware key press delivered at the UIKit boundary (iOS only): what the metal
+    /// view's `pressesBegan:` / `pressesEnded:` reads out of the `UIPress`, run through the
+    /// same delivery; a plain key while a text input is up is typed through `insertText:`
+    /// the way UIKit's text system would. `usage` is the USB HID usage (`hid`), `modifiers`
+    /// the chord in GPUI's syntax (`cmd-shift`, empty for none). macOS answers an error.
+    UiKeyPress {
+        /// `UIKey.keyCode`.
+        usage: u32,
+        /// `cmd`, `ctrl`, `alt`, `shift`, `capslock`, joined by `-`.
+        #[serde(default)]
+        modifiers: String,
+        /// Which callback.
+        phase: UiPressPhase,
+    },
+    /// One `touches…:withEvent:` set delivered at the UIKit boundary (iOS only): every
+    /// touch in it with the same phase, as UIKit reports a set. Ids identify fingers across
+    /// phases. GPUI's own recognizer turns them into taps, pans, long presses and drags.
+    UiTouch {
+        /// The fingers.
+        touches: Vec<UiTouchPoint>,
+        /// `UITouch.phase` of every touch in the set.
+        phase: UiTouchPhase,
+    },
+    /// One report of the metal view's `UIPinchGestureRecognizer` (iOS only): `scale` is the
+    /// change since the previous report (the view resets the recognizer to 1 after each), so
+    /// a whole pinch is the product of its steps.
+    UiPinch {
+        /// `recognizer.scale`.
+        scale: f32,
+        /// `locationInView:` x in points.
+        x: f32,
+        /// `locationInView:` y in points.
+        y: f32,
+        /// `recognizer.state`.
+        phase: UiGesturePhase,
+    },
+    /// The text system's `insertText:` on the text input view (iOS only): what the soft
+    /// keyboard delivers, IME included.
+    UiInsertText {
+        /// The text.
+        text: String,
+    },
+    /// The text system's `deleteBackward` on the text input view (iOS only).
+    UiDeleteBackward,
     /// Everything the chrome and the canvas know, as data.
     Dump,
     /// Render the current frame with the app's own renderer to a PNG at `path`.
@@ -155,6 +199,131 @@ pub enum Command {
 
 const fn one() -> u32 {
     1
+}
+
+/// Which `presses…:withEvent:` callback a described key press enters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiPressPhase {
+    /// `pressesBegan:`.
+    Began,
+    /// `pressesEnded:`.
+    Ended,
+    /// `pressesCancelled:`.
+    Cancelled,
+}
+
+/// `UITouchPhase`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTouchPhase {
+    /// `touchesBegan:`.
+    Began,
+    /// `touchesMoved:`.
+    Moved,
+    /// A touch in a `touchesMoved:` set that did not move itself.
+    Stationary,
+    /// `touchesEnded:`.
+    Ended,
+    /// `touchesCancelled:`.
+    Cancelled,
+}
+
+/// `UIGestureRecognizerState` while a continuous recognizer reports to its target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiGesturePhase {
+    /// `UIGestureRecognizerStateBegan`.
+    Began,
+    /// `UIGestureRecognizerStateChanged`.
+    Changed,
+    /// `UIGestureRecognizerStateEnded`.
+    Ended,
+    /// `UIGestureRecognizerStateCancelled`.
+    Cancelled,
+}
+
+/// One finger of a [`Command::UiTouch`] set.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct UiTouchPoint {
+    /// The finger, stable from its `began` to its `ended`.
+    pub id: u64,
+    /// `locationInView:` x in points.
+    pub x: f32,
+    /// `locationInView:` y in points.
+    pub y: f32,
+}
+
+/// USB HID usages of the keyboard page (`UIKeyboardHIDUsage`), as a test names keys.
+pub mod hid {
+    /// The usage for a key in GPUI's name (`a`, `1`, `up`, `enter`, `escape`, `-`, `/`…), or
+    /// `None` for a key a US keyboard does not have a usage for.
+    #[must_use]
+    pub fn usage(key: &str) -> Option<u32> {
+        let mut chars = key.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            return Some(match c {
+                'a'..='z' => 0x04_u32.saturating_add(u32::from(c).saturating_sub(u32::from('a'))),
+                '1'..='9' => 0x1E_u32.saturating_add(u32::from(c).saturating_sub(u32::from('1'))),
+                '0' => 0x27,
+                ' ' => 0x2C,
+                '-' => 0x2D,
+                '=' => 0x2E,
+                '[' => 0x2F,
+                ']' => 0x30,
+                '\\' => 0x31,
+                ';' => 0x33,
+                '\'' => 0x34,
+                '`' => 0x35,
+                ',' => 0x36,
+                '.' => 0x37,
+                '/' => 0x38,
+                _ => return None,
+            });
+        }
+        Some(match key {
+            "enter" => 0x28,
+            "escape" => 0x29,
+            "backspace" => 0x2A,
+            "tab" => 0x2B,
+            "space" => 0x2C,
+            "capslock" => 0x39,
+            "f1" => 0x3A,
+            "f2" => 0x3B,
+            "f3" => 0x3C,
+            "f4" => 0x3D,
+            "f5" => 0x3E,
+            "f6" => 0x3F,
+            "f7" => 0x40,
+            "f8" => 0x41,
+            "f9" => 0x42,
+            "f10" => 0x43,
+            "f11" => 0x44,
+            "f12" => 0x45,
+            "insert" => 0x49,
+            "home" => 0x4A,
+            "pageup" => 0x4B,
+            "delete" => 0x4C,
+            "end" => 0x4D,
+            "pagedown" => 0x4E,
+            "right" => 0x4F,
+            "left" => 0x50,
+            "down" => 0x51,
+            "up" => 0x52,
+            _ => return None,
+        })
+    }
+
+    /// A keystroke in GPUI's binding syntax (`cmd-shift-l`, `up`, `ctrl-c`) split into the
+    /// key's usage and its modifiers (`cmd-shift`), or `None` when the key has no usage.
+    #[must_use]
+    pub fn chord(keystroke: &str) -> Option<(u32, String)> {
+        let (modifiers, key) = keystroke.rsplit_once('-').unwrap_or(("", keystroke));
+        // A bare `-` is the minus key ("cmd--" is command + minus).
+        let (modifiers, key) =
+            if key.is_empty() { (modifiers.trim_end_matches('-'), "-") } else { (modifiers, key) };
+        usage(key).map(|usage| (usage, modifiers.to_owned()))
+    }
 }
 
 /// What the app answers.
@@ -594,6 +763,34 @@ mod tests {
         // Defaults keep the driver's JSON short.
         let short: Command = serde_json::from_str(r#"{"cmd":"click","x":1,"y":2}"#).unwrap();
         assert_eq!(short, Command::Click { x: 1.0, y: 2.0, button: Button::Left, count: 1 });
+    }
+
+    #[test]
+    fn hid_usages_follow_the_keyboard_page() {
+        assert_eq!(hid::usage("a"), Some(0x04));
+        assert_eq!(hid::usage("l"), Some(0x0F));
+        assert_eq!(hid::usage("z"), Some(0x1D));
+        assert_eq!(hid::usage("1"), Some(0x1E));
+        assert_eq!(hid::usage("0"), Some(0x27));
+        assert_eq!(hid::usage("up"), Some(0x52));
+        assert_eq!(hid::usage("enter"), Some(0x28));
+        assert_eq!(hid::usage("-"), Some(0x2D));
+        assert_eq!(hid::usage("é"), None);
+        assert_eq!(hid::usage("fn"), None);
+        assert_eq!(hid::chord("cmd-shift-l"), Some((0x0F, "cmd-shift".to_owned())));
+        assert_eq!(hid::chord("up"), Some((0x52, String::new())));
+        assert_eq!(hid::chord("ctrl-c"), Some((0x06, "ctrl".to_owned())));
+        assert_eq!(hid::chord("cmd--"), Some((0x2D, "cmd".to_owned())));
+        assert_eq!(hid::chord("-"), Some((0x2D, String::new())));
+        assert_eq!(hid::chord("cmd-fn"), None);
+        let cmd = Command::UiKeyPress {
+            usage: 0x0F,
+            modifiers: "cmd-shift".into(),
+            phase: UiPressPhase::Began,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"cmd\":\"ui_key_press\"") && json.contains("\"began\""), "{json}");
+        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
     }
 
     #[test]

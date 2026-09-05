@@ -8,7 +8,9 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 
-use crate::{Button, Command, Dump, Reply};
+use crate::{
+    Button, Command, Dump, Reply, UiGesturePhase, UiPressPhase, UiTouchPhase, UiTouchPoint, hid,
+};
 
 /// How often [`Driver::wait_for`] polls.
 const POLL: Duration = Duration::from_millis(100);
@@ -115,6 +117,100 @@ impl Driver {
     /// When the socket breaks.
     pub async fn scroll(&mut self, x: f32, y: f32, dx: f32, dy: f32, zoom: bool) -> Result<()> {
         self.ok(&Command::Scroll { x, y, dx, dy, zoom }).await
+    }
+
+    /// A hardware key press and release at the UIKit boundary (iOS): `keystroke` in GPUI's
+    /// binding syntax (`cmd-shift-l`, `up`, `a`), the key's HID usage and the chord's
+    /// modifier flags going through `pressesBegan:` / `pressesEnded:`.
+    ///
+    /// # Errors
+    ///
+    /// When the key has no usage, the app is not on iOS, or the socket breaks.
+    pub async fn ui_key(&mut self, keystroke: &str) -> Result<()> {
+        let (usage, modifiers) =
+            hid::chord(keystroke).with_context(|| format!("no HID usage for {keystroke:?}"))?;
+        for phase in [UiPressPhase::Began, UiPressPhase::Ended] {
+            self.ok(&Command::UiKeyPress { usage, modifiers: modifiers.clone(), phase }).await?;
+        }
+        Ok(())
+    }
+
+    /// One `touches…:withEvent:` set at the UIKit boundary (iOS).
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_touch(&mut self, touches: &[UiTouchPoint], phase: UiTouchPhase) -> Result<()> {
+        self.ok(&Command::UiTouch { touches: touches.to_vec(), phase }).await
+    }
+
+    /// One finger down and up at a window point (iOS): a tap once GPUI recognizes it.
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_tap(&mut self, x: f32, y: f32) -> Result<()> {
+        let finger = [UiTouchPoint { id: 1, x, y }];
+        self.ui_touch(&finger, UiTouchPhase::Began).await?;
+        self.ui_touch(&finger, UiTouchPhase::Ended).await
+    }
+
+    /// One finger down at `from`, moved to `to` in `steps`, held still for a few frames (no
+    /// fling) and lifted (iOS): a pan once GPUI recognizes it.
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_pan(&mut self, from: (f32, f32), to: (f32, f32), steps: u32) -> Result<()> {
+        let at = |x: f32, y: f32| [UiTouchPoint { id: 1, x, y }];
+        self.ui_touch(&at(from.0, from.1), UiTouchPhase::Began).await?;
+        #[expect(clippy::cast_precision_loss, reason = "a handful of steps")]
+        let n = steps.max(1) as f32;
+        for i in 1..=steps.max(1) {
+            #[expect(clippy::cast_precision_loss, reason = "a handful of steps")]
+            let t = i as f32 / n;
+            let (x, y) = ((to.0 - from.0).mul_add(t, from.0), (to.1 - from.1).mul_add(t, from.1));
+            self.ui_touch(&at(x, y), UiTouchPhase::Moved).await?;
+        }
+        for _ in 0..4 {
+            self.ui_touch(&at(to.0, to.1), UiTouchPhase::Stationary).await?;
+        }
+        self.ui_touch(&at(to.0, to.1), UiTouchPhase::Ended).await
+    }
+
+    /// A pinch about a window point growing (or shrinking) by `factor` in `steps` reports of
+    /// the recognizer (iOS): each report carries the step's own scale, as the view reads it.
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_pinch(&mut self, x: f32, y: f32, factor: f32, steps: u32) -> Result<()> {
+        #[expect(clippy::cast_precision_loss, reason = "a handful of steps")]
+        let step = factor.powf(1.0 / steps.max(1) as f32);
+        self.ok(&Command::UiPinch { scale: 1.0, x, y, phase: UiGesturePhase::Began }).await?;
+        for _ in 0..steps.max(1) {
+            self.ok(&Command::UiPinch { scale: step, x, y, phase: UiGesturePhase::Changed })
+                .await?;
+        }
+        self.ok(&Command::UiPinch { scale: 1.0, x, y, phase: UiGesturePhase::Ended }).await
+    }
+
+    /// The text system's `insertText:` (iOS).
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_insert_text(&mut self, text: &str) -> Result<()> {
+        self.ok(&Command::UiInsertText { text: text.to_owned() }).await
+    }
+
+    /// The text system's `deleteBackward` (iOS).
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_delete_backward(&mut self) -> Result<()> {
+        self.ok(&Command::UiDeleteBackward).await
     }
 
     /// Open `count` sessions running `command` on the active canvas.

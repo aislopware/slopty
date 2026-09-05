@@ -41,14 +41,33 @@ pub extern "C" fn slopty_ios_run() -> bool {
 }
 
 /// Logs go to stderr, which `simctl launch --console-pty` and `devicectl --console` stream.
+/// Under the self-test (`SLOPTY_TEST_SOCKET` with `SLOPTY_DATA_DIR`) they are mirrored, with
+/// any panic, into `<data dir>/app.log`: `simctl launch` without a console sends the app's
+/// stderr nowhere a test can read, and a test that lost the socket needs the reason.
 fn init_logging() {
+    use tracing_subscriber::fmt::writer::MakeWriterExt as _;
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug"));
-    let _already = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
+    let mirror = std::env::var_os(slopty_e2e::SOCKET_ENV)
+        .and_then(|_| std::env::var_os("SLOPTY_DATA_DIR"))
+        .map(|dir| std::path::PathBuf::from(dir).join("app.log"))
+        .and_then(|path| std::fs::File::options().create(true).append(true).open(path).ok())
+        .map(std::sync::Arc::new);
+    let panics = mirror.clone();
+    if let Some(file) = panics {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            use std::io::Write as _;
+            let _written = writeln!(&*file, "panic: {info}");
+            default(info);
+        }));
+    }
+    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false);
+    let _already = match mirror {
+        Some(file) => builder.with_writer(std::io::stderr.and(file)).try_init(),
+        None => builder.with_writer(std::io::stderr).try_init(),
+    };
 }
 
 /// Stand-ins for CGL (macOS OpenGL) entry points that do not exist on iOS.

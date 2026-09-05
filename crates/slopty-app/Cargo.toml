@@ -14,11 +14,18 @@ workspace = true
 default = [  ]
 # `Window::render_to_image` for the self-test socket (`cargo xtask e2e app`): GPUI's
 # test-support on the platform crate. Off in the bundle.
-e2e = [ "gpui/test-support", "gpui_platform/test-support", "slopty-ui/e2e" ]
+e2e = [
+    "gpui/test-support",
+    "gpui_platform/test-support",
+    "slopty-ui/e2e",
+    "dep:gpui_ios",
+    "gpui_ios?/test-support",
+]
 
 [package.metadata.cargo-shear]
 # Only named so the `e2e` feature can reach its `test-support`; the code goes through gpui-kit.
-ignored = [ "gpui_platform" ]
+# `gpui_ios` is the UIKit-boundary injection of the test socket, iOS only.
+ignored = [ "gpui_platform", "gpui_ios" ]
 
 [dependencies]
 anyhow.workspace = true
@@ -38,6 +45,10 @@ slopty-ui.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# The test socket's UIKit-boundary delivery (`gpui_ios::inject`), with the `e2e` feature.
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui_ios = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

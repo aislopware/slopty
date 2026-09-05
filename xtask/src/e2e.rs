@@ -146,13 +146,23 @@ const INPUT: &[Suite] = &[Suite {
     serial: false,
 }];
 
-const IOS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_IOS_E2E"),
-    package: "slopty-e2e",
-    test: "ios",
-    filter: "",
-    serial: false,
-}];
+const IOS: &[Suite] = &[
+    Suite {
+        gate: Some("SLOPTY_IOS_E2E"),
+        package: "slopty-e2e",
+        test: "ios",
+        filter: "",
+        serial: false,
+    },
+    // The UIKit-boundary scenarios share the one simulator: one app at a time.
+    Suite {
+        gate: Some("SLOPTY_IOS_E2E"),
+        package: "slopty-e2e",
+        test: "ios_uikit",
+        filter: "",
+        serial: true,
+    },
+];
 
 const SMOOTH: &[Suite] = &[Suite {
     gate: Some("SLOPTY_SMOOTH_E2E"),

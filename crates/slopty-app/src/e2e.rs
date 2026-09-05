@@ -11,6 +11,12 @@
 //! The listener runs on the tokio runtime; each command crosses to the GPUI thread through a
 //! channel and is applied inside `WindowHandle::update`, so the app sees it like any other
 //! foreground work.
+//!
+//! The `Ui*` commands are the exception: on iOS they are handed to the fork's `gpui_ios::inject`
+//! with no window leased, which runs the metal view's own `pressesBegan:` / `touchesBegan:` /
+//! pinch / `insertText:` delivery from a *description* of the UIKit object (the values the
+//! callback would have read out of it), so the socket proves the phone's input path and not
+//! only GPUI's. macOS answers them with an error.
 
 use std::path::PathBuf;
 
@@ -95,23 +101,29 @@ pub fn serve(
                     cx.update(|cx| cx.quit());
                     continue;
                 }
+                // At the UIKit boundary, from the async task (no window leased): the fork's
+                // delivery re-enters GPUI's dispatch exactly as a UIKit callback does. Then
+                // settle on a frame like any input.
+                Command::UiKeyPress { .. }
+                | Command::UiTouch { .. }
+                | Command::UiPinch { .. }
+                | Command::UiInsertText { .. }
+                | Command::UiDeleteBackward => match uikit::inject(command) {
+                    Ok(()) => after_frame(window, Reply::Ok, cx).await,
+                    Err(message) => Reply::Error { message },
+                },
                 // Input settles on the next frame: focus moved by a click is only in the
                 // dispatch tree once it has been drawn, so a keystroke sent before that would
                 // go nowhere. Reply after the frame, and the driver never races the app.
                 other => {
-                    let (done_tx, done_rx) = oneshot::channel();
-                    let scheduled = cx.update_window(window, |_root, window, cx| {
-                        let answer = apply(&workspace, other, window, cx);
-                        window.refresh();
-                        window.on_next_frame(move |_window, _cx| {
-                            let _sent = done_tx.send(answer);
-                        });
+                    let mut answer = None;
+                    let applied = cx.update_window(window, |_root, window, cx| {
+                        answer = Some(apply(&workspace, other, window, cx));
                     });
-                    match scheduled {
-                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
-                            message: "window closed before the frame".into(),
-                        }),
-                        Err(e) => error(&e),
+                    match (applied, answer) {
+                        (Ok(()), Some(answer)) => after_frame(window, answer, cx).await,
+                        (Ok(()), None) => Reply::Error { message: "not applied".into() },
+                        (Err(e), _) => error(&e),
                     }
                 }
             };
@@ -119,6 +131,135 @@ pub fn serve(
         }
     })
     .detach();
+}
+
+/// `answer`, once the window has drawn a frame with everything dispatched so far.
+async fn after_frame(window: AnyWindowHandle, answer: Reply, cx: &mut gpui::AsyncApp) -> Reply {
+    let (done_tx, done_rx) = oneshot::channel();
+    let scheduled = cx.update_window(window, |_root, window, _cx| {
+        window.refresh();
+        window.on_next_frame(move |_window, _cx| {
+            let _sent = done_tx.send(answer);
+        });
+    });
+    match scheduled {
+        Ok(()) => done_rx
+            .await
+            .unwrap_or_else(|_| Reply::Error { message: "window closed before the frame".into() }),
+        Err(e) => error(&e),
+    }
+}
+
+/// The `Ui*` commands: UIKit-boundary delivery on iOS, an error elsewhere.
+mod uikit {
+    use slopty_e2e::Command;
+
+    /// `UIKeyModifierFlags`, from GPUI's modifier names.
+    const ALPHA_SHIFT: u32 = 1 << 16;
+    const SHIFT: u32 = 1 << 17;
+    const CONTROL: u32 = 1 << 18;
+    const ALTERNATE: u32 = 1 << 19;
+    const COMMAND: u32 = 1 << 20;
+
+    /// The flag word for `cmd-shift`-style modifiers (empty for none).
+    ///
+    /// # Errors
+    ///
+    /// Names a modifier GPUI does not have.
+    pub fn modifier_flags(modifiers: &str) -> Result<u32, String> {
+        let mut flags = 0;
+        for name in modifiers.split('-').filter(|m| !m.is_empty()) {
+            flags |= match name {
+                "cmd" | "command" | "platform" | "super" => COMMAND,
+                "ctrl" | "control" => CONTROL,
+                "alt" | "option" => ALTERNATE,
+                "shift" => SHIFT,
+                "capslock" => ALPHA_SHIFT,
+                other => return Err(format!("unknown modifier {other:?}")),
+            };
+        }
+        Ok(flags)
+    }
+
+    /// Deliver `command` at the UIKit boundary.
+    ///
+    /// # Errors
+    ///
+    /// Off iOS, with a bad modifier, or when the fork has no window.
+    #[cfg(all(target_os = "ios", feature = "e2e"))]
+    pub fn inject(command: Command) -> Result<(), String> {
+        use gpui_ios::described::{
+            DescribedInput, DescribedPinch, DescribedPress, DescribedTouch, GestureState,
+            PressPhase, UiTouchPhase,
+        };
+        use slopty_e2e::{UiGesturePhase, UiPressPhase, UiTouchPhase as Phase};
+
+        let input = match command {
+            Command::UiKeyPress { usage, modifiers, phase } => {
+                DescribedInput::Press(DescribedPress {
+                    usage,
+                    flags: modifier_flags(&modifiers)?,
+                    phase: match phase {
+                        UiPressPhase::Began => PressPhase::Began,
+                        UiPressPhase::Ended => PressPhase::Ended,
+                        UiPressPhase::Cancelled => PressPhase::Cancelled,
+                    },
+                })
+            }
+            Command::UiTouch { touches, phase } => {
+                let phase = match phase {
+                    Phase::Began => UiTouchPhase::Began,
+                    Phase::Moved => UiTouchPhase::Moved,
+                    Phase::Stationary => UiTouchPhase::Stationary,
+                    Phase::Ended => UiTouchPhase::Ended,
+                    Phase::Cancelled => UiTouchPhase::Cancelled,
+                };
+                DescribedInput::Touches(
+                    touches
+                        .into_iter()
+                        .map(|t| DescribedTouch { id: t.id, phase, x: t.x, y: t.y })
+                        .collect(),
+                )
+            }
+            Command::UiPinch { scale, x, y, phase } => DescribedInput::Pinch(DescribedPinch {
+                state: match phase {
+                    UiGesturePhase::Began => GestureState::Began,
+                    UiGesturePhase::Changed => GestureState::Changed,
+                    UiGesturePhase::Ended => GestureState::Ended,
+                    UiGesturePhase::Cancelled => GestureState::Cancelled,
+                },
+                scale,
+                x,
+                y,
+            }),
+            Command::UiInsertText { text } => DescribedInput::InsertText(text),
+            Command::UiDeleteBackward => DescribedInput::DeleteBackward,
+            other => return Err(format!("not a UIKit command: {other:?}")),
+        };
+        gpui_ios::inject(input).map_err(|e| e.to_string())
+    }
+
+    /// Off iOS (or without the `e2e` feature) nothing sits at a UIKit boundary.
+    #[cfg(not(all(target_os = "ios", feature = "e2e")))]
+    #[expect(clippy::needless_pass_by_value, reason = "the iOS twin consumes it")]
+    pub fn inject(command: Command) -> Result<(), String> {
+        let _ = modifier_flags;
+        Err(format!("{command:?}: UIKit injection is iOS only (with the e2e feature)"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn modifier_names_become_uikey_flags() {
+            assert_eq!(modifier_flags(""), Ok(0));
+            assert_eq!(modifier_flags("cmd-shift"), Ok(COMMAND | SHIFT));
+            assert_eq!(modifier_flags("ctrl"), Ok(CONTROL));
+            assert_eq!(modifier_flags("alt-capslock"), Ok(ALTERNATE | ALPHA_SHIFT));
+            assert!(modifier_flags("fn").is_err());
+        }
+    }
 }
 
 fn error(e: &dyn std::fmt::Display) -> Reply {
@@ -326,9 +467,14 @@ fn apply(
             Reply::Ok
         }
         Command::Dump => Reply::Dump(Box::new(workspace.read(cx).dump(window, cx))),
-        Command::Pair { .. } | Command::Render { .. } | Command::Quit => {
-            Reply::Error { message: "handled elsewhere".into() }
-        }
+        Command::Pair { .. }
+        | Command::Render { .. }
+        | Command::Quit
+        | Command::UiKeyPress { .. }
+        | Command::UiTouch { .. }
+        | Command::UiPinch { .. }
+        | Command::UiInsertText { .. }
+        | Command::UiDeleteBackward => Reply::Error { message: "handled elsewhere".into() },
     }
 }
 

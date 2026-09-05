@@ -25,6 +25,7 @@ gpui.workspace = true
 gpui-kit.workspace = true
 gpui_ios.workspace = true
 slopty-app.workspace = true
+slopty-e2e = { workspace = true, default-features = false }
 slopty-platform.workspace = true
 tokio.workspace = true
 tracing.workspace = true

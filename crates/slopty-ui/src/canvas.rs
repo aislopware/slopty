@@ -2750,6 +2750,92 @@ mod tests {
         cx.update(|window, cx| view.read(cx).focus.is_focused(window))
     }
 
+    /// One finger down and up, as the phone delivers it (`PlatformInput::Touch`, recognized by
+    /// GPUI into a tap): on an item it activates the item and gives it the keyboard, the same
+    /// as a click; on bare canvas the keyboard stays with the active terminal (the canvas hands
+    /// it back on the next frame, see `keep_focus_rendered`).
+    /// A finger tap (touch Started then Ended in place) through gpui's touch recognizer lands
+    /// as a click: on an item it activates it; on bare canvas the keyboard stays where it was.
+    #[gpui::test]
+    fn a_finger_tap_activates_what_it_lands_on(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, TouchPhase};
+
+        let (view, _rx, me, cx) = canvas(cx);
+        let (first, second) = (SessionId::new(), SessionId::new());
+        // Two shells side by side, both inside the test viewport, so opening the second
+        // reveals nothing and pans nothing.
+        let left = Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 };
+        let right = Rect { x: 440.0, ..left };
+        let a = host_opens(&view, cx, first, me, left, 1);
+        let b = host_opens(&view, cx, second, me, right, 2);
+        assert!(terminal_focused(&view, cx, second), "the newest shell has the keyboard");
+        let tap = |cx: &mut VisualTestContext, at: Point<Pixels>| {
+            for phase in [TouchPhase::Started, TouchPhase::Ended] {
+                cx.simulate_event(TouchEvent {
+                    id: TouchId(1),
+                    phase,
+                    position: at,
+                    predicted_position: None,
+                    force: None,
+                });
+            }
+        };
+        let bounds_a = cx.debug_bounds(selector("item", a)).expect("the first item");
+        let bounds_b = cx.debug_bounds(selector("item", b)).expect("the second item");
+        assert!(bounds_a.right() < bounds_b.left(), "{bounds_a:?} is left of {bounds_b:?}");
+        tap(cx, bounds_a.center());
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(a), "a tap activates");
+        assert!(terminal_focused(&view, cx, first), "and focuses the shell under it");
+        let bare = point(bounds_a.center().x, bounds_a.bottom() + px(40.0));
+        tap(cx, bare);
+        assert!(terminal_focused(&view, cx, first), "bare canvas leaves the keyboard where it was");
+        assert!(!canvas_focused(&view, cx));
+        tap(cx, bounds_b.center());
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(b));
+        assert!(terminal_focused(&view, cx, second));
+    }
+
+    /// A one-finger drag on bare canvas through gpui's touch recognizer: the content follows
+    /// the finger on the finger's axis.
+    #[gpui::test]
+    fn a_finger_pan_on_bare_canvas_moves_the_content_with_the_finger(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, TouchPhase};
+
+        let (view, _rx, me, cx) = canvas(cx);
+        let a = host_opens(
+            &view,
+            cx,
+            SessionId::new(),
+            me,
+            Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+            1,
+        );
+        let before = cx.debug_bounds(selector("item", a)).expect("the item");
+        let start = point(before.center().x, before.bottom() + px(40.0));
+        let touch = |cx: &mut VisualTestContext, phase: TouchPhase, at: Point<Pixels>| {
+            cx.simulate_event(TouchEvent {
+                id: TouchId(1),
+                phase,
+                position: at,
+                predicted_position: None,
+                force: None,
+            });
+        };
+        touch(cx, TouchPhase::Started, start);
+        for step in 1_u8..=6 {
+            touch(cx, TouchPhase::Moved, point(start.x - px(20.0 * f32::from(step)), start.y));
+        }
+        let end = point(start.x - px(120.0), start.y);
+        touch(cx, TouchPhase::Ended, end);
+        let after = cx.debug_bounds(selector("item", a)).expect("the item");
+        eprintln!("DBG before={before:?} after={after:?}");
+        assert!(
+            (f32::from(after.origin.x - before.origin.x) + 120.0).abs() < 2.0,
+            "{before:?} → {after:?}"
+        );
+        assert_eq!(after.origin.y, before.origin.y);
+    }
+
     #[gpui::test]
     fn cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it(cx: &mut TestAppContext) {
         let (view, mut rx, me, cx) = canvas(cx);
