@@ -247,6 +247,6 @@ way the CLI does and the connect loop resumes.
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
 | `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim\|device` generates the Xcode project | client |
 | `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
-| `xtask` | all scripts (build, gates, bundle, sign) | dev |
+| `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-host`.

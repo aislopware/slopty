@@ -7,6 +7,7 @@
 
 mod bundle;
 mod gate;
+mod icon;
 mod ime;
 mod ios;
 mod release;
@@ -89,6 +90,12 @@ enum Cmd {
     },
     /// macOS: build `Slopty.app` (app + host daemons + CLI inside) and sign it.
     Bundle(bundle::BundleOpts),
+    /// Render `assets/icon.svg` into PNG files and an `.icns` under a directory, for a look.
+    Icon {
+        /// Output directory.
+        #[arg(default_value = "target/icon")]
+        out: camino::Utf8PathBuf,
+    },
     /// iOS: build the static library, package the xcframework, generate and build the Xcode
     /// project.
     Ios {
@@ -115,6 +122,7 @@ fn main() -> Result<()> {
         Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
         Cmd::Run { cmd } => run::run(&sh, &cmd),
         Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
+        Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
     }
 }

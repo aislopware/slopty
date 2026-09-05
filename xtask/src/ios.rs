@@ -103,6 +103,23 @@ pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
 }
 
 /// Build the static library and the app bundle; returns the `.app` path.
+/// One 1024 px universal icon; Xcode derives every other size from it.
+const APPICON_CONTENTS: &str = r#"{
+  "images" : [
+    {
+      "filename" : "AppIcon.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+"#;
+
 fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let root = crate::tools::repo_root()?;
     let profile = if opts.release { "release" } else { "debug" };
@@ -123,6 +140,11 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let out = root.join("target").join("ios").join(sdk.dir());
     sh.create_dir(&out)?;
     let shim = root.join("apps").join("slopty-ios").join("app").join("main.m");
+    let icon = crate::icon::Icon::load(sh)?;
+    let iconset = out.join("Assets.xcassets").join("AppIcon.appiconset");
+    sh.create_dir(&iconset)?;
+    sh.write_file(iconset.join("Contents.json"), APPICON_CONTENTS)?;
+    sh.write_file(iconset.join("AppIcon.png"), icon.png(1024)?)?;
     sh.write_file(out.join("project.yml"), project_spec(sdk, &shim, &lib))?;
     step(
         "xcodegen generate",
@@ -185,6 +207,7 @@ settings:
     platform: iOS
     sources:
       - path: {shim}
+      - path: Assets.xcassets
     info:
       path: Info.plist
       properties:
@@ -210,6 +233,7 @@ settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}
         PRODUCT_NAME: {PRODUCT}
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEAD_CODE_STRIPPING: YES
         LIBRARY_SEARCH_PATHS:
           - "{lib_dir}"

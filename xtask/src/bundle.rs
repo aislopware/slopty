@@ -62,6 +62,10 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
     }
     let version = crate::release::current_version(sh)?;
     sh.write_file(contents.join("Info.plist"), info_plist(&version))?;
+    sh.write_file(
+        contents.join("Resources").join(format!("{PRODUCT}.icns")),
+        crate::icon::Icon::load(sh)?.icns()?,
+    )?;
     sh.write_file(contents.join("PkgInfo"), "APPL????")?;
     let identity = opts.sign.as_deref().unwrap_or("-");
     // Sign the nested binaries first, then the bundle; `--deep` is deprecated for a reason.
@@ -97,6 +101,8 @@ fn info_plist(version: &str) -> String {
 	<string>{PRODUCT}</string>
 	<key>CFBundleExecutable</key>
 	<string>slopty-app</string>
+	<key>CFBundleIconFile</key>
+	<string>{PRODUCT}</string>
 	<key>CFBundleIdentifier</key>
 	<string>{BUNDLE_ID}</string>
 	<key>CFBundleInfoDictionaryVersion</key>

@@ -229,6 +229,8 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "5988a0
 # cli / scripts
 clap = { version = "4.6.6", features = [ "derive", "env" ] }
 xshell = "0.2.7"
+resvg = { version = "0.48.1", default-features = false }
+icns = "0.4.0"
 
 # testing
 insta = { version = "1.48.0", features = [ "yaml", "redactions" ] }

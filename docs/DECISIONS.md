@@ -619,6 +619,16 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `CHANGELOG.md`; `cargo xtask release` glues them and tags `vX.Y.Z`. Rejected: cocogitto
   (last release 2026-03, overlaps both), release-plz / cargo-release (crates.io-centric; nothing
   here is published).
+- ✅ **App icon rendered from one SVG at build time** (2026-09-05). `assets/icon.svg` (dark
+  full-bleed square, faint dot grid for the canvas, an accent `❯` and a green cursor block) is
+  rasterised by `xtask::icon` with `resvg` 0.48.1 + `tiny-skia` 0.12 (MPL-2.0/BSD, already
+  allowed) into `Slopty.icns` (16…512 pt at 1× and 2× via `icns` 0.4.0) for `cargo xtask
+  bundle` (`CFBundleIconFile`) and a 1024 px PNG in a generated `Assets.xcassets` for `cargo
+  xtask ios` (`ASSETCATALOG_COMPILER_APPICON_NAME`). No `iconutil`/`sips`/design tool; `cargo
+  xtask icon [dir]` writes the PNG ladder for a look. Full bleed on purpose: macOS 26 and iOS
+  apply their own squircle mask, so baked-in rounded corners would double up. Verified: the
+  Dock shows the icon for the debug bundle and the iOS 26.5 simulator home screen shows it
+  after `cargo xtask ios sim`.
 - ✅ Miri only for pure crates (cannot cross objc2 FFI); cargo-careful + ASan/TSan nightly lane for
   the rest; `leaks --atExit` for framework wrappers (Valgrind does not exist on Apple silicon).
 - ✅ No mold/lld on macOS (Apple's ld-prime is competitive; mold's Mach-O port is commercial).

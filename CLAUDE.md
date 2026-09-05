@@ -34,5 +34,6 @@ hypothesis until DECISIONS.md marks it verified.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask run host|app` to launch; `cargo xtask ios sim|device` for the phone;
-  `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`;
+  `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
+  with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
