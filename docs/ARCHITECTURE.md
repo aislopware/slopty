@@ -522,6 +522,17 @@ pasteboard flows back through clipboard sync). ⌘⇧I (Canvas ▸ Stream Stats)
 window with its stream size and scale, fps, Mb/s, link RTT and the FEC/lost/NACK/refresh and
 audio counters, re-sampled once a second from `ScreenStats`.
 
+**Canvas navigation.** ⌘1 fits every item, ⌘2 fits the active one, ⌘0 returns to 100 % with the
+active item still in the middle, and ⌘⇧R tidies the canvas into one block per repository. Every
+one of them is a `Camera` the view flies to rather than jumps to: `slopty_client::canvas::Flight`
+interpolates two cameras over 180 ms with a cubic ease-out — zoom geometrically, the viewport's
+centre in a straight line — and the canvas element's prepaint advances it by the time since the
+last frame. The render loop is the only clock, and a landed flight stops asking for frames. The
+arrangement itself is pure (`slopty_client::arrange`): items in, origins and a `Heading` per
+block out, grouped by the repository their session's working directory belongs to (from OSC 7,
+already on the wire as `SessionSummary.cwd`) and ordered by the z the canvas already keeps.
+Headings draw in canvas coordinates with role `Heading`, so they pan, zoom and read aloud.
+
 **Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph
 runs shaped per row and cached by content hash, background quads, cursor, selection,
 underlines and strikethroughs at the offsets §2's metrics derive, ⌘-hover link underline) with a hairline over every prompt-start row but the first line: the

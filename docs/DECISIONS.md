@@ -1386,6 +1386,47 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   AppKit-specific (a libghostty surface cannot live under a scaled ancestor) and product-fit
   (undiscoverable, not keyboard-navigable). We own the renderer, so zoom is real, and we add
   keyboard navigation, zoom-to-fit/selection, grid snap, arrange-by-repo and a minimap (kolu).
+- ✅ **Canvas navigation: ⌘1 fit all, ⌘2 fit the active item, ⌘0 back to 100 %, ⌘⇧R arrange**
+  (2026-09-06). ⌘1 and ⌘0 already existed; ⌘2 is the natural sibling of ⌘1 and ⌘⇧R is free
+  (⌘⇧A is next-attention, ⌘⇧M mute, ⌘⇧I stats, ⌘⇧T/N/L the agent, the note and the
+  conversation). ⌘0 no longer resets about the middle of the *viewport* but keeps the **active
+  item** centred, which is what "back to 100 %" means when something is being worked on; with
+  nothing active it behaves as before. ⌘2 with nothing active does nothing — ⌘1 is the action
+  for "show me everything". There is no multi-selection on the canvas, so "zoom to selection"
+  is zoom to the active item; `CanvasView::active_rect` is the one place a selection would join.
+- ✅ **Camera moves are a pure flight the render loop advances** (2026-09-06):
+  `slopty_client::canvas::Flight` interpolates between two cameras over `FLIGHT` = 180 ms with
+  a cubic ease-out, and the canvas element's prepaint advances it by the time since the last
+  frame. No timer anywhere — the frame *is* the clock — and a landed flight stops asking for
+  frames, so a still canvas costs nothing. Zoom interpolates **geometrically** and the
+  viewport's centre travels in a straight line between the two centres, so a simultaneous
+  zoom-out and pan reads as one movement instead of a swing. The self-test turns animation off
+  (`CanvasView::set_animation`, `#[cfg(feature = "e2e")]`): there a frame is a step, not a
+  moment, and a dump taken mid-flight would report where the camera was passing through.
+  Tested with a clock of its own in `slopty-client` (ease, exact landing, straight centre) and
+  through the actions headlessly.
+- ✅ **Arrange by repository is a pure layout function, keyed on the working directory**
+  (2026-09-06). `slopty_client::arrange::arrange_by_repo` takes items (id, size, cwd, activity)
+  and returns origins plus one `Heading` per block: no document, no camera, no clock, so
+  determinism, no-overlap, size-preservation and block order are ordinary unit tests. Blocks
+  run left to right by most recent activity, which is the item's **z order** — raising an item
+  on focus is already the recency the canvas keeps, so nothing new is stored. Inside a block
+  items fill a square-ish grid, most recent first, ties broken on the item id. Gutters are
+  `GAP` inside a block and `3 × GAP` between blocks; the heading is a 28-pt band above each one,
+  drawn in canvas coordinates with role `Heading` so it pans, zooms and reads aloud.
+  **No wire change**: the repo key is derived on the client from `SessionSummary.cwd`, which
+  the host already sends from OSC 7. Two shells share a repository when one's directory
+  contains the other's — right for a shell at a checkout's root plus shells in its
+  subdirectories, wrong for a set of shells that are all in sibling subdirectories with none at
+  the root. The exact answer is the git root, which only the host can resolve; that needs a
+  field on `SessionSummary` and `PROTOCOL_VERSION` 13 → 14, deliberately not taken here because
+  `claude/parity` may want 14 for media. `CanvasItem.group` stays unused and available for it.
+  Arranging is **not undoable**: the canvas has no undo stack, for this or for a drag.
+  Goldens: `arrange-by-repo` is new and `note` was re-accepted for ⌘0's new centre (2.19 % of
+  pixels, a pan). The four **iOS** goldens were re-accepted too — they predate the ghostty
+  metrics ruling above, and `ios-phone-terminal` had drifted to 0.9–1.1 % against a 1 %
+  tolerance, i.e. it was failing on some runs and passing on others before this branch touched
+  anything. Refreshed they are all 0.000 %.
 - ✅ Kind-aware culling: terminals keep state and stop painting off-screen; video pauses decode.
 - ✅ **Host-authoritative document, optimistic client.** `slopty-host::CanvasStore` owns the
   document (JSON at `<data>/canvas.json`, atomic rename, serialised writers), validates every
@@ -1873,10 +1914,17 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   JSONL into `$HOME/.claude/projects/<escaped cwd>` where the real one would, stepping from
   stage to stage when the test creates a marker file, so nothing depends on a sleep. This
   keeps the rule from the played-hook ruling above: the test drives the app's own UI and the
-  harness's own environment, and never types a command into the shell under test. Not covered
-  end-to-end: clicking the "hooks" pill through to hostd writing `settings.json` — the click
-  is a headless GPUI test and the writer is unit-tested, but the two are not joined in the app
-  self-test, because the pill's position is not in the dump.
+  harness's own environment, and never types a command into the shell under test.
+- ✅ **The "hooks" pill is clicked end to end, through the accessibility tree** (2026-09-06),
+  closing the gap the ruling above used to name. The pill's position *is* in the dump: it is a
+  button with a label, so it carries bounds in `dump.a11y`, which is also how a screen reader
+  reaches it — the test clicks the middle of those bounds with `Command::Click` and asserts
+  hostd wrote Claude Code's settings with the relay and all 12 `HOOK_EVENTS`. The file asserted
+  is `<run temp dir>/home/.claude/settings.json`, and the test asserts that path is **under the
+  run's directory before asserting its content**, so a wiring mistake fails the test instead of
+  editing the developer's `~/.claude`. The pill retires after one click, so a second *click* is
+  not reachable through the UI; idempotence is asserted against the file the daemon actually
+  wrote (`install_at` → `Unchanged`, bytes identical).
 - ⏸ ACP via `agent-client-protocol` 2.0.0 + `@agentclientprotocol/claude-agent-acp` for structured
   driving — after the PTY path works.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
