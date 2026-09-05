@@ -2352,4 +2352,66 @@ mod tests {
         assert_eq!(grid.value.as_deref(), Some("2"), "row 0 holds the cursor: {grid:?}");
         assert_eq!(view.read_with(cx, |v, _| v.cursor_row_text()), "2");
     }
+
+    /// Underline and strikethrough are drawn from the font's own metrics — whole device
+    /// pixels, measured down from the top of the row — instead of GPUI's fixed offsets: the
+    /// strikethrough crosses the text, the underline sits below it, both inside the row.
+    #[gpui::test]
+    fn the_decorations_sit_where_the_font_puts_them(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let style = Style {
+            underline: slopty_grid::Underline::Single,
+            flags: slopty_grid::StyleFlags::STRIKETHROUGH,
+            ..Style::DEFAULT
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![RowUpdate { row: 0, line: Line::from_text("abc", 10, style) }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let width = f32::from(metrics.cell_width * 3.0) * scale;
+        let top = f32::from(metrics.origin.y) * scale;
+        // The two strokes: the only quads three cells wide at the left of the first row.
+        let mut strokes: Vec<(f32, f32)> = quads
+            .iter()
+            .filter(|q| {
+                (q.bounds.size.width.0 - width).abs() < 0.5
+                    && f32::from(metrics.origin.x).mul_add(-scale, q.bounds.origin.x.0).abs() < 0.5
+            })
+            .map(|q| (q.bounds.origin.y.0 - top, q.bounds.size.height.0))
+            .collect();
+        strokes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(strokes.len(), 2, "a strikethrough and an underline: {strokes:?}");
+
+        let row = f32::from(metrics.line_height) * scale;
+        for (y, thickness) in &strokes {
+            assert!(thickness.fract() == 0.0 && *thickness >= 1.0, "whole pixels: {thickness}");
+            assert!(y.fract() == 0.0, "on a device pixel: {y}");
+            assert!(*y > 0.0 && y + thickness <= row, "inside the row: {y} + {thickness} > {row}");
+        }
+        let (strikethrough, underline) = (strokes[0].0, strokes[1].0);
+        assert!(
+            strikethrough > row * 0.25 && strikethrough < row * 0.75,
+            "the strikethrough crosses the lowercase letters: {strokes:?}"
+        );
+        assert!(underline > row * 0.75, "the underline is below the baseline: {strokes:?}");
+    }
 }

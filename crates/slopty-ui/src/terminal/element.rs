@@ -9,8 +9,8 @@ use std::hash::{Hash as _, Hasher as _};
 use gpui::{
     App, BorrowAppContext as _, Bounds, DispatchPhase, Element, ElementId, ElementInputHandler,
     Entity, Focusable as _, Font, FontId, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, LongPressEvent, Pixels, Point, ShapedLine, SharedString, Size, StrikethroughStyle,
-    Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
+    LayoutId, LongPressEvent, Pixels, Point, ShapedLine, SharedString, Size, Style, TextAlign,
+    TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use slopty_grid::{CursorShape, Line, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
@@ -18,6 +18,7 @@ use slopty_theme::{TerminalPalette, Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
+use crate::terminal::metrics::{self, Grid};
 use crate::terminal::view::TerminalView;
 
 /// Cell geometry for one layout.
@@ -81,6 +82,8 @@ impl CellMetrics {
 #[derive(Debug)]
 pub struct Prepared {
     metrics: CellMetrics,
+    /// Where the decorations and the cursor sit inside a cell, from ghostty's derivation.
+    grid: Grid,
     rows: Vec<PreparedRow>,
     cursor: Option<(Bounds<Pixels>, CursorShape, Hsla)>,
     background: Hsla,
@@ -94,11 +97,45 @@ pub struct Prepared {
 struct PreparedRow {
     y: Pixels,
     quads: Vec<(u16, u16, Hsla)>,
+    /// Underlines and strikethroughs, at ghostty's offsets rather than GPUI's.
+    decorations: Vec<Decoration>,
     line: ShapedLine,
     /// Columns of the link under a ⌘-hover, underlined over the text.
     link: Option<(u16, u16)>,
     /// Colour of the command-block separator drawn along the row's top edge.
     separator: Option<Hsla>,
+}
+
+/// One decoration stroke over a run of columns, relative to the row's top-left corner.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Decoration {
+    start: u16,
+    end: u16,
+    color: Hsla,
+    /// Distance from the top of the row to the top of the stroke.
+    y: Pixels,
+    thickness: Pixels,
+}
+
+/// Add one cell's worth of stroke, joining it to the run to its left when they match.
+///
+/// A cell contributes at most three strokes (two for a double underline, one strikethrough),
+/// so the run this one continues, if any, is within the last few.
+fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line) {
+    let joins = |d: &&mut Decoration| {
+        d.end == col && d.color == color && d.y == line.y && d.thickness == line.thickness
+    };
+    if let Some(run) = out.iter_mut().rev().take(3).find(joins) {
+        run.end = col.saturating_add(1);
+        return;
+    }
+    out.push(Decoration {
+        start: col,
+        end: col.saturating_add(1),
+        color,
+        y: line.y,
+        thickness: line.thickness,
+    });
 }
 
 /// The command-block separator for a prompt-start row: the terminal foreground, faint, or
@@ -207,7 +244,8 @@ fn mono_font(family: &str, style: &CellStyle) -> Font {
     )
 }
 
-fn text_run(len: usize, family: &str, style: &CellStyle, palette: &TerminalPalette) -> TextRun {
+/// The colour a cell's glyphs take, with inverse, faint and invisible applied.
+fn cell_color(style: &CellStyle, palette: &TerminalPalette) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
     let fg_slot = if inverse { style.bg } else { style.fg };
     let mut color = hsla(palette.resolve(fg_slot, inverse));
@@ -217,33 +255,42 @@ fn text_run(len: usize, family: &str, style: &CellStyle, palette: &TerminalPalet
     if style.flags.contains(StyleFlags::INVISIBLE) {
         color.a = 0.0;
     }
-    let underline_color = match style.underline_color {
-        slopty_grid::Color::Default => color,
+    color
+}
+
+/// The colour of a cell's underline: SGR 58 when the cell sets one, else the text colour.
+fn underline_color(style: &CellStyle, palette: &TerminalPalette, text: Hsla) -> Hsla {
+    match style.underline_color {
+        slopty_grid::Color::Default => text,
         other => hsla(palette.resolve(other, false)),
-    };
-    let underline = match style.underline {
-        Underline::None => None,
-        Underline::Single | Underline::Dotted | Underline::Dashed => {
-            Some(UnderlineStyle { thickness: px(1.0), color: Some(underline_color), wavy: false })
-        }
-        Underline::Double => {
-            Some(UnderlineStyle { thickness: px(2.0), color: Some(underline_color), wavy: false })
-        }
-        Underline::Curly => {
-            Some(UnderlineStyle { thickness: px(1.0), color: Some(underline_color), wavy: true })
-        }
-    };
-    let strikethrough = style
-        .flags
-        .contains(StyleFlags::STRIKETHROUGH)
-        .then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) });
+    }
+}
+
+/// A run of same-styled cells.
+///
+/// Straight underlines and strikethroughs are left off the run and painted from ghostty's
+/// metrics instead, because GPUI puts them at offsets of its own. A curly underline stays with
+/// the run: drawing a wave is GPUI's alone, and it only reads the thickness from here.
+fn text_run(
+    len: usize,
+    family: &str,
+    style: &CellStyle,
+    palette: &TerminalPalette,
+    underline: metrics::Line,
+) -> TextRun {
+    let color = cell_color(style, palette);
+    let curly = (style.underline == Underline::Curly).then(|| UnderlineStyle {
+        thickness: underline.thickness,
+        color: Some(underline_color(style, palette, color)),
+        wavy: true,
+    });
     TextRun {
         len,
         font: mono_font(family, style),
         color,
         background_color: None,
-        underline,
-        strikethrough,
+        underline: curly,
+        strikethrough: None,
     }
 }
 
@@ -257,36 +304,56 @@ fn pick_family(window: &Window, candidates: &[String]) -> String {
         .unwrap_or_else(|| fonts::MONO_FAMILY.to_owned())
 }
 
-/// A pixel length as a whole number, with a fallback for nonsense.
-fn whole_px(v: Pixels, fallback: u16) -> u16 {
-    let rounded = f32::from(v).round();
-    if rounded.is_finite() && rounded >= 0.0 && rounded <= f32::from(u16::MAX) {
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "range checked"
-        )]
-        let out = rounded as u16;
-        out
-    } else {
-        fallback
+/// A cell length for the wire, with a fallback for nonsense.
+fn whole_u16(v: u32, fallback: u16) -> u16 {
+    match u16::try_from(v) {
+        Ok(0) | Err(_) => fallback,
+        Ok(v) => v,
     }
 }
 
-/// Measure the monospace cell for `family` at `size`: advance of `M`, line height from the
-/// theme multiplier, both snapped to device pixels.
+/// The theme's line-height multiplier as ghostty's `adjust-cell-height`: a percentage of the
+/// derived cell, not a replacement for it. `1.0` leaves the font's own line height alone.
+fn adjusted_height(height: u32, mult: f32) -> u32 {
+    if !mult.is_finite() || mult <= 0.0 || (mult - 1.0).abs() < f32::EPSILON {
+        return height;
+    }
+    let scaled = f32::from(u16::try_from(height).unwrap_or(u16::MAX)) * mult;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped first")]
+    let out = scaled.round().clamp(1.0, f32::from(u16::MAX)) as u32;
+    out
+}
+
+/// The cell geometry for `font` at `font_size`, from ghostty's derivation.
+///
+/// The face is measured in device pixels — `font_size` times the display scale — so the cell
+/// is a whole number of them, and [`Grid`] divides back to points. GPUI's text system reports
+/// neither the line gap nor the `post` underline metrics, so those go in empty and ghostty's
+/// estimates stand in, exactly as they do for a font whose tables omit them.
 fn measure(
     window: &Window,
     font: &Font,
     font_size: Pixels,
-    line_height_mult: f32,
-) -> (Pixels, Pixels, FontId) {
+    height_mult: f32,
+) -> (Grid, metrics::Metrics, FontId) {
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(font);
-    let advance = text_system.advance(font_id, font_size, 'M').map_or(font_size * 0.6, |s| s.width);
     let scale = window.scale_factor().max(1.0);
-    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
-    (snap(advance), snap(font_size * line_height_mult), font_id)
+    let size = font_size * scale;
+    let device = |v: Pixels| f64::from(f32::from(v));
+    let advance = text_system.advance(font_id, size, 'M').map_or(size * 0.6, |s| s.width);
+    let face = metrics::Face {
+        cell_width: device(advance),
+        ascent: device(text_system.ascent(font_id, size)),
+        descent: device(text_system.descent(font_id, size)),
+        line_gap: 0.0,
+        cap_height: Some(device(text_system.cap_height(font_id, size))),
+        ex_height: Some(device(text_system.x_height(font_id, size))),
+        ..metrics::Face::default()
+    };
+    let mut derived = metrics::calc(&face);
+    derived.set_cell_height(adjusted_height(derived.cell_height, height_mult));
+    (Grid::new(&derived, scale), derived, font_id)
 }
 
 impl Element for TerminalElement {
@@ -377,8 +444,10 @@ impl Element for TerminalElement {
         let base_font = fonts::terminal_font(&family, false, false);
         // Grid size comes from the unscaled geometry so zooming never resizes the PTY.
         let base_size = px(theme.typography.mono_size);
-        let (base_cell_width, base_line_height, _font_id) =
-            measure(window, &base_font, base_size, theme.typography.mono_line_height);
+        let height_mult = theme.typography.mono_line_height;
+        let (base_grid, base_derived, _font_id) =
+            measure(window, &base_font, base_size, height_mult);
+        let (base_cell_width, base_line_height) = (base_grid.cell_width, base_grid.line_height);
         let base_pad = px(theme.spacing.sm);
         let unscaled = size(bounds.size.width / zoom, bounds.size.height / zoom);
         let inner = size(unscaled.width - base_pad * 2.0, unscaled.height - base_pad * 2.0);
@@ -387,13 +456,15 @@ impl Element for TerminalElement {
             (f32::from(inner.width) / f32::from(base_cell_width)).floor().max(1.0) as u16,
             (f32::from(inner.height) / f32::from(base_line_height)).floor().max(1.0) as u16,
         );
-        // Paint geometry is the scaled one.
+        // Paint geometry is the scaled one: derived again at the zoomed size, so the cell stays
+        // a whole number of device pixels instead of drifting off the grid as zoom multiplies.
         let font_size = base_size * zoom;
-        let (cell_width, line_height) = if (zoom - 1.0).abs() < f32::EPSILON {
-            (base_cell_width, base_line_height)
+        let grid = if (zoom - 1.0).abs() < f32::EPSILON {
+            base_grid
         } else {
-            (base_cell_width * zoom, base_line_height * zoom)
+            measure(window, &base_font, font_size, height_mult).0
         };
+        let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad * zoom;
         let origin = bounds.origin + point(pad, pad);
         let metrics = CellMetrics { origin, cell_width, line_height, cols, rows };
@@ -401,8 +472,8 @@ impl Element for TerminalElement {
             cols,
             rows,
             metrics: slopty_proto::input::CellMetrics {
-                cell_width: whole_px(base_cell_width, 8),
-                cell_height: whole_px(base_line_height, 16),
+                cell_width: whole_u16(base_derived.cell_width, 8),
+                cell_height: whole_u16(base_derived.cell_height, 16),
             },
         };
         self.view.update(cx, |view, cx| view.fitted(fitted, metrics, cx));
@@ -421,10 +492,11 @@ impl Element for TerminalElement {
                     prepared_rows.push(PreparedRow {
                         y,
                         quads: Vec::new(),
+                        decorations: Vec::new(),
                         line: text_system.shape_line(
                             "~".into(),
                             font_size,
-                            &[text_run(1, &family, &CellStyle::DEFAULT, palette)],
+                            &[text_run(1, &family, &CellStyle::DEFAULT, palette, grid.underline)],
                             Some(cell_width),
                         ),
                         link: None,
@@ -435,6 +507,7 @@ impl Element for TerminalElement {
                 let key = row_hash(line, focused, font_size, &family, palette);
                 cache.touched.insert(key, cache.generation);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
+                let mut decorations: Vec<Decoration> = Vec::new();
                 for (col, cell) in line.cells.iter().enumerate() {
                     let col = u16::try_from(col).unwrap_or(u16::MAX);
                     let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
@@ -447,9 +520,27 @@ impl Element for TerminalElement {
                             && *c == color
                         {
                             *end = col.saturating_add(1);
-                            continue;
+                        } else {
+                            quads.push((col, col.saturating_add(1), color));
                         }
-                        quads.push((col, col.saturating_add(1), color));
+                    }
+                    // Underline and strikethrough go where the font says, not where GPUI
+                    // would put them; a curly underline is drawn by GPUI with the run.
+                    let text = cell_color(&cell.style, palette);
+                    if !matches!(cell.style.underline, Underline::None | Underline::Curly) {
+                        let color = underline_color(&cell.style, palette, text);
+                        stroke(&mut decorations, col, color, grid.underline);
+                        if cell.style.underline == Underline::Double {
+                            // The second stroke sits one stroke's gap above the first.
+                            let above = metrics::Line {
+                                y: grid.underline.y - grid.underline.thickness * 2.0,
+                                thickness: grid.underline.thickness,
+                            };
+                            stroke(&mut decorations, col, color, above);
+                        }
+                    }
+                    if cell.style.flags.contains(StyleFlags::STRIKETHROUGH) {
+                        stroke(&mut decorations, col, text, grid.strikethrough);
                     }
                 }
                 // The selection paints over cell backgrounds and under the text.
@@ -501,14 +592,20 @@ impl Element for TerminalElement {
                             }
                             _ => {
                                 if let Some((style, acc)) = current.take() {
-                                    runs.push(text_run(acc, &family, &style, palette));
+                                    runs.push(text_run(
+                                        acc,
+                                        &family,
+                                        &style,
+                                        palette,
+                                        grid.underline,
+                                    ));
                                 }
                                 current = Some((cell.style, len));
                             }
                         }
                     }
                     if let Some((style, acc)) = current.take() {
-                        runs.push(text_run(acc, &family, &style, palette));
+                        runs.push(text_run(acc, &family, &style, palette, grid.underline));
                     }
                     let shaped = text_system.shape_line(
                         SharedString::from(text),
@@ -525,7 +622,14 @@ impl Element for TerminalElement {
                 // A prompt starts here: rule off the command above it, red when it failed.
                 let separator = (line.mark.starts_prompt() && index.0 > 0)
                     .then(|| separator_color(&theme, line.mark.exit()));
-                prepared_rows.push(PreparedRow { y, quads, line: shaped, link, separator });
+                prepared_rows.push(PreparedRow {
+                    y,
+                    quads,
+                    decorations,
+                    line: shaped,
+                    link,
+                    separator,
+                });
             }
         });
 
@@ -544,7 +648,8 @@ impl Element for TerminalElement {
         let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
             .iter()
             .map(|p| {
-                let mut run = text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette);
+                let mut run =
+                    text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
                 run.color.a = 0.75;
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
@@ -566,7 +671,8 @@ impl Element for TerminalElement {
             .collect();
         // The input method's composition, underlined at the cursor (what Terminal.app does).
         if let Some(text) = marked.filter(|_| cursor_visible) {
-            let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
+            let mut run =
+                text_run(text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
             run.underline =
                 Some(UnderlineStyle { thickness: px(1.0), color: Some(run.color), wavy: false });
             let shaped = text_system.shape_line(
@@ -584,6 +690,7 @@ impl Element for TerminalElement {
 
         Prepared {
             metrics,
+            grid,
             rows: prepared_rows,
             cursor: cursor_prepared,
             background: hsla(palette.bg),
@@ -604,6 +711,7 @@ impl Element for TerminalElement {
     ) {
         let prepared = prepaint;
         let m = prepared.metrics;
+        let grid = prepared.grid;
         // Registers the view as the text-input target while it is focused (soft keyboard on
         // iOS, input-method commits on macOS).
         let focus = self.view.read(cx).focus_handle(cx);
@@ -640,16 +748,17 @@ impl Element for TerminalElement {
         if let Some((cursor_bounds, shape, color)) = prepared.cursor {
             let quad = match shape {
                 CursorShape::Block => fill(cursor_bounds, color),
-                CursorShape::Bar => {
-                    fill(Bounds::new(cursor_bounds.origin, size(px(2.0), m.line_height)), color)
-                }
+                CursorShape::Bar => fill(
+                    Bounds::new(cursor_bounds.origin, size(grid.cursor_thickness, m.line_height)),
+                    color,
+                ),
                 CursorShape::Underline => fill(
                     Bounds::new(
                         point(
                             cursor_bounds.origin.x,
-                            cursor_bounds.origin.y + m.line_height - px(2.0),
+                            cursor_bounds.origin.y + m.line_height - grid.cursor_thickness,
                         ),
-                        size(m.cell_width, px(2.0)),
+                        size(m.cell_width, grid.cursor_thickness),
                     ),
                     color,
                 ),
@@ -671,13 +780,25 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint row");
             }
         }
-        // The ⌘-hover link underline sits on the row's last pixel line, in the text colour.
+        // Underlines and strikethroughs, over the glyphs, where the font's metrics put them.
+        for row in &prepared.rows {
+            for deco in &row.decorations {
+                let x = m.origin.x + m.cell_width * f32::from(deco.start);
+                let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
+                let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
+                window.paint_quad(fill(bounds, deco.color));
+            }
+        }
+        // The ⌘-hover link underline joins them, in the text colour.
         for row in &prepared.rows {
             if let Some((start, end)) = row.link {
                 let x = m.origin.x + m.cell_width * f32::from(start);
                 let w = m.cell_width * f32::from(end.saturating_sub(start));
-                let y = row.y + m.line_height - px(1.0);
-                window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.0))), prepared.link));
+                let y = row.y + grid.underline.y;
+                window.paint_quad(fill(
+                    Bounds::new(point(x, y), size(w, grid.underline.thickness)),
+                    prepared.link,
+                ));
             }
         }
         for (at, line) in &prepared.overlay {

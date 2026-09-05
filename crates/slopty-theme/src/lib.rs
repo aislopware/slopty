@@ -155,7 +155,8 @@ pub struct Typography {
     pub mono_families: Vec<String>,
     /// Terminal font size in points.
     pub mono_size: f32,
-    /// Terminal line height as a multiple of the font size.
+    /// Terminal line height as a multiple of the one the font asks for (ghostty's
+    /// `adjust-cell-height`). `1.0` is the font's own, which is what a terminal wants.
     pub mono_line_height: f32,
     /// Line height of Markdown prose (assistant turns), as a multiple of the font size.
     pub markdown_line_height: f32,
@@ -194,7 +195,7 @@ impl Default for Typography {
                 "Menlo".to_owned(),
             ],
             mono_size: 13.0,
-            mono_line_height: 1.35,
+            mono_line_height: 1.0,
             markdown_line_height: 1.5,
             ui_family: ".SystemUIFont".to_owned(),
             ui_size: 13.0,
