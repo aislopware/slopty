@@ -298,7 +298,7 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   | `radii.xs / sm / md` | 4 / 6 / 8 | same | pills and inline buttons / buttons, inputs, key caps / panels, items, popovers |
   | `spacing.xxs … xl` | 2 / 4 / 8 / 12 / 16 / 24 | same | the only paddings and gaps in chrome |
   | `typography.ui_size` + `caption()/small()/title()` | 13 → 10 / 12 / 15 | same | chrome type scale (settings move the base) |
-  | `typography.mono_size` @ `mono_line_height` | 13 @ 1.35 | same | terminal grid, code in the conversation |
+  | `typography.mono_size` @ `mono_line_height` | 13 @ 1.0 | same | terminal grid, code in the conversation (the multiplier is ghostty's `adjust-cell-height`; 1.0 = the font's own) |
   | `typography.markdown_line_height` | 1.5 | same | assistant turns |
   | `alpha::TINT_FAINT / TINT / TINT_STRONG / TINT_PRESSED` | 0.08 / 0.12 / 0.25 / 0.4 | same | selected row / pill fills, hover / answer buttons, the human's bubble / a strong tint under the pointer |
   | `alpha::HOVER` | 0.08 | same | hover wash of `text` on a bare button |
@@ -347,8 +347,53 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Rendering is our GPUI element**, not sugarloaf or ghostty's renderer. Glyph shaping via
   GPUI's text system with our own cell layout, sprite glyphs for box drawing, per-row dirty
   tracking (zed's terminal element reshapes every frame; we won't).
-- 🔬 **Font metrics follow ghostty's `src/font/Metrics.zig`** (slop-desk claim; re-derive from the
-  vendored source when implementing).
+- ✅ **Font metrics follow ghostty's `src/font/Metrics.zig`**, ported as the pure function
+  `slopty_ui::terminal::metrics` (`Face` in, `Metrics` out; no window, no IO), verified
+  2026-09-05 against the vendored Zig. The derivation, all in **device pixels** (the face is
+  measured at `font_size × scale`, and `Grid` divides back to points so a cell is a whole
+  number of device pixels):
+
+  ```
+  cell_width  = round(advance('M'))                       min 1
+  cell_height = round(ascent - descent + line_gap)         min 1
+  baseline    = round((line_gap/2 - descent) - (cell_height - face_height)/2)   [up from the bottom]
+  underline_thickness     = ceil(post.thickness ?? 0.15 · ex)   min 1
+  underline_position      = round((cell_height - baseline) - (post.position ?? -thickness))
+  strikethrough_thickness = underline_thickness
+  strikethrough_position  = round((cell_height - baseline) - (ex + unrounded thickness)/2)
+  overline y = 0, overline/box thickness = underline_thickness, cursor_thickness = 1
+  ```
+
+  Rounding, not ceiling: the error stays under half a pixel and the apparent spacing matches
+  between a 1× and a 2× display; the baseline is then centred in the rounded cell, so the text
+  is inset (or overhangs) equally top and bottom. `Metrics::set_cell_height` is ghostty's
+  `adjust-cell-height`: it splits the added pixels between top and bottom, giving the odd one
+  to the side the text sits nearer. Estimates fill in what a font does not say — cap = 0.75 ·
+  ascent, ex = 0.75 · cap, underline thickness = 0.15 · ex, underline position = −thickness —
+  and GPUI's `TextSystem` exposes neither the line gap nor the `post` table, so in production
+  those estimates always apply. Two fonts, two sizes, two displays, in device pixels
+  (`cargo nextest run -p slopty-ui terminal::metrics`; ghostty's formula recomputed
+  independently gives the same numbers):
+
+  | font | pt | DPR | w | h | baseline | underline y/thick | strike y/thick |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | JetBrains Mono | 13 | 1 | 8 | 17 | 4 | 14 / 2 | 9 / 2 |
+  | JetBrains Mono | 13 | 2 | 16 | 34 | 7 | 29 / 3 | 19 / 3 |
+  | JetBrains Mono | 15 | 1 | 9 | 20 | 4 | 17 / 2 | 12 / 2 |
+  | JetBrains Mono | 15 | 2 | 18 | 39 | 8 | 33 / 3 | 22 / 3 |
+  | Menlo | 13 | 1 | 8 | 15 | 3 | 13 / 1 | 8 / 1 |
+  | Menlo | 13 | 2 | 16 | 30 | 6 | 26 / 2 | 16 / 2 |
+  | Menlo | 15 | 1 | 9 | 17 | 4 | 14 / 1 | 9 / 1 |
+  | Menlo | 15 | 2 | 18 | 35 | 7 | 30 / 2 | 19 / 2 |
+
+  Consequences in the element (`crates/slopty-ui/src/terminal/element.rs`): the row height is
+  the font's own, so `typography.mono_line_height` **defaults to 1.0** and now means ghostty's
+  `adjust-cell-height` percentage rather than a multiplier over the point size; underline and
+  strikethrough are painted as quads at these offsets because GPUI hardcodes its own
+  (`text_system/line.rs`: underline at `baseline + descent · 0.618`), leaving only the curly
+  underline to GPUI (drawing a wave is its alone); the bar and underline cursors take
+  `cursor_thickness` (one device pixel, as ghostty); and `TermSize.metrics` on the wire is now
+  the cell in **device** pixels, which is what `ws_xpixel`/`ws_ypixel` are supposed to carry.
 - ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to hostd by
   `SCM_RIGHTS` (`nix` `sendmsg`/`recvmsg`; `sendfd` dropped — one fewer dependency, and macOS
   has no `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a
@@ -362,7 +407,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the engine mapping is exhaustive at compile time. Our hand-written W3C list had drifted
   (letters named `KeyA` vs `A`, missing numpad/browser keys).
 - ✅ **Terminal type**: `xterm-ghostty` when its terminfo is installed, else `xterm-256color`.
-  The app installs ghostty's terminfo on first run (later).
+  ghostty's entry (270 capabilities, three names) is ported to `slopty_pty::terminfo` as const
+  data and rendered exactly as `Source.zig` renders it; the rendered source is an insta
+  snapshot (`crates/slopty-pty/tests/snapshots`), so bumping the vendored ghostty shows up as a
+  diff instead of a silent change in what programs are told. **ptyd compiles it on start-up**
+  (2026-09-05): `tokio::spawn` right after `bind`, `/usr/bin/tic -x -o <db> -` with the source
+  on stdin — the absolute path, never a `tic` from `PATH`. The database is `$HOME/.terminfo`,
+  or `$SLOPTY_TERMINFO_DIR` when a test or a sandboxed run names one (the app self-test points
+  both it and `TERMINFO_DIRS` at the stack's temp dir, so no run touches the developer's home).
+  Idempotent: `installed()` looks for `78/xterm-ghostty` or `x/xterm-ghostty` under the same
+  directories the lookup searches, and does nothing when it is there. Nothing blocks on it —
+  `default_term()` is read per spawn, so a shell that starts before `tic` finishes simply gets
+  `xterm-256color`. On macOS `tic` warns about the description field and still exits 0, so only
+  a non-zero status is an error.
 
 ## Transport
 

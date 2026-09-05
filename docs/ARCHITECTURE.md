@@ -105,6 +105,18 @@ at each. Every `Line` then carries a `SemanticMark`: `Prompt { exit }` on the ro
 started (with the previous command's status), `PromptContinuation` for the rest of a
 multi-line prompt, `Input`, `Output`. The client side is in §6.
 
+**Render metrics.** The cell grid is derived exactly as ghostty derives it
+(`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
+function from a face — advance, ascent, descent, line gap, and the underline/strikethrough
+metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
+underline, the strikethrough, the overline and the cursor. The element measures the face at
+`font_size × scale`, derives once, and `Grid` divides back to logical points, so a row is
+pixel-aligned on the display it was measured for; `typography.mono_line_height` is ghostty's
+`adjust-cell-height` percentage on top (1.0 = the font's own). The element paints underlines
+and strikethroughs itself, at those offsets, because GPUI puts them elsewhere — only the curly
+underline is left to GPUI. The same derived cell goes on the wire in `TermSize.metrics`, which
+becomes the PTY's `ws_xpixel`/`ws_ypixel`.
+
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
 (handshake through a `watch` pair so the fd is never read by two parties), ships the ring
@@ -112,6 +124,15 @@ contents plus the master over `SCM_RIGHTS`, and hostd reads the fd directly from
 no relay hop. Losing the hostd connection resumes draining; the child never blocks. A bare
 program name the daemon cannot find on its own `PATH` runs through the user's login shell,
 interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
+
+**The shell's environment.** Every child gets `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM`,
+`TERM_PROGRAM_VERSION` and the shell integration's `ZDOTDIR`, on top of ptyd's own. `TERM` is
+`xterm-ghostty` once ghostty's terminfo is compiled, else `xterm-256color`. ptyd compiles it
+itself on start-up — `slopty_pty::terminfo` holds ghostty's entry as const data, renders the
+source, and runs `/usr/bin/tic -x -o $HOME/.terminfo -` in a background task — so a fresh
+machine gets the full capability set without anyone installing ghostty. The install is
+idempotent, nothing waits for it (`TERM` is read per spawn), and `$SLOPTY_TERMINFO_DIR`
+redirects the database for tests.
 
 **Deployment.** `slopty host install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
 `dev.aislopware.slopty.hostd`; `KeepAlive`, `RunAtLoad`, `ProcessType Interactive`) with the
@@ -458,8 +479,8 @@ window with its stream size and scale, fps, Mb/s, link RTT and the FEC/lost/NACK
 audio counters, re-sampled once a second from `ScreenStats`.
 
 **Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph
-runs shaped per row and cached by content hash, background quads, cursor, selection, ⌘-hover
-link underline) with a hairline over every prompt-start row but the first line: the
+runs shaped per row and cached by content hash, background quads, cursor, selection,
+underlines and strikethroughs at the offsets §2's metrics derive, ⌘-hover link underline) with a hairline over every prompt-start row but the first line: the
 command-block separator, the foreground at 18 % alpha, or the theme's `surfaces.error` token
 at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`). Terminal-context bindings: ⌘C /
