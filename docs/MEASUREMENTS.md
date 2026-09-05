@@ -772,7 +772,9 @@ steps.
 | **total**                     | **282 s** | budget 5–10 min |
 
 nextest's build is the next target if the gate grows: it recompiles the workspace in the `test`
-profile after clippy checked it in `dev`, and sccache does not cache incremental workspace crates.
+profile after clippy checked it in `dev`, and sccache does not cache incremental workspace crates
+(second look 2026-09-06: check is not build; clippy produces rmeta only, so test codegen cannot
+be shared; no tested variant beats the baseline by ≥ 10 %, see below).
 
 ## 2026-09-05 — start-up over iroh on a quiet machine, and arrival → present (mac-studio, debug)
 
@@ -1242,3 +1244,39 @@ pgrep -fl "cargo|rustc" | wc -l
 cargo xtask e2e smooth > /tmp/glyphs-smooth-after.log 2>&1; grep MEASURE /tmp/glyphs-smooth-after.log
 sh /tmp/glyphs-sample-zoom.sh      # scenario (b) alone with `sample` on the app's main thread
 ```
+
+## 2026-09-06 — gate wall time, second look (mac-studio, 10 cores, warm caches)
+
+Re-evaluating gate wall time and investigating whether nextest test binary codegen can share
+artifacts with clippy or run concurrently. Tested on `pi/gatetime` worktree against baseline
+(e811039).
+
+### Methodology & Commands
+* Warm: touch nothing, `time cargo xtask gate`.
+* Incremental: touch `crates/slopty-client/src/lib.rs` (revert after), `time cargo xtask gate`.
+  Note: appending a trailing newline to EOF triggers `cargo fmt --check` failure (`Diff in ...: - \n`),
+  so the incremental touch inserts a blank line between module declarations to pass rustfmt while
+  invalidating `slopty-client` and all downstream dependents.
+* Nextest alone: `time cargo nextest run --workspace --no-run` alone warm (~1.8–2.0 s) vs after touch
+  (12.7 s real, 7.5 s build).
+* Nextest rebuilds after touch: `cargo build --tests --workspace -v 2>&1 | grep -c Running` = 0 warm,
+  10 units after touch (6 packages: `slopty-client`, `slopty-ui` [lib + test], `slopty-cli` [bin],
+  `slopty-hostd` [bin + test], `slopty-app` [lib + test], `slopty` [bin]).
+
+### Results (baseline vs variants)
+
+| Variant | Warm gate (real / step sum) | Incremental gate (real / step sum) | Clippy host (inc) | Clippy iOS (inc) | Nextest (inc) | Doctests (inc) | Rustdoc (inc) | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline** | 14.1 s / 13.3 s | 50.6–66.1 s / 50.0–64.1 s (~57 s avg) | 4.9–12.2 s | 4.6–9.2 s | 14.3–25.6 s | 5.6–18.5 s | 7.1–9.0 s | Clippy host `--target <host>`, nextest default `target/debug` |
+| **(i) Nextest `--target <host>`** | 23.4 s / 22.3 s | 55.1 s / 54.2 s | 6.6 s | 5.8 s | 23.4 s | 11.0 s | 6.7 s | Shares `target/<triple>`, but clippy emits rmeta only; doctests/doc still use `target/debug` |
+| **(ii) Drop `--target` from host clippy** | 20.8 s / 20.0 s | 46.3–72.6 s / 45.6–72.0 s (~59 s avg) | 5.1–14.5 s | 6.2–12.4 s | 15.9–27.1 s | 5.1–8.5 s | 8.7–10.9 s | Clippy moves to `target/debug`; rmeta cannot link test bins; within noise |
+| **(iii) Concurrent nextest build + iOS clippy** | 21.9 s / 19.5 s | 59.6 s / 58.9 s | 6.6 s | 7.9 s | 30.7 s (build+run) | 6.8 s | 14.1 s | Cargo serialises on `target/.cargo-lock` ("Blocking waiting for file lock on build directory") |
+| **(iv) Profile test codegen share** | — | — | — | — | — | — | — | Ruled out: clippy emits `.rmeta` only ("check is not build"); test runners require full codegen |
+
+### Outcome
+Kept change: **none** (negative result). No variant beats the baseline incremental gate by ≥ 10 %.
+The workspace crates recompile during nextest because `cargo check` does not emit object code or `.rlib`s,
+sccache cannot cache incremental workspace crates, and Cargo serialises concurrent workspace builds on
+the target directory lock.
+
+
