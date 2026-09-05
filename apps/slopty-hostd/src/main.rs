@@ -66,6 +66,26 @@ pub struct Daemon {
     pub canvas: CanvasStore,
     /// Coding agents observed in sessions (fed by `slopty hook` over the control socket).
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
+    /// The host's pasteboard, synced with remote-window clients.
+    pub pasteboard: Arc<slopty_input::Pasteboard>,
+}
+
+/// How often the pasteboard's change count is read (one Mach call to the pasteboard server).
+const PASTEBOARD_PERIOD: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Broadcast every text change of the host pasteboard; `conn` forwards it only to clients
+/// with a remote window open. Writes made through `Pasteboard::write` are not reported.
+async fn watch_pasteboard(daemon: Daemon) -> ! {
+    let mut tick = tokio::time::interval(PASTEBOARD_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if let Some(text) = daemon.pasteboard.poll() {
+            tracing::debug!(bytes = text.len(), "host clipboard changed");
+            let event = slopty_proto::screen::ScreenEvent::Clipboard { text };
+            let _sent = daemon.events.send(slopty_proto::HostMsg::Screen(event));
+        }
+    }
 }
 
 #[tokio::main]
@@ -104,7 +124,9 @@ async fn main() -> Result<()> {
         events,
         canvas,
         agents: Arc::default(),
+        pasteboard: Arc::new(slopty_input::Pasteboard::new()),
     };
+    tokio::spawn(watch_pasteboard(daemon.clone()));
 
     if let Some(mut exits) = daemon.host.take_exits() {
         let host = daemon.host.clone();

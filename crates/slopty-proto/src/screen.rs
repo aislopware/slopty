@@ -211,7 +211,17 @@ pub enum ScreenRequest {
     },
     /// Raise/focus the window on the host.
     Focus(StreamId),
+    /// Put `text` on the host's pasteboard (sent ahead of a paste chord so the host pastes
+    /// what the client copied). Text only, at most `MAX_CLIPBOARD_BYTES`.
+    Clipboard {
+        /// The client's clipboard text.
+        text: String,
+    },
 }
+
+/// Largest clipboard text carried in either direction; a pasteboard can hold a whole file,
+/// and pushing that on every change would starve the video stream.
+pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
 /// Loss feedback, client → host, sent as a QUIC **datagram** rather than on the control stream.
 ///
@@ -340,4 +350,9 @@ pub enum ScreenEvent {
     },
     /// Window list changed (a window appeared or vanished).
     ListingChanged,
+    /// The host's pasteboard changed to `text` (only sent to clients with a stream open).
+    Clipboard {
+        /// The host's clipboard text.
+        text: String,
+    },
 }

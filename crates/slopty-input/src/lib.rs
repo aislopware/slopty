@@ -30,6 +30,9 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 use slopty_proto::screen::{CaptureTarget, ScreenInput, ScrollPhase};
 
 pub mod keymap;
+pub mod pasteboard;
+
+pub use pasteboard::Pasteboard;
 
 /// How long cached window bounds stay valid; windows move rarely, pointer events are dense.
 const BOUNDS_TTL: Duration = Duration::from_millis(100);

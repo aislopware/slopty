@@ -27,7 +27,8 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, Quality, ScreenInput, ScreenRequest, ScrollPhase, VideoCodec,
+    CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, ScreenInput, ScreenRequest, ScrollPhase,
+    VideoCodec,
 };
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -85,6 +86,9 @@ pub struct ScreenView {
     /// Keys whose press went to the host, so a release for a locally-handled chord (its press
     /// was eaten by a canvas binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
+    /// The text last known to be on the host's pasteboard (received from it, or pushed by
+    /// this view ahead of a paste); a paste chord only pushes when the clipboard differs.
+    host_clipboard: Option<String>,
     _pump: Task<()>,
 }
 
@@ -170,6 +174,7 @@ impl ScreenView {
             bounds: Bounds::default(),
             frames: 0,
             held: Vec::new(),
+            host_clipboard: None,
             _pump: pump,
         }
     }
@@ -368,6 +373,9 @@ impl ScreenView {
         if !self.held.contains(&code) {
             self.held.push(code);
         }
+        if is_paste_chord(&ev.keystroke) {
+            self.push_clipboard(cx);
+        }
         self.input(ScreenInput::Key {
             code,
             action: if ev.is_held { KeyAction::Repeat } else { KeyAction::Press },
@@ -388,6 +396,23 @@ impl ScreenView {
             text: None,
         });
         cx.stop_propagation();
+    }
+
+    /// Before a paste reaches the host, make sure it pastes what this client copied: send the
+    /// clipboard text on the (ordered) control stream ahead of the key. Skipped when the host
+    /// already has it, or when the clipboard is not text small enough to sync.
+    fn push_clipboard(&mut self, cx: &Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        if text.len() > MAX_CLIPBOARD_BYTES || self.host_clipboard.as_deref() == Some(&*text) {
+            return;
+        }
+        self.send(ScreenRequest::Clipboard { text: text.clone() });
+        self.host_clipboard = Some(text);
+    }
+
+    /// The host's pasteboard changed (the canvas already copied it locally).
+    pub fn host_clipboard_changed(&mut self, text: &str) {
+        self.host_clipboard = Some(text.to_owned());
     }
 
     /// The host's pointer as an arrow, in view coordinates.
@@ -508,5 +533,30 @@ impl Render for ScreenView {
             .child(picture)
             .child(record_bounds)
             .children(self.cursor_overlay())
+    }
+}
+
+/// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
+fn is_paste_chord(keystroke: &gpui::Keystroke) -> bool {
+    let m = keystroke.modifiers;
+    m.platform && !m.control && !m.alt && keystroke.key == "v"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chord(s: &str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(s).expect("keystroke")
+    }
+
+    #[test]
+    fn paste_chords() {
+        assert!(is_paste_chord(&chord("cmd-v")));
+        assert!(is_paste_chord(&chord("cmd-shift-v")));
+        assert!(!is_paste_chord(&chord("v")));
+        assert!(!is_paste_chord(&chord("ctrl-v")));
+        assert!(!is_paste_chord(&chord("cmd-alt-v")));
+        assert!(!is_paste_chord(&chord("cmd-c")));
     }
 }

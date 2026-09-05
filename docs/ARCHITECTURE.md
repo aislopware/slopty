@@ -115,6 +115,16 @@ Mute is per item and per client (the "mute" pill, ⌘⇧M, Canvas ▸ Mute Windo
 arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
 different.
 
+**Clipboard** follows the window both ways, text only (≤ 256 KiB). Host → client: hostd polls
+`NSPasteboard.changeCount` every 200 ms (`slopty-input::Pasteboard`) and broadcasts
+`ScreenEvent::Clipboard`, which each connection forwards only while that client has a window
+open; the canvas writes it to the local clipboard unless it already holds the same text (with
+the host on the same Mac that write would bump the count the host watches and echo forever).
+Client → host: a ⌘V into a window first sends `ScreenRequest::Clipboard` on the ordered
+control stream, so the host pastes what the client copied; the view remembers what the host
+holds and skips the push when nothing changed. Writes the host makes for a client are not
+reported back by the poller.
+
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;

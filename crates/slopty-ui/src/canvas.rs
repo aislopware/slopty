@@ -641,6 +641,20 @@ impl CanvasView {
             ScreenEvent::Geometry { stream, width, height } => {
                 self.follow_geometry(stream, width, height, cx);
             }
+            ScreenEvent::Clipboard { text } => {
+                // Every open window shares the one host pasteboard.
+                for view in self.screens.values() {
+                    view.update(cx, |v, _| v.host_clipboard_changed(&text));
+                }
+                // Same text already here: leave the clipboard alone. With the host on this
+                // very Mac (the dev loop) the write would bump the change count the host
+                // watches and the two would echo the text back and forth forever.
+                let same =
+                    cx.read_from_clipboard().and_then(|i| i.text()).as_deref() == Some(&*text);
+                if !same {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
             ScreenEvent::Cursor { .. } | ScreenEvent::ListingChanged => {}
         }
         cx.notify();

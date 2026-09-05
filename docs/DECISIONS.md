@@ -501,6 +501,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   windows on a canvas cost nothing; the first loud chunk reopens it (the 300 ms hold keeps
   natural pauses from chattering). Measured 2026-09-05 on loopback (display 6, `afplay`
   Glass.aiff ×3, 5 s): 249 packets sent, 246 received, 0 lost, bench player audible.
+- ✅ **Clipboard sync is polled on the host and pushed ahead of ⌘V on the client**
+  (2026-09-05, protocol 4). `NSPasteboard` has no change notification, only `changeCount`,
+  so hostd reads it every 200 ms (one Mach call to the pasteboard server); a client-side
+  watcher was rejected because GPUI's clipboard API has no count and the client would have to
+  push on every poll. The client instead pushes exactly when it matters: the paste chord
+  goes to the host on the same ordered stream right after `ScreenRequest::Clipboard`, so the
+  host's paste already sees the text. Only clients with a window open receive the host's
+  clipboard (the connection filters the broadcast) and the client never writes text it
+  already holds, which is what stops the loopback echo when app and host share a Mac.
+  Text only; files and images stay local. `cargo xtask bundle` builds `Slopty.app` with the
+  daemons and CLI beside the app (`Contents/MacOS/slopty host install` works unchanged since
+  the installer copies from its own directory), ad-hoc signed unless `--sign` names an
+  identity.
 - ⏸ A real jitter estimator and PLC (Apple's decoder takes no
   empty packet for concealment as far as the test showed; not tried). No `Quality` field for
   audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes

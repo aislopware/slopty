@@ -7,7 +7,7 @@ mod golden {
     use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::screen::Feedback;
+    use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
     use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -103,6 +103,15 @@ mod golden {
         let refresh = Feedback::Refresh { stream: StreamId(7), last_good_frame: 300 };
         let bytes = codec::encode_body(&refresh).expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
+    }
+
+    #[test]
+    fn clipboard() {
+        snap(
+            "client_clipboard",
+            &ClientMsg::Screen(ScreenRequest::Clipboard { text: "fox".to_owned() }),
+        );
+        snap("host_clipboard", &HostMsg::Screen(ScreenEvent::Clipboard { text: "fox".to_owned() }));
     }
 
     #[test]

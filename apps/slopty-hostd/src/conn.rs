@@ -11,7 +11,7 @@ use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, HelloAck};
-use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -109,6 +109,8 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             ev = events.recv() => {
                 match ev {
+                    // The host clipboard is only shared with clients showing a window.
+                    Ok(HostMsg::Screen(ScreenEvent::Clipboard { .. })) if peer.screens.is_empty() => {}
                     Ok(msg) => {
                         if peer.out.send(msg).await.is_err() {
                             break Ok("writer gone");
@@ -334,6 +336,15 @@ impl Peer<'_> {
                     && let Err(e) = s.focus()
                 {
                     tracing::debug!(client = %self.client, %stream, error = %e, "focus");
+                }
+            }
+            ScreenRequest::Clipboard { text } => {
+                if self.screens.is_empty() || text.len() > MAX_CLIPBOARD_BYTES {
+                    tracing::debug!(client = %self.client, bytes = text.len(), "clipboard refused");
+                } else if self.daemon.pasteboard.write(&text) {
+                    tracing::debug!(client = %self.client, bytes = text.len(), "pasteboard set");
+                } else {
+                    tracing::warn!(client = %self.client, "pasteboard write failed");
                 }
             }
         }
