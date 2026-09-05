@@ -26,8 +26,8 @@ use slopty_core::StreamId;
 use slopty_input::{Injector, InputError};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Decision, EncodedFrame, MediaError, Packetizer, RateController, Redundancy, audio_datagram,
-    cursor_datagram,
+    Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController, Redundancy,
+    audio_datagram, cursor_datagram, heartbeat_datagram,
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
@@ -111,6 +111,8 @@ pub struct ScreenStats {
     pub datagrams: u64,
     /// Datagrams discarded because the queue was full.
     pub queue_full: u64,
+    /// Heartbeats sent while the source was quiet.
+    pub heartbeats: u64,
     /// Worst capture-to-packet latency seen, microseconds.
     pub latency_max_us: u64,
     /// Sum of capture-to-packet latencies, microseconds (divide by `encoded`).
@@ -151,6 +153,8 @@ struct Counters {
     encoded: AtomicU64,
     datagrams: AtomicU64,
     queue_full: AtomicU64,
+    /// Heartbeats sent while the source was quiet.
+    heartbeats: AtomicU64,
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
     bitrate_bps: AtomicU64,
@@ -165,6 +169,7 @@ impl Counters {
             encoded: AtomicU64::new(0),
             datagrams: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
+            heartbeats: AtomicU64::new(0),
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
             bitrate_bps: AtomicU64::new(0),
@@ -178,6 +183,7 @@ impl Counters {
             encoded: self.encoded.load(Ordering::Relaxed),
             datagrams: self.datagrams.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
+            heartbeats: self.heartbeats.load(Ordering::Relaxed),
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
             audio_packets: self.audio_packets.load(Ordering::Relaxed),
@@ -209,6 +215,8 @@ struct Shared {
     rate: Mutex<RateController>,
     /// `datagrams_sent` at the previous receiver report.
     sent_at_report: AtomicU64,
+    /// `host_now_us()` when the last datagram was queued; the heartbeat clock.
+    last_push_us: AtomicU64,
     out: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     counters: Counters,
@@ -233,6 +241,7 @@ impl Shared {
         match self.out.try_send(datagram) {
             Ok(()) => {
                 self.counters.datagrams.fetch_add(1, Ordering::Relaxed);
+                self.last_push_us.store(host_now_us(), Ordering::Relaxed);
                 true
             }
             Err(_full_or_closed) => {
@@ -442,6 +451,7 @@ impl ScreenStream {
             redundancy: Mutex::new(Redundancy::new()),
             rate: Mutex::new(RateController::new(encoder_config.bitrate_bps)),
             sent_at_report: AtomicU64::new(0),
+            last_push_us: AtomicU64::new(host_now_us()),
             out,
             budget,
             counters: Counters::new(),
@@ -670,17 +680,29 @@ impl ScreenStream {
     }
 }
 
-/// Sample the pointer and send its position in stream pixels whenever it moves. Runs until the
-/// task is aborted by [`ScreenStream::close`] or the transport queue closes.
+/// Sample the pointer and send its position in stream pixels whenever it moves, and a
+/// heartbeat whenever nothing at all left for [`HEARTBEAT_AFTER`] (a quiet source must not
+/// read as a stalled link). Runs until the task is aborted by [`ScreenStream::close`] or the
+/// transport queue closes.
 async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut bounds: Option<Rect> = None;
     let mut last: Option<(i32, i32, bool)> = None;
     let mut seq: u32 = 0;
+    let mut beats: u32 = 0;
     let mut tick: u64 = 0;
+    let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
     while !shared.out.is_closed() {
         ticks.tick().await;
+        let now = host_now_us();
+        let silence_us = now.saturating_sub(shared.last_push_us.load(Ordering::Relaxed));
+        if silence_us >= heartbeat_after_us {
+            beats = beats.wrapping_add(1);
+            tracing::trace!(stream = %shared.id, beats, silence_us, "heartbeat");
+            shared.counters.heartbeats.fetch_add(1, Ordering::Relaxed);
+            shared.push(heartbeat_datagram(shared.id, beats, send_ms_lo(now)));
+        }
         if tick.is_multiple_of(BOUNDS_EVERY) {
             bounds = slopty_capture::target_bounds(target);
         }

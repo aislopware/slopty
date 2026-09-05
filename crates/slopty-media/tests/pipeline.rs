@@ -9,9 +9,11 @@ mod tests {
     use proptest::prelude::*;
     use slopty_core::StreamId;
     use slopty_media::{
-        Action, Config, EncodedFrame, FrameOut, Ignored, Ingest, Packetizer, Reassembler, SentFrame,
+        Action, Config, EncodedFrame, FrameOut, HEARTBEAT_AFTER, Ignored, Ingest, Packetizer,
+        RateController, Reassembler, SentFrame, heartbeat_datagram,
     };
     use slopty_proto::media::{MediaHeader, flags};
+    use slopty_proto::screen::RateVerdict;
 
     const STREAM: StreamId = StreamId(4);
     const RTT: Duration = Duration::from_millis(20);
@@ -335,6 +337,40 @@ mod tests {
         assert_eq!((r.stalled_ms, r.stalls), (80, 1));
         let r = h.rx.take_report(h.now, 0);
         assert_eq!((r.stalled_ms, r.stalls), (0, 0), "the window is reset");
+    }
+
+    /// A source that produces no frames for a while is not a stalled link: the host's
+    /// heartbeats keep the receiver's stall clock running only on silence from the link.
+    #[test]
+    fn heartbeats_keep_a_quiet_source_from_reading_as_a_stall() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        // 400 ms with nothing on screen, a heartbeat every HEARTBEAT_AFTER.
+        for beat in 1..=16 {
+            h.advance(HEARTBEAT_AFTER);
+            let dg = heartbeat_datagram(STREAM, beat, 0);
+            assert_eq!(h.rx.ingest(&dg, h.now), Ingest::Heartbeat);
+            assert!(h.tick().is_empty());
+        }
+        assert!(!h.rx.stalled(h.now));
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (0, 0), "no stall with heartbeats");
+        assert_eq!((report.frames_lost, report.datagrams_lost, report.frames_ok), (0, 0, 1));
+        // The controller sees a clean window: heartbeats are not frames, not loss, not queue.
+        let mut c = RateController::new(30_000_000);
+        let decision = (0..64).find_map(|_| c.on_report(&report, 0, None));
+        assert_eq!(decision.map(|d| d.verdict), Some(RateVerdict::Grow));
+        // The same 400 ms without heartbeats is a stall, released by the next frame.
+        h.advance(Duration::from_millis(400));
+        assert!(h.rx.stalled(h.now));
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s1.datagrams);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (400, 1), "silence from the link");
+        assert_eq!(h.rx.stats().stalls, 1);
+        assert_eq!(h.drain().len(), 1, "the frame after the stall is delivered");
     }
 
     #[test]

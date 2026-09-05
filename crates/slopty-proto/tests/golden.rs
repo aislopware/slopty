@@ -149,6 +149,26 @@ mod golden {
         );
     }
 
+    /// The datagram header is a fixed `zerocopy` layout, not postcard; a heartbeat is the
+    /// header alone.
+    #[test]
+    fn media_heartbeat_header() {
+        use slopty_proto::media::{Kind, MediaHeader};
+        use zerocopy::IntoBytes as _;
+        use zerocopy::little_endian::{U16, U32};
+        let header = MediaHeader {
+            stream: U32::new(7),
+            frame: U32::new(0x0102_0304),
+            index: U16::new(0),
+            data_count: U16::new(0),
+            parity_count: 0,
+            kind: Kind::Heartbeat as u8,
+            flags: 0,
+            send_ms_lo: 0xAB,
+        };
+        insta::assert_snapshot!("media_heartbeat", hex(header.as_bytes()));
+    }
+
     #[test]
     fn clipboard() {
         snap(

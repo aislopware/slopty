@@ -32,6 +32,10 @@ use slopty_proto::screen::ReceiverReport;
 
 use crate::cursor::parse_cursor;
 
+/// Shortest silence on a stream that counts as a stall (see [`Config::stall_gap`]); the host
+/// heartbeats at half this while its source is quiet.
+pub const STALL_GAP: Duration = Duration::from_millis(50);
+
 /// Timing and bounds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Config {
@@ -69,7 +73,7 @@ impl Default for Config {
             refresh_repeat: Duration::from_millis(100),
             refresh_repeat_max: Duration::from_secs(2),
             max_hold: Duration::from_millis(500),
-            stall_gap: Duration::from_millis(50),
+            stall_gap: STALL_GAP,
         }
     }
 }
@@ -134,6 +138,8 @@ pub enum Ingest {
         /// Position.
         update: CursorUpdate,
     },
+    /// The host had nothing to send: the link moved, the stall clock restarted, nothing else.
+    Heartbeat,
     /// Dropped.
     Ignored(Ignored),
 }
@@ -398,6 +404,7 @@ impl Reassembler {
         match header.kind() {
             None => Ingest::Ignored(Ignored::Malformed),
             Some(Kind::Audio) => Ingest::Audio { seq: header.frame.get(), payload },
+            Some(Kind::Heartbeat) => Ingest::Heartbeat,
             Some(Kind::Cursor) => {
                 parse_cursor(&payload).map_or(Ingest::Ignored(Ignored::Malformed), |update| {
                     Ingest::Cursor { seq: header.frame.get(), update }

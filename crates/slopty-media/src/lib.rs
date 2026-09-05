@@ -13,19 +13,21 @@
 #![forbid(unsafe_code)]
 
 mod cursor;
+mod heartbeat;
 mod packetize;
 mod rate;
 mod reassemble;
 mod redundancy;
 
 pub use cursor::{cursor_datagram, parse_cursor};
+pub use heartbeat::{HEARTBEAT_AFTER, heartbeat_datagram};
 pub use packetize::{
     DEFAULT_PARITY_PERMILLE, EncodedFrame, HISTORY_FRAMES, Layout, MAX_DATA_FRAGMENTS,
     MAX_PARITY_FRAGMENTS, MIN_PAYLOAD, Packetizer, SentFrame, audio_datagram, layout,
 };
 pub use rate::{Decision, PathSample, RateController, Window as RateWindow, judge};
 pub use reassemble::{
-    Action, Config, FrameInfo, FrameOut, Ignored, Ingest, Reassembler, ReassemblerStats,
+    Action, Config, FrameInfo, FrameOut, Ignored, Ingest, Reassembler, ReassemblerStats, STALL_GAP,
 };
 pub use redundancy::Redundancy;
 

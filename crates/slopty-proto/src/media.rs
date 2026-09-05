@@ -29,6 +29,10 @@ pub enum Kind {
     Audio = 2,
     /// Cursor position update.
     Cursor = 3,
+    /// Nothing to show: the source is quiet, the link is not. Header only, sent when no other
+    /// datagram left for a while, so the receiver's stall clock keeps running on silence from
+    /// the link alone.
+    Heartbeat = 4,
 }
 
 impl Kind {
@@ -40,6 +44,7 @@ impl Kind {
             1 => Some(Self::VideoParity),
             2 => Some(Self::Audio),
             3 => Some(Self::Cursor),
+            4 => Some(Self::Heartbeat),
             _ => None,
         }
     }

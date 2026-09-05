@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: hex(header.as_bytes())
+---
+07 00 00 00 04 03 02 01 00 00 00 00 00 04 00 ab

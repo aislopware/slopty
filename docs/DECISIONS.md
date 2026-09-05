@@ -525,6 +525,24 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   nor ends it), the burst rule in `the_release_burst_after_a_stall_is_not_judged`, the
   reassembler's charging in `reports_carry_the_stall_time_and_count`. Evidence from the mesh
   in MEASUREMENTS.md ("stall-aware bitrate").
+- ✅ **Capture heartbeat** (2026-09-05). The reassembler's stall clock counts silence on the
+  link, but a screen that does not change is silent too: ScreenCaptureKit delivers no frame
+  for a still display, and its warm-up after the first frame is a 300 ms hole. Every such
+  gap read as a stall and froze the controller for a window (0.5 s of growth lost at every
+  start, see "stall-aware bitrate" in MEASUREMENTS.md). *Wire:* `Kind::Heartbeat` (4), a bare
+  16-byte `MediaHeader` with no body, `frame` reused as a beat counter; `PROTOCOL_VERSION`
+  8 → 9, golden `media_heartbeat`. A header-only datagram over a new control message
+  because it has to travel the same datagram path the stall clock watches (a reliable-stream
+  message would arrive through a different queue and prove nothing about the datagram path)
+  and because the reassembler already resets `arrived_at` for any datagram of its stream
+  before looking at the kind: the beat resets the stall clock and nothing else — not
+  `any_arrived`, not the frame or loss counters — so a report window full of beats is clean
+  and the controller grows (`heartbeats_keep_a_quiet_source_from_reading_as_a_stall`: 400 ms
+  of beats → `(stalled_ms, stalls) = (0, 0)` and `Grow`; the same 400 ms without → `(400,
+  1)`). *Host:* `ScreenStream` records the time of its last successful push; the cursor
+  sampler (already ticking at 120 Hz) pushes a beat whenever that is `HEARTBEAT_AFTER` =
+  25 ms old, half the receiver's 50 ms `STALL_GAP`, so one lost beat still does not read as a
+  stall. Counted in `ScreenStats::heartbeats`. The client ignores `Ingest::Heartbeat`.
 - ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
   length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
   same even size ≤ 1184 B, so padding ≤ 2 B per fragment and the RS shard size is inferred from

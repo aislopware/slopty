@@ -408,7 +408,7 @@ impl Worker {
                 }
             }
             Ingest::Audio { seq, payload } => self.play_audio(seq, &payload),
-            Ingest::Ignored(_) => {}
+            Ingest::Heartbeat | Ingest::Ignored(_) => {}
         }
     }
 
