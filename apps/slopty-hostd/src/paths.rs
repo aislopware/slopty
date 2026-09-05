@@ -35,8 +35,15 @@ pub fn host_id(data_dir: &std::path::Path) -> Result<HostId> {
     Ok(id)
 }
 
-/// The machine's hostname, without a `.local` suffix.
+/// `$SLOPTY_HOST_NAME`, else the machine's computer name (two daemons on one Mac, as in a
+/// test, would otherwise be indistinguishable in a client's host switcher).
 pub fn host_name() -> String {
+    if let Some(name) = std::env::var_os("SLOPTY_HOST_NAME") {
+        let name = name.to_string_lossy().trim().to_owned();
+        if !name.is_empty() {
+            return name;
+        }
+    }
     std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
         .output()
