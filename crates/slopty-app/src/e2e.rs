@@ -21,8 +21,8 @@ use gpui::{
 };
 use slopty_core::ItemId;
 use slopty_e2e::{
-    Button, Command, ConversationInfo, Dump, FrameInfo, HostInfo, ItemInfo, LatencyInfo, Reply,
-    ScreenInfo, TerminalInfo, WindowInfo,
+    Button, Command, ConversationInfo, Dump, FaceInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
+    Reply, ScreenInfo, TerminalInfo, WindowInfo,
 };
 use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
 use slopty_proto::canvas::ItemKind;
@@ -548,10 +548,26 @@ impl Workspace {
                         .map(str::to_owned),
                     conversation,
                     latency: latency_info(view.latency()),
+                    face: view.metrics().map(|m| face_info(&m)),
                 });
             }
         }
         dump.focused = focused;
         dump
+    }
+}
+
+/// The measured face for the dump.
+#[expect(clippy::cast_possible_truncation, reason = "device pixels; f32 carries them")]
+fn face_info(m: &slopty_ui::terminal::CellMetrics) -> FaceInfo {
+    let f = m.face;
+    FaceInfo {
+        size: m.face_size,
+        cell_width: f.cell_width as f32,
+        ascent: f.ascent as f32,
+        descent: f.descent as f32,
+        line_gap: f.line_gap as f32,
+        underline_position: f.underline_position.map(|v| v as f32),
+        underline_thickness: f.underline_thickness.map(|v| v as f32),
     }
 }

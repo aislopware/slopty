@@ -109,8 +109,11 @@ multi-line prompt, `Input`, `Output`. The client side is in §6.
 (`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
 function from a face — advance, ascent, descent, line gap, and the underline/strikethrough
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
-underline, the strikethrough, the overline and the cursor. The element measures the face at
-`font_size × scale`, derives once — a zoomed grid is that one scaled, so the columns that fit
+underline, the strikethrough, the overline and the cursor. The face comes from the font's own
+tables through the fork's `TextSystem::font_metrics` (`hhea` line gap, `post` underline
+position and thickness; Core Text on both platforms), with ghostty's estimates only where a
+font says zero; the self-test dump reports it (`terminals[].face`). The element measures the
+face at `font_size × scale`, derives once — a zoomed grid is that one scaled, so the columns that fit
 still fit — and `Grid` divides back to logical points, so a row is pixel-aligned on the display
 it was measured for; `typography.mono_line_height` is ghostty's
 `adjust-cell-height` percentage on top (1.0 = the font's own). The element paints underlines

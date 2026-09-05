@@ -43,6 +43,12 @@ pub struct CellMetrics {
     /// `TermSize::metrics`, which is whole device pixels of the unzoomed grid — so a pixel
     /// mouse report lands on the cell the pointer is actually over.
     pub pixel_scale: f32,
+    /// The face the grid was derived from, in device pixels at `face_size` (the unzoomed font
+    /// size times the display scale): what the font said, `None` where it said nothing and
+    /// ghostty's estimate stood in. For the self-test dump.
+    pub face: metrics::Face,
+    /// Device pixels per em the face was measured at.
+    pub face_size: f32,
 }
 
 impl CellMetrics {
@@ -222,7 +228,7 @@ struct ShapeCache {
     frame: Option<u64>,
     /// The derived grid per (family, font size, scale, line-height multiplier): deriving it
     /// walked the font system every frame for nothing.
-    grids: HashMap<(String, u32, u32, u32), (Grid, metrics::Metrics)>,
+    grids: HashMap<(String, u32, u32, u32), (Grid, metrics::Metrics, metrics::Face)>,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -236,7 +242,7 @@ impl ShapeCache {
         font: &Font,
         font_size: Pixels,
         height_mult: f32,
-    ) -> (Grid, metrics::Metrics) {
+    ) -> (Grid, metrics::Metrics, metrics::Face) {
         let key = (
             family.to_owned(),
             f32::from(font_size).to_bits(),
@@ -246,9 +252,9 @@ impl ShapeCache {
         if let Some(grid) = self.grids.get(&key) {
             return *grid;
         }
-        let (grid, derived, _font_id) = measure(window, font, font_size, height_mult);
-        self.grids.insert(key, (grid, derived));
-        (grid, derived)
+        let (grid, derived, _font_id, face) = measure(window, font, font_size, height_mult);
+        self.grids.insert(key, (grid, derived, face));
+        (grid, derived, face)
     }
 
     /// Drop entries not used in the last two generations. A generation is a frame when the
@@ -495,15 +501,16 @@ fn adjusted_height(height: u32, mult: f32) -> u32 {
 /// The cell geometry for `font` at `font_size`, from ghostty's derivation.
 ///
 /// The face is measured in device pixels — `font_size` times the display scale — so the cell
-/// is a whole number of them, and [`Grid`] divides back to points. GPUI's text system reports
-/// neither the line gap nor the `post` underline metrics, so those go in empty and ghostty's
-/// estimates stand in, exactly as they do for a font whose tables omit them.
+/// is a whole number of them, and [`Grid`] divides back to points. The line gap and the
+/// underline come from the font's own tables (`hhea` leading, `post` underline position and
+/// thickness, through the fork's `TextSystem::font_metrics`); a font that leaves them at zero
+/// gets ghostty's estimates, which is ghostty's own rule.
 fn measure(
     window: &Window,
     font: &Font,
     font_size: Pixels,
     height_mult: f32,
-) -> (Grid, metrics::Metrics, FontId) {
+) -> (Grid, metrics::Metrics, FontId, metrics::Face) {
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(font);
     let scale = window.scale_factor().max(1.0);
@@ -514,14 +521,18 @@ fn measure(
         cell_width: device(advance),
         ascent: device(text_system.ascent(font_id, size)),
         descent: device(text_system.descent(font_id, size)),
-        line_gap: 0.0,
+        line_gap: device(text_system.line_gap(font_id, size)).max(0.0),
+        underline_position: Some(device(text_system.underline_position(font_id, size)))
+            .filter(|v| *v != 0.0),
+        underline_thickness: Some(device(text_system.underline_thickness(font_id, size)))
+            .filter(|v| *v > 0.0),
         cap_height: Some(device(text_system.cap_height(font_id, size))),
         ex_height: Some(device(text_system.x_height(font_id, size))),
         ..metrics::Face::default()
     };
     let mut derived = metrics::calc(&face);
     derived.set_cell_height(adjusted_height(derived.cell_height, height_mult));
-    (Grid::new(&derived, scale), derived, font_id)
+    (Grid::new(&derived, scale), derived, font_id, face)
 }
 
 impl Element for TerminalElement {
@@ -593,7 +604,7 @@ impl Element for TerminalElement {
         // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
         // cell is derived once per family, size and scale, not once per frame.
         let base_font = fonts::terminal_font(&family, false, false);
-        let (base_grid, base_derived) = cx.update_global::<ShapeCache, _>(|cache, _| {
+        let (base_grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
             cache.grid(window, &family, &base_font, base_size, height_mult)
         });
         let (base_cell_width, base_line_height) = (base_grid.cell_width, base_grid.line_height);
@@ -619,6 +630,8 @@ impl Element for TerminalElement {
             cols,
             rows,
             pixel_scale: window.scale_factor().max(1.0) / zoom,
+            face,
+            face_size: f32::from(base_size) * window.scale_factor().max(1.0),
         };
         let fitted = TermSize {
             cols,
@@ -998,6 +1011,8 @@ mod tests {
             cols: 80,
             rows: 24,
             pixel_scale: scale / zoom,
+            face: metrics::Face::default(),
+            face_size: 13.0 * scale,
         }
     }
 

@@ -1163,3 +1163,22 @@ the simulator case shares, but the run was not made), and a target that draws on
 — `check_source` latches on `encoded > 0`, so that case reports `Live` forever and only the cap
 protects the client.
 
+## 2026-09-06 — font truth: the cell from the font's own tables (macOS app self-test, debug)
+
+`cargo xtask e2e app` on the tree where `measure` fills the line gap and the `post` underline
+from the fork's `TextSystem::font_metrics` (JetBrains Mono 13 pt, the e2e window at 2×).
+`dump.terminals[0].face` in device pixels per em (26): ascent 1.020, descent −0.300, line
+gap 0, underline −0.155 / 0.050 (asserted by `check_jetbrains_mono_face`, macOS and both
+simulators). Goldens (`snapshot <name>: differing of total`):
+
+| golden | differing / total | note |
+| --- | --- | --- |
+| note | 0 / 540000 | |
+| terminal | 1540 / 540000 (0.285 %) | rows 122–188, x 33–270: the echoed prompt's glyphs, the same 1540 as the pre-track run (`/tmp/e2e-terminal.log`); no underline in the scene |
+| conversation | 0 / 540000 | |
+| conversation-permission | 0 / 540000 | |
+
+No golden accepted: nothing in the scenes is underlined or struck through, the line gap is
+zero, so the cell, baseline and glyph positions are the ones before. The change shows only
+under an underline (one pixel lower, 1 device pixel thick at 1×, 2 at 2×; DECISIONS "The
+font's own line gap and underline").

@@ -405,6 +405,19 @@ mod tests {
         }
     }
 
+    /// `JetBrains Mono` with what its `post` table says about the underline: position −155,
+    /// thickness 50 (per 1000). Core Text reports both, so this is the face the element
+    /// measures in the app; the plain [`jetbrains_mono`] rows are the estimate a font without
+    /// a `post` table gets.
+    fn jetbrains_mono_tables(size: f64) -> Face {
+        let em = |units: f64| units / 1000.0 * size;
+        Face {
+            underline_position: Some(em(-155.0)),
+            underline_thickness: Some(em(50.0)),
+            ..jetbrains_mono(size)
+        }
+    }
+
     /// Menlo, macOS's own terminal face, from its font tables: 2048 units per em, advance
     /// 1233, ascent 1901, descent -483, no line gap, underline -130 thick 90, cap height 1493,
     /// ex height 1120. A face with every metric present, and a different em, so the
@@ -539,11 +552,19 @@ mod tests {
     #[test]
     fn two_fonts_two_sizes_two_displays_match_ghostty() {
         type Row = (fn(f64) -> Face, f64, f64, [u32; 7]);
-        let table: [Row; 8] = [
+        let table: [Row; 12] = [
             (jetbrains_mono, 13.0, 1.0, [8, 17, 4, 14, 2, 9, 2]),
             (jetbrains_mono, 13.0, 2.0, [16, 34, 7, 29, 3, 19, 3]),
             (jetbrains_mono, 15.0, 1.0, [9, 20, 4, 17, 2, 12, 2]),
             (jetbrains_mono, 15.0, 2.0, [18, 39, 8, 33, 3, 22, 3]),
+            // The font says so: the stroke sits 0.155 em below the baseline (2.0 px at 13 pt,
+            // where the estimate put it 1.0 px down) and is 0.05 em thick (0.65 px → 1, where
+            // the estimate's 0.15 × ex = 1.006 → 2); the strikethrough, still estimated, is
+            // centred on the ex height with the thinner stroke and takes its thickness.
+            (jetbrains_mono_tables, 13.0, 1.0, [8, 17, 4, 15, 1, 9, 1]),
+            (jetbrains_mono_tables, 13.0, 2.0, [16, 34, 7, 31, 2, 20, 2]),
+            (jetbrains_mono_tables, 15.0, 1.0, [9, 20, 4, 18, 1, 12, 1]),
+            (jetbrains_mono_tables, 15.0, 2.0, [18, 39, 8, 36, 2, 23, 2]),
             (menlo, 13.0, 1.0, [8, 15, 3, 13, 1, 8, 1]),
             (menlo, 13.0, 2.0, [16, 30, 6, 26, 2, 16, 2]),
             (menlo, 15.0, 1.0, [9, 17, 4, 14, 1, 9, 1]),

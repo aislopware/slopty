@@ -432,18 +432,24 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   is inset (or overhangs) equally top and bottom. `Metrics::set_cell_height` is ghostty's
   `adjust-cell-height`: it splits the added pixels between top and bottom, giving the odd one
   to the side the text sits nearer. Estimates fill in what a font does not say — cap = 0.75 ·
-  ascent, ex = 0.75 · cap, underline thickness = 0.15 · ex, underline position = −thickness —
-  and GPUI's `TextSystem` exposes neither the line gap nor the `post` table, so in production
-  those estimates always apply. Two fonts, two sizes, two displays, in device pixels
+  ascent, ex = 0.75 · cap, underline thickness = 0.15 · ex, underline position = −thickness.
+  (Until 2026-09-06 GPUI's `TextSystem` exposed neither the line gap nor the `post` table, so
+  those estimates always applied in production; the fork now exposes them, see "The font's
+  own line gap and underline" below.) Two fonts, two sizes, two displays, in device pixels
   (`cargo nextest run -p slopty-ui terminal::metrics`; ghostty's formula recomputed
-  independently gives the same numbers):
+  independently gives the same numbers). The first four JetBrains Mono rows are the face
+  without its `post` table (the estimates); the "tables" rows are what the app measures:
 
   | font | pt | DPR | w | h | baseline | underline y/thick | strike y/thick |
   | --- | --- | --- | --- | --- | --- | --- | --- |
-  | JetBrains Mono | 13 | 1 | 8 | 17 | 4 | 14 / 2 | 9 / 2 |
-  | JetBrains Mono | 13 | 2 | 16 | 34 | 7 | 29 / 3 | 19 / 3 |
-  | JetBrains Mono | 15 | 1 | 9 | 20 | 4 | 17 / 2 | 12 / 2 |
-  | JetBrains Mono | 15 | 2 | 18 | 39 | 8 | 33 / 3 | 22 / 3 |
+  | JetBrains Mono (no post) | 13 | 1 | 8 | 17 | 4 | 14 / 2 | 9 / 2 |
+  | JetBrains Mono (no post) | 13 | 2 | 16 | 34 | 7 | 29 / 3 | 19 / 3 |
+  | JetBrains Mono (no post) | 15 | 1 | 9 | 20 | 4 | 17 / 2 | 12 / 2 |
+  | JetBrains Mono (no post) | 15 | 2 | 18 | 39 | 8 | 33 / 3 | 22 / 3 |
+  | JetBrains Mono (tables) | 13 | 1 | 8 | 17 | 4 | 15 / 1 | 9 / 1 |
+  | JetBrains Mono (tables) | 13 | 2 | 16 | 34 | 7 | 31 / 2 | 20 / 2 |
+  | JetBrains Mono (tables) | 15 | 1 | 9 | 20 | 4 | 18 / 1 | 12 / 1 |
+  | JetBrains Mono (tables) | 15 | 2 | 18 | 39 | 8 | 36 / 2 | 23 / 2 |
   | Menlo | 13 | 1 | 8 | 15 | 3 | 13 / 1 | 8 / 1 |
   | Menlo | 13 | 2 | 16 | 30 | 6 | 26 / 2 | 16 / 2 |
   | Menlo | 15 | 1 | 9 | 17 | 4 | 14 / 1 | 9 / 1 |
@@ -465,6 +471,25 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   **scaled**, never re-derived, because the columns that fit were counted with the unzoomed
   cell — re-deriving rounds the cell up and clips the last column (at 13 pt, DPR 2, zoom 0.3 the
   cell came out 2.5 pt against the 1.2 pt the item had room for).
+- ✅ **The font's own line gap and underline, through the fork** (2026-09-06, fork commit
+  `876a96f`). font-kit's Core Text loader had always read `CTFontGetLeading`,
+  `CTFontGetUnderlinePosition` and `CTFontGetUnderlineThickness` (the `hhea` line gap and the
+  `post` table) into GPUI's `FontMetrics`; only the accessor was missing. The fork adds
+  `TextSystem::font_metrics(font_id) -> FontMetrics` plus per-size `line_gap`,
+  `underline_position`, `underline_thickness` beside `ascent`/`descent`, on macOS and iOS alike
+  (both platform text systems go through font-kit). `measure` in the terminal element now
+  fills `Face::{line_gap, underline_position, underline_thickness}` from them and leaves an
+  estimate only where the font says zero (ghostty's rule: `post.thickness ?? 0.15 · ex`).
+  Effect on the bundled JetBrains Mono (`post` underlinePosition −155, thickness 50 per 1000
+  em; `hhea` line gap 0): the underline moves one pixel down and thins from 2 to 1 device
+  pixel at 13 pt on a 1× display (2 px at 2×), the strikethrough thins with it; the cell,
+  baseline and line height do not change (no line gap). Menlo (`post` −130 / 90, line gap 0)
+  already matched the estimate's rounding at these sizes. Verified end to end, not by pixels:
+  `dump.terminals[].face` reports the measured face (device pixels per em, ascent, descent,
+  line gap, underline position/thickness or `null` for an estimate) and the macOS and
+  simulator self-tests assert JetBrains Mono's numbers to the em (`check_jetbrains_mono_face`:
+  ascent 1.020, descent −0.300, line gap 0, underline −0.155 / 0.050). Goldens: see
+  MEASUREMENTS.md "font truth" for the moved pixels.
 - ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to hostd by
   `SCM_RIGHTS` (`nix` `sendmsg`/`recvmsg`; `sendfd` dropped — one fewer dependency, and macOS
   has no `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a

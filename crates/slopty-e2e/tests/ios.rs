@@ -123,6 +123,7 @@ mod tests {
             .await
             .unwrap();
         let session = dump.terminals[0].session.clone();
+        slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
         stack.play_hook(&session, "Stop", r#","last_assistant_message":"Fixed.""#).await.unwrap();
         let drv = &mut stack.driver;
         drv.wait_for("the agent to be seen", STEP, |d| {

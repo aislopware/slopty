@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
@@ -545,4 +545,30 @@ impl Drop for Stack {
             let _killed = child.start_kill();
         }
     }
+}
+
+/// Check that the terminal face is the bundled `JetBrains Mono` as its tables say.
+///
+/// Measured through the platform text system: no line gap, the underline 0.155 em below the
+/// baseline and 0.05 em thick (`post`), so the app derives the cell from the font, not from
+/// ghostty's estimates. Same on macOS and iOS.
+///
+/// # Errors
+/// When the grid has not been laid out or the face carries an estimate instead of the font.
+pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
+    let Some(face) = face else { bail!("the grid has not been laid out: no face") };
+    ensure!(face.size > 0.0, "{face:?}");
+    let em = |v: f32| v / face.size;
+    ensure!((em(face.ascent) - 1.020).abs() < 0.01, "hhea ascender 1020: {face:?}");
+    ensure!((em(face.descent) + 0.300).abs() < 0.01, "hhea descender -300: {face:?}");
+    ensure!(face.line_gap.abs() < f32::EPSILON, "no line gap: {face:?}");
+    let Some(position) = face.underline_position else {
+        bail!("post underlinePosition not read: {face:?}")
+    };
+    let Some(thickness) = face.underline_thickness else {
+        bail!("post underlineThickness not read: {face:?}")
+    };
+    ensure!((em(position) + 0.155).abs() < 0.005, "post underlinePosition -155: {face:?}");
+    ensure!((em(thickness) - 0.050).abs() < 0.005, "post underlineThickness 50: {face:?}");
+    Ok(())
 }

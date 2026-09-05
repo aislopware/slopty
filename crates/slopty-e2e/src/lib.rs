@@ -313,7 +313,7 @@ pub struct ItemInfo {
 }
 
 /// One terminal.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct TerminalInfo {
     /// Session id.
     pub session: String,
@@ -336,6 +336,8 @@ pub struct TerminalInfo {
     pub conversation: Option<ConversationInfo>,
     /// Keystroke → paint, for keys typed into this terminal.
     pub latency: LatencyInfo,
+    /// What the terminal font said about itself, once the grid has been laid out.
+    pub face: Option<FaceInfo>,
 }
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
@@ -380,6 +382,26 @@ impl LatencyInfo {
             self.predicted,
         )
     }
+}
+
+/// The face the grid was derived from, in device pixels at `size` pixels per em: the font's
+/// own numbers where it has them, `None` where ghostty's estimate stood in.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct FaceInfo {
+    /// Device pixels per em the face was measured at (font size × display scale).
+    pub size: f32,
+    /// Widest printable-ASCII advance.
+    pub cell_width: f32,
+    /// Typographic ascent (positive) and descent (negative).
+    pub ascent: f32,
+    /// Typographic ascent (positive) and descent (negative).
+    pub descent: f32,
+    /// Line gap (`hhea` leading), 0 when the font has none.
+    pub line_gap: f32,
+    /// Top of the underline stroke relative to the baseline (negative below), from `post`.
+    pub underline_position: Option<f32>,
+    /// Underline thickness, from `post`.
+    pub underline_thickness: Option<f32>,
 }
 
 /// One remote window or display, and how its pictures reach the screen.

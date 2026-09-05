@@ -114,6 +114,7 @@ mod tests {
         assert!(!dump.rows_containing("echo e2e-").is_empty(), "{dump:#?}");
         let cursor = dump.terminals[0].cursor;
         assert!(cursor[1] >= 2, "cursor moved below the output: {cursor:?}");
+        slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
 
         // The frame the app draws, from its own renderer.
         let frame = drv.render(&render_path).await.unwrap();
