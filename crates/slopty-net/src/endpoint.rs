@@ -4,7 +4,9 @@ use std::future::poll_fn;
 use std::pin::Pin;
 use std::time::Duration;
 
-use iroh::endpoint::{BindOpts, IdleTimeout, PathEvent, QuicTransportConfig, VarInt, presets};
+use iroh::endpoint::{
+    AckFrequencyConfig, BindOpts, IdleTimeout, PathEvent, QuicTransportConfig, VarInt, presets,
+};
 use iroh::{Endpoint, RelayMode, SecretKey, TransportAddr, Watcher as _};
 
 use crate::{ALPN, NetError};
@@ -57,7 +59,16 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Keep-alive so NAT bindings survive and RTT stays measured while idle.
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// Datagram buffers: a few frames of 4K video at 60 fps.
-const DATAGRAM_BUFFER: usize = 4 << 20;
+pub const DATAGRAM_BUFFER: usize = 4 << 20;
+/// Longest the peer may sit on an ACK (QUIC's default is 25 ms).
+///
+/// Media leaves the host in one burst per frame, larger than the congestion window on a
+/// short path (BBR sizes the window from bandwidth × min RTT, ~2 frames on loopback), so the
+/// tail of every frame waits for the ACK of its head. With the default the ACK of an odd
+/// last packet waits the full 25 ms — longer than a frame interval — and that wait reached
+/// the receiver as a missing tail and a NACK (MEASUREMENTS.md, "start-up on a cold
+/// connection"). 2 ms keeps the window turning at the path's round trip.
+const MAX_ACK_DELAY: Duration = Duration::from_millis(2);
 
 /// Transport config shared by both roles.
 ///
@@ -68,8 +79,11 @@ const DATAGRAM_BUFFER: usize = 4 << 20;
 #[must_use]
 pub fn transport_config() -> QuicTransportConfig {
     let idle = IdleTimeout::try_from(IDLE_TIMEOUT).ok();
+    let mut acks = AckFrequencyConfig::default();
+    acks.max_ack_delay(Some(MAX_ACK_DELAY));
     QuicTransportConfig::builder()
         .congestion_controller_factory(congestion_controller())
+        .ack_frequency_config(Some(acks))
         .max_idle_timeout(idle)
         .keep_alive_interval(KEEP_ALIVE)
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
@@ -81,19 +95,53 @@ pub fn transport_config() -> QuicTransportConfig {
 
 /// Environment override for the congestion controller: `cubic`, `bbr3` or `newreno`.
 pub const CC_ENV: &str = "SLOPTY_CC";
+/// Environment override for the initial congestion window, in packets (diagnostics).
+pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
+/// Initial congestion window, in packets of the initial 1200-byte datagram size.
+///
+/// RFC 9002's 10 packets (noq's default) is sized for an unknown peer on the open Internet;
+/// a paired host and client on a LAN or a private mesh can afford the burst Chromium's QUIC
+/// starts with. The first keyframe is tens to hundreds of kilobytes and every window's worth
+/// of it costs a round trip (MEASUREMENTS.md, "start-up over the mesh").
+const INITIAL_WINDOW_PACKETS: u64 = 32;
+
+/// The initial congestion window in bytes: [`INITIAL_WINDOW_ENV`] packets if set, else
+/// [`INITIAL_WINDOW_PACKETS`].
+fn initial_window() -> u64 {
+    let packets = std::env::var(INITIAL_WINDOW_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(INITIAL_WINDOW_PACKETS);
+    packets.saturating_mul(1200)
+}
 
 /// The congestion controller factory: [`CC_ENV`] if set and known, else BBR3.
 fn congestion_controller()
 -> std::sync::Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync + 'static> {
     use noq_proto::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
     let choice = std::env::var(CC_ENV).unwrap_or_default();
+    let window = initial_window();
+    let bbr3 = || {
+        let mut config = Bbr3Config::default();
+        config.initial_window(window);
+        std::sync::Arc::new(config)
+    };
     match choice.as_str() {
-        "cubic" => std::sync::Arc::new(CubicConfig::default()),
-        "newreno" => std::sync::Arc::new(NewRenoConfig::default()),
-        "bbr3" | "" => std::sync::Arc::new(Bbr3Config::default()),
+        "cubic" => {
+            let mut config = CubicConfig::default();
+            config.initial_window(window);
+            std::sync::Arc::new(config)
+        }
+        "newreno" => {
+            let mut config = NewRenoConfig::default();
+            config.initial_window(window);
+            std::sync::Arc::new(config)
+        }
+        "bbr3" | "" => bbr3(),
         other => {
             tracing::warn!(%other, "unknown {CC_ENV}; using bbr3");
-            std::sync::Arc::new(Bbr3Config::default())
+            bbr3()
         }
     }
 }
