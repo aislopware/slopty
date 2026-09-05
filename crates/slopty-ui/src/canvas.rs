@@ -350,6 +350,31 @@ impl CanvasView {
         self.camera.zoom
     }
 
+    /// Every item, bottom to top.
+    pub fn items(&self) -> Vec<&CanvasItem> {
+        self.doc.by_z()
+    }
+
+    /// The camera (canvas → viewport mapping).
+    #[must_use]
+    pub const fn camera(&self) -> Camera {
+        self.camera
+    }
+
+    /// Where a canvas rect sits in the window, in points, as of the last frame.
+    #[must_use]
+    pub fn window_bounds(&self, rect: Rect) -> Bounds<Pixels> {
+        let s = self.camera.to_screen(rect);
+        let (origin, _size) = self.viewport;
+        Bounds::new(point(origin.x + px(s.x), origin.y + px(s.y)), size(px(s.w), px(s.h)))
+    }
+
+    /// The item that last took a click or a key.
+    #[must_use]
+    pub const fn active_item(&self) -> Option<ItemId> {
+        self.active
+    }
+
     /// Number of items.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1179,6 +1204,7 @@ impl CanvasView {
     pub fn close_item(&mut self, _: &CloseItem, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active else { return };
         let Some(item) = self.doc.get(id).cloned() else { return };
+        tracing::debug!(%id, kind = ?item.kind, "close item");
         match item.kind {
             // A live session closes through the host, which removes the item; an ended one
             // has nothing to close, so drop the item straight from the document.
@@ -1306,6 +1332,29 @@ impl CanvasView {
         self.drag = Some(Drag::Resize { id, grab: ev.position, start });
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Keyboard focus must sit on an element that is drawn. Below [`CARD_ZOOM`] terminals are
+    /// summary cards and their views are not in the frame, so a focus left on one would make
+    /// GPUI drop every keystroke, ⌘ shortcuts included (found by the app self-test: after ⌘1
+    /// zoomed two shells into cards, ⌘W did nothing). Cards hand the keyboard to the canvas;
+    /// coming back to live grids hands it to the active terminal.
+    fn keep_focus_rendered(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let card = self.camera.zoom < CARD_ZOOM;
+        if card {
+            let terminal_focused =
+                self.terminals.values().any(|v| v.read(cx).focus_handle(cx).is_focused(window));
+            if terminal_focused {
+                window.focus(&self.focus, cx);
+            }
+        } else if self.focus.is_focused(window)
+            && let Some(active) = self.active
+            && let Some(ItemKind::Terminal { session }) = self.doc.get(active).map(|i| &i.kind)
+            && let Some(view) = self.terminals.get(session)
+        {
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
     }
 
     fn click_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
@@ -1683,6 +1732,7 @@ impl Render for CanvasView {
         if std::mem::take(&mut self.pending_focus_self) {
             window.focus(&self.focus, cx);
         }
+        self.keep_focus_rendered(window, cx);
         self.reconcile_notes(window, cx);
         if let Some(id) = self.pending_focus_note.take()
             && let Some(view) = self.notes.get(&id)
