@@ -98,7 +98,7 @@ impl Driver {
     /// When the socket breaks.
     pub async fn dump(&mut self) -> Result<Dump> {
         match self.call(&Command::Dump).await? {
-            Reply::Dump(dump) => Ok(dump),
+            Reply::Dump(dump) => Ok(*dump),
             Reply::Error { message } => bail!("dump: {message}"),
             other => bail!("dump: unexpected {other:?}"),
         }

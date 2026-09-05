@@ -126,7 +126,7 @@ pub enum Reply {
     /// Done.
     Ok,
     /// A [`Command::Dump`].
-    Dump(Dump),
+    Dump(Box<Dump>),
     /// A [`Command::Render`]: the image written, in device pixels.
     Rendered {
         /// Width.
@@ -166,6 +166,25 @@ pub struct Dump {
     pub terminals: Vec<TerminalInfo>,
     /// Remote windows and displays on the active canvas.
     pub screens: Vec<ScreenInfo>,
+    /// The accessibility tree GPUI built for the last frame, depth first in reading order,
+    /// trimmed to what a screen reader reads. Empty when the app was built without `e2e`.
+    #[serde(default)]
+    pub a11y: Vec<A11yNode>,
+}
+
+/// One node of the accessibility tree.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct A11yNode {
+    /// The accesskit role as `Debug` prints it: `Button`, `Terminal`, `Heading`, …
+    pub role: String,
+    /// The label, if any.
+    pub label: Option<String>,
+    /// The value, if any (a terminal's cursor row, a text field's text).
+    pub value: Option<String>,
+    /// The node holds the keyboard focus.
+    pub focused: bool,
+    /// Window rect in points: x, y, w, h.
+    pub bounds: [f32; 4],
 }
 
 /// The window.
@@ -306,6 +325,14 @@ impl Dump {
     #[must_use]
     pub fn item(&self, kind: &str) -> Option<&ItemInfo> {
         self.items.iter().find(|i| i.kind == kind)
+    }
+
+    /// The first accessibility node with `role` and, when given, `label`.
+    #[must_use]
+    pub fn a11y_node(&self, role: &str, label: Option<&str>) -> Option<&A11yNode> {
+        self.a11y
+            .iter()
+            .find(|n| n.role == role && label.is_none_or(|l| n.label.as_deref() == Some(l)))
     }
 }
 

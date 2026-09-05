@@ -60,6 +60,10 @@ mod tests {
         assert_eq!(dump.hosts.len(), 1, "{dump:#?}");
         assert_eq!(dump.items.len(), 1, "{dump:#?}");
         let term = dump.item("terminal").unwrap().clone();
+        // The grid as VoiceOver gets it: a terminal whose value is the cursor row, on screen.
+        let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
+        assert!(grid.bounds[0] >= 0.0 && grid.bounds[1] >= 0.0, "{grid:?}");
         let [x, y, w, h] = term.bounds;
         let (vw, vh) = (dump.window.width, dump.window.height);
         assert!(vw > 300.0 && vh > 300.0, "window: {vw}x{vh}");
@@ -141,6 +145,21 @@ mod tests {
         let conversation = dump.terminals[0].conversation.clone().unwrap();
         assert_eq!(conversation.entries, TRANSCRIPT_LINES, "{dump:#?}");
         assert!(conversation.composer_focused && conversation.pinned, "{conversation:?}");
+        // VoiceOver's view of it, from the same tree the bridge mirrors: the entries as list
+        // items, the composer field with the keyboard, the send button, the key bar's keys.
+        let items = dump.a11y.iter().filter(|n| n.role == "ListItem").count();
+        assert_eq!(items, TRANSCRIPT_LINES.len(), "{:#?}", dump.a11y);
+        // (`composer_focused` above is the keyboard check: GPUI pins the focus to a node
+        // inside gpui-kit's input, not to the labelled field.)
+        assert!(
+            dump.a11y_node("MultilineTextInput", Some("Message to Claude")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+        assert!(dump.a11y_node("Button", Some("Send")).is_some(), "{:#?}", dump.a11y);
+        for key in ["Escape", "Control", "Command", "Paste"] {
+            assert!(dump.a11y_node("Button", Some(key)).is_some(), "{key}: {:#?}", dump.a11y);
+        }
         // The item (and the composer at its bottom) stays inside the screen, above the key
         // bar and the home indicator.
         let term = dump.item("terminal").unwrap();

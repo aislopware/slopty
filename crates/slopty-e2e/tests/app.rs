@@ -54,6 +54,21 @@ mod tests {
         let term = dump.item("terminal").unwrap().clone();
         assert!(term.active, "{dump:#?}");
         assert!(term.bounds[2] > 100.0 && term.bounds[3] > 100.0, "{term:?}");
+        // What a screen reader gets: the item's heading, the grid as a terminal whose value is
+        // the cursor row, the top bar's buttons, all inside the window.
+        assert!(
+            dump.a11y_node("Heading", None).is_some_and(|n| {
+                n.label.as_deref().is_some_and(|l| l.starts_with("terminal "))
+            }),
+            "{:#?}",
+            dump.a11y
+        );
+        let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
+        assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
+        for label in ["shell", "agent", "note", "window", "fit"] {
+            assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
+        }
 
         // Typed text goes client → host → PTY → shell → host → client rows.
         drv.type_text("echo e2e-$((6*7))").await.unwrap();
@@ -181,6 +196,18 @@ mod tests {
         assert_eq!(conversation.entries, TRANSCRIPT_LINES, "{dump:#?}");
         assert!(conversation.composer_focused && conversation.pinned, "{conversation:?}");
         assert_eq!(conversation.attention, None);
+        // The conversation as a screen reader gets it: every entry a list item, the composer
+        // a labelled text field with the keyboard, its send button after it.
+        let items = dump.a11y.iter().filter(|n| n.role == "ListItem").count();
+        assert_eq!(items, TRANSCRIPT_LINES.len(), "{:#?}", dump.a11y);
+        // (`composer_focused` above is the keyboard check: GPUI pins the focus to a node
+        // inside gpui-kit's input, not to the labelled field.)
+        assert!(
+            dump.a11y_node("MultilineTextInput", Some("Message to Claude")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+        assert!(dump.a11y_node("Button", Some("Send")).is_some(), "{:#?}", dump.a11y);
 
         // Typed text lands in the composer, not in the shell; Enter sends it into the shell
         // (a comment: the shell echoes it at its prompt and runs nothing) and clears it.

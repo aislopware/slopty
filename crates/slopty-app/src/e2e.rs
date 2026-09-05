@@ -261,7 +261,7 @@ fn apply(
             window.resize(size(px(width), px(height)));
             Reply::Ok
         }
-        Command::Dump => Reply::Dump(workspace.read(cx).dump(window, cx)),
+        Command::Dump => Reply::Dump(Box::new(workspace.read(cx).dump(window, cx))),
         Command::Pair { .. } | Command::Render { .. } | Command::Quit => {
             Reply::Error { message: "handled elsewhere".into() }
         }
