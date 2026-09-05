@@ -1,6 +1,6 @@
 //! Terminal session state on the client.
 
-use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, TermModes};
+use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, SemanticMark, TermModes};
 use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest, TermSize};
 
 /// Lines kept client-side. Newest-first eviction; the host retains 50k.
@@ -300,6 +300,70 @@ impl TermState {
             .collect()
     }
 
+    /// Newest line (the bottom of the screen).
+    fn newest(&self) -> LineIndex {
+        LineIndex(
+            self.first_visible.0.saturating_add(u64::from(self.screen.rows())).saturating_sub(1),
+        )
+    }
+
+    /// The start of the nearest prompt strictly above `index`, among the lines held here
+    /// (uncached history is not searched).
+    #[must_use]
+    pub fn prompt_before(&self, index: LineIndex) -> Option<LineIndex> {
+        let oldest = self.scrollback.oldest().0.min(self.first_visible.0);
+        let mut i = index.0;
+        while i > oldest {
+            i = i.saturating_sub(1);
+            if self.line(LineIndex(i)).is_some_and(|l| l.mark.starts_prompt()) {
+                return Some(LineIndex(i));
+            }
+        }
+        None
+    }
+
+    /// The start of the nearest prompt strictly below `index`, among the lines held here.
+    #[must_use]
+    pub fn prompt_after(&self, index: LineIndex) -> Option<LineIndex> {
+        let newest = self.newest().0;
+        let mut i = index.0;
+        while i < newest {
+            i = i.saturating_add(1);
+            if self.line(LineIndex(i)).is_some_and(|l| l.mark.starts_prompt()) {
+                return Some(LineIndex(i));
+            }
+        }
+        None
+    }
+
+    /// Scroll so that `index` is the top row of the viewport.
+    pub fn scroll_to_line(&mut self, index: LineIndex) -> Vec<Effect> {
+        self.scroll_to(self.first_visible.0.saturating_sub(index.0))
+    }
+
+    /// The output of the last finished command: the output rows right above the newest prompt,
+    /// trailing blank rows trimmed, joined with newlines. `None` without shell integration.
+    #[must_use]
+    pub fn last_command_output(&self) -> Option<String> {
+        let prompt = self.prompt_before(LineIndex(self.newest().0.saturating_add(1)))?;
+        let mut rows: Vec<String> = Vec::new();
+        let mut i = prompt.0;
+        while i > 0 {
+            i = i.saturating_sub(1);
+            match self.line(LineIndex(i)) {
+                Some(line) if matches!(line.mark, SemanticMark::Output | SemanticMark::Unknown) => {
+                    rows.push(line.text());
+                }
+                _ => break,
+            }
+        }
+        rows.reverse();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        (!rows.is_empty()).then(|| rows.join("\n"))
+    }
+
     /// The absolute index of view row `row` (0 = top of the viewport).
     #[must_use]
     pub const fn index_at_row(&self, row: u16) -> LineIndex {
@@ -397,6 +461,46 @@ mod tests {
 
     fn size() -> TermSize {
         TermSize { cols: 10, rows: 3, ..TermSize::default() }
+    }
+
+    fn marked(text: &str, mark: SemanticMark) -> Line {
+        let mut line = Line::from_text(text, 10, Style::DEFAULT);
+        line.mark = mark;
+        line
+    }
+
+    #[test]
+    fn prompt_navigation_and_last_output_follow_the_marks() {
+        let prompt = |exit| SemanticMark::Prompt { exit };
+        let mut state = TermState::new(size());
+        // Screen 6..=8, then history 0..=5 into the cache.
+        let mut f = frame(1, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
+        f.updates[0].line.mark = SemanticMark::Output;
+        f.updates[1].line.mark = SemanticMark::Output;
+        f.updates[2].line.mark = prompt(Some(0));
+        state.apply(TermEvent::Frame(f));
+        state.apply(TermEvent::Lines {
+            start: LineIndex(0),
+            lines: vec![
+                marked("$ ls", prompt(None)),
+                marked("a", SemanticMark::Output),
+                marked("b", SemanticMark::Output),
+                marked("$ false", prompt(Some(0))),
+                marked("$ seq 2", prompt(Some(1))),
+                marked("1", SemanticMark::Output),
+            ],
+        });
+
+        assert_eq!(state.prompt_before(LineIndex(8)), Some(LineIndex(4)));
+        assert_eq!(state.prompt_before(LineIndex(4)), Some(LineIndex(3)));
+        assert_eq!(state.prompt_before(LineIndex(0)), None);
+        assert_eq!(state.prompt_after(LineIndex(0)), Some(LineIndex(3)));
+        assert_eq!(state.prompt_after(LineIndex(4)), Some(LineIndex(8)));
+        assert_eq!(state.prompt_after(LineIndex(8)), None);
+        assert_eq!(state.last_command_output(), Some("1\n2".to_owned()), "blank tail trimmed");
+        let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
+        assert_eq!(state.index_at_row(0), LineIndex(3));
+        assert_eq!(state.view_offset(), 3);
     }
 
     fn texts(state: &TermState) -> Vec<Option<String>> {

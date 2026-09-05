@@ -54,10 +54,18 @@ mod actions {
             FindPrev,
             /// Close the search bar.
             CloseFind,
+            /// Scroll the previous prompt to the top of the viewport.
+            PrevPrompt,
+            /// Scroll the next prompt to the top of the viewport.
+            NextPrompt,
+            /// Copy the output of the last command.
+            CopyLastOutput,
         ]
     );
 }
-pub use actions::{CloseFind, Copy, Find, FindNext, FindPrev, Paste};
+pub use actions::{
+    CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt,
+};
 
 /// Key bindings for the terminal context.
 #[must_use]
@@ -69,6 +77,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-f", Find, CTX),
         KeyBinding::new("cmd-g", FindNext, CTX),
         KeyBinding::new("cmd-shift-g", FindPrev, CTX),
+        KeyBinding::new("cmd-up", PrevPrompt, CTX),
+        KeyBinding::new("cmd-down", NextPrompt, CTX),
+        KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
         KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
     ]
@@ -579,6 +590,47 @@ impl TerminalView {
         if let Some(text) = self.selected_text().filter(|t| !t.is_empty()) {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
+    }
+
+    /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
+    pub fn copy_last_output(
+        &mut self,
+        _: &CopyLastOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self.state.last_command_output() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    /// ⌘↑: the prompt above the viewport's top row, scrolled to the top.
+    pub fn prev_prompt(&mut self, _: &PrevPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        let top = self.state.index_at_row(0);
+        if let Some(target) = self.state.prompt_before(top) {
+            self.jump_to(target, cx);
+        }
+    }
+
+    /// ⌘↓: the prompt below the viewport's top row, scrolled to the top; none left means back
+    /// to following output.
+    pub fn next_prompt(&mut self, _: &NextPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        let top = self.state.index_at_row(0);
+        if let Some(target) = self.state.prompt_after(top) {
+            self.jump_to(target, cx);
+        } else {
+            self.state.scroll_to_bottom();
+            cx.notify();
+        }
+    }
+
+    fn jump_to(&mut self, index: LineIndex, cx: &mut Context<Self>) {
+        for effect in self.state.scroll_to_line(index) {
+            if let Effect::Request(req) = effect {
+                self.send(req);
+            }
+        }
+        cx.notify();
     }
 
     /// ⌘V: the clipboard into the session (the host brackets it when the program asked).
@@ -1201,6 +1253,7 @@ impl Render for TerminalView {
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         div()
             .id("terminal")
+            .debug_selector(|| "terminal".to_owned())
             .key_context("Terminal")
             .track_focus(&self.focus)
             .relative()
@@ -1210,6 +1263,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
+            .on_action(cx.listener(Self::prev_prompt))
+            .on_action(cx.listener(Self::next_prompt))
+            .on_action(cx.listener(Self::copy_last_output))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -1225,11 +1281,176 @@ impl Render for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
-    use slopty_grid::{Line, RowUpdate, Style, TermModes};
+    use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
+    use slopty_grid::{Line, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
+    use crate::terminal::element::separator_color;
+
+    /// A focused terminal in a headless window with the Terminal bindings, drawn once.
+    fn terminal(
+        cx: &mut TestAppContext,
+    ) -> (Entity<TerminalView>, mpsc::Receiver<ClientMsg>, &mut VisualTestContext) {
+        let (tx, rx) = mpsc::channel(64);
+        cx.update(|cx| cx.bind_keys(key_bindings()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        cx.run_until_parked();
+        (view, rx, cx)
+    }
+
+    fn marked(text: &str, mark: SemanticMark) -> Line {
+        let mut line = Line::from_text(text, 10, Style::DEFAULT);
+        line.mark = mark;
+        line
+    }
+
+    /// Three command blocks: `ls` (a, b), `false` (nothing), `seq 2` (1, 2, blank), then the
+    /// newest prompt. Lines 0..=5 are history the host already sent, 6..=8 the screen.
+    fn with_command_blocks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) {
+        let prompt = |exit| SemanticMark::Prompt { exit };
+        let screen =
+            [("2", SemanticMark::Output), ("", SemanticMark::Output), ("$ ", prompt(Some(0)))];
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(6),
+                    total_lines: 9,
+                    input_ack: 0,
+                    updates: screen
+                        .iter()
+                        .enumerate()
+                        .map(|(row, (text, mark))| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: marked(text, *mark),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+            view.apply(
+                TermEvent::Lines {
+                    start: LineIndex(0),
+                    lines: vec![
+                        marked("$ ls", prompt(None)),
+                        marked("a", SemanticMark::Output),
+                        marked("b", SemanticMark::Output),
+                        marked("$ false", prompt(Some(0))),
+                        marked("$ seq 2", prompt(Some(1))),
+                        marked("1", SemanticMark::Output),
+                    ],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    fn top_line(view: &Entity<TerminalView>, cx: &VisualTestContext) -> LineIndex {
+        view.read_with(cx, |view, _| view.state.index_at_row(0))
+    }
+
+    /// The view rows (0 = top) that carry a command-block separator, with its colour: the
+    /// 1 px quads spanning the grid's width, read from the scene.
+    fn separators(
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(u16, gpui::Hsla)> {
+        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
+            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
+        };
+        let grid_width = metrics.cell_width * f32::from(metrics.cols);
+        let mut out = Vec::new();
+        for q in &quads {
+            if !(near(q.bounds.size.height, px(1.0))
+                && near(q.bounds.size.width, grid_width)
+                && near(q.bounds.origin.x, metrics.origin.x))
+            {
+                continue;
+            }
+            assert!(q.bounds.origin.y.0 >= f32::from(bounds.origin.y) * scale, "inside the view");
+            let row = (0..metrics.rows)
+                .find(|&row| {
+                    near(q.bounds.origin.y, metrics.origin.y + metrics.line_height * f32::from(row))
+                })
+                .expect("a separator sits on a row's top edge");
+            out.push((row, q.background.as_solid().expect("a solid fill")));
+        }
+        out.sort_by_key(|(row, _)| *row);
+        out
+    }
+
+    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport; the block separator
+    /// is drawn on every prompt-start row but the first line, red after a failed command.
+    #[gpui::test]
+    fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let palette = Theme::default().terminal;
+        let ok = separator_color(&palette, Some(0));
+        let failed = separator_color(&palette, Some(1));
+        let none = separator_color(&palette, None);
+        assert_ne!(ok, failed);
+        assert_eq!(ok, none, "no status and a zero status rule the same faint line");
+
+        assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
+        assert_eq!(separators(&view, cx), vec![(2, ok)], "the newest prompt, after `seq 2`");
+
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");
+        assert_eq!(separators(&view, cx), vec![(0, failed)], "`false` failed");
+
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(3));
+        assert_eq!(separators(&view, cx), vec![(0, ok), (1, failed)]);
+
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(0));
+        assert_eq!(separators(&view, cx), vec![], "never on the very first line");
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(0), "nothing above: stays");
+
+        cx.simulate_keystrokes("cmd-down");
+        assert_eq!(top_line(&view, cx), LineIndex(3));
+        cx.simulate_keystrokes("cmd-down");
+        assert_eq!(top_line(&view, cx), LineIndex(4));
+        cx.simulate_keystrokes("cmd-down");
+        assert_eq!(top_line(&view, cx), LineIndex(6), "the newest prompt cannot go higher");
+        assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
+    }
+
+    /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.
+    #[gpui::test]
+    fn cmd_shift_c_copies_the_last_commands_output(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into())));
+        cx.simulate_keystrokes("cmd-shift-c");
+        let text = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        };
+        assert_eq!(text(cx).as_deref(), Some("before"), "no prompts: the clipboard is untouched");
+
+        with_command_blocks(&view, cx);
+        cx.simulate_keystrokes("cmd-shift-c");
+        assert_eq!(text(cx).as_deref(), Some("1\n2"), "blank tail trimmed, prompt rows excluded");
+    }
 
     #[test]
     fn selection_columns_cover_edges_and_middle_lines() {

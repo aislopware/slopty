@@ -16,7 +16,7 @@ use slopty_grid::{CursorShape, Line, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
 use slopty_theme::TerminalPalette;
 
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
 use crate::terminal::view::TerminalView;
 
@@ -97,6 +97,19 @@ struct PreparedRow {
     line: ShapedLine,
     /// Columns of the link under a ⌘-hover, underlined over the text.
     link: Option<(u16, u16)>,
+    /// Colour of the command-block separator drawn along the row's top edge.
+    separator: Option<Hsla>,
+}
+
+/// The command-block separator for a prompt-start row: the foreground, faint, or the
+/// theme's ANSI red when the command before it reported a non-zero status.
+#[must_use]
+pub fn separator_color(palette: &TerminalPalette, exit: Option<u8>) -> Hsla {
+    if exit.is_some_and(|code| code != 0) {
+        hsla_alpha(palette.palette(1), 0.7)
+    } else {
+        hsla_alpha(palette.fg, 0.18)
+    }
 }
 
 /// The element.
@@ -394,6 +407,7 @@ impl Element for TerminalElement {
                             Some(cell_width),
                         ),
                         link: None,
+                        separator: None,
                     });
                     continue;
                 };
@@ -487,7 +501,10 @@ impl Element for TerminalElement {
                 let link = link
                     .filter(|&(at, _, _)| at == index)
                     .map(|(_, start, end)| (start, end.min(grid_cols)));
-                prepared_rows.push(PreparedRow { y, quads, line: shaped, link });
+                // A prompt starts here: rule off the command above it, red when it failed.
+                let separator = (line.mark.starts_prompt() && index.0 > 0)
+                    .then(|| separator_color(palette, line.mark.exit()));
+                prepared_rows.push(PreparedRow { y, quads, line: shaped, link, separator });
             }
         });
 
@@ -585,6 +602,13 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         for row in &prepared.rows {
+            if let Some(color) = row.separator {
+                let w = m.cell_width * f32::from(m.cols);
+                window.paint_quad(fill(
+                    Bounds::new(point(m.origin.x, row.y), size(w, px(1.0))),
+                    color,
+                ));
+            }
             for (start, end, color) in &row.quads {
                 let x = m.origin.x + m.cell_width * f32::from(*start);
                 let w = m.cell_width * f32::from(end.saturating_sub(*start));
