@@ -2414,4 +2414,28 @@ mod tests {
         );
         assert!(underline > row * 0.75, "the underline is below the baseline: {strokes:?}");
     }
+
+    /// However far the canvas has zoomed, the painted grid stays inside the item: the columns
+    /// were counted with the unzoomed cell, so the zoomed cell is that one scaled, never one
+    /// derived again and rounded up (which clipped the last column at small zooms).
+    #[gpui::test]
+    fn a_zoomed_grid_still_fits_the_item(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let pad = px(Theme::default().spacing.sm);
+        for zoom in [0.3_f32, 0.5, 1.0, 2.0] {
+            view.update_in(cx, |view, _window, cx| {
+                view.set_zoom(zoom);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let item = cx.debug_bounds("terminal").expect("the terminal is drawn");
+            let m = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+            let content = item.size.width - pad * 2.0 * zoom;
+            let painted = m.cell_width * f32::from(m.cols);
+            assert!(painted <= content, "at zoom {zoom}: {painted:?} > {content:?}");
+            let rows = m.line_height * f32::from(m.rows);
+            let tall = item.size.height - pad * 2.0 * zoom;
+            assert!(rows <= tall, "at zoom {zoom}: {rows:?} > {tall:?}");
+        }
+    }
 }

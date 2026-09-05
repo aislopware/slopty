@@ -22,7 +22,7 @@ use crate::terminal::metrics::{self, Grid};
 use crate::terminal::view::TerminalView;
 
 /// Cell geometry for one layout.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CellMetrics {
     /// Content origin in window coordinates.
     pub origin: Point<Pixels>,
@@ -34,6 +34,12 @@ pub struct CellMetrics {
     pub cols: u16,
     /// Grid size that fits.
     pub rows: u16,
+    /// Device pixels of the *fitted* grid per logical point painted: `scale / zoom`.
+    ///
+    /// [`Self::pixel_at`] reports in the units the host measures in — the cell size in
+    /// `TermSize::metrics`, which is whole device pixels of the unzoomed grid — so a pixel
+    /// mouse report lands on the cell the pointer is actually over.
+    pub pixel_scale: f32,
 }
 
 impl CellMetrics {
@@ -66,13 +72,19 @@ impl CellMetrics {
         (col.min(self.cols.saturating_sub(1)), row.min(self.rows.saturating_sub(1)))
     }
 
-    /// Pixel offset within the content area (clamped at 0).
+    /// Pixel offset within the content area (clamped at 0), in the device pixels of the fitted
+    /// grid — the units the host divides by the cell size it was told.
     #[must_use]
     pub fn pixel_at(&self, pos: Point<Pixels>) -> (u32, u32) {
+        let scale = if self.pixel_scale.is_finite() && self.pixel_scale > 0.0 {
+            self.pixel_scale
+        } else {
+            1.0
+        };
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped ≥ 0")]
         let out = (
-            f32::from(pos.x - self.origin.x).max(0.0) as u32,
-            f32::from(pos.y - self.origin.y).max(0.0) as u32,
+            (f32::from(pos.x - self.origin.x).max(0.0) * scale) as u32,
+            (f32::from(pos.y - self.origin.y).max(0.0) * scale) as u32,
         );
         out
     }
@@ -304,6 +316,23 @@ fn pick_family(window: &Window, candidates: &[String]) -> String {
         .unwrap_or_else(|| fonts::MONO_FAMILY.to_owned())
 }
 
+/// Where to hand a shaped line to GPUI so its baseline lands on `baseline`.
+///
+/// GPUI centres a line in the box it is given — `(line_height - ascent - descent) / 2 + ascent`
+/// down from the origin (`text_system/line.rs`) — which is close to, but not, where the font's
+/// metrics put the baseline. Offsetting the origin by the difference is exact, and uses the
+/// shaped line's own ascent and descent, so a row that fell back to another font still lines up.
+fn text_origin_y(
+    row_y: Pixels,
+    line_height: Pixels,
+    baseline: Pixels,
+    ascent: Pixels,
+    descent: Pixels,
+) -> Pixels {
+    let centred = (line_height - ascent - descent) / 2.0 + ascent;
+    row_y + baseline - centred
+}
+
 /// A cell length for the wire, with a fallback for nonsense.
 fn whole_u16(v: u32, fallback: u16) -> u16 {
     match u16::try_from(v) {
@@ -456,18 +485,22 @@ impl Element for TerminalElement {
             (f32::from(inner.width) / f32::from(base_cell_width)).floor().max(1.0) as u16,
             (f32::from(inner.height) / f32::from(base_line_height)).floor().max(1.0) as u16,
         );
-        // Paint geometry is the scaled one: derived again at the zoomed size, so the cell stays
-        // a whole number of device pixels instead of drifting off the grid as zoom multiplies.
+        // Paint geometry is the unzoomed one scaled: `cols` and `rows` were counted with the
+        // unzoomed cell, so scaling is what keeps `cols × cell_width` inside the item's content
+        // width. Re-deriving at the zoomed size would round the cell up and clip the last column.
         let font_size = base_size * zoom;
-        let grid = if (zoom - 1.0).abs() < f32::EPSILON {
-            base_grid
-        } else {
-            measure(window, &base_font, font_size, height_mult).0
-        };
+        let grid = base_grid.scaled(zoom);
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad * zoom;
         let origin = bounds.origin + point(pad, pad);
-        let metrics = CellMetrics { origin, cell_width, line_height, cols, rows };
+        let metrics = CellMetrics {
+            origin,
+            cell_width,
+            line_height,
+            cols,
+            rows,
+            pixel_scale: window.scale_factor().max(1.0) / zoom,
+        };
         let fitted = TermSize {
             cols,
             rows,
@@ -769,8 +802,17 @@ impl Element for TerminalElement {
             window.paint_quad(quad);
         }
         for row in &prepared.rows {
+            // GPUI centres the line in its own box; nudge it so its baseline is the derived one
+            // and the glyphs sit on the same line as the decorations under them.
+            let y = text_origin_y(
+                row.y,
+                m.line_height,
+                grid.baseline,
+                row.line.ascent,
+                row.line.descent,
+            );
             if let Err(e) = row.line.paint(
-                point(m.origin.x, row.y),
+                point(m.origin.x, y),
                 m.line_height,
                 TextAlign::Left,
                 None,
@@ -811,5 +853,63 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint prediction");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The metrics of a grid laid out at `scale` and painted at `zoom`, `JetBrains Mono` 13 pt:
+    /// an 8 × 17 device-pixel cell, so 8/scale × 17/scale points, times the zoom.
+    fn metrics(scale: f32, zoom: f32) -> CellMetrics {
+        CellMetrics {
+            origin: point(px(10.0), px(20.0)),
+            cell_width: px(8.0 / scale * zoom),
+            line_height: px(17.0 / scale * zoom),
+            cols: 80,
+            rows: 24,
+            pixel_scale: scale / zoom,
+        }
+    }
+
+    /// A pixel mouse report is in the units the host measures in: device pixels of the *fitted*
+    /// grid, whatever the display's scale and however far the canvas has zoomed. The host
+    /// divides by the cell size it was told (8 × 17 here), so the column it reads back is the
+    /// column the pointer is over.
+    #[test]
+    fn a_pixel_mouse_report_is_in_the_cell_size_the_host_was_told() {
+        for scale in [1.0, 2.0] {
+            for zoom in [0.5, 1.0, 2.0] {
+                let m = metrics(scale, zoom);
+                // The left edge of column 10, row 3.
+                let at = point(m.origin.x + m.cell_width * 10.0, m.origin.y + m.line_height * 3.0);
+                let (x, y) = m.pixel_at(at);
+                assert_eq!((x / 8, y / 17), (10, 3), "at scale {scale} zoom {zoom}");
+                assert_eq!(m.cell_at(at), Some((10, 3)), "at scale {scale} zoom {zoom}");
+                assert_eq!(m.pixel_at(m.origin), (0, 0));
+            }
+        }
+    }
+
+    /// The glyphs go on the baseline the metrics derived, not the one GPUI would centre on.
+    /// `JetBrains Mono` 13 pt at DPR 2: a 17 pt row with a 13.5 pt baseline, where GPUI's own
+    /// centring (ascent 13.325, descent 3.575) would put it at 13.375.
+    #[test]
+    fn the_text_sits_on_the_derived_baseline() {
+        let (row_y, line_height) = (px(100.0), px(17.0));
+        let (ascent, descent) = (px(13.325), px(3.575));
+        let centred = (line_height - ascent - descent) / 2.0 + ascent;
+        assert!((f32::from(centred) - 13.375).abs() < 1e-4, "{centred:?}");
+
+        // The derived baseline is the lower of the two, so the line is nudged down by 0.125.
+        let y = text_origin_y(row_y, line_height, px(13.5), ascent, descent);
+        assert!((f32::from(y) - 100.125).abs() < 1e-4, "{y:?}");
+        // Which is to say: painting there puts the baseline exactly where it was derived.
+        assert!((f32::from(y + centred - row_y) - 13.5).abs() < 1e-4);
+
+        // A row that fell back to a taller face is corrected by its own amount.
+        let tall = text_origin_y(row_y, line_height, px(13.5), px(15.0), px(4.0));
+        assert!(tall < y, "{tall:?} vs {y:?}");
     }
 }

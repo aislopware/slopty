@@ -323,6 +323,30 @@ impl Grid {
     }
 }
 
+impl Grid {
+    /// The same geometry at `zoom` times the size.
+    ///
+    /// A zoomed grid is *scaled*, never re-derived: the columns that fit were counted with the
+    /// unzoomed cell, so `cols × cell_width` has to stay inside `zoom ×` the item's content
+    /// width. Rounding a freshly derived cell up would break that and clip the last column.
+    #[must_use]
+    pub fn scaled(self, zoom: f32) -> Self {
+        if !zoom.is_finite() || zoom <= 0.0 || (zoom - 1.0).abs() < f32::EPSILON {
+            return self;
+        }
+        let line = |l: Line| Line { y: l.y * zoom, thickness: l.thickness * zoom };
+        Self {
+            cell_width: self.cell_width * zoom,
+            line_height: self.line_height * zoom,
+            baseline: self.baseline * zoom,
+            underline: line(self.underline),
+            strikethrough: line(self.strikethrough),
+            overline: line(self.overline),
+            cursor_thickness: self.cursor_thickness * zoom,
+        }
+    }
+}
+
 /// Widening that is exact for the ranges above (`u32` clamped to `u16::MAX`, `i32` to ±65535).
 trait PipeF32 {
     fn pipe_f32(self) -> f32;
