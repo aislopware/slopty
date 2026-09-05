@@ -52,6 +52,34 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `any(macos, ios)` (`core-video` 0.5 builds for both), so the phone paints the decoder's
   `CVPixelBuffer` the same zero-copy way. Checked on macOS, `aarch64-apple-ios-sim` and
   `aarch64-apple-ios`.
+- ✅ **Hardware keyboards and pointers on iOS live in the fork, not the app** (2026-09-05,
+  fork commit `dfc149e`). `gpui_ios` only implemented `UIKeyInput` (`insertText:` /
+  `deleteBackward`), so an iPad with a Magic Keyboard had no arrows, escape, ⌃C or ⌘ chords:
+  UIKit delivers physical keys as `pressesBegan:`/`pressesEnded:` on the responder chain and
+  nothing handled them. Ruling: the metal view handles presses (and is first responder whenever
+  the text input view is not, so canvas-level shortcuts work with nothing focused); the
+  `UIKey` → `Keystroke` mapping (`hardware_keyboard.rs`) copies `gpui_macos`' rules — a shifted
+  letter is `shift-a`, a shifted symbol is `!` with shift dropped, chords carry no `key_char`,
+  `charactersIgnoringModifiers` falls back to the HID usage's ASCII name for non-Latin
+  layouts — so Slopty's keymaps and `slopty_ui::keys` need nothing iOS-specific. Plain text
+  while a text input is first responder is forwarded to `super` (UIKit's text system types it,
+  IME and marked text intact); everything else is consumed so the text system does not also
+  insert "\n" for Enter. UIKit does not auto-repeat presses (verified: no repeated
+  `pressesBegan` for a held arrow), so the window runs its own repeat (400 ms / 50 ms, GCD
+  main-queue timer, generation-checked so a release cancels it) and delivers `is_held`, which
+  `TerminalView::key_down` already turns into repeat key events. Modifier keys (HID
+  `0xE0..=0xE7`) update `Window::modifiers()` and emit `ModifiersChanged`; caps lock is tracked
+  from `alphaShift`. Pointer: `UIHoverGestureRecognizer` → `MouseMove`,
+  `UIPanGestureRecognizer` with `allowedScrollTypesMask = all` and `maximumNumberOfTouches = 0`
+  (indirect scrolls only, so gpui core's touch recognizer keeps one-finger drags) →
+  `ScrollWheel` with pixel deltas and phases; `UIApplicationSupportsIndirectInputEvents` in
+  the plist so trackpad clicks are pointer touches. Bundle: `TARGETED_DEVICE_FAMILY 1,2`, all
+  iPad orientations (`UIRequiresFullScreen` is deprecated and ignored from iOS 26, so nothing
+  opts out of Split View / Stage Manager). Verified: the mapping's unit tests (letters
+  keep shift, symbols drop it, chords have no `key_char`, named keys, modifiers ignored) run on
+  the host through a shim crate because `gpui_ios` is `cfg(target_os = "ios")`; the app builds
+  for `aarch64-apple-ios-sim` against the new pin. Not verified by a test: the UIKit delivery
+  itself (no simulator-driven layer exists yet; the iOS self-test socket is the next step).
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
   things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`
   on iOS), and stand-ins for three CGL symbols (`CGLErrorString`, `CGLGetCurrentContext`,

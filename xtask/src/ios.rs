@@ -18,12 +18,36 @@ const BUNDLE_ID: &str = "dev.aislopware.slopty";
 const PRODUCT: &str = "Slopty";
 /// Deployment target (the project floor).
 const IOS_VERSION: &str = "26.5";
-/// Simulator device created by `sim` when none exists.
-const SIM_NAME: &str = "Slopty iPhone";
-/// Device type for the simulator.
-const SIM_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro";
 /// Runtime for the simulator.
 const SIM_RUNTIME: &str = "com.apple.CoreSimulator.SimRuntime.iOS-26-5";
+
+/// Which simulator `sim` boots; each is created on first use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SimKind {
+    /// iPhone 17 Pro.
+    #[default]
+    Iphone,
+    /// iPad Pro 13-inch (M5): the tablet layout, pointer and hardware keyboard.
+    Ipad,
+}
+
+impl SimKind {
+    /// Simulator device name.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Iphone => "Slopty iPhone",
+            Self::Ipad => "Slopty iPad",
+        }
+    }
+
+    /// `simctl` device type.
+    const fn device_type(self) -> &'static str {
+        match self {
+            Self::Iphone => "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+            Self::Ipad => "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB",
+        }
+    }
+}
 
 /// iOS subcommands.
 #[derive(Subcommand, Debug)]
@@ -52,6 +76,9 @@ pub struct IosOpts {
     /// Device name or identifier for `device` (default: the first connected iPhone/iPad).
     #[arg(long)]
     device: Option<String>,
+    /// Which simulator `sim` uses (`SLOPTY_SIM_UDID` overrides both).
+    #[arg(long, value_enum, default_value_t)]
+    sim: SimKind,
 }
 
 /// One SDK flavour.
@@ -225,14 +252,21 @@ settings:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: Slopty finds your host on the local network.
         NSBonjourServices:
           - _slopty._udp
         CADisableMinimumFrameDurationOnPhone: true
+        UIApplicationSupportsIndirectInputEvents: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}
         PRODUCT_NAME: {PRODUCT}
+        TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEAD_CODE_STRIPPING: YES
         LIBRARY_SEARCH_PATHS:
@@ -262,7 +296,7 @@ settings:
 
 /// Boot the simulator (creating it on first use), install and launch with the console attached.
 fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
-    let udid = simulator_udid(sh)?;
+    let udid = simulator_udid(sh, opts.sim)?;
     let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().quiet();
     boot.run()?;
     step("open Simulator.app", &cmd!(sh, "open -a Simulator"))?;
@@ -276,24 +310,31 @@ fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
     )
 }
 
-/// The simulator to use: `SLOPTY_SIM_UDID`, else the device named [`SIM_NAME`], created if needed.
-fn simulator_udid(sh: &Shell) -> Result<String> {
+/// The simulator to use: `SLOPTY_SIM_UDID`, else the device named for `kind`, created if needed.
+fn simulator_udid(sh: &Shell, kind: SimKind) -> Result<String> {
     if let Ok(udid) = std::env::var("SLOPTY_SIM_UDID") {
         return Ok(udid);
     }
+    let name = kind.name();
     let list = cmd!(sh, "xcrun simctl list devices available").read()?;
-    for line in list.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(SIM_NAME)
-            && let Some((_, after)) = rest.split_once('(')
-            && let Some((udid, _)) = after.split_once(')')
-        {
-            return Ok(udid.to_owned());
-        }
+    if let Some(udid) = simulator_named(&list, name) {
+        return Ok(udid.to_owned());
     }
-    println!("▶ creating simulator {SIM_NAME:?}");
-    let udid = cmd!(sh, "xcrun simctl create {SIM_NAME} {SIM_DEVICE_TYPE} {SIM_RUNTIME}").read()?;
+    println!("▶ creating simulator {name:?}");
+    let device_type = kind.device_type();
+    let udid = cmd!(sh, "xcrun simctl create {name} {device_type} {SIM_RUNTIME}").read()?;
     Ok(udid.trim().to_owned())
+}
+
+/// The UDID of the device called exactly `name` in `simctl list devices` output.
+fn simulator_named<'a>(list: &'a str, name: &str) -> Option<&'a str> {
+    list.lines().map(str::trim).find_map(|line| {
+        let rest = line.strip_prefix(name)?;
+        let (_, after) = rest.trim_start().split_once('(')?;
+        // "Slopty iPhone (UDID) (Booted)": the name must end here, not run on ("Slopty iPhone 2").
+        rest.starts_with(' ').then_some(())?;
+        after.split_once(')').map(|(udid, _)| udid)
+    })
 }
 
 /// Install on a connected device via `devicectl` and launch with the console attached.
