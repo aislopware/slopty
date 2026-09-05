@@ -2211,18 +2211,42 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   carries `target_hidden`, set from `window_on_screen` at the **top** of every geometry tick —
   before `Transitions::settle`, which returns early while a swap is in flight and would otherwise
   leave the guard stale exactly when it is needed — and `on_frame` drops anything captured while
-  it is set, counting it as `ScreenStats::withheld`. In practice it catches 0–1 frames per hide,
-  which is the honest size of the hole. `ScreenStats` also gained `on_crop` (which path the stream
-  is on right now, as against `cropped`, which counts frames that came that way), because a test
-  cannot otherwise tell "left the crop" from "the desktop happens to be still".
-  Not changed: `window_on_screen` still reads `kCGWindowIsOnscreen`. Deciding it from membership
-  of the on-screen window list instead made no difference to any run, and a change to shared
-  capture semantics with no measurement behind it is not worth landing.
-  Test: `a_hidden_window_stops_being_served_from_its_crop` (`apps/slopty-hostd/tests/e2e.rs`,
-  gate `SLOPTY_SCREEN_E2E`), which drives visible → crop path → hide → show with the idle-window
-  helper and reads the host's counters over the control socket. The client's own frame count is
-  *not* the evidence: frames sent legitimately while the window was still up are still being
-  decoded seconds later, and asserting on them fails for the wrong reason.
+  it is set, counting it as `ScreenStats::withheld`. `ScreenStats` also gained `on_crop` (which
+  path the stream is on right now, as against `cropped`, which counts frames that came that way),
+  because a test cannot otherwise tell "left the crop" from "the desktop happens to be still",
+  and it is filled in one place (`Shared::stats`) so no reader can publish the counters' `false`
+  placeholder and report the window filter for a stream on the crop.
+  Not changed: `window_on_screen` still reads `kCGWindowIsOnscreen` — see the entry below for the
+  measurement that finally settles it.
+  Tests: `a_frame_captured_while_the_target_is_hidden_is_withheld` (unit, `slopty-host`) is the
+  statement — a frame handed to `on_frame` while the guard is set is counted as withheld and goes
+  no further, and it fails the moment the guard is removed. `a_hidden_window_stops_being_served_
+  from_its_crop` (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) drives visible →
+  crop path → hide → show for real, with a **second window repainting directly behind the
+  target**: without that backdrop the framework has no new frame for the rectangle once the
+  window goes, so every assertion about what is not sent passes for free. The client's own frame
+  count is *not* the evidence either: frames sent legitimately while the window was still up are
+  still being decoded seconds later, and asserting on them fails for the wrong reason.
+- ⏳ **A hide is ~270 ms late, and the crop sends that rectangle meanwhile** (2026-09-06, open).
+  With something repainting behind the target, the same test measures **12–15 crop frames sent
+  after AppKit ordered the window out** — not the zero the entry above reports, which was measured
+  against an empty rectangle. The cause is not this code: every way of asking CoreGraphics whether
+  a window is on screen keeps saying yes for **267–279 ms** after `orderOut` returns, measured by
+  a 2 ms probe as well as by the 100 ms geometry tick, and the window's own `kCGWindowIsOnscreen`
+  and membership of the on-screen list flip in the same millisecond as each other. So no polling
+  predicate can meet "within one geometry tick", and the guard above does not cover this gap
+  either — by the time the host knows, the framework has stopped on its own.
+  What bounds it today is the crop filter itself: it is
+  `initWithDisplay:includingApplications:exceptingWindows:` restricted to the target's **owning
+  application**, so in principle only that application's other windows can appear. The test does
+  not confirm that — its backdrop is a bare executable with no bundle identifier, and copying it
+  to a second path did not make ScreenCaptureKit treat it as a second application — so whether a
+  genuinely different app can appear in the crop is unresolved.
+  Not decided here, because it trades against a ruled measurement rather than fixing a mistake:
+  `CROP_WINDOWS` is on by default and buys ~6 ms of capture→decoded latency (2026-09-05, "capture
+  floor"). Turning it off closes this window at that cost; leaving it on accepts ~270 ms of the
+  owning application's other windows on every hide. The e2e keeps a ceiling of 30 frames on the
+  gap so a regression in detection cannot pass unnoticed.
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
   closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops

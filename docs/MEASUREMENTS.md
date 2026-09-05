@@ -1387,14 +1387,56 @@ then ordered out. Seven runs, mac-studio, debug build:
 | goes back onto the crop while hidden                   | never                     |
 | show → frames again                                    | every run                 |
 
-So the alarm raised in the previous section was false, and the real number is the one in the
-third row. The guard exists for the gap between the geometry tick deciding and ScreenCaptureKit
-acknowledging: it catches at most a frame, which is the size of that gap in practice.
+So the alarm raised in the previous section was false as it was written. **These numbers are a
+measurement of an empty rectangle, though, and the next section is what they look like once
+there is something behind the window to see.** With nothing but the desktop behind it,
+ScreenCaptureKit has no new frame to deliver for the crop once the window goes, so "frames
+encoded while the window is away: 0" says more about the wallpaper than about the host.
 
 The client's frame count is not usable as evidence here and the test does not assert on it: at
 the moment the host leaves the crop the client is still decoding the frames sent while the window
 was legitimately up, so its count keeps climbing for seconds afterwards for entirely honest
 reasons. Only the host's counters can distinguish the two.
+
+## 2026-09-06 — how late a hide is, and what the crop sends meanwhile
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e a_hidden_window_stops --no-capture
+```
+
+The same test with a **second window of the same kind directly behind the target, repainting**,
+so the rectangle the crop covers holds something that changes the moment the target is ordered
+out. That is the difference between the section above and this one, and it changes the answer.
+
+Timed from the helper's own report that AppKit ordered the window out (`isVisible()` false),
+five runs, mac-studio, debug build:
+
+| what                                                            | measured           |
+| ---------------------------------------------------------------- | ------------------ |
+| order out → the host sees the window off screen                 | **267–279 ms**     |
+| the host sees it → it has left the crop path                    | 1–20 ms            |
+| crop frames sent after the order and before the swap            | **0, 12, 13, 14, 15** |
+| frames encoded while the window is away (after the swap)        | 0                  |
+| frames withheld by the guard                                    | 0                  |
+
+The ~270 ms is not the geometry tick and not this code: the tick runs every 100 ms on the dot
+(traced), and a probe polling every 2 ms straight from the test measures the same. Both ways of
+asking CoreGraphics flip together — `kCGWindowIsOnscreen` on the window's own description and
+membership of the on-screen window list gave **269 / 269** and **279 / 279** ms in the same
+runs — so the lag is the WindowServer's, and asking harder does not help. (An earlier track
+changed this predicate from one to the other and reverted it for want of a measurement; this is
+that measurement, and it says the two are the same thing.)
+
+For that ~270 ms the display crop keeps sending the rectangle, which now holds the window
+behind. The guard withholds nothing, because by the time the host knows, the framework has
+already stopped: the guard covers the tick→acknowledgement gap, which is 1–20 ms here, and not
+this one. What the crop filter *does* bound is whose windows can be in it — it is
+`initWithDisplay:includingApplications:exceptingWindows:` restricted to the target's owning
+application — but that bound was not confirmed here: both helpers are bare executables with no
+bundle identifier, and the leak measured above says ScreenCaptureKit did not treat the copy at a
+second path as a second application. Whether a genuinely different bundled app can appear in the
+crop is still open.
 
 ## 2026-09-06 — stalls are not made by load
 

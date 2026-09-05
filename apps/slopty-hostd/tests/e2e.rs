@@ -1492,12 +1492,22 @@ mod tests {
         path
     }
 
+    /// Where both windows of the crop test open, in screen points from the bottom left: the same
+    /// place, so the one ordered in second covers the first exactly.
+    const CROP_ORIGIN: &str = "40,40";
+
     /// What a stream must never show: a window on the display-crop path that is hidden stops
     /// being served from that rectangle at once, so the viewer sees the picture stop rather than
     /// the desktop behind it.
     ///
     /// The target is this test's own window, visible and unobstructed so the host takes the crop
-    /// path, then ordered out. Gated on `SLOPTY_SCREEN_E2E`.
+    /// path, then ordered out. A second window of the same kind sits directly behind it, at the
+    /// same origin, repainting: while the target covers it the crop is a picture of the target,
+    /// and the moment the target is ordered out the same rectangle is a window that keeps
+    /// changing. That backdrop is what gives the test its teeth — without it ScreenCaptureKit has
+    /// nothing new to deliver for the rectangle once the target goes, so a stream that never
+    /// stopped looking at the crop would be indistinguishable from one that did.
+    /// Gated on `SLOPTY_SCREEN_E2E`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hidden_window_stops_being_served_from_its_crop() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
@@ -1505,12 +1515,31 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
+        let helper_bin = bin_of("slopty-e2e", "slopty-idle-window");
+        // The thing that must never reach the client, in the rectangle the crop covers.
+        let backdrop_markers = dir.path().join("backdrop");
+        std::fs::create_dir_all(&backdrop_markers).unwrap();
+        // A copy at another path, so ScreenCaptureKit sees a different application: the crop
+        // filter includes the target's own application only, and a second instance of the same
+        // executable would be that same application.
+        let backdrop_bin = dir.path().join("slopty-backdrop-window");
+        std::fs::copy(&helper_bin, &backdrop_bin).expect("copy the helper");
+        let mut backdrop = Command::new(&backdrop_bin)
+            .arg(&backdrop_markers)
+            .arg(format!("slopty backdrop {}", std::process::id()))
+            .arg(CROP_ORIGIN)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the backdrop window");
+        wait_for_marker(&backdrop_markers.join("ready"), "the backdrop window").await;
+
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
         let title = format!("slopty crop {}", std::process::id());
-        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+        let mut helper = Command::new(&helper_bin)
             .arg(&markers)
             .arg(&title)
+            .arg(CROP_ORIGIN)
             .kill_on_drop(true)
             .spawn()
             .expect("spawn the idle window");
@@ -1559,6 +1588,20 @@ mod tests {
         let asked = cropping.cropped;
         std::fs::write(markers.join("hide"), b"").unwrap();
         let hidden_at = std::time::Instant::now();
+        // When the window was really ordered out, as AppKit saw it: the marker is only a
+        // request, and everything measured below is measured from the act, not the asking.
+        let ordered_out = loop {
+            if std::fs::read_to_string(markers.join("state"))
+                .is_ok_and(|s| s.starts_with("hide visible=false"))
+            {
+                break std::time::Instant::now();
+            }
+            assert!(hidden_at.elapsed() < Duration::from_secs(5), "the helper never hid");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        let at_order = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+            .await
+            .expect("the stream is still live");
         let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop).await;
         let swap_ms = hidden_at.elapsed().as_millis();
         let swapped = swapped
@@ -1567,16 +1610,35 @@ mod tests {
         // asking the window to go and the swap, most of which are still of the visible window
         // (the helper takes up to its own tick to order out, and the WindowServer a moment more).
         let between = swapped.cropped.saturating_sub(asked);
+        // What the client could conceivably have seen of the backdrop: crop frames sent after
+        // AppKit says the window was ordered out. Everything before that is a picture of the
+        // window, which is what the client asked for.
+        let after_order = swapped.cropped.saturating_sub(at_order.cropped);
         eprintln!(
-            "hide: filter after {swap_ms} ms, {between} cropped frames sent in between, \
-             {} withheld",
-            swapped.withheld
+            "hide: ordered out after {} ms, filter {} ms later, {between} cropped frames in \
+             between and {after_order} of them after the order, {} withheld",
+            (ordered_out - hidden_at).as_millis(),
+            swap_ms.saturating_sub((ordered_out - hidden_at).as_millis()),
+            swapped.withheld.saturating_sub(cropping.withheld),
+        );
+
+        // A ceiling on a gap this layer cannot close, not the rule. Every way of asking the
+        // WindowServer whether a window is on screen keeps saying yes for ~270 ms after AppKit
+        // has ordered it out (MEASUREMENTS.md, "how late a hide is"), and a display crop keeps
+        // delivering that rectangle throughout: ~370 ms of crop frames at 60 Hz, 12-17 measured.
+        // The bound is what a regression would have to beat; the statement that no frame gets
+        // through once the host does know is the unit test
+        // (`a_frame_captured_while_the_target_is_hidden_is_withheld`), not this.
+        assert!(
+            after_order <= 30,
+            "{after_order} crop frames were sent after the window was ordered out: {swapped:?}"
         );
 
         // Nothing more is captured for the client while the window is away: not from the crop
-        // (the rectangle now holds the desktop) and not from the window filter (there is no
-        // window). The count is the host's, so it does not race the client decoding the frames
-        // that were legitimately sent while the window was still up.
+        // (the rectangle now holds the backdrop, which is repainting throughout, so a stream
+        // still on the crop would have plenty to send) and not from the window filter (there is
+        // no window). The count is the host's, so it does not race the client decoding the
+        // frames that were legitimately sent while the window was still up.
         let settled = swapped;
         tokio::time::sleep(Duration::from_secs(2)).await;
         let after = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
@@ -1596,6 +1658,8 @@ mod tests {
 
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
+        std::fs::write(backdrop_markers.join("quit"), b"").unwrap();
+        let _backdrop_stopped = backdrop.wait().await;
         drop(screen);
         link.close();
         endpoint.close().await;

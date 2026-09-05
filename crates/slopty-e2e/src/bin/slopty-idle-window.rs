@@ -7,7 +7,7 @@
 //! the target has to be on screen when it is listed and off screen when the stream opens, and no
 //! window this session does not own may be touched.
 //!
-//! So it owns one. `slopty-idle-window <dir> <title>` opens a small window with that title,
+//! So it owns one. `slopty-idle-window <dir> <title> [x,y]` opens a small window with that title,
 //! orders it in (without taking the keyboard: `orderFrontRegardless`, never `makeKey`) and then
 //! watches `<dir>` for one-word markers:
 //!
@@ -19,6 +19,11 @@
 //! * `quit` — leave.
 //!
 //! It writes `ready` into `<dir>` once the window is up.
+//!
+//! The optional origin is for the crop-path test, which needs a second one of these directly
+//! behind the target: while the target covers it the crop shows the target, and the moment the
+//! target is ordered out the same rectangle is a window that keeps repainting — which is what
+//! makes a leak from the crop something the host has a frame to leak.
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), String> {
@@ -45,13 +50,21 @@ mod macos {
     const TICK: f64 = 0.05;
     /// Content size in points. Small: it is on screen for as long as the picker takes to list it.
     const SIZE: NSSize = NSSize { width: 240.0, height: 160.0 };
-    /// Where it opens, in screen points from the bottom left.
+    /// Where it opens by default, in screen points from the bottom left.
     const ORIGIN: NSPoint = NSPoint { x: 40.0, y: 40.0 };
 
     pub fn run() -> Result<(), String> {
         let mut args = std::env::args().skip(1);
         let (Some(dir), Some(title)) = (args.next(), args.next()) else {
-            return Err("usage: slopty-idle-window <marker-dir> <title>".to_owned());
+            return Err("usage: slopty-idle-window <marker-dir> <title> [x,y]".to_owned());
+        };
+        let origin = match args.next() {
+            None => ORIGIN,
+            Some(pair) => {
+                let (x, y) = pair.split_once(',').ok_or_else(|| format!("origin {pair}"))?;
+                let read = |s: &str| s.parse::<f64>().map_err(|e| format!("origin {pair}: {e}"));
+                NSPoint { x: read(x)?, y: read(y)? }
+            }
         };
         let dir = PathBuf::from(dir);
         let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_owned())?;
@@ -63,7 +76,7 @@ mod macos {
         // pumps the main run loop itself below.
         app.finishLaunching();
 
-        let frame = NSRect { origin: ORIGIN, size: SIZE };
+        let frame = NSRect { origin, size: SIZE };
         // SAFETY: the designated `NSWindow` initialiser; every argument is a plain value and the
         // window is created and used on the main thread (AppKit, `NSWindow`).
         let window = unsafe {
