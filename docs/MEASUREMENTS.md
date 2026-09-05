@@ -996,6 +996,46 @@ desktop, and driving the app's own UI to make it draw is the app self-test's job
 over the mesh, and group parity shared across consecutive small frames (not implemented — the
 minimum measured well enough not to need a wire change).
 
+## 2026-09-06 — the apply path under a 20-shell flood (mac-studio, e2e app build)
+
+Applying host frames was 31 % of the main thread in the table below, 16 % of it
+`Vec<Cell>::clone`: the client copied every row it received so the same line could sit in both
+the screen and the scrollback. It no longer copies — both hold `Arc<Line>` and applying a row
+makes one allocation (DECISIONS, Canvas → performance).
+
+```
+cargo build -p slopty --bin slopty-app          # the harness launches this binary; nextest does not rebuild it
+SLOPTY_SMOOTH_E2E=1 SLOPTY_SMOOTH_SHELLS=20 cargo nextest run -p slopty-e2e --test smooth \
+  --test-threads 1 --no-capture -E 'test(twenty_streaming)'
+sample $(pgrep -n -x slopty-app) 10 -file /tmp/sample-<tag>.raw    # 4 s after the run starts
+```
+
+Share of main-thread samples, paired runs on a quiet machine (`pgrep -f rustc | wc -l` ≤ 6,
+`/tmp/sample-before10.raw`, `/tmp/sample-after10.raw`; each 10 s, ~5 000 samples):
+
+| stage | draw | shaping | applying host frames | of which `Vec<Cell>::clone` | of which scrollback |
+| --- | --- | --- | --- | --- | --- |
+| before (line copied into both) | 20.3 % | 4.2 % | **14.8 %** | 6.8 % | 5.9 % |
+| after (`Arc<Line>` shared) | 10.4 % | 1.7 % | **4.2 %** | 0.0 % | 3.8 % |
+
+Only the apply column is attributable: draw and shaping move with the phase the sample lands in
+and are quoted for context, not as a result. Frame times over the same runs
+(`draw p50 / p95 / p99 / max ms · frames, over 16.7 ms`) are noise-dominated at this machine's
+load — pan before 2.4 / 13.1 / 25.5 / 82.9 · 233, 5 over; after 2.3 / 10.0 / 21.9 / 272.6 · 271,
+4 over — six alternating runs of each build overlapped completely, so the sample is the evidence
+and the frame numbers are not.
+
+**The scrollback container was measured and left alone.** A `VecDeque` ring over
+`[base, base + capacity)` with holes replaced the `BTreeMap` in a working build; two more paired
+samples gave apply 4.2 % / 6.2 % (map) against 7.3 % / 5.0 % (ring) — the same number twice over.
+The profile says why: what `insert_shared` spends its time on is `Arc::drop_slow` freeing the
+line that fell out of the cache, which both containers pay identically. The "B-tree churn" of the
+2026-09-05 note was that same free, seen under the `pop_first` frame it happened in.
+
+One copy nobody had measured went with the same commit: `Scrollback::set_extent` ran `split_off`
+on **every frame**, rebuilding the map whether or not the host had dropped a line. It now splits
+only when `oldest` advances.
+
 ## 2026-09-05 — canvas frame time under streaming load (mac-studio, e2e app build)
 
 The app times its own draws (`slopty_ui::frames`: `begin` at the top of `Workspace::render`,

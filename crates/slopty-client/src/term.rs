@@ -459,7 +459,7 @@ mod tests {
         let mut s = TermState::new(size());
         s.apply(TermEvent::Frame(frame(1, true, 0, 100, 103, &[(0, "one"), (1, "two")])));
 
-        let on_screen = s.screen().lines().first().expect("row 0").clone();
+        let on_screen = std::sync::Arc::clone(s.screen().lines().first().expect("row 0"));
         let in_history = s.scrollback().shared(LineIndex(100)).expect("cached at its index");
         assert!(
             std::sync::Arc::ptr_eq(&on_screen, &in_history),

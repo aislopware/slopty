@@ -420,10 +420,32 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   zoom 1.1–1.5 → 1.1–1.3 ms; the p99 / max of the zoom cycle stayed over 16.7 ms on every tree
   (prepaint over twenty visible grids plus the flood, on a machine that was never idle), so
   the smooth guard gains **no zoom limit** for now.
-- 🔬 **Not done, with the numbers that would justify it**: sharing a `Line` between screen and
-  scrollback (`Arc<Line>`) instead of copying it — applying the flood is a third of the main
-  thread during the zoom (`Vec<Cell>` copies 15 %, `slopty_grid` drops 10 %), the largest
-  remaining cost now that the zoom shapes nothing.
+- ✅ **A line is shared between the screen and the scrollback** (2026-09-06, measured). Both hold
+  `Arc<Line>`; applying a row makes one allocation and puts it in both, so a row that scrolls off
+  the screen into history is moved, never copied. Every accessor still hands out `&Line`, so the
+  painter and the wire are untouched. `Screen::resize` is the one place that has to diverge, and
+  it uses `Arc::make_mut`, which copies only a row history also holds and only on a resize.
+  Measured with 20 flooding shells (MEASUREMENTS, same date): applying host frames went from
+  **14.8 % to 4.2 %** of the main thread and `Vec<Cell>::clone` from **6.8 % to 0 %**. The same
+  change fixed a second copy nobody had measured: `Scrollback::set_extent` ran `split_off` on
+  every frame, rebuilding the map whether or not the host had dropped anything; it now splits
+  only when `oldest` actually advances.
+- ❌ **A `VecDeque` ring instead of the scrollback's `BTreeMap`** (2026-09-06, measured, not
+  taken). Written and measured: a ring of `capacity` slots over `[base, base + capacity)` with
+  holes for what has not arrived. Two paired 10-second samples put it inside the map's own
+  spread — apply 4.2 % / 6.2 % with the map against 7.3 % / 5.0 % with the ring — because the
+  container was never the cost. What the profile actually shows inside `insert_shared` is
+  `Arc::drop_slow` freeing the evicted line's `Vec<Cell>`, which both containers pay identically;
+  the "B-tree churn" in the earlier note was that same drop, attributed to the `pop_first` frame
+  it happened under. Against no win the ring costs behaviour: the map holds two disjoint regions
+  (the live tail and a history range the user scrolled to and fetched), and a single contiguous
+  ring has to re-base and drop one of them. `missing()` exists precisely because the cache is
+  sparse.
+- 🔬 **Not done, with the numbers that would justify it**: size-independent glyph painting (shape
+- 🔬 **What is left of the apply path** (2026-09-06): freeing an evicted line, ~4 % of the main
+  thread under a 20-shell flood; a line-buffer pool would be the next step and is not worth it
+  at that size. The two earlier 🔬 items here (the shared line, size-independent glyph
+  painting) are the ✅ rulings above.
 
 ## Terminal
 
