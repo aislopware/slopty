@@ -10,12 +10,14 @@
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
+//! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
 pub mod a11y;
 pub mod canvas;
 pub mod colors;
 pub mod fonts;
+pub mod frames;
 pub mod keys;
 pub mod kit;
 pub mod note;

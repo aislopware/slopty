@@ -266,6 +266,9 @@ pub struct CanvasView {
     picker: Option<Entity<WindowPicker>>,
     /// A `List` is in flight for the picker.
     picker_wanted: bool,
+    /// The next listing adds its first display straight away (the self-test socket's way
+    /// to put a remote display on the canvas without the picker).
+    display_wanted: bool,
     /// The stats overlay is on (applies to windows opened later too).
     show_stats: bool,
     /// Latest link RTT, handed to windows opened later.
@@ -338,6 +341,7 @@ impl CanvasView {
             open_screen,
             picker: None,
             picker_wanted: false,
+            display_wanted: false,
             show_stats: false,
             rtt: None,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
@@ -802,6 +806,15 @@ impl CanvasView {
         match event {
             ScreenEvent::Listing { windows, displays } => {
                 self.fill_titles(&windows);
+                if std::mem::take(&mut self.display_wanted)
+                    && let Some(d) = displays.first()
+                {
+                    self.add_screen_item(
+                        CaptureTarget::Display(d.id),
+                        (d.w, d.h),
+                        format!("display {}", d.id),
+                    );
+                }
                 if self.picker_wanted {
                     self.picker_wanted = false;
                     self.show_picker(windows, displays, cx);
@@ -1197,6 +1210,13 @@ impl CanvasView {
         self.open_session(vec![AGENT_COMMAND.to_owned()], Some(AGENT_COMMAND.to_owned()), cx);
     }
 
+    /// Open a session running `command` (the login shell when empty), titled after its
+    /// program; the host places it. The self-test socket's way to put load on the canvas.
+    pub fn open_command(&self, command: Vec<String>, cx: &mut Context<Self>) {
+        let title = command.first().cloned();
+        self.open_session(command, title, cx);
+    }
+
     fn open_session(&self, command: Vec<String>, title: Option<String>, cx: &mut Context<Self>) {
         tracing::debug!(?command, "open session");
         self.send(ClientMsg::OpenSession(OpenSession {
@@ -1272,6 +1292,13 @@ impl CanvasView {
     /// sessions, agents first, to jump to).
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         self.picker_wanted = true;
+        self.send(ClientMsg::Screen(ScreenRequest::List));
+        cx.notify();
+    }
+
+    /// Add the host's first display as an item, as picking it in the picker would.
+    pub fn add_first_display(&mut self, cx: &mut Context<Self>) {
+        self.display_wanted = true;
         self.send(ClientMsg::Screen(ScreenRequest::List));
         cx.notify();
     }
@@ -1439,6 +1466,26 @@ impl CanvasView {
             let handle = view.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+    }
+
+    /// Whether `item` gets an element this frame: it overlaps the viewport, or it is the active
+    /// item or the one under a drag. Before the first paint the viewport is unknown and
+    /// everything draws.
+    fn draws(&self, item: &CanvasItem) -> bool {
+        let (_, vp) = self.viewport;
+        let (w, h) = (f32::from(vp.width), f32::from(vp.height));
+        if w <= 0.0 || h <= 0.0 || self.active == Some(item.id) {
+            return true;
+        }
+        let dragged = match self.drag {
+            Some(Drag::Move { id, .. } | Drag::Resize { id, .. }) => id == item.id,
+            _ => false,
+        };
+        if dragged {
+            return true;
+        }
+        let s = self.camera.to_screen(item.rect);
+        s.x < w && s.y < h && s.x + s.w > 0.0 && s.y + s.h > 0.0
     }
 
     fn click_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
@@ -1889,8 +1936,14 @@ impl Render for CanvasView {
         .inset_0();
 
         let empty = self.is_empty();
-        let rendered: Vec<gpui::AnyElement> =
-            items.iter().map(|item| self.render_item(item, window, cx)).collect();
+        // Only what the viewport shows is built: an off-screen terminal's element would still
+        // shape and lay out every row. The active item and the one being dragged always are,
+        // so focus and a drag never land on an element that was not drawn.
+        let rendered: Vec<gpui::AnyElement> = items
+            .iter()
+            .filter(|item| self.draws(item))
+            .map(|item| self.render_item(item, window, cx))
+            .collect();
         let minimap = (!empty).then(|| self.render_minimap(cx));
         div()
             .id("canvas")
@@ -2699,5 +2752,39 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds(selector("agent", item)).is_none(), "{item:?}");
+    }
+
+    #[gpui::test]
+    fn items_outside_the_viewport_are_not_drawn_unless_active(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let near = host_opens(&view, cx, a, me, SHELL, 1);
+        let far_rect = Rect { x: 5000.0, y: 5000.0, ..SHELL };
+        let far = host_opens(&view, cx, b, me, far_rect, 2);
+        // The newest item is active, so it is drawn even though it is off-screen.
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(far));
+        assert!(cx.debug_bounds(selector("item", near)).is_some(), "near item drawn");
+        assert!(cx.debug_bounds(selector("item", far)).is_some(), "active item drawn off-screen");
+
+        // Activate the near one and look at it: the far one leaves the tree.
+        view.update(cx, |c, cx| {
+            c.activate(near, cx);
+            c.camera = Camera { x: 0.0, y: 0.0, zoom: 1.0 };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("item", near)).is_some());
+        assert!(cx.debug_bounds(selector("item", far)).is_none(), "off-screen item culled");
+
+        // Pan the camera onto it and make it active: it is drawn again, and the near one,
+        // neither visible nor active, is culled in turn.
+        view.update(cx, |c, cx| {
+            c.camera.pan(-5000.0, -5000.0);
+            c.activate(far, cx);
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds(selector("item", far)).expect("far item drawn after the pan");
+        assert!(f32::from(bounds.origin.x) < VIEWPORT.0, "{bounds:?}");
+        assert!(cx.debug_bounds(selector("item", near)).is_none(), "near item is off-screen now");
     }
 }

@@ -27,7 +27,7 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::terminal::conversation::{Attention, Conversation};
 use crate::terminal::element::{CellMetrics, TerminalElement};
-use crate::terminal::url;
+use crate::terminal::{latency, url};
 
 /// Hits asked for per search; the host counts every hit regardless.
 const SEARCH_MAX: u32 = 5_000;
@@ -172,6 +172,8 @@ pub struct TerminalView {
     font_family: Option<String>,
     zoom: f32,
     predictor: Predictor,
+    /// Keystroke → paint, predicted and echoed (see [`latency`]).
+    latency: latency::KeyLatency,
     /// Text an input method is composing at the cursor (Telex, kana, …), not yet sent.
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
@@ -246,6 +248,7 @@ impl TerminalView {
             font_family: None,
             zoom: 1.0,
             predictor: Predictor::new(policy_from_env()),
+            latency: latency::KeyLatency::default(),
             marked: None,
             sticky_control: false,
             sticky_command: false,
@@ -852,6 +855,17 @@ impl TerminalView {
         Some((pending, self.predictor.cursor(self.state.cursor())))
     }
 
+    /// The element painted a frame: `predicting` says whether the local-echo overlay was up.
+    pub fn painted(&mut self, predicting: bool) {
+        self.latency.painted(Instant::now(), predicting, self.state.input_ack());
+    }
+
+    /// Keystroke → paint percentiles (see [`latency`]).
+    #[must_use]
+    pub fn latency(&self) -> latency::LatencyStats {
+        self.latency.stats()
+    }
+
     /// Lifetime prediction hits and misses.
     #[must_use]
     pub const fn prediction_stats(&self) -> (u64, u64) {
@@ -894,12 +908,14 @@ impl TerminalView {
         if self.state.view_offset() != 0 {
             self.state.scroll_to_bottom();
         }
+        let now = Instant::now();
+        self.latency.pressed(self.key_seq, now);
         let _guess = self.predictor.on_key(
             &key,
             self.state.cursor(),
             self.state.size().cols,
             self.state.modes(),
-            Instant::now(),
+            now,
         );
         self.send(TermRequest::Key(key));
         cx.notify();
@@ -1696,6 +1712,48 @@ mod tests {
         cx.simulate_keystrokes("cmd-down");
         assert_eq!(top_line(&view, cx), LineIndex(6), "the newest prompt cannot go higher");
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
+    }
+
+    /// The shaped-word cache: three rows made of two words shape two entries, another frame
+    /// with the same words shapes nothing new, and a new word adds one.
+    #[gpui::test]
+    fn words_are_shaped_once_across_rows_and_frames(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let frame = |seq, rows: [&str; 3]| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                updates: rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, text)| RowUpdate {
+                        row: u16::try_from(row).unwrap(),
+                        line: Line::from_text(text, 10, Style::DEFAULT),
+                    })
+                    .collect(),
+            })
+        };
+        view.update_in(cx, |view, _window, cx| view.apply(frame(1, ["foo bar", "bar", "foo"]), cx));
+        cx.run_until_parked();
+        let words = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::terminal::element::cached_words(cx))
+        };
+        assert_eq!(words(cx), 2, "foo and bar");
+        view.update_in(cx, |view, _window, cx| view.apply(frame(2, ["bar foo", "foo", "bar"]), cx));
+        cx.run_until_parked();
+        assert_eq!(words(cx), 2, "the same words in other places shape nothing");
+        view.update_in(cx, |view, _window, cx| view.apply(frame(3, ["bar foo", "baz", ""]), cx));
+        cx.run_until_parked();
+        assert_eq!(words(cx), 3, "baz is new; foo and bar are kept");
     }
 
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.

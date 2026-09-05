@@ -1,10 +1,13 @@
 //! `TerminalElement`: paints a `TermState` as cell-aligned text runs and quads.
 //!
 //! Per row: one shaped line with a run per style change, background quads for non-default
-//! backgrounds, and the cursor. Shaping is cached by row content hash across frames.
+//! backgrounds, and the cursor. Shaping is cached across frames and views by the content hash
+//! of each word (a row split at its plain spaces), so a word shaped once serves every row it
+//! appears in.
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
+use std::rc::Rc;
 
 use gpui::{
     App, BorrowAppContext as _, Bounds, DispatchPhase, Element, ElementId, ElementInputHandler,
@@ -12,7 +15,7 @@ use gpui::{
     LayoutId, LongPressEvent, Pixels, Point, ShapedLine, SharedString, Size, Style, TextAlign,
     TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
 };
-use slopty_grid::{CursorShape, Line, Style as CellStyle, StyleFlags, Underline};
+use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
 use slopty_theme::{TerminalPalette, Theme, alpha};
 
@@ -103,6 +106,8 @@ pub struct Prepared {
     link: Hsla,
     /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
+    /// The overlay carries predictions (not only a composition).
+    predicting: bool,
 }
 
 #[derive(Debug)]
@@ -111,7 +116,8 @@ struct PreparedRow {
     quads: Vec<(u16, u16, Hsla)>,
     /// Underlines and strikethroughs, at ghostty's offsets rather than GPUI's.
     decorations: Vec<Decoration>,
-    line: ShapedLine,
+    /// The row's words, each shaped on its own and placed at its start column.
+    segments: Vec<(u16, Rc<ShapedLine>)>,
     /// Columns of the link under a ⌘-hover, underlined over the text.
     link: Option<(u16, u16)>,
     /// Colour of the command-block separator drawn along the row's top edge.
@@ -204,20 +210,57 @@ impl IntoElement for TerminalElement {
     }
 }
 
-/// Shaped-line cache keyed by (row text + styles) hash, kept on the App as a global so it
-/// survives across frames and views.
+/// Shaped-word cache keyed by (text + styles + size + palette) hash, kept on the App as a
+/// global so it survives across frames and views.
 #[derive(Default)]
 struct ShapeCache {
-    lines: HashMap<u64, ShapedLine>,
+    lines: HashMap<u64, Rc<ShapedLine>>,
     generation: u64,
     touched: HashMap<u64, u64>,
+    /// The frame the last sweep ran in, so twenty terminals in one frame sweep once.
+    frame: Option<u64>,
+    /// The derived grid per (family, font size, scale, line-height multiplier): deriving it
+    /// walked the font system every frame for nothing.
+    grids: HashMap<(String, u32, u32, u32), (Grid, metrics::Metrics)>,
 }
 
 impl gpui::Global for ShapeCache {}
 
 impl ShapeCache {
-    /// Drop entries not used in the last two generations.
-    fn sweep(&mut self) {
+    /// The cell geometry for `family` at `font_size` on this window (see [`measure`]).
+    fn grid(
+        &mut self,
+        window: &Window,
+        family: &str,
+        font: &Font,
+        font_size: Pixels,
+        height_mult: f32,
+    ) -> (Grid, metrics::Metrics) {
+        let key = (
+            family.to_owned(),
+            f32::from(font_size).to_bits(),
+            window.scale_factor().to_bits(),
+            height_mult.to_bits(),
+        );
+        if let Some(grid) = self.grids.get(&key) {
+            return *grid;
+        }
+        let (grid, derived, _font_id) = measure(window, font, font_size, height_mult);
+        self.grids.insert(key, (grid, derived));
+        (grid, derived)
+    }
+
+    /// Drop entries not used in the last two generations. A generation is a frame when the
+    /// frame probe counts them (`frame`), else one call: without the frame index every
+    /// element's prepaint would be a generation and four terminals on screen would evict each
+    /// other's rows every frame.
+    fn sweep(&mut self, frame: Option<u64>) {
+        if let Some(frame) = frame {
+            if self.frame == Some(frame) {
+                return;
+            }
+            self.frame = Some(frame);
+        }
         self.generation = self.generation.wrapping_add(1);
         let keep_after = self.generation.saturating_sub(2);
         self.touched.retain(|_, g| *g >= keep_after);
@@ -226,26 +269,121 @@ impl ShapeCache {
     }
 }
 
-/// Key of a shaped row: everything the shaped runs bake in (text, styles, size, family and
-/// the palette the styles were resolved through), so a theme swap never replays old colours.
-fn row_hash(
-    line: &Line,
-    focused: bool,
-    font_size: Pixels,
-    family: &str,
-    palette: &TerminalPalette,
-) -> u64 {
+/// The part of a shaped word's key that is the same for every word of a view this frame:
+/// size, family and the palette the styles were resolved through, so a theme swap never
+/// replays old colours.
+fn hash_base(focused: bool, font_size: Pixels, family: &str, palette: &TerminalPalette) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     focused.hash(&mut h);
     f32::from(font_size).to_bits().hash(&mut h);
     family.hash(&mut h);
     palette.hash(&mut h);
-    for cell in &line.cells {
+    h.finish()
+}
+
+/// Key of a shaped word: the base plus everything the shaped runs bake in (text, styles).
+fn segment_hash(base: u64, cells: &[Cell]) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    base.hash(&mut h);
+    for cell in cells {
         cell.text.as_str().hash(&mut h);
         cell.style.hash(&mut h);
         (cell.width as u8).hash(&mut h);
     }
     h.finish()
+}
+
+/// A cell whose shaped run paints nothing: a narrow blank without a curly underline (its
+/// background is a quad and a straight underline or strikethrough is a [`Decoration`], both
+/// drawn from the cells, not from the run). Rows are split into words at these.
+fn plain_space(cell: &Cell) -> bool {
+    cell.width == CellWidth::Narrow
+        && matches!(cell.text.as_str(), "" | " ")
+        && cell.style.underline != Underline::Curly
+}
+
+/// A cell shaped on its own: a digit. Counters, timestamps and sizes make most of a streaming
+/// row's unique text, and no coding font ligates digits, so each digit is one cached glyph
+/// instead of a fresh word every frame. A curly-underlined digit stays in its word so GPUI
+/// draws the wave in one piece.
+fn stands_alone(cell: &Cell) -> bool {
+    cell.width == CellWidth::Narrow
+        && cell.text.as_ascii().is_some_and(|b| b.is_ascii_digit())
+        && cell.style.underline != Underline::Curly
+}
+
+/// The words of a row: maximal runs of cells that are not plain spaces, digits on their own,
+/// with the column each starts at. Positions inside a word come from its cluster index, so a
+/// word shapes the same wherever it sits.
+fn segments(cells: &[Cell]) -> Vec<(u16, &[Cell])> {
+    let col = |i: usize| u16::try_from(i).unwrap_or(u16::MAX);
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, cell) in cells.iter().enumerate() {
+        let space = plain_space(cell);
+        let alone = stands_alone(cell);
+        if (space || alone)
+            && let Some(s) = start.take()
+            && let Some(word) = cells.get(s..i)
+        {
+            out.push((col(s), word));
+        }
+        if alone {
+            if let Some(digit) = cells.get(i..=i) {
+                out.push((col(i), digit));
+            }
+        } else if !space && start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(word) = start.and_then(|s| cells.get(s..).map(|w| (s, w))) {
+        out.push((col(word.0), word.1));
+    }
+    out
+}
+
+/// Shape one word of `cells` (wide cells followed by a spacer so advances line up under the
+/// forced cell width).
+fn shape_cells(
+    text_system: &gpui::WindowTextSystem,
+    cells: &[Cell],
+    font_size: Pixels,
+    grid: &Grid,
+    family: &str,
+    palette: &TerminalPalette,
+) -> ShapedLine {
+    let mut text = String::with_capacity(cells.len());
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut current: Option<(CellStyle, usize)> = None;
+    for cell in cells {
+        if !cell.width.draws_text() {
+            continue;
+        }
+        let piece: &str = if cell.text.is_empty() { " " } else { cell.text.as_str() };
+        text.push_str(piece);
+        let mut len = piece.len();
+        if cell.width.columns() == 2 && piece.chars().count() == 1 {
+            // shape_line forces per-glyph width; a wide glyph gets one cell, so add a spacer
+            // cell after it.
+            text.push(' ');
+            len = len.saturating_add(1);
+        }
+        match &mut current {
+            Some((style, acc)) if *style == cell.style => {
+                *acc = acc.saturating_add(len);
+            }
+            _ => {
+                if let Some((style, acc)) = current.take() {
+                    runs.push(text_run(acc, family, &style, palette, grid.underline));
+                }
+                current = Some((cell.style, len));
+            }
+        }
+    }
+    if let Some((style, acc)) = current.take() {
+        runs.push(text_run(acc, family, &style, palette, grid.underline));
+    }
+    text_system.shape_line(SharedString::from(text), font_size, &runs, Some(grid.cell_width))
 }
 
 fn mono_font(family: &str, style: &CellStyle) -> Font {
@@ -431,53 +569,33 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepared {
-        let (theme, rows_view, cursor, view_offset, modes, known_family, predicted, marked) = {
-            let view = self.view.read(cx);
-            let state = view.state();
-            let rows: Vec<Option<Line>> =
-                state.view().into_iter().map(|r| r.line.cloned()).collect();
-            let predicted = view.predictions();
-            (
-                view.theme().clone(),
-                rows,
-                predicted.as_ref().map_or_else(|| state.cursor(), |(_, c)| *c),
-                state.view_offset(),
-                state.modes(),
-                view.font_family().map(str::to_owned),
-                predicted.map(|(p, _)| p).unwrap_or_default(),
-                view.marked().map(str::to_owned),
-            )
-        };
-        let (selection, top_index, grid_cols, hits, link) = {
-            let view = self.view.read(cx);
-            let hits = view
-                .search_highlights()
-                .map(|(matches, current)| (matches.to_vec(), current))
-                .unwrap_or_default();
-            (
-                view.selection(),
-                view.state().index_at_row(0),
-                view.state().size().cols,
-                hits,
-                view.link_highlight(),
-            )
-        };
-        let palette = &theme.terminal;
         // Resolving the family walks every installed font; do it once per view.
+        let known_family = self.view.read(cx).font_family().map(str::to_owned);
         let family = known_family.unwrap_or_else(|| {
-            let picked = pick_family(window, &theme.typography.mono_families);
+            let candidates = self.view.read(cx).theme().typography.mono_families.clone();
+            let picked = pick_family(window, &candidates);
             self.view.update(cx, |view, _cx| view.set_font_family(picked.clone()));
             picked
         });
+        if !cx.has_global::<ShapeCache>() {
+            cx.set_global(ShapeCache::default());
+        }
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
+        let (base_size, height_mult, base_pad) = {
+            let theme = self.view.read(cx).theme();
+            (
+                px(theme.typography.mono_size),
+                theme.typography.mono_line_height,
+                px(theme.spacing.sm),
+            )
+        };
+        // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
+        // cell is derived once per family, size and scale, not once per frame.
         let base_font = fonts::terminal_font(&family, false, false);
-        // Grid size comes from the unscaled geometry so zooming never resizes the PTY.
-        let base_size = px(theme.typography.mono_size);
-        let height_mult = theme.typography.mono_line_height;
-        let (base_grid, base_derived, _font_id) =
-            measure(window, &base_font, base_size, height_mult);
+        let (base_grid, base_derived) = cx.update_global::<ShapeCache, _>(|cache, _| {
+            cache.grid(window, &family, &base_font, base_size, height_mult)
+        });
         let (base_cell_width, base_line_height) = (base_grid.cell_width, base_grid.line_height);
-        let base_pad = px(theme.spacing.sm);
         let unscaled = size(bounds.size.width / zoom, bounds.size.height / zoom);
         let inner = size(unscaled.width - base_pad * 2.0, unscaled.height - base_pad * 2.0);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≥ 1 clamped")]
@@ -511,34 +629,54 @@ impl Element for TerminalElement {
         };
         self.view.update(cx, |view, cx| view.fitted(fitted, metrics, cx));
 
-        if !cx.has_global::<ShapeCache>() {
-            cx.set_global(ShapeCache::default());
-        }
-        let focused = self.focused;
-        let mut prepared_rows = Vec::with_capacity(rows_view.len());
+        // Shaping reads the view's rows in place (no copy of the grid per frame) while the
+        // cache is out of the app: put it back before anything else touches `cx`.
+        let mut cache = std::mem::take(cx.global_mut::<ShapeCache>());
         let text_system = std::sync::Arc::clone(window.text_system());
-        cx.update_global::<ShapeCache, _>(|cache, _cx| {
-            cache.sweep();
-            for (i, line) in rows_view.iter().enumerate() {
+        let focused = self.focused;
+        let prepared = {
+            let view = self.view.read(cx);
+            let theme = view.theme();
+            let palette = &theme.terminal;
+            let state = view.state();
+            let rows_view = state.view();
+            let predicted = view.predictions();
+            let cursor = predicted.as_ref().map_or_else(|| state.cursor(), |(_, c)| *c);
+            let view_offset = state.view_offset();
+            let modes = state.modes();
+            let marked = view.marked();
+            let selection = view.selection();
+            let top_index = state.index_at_row(0);
+            let grid_cols = state.size().cols;
+            let (matches, current) = view.search_highlights().unwrap_or((&[], None));
+            let link = view.link_highlight();
+
+            cache.sweep(crate::frames::index(cx));
+            let base = hash_base(focused, font_size, &family, palette);
+            // Rows above the oldest line the host still has: a `~` filler, shaped once.
+            let mut filler: Option<Rc<ShapedLine>> = None;
+            let mut prepared_rows = Vec::with_capacity(rows_view.len());
+            for (i, row) in rows_view.iter().enumerate() {
                 let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
-                let Some(line) = line else {
-                    prepared_rows.push(PreparedRow {
-                        y,
-                        quads: Vec::new(),
-                        decorations: Vec::new(),
-                        line: text_system.shape_line(
+                let Some(line) = row.line else {
+                    let filler = filler.get_or_insert_with(|| {
+                        Rc::new(text_system.shape_line(
                             "~".into(),
                             font_size,
                             &[text_run(1, &family, &CellStyle::DEFAULT, palette, grid.underline)],
                             Some(cell_width),
-                        ),
+                        ))
+                    });
+                    prepared_rows.push(PreparedRow {
+                        y,
+                        quads: Vec::new(),
+                        decorations: Vec::new(),
+                        segments: vec![(0, Rc::clone(filler))],
                         link: None,
                         separator: None,
                     });
                     continue;
                 };
-                let key = row_hash(line, focused, font_size, &family, palette);
-                cache.touched.insert(key, cache.generation);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
                 for (col, cell) in line.cells.iter().enumerate() {
@@ -584,152 +722,133 @@ impl Element for TerminalElement {
                     quads.push((range.start, range.end, hsla(palette.selection)));
                 }
                 // Search hits, sorted by line: the slice for this row by binary search.
-                let (matches, current) = &hits;
                 let first = matches.partition_point(|m| m.line < index);
                 for (k, m) in matches.iter().skip(first).enumerate() {
                     if m.line != index {
                         break;
                     }
-                    let color = if *current == Some(first.saturating_add(k)) {
+                    let color = if current == Some(first.saturating_add(k)) {
                         palette.search_current
                     } else {
                         palette.search_match
                     };
                     quads.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
                 }
-                let shaped = if let Some(s) = cache.lines.get(&key) {
-                    s.clone()
-                } else {
-                    let mut text = String::with_capacity(line.cells.len());
-                    let mut runs: Vec<TextRun> = Vec::new();
-                    let mut current: Option<(CellStyle, usize)> = None;
-                    for cell in &line.cells {
-                        if !cell.width.draws_text() {
-                            continue;
-                        }
-                        let piece: &str =
-                            if cell.text.is_empty() { " " } else { cell.text.as_str() };
-                        // A wide cell occupies two columns; pad with a space so advances line up
-                        // under forced width.
-                        text.push_str(piece);
-                        let mut len = piece.len();
-                        if cell.width.columns() == 2 && piece.chars().count() == 1 {
-                            // shape_line forces per-glyph width; a wide glyph gets one cell, so
-                            // add a spacer cell after it.
-                            text.push(' ');
-                            len = len.saturating_add(1);
-                        }
-                        match &mut current {
-                            Some((style, acc)) if *style == cell.style => {
-                                *acc = acc.saturating_add(len);
-                            }
-                            _ => {
-                                if let Some((style, acc)) = current.take() {
-                                    runs.push(text_run(
-                                        acc,
-                                        &family,
-                                        &style,
-                                        palette,
-                                        grid.underline,
-                                    ));
-                                }
-                                current = Some((cell.style, len));
-                            }
-                        }
-                    }
-                    if let Some((style, acc)) = current.take() {
-                        runs.push(text_run(acc, &family, &style, palette, grid.underline));
-                    }
-                    let shaped = text_system.shape_line(
-                        SharedString::from(text),
-                        font_size,
-                        &runs,
-                        Some(cell_width),
-                    );
-                    cache.lines.insert(key, shaped.clone());
-                    shaped
-                };
+                let segments = segments(&line.cells)
+                    .into_iter()
+                    .map(|(col, cells)| {
+                        let key = segment_hash(base, cells);
+                        cache.touched.insert(key, cache.generation);
+                        let shaped = cache.lines.entry(key).or_insert_with(|| {
+                            Rc::new(shape_cells(
+                                &text_system,
+                                cells,
+                                font_size,
+                                &grid,
+                                &family,
+                                palette,
+                            ))
+                        });
+                        (col, Rc::clone(shaped))
+                    })
+                    .collect();
                 let link = link
                     .filter(|&(at, _, _)| at == index)
                     .map(|(_, start, end)| (start, end.min(grid_cols)));
                 // A prompt starts here: rule off the command above it, red when it failed.
                 let separator = (line.mark.starts_prompt() && index.0 > 0)
-                    .then(|| separator_color(&theme, line.mark.exit()));
+                    .then(|| separator_color(theme, line.mark.exit()));
                 prepared_rows.push(PreparedRow {
                     y,
                     quads,
                     decorations,
-                    line: shaped,
+                    segments,
                     link,
                     separator,
                 });
             }
-        });
 
-        let cursor_visible = cursor.visible
-            && view_offset == 0
-            && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
-        // While an input method composes, its underlined preview stands in for the cursor.
-        let cursor_prepared = (cursor_visible && marked.is_none()).then(|| {
-            let x = origin.x + cell_width * f32::from(cursor.col);
-            let y = origin.y + line_height * f32::from(cursor.row);
-            let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
-            (Bounds::new(point(x, y), size(cell_width, line_height)), shape, hsla(palette.cursor))
-        });
+            let cursor_visible = cursor.visible
+                && view_offset == 0
+                && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
+            // While an input method composes, its underlined preview stands in for the cursor.
+            let cursor_prepared = (cursor_visible && marked.is_none()).then(|| {
+                let x = origin.x + cell_width * f32::from(cursor.col);
+                let y = origin.y + line_height * f32::from(cursor.row);
+                let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
+                (
+                    Bounds::new(point(x, y), size(cell_width, line_height)),
+                    shape,
+                    hsla(palette.cursor),
+                )
+            });
 
-        // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
-        let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
-            .iter()
-            .map(|p| {
+            // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
+            let predicted = predicted.map(|(p, _)| p).unwrap_or_default();
+            let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
+                .iter()
+                .map(|p| {
+                    let mut run = text_run(
+                        p.text.len(),
+                        &family,
+                        &CellStyle::DEFAULT,
+                        palette,
+                        grid.underline,
+                    );
+                    run.color.a = 0.75;
+                    run.underline = Some(UnderlineStyle {
+                        thickness: px(1.0),
+                        color: Some(run.color),
+                        wavy: false,
+                    });
+                    let shaped = text_system.shape_line(
+                        SharedString::from(p.text.clone()),
+                        font_size,
+                        &[run],
+                        Some(cell_width),
+                    );
+                    let at = point(
+                        origin.x + cell_width * f32::from(p.col),
+                        origin.y + line_height * f32::from(p.row),
+                    );
+                    (at, shaped)
+                })
+                .collect();
+            // The input method's composition, underlined at the cursor (what Terminal.app does).
+            if let Some(text) = marked.filter(|_| cursor_visible) {
                 let mut run =
-                    text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
-                run.color.a = 0.75;
+                    text_run(text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(run.color),
                     wavy: false,
                 });
                 let shaped = text_system.shape_line(
-                    SharedString::from(p.text.clone()),
+                    SharedString::from(text.to_owned()),
                     font_size,
                     &[run],
                     Some(cell_width),
                 );
                 let at = point(
-                    origin.x + cell_width * f32::from(p.col),
-                    origin.y + line_height * f32::from(p.row),
+                    origin.x + cell_width * f32::from(cursor.col),
+                    origin.y + line_height * f32::from(cursor.row),
                 );
-                (at, shaped)
-            })
-            .collect();
-        // The input method's composition, underlined at the cursor (what Terminal.app does).
-        if let Some(text) = marked.filter(|_| cursor_visible) {
-            let mut run =
-                text_run(text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
-            run.underline =
-                Some(UnderlineStyle { thickness: px(1.0), color: Some(run.color), wavy: false });
-            let shaped = text_system.shape_line(
-                SharedString::from(text),
-                font_size,
-                &[run],
-                Some(cell_width),
-            );
-            let at = point(
-                origin.x + cell_width * f32::from(cursor.col),
-                origin.y + line_height * f32::from(cursor.row),
-            );
-            overlay.push((at, shaped));
-        }
+                overlay.push((at, shaped));
+            }
 
-        Prepared {
-            metrics,
-            grid,
-            rows: prepared_rows,
-            cursor: cursor_prepared,
-            background: hsla(palette.bg),
-            link: hsla(palette.fg),
-            overlay,
-        }
+            Prepared {
+                metrics,
+                grid,
+                rows: prepared_rows,
+                cursor: cursor_prepared,
+                background: hsla(palette.bg),
+                link: hsla(palette.fg),
+                overlay,
+                predicting: !predicted.is_empty(),
+            }
+        };
+        *cx.global_mut::<ShapeCache>() = cache;
+        prepared
     }
 
     fn paint(
@@ -802,24 +921,22 @@ impl Element for TerminalElement {
             window.paint_quad(quad);
         }
         for row in &prepared.rows {
-            // GPUI centres the line in its own box; nudge it so its baseline is the derived one
-            // and the glyphs sit on the same line as the decorations under them.
-            let y = text_origin_y(
-                row.y,
-                m.line_height,
-                grid.baseline,
-                row.line.ascent,
-                row.line.descent,
-            );
-            if let Err(e) = row.line.paint(
-                point(m.origin.x, y),
-                m.line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                tracing::debug!(error = %e, "paint row");
+            for (col, segment) in &row.segments {
+                // GPUI centres the line in its own box; nudge it so its baseline is the derived
+                // one and the glyphs sit on the same line as the decorations under them.
+                let y = text_origin_y(
+                    row.y,
+                    m.line_height,
+                    grid.baseline,
+                    segment.ascent,
+                    segment.descent,
+                );
+                let x = m.origin.x + m.cell_width * f32::from(*col);
+                if let Err(e) =
+                    segment.paint(point(x, y), m.line_height, TextAlign::Left, None, window, cx)
+                {
+                    tracing::debug!(error = %e, "paint row");
+                }
             }
         }
         // Underlines and strikethroughs, over the glyphs, where the font's metrics put them.
@@ -853,11 +970,21 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint prediction");
             }
         }
+        let predicting = prepared.predicting;
+        self.view.update(cx, |view, _cx| view.painted(predicting));
     }
+}
+
+/// How many shaped words the cache holds (tests: a word shaped once serves every row).
+#[cfg(test)]
+pub fn cached_words(cx: &App) -> usize {
+    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.lines.len())
 }
 
 #[cfg(test)]
 mod tests {
+    use slopty_grid::Line;
+
     use super::*;
 
     /// The metrics of a grid laid out at `scale` and painted at `zoom`, `JetBrains Mono` 13 pt:
@@ -911,5 +1038,90 @@ mod tests {
         // A row that fell back to a taller face is corrected by its own amount.
         let tall = text_origin_y(row_y, line_height, px(13.5), px(15.0), px(4.0));
         assert!(tall < y, "{tall:?} vs {y:?}");
+    }
+
+    fn cells(text: &str) -> Vec<Cell> {
+        Line::from_text(text, 12, CellStyle::DEFAULT).cells
+    }
+
+    fn cols(text: &str) -> Vec<(u16, usize)> {
+        segments(&cells(text)).into_iter().map(|(col, word)| (col, word.len())).collect()
+    }
+
+    #[test]
+    fn rows_split_into_words_at_plain_spaces() {
+        assert_eq!(cols("foo bar  baz"), vec![(0, 3), (4, 3), (9, 3)]);
+        assert_eq!(cols("  x"), vec![(2, 1)]);
+        assert_eq!(cols(""), vec![], "a blank row has nothing to shape");
+    }
+
+    #[test]
+    fn digits_stand_alone_inside_and_beside_words() {
+        assert_eq!(cols("ab12 3"), vec![(0, 2), (2, 1), (3, 1), (5, 1)]);
+        assert_eq!(cols("0xf"), vec![(0, 1), (1, 2)]);
+        let mut row = cells("12");
+        row[0].style.underline = Underline::Curly;
+        row[1].style.underline = Underline::Curly;
+        assert_eq!(segments(&row).len(), 1, "a curly-underlined number is one piece");
+    }
+
+    #[test]
+    fn only_a_curly_underline_keeps_a_space_in_its_word() {
+        let mut row = cells("a b");
+        row[1].style.underline = Underline::Curly;
+        assert_eq!(segments(&row).len(), 1, "GPUI draws the wave with the run");
+        let mut row = cells("a b");
+        row[1].style.underline = Underline::Single;
+        assert_eq!(segments(&row).len(), 2, "a straight underline is a decoration quad");
+        let mut row = cells("a b");
+        row[1].style.flags |= StyleFlags::STRIKETHROUGH;
+        assert_eq!(segments(&row).len(), 2, "so is a strikethrough");
+        let mut row = cells("a b");
+        row[1].style.bg = slopty_grid::Color::Palette(1);
+        assert_eq!(segments(&row).len(), 2, "a background is a quad, not a glyph");
+    }
+
+    #[test]
+    fn a_wide_cell_and_its_spacer_stay_together() {
+        let wide = |c: char| Cell {
+            text: slopty_grid::CellText::from_char(c),
+            style: CellStyle::DEFAULT,
+            width: CellWidth::Wide,
+        };
+        let tail = Cell {
+            text: slopty_grid::CellText::EMPTY,
+            style: CellStyle::DEFAULT,
+            width: CellWidth::SpacerTail,
+        };
+        let row = [wide('日'), tail.clone(), wide('本'), tail, Cell::BLANK, cells("x")[0].clone()];
+        let words = segments(&row);
+        assert_eq!(words.len(), 2, "{words:?}");
+        assert_eq!(words[0].0, 0);
+        assert_eq!(words[0].1.len(), 4, "two wide cells with their spacer tails");
+        assert_eq!(words[1].0, 5);
+    }
+
+    #[test]
+    fn a_word_hashes_the_same_wherever_it_sits() {
+        let a = cells("foo bar");
+        let b = cells("    bar foo");
+        let (wa, wb) = (segments(&a), segments(&b));
+        assert_eq!(segment_hash(1, wa[1].1), segment_hash(1, wb[0].1), "bar");
+        assert_eq!(segment_hash(1, wa[0].1), segment_hash(1, wb[1].1), "foo");
+        assert_ne!(segment_hash(1, wa[0].1), segment_hash(2, wa[0].1), "another base");
+    }
+
+    #[test]
+    fn the_cache_sweeps_once_per_frame_and_keeps_what_the_frame_touched() {
+        let mut cache = ShapeCache::default();
+        cache.sweep(Some(1));
+        let g = cache.generation;
+        cache.sweep(Some(1));
+        cache.sweep(Some(1));
+        assert_eq!(cache.generation, g, "twenty terminals in one frame sweep once");
+        cache.sweep(Some(2));
+        assert_eq!(cache.generation, g.wrapping_add(1));
+        cache.sweep(None);
+        assert_eq!(cache.generation, g.wrapping_add(2), "without a frame index every call sweeps");
     }
 }

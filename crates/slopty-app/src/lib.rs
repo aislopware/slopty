@@ -15,8 +15,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowOptions, div, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, WindowOptions, div, px,
 };
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -72,6 +72,9 @@ fn hardware_keyboard_attached() -> bool {
     }
     slopty_platform::hardware_keyboard_attached()
 }
+
+/// Link events applied per foreground turn at most (see the link loop).
+const LINK_BATCH: usize = 256;
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys).
@@ -491,73 +494,35 @@ impl Workspace {
                 .detach();
                 let mut first_snapshot = true;
                 tracing::debug!(host = %id.fmt_short(), sessions = ack.sessions.len(), "link up; pumping events");
-                while let Some(event) = events.recv().await {
-                    tracing::trace!(?event, "link event");
-                    match event {
-                        LinkEvent::Term { session, event } => {
-                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+                // One foreground turn per frame, not per event: a flood of terminal frames
+                // from many sessions would otherwise run a GPUI update (and, when the window
+                // is drawn from the update, a whole frame) for each of them. The first event
+                // after a quiet spell is applied at once; while events keep coming they are
+                // applied in one update per nominal frame.
+                let pace = frame_nominal();
+                let mut last_apply: Option<std::time::Instant> = None;
+                while let Some(first) = events.recv().await {
+                    if let Some(due) = last_apply.and_then(|at| at.checked_add(pace)) {
+                        let wait = due.saturating_duration_since(std::time::Instant::now());
+                        if !wait.is_zero() {
+                            cx.background_executor().timer(wait).await;
                         }
-                        LinkEvent::Control(HostMsg::Canvas(sync)) => {
-                            let is_snapshot =
-                                matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
-                            canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
-                            if is_snapshot && first_snapshot {
-                                first_snapshot = false;
-                                // First run: an empty canvas gets one shell so there is
-                                // something to type into. Otherwise bring the existing
-                                // layout into view.
-                                let window = this.update(cx, |ws, _cx| ws.window).ok().flatten();
-                                if let Some(window) = window {
-                                    let _opened = window.update(cx, |_root, window, cx| {
-                                        canvas.update(cx, |c, cx| {
-                                            if c.is_empty() {
-                                                c.new_terminal(&NewTerminal, window, cx);
-                                            } else {
-                                                c.fit_when_painted();
-                                            }
-                                        });
-                                    });
-                                }
-                            }
-                        }
-                        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
-                            canvas.update(cx, |c, cx| c.session_opened(summary, cx));
-                        }
-                        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
-                            canvas.update(cx, |c, cx| c.session_closed(session, cx));
-                        }
-                        LinkEvent::Control(HostMsg::Term { session, event }) => {
-                            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-                        }
-                        LinkEvent::Control(HostMsg::Screen(event)) => {
-                            canvas.update(cx, |c, cx| c.screen_event(event, cx));
-                        }
-                        LinkEvent::Control(HostMsg::Agent(event)) => {
-                            canvas.update(cx, |c, cx| c.agent_event(event, cx));
-                        }
-                        LinkEvent::Control(HostMsg::Transcript(update)) => {
-                            canvas.update(cx, |c, cx| c.transcript_update(update, cx));
-                        }
-                        LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
-                            let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
-                            if !ok {
-                                // The offer stays on the title bar so it can be tried again.
-                                canvas.update(cx, CanvasView::hooks_offer_failed);
-                            }
-                        }
-                        LinkEvent::Control(_) => {}
-                        LinkEvent::Disconnected(why) => {
-                            let _set = this.update(cx, |ws, cx| {
-                                if let Some(slot) = ws.slot_mut(id) {
-                                    slot.disconnect(HostStatus::Reconnecting(format!(
-                                        "disconnected: {why}"
-                                    )));
-                                }
-                                ws.refresh_badge();
-                                cx.notify();
-                            });
-                            break;
-                        }
+                    }
+                    let mut batch = Vec::with_capacity(LINK_BATCH);
+                    batch.push(first);
+                    while batch.len() < LINK_BATCH
+                        && let Ok(next) = events.try_recv()
+                    {
+                        batch.push(next);
+                    }
+                    last_apply = Some(std::time::Instant::now());
+                    let disconnected = cx.update(|cx| {
+                        batch.into_iter().fold(false, |down, event| {
+                            down | apply_link_event(&this, &canvas, id, &mut first_snapshot, event, cx)
+                        })
+                    });
+                    if disconnected {
+                        break;
                     }
                 }
                 // Dropping the link closes the connection; the endpoint stays for the retry.
@@ -1267,6 +1232,8 @@ const fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The frame's draw starts here; the probe element at the end of the tree closes it.
+        slopty_ui::frames::begin(cx);
         let surfaces = &self.theme.surfaces;
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         let insets = window.insets().effective();
@@ -1325,7 +1292,97 @@ impl Render for Workspace {
                     .when_some(key_bar, gpui::ParentElement::child),
             )
             .when_some(switcher, gpui::ParentElement::child)
+            .child(slopty_ui::frames::probe())
     }
+}
+
+/// Apply one event from a host link to the workspace; `true` when the link is gone.
+fn apply_link_event(
+    this: &WeakEntity<Workspace>,
+    canvas: &Entity<CanvasView>,
+    id: EndpointId,
+    first_snapshot: &mut bool,
+    event: LinkEvent,
+    cx: &mut App,
+) -> bool {
+    tracing::trace!(?event, "link event");
+    match event {
+        LinkEvent::Term { session, event } => {
+            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+        }
+        LinkEvent::Control(HostMsg::Canvas(sync)) => {
+            let is_snapshot = matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
+            canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
+            if is_snapshot && *first_snapshot {
+                *first_snapshot = false;
+                // First run: an empty canvas gets one shell so there is
+                // something to type into. Otherwise bring the existing
+                // layout into view.
+                let window = this.update(cx, |ws, _cx| ws.window).ok().flatten();
+                if let Some(window) = window {
+                    let _opened = window.update(cx, |_root, window, cx| {
+                        canvas.update(cx, |c, cx| {
+                            if c.is_empty() {
+                                c.new_terminal(&NewTerminal, window, cx);
+                            } else {
+                                c.fit_when_painted();
+                            }
+                        });
+                    });
+                }
+            }
+        }
+        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
+            canvas.update(cx, |c, cx| c.session_opened(summary, cx));
+        }
+        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+            canvas.update(cx, |c, cx| c.session_closed(session, cx));
+        }
+        LinkEvent::Control(HostMsg::Term { session, event }) => {
+            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+        }
+        LinkEvent::Control(HostMsg::Screen(event)) => {
+            canvas.update(cx, |c, cx| c.screen_event(event, cx));
+        }
+        LinkEvent::Control(HostMsg::Agent(event)) => {
+            canvas.update(cx, |c, cx| c.agent_event(event, cx));
+        }
+        LinkEvent::Control(HostMsg::Transcript(update)) => {
+            canvas.update(cx, |c, cx| c.transcript_update(update, cx));
+        }
+        LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
+            let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
+            if !ok {
+                // The offer stays on the title bar so it can be tried again.
+                canvas.update(cx, CanvasView::hooks_offer_failed);
+            }
+        }
+        LinkEvent::Control(_) => {}
+        LinkEvent::Disconnected(why) => {
+            let _set = this.update(cx, |ws, cx| {
+                if let Some(slot) = ws.slot_mut(id) {
+                    slot.disconnect(HostStatus::Reconnecting(format!("disconnected: {why}")));
+                }
+                ws.refresh_badge();
+                cx.notify();
+            });
+            return true;
+        }
+    }
+    false
+}
+
+/// The display period the frame probe measures against: `SLOPTY_FRAME_HZ` when set (the
+/// simulator runs at 60 Hz whatever the device it imitates), else 60 Hz on macOS and 120 Hz on
+/// iOS.
+fn frame_nominal() -> std::time::Duration {
+    std::env::var("SLOPTY_FRAME_HZ")
+        .ok()
+        .and_then(|hz| hz.parse::<f64>().ok())
+        .filter(|hz| hz.is_finite() && *hz > 0.0)
+        .map_or_else(slopty_ui::frames::default_nominal, |hz| {
+            std::time::Duration::from_secs_f64(1.0 / hz)
+        })
 }
 
 /// Open the workspace window and start the host link loop on `handle`'s runtime. Call once
@@ -1356,6 +1413,7 @@ pub fn open_workspace(
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
     slopty_ui::kit::sync(&Theme::default(), cx);
+    slopty_ui::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
     let loaded = Settings::load(&settings_path);
     let workspace = cx.new(|_cx| Workspace {

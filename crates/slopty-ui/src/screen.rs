@@ -145,9 +145,12 @@ pub struct HudInput<'a> {
     pub stats: &'a ScreenStats,
     /// Arrival → present, from the element's pacer.
     pub pacing: &'a PacingStats,
+    /// The UI's own frame times, when the app installed a probe.
+    pub ui: Option<&'a crate::frames::FrameStats>,
 }
 
-/// The three lines of the stats overlay: what is on screen, how it got there, and when.
+/// The four lines of the stats overlay: what is on screen, how it got there, when, and how
+/// the UI itself keeps up.
 ///
 /// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
 /// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
@@ -157,7 +160,10 @@ pub struct HudInput<'a> {
 /// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
 /// of it), the spacing of those paints and its jitter, and the two cadence faults —
 /// `skip` (a frame the display never saw) and `repeat` (a paint that showed the picture again).
-/// Pure so it can be checked without a window.
+/// Line four is the UI: draw time of the whole window (p50 / p95 / p99 / max over the last
+/// [`crate::frames::RING`] frames), the spacing of frames, and how many went over the display
+/// period or were dropped ([`crate::frames::hud_line`]). Pure so it can be checked without a
+/// window.
 #[must_use]
 pub fn hud_lines(input: &HudInput<'_>) -> String {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -178,10 +184,12 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         },
     );
     let pacing = input.pacing;
+    let ui = crate::frames::hud_line(input.ui);
     format!(
         "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
          jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}\n\
-         present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}",
+         present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
+         {ui}",
         input.size.0,
         input.size.1,
         input.scale,
@@ -438,7 +446,8 @@ impl ScreenView {
     }
 
     /// Recompute the overlay's rates when a second has passed; returns the text to draw.
-    fn hud_text(&mut self) -> Option<String> {
+    fn hud_text(&mut self, cx: &gpui::App) -> Option<String> {
+        let ui = crate::frames::stats(cx);
         let hud = self.hud.as_mut()?;
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
@@ -459,6 +468,7 @@ impl ScreenView {
                 rate: self.rate,
                 stats: &stats,
                 pacing: &self.pacer.stats(),
+                ui: ui.as_ref(),
             });
             hud.sample = stats;
             hud.sampled_at = now;
@@ -882,7 +892,7 @@ impl Render for ScreenView {
             },
         );
 
-        let hud = self.hud_text().map(|text| {
+        let hud = self.hud_text(cx).map(|text| {
             div()
                 .absolute()
                 .top(px(self.theme.spacing.xs))
@@ -1106,6 +1116,7 @@ mod tests {
             rate: Some((19_200_000, RateVerdict::Stall, true)),
             stats: &stats,
             pacing: &pacing,
+            ui: None,
         });
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
@@ -1114,6 +1125,7 @@ mod tests {
                 "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms",
                 "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0",
                 "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
+                "ui –",
             ]
         );
         let blank = hud_lines(&HudInput {
@@ -1126,6 +1138,7 @@ mod tests {
             rate: None,
             stats: &ScreenStats::default(),
             pacing: &PacingStats::default(),
+            ui: None,
         });
         assert!(blank.contains("rtt –") && blank.contains("age –") && blank.contains("target –"));
         assert!(blank.contains("present 0.0 / 0.0 / 0.0 ms"), "{blank}");
