@@ -114,6 +114,7 @@ impl Session {
 }
 
 pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
+    slopty_client::warm_up_decoder();
     let me = identity(data_dir)?;
     let (_id, known) = pick(&me, needle)?;
     let reach = Reach::from_env();

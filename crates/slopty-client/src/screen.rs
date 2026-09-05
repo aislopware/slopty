@@ -48,24 +48,29 @@ pub struct ScreenRouter {
     lcg: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// A datagram and when the connection handed it over: the stream worker may be busy (a decode,
+/// a report) when it lands, and the reassembler's stall clock must not charge that wait to
+/// the link.
+type Arrival = (Instant, Bytes);
+
 #[derive(Debug, Default)]
 struct Routes {
-    attached: HashMap<StreamId, mpsc::Sender<Bytes>>,
-    pending: HashMap<StreamId, VecDeque<Bytes>>,
+    attached: HashMap<StreamId, mpsc::Sender<Arrival>>,
+    pending: HashMap<StreamId, VecDeque<Arrival>>,
 }
 
 impl Routes {
-    fn deliver(&mut self, stream: StreamId, datagram: Bytes) {
+    fn deliver(&mut self, stream: StreamId, arrival: Arrival) {
         if let Some(tx) = self.attached.get(&stream) {
             // A full queue means the stream task is behind; dropping is the right call.
-            let _dropped = tx.try_send(datagram);
+            let _dropped = tx.try_send(arrival);
             return;
         }
         let backlog = self.pending.entry(stream).or_default();
         if backlog.len() >= PENDING_DEPTH {
             backlog.pop_front();
         }
-        backlog.push_back(datagram);
+        backlog.push_back(arrival);
     }
 }
 
@@ -101,19 +106,19 @@ impl ScreenRouter {
         roll < self.drop_permille
     }
 
-    /// Deliver one datagram (called by the connection's datagram reader).
-    pub fn route(&self, datagram: Bytes) {
+    /// Deliver one datagram that arrived at `now` (called by the connection's datagram reader).
+    pub fn route(&self, datagram: Bytes, now: Instant) {
         if self.inject_loss() {
             return;
         }
         let Some((header, _payload)) = MediaHeader::parse(&datagram) else { return };
         let stream = StreamId(header.stream.get());
-        self.inner.lock().deliver(stream, datagram);
+        self.inner.lock().deliver(stream, (now, datagram));
     }
 
     /// Start receiving `stream`'s datagrams, backlog first.
     #[must_use]
-    pub fn attach(&self, stream: StreamId) -> mpsc::Receiver<Bytes> {
+    pub fn attach(&self, stream: StreamId) -> mpsc::Receiver<Arrival> {
         let (tx, rx) = mpsc::channel(STREAM_DEPTH);
         let mut routes = self.inner.lock();
         if let Some(backlog) = routes.pending.remove(&stream) {
@@ -178,6 +183,23 @@ pub struct ScreenStats {
     pub stalled_ms: u64,
     /// The link is stalled right now (as of the last report).
     pub stalled: bool,
+    /// When the first datagram of the stream arrived.
+    pub first_datagram_at: Option<Instant>,
+    /// When the first frame was complete and handed to the decoder.
+    pub first_frame_at: Option<Instant>,
+    /// When the first decoded picture came back.
+    pub first_decoded_at: Option<Instant>,
+    /// Longest wait from a frame's first fragment to its completion (the first frame's
+    /// figure is the keyframe's spread over the wire).
+    pub hold_max: Duration,
+    /// Median wait from first fragment to completion in the last report window.
+    pub hold_p50: Duration,
+    /// 95th percentile of the same.
+    pub hold_p95: Duration,
+    /// RFC 3550 interarrival jitter on the host's capture clock, as last reported.
+    pub jitter: Duration,
+    /// Frames the worker is holding in order behind a missing one, as last reported.
+    pub queue_depth: u8,
 }
 
 /// Playback for one stream, created on its first audio packet.
@@ -293,7 +315,10 @@ pub fn spawn_screen(
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
     let muted = Arc::new(AtomicBool::new(false));
+    let first_decoded = Arc::new(Mutex::new(None));
+    let decoded_at = Arc::clone(&first_decoded);
     let decoder = Decoder::new(codec, move |frame| {
+        decoded_at.lock().get_or_insert_with(Instant::now);
         let _no_receiver = frames_tx.send(Some(Arc::new(frame)));
     });
     let worker = Worker {
@@ -310,6 +335,7 @@ pub fn spawn_screen(
         counters: ScreenStats::default(),
         audio: AudioSlot::Unopened,
         muted: Arc::clone(&muted),
+        first_decoded,
     };
     let task = runtime.spawn(worker.run());
     ScreenHandle { stream, frames, cursor, stats, muted, router: router.clone(), task }
@@ -317,7 +343,7 @@ pub fn spawn_screen(
 
 struct Worker {
     stream: StreamId,
-    datagrams: mpsc::Receiver<Bytes>,
+    datagrams: mpsc::Receiver<Arrival>,
     reassembler: Reassembler,
     decoder: Decoder,
     out: mpsc::Sender<ClientMsg>,
@@ -330,6 +356,8 @@ struct Worker {
     audio: AudioSlot,
     /// Decode but do not play while set.
     muted: Arc<AtomicBool>,
+    /// Set by the decoder callback when the first picture comes back.
+    first_decoded: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Worker {
@@ -373,9 +401,15 @@ impl Worker {
             let busy = self.reassembler.queue_depth() > 0 || self.reassembler.awaiting_refresh();
             let tick = tokio::time::sleep(if busy { TICK } else { IDLE_TICK });
             tokio::select! {
-                datagram = self.datagrams.recv() => {
-                    let Some(datagram) = datagram else { break };
-                    self.ingest(&datagram);
+                arrival = self.datagrams.recv() => {
+                    let Some((at, datagram)) = arrival else { break };
+                    self.ingest(&datagram, at);
+                    // Everything that is already queued (a burst, or the backlog from before
+                    // the stream was attached) goes in before the timers look at frame ages:
+                    // the stamps say when those datagrams arrived, not when they were read.
+                    while let Ok((at, datagram)) = self.datagrams.try_recv() {
+                        self.ingest(&datagram, at);
+                    }
                 }
                 () = tick => {}
                 _instant = report.tick() => self.report().await,
@@ -387,11 +421,12 @@ impl Worker {
         tracing::debug!(stream = %self.stream, "screen worker finished");
     }
 
-    fn ingest(&mut self, datagram: &Bytes) {
+    /// Feed one datagram that the connection handed over at `now`.
+    fn ingest(&mut self, datagram: &Bytes, now: Instant) {
         self.counters.datagrams = self.counters.datagrams.saturating_add(1);
         let len = u64::try_from(datagram.len()).unwrap_or(u64::MAX);
         self.counters.bytes = self.counters.bytes.saturating_add(len);
-        let now = Instant::now();
+        self.counters.first_datagram_at.get_or_insert(now);
         match self.reassembler.ingest(datagram, now) {
             Ingest::Video => self.deliver(),
             Ingest::Cursor { seq, update } => {
@@ -416,6 +451,10 @@ impl Worker {
     fn deliver(&mut self) {
         while let Some(frame) = self.reassembler.next_frame() {
             self.counters.frames = self.counters.frames.saturating_add(1);
+            self.counters.first_frame_at.get_or_insert_with(Instant::now);
+            if frame.hold > self.counters.hold_max {
+                self.counters.hold_max = frame.hold;
+            }
             let pts = u64::from(frame.info.capture_ts_us);
             match self.decoder.decode(&frame.data, pts) {
                 Ok(()) => {
@@ -462,6 +501,11 @@ impl Worker {
         self.counters.stalls = stats.stalls;
         self.counters.stalled_ms = stats.stalled_ms;
         self.counters.stalled = self.reassembler.stalled(now);
+        self.counters.hold_p50 = report.hold_p50.to_std();
+        self.counters.hold_p95 = report.hold_p95.to_std();
+        self.counters.jitter = report.owd_jitter.to_std();
+        self.counters.queue_depth = report.queue_depth;
+        self.counters.first_decoded_at = *self.first_decoded.lock();
         self.stats.send_replace(self.counters);
         let stream = self.stream;
         let _gone =

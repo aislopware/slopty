@@ -15,6 +15,6 @@ pub mod screen;
 pub mod term;
 
 pub use canvas::{Camera, CanvasChange, CanvasDoc};
-pub use link::{HostLink, LinkEvent};
+pub use link::{HostLink, LinkEvent, warm_up_decoder};
 pub use screen::{CursorState, ScreenHandle, ScreenStats};
 pub use term::{Effect, TermState, ViewRow};

@@ -53,6 +53,7 @@ impl HostLink {
     /// Wrap a connection: spawns the control reader, the session-stream acceptor and the writer.
     #[must_use]
     pub fn start(conn: HostConn) -> Self {
+        warm_up_decoder();
         let HostConn { conn: quic, ack, tx, mut rx, .. } = conn;
         let (events_tx, events_rx) = mpsc::channel(EVENT_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(OUT_DEPTH);
@@ -131,7 +132,7 @@ impl HostLink {
         tasks.spawn(async move {
             loop {
                 match datagram_conn.read_datagram().await {
-                    Ok(datagram) => datagram_router.route(datagram),
+                    Ok(datagram) => datagram_router.route(datagram, std::time::Instant::now()),
                     Err(e) => {
                         tracing::debug!(error = %e, "read_datagram ended");
                         break;
@@ -243,5 +244,29 @@ impl HostLink {
 impl Drop for HostLink {
     fn drop(&mut self) {
         self.tasks.abort_all();
+    }
+}
+
+/// Whether the process has warmed VideoToolbox's decoder up yet.
+static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pay VideoToolbox's first-session cost (150–400 ms) now, on its own thread, rather than in
+/// the first stream's worker where it holds the keyframe and reads as a link stall.
+///
+/// Once per process; later calls are free. [`HostLink::start`] calls it, but a session
+/// created while the first stream is already starting still delays that stream's own
+/// session, so the apps call it at launch, before any host is dialed.
+pub fn warm_up_decoder() {
+    if DECODER_WARM.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("decoder-warm-up".to_owned()).spawn(|| {
+        match slopty_codec::warm_up() {
+            Ok(took) => tracing::debug!(ms = took.as_millis(), "decoder warmed up"),
+            Err(e) => tracing::debug!(error = %e, "decoder warm-up failed"),
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::debug!(error = %e, "decoder warm-up thread");
     }
 }

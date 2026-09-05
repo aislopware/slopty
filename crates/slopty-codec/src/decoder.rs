@@ -119,6 +119,41 @@ impl std::fmt::Debug for Decoder {
     }
 }
 
+/// VPS, SPS and PPS of a 64×64 HEVC Main stream (Apple's encoder, `slopty-codec` round trip),
+/// enough to build a format description and a session without a picture.
+const WARM_UP_HEVC: [&[u8]; 3] = [
+    &[
+        0x40, 0x01, 0x0c, 0x03, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x00, 0x00, 0x04, 0x30, 0x24,
+    ],
+    &[
+        0x42, 0x01, 0x03, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x3c, 0x00, 0x00, 0xa0, 0x14, 0x20, 0x41, 0xc1, 0x8f, 0x88, 0x04, 0x3b, 0x91,
+        0x48, 0x20, 0xb9, 0xf8, 0x4f, 0x42, 0xfa, 0x86, 0xf5, 0x43, 0xfa, 0xa8, 0x23, 0xd5, 0x50,
+        0x4f, 0xaa, 0xa8, 0x2b, 0xd5, 0x55, 0x05, 0xfa, 0xaa, 0xa8, 0x33, 0xd5, 0x55, 0x50, 0x6f,
+        0xaa, 0xaa, 0xa8, 0x3b, 0xd5, 0x55, 0x55, 0x07, 0xfa, 0xaa, 0xaa, 0xa8, 0x10, 0xf5, 0x55,
+        0x55, 0x54, 0xa6, 0xe0, 0x40, 0x40, 0x40, 0x7f, 0x08, 0x04, 0x10,
+    ],
+    &[0x44, 0x01, 0xc0, 0x72, 0xf0, 0x5b, 0x24],
+];
+
+/// Create and drop one HEVC decompression session so the first real stream does not pay
+/// for VideoToolbox's start-up in this process. Returns how long that took.
+///
+/// Measured 2026-09-05 (MEASUREMENTS.md, "start-up on a cold connection"): the first
+/// `VTDecompressionSessionCreate` in a process takes ~150 ms, every later one ~3 ms, and the
+/// stream worker that creates it holds every datagram behind it for that long — which the
+/// reassembler then counted as a 150 ms link stall. Call this once, off the stream's path,
+/// when a host link comes up.
+pub fn warm_up() -> Result<std::time::Duration, CodecError> {
+    let started = std::time::Instant::now();
+    let mut decoder = Decoder::new(VideoCodec::Hevc, |_frame| {});
+    let sets: Vec<Vec<u8>> = WARM_UP_HEVC.iter().map(|nal| nal.to_vec()).collect();
+    decoder.configure(&sets)?;
+    drop(decoder);
+    Ok(started.elapsed())
+}
+
 impl Decoder {
     /// A decoder that delivers pictures to `sink` on VideoToolbox's thread.
     pub fn new(codec: VideoCodec, sink: impl Fn(DecodedFrame) + Send + Sync + 'static) -> Self {
@@ -153,7 +188,9 @@ impl Decoder {
         let sets: Vec<Vec<u8>> =
             annexb::nal_units(annexb).filter(|nal| is_ps(nal)).map(<[u8]>::to_vec).collect();
         if !sets.is_empty() && sets != self.parameter_sets {
+            let t0 = std::time::Instant::now();
             self.configure(&sets)?;
+            tracing::debug!(ms = t0.elapsed().as_millis(), "decoder session configured");
             self.parameter_sets = sets;
         }
         let Some(session) = self.session.as_ref() else {

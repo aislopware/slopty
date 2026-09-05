@@ -1288,6 +1288,8 @@ pub fn open_workspace(
     handle: tokio::runtime::Handle,
     options: WindowOptions,
 ) -> anyhow::Result<()> {
+    // VideoToolbox's first decoder session costs 150–400 ms; pay it before any host is dialed.
+    slopty_client::warm_up_decoder();
     if let Err(e) = slopty_ui::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }

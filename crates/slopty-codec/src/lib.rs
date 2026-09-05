@@ -23,7 +23,7 @@ mod decoder;
 mod encoder;
 
 #[cfg(target_vendor = "apple")]
-pub use decoder::{DecodedFrame, Decoder, PixelBuffer};
+pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
 #[cfg(target_os = "macos")]
 pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
 

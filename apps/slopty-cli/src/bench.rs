@@ -284,8 +284,28 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         first_frame.map_or(0.0, |t| t.saturating_duration_since(opened_at).as_secs_f64() * 1e3),
         run.as_secs_f64()
     );
+    let since = |at: Option<Instant>| {
+        at.map_or_else(
+            || "–".to_owned(),
+            |t| format!("{:.0} ms", t.saturating_duration_since(opened_at).as_secs_f64() * 1e3),
+        )
+    };
+    println!(
+        "  after Open: first datagram {}, first frame complete {}, first decoded {}; keyframe spread (hold max) {:.1} ms",
+        since(stats.first_datagram_at),
+        since(stats.first_frame_at),
+        since(stats.first_decoded_at),
+        stats.hold_max.as_secs_f64() * 1e3
+    );
     println!("  capture→decoded (host clock; loopback only): {}", quantiles(&mut latency_us));
     println!("  arrival gap: {}", quantiles(&mut gaps_us));
+    println!(
+        "  last report: hold p50 {:.1} ms p95 {:.1} ms  jitter {:.1} ms  queue {}",
+        stats.hold_p50.as_secs_f64() * 1e3,
+        stats.hold_p95.as_secs_f64() * 1e3,
+        stats.jitter.as_secs_f64() * 1e3,
+        stats.queue_depth
+    );
     println!(
         "  datagrams {}  fec-recovered {}  lost {}  nacks {}  refreshes {}  decode errors {}",
         stats.datagrams,
