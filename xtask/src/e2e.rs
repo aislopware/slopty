@@ -32,7 +32,8 @@ pub enum Case {
     /// All of the above (not `ios`, which needs a simulator).
     All,
     /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
-    /// through its test socket: pair, open a shell, type, read the rows back.
+    /// through its test socket: pair, open a shell, type, read the rows back, render frames
+    /// against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
     Ios,
 }
 

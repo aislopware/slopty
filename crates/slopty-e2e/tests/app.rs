@@ -9,7 +9,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_e2e::harness::{TRANSCRIPT_LINES, artifacts_dir};
-    use slopty_e2e::snapshot::assert_matches;
+    use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
     use slopty_e2e::{Command, Stack};
 
     /// How long a host round trip (open a shell, run a command) may take.
@@ -25,20 +25,6 @@ mod tests {
             return false;
         }
         true
-    }
-
-    /// Count the pixels that are not close to `bg`; a blank frame is a renderer failure, not
-    /// a layout to compare.
-    fn foreground_fraction(img: &image::RgbaImage) -> f64 {
-        let bg = *img.get_pixel(0, 0);
-        let differing = img
-            .pixels()
-            .filter(|p| p.0.iter().zip(bg.0.iter()).any(|(a, b)| a.abs_diff(*b) > 24))
-            .count();
-        let total = u64::from(img.width()).saturating_mul(u64::from(img.height()));
-        #[expect(clippy::cast_precision_loss, reason = "pixel counts fit f64 exactly")]
-        let f = differing as f64 / total as f64;
-        f
     }
 
     #[tokio::test]

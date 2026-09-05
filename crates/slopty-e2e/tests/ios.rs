@@ -7,18 +7,30 @@
 //! the screen it is on (a phone shrinks it to the viewport, an iPad keeps the desktop size);
 //! and a played Claude Code session (its hook handed to hostd from the test) shows its
 //! conversation, inside the screen above the key bar, with a composer that types into the
-//! shell.
+//! shell. Each scenario renders the app's own frame (the fork's iOS `render_to_image`) and
+//! compares it with a golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::harness::{Simulator, Stack, TRANSCRIPT_LINES};
+    use slopty_e2e::harness::{Simulator, Stack, TRANSCRIPT_LINES, artifacts_dir};
+    use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
     /// The desktop terminal size a viewport this wide keeps (`slopty_client::canvas`).
     const DESKTOP_TERMINAL_WIDTH: f32 = 720.0;
+    /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
+    const TOLERANCE: f64 = 0.01;
+    /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
+    /// an iPad's 2064×2752 pixels.
+    const BLANK: f64 = 0.002;
+
+    /// Which device family the app is on, from its viewport: the golden's name prefix.
+    fn device(window_width: f32) -> &'static str {
+        if window_width >= DESKTOP_TERMINAL_WIDTH + 100.0 { "pad" } else { "phone" }
+    }
 
     fn simulator() -> Option<Simulator> {
         if std::env::var_os("SLOPTY_IOS_E2E").is_none() {
@@ -34,6 +46,7 @@ mod tests {
     async fn a_shell_on_the_simulator_echoes_and_is_sized_for_its_screen() {
         let Some(simulator) = simulator() else { return };
         let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let render_path = stack.path("terminal.png");
         let drv = &mut stack.driver;
 
         let dump = drv
@@ -71,6 +84,13 @@ mod tests {
             .unwrap();
         assert!(!dump.rows_containing("echo ios-").is_empty(), "{dump:#?}");
 
+        // The frame the app draws, from its own renderer, against this device's golden.
+        let frame = drv.render(&render_path).await.unwrap();
+        let fg = foreground_fraction(&frame);
+        assert!(fg > BLANK, "frame is blank ({fg:.4} foreground)");
+        let name = format!("ios-{}-terminal", device(vw));
+        assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
         // ⌘N from a hardware keyboard (the same keystroke the socket dispatches) opens a second
         // shell; ⌘W closes it again.
         drv.keys("cmd-n").await.unwrap();
@@ -89,6 +109,7 @@ mod tests {
     async fn the_conversation_view_on_the_simulator() {
         let Some(simulator) = simulator() else { return };
         let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let render_path = stack.path("conversation.png");
         let dump = stack
             .driver
             .wait_for("the first shell with a prompt", STEP, |d| {
@@ -141,8 +162,12 @@ mod tests {
             .unwrap();
         assert_eq!(dump.terminals[0].conversation.as_ref().unwrap().composer, "");
 
-        // No `render` here: the iOS platform of the GPUI fork has no `render_to_image` yet, so
-        // the frame is checked through the dump (layout, focus, entries), not a golden.
+        // The conversation as drawn on this device: every entry, the composer above the key bar.
+        let frame = drv.render(&render_path).await.unwrap();
+        assert!(foreground_fraction(&frame) > BLANK, "frame is blank");
+        let name = format!("ios-{}-conversation", device(dump.window.width));
+        assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
         drv.keys("cmd-shift-l").await.unwrap();
         drv.wait_for("the grid back", STEP, |d| d.terminals[0].conversation.is_none())
             .await

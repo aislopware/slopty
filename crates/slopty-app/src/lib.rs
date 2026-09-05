@@ -59,6 +59,18 @@ const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool 
 /// Key bar height in points.
 const KEY_BAR_H: f32 = 40.0;
 
+/// Whether a hardware keyboard is attached. The e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1`
+/// decide instead of the platform: on the simulator `GameController` reports the Mac's keyboard
+/// about a second after launch, and a golden must not depend on which side of that poll the
+/// frame landed on.
+fn hardware_keyboard_attached() -> bool {
+    #[cfg(feature = "e2e")]
+    if let Some(forced) = std::env::var_os("SLOPTY_HARDWARE_KEYBOARD") {
+        return forced == "1";
+    }
+    slopty_platform::hardware_keyboard_attached()
+}
+
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys).
 const BAR_KEYS: [(&str, &str, Option<&str>); 11] = [
@@ -1311,7 +1323,7 @@ pub fn open_workspace(
         hosts: Vec::new(),
         active: None,
         switcher: false,
-        hardware_keyboard: slopty_platform::hardware_keyboard_attached(),
+        hardware_keyboard: hardware_keyboard_attached(),
         theme: Theme::default(),
         settings: Settings::default(),
         window_dark: true,
@@ -1394,7 +1406,7 @@ fn watch_settings(path: std::path::PathBuf, workspace: Entity<Workspace>, cx: &A
         let mut last = settings::Stamp::of(&path);
         loop {
             cx.background_executor().timer(settings::POLL).await;
-            let keyboard = slopty_platform::hardware_keyboard_attached();
+            let keyboard = hardware_keyboard_attached();
             workspace.update(cx, |ws, cx| ws.set_hardware_keyboard(keyboard, cx));
             let now = settings::Stamp::of(&path);
             if now == last {

@@ -250,6 +250,8 @@ impl Stack {
             .env("SIMCTL_CHILD_SLOPTY_DATA_DIR", &app_dir)
             .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
             .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
+            // Glass only: the key bar stays in the frame whatever the simulator has attached.
+            .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())

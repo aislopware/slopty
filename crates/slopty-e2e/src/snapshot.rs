@@ -212,6 +212,24 @@ pub fn assert_matches(
     }
 }
 
+/// The fraction of pixels that are not close to the top-left pixel's colour: a blank frame is
+/// a renderer failure, not a layout to compare.
+#[must_use]
+pub fn foreground_fraction(img: &RgbaImage) -> f64 {
+    let bg = img.get_pixel_checked(0, 0).copied().unwrap_or(Rgba([0, 0, 0, 0]));
+    let differing = img
+        .pixels()
+        .filter(|p| p.0.iter().zip(bg.0.iter()).any(|(a, b)| a.abs_diff(*b) > 24))
+        .count();
+    let total = u64::from(img.width()).saturating_mul(u64::from(img.height()));
+    if total == 0 {
+        return 0.0;
+    }
+    #[expect(clippy::cast_precision_loss, reason = "pixel counts fit f64 exactly")]
+    let f = differing as f64 / total as f64;
+    f
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
