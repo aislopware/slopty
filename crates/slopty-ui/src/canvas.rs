@@ -3464,4 +3464,35 @@ mod tests {
         let picks = cx.update(|_window, cx| crate::terminal::family_picks(cx));
         assert_eq!(picks, 1, "one walk of the installed fonts for the whole app");
     }
+
+    /// A grid that hangs half off the viewport prepares only the rows the viewport shows;
+    /// one fully inside prepares them all. (Whole off-screen items are not built at all.)
+    #[gpui::test]
+    fn only_the_rows_inside_the_viewport_are_prepared(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let rows_prepared = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::terminal::rows_prepared(cx))
+        };
+        let grid_rows = |view: &Entity<CanvasView>, cx: &mut VisualTestContext, session| {
+            view.read_with(cx, |c, cx| {
+                c.terminals.get(&session).and_then(|t| t.read(cx).metrics()).map(|m| m.rows)
+            })
+        };
+        let inside = SessionId::new();
+        host_opens(&view, cx, inside, me, Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 }, 1);
+        cx.run_until_parked();
+        let rows = grid_rows(&view, cx, inside).expect("laid out");
+        assert!(rows > 4, "{rows}");
+        assert_eq!(rows_prepared(cx), usize::from(rows), "every row of a grid fully on screen");
+
+        // The lower one starts 150 pt above the viewport's bottom edge: its title bar and a
+        // few rows show.
+        let low = SessionId::new();
+        let y = VIEWPORT.1 - 150.0;
+        host_opens(&view, cx, low, me, Rect { x: 0.0, y, w: 400.0, h: 300.0 }, 2);
+        cx.run_until_parked();
+        let rows = grid_rows(&view, cx, low).expect("laid out");
+        let prepared = rows_prepared(cx);
+        assert!(prepared >= 1 && prepared < usize::from(rows) / 2, "{prepared} of {rows}");
+    }
 }

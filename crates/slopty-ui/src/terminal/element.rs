@@ -253,6 +253,9 @@ struct ShapeCache {
     /// How many times the installed fonts were listed (tests).
     #[cfg(test)]
     picks: usize,
+    /// How many rows the last prepaint built (tests: the rows the clip shows, not the grid's).
+    #[cfg(test)]
+    rows_prepared: usize,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -704,11 +707,18 @@ impl Element for TerminalElement {
 
             cache.sweep(crate::frames::index(cx));
             let base = hash_base(focused, base_size, &family, palette);
+            // Rows the clip cannot show (a grid half off the viewport) are not built at all:
+            // no quads, no words, no hashing. Paint walks only the rows prepared here.
+            let clip = window.content_mask().bounds.intersect(&bounds);
+            let (clip_top, clip_bottom) = (clip.top(), clip.bottom());
             // Rows above the oldest line the host still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<Word>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             for (i, row) in rows_view.iter().enumerate() {
                 let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
+                if y + line_height <= clip_top || y >= clip_bottom {
+                    continue;
+                }
                 let Some(line) = row.line else {
                     let filler = filler.get_or_insert_with(|| {
                         let line = text_system.shape_line(
@@ -820,6 +830,11 @@ impl Element for TerminalElement {
                     link,
                     separator,
                 });
+            }
+
+            #[cfg(test)]
+            {
+                cache.rows_prepared = prepared_rows.len();
             }
 
             let cursor_visible = cursor.visible
@@ -1052,6 +1067,12 @@ pub fn cached_words(cx: &App) -> usize {
 #[cfg(test)]
 pub fn family_picks(cx: &App) -> usize {
     cx.try_global::<ShapeCache>().map_or(0, |cache| cache.picks)
+}
+
+/// How many rows the last prepaint built (tests: only the rows inside the clip).
+#[cfg(test)]
+pub fn rows_prepared(cx: &App) -> usize {
+    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.rows_prepared)
 }
 
 #[cfg(test)]

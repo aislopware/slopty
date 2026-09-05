@@ -7,9 +7,9 @@ pub mod metrics;
 pub mod url;
 mod view;
 
-#[cfg(test)]
-pub(crate) use element::family_picks;
 pub use element::{CellMetrics, Prepared, TerminalElement};
+#[cfg(test)]
+pub(crate) use element::{family_picks, rows_prepared};
 pub use view::{
     CloseFind, Copy, Find, FindNext, FindPrev, Paste, Selection, TerminalView, TerminalViewEvent,
     key_bindings,
