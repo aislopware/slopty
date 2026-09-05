@@ -189,6 +189,8 @@ impl Peer<'_> {
             ClientMsg::OpenSession(req) => match self.daemon.host.open(&req).await {
                 Ok(handle) => {
                     let session = handle.id();
+                    // Whoever opened it sizes it, whichever client attaches first.
+                    let _reserved = handle.reserve_driver(self.client);
                     let summaries = self.daemon.host.summaries().await;
                     if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
                         let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));

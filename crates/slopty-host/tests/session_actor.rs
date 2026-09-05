@@ -186,6 +186,34 @@ mod actor {
         session.close();
     }
 
+    /// The opener drives even when another client attaches first.
+    #[tokio::test]
+    async fn reserved_driver_beats_the_first_attach() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "read x; exit 0"]);
+        let opener = ClientId::new();
+        let other = ClientId::new();
+        session.reserve_driver(opener).unwrap();
+        let (tx_other, mut rx_other) = mpsc::channel(64);
+        let (tx_opener, mut rx_opener) = mpsc::channel(64);
+        session.attach(other, size(60, 10), tx_other).unwrap();
+        let (events, _) =
+            wait_for(&mut rx_other, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_))))
+                .await;
+        assert!(!events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.cols == 40)));
+
+        session.attach(opener, size(50, 8), tx_opener).unwrap();
+        let (events, _) = wait_for(&mut rx_opener, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.cols == 50 && f.rows == 8))
+        })
+        .await;
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
+
+        session.request(opener, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
+
     /// A client that reconnects replaces its old viewer; the old connection dying afterwards
     /// must not evict the new one.
     #[tokio::test]

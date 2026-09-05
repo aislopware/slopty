@@ -27,6 +27,7 @@ pub type ClientSink = mpsc::Sender<TermEvent>;
 enum Cmd {
     Attach { client: ClientId, size: TermSize, sink: ClientSink },
     Detach { client: ClientId, sink: Option<ClientSink> },
+    Reserve { client: ClientId },
     Request { client: ClientId, req: TermRequest },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     Close,
@@ -59,6 +60,7 @@ impl std::fmt::Debug for Cmd {
         let name = match self {
             Self::Attach { .. } => "Attach",
             Self::Detach { .. } => "Detach",
+            Self::Reserve { .. } => "Reserve",
             Self::Request { .. } => "Request",
             Self::Snapshot { .. } => "Snapshot",
             Self::Close => "Close",
@@ -95,6 +97,13 @@ impl SessionHandle {
     /// QUIC connection idles out) must not evict the new connection's viewer.
     pub fn detach_sink(&self, client: ClientId, sink: &ClientSink) -> Result<(), HostError> {
         self.send(Cmd::Detach { client, sink: Some(sink.clone()) })
+    }
+
+    /// Make `client` the driver before anyone attaches: the client that opened a session
+    /// sizes it, even if another client's attach (it sees the session first via the
+    /// broadcast) lands earlier.
+    pub fn reserve_driver(&self, client: ClientId) -> Result<(), HostError> {
+        self.send(Cmd::Reserve { client })
     }
 
     /// Forward a terminal request from a client.
@@ -396,6 +405,13 @@ impl Actor {
                 });
                 if self.viewers.len() != before {
                     self.on_viewer_gone(client);
+                }
+            }
+            Cmd::Reserve { client } => {
+                if let Some(old) = self.driver.replace(client)
+                    && old != client
+                {
+                    self.send_to(old, TermEvent::Driver { you: false });
                 }
             }
             Cmd::Request { client, req } => self.request(client, req).await,

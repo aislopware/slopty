@@ -51,8 +51,9 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`); nothing reaches the host.
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
-- Terminal size is owned by one **driver** client (first to attach; anyone can take it with the
-  "take" pill, which also fits the item to their viewport); viewers see the driver's grid.
+- Terminal size is owned by one **driver** client (the one that opened the session, else the
+  first to attach; anyone can take it with the "take" pill, which also fits the item to their
+  viewport); viewers see the driver's grid.
 
 **Absolute line numbering.** Clients cache scrollback by `LineIndex` (absolute, monotonic). The
 engine keeps a libghostty *tracked grid ref* pinned to the newest active row and re-derives the

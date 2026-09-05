@@ -111,6 +111,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   Verified on the iOS 26.5 simulator 2026-09-05: "+ shell" on the phone opens a 43×22 PTY
   shown at 100 % across the phone's width. Landscape (both directions in the spec) rotates the
   GPUI window with the keyboard; nothing else was needed.
+- ✅ **The opener drives.** Every client attaches to a new terminal the moment the
+  `SessionOpened` broadcast reaches it, so the phone could become driver of a shell the desktop
+  just opened (observed 2026-09-05: a fresh desktop shell wearing the "take" pill). hostd calls
+  `SessionHandle::reserve_driver(opener)` before broadcasting; the first attach no longer
+  decides. Test `reserved_driver_beats_the_first_attach`.
 - ✅ **Driver hand-off is explicit: the "take" pill.** A terminal whose PTY follows another
   client's size shows "take" in its title bar (`TerminalState::driving` is false).
   `CanvasView::take_over` sizes the item for this viewport (clamped between the default
