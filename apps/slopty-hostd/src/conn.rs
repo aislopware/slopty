@@ -210,8 +210,12 @@ async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
     }
 }
 
-/// How long the pump waits for the next datagram before checking whether QUIC has let go of
-/// the ones it was holding (only while a hold is on).
+/// How long the pump waits for the next datagram before looking again, while anything is
+/// outstanding: QUIC still holding what it took, or datagrams still queued for it.
+///
+/// It is also the promise the pump's own lateness is measured against. A turn that asks for
+/// this much and comes back far later is this task not being scheduled, which is the only way
+/// to tell that from the path holding the bytes.
 const HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// One stretch during which QUIC held datagrams in its send buffer (congestion window or
@@ -222,11 +226,31 @@ struct Hold {
     cwnd_at_max: u64,
 }
 
-/// One stretch during which the pump itself was behind: datagrams waited in the channel
-/// ahead of QUIC, because this task was not scheduled to move them.
+/// One stretch during which datagrams waited in the pump's channel, ahead of QUIC.
+///
+/// `behind` sums only the turns the pump *owed* them — the gaps in which the queue was already
+/// non-empty when the loop last looked — rather than the wall clock since the backlog was first
+/// noticed. Timing from the moment `recv` hands over the first datagram measures how long the
+/// drain took and misses the sleep before it entirely, which is how a pump descheduled for
+/// 200 ms could wake, drain in 1 ms and report 1 ms behind.
+///
+/// `late` is the worst single turn: how far past [`HOLD_POLL`] one trip round the loop took
+/// while work was outstanding. That is the pump not being scheduled, stated directly.
+#[derive(Default, PartialEq, Eq, Debug)]
 struct Backlog {
-    since: std::time::Instant,
+    behind: std::time::Duration,
+    late: std::time::Duration,
     max_queued: usize,
+}
+
+impl Backlog {
+    /// Fold in one turn of the pump loop: `since` is how long the turn took and `queued` is what
+    /// was already waiting when the *previous* turn looked. Only called when that was non-zero.
+    fn turn(&mut self, since: std::time::Duration, queued: usize) {
+        self.behind = self.behind.saturating_add(since);
+        self.late = self.late.max(since.saturating_sub(HOLD_POLL));
+        self.max_queued = self.max_queued.max(queued);
+    }
 }
 
 /// Drain the media queue into QUIC datagrams, tracking what the path can carry.
@@ -244,8 +268,15 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget:
     let mut last_budget = 0;
     let mut hold: Option<Hold> = None;
     let mut backlog: Option<Backlog> = None;
+    // What the previous turn of the loop saw, so this one can tell how long the pump owed a
+    // turn to datagrams that were already waiting.
+    let mut last_turn = std::time::Instant::now();
+    let mut queued_before = 0_usize;
     loop {
-        let datagram = if hold.is_some() {
+        // Poll while anything is outstanding, so every turn with work to do has a deadline to
+        // be late against; block only when there is nothing to be late for.
+        let waiting = hold.is_some() || queued_before > 0;
+        let datagram = if waiting {
             match tokio::time::timeout(HOLD_POLL, rx.recv()).await {
                 Ok(Some(d)) => Some(d),
                 Ok(None) => break,
@@ -254,24 +285,27 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget:
         } else {
             rx.recv().await
         };
+        let now = std::time::Instant::now();
+        let since = now.saturating_duration_since(last_turn);
+        last_turn = now;
         let held =
             slopty_net::endpoint::DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
         budget.set_held(held);
-        match (&mut backlog, rx.len()) {
-            (None, 0) => {}
-            (None, queued) => {
-                backlog = Some(Backlog { since: std::time::Instant::now(), max_queued: queued });
-            }
-            (Some(b), 0) => {
-                tracing::debug!(
-                    behind_ms = b.since.elapsed().as_millis(),
-                    max_queued = b.max_queued,
-                    "the datagram pump caught up"
-                );
-                backlog = None;
-            }
-            (Some(b), queued) => b.max_queued = b.max_queued.max(queued),
+        let queued = rx.len();
+        if queued_before > 0 {
+            backlog.get_or_insert_with(Backlog::default).turn(since, queued_before);
         }
+        if queued == 0
+            && let Some(b) = backlog.take()
+        {
+            tracing::debug!(
+                behind_ms = b.behind.as_millis(),
+                late_ms = b.late.as_millis(),
+                max_queued = b.max_queued,
+                "the datagram pump caught up"
+            );
+        }
+        queued_before = queued;
         match (&mut hold, held) {
             (None, 0) => {}
             (None, bytes) => {
@@ -695,5 +729,48 @@ impl Peer<'_> {
             let _finished = stream.finish();
         });
         self.attached.insert(session, (task, sink));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{Backlog, HOLD_POLL};
+
+    /// 200 ms of sleep, less the millisecond the loop was entitled to take.
+    const LATE: Duration = match Duration::from_millis(200).checked_sub(HOLD_POLL) {
+        Some(late) => late,
+        None => Duration::ZERO,
+    };
+
+    /// The scenario the review named: the pump is descheduled for 200 ms while datagrams pile
+    /// up, then wakes and drains them in a millisecond. Timing the stretch from the moment
+    /// `recv` first hands one over would report 1 ms; the sleep is the whole of the lag.
+    #[test]
+    fn a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain() {
+        let mut b = Backlog::default();
+        b.turn(Duration::from_millis(200), 40);
+        assert_eq!(b.behind, Duration::from_millis(200));
+        assert_eq!(b.late, LATE);
+        assert_eq!(b.max_queued, 40);
+        // Draining the rest quickly adds its own small cost and erases nothing.
+        for _ in 0..40 {
+            b.turn(Duration::from_micros(25), 1);
+        }
+        assert_eq!(b.behind, Duration::from_millis(201));
+        assert_eq!(b.late, LATE, "the worst turn stands");
+        assert_eq!(b.max_queued, 40);
+    }
+
+    /// A pump that keeps its promise every turn is never late, however long the backlog lasts.
+    #[test]
+    fn a_pump_that_keeps_its_turn_is_never_late() {
+        let mut b = Backlog::default();
+        for _ in 0..100 {
+            b.turn(HOLD_POLL, 3);
+        }
+        assert_eq!(b.late, Duration::ZERO);
+        assert_eq!(b.behind, HOLD_POLL.saturating_mul(100), "still time datagrams spent queued");
     }
 }
