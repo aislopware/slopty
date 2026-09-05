@@ -79,6 +79,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     let budget = DatagramBudget::new();
     let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
     let paths = tokio::spawn(slopty_net::endpoint::log_path_events(conn.clone(), "host"));
+    let health = tokio::spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "host"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
     let feedback = tokio::spawn(read_feedback(conn.clone(), feedback_tx));
     let mut peer = Peer {
@@ -93,6 +94,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         budget,
         pump,
         paths,
+        health,
         feedback,
         transcripts: HashMap::new(),
     };
@@ -220,14 +222,28 @@ struct Hold {
     cwnd_at_max: u64,
 }
 
+/// One stretch during which the pump itself was behind: datagrams waited in the channel
+/// ahead of QUIC, because this task was not scheduled to move them.
+struct Backlog {
+    since: std::time::Instant,
+    max_queued: usize,
+}
+
 /// Drain the media queue into QUIC datagrams, tracking what the path can carry.
 ///
 /// Logs every stretch during which QUIC held datagrams back (the send buffer was not empty):
 /// media that waits there is latency the receiver sees as a stall, and the length and size
 /// of those holds is what start-up and bitrate steps are judged by.
+///
+/// Logs the other half too. A datagram waits in one of two places, and only the second is the
+/// path's doing: in this task's channel, because the pump has not run; or in QUIC's send buffer,
+/// because the window or the pacer holds it. A receiver cannot tell them apart — both are
+/// silence on the link — so a stall charged to the network needs the backlog line ruled out
+/// first.
 async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget: DatagramBudget) {
     let mut last_budget = 0;
     let mut hold: Option<Hold> = None;
+    let mut backlog: Option<Backlog> = None;
     loop {
         let datagram = if hold.is_some() {
             match tokio::time::timeout(HOLD_POLL, rx.recv()).await {
@@ -241,6 +257,21 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget:
         let held =
             slopty_net::endpoint::DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
         budget.set_held(held);
+        match (&mut backlog, rx.len()) {
+            (None, 0) => {}
+            (None, queued) => {
+                backlog = Some(Backlog { since: std::time::Instant::now(), max_queued: queued });
+            }
+            (Some(b), 0) => {
+                tracing::debug!(
+                    behind_ms = b.since.elapsed().as_millis(),
+                    max_queued = b.max_queued,
+                    "the datagram pump caught up"
+                );
+                backlog = None;
+            }
+            (Some(b), queued) => b.max_queued = b.max_queued.max(queued),
+        }
         match (&mut hold, held) {
             (None, 0) => {}
             (None, bytes) => {
@@ -301,6 +332,8 @@ struct Peer<'d> {
     budget: DatagramBudget,
     pump: JoinHandle<()>,
     paths: JoinHandle<()>,
+    /// The periodic congestion-window sample; a no-op task unless the trace is on.
+    health: JoinHandle<()>,
     feedback: JoinHandle<()>,
     /// Conversations this client follows, with the reader's position in each file.
     transcripts: HashMap<SessionId, Tail>,
@@ -318,6 +351,7 @@ impl Drop for Peer<'_> {
         }
         self.pump.abort();
         self.paths.abort();
+        self.health.abort();
         self.feedback.abort();
     }
 }

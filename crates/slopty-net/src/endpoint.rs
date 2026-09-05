@@ -289,6 +289,58 @@ pub fn selected_path(conn: &iroh::endpoint::Connection) -> Option<(Duration, u64
     })
 }
 
+/// Environment variable that turns [`trace_path_health`] on, in milliseconds between samples.
+pub const PATH_TRACE_ENV: &str = "SLOPTY_PATH_TRACE_MS";
+
+/// The sampling period from [`PATH_TRACE_ENV`], or `None` when the trace is off.
+///
+/// A congestion window is only legible as a series: one reading at the end of a run cannot tell
+/// a window that sat on BBR's four-packet floor the whole time from one that dipped there for
+/// `ProbeRTT`. Off by default because the line is per sample, not per event.
+#[must_use]
+pub fn path_trace_period() -> Option<Duration> {
+    parse_trace_period(std::env::var(PATH_TRACE_ENV).ok()?.as_str())
+}
+
+/// [`path_trace_period`] without the environment: milliseconds; `0` and anything unreadable is off.
+fn parse_trace_period(raw: &str) -> Option<Duration> {
+    let ms: u64 = raw.trim().parse().ok()?;
+    (ms > 0).then(|| Duration::from_millis(ms))
+}
+
+/// Sample the selected path every [`path_trace_period`] and log it, until the connection closes.
+///
+/// Returns at once when the trace is off. `cwnd` against `space` is the whole send-side picture:
+/// a window at its floor with the datagram buffer filling is media waiting on ACKs.
+pub async fn trace_path_health(conn: iroh::endpoint::Connection, side: &'static str) {
+    let Some(period) = path_trace_period() else { return };
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if conn.close_reason().is_some() {
+            return;
+        }
+        let space = conn.datagram_send_buffer_space();
+        let Some(path) =
+            conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| p.stats())
+        else {
+            continue;
+        };
+        tracing::debug!(
+            side,
+            rtt_us = path.rtt.as_micros(),
+            cwnd = path.cwnd,
+            space,
+            congestion = path.congestion_events,
+            lost = path.lost_packets,
+            sent = path.udp_tx.datagrams,
+            mtu = path.current_mtu,
+            "path health"
+        );
+    }
+}
+
 /// Log every path change on `conn` at info level until the connection closes.
 ///
 /// Opened, closed (with the path's final stats) and selected. Path flaps are the first thing
@@ -327,6 +379,20 @@ pub async fn log_path_events(conn: iroh::endpoint::Connection, side: &'static st
                 tracing::debug!(side, missed, "path events lagged");
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_path_trace_is_off_unless_a_period_asks_for_it() {
+        assert_eq!(parse_trace_period("100"), Some(Duration::from_millis(100)));
+        assert_eq!(parse_trace_period(" 25 "), Some(Duration::from_millis(25)));
+        for off in ["", "0", "no", "-1", "1.5"] {
+            assert_eq!(parse_trace_period(off), None, "{off:?} should leave the trace off");
         }
     }
 }
