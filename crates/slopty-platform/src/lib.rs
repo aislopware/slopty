@@ -138,3 +138,19 @@ pub fn playback_audio_session() {
         }
     }
 }
+
+/// Whether a physical keyboard is attached. On iOS this is `GameController`'s coalesced keyboard
+/// (nil until one connects over Smart Connector, Bluetooth or USB); a Mac always has one.
+#[cfg_attr(not(target_os = "ios"), expect(clippy::missing_const_for_fn, reason = "constant here"))]
+pub fn hardware_keyboard_attached() -> bool {
+    #[cfg(target_os = "ios")]
+    {
+        // SAFETY: GameController rule: `coalescedKeyboard` is a class property readable from
+        // any thread; it is nil when no keyboard is connected, which `Option` covers.
+        unsafe { objc2_game_controller::GCKeyboard::coalescedKeyboard() }.is_some()
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        true
+    }
+}

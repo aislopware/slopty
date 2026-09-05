@@ -78,7 +78,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   opts out of Split View / Stage Manager). Verified: the mapping's unit tests (letters
   keep shift, symbols drop it, chords have no `key_char`, named keys, modifiers ignored) run on
   the host through a shim crate because `gpui_ios` is `cfg(target_os = "ios")`; the app builds
-  for `aarch64-apple-ios-sim` against the new pin. Not verified by a test: the UIKit delivery
+  for `aarch64-apple-ios-sim` against the new pin. The app hides the key bar while
+  `slopty_platform::hardware_keyboard_attached()` (GameController's coalesced keyboard, polled
+  on the settings tick — GameController posts connect/disconnect notifications, but a poll that
+  already runs costs nothing and needs no observer lifetime) is true; `key_bar_visible` is the
+  pure rule with its table test. Not verified by a test: the UIKit delivery
   itself (no simulator-driven layer exists yet; the iOS self-test socket is the next step).
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
   things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`

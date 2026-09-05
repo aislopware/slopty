@@ -50,6 +50,12 @@ const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
 const NARROW_BAR: f32 = 600.0;
 /// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
 const KEY_BAR: bool = cfg!(target_os = "ios");
+
+/// The key bar is for a touch platform typing on glass: a hardware keyboard has every key on
+/// it, so the row hides while one is attached and comes back when it is unplugged.
+const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool {
+    touch_platform && !hardware_keyboard
+}
 /// Key bar height in points.
 const KEY_BAR_H: f32 = 40.0;
 
@@ -110,6 +116,8 @@ pub struct Workspace {
     active: Option<EndpointId>,
     /// The host switcher is open.
     switcher: bool,
+    /// A physical keyboard is attached (polled with the settings; hides the key bar).
+    hardware_keyboard: bool,
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
@@ -127,6 +135,15 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// A keyboard was attached or removed: show or hide the key bar.
+    fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
+        if self.hardware_keyboard != attached {
+            tracing::info!(attached, "hardware keyboard");
+            self.hardware_keyboard = attached;
+            cx.notify();
+        }
+    }
+
     /// Take a (re)loaded settings file: log what was odd about it, show it in the bar for a
     /// few seconds, and rebuild the theme.
     fn apply_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
@@ -1222,7 +1239,7 @@ impl Render for Workspace {
                 .text_color(hsla(surfaces.text_muted))
                 .child(SharedString::from(self.status_text())),
         };
-        let key_bar = KEY_BAR
+        let key_bar = key_bar_visible(KEY_BAR, self.hardware_keyboard)
             .then(|| self.active_canvas()?.read(cx).active_key_target())
             .flatten()
             .map(|target| self.key_bar(&target, cx));
@@ -1289,6 +1306,7 @@ pub fn open_workspace(
         hosts: Vec::new(),
         active: None,
         switcher: false,
+        hardware_keyboard: slopty_platform::hardware_keyboard_attached(),
         theme: Theme::default(),
         settings: Settings::default(),
         window_dark: true,
@@ -1364,12 +1382,15 @@ pub fn open_workspace(
     Ok(())
 }
 
-/// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls).
+/// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),
+/// and notice a hardware keyboard coming or going on the same tick.
 fn watch_settings(path: std::path::PathBuf, workspace: Entity<Workspace>, cx: &App) {
     cx.spawn(async move |cx| {
         let mut last = settings::Stamp::of(&path);
         loop {
             cx.background_executor().timer(settings::POLL).await;
+            let keyboard = slopty_platform::hardware_keyboard_attached();
+            workspace.update(cx, |ws, cx| ws.set_hardware_keyboard(keyboard, cx));
             let now = settings::Stamp::of(&path);
             if now == last {
                 continue;
@@ -1398,4 +1419,17 @@ fn open_settings_file(cx: &App) {
 /// Backoff between connection attempts: 1 s after a drop, doubling per failure, capped.
 fn retry_delay(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs((1_u64 << failures.min(4)).min(10))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_bar_visible;
+
+    #[test]
+    fn the_key_bar_is_for_glass_without_a_keyboard() {
+        assert!(key_bar_visible(true, false));
+        assert!(!key_bar_visible(true, true));
+        assert!(!key_bar_visible(false, false));
+        assert!(!key_bar_visible(false, true));
+    }
 }

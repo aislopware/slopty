@@ -211,6 +211,10 @@ objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "AVAudioSession",
     "AVAudioSessionTypes",
 ] }
+objc2-game-controller = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "GCKeyboard",
+] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 

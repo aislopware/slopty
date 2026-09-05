@@ -21,3 +21,4 @@ objc2-app-kit.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
+objc2-game-controller.workspace = true

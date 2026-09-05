@@ -283,6 +283,7 @@ settings:
       - sdk: CoreText.framework
       - sdk: CoreVideo.framework
       - sdk: Foundation.framework
+      - sdk: GameController.framework
       - sdk: Metal.framework
       - sdk: Network.framework
       - sdk: QuartzCore.framework

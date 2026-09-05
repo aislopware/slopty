@@ -238,7 +238,8 @@ through the text system (`insertText:`, IME) while a text input has focus. UIKit
 repeat presses, so the window repeats a held key itself (400 ms, then every 50 ms, delivered
 as `is_held`). A trackpad or mouse hovers as `MouseMove` and scrolls as `ScrollWheel` with
 phases (a `UIPanGestureRecognizer` limited to indirect scrolls, so direct drags stay with the
-touch recognizer); `UIApplicationSupportsIndirectInputEvents` is set so clicks are pointer
+touch recognizer); while a keyboard is attached (`GCKeyboard.coalescedKeyboard`, polled once a
+second with the settings) the key bar hides, since every key on it is under the fingers; `UIApplicationSupportsIndirectInputEvents` is set so clicks are pointer
 events rather than synthesised touches. The bundle targets iPhone and iPad
 (`TARGETED_DEVICE_FAMILY 1,2`, every iPad orientation, so Split View and Stage Manager can
 resize the window; the canvas re-fits on resize like any window);
