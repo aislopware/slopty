@@ -165,8 +165,11 @@ a hidden window produces no frames, so no amount of asking helps. The host answe
 encoder has produced nothing and again the moment it does — and the receiver stops asking while
 the source is idle (`Reassembler::set_source_live`), with the element's placeholder saying
 "waiting for the window to draw" instead of "waiting for the first frame". For a host too silent
-to send the hint, `Config::refresh_max_repeats` (12, ≈17 s with the backoff) is the fallback cap;
-any datagram on the stream clears both.
+to send the hint, `Config::refresh_max_repeats` (12, ≈17 s with the backoff) is the fallback cap.
+The two are cleared by different evidence: *any* datagram on the stream — a heartbeat included —
+restarts the cap, because it proves the host is still there, while only a video fragment lifts the
+idle suppression, because only a picture proves the source is drawing (a hint that has not changed
+never overwrites what the stream itself proved).
 
 **Presentation path.** The reassembler stamps every complete frame with the arrival of the
 datagram that finished it (`FrameOut::arrived`); the stream worker parks that instant under the

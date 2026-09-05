@@ -1612,10 +1612,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   as a `Role::Status` labelled with that text, since it is the only thing a screen reader has to
   read while the surface is empty and it changes when the host reports the source. A
   cap stays as the fallback for a host too silent to send the hint — `refresh_max_repeats` 12,
-  ≈17 s of asking with the backoff — and any datagram on the stream clears both. Wire:
+  ≈17 s of asking with the backoff. Different evidence clears each: any datagram, heartbeat
+  included, restarts the cap (the host is there); only a video fragment lifts the suppression
+  (the source drew). Wire:
   `SourceState` + the new `ScreenEvent` variant, goldens `host_screen_source` (new) and
   `host_screen_rate` / `client_hello` re-accepted, PROTOCOL_VERSION 12 → 13. Tests:
-  `an_idle_source_stops_the_refresh_requests` and `refresh_requests_give_up_after_the_cap`
+  `an_idle_source_stops_the_refresh_requests`, `refresh_requests_give_up_after_the_cap` and
+  `a_heartbeat_restarts_the_cap_and_a_frame_lifts_the_idle_hint`
   (`crates/slopty-media/tests/pipeline.rs`), `the_placeholder_says_which_end_is_waiting`.
 - ✅ **Parity tracks loss asymmetrically, with a deadband** (2026-09-05). The ratio is
   `2 × smoothed loss + 5 %`, clamped to 5…50 %, and a report with `frames_lost > 0` raises it to
