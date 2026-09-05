@@ -26,7 +26,7 @@ mod roundtrip {
     async fn start() -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("ptyd.sock");
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"))
             .arg("--socket")
             .arg(&socket)
             .arg("--backlog-bytes")
@@ -34,11 +34,26 @@ mod roundtrip {
             .spawn()
             .unwrap();
         // The socket file appears between bind() and listen(); poll by connecting.
-        for _ in 0..500 {
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(60)).expect("deadline");
+        let mut ready = false;
+        loop {
+            if let Some(status) = child.try_wait().expect("poll ptyd") {
+                panic!("ptyd exited early: {status}");
+            }
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                ready = true;
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !ready {
+            let _kill = child.kill();
+            let _wait = child.wait();
+            panic!("ptyd socket not ready after 60 s");
         }
         Daemon { child, socket, _dir: dir }
     }
