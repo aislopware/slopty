@@ -104,6 +104,14 @@ impl WindowPicker {
         Self { sessions, windows, displays, theme, focus: cx.focus_handle() }
     }
 
+    /// Swap the theme.
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme != theme {
+            self.theme = theme;
+            cx.notify();
+        }
+    }
+
     fn key_down(_this: &mut Self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if ev.keystroke.key == "escape" {
             cx.emit(PickerEvent::Dismiss);

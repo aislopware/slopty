@@ -688,6 +688,25 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// Swap the theme everywhere: the plane, every terminal (which re-fits its grid to the
+    /// new font on its next frame), every window's chrome and the picker.
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme == theme {
+            return;
+        }
+        for view in self.terminals.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        for view in self.screens.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        if let Some(picker) = &self.picker {
+            picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
+        }
+        self.theme = theme;
+        cx.notify();
+    }
+
     /// Link RTT (fanned out to every terminal's predictor and every window's overlay).
     pub fn set_rtt(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
         self.rtt = rtt;
@@ -1363,7 +1382,8 @@ impl CanvasView {
         let id = item.id;
         let card = zoom < CARD_ZOOM;
         let title_h = if card { TITLE_H } else { TITLE_H * zoom };
-        let ui_size = if card { 12.0 } else { 12.0 * zoom };
+        let base_ui = self.theme.typography.ui_size - 1.0;
+        let ui_size = if card { base_ui } else { base_ui * zoom };
 
         let (title, focused) = match item.kind {
             ItemKind::Terminal { session } => {

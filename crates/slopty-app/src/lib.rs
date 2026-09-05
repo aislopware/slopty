@@ -6,6 +6,7 @@
 //! runtime and the GPUI application, then call [`open_workspace`].
 
 pub mod net;
+pub mod settings;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -15,9 +16,11 @@ use gpui::{
 };
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
 use slopty_core::SessionId;
 use slopty_proto::HostMsg;
+use slopty_settings::{Loaded, Settings};
 use slopty_theme::Theme;
 use slopty_ui::canvas::{
     AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
@@ -72,6 +75,8 @@ const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("→", "right", None),
     ("/", "/", Some("/")),
 ];
+/// How long a settings notice (parse error, unknown keys) replaces the status text.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
 /// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
 const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 /// Nothing heard for this long and the connection is given up so the reconnect loop takes
@@ -104,6 +109,13 @@ pub struct Workspace {
     /// How long the host has sent nothing at all, once past [`SILENCE_WARN`].
     silent: Option<std::time::Duration>,
     theme: Theme,
+    /// The user's `settings.toml` as last loaded (defaults when absent or broken).
+    settings: Settings,
+    /// The window's appearance is dark (`theme.appearance = "system"` follows it).
+    window_dark: bool,
+    /// A transient message shown in place of the status (with the sequence that clears it).
+    notice: Option<(u64, String)>,
+    notice_seq: u64,
     subscriptions: Vec<gpui::Subscription>,
     pairing: Option<Pairing>,
     /// Networking runtime; pairing runs there.
@@ -113,6 +125,74 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Take a (re)loaded settings file: log what was odd about it, show it in the bar for a
+    /// few seconds, and rebuild the theme.
+    fn apply_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
+        for warning in &loaded.warnings {
+            tracing::warn!(%warning, "settings");
+        }
+        if let Some(error) = &loaded.error {
+            tracing::error!(%error, "settings ignored");
+            self.show_notice(format!("settings: {error}"), cx);
+        } else if let Some(first) = loaded.warnings.first() {
+            let more = loaded.warnings.len().saturating_sub(1);
+            let text = if more == 0 {
+                format!("settings: {first}")
+            } else {
+                format!("settings: {first} (+{more} more)")
+            };
+            self.show_notice(text, cx);
+        }
+        self.settings = loaded.settings;
+        self.rebuild_theme(cx);
+    }
+
+    /// The window turned dark or light.
+    fn set_window_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
+        if self.window_dark != dark {
+            self.window_dark = dark;
+            self.rebuild_theme(cx);
+        }
+    }
+
+    /// Derive the theme from the settings and the window, and push it everywhere.
+    fn rebuild_theme(&mut self, cx: &mut Context<Self>) {
+        let theme = settings::theme_for(&self.settings, self.window_dark);
+        if theme == self.theme {
+            return;
+        }
+        let mode = match theme.variant() {
+            slopty_theme::Variant::Dark => gpui_kit::component::ThemeMode::Dark,
+            slopty_theme::Variant::Light => gpui_kit::component::ThemeMode::Light,
+        };
+        // gpui-kit widgets (the pairing input) follow their own theme.
+        gpui_kit::component::Theme::change(mode, None, cx);
+        if let Some(canvas) = &self.canvas {
+            canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
+        }
+        self.theme = theme;
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    /// Replace the status text with `text` for [`NOTICE_FOR`].
+    fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        let seq = self.notice_seq;
+        self.notice = Some((seq, text));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_FOR).await;
+            let _cleared = this.update(cx, |ws, cx| {
+                if ws.notice.as_ref().is_some_and(|(s, _)| *s == seq) {
+                    ws.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Show the pairing panel (idempotent).
     fn show_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pairing.is_some() {
@@ -461,23 +541,25 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let s = &self.theme.surfaces;
+        // Bar text sits one point under the UI size (12 at the default 13).
+        let ui = self.theme.typography.ui_size - 1.0;
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
         let zoom_pct = (self.zoom * 100.0).round().max(0.0) as u32;
-        let label = |text: String| {
+        let label = move |text: String| {
             div()
                 .flex_none()
-                .text_size(px(12.0))
+                .text_size(px(ui))
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(text))
         };
-        let button = |id: &'static str, text: &'static str, hint: &'static str| {
+        let button = move |id: &'static str, text: &'static str, hint: &'static str| {
             div()
                 .id(id)
                 .flex_none()
                 .px(px(if narrow { 5.0 } else { 8.0 }))
                 .py(px(3.0))
                 .rounded(px(5.0))
-                .text_size(px(12.0))
+                .text_size(px(ui))
                 .text_color(hsla(s.text))
                 .hover(|el| el.bg(hsla(s.panel)))
                 .cursor_pointer()
@@ -533,7 +615,7 @@ impl Workspace {
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(px(5.0))
-                .text_size(px(12.0))
+                .text_size(px(ui))
                 .text_color(hsla(warm))
                 .bg(slopty_ui::colors::hsla_alpha(warm, 0.15))
                 .hover(|el| el.bg(slopty_ui::colors::hsla_alpha(warm, 0.3)))
@@ -570,7 +652,7 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(12.5))
+                    .text_size(px(ui + 0.5))
                     .text_color(hsla(s.text))
                     .child(SharedString::from(if self.host_name.is_empty() {
                         "Slopty".to_owned()
@@ -578,7 +660,12 @@ impl Workspace {
                         self.host_name.clone()
                     })),
             )
-            .child(label(self.status.clone()))
+            .child(match &self.notice {
+                Some((_, text)) => {
+                    label(text.clone()).text_color(hsla(self.theme.terminal.palette(3)))
+                }
+                None => label(self.status.clone()),
+            })
             .child(div().flex_1())
             .child(match (self.silent, self.rtt, self.relayed) {
                 (Some(gap), _, _) => label(format!("host silent {}s", gap.as_secs()))
@@ -668,9 +755,13 @@ pub fn open_workspace(
     }
     cx.bind_keys(slopty_ui::canvas::key_bindings());
     cx.bind_keys(slopty_ui::terminal::key_bindings());
-    // gpui-kit widgets (the pairing input) follow their own theme; Slopty is dark only.
+    cx.bind_keys([gpui::KeyBinding::new("cmd-,", OpenSettings, None)]);
+    cx.on_action(|_: &OpenSettings, cx| open_settings_file(cx));
+    // gpui-kit widgets (the pairing input) follow their own theme; the real one is set once the
+    // window's appearance is known, below.
     gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-    let theme = Theme::default();
+    let settings_path = slopty_settings::path();
+    let loaded = Settings::load(&settings_path);
     let (paired_tx, mut paired_rx) = tokio::sync::mpsc::unbounded_channel();
     let workspace = cx.new(|_cx| Workspace {
         canvas: None,
@@ -681,15 +772,33 @@ pub fn open_workspace(
         rtt: None,
         relayed: None,
         silent: None,
-        theme: theme.clone(),
+        theme: Theme::default(),
+        settings: Settings::default(),
+        window_dark: true,
+        notice: None,
+        notice_seq: 0,
         subscriptions: Vec::new(),
         pairing: None,
         runtime: handle.clone(),
         paired: paired_tx,
     });
     let root_view = workspace.clone();
-    let window =
-        cx.open_window(options, move |window, cx| cx.new(|cx| Root::new(root_view, window, cx)))?;
+    let window = cx.open_window(options, move |window, cx| {
+        // The theme follows the window's appearance while `theme.appearance = "system"`.
+        let observed = root_view.clone();
+        let subscription = window.observe_window_appearance(move |window, cx| {
+            let dark = settings::is_dark(window.appearance());
+            observed.update(cx, |ws, cx| ws.set_window_dark(dark, cx));
+        });
+        let dark = settings::is_dark(window.appearance());
+        root_view.update(cx, |ws, cx| {
+            ws.subscriptions.push(subscription);
+            ws.window_dark = dark;
+            ws.apply_loaded(loaded, cx);
+        });
+        cx.new(|cx| Root::new(root_view, window, cx))
+    })?;
+    watch_settings(settings_path, workspace.clone(), cx);
     // A tap on an agent banner brings the app and that session forward; its buttons answer.
     let for_notifications = workspace.clone();
     cx.on_system_notification_response(move |response, cx| {
@@ -882,6 +991,37 @@ pub fn open_workspace(
     })
     .detach();
     Ok(())
+}
+
+/// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls).
+fn watch_settings(path: std::path::PathBuf, workspace: Entity<Workspace>, cx: &App) {
+    cx.spawn(async move |cx| {
+        let mut last = settings::Stamp::of(&path);
+        loop {
+            cx.background_executor().timer(settings::POLL).await;
+            let now = settings::Stamp::of(&path);
+            if now == last {
+                continue;
+            }
+            last = now;
+            tracing::info!(path = %path.display(), "settings changed; reloading");
+            let loaded = Settings::load(&path);
+            workspace.update(cx, |ws, cx| ws.apply_loaded(loaded, cx));
+        }
+    })
+    .detach();
+}
+
+/// The "Settings…" menu item (⌘,): open the file in the default editor, writing the commented
+/// defaults first when there is none.
+fn open_settings_file(cx: &App) {
+    let path = slopty_settings::path();
+    match Settings::init(&path) {
+        Ok(true) => tracing::info!(path = %path.display(), "wrote default settings"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "write default settings"),
+    }
+    cx.open_with_system(&path);
 }
 
 /// Backoff between connection attempts: 1 s after a drop, doubling per failure, capped.

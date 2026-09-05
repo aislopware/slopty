@@ -40,6 +40,8 @@ fn menus() -> Vec<Menu> {
     use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
     vec![
         Menu::new("Slopty").items([
+            MenuItem::action("Settings…", slopty_app::OpenSettings),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Hide Slopty", Hide),

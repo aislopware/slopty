@@ -216,6 +216,17 @@ pasteboard flows back through clipboard sync). ⌘⇧I (Canvas ▸ Stream Stats)
 window with its stream size and scale, fps, Mb/s, link RTT and the FEC/lost/NACK/refresh and
 audio counters, re-sampled once a second from `ScreenStats`.
 
+**Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
+item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
+missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | ui_size`,
+`[theme] appearance = dark | light | system`; every key has a default, unknown keys warn, a
+file that does not parse is skipped with the error in the top bar for a few seconds. The app
+polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from
+`appearance`, `system` following `window.appearance()` through `observe_window_appearance`)
+and pushes it down `CanvasView::set_theme` → every terminal, window and the picker; the
+terminal element re-measures its cell grid from the new size on the next frame and `fitted`
+resizes the session. iOS reads the same path (in its sandbox) but has no editor entry.
+
 **Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
 ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,
 which is the only practical path on a phone). `slopty_app::net::pair_host` redeems it the same
@@ -239,7 +250,8 @@ way the CLI does and the connect loop resumes.
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | host |
 | `slopty-host` | session manager, mux, fan-out | host |
 | `slopty-client` | client session state, canvas document | client |
-| `slopty-theme` | design tokens | client |
+| `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
+| `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views | client |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, pairing panel, host link loop | client |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |

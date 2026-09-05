@@ -19,7 +19,11 @@ slopty-core.workspace = true
 slopty-net = { workspace = true, features = [ "mdns" ] }
 slopty-platform.workspace = true
 slopty-proto.workspace = true
+slopty-settings.workspace = true
 slopty-theme.workspace = true
 slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

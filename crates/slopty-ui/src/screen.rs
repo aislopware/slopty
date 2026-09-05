@@ -145,6 +145,14 @@ impl Focusable for ScreenView {
 }
 
 impl ScreenView {
+    /// Swap the theme (chrome colours only; the picture is the host's).
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme != theme {
+            self.theme = theme;
+            cx.notify();
+        }
+    }
+
     /// Wrap an opened stream.
     pub fn new(
         opened: Opened,

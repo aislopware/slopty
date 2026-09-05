@@ -570,6 +570,20 @@ impl TerminalView {
         &self.theme
     }
 
+    /// Swap the theme. A changed family list drops the resolved family so the element picks
+    /// again; the element re-measures the grid from the new size on its next frame and
+    /// `fitted` resizes the session.
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme == theme {
+            return;
+        }
+        if self.theme.typography.mono_families != theme.typography.mono_families {
+            self.font_family = None;
+        }
+        self.theme = theme;
+        cx.notify();
+    }
+
     /// The monospace family the element resolved (first installed from the theme's list).
     #[must_use]
     pub fn font_family(&self) -> Option<&str> {

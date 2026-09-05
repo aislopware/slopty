@@ -1,7 +1,5 @@
 //! Networking on the tokio side.
 
-use std::path::PathBuf;
-
 use anyhow::{Context as _, Result, bail};
 use slopty_client::{HostLink, LinkEvent};
 use slopty_core::ClientId;
@@ -30,16 +28,8 @@ pub struct Connected {
     pub endpoint: slopty_net::Endpoint,
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SLOPTY_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    home.join("Library").join("Application Support").join("Slopty")
-}
-
 fn identity() -> Result<Identity> {
-    Ok(Identity::open(&data_dir().join("client.json"))?)
+    Ok(Identity::open(&slopty_settings::data_dir().join("client.json"))?)
 }
 
 /// Our greeting: which app this is, by platform.
