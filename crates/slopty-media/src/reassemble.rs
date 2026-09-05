@@ -172,6 +172,10 @@ pub struct ReassemblerStats {
     pub nacks: u64,
     /// Refresh requests sent.
     pub refreshes: u64,
+    /// Stalls that released (silence past the stall gap, then datagrams again).
+    pub stalls: u64,
+    /// Time spent stalled, in milliseconds (released stalls plus the one in progress, if any).
+    pub stalled_ms: u64,
 }
 
 struct Partial {
@@ -264,6 +268,10 @@ struct Window {
     frames_lost: u32,
     datagrams_lost: u32,
     holds_ns: Vec<u64>,
+    /// Silence charged to this window (see `Reassembler::charge_stall`).
+    stalled: Duration,
+    /// Stalls that released in this window.
+    stalls: u16,
 }
 
 /// Reassembles one stream's video datagrams and drives its loss policy.
@@ -286,6 +294,11 @@ pub struct Reassembler {
     last_arrival: Option<(u64, u32)>,
     /// When the last datagram of this stream (of any kind) came in.
     arrived_at: Instant,
+    /// Silence before this instant has already been charged to a report window.
+    stall_charged_to: Instant,
+    /// A video datagram of this stream has arrived at least once; before that, silence is the
+    /// stream starting up (the cursor arrives before the first frame), not a stall.
+    any_arrived: bool,
     /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
     last_rtt: Duration,
     last_host_ts_us: u32,
@@ -325,6 +338,8 @@ impl Reassembler {
             jitter_us: 0,
             last_arrival: None,
             arrived_at: now,
+            stall_charged_to: now,
+            any_arrived: false,
             last_rtt: Duration::from_millis(20),
             last_host_ts_us: 0,
             ltr_acks: VecDeque::new(),
@@ -371,7 +386,10 @@ impl Reassembler {
             return Ingest::Ignored(Ignored::Foreign);
         }
         let gap = now.saturating_duration_since(self.arrived_at);
-        if gap >= self.last_rtt.saturating_add(self.cfg.nack_delay).max(self.cfg.stall_gap) {
+        if self.stalled(now) {
+            self.charge_stall(now);
+            self.window.stalls = self.window.stalls.saturating_add(1);
+            self.stats.stalls = self.stats.stalls.saturating_add(1);
             self.resume(now, gap);
         }
         self.arrived_at = now;
@@ -391,6 +409,7 @@ impl Reassembler {
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
         self.refresh_repeats = 0;
+        self.any_arrived = true;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());
         let total = data_count.saturating_add(usize::from(header.parity_count));
@@ -592,6 +611,30 @@ impl Reassembler {
         }
     }
 
+    /// Silence on the stream that counts as a stall: one NACK round trip, at least
+    /// [`Config::stall_gap`].
+    fn stall_threshold(&self) -> Duration {
+        self.last_rtt.saturating_add(self.cfg.nack_delay).max(self.cfg.stall_gap)
+    }
+
+    /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the
+    /// stream's first video datagram: that wait is the host starting the stream).
+    #[must_use]
+    pub fn stalled(&self, now: Instant) -> bool {
+        self.any_arrived && now.saturating_duration_since(self.arrived_at) >= self.stall_threshold()
+    }
+
+    /// Charge the silence since the last datagram (the part not yet charged) to the current
+    /// report window, so a stall is reported whether it released or is still on.
+    fn charge_stall(&mut self, now: Instant) {
+        let from = self.arrived_at.max(self.stall_charged_to);
+        let silence = now.saturating_duration_since(from);
+        self.window.stalled = self.window.stalled.saturating_add(silence);
+        self.stats.stalled_ms =
+            self.stats.stalled_ms.saturating_add(u64::try_from(silence.as_millis()).unwrap_or(0));
+        self.stall_charged_to = now;
+    }
+
     /// The link moved again after a `gap` with nothing on it: restart every pending frame's
     /// NACK clock, so the answer to a NACK that was stuck in the stall gets its round trip.
     fn resume(&mut self, now: Instant, gap: Duration) {
@@ -726,8 +769,12 @@ impl Reassembler {
     }
 
     /// Build the periodic receiver report and reset the window counters. `late_frames` comes
-    /// from the presenter, which alone knows about vsync.
-    pub fn take_report(&mut self, late_frames: u32) -> ReceiverReport {
+    /// from the presenter, which alone knows about vsync; `now` charges a stall still in
+    /// progress to this window.
+    pub fn take_report(&mut self, now: Instant, late_frames: u32) -> ReceiverReport {
+        if self.stalled(now) {
+            self.charge_stall(now);
+        }
         let window = std::mem::take(&mut self.window);
         let mut holds = window.holds_ns;
         holds.sort_unstable();
@@ -758,6 +805,8 @@ impl Reassembler {
             late_frames,
             acked_ltr,
             acked_ltr_len,
+            stalled_ms: u16::try_from(window.stalled.as_millis()).unwrap_or(u16::MAX),
+            stalls: window.stalls,
         }
     }
 }

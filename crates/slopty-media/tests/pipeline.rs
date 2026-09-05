@@ -394,7 +394,7 @@ mod tests {
         let out = h.drain();
         assert_eq!(out.len(), 2);
         h.rx.ack_ltr(out[0].info.ltr_token.unwrap());
-        let report = h.rx.take_report(1);
+        let report = h.rx.take_report(h.now, 1);
         assert_eq!(
             (report.frames_ok, report.frames_fec, report.frames_lost, report.datagrams_lost),
             (2, 1, 0, 2)
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!((report.acked_ltr_len, report.acked_ltr[0]), (1, 0xABCD));
         assert_eq!(report.late_frames, 1);
         assert_eq!(report.queue_depth, 0);
-        let empty = h.rx.take_report(0);
+        let empty = h.rx.take_report(h.now, 0);
         assert_eq!((empty.frames_ok, empty.acked_ltr_len), (0, 0));
     }
 

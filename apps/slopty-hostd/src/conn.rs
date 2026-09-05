@@ -330,7 +330,15 @@ impl Peer<'_> {
                                 cwnd,
                             }
                         });
-                    s.report(&report, path);
+                    if let Some(decision) = s.report(&report, path) {
+                        let event = ScreenEvent::Rate {
+                            stream,
+                            target_bps: decision.target_bps,
+                            verdict: decision.verdict,
+                            capped: decision.capped,
+                        };
+                        let _sent = self.out.send(HostMsg::Screen(event)).await;
+                    }
                 }
             }
             ScreenRequest::Input { stream, input } => {

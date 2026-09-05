@@ -26,7 +26,7 @@ use slopty_core::StreamId;
 use slopty_input::{Injector, InputError};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    EncodedFrame, MediaError, Packetizer, RateController, Redundancy, audio_datagram,
+    Decision, EncodedFrame, MediaError, Packetizer, RateController, Redundancy, audio_datagram,
     cursor_datagram,
 };
 use slopty_proto::media::MAX_DATAGRAM;
@@ -601,8 +601,9 @@ impl ScreenStream {
     }
 
     /// Fold in a receiver report: LTR acks feed the encoder, loss feeds the parity ratio, and
-    /// loss, queueing and the QUIC path (`path`) drive the bitrate.
-    pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) {
+    /// loss, queueing, stalls and the QUIC path (`path`) drive the bitrate. Returns the
+    /// controller's decision when this report completed a decision window.
+    pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
         let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
         self.shared.pending.lock().acked.extend(acked);
         let sent_total = self.shared.packetizer.lock().datagrams_sent();
@@ -610,10 +611,23 @@ impl ScreenStream {
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
         let permille = self.shared.redundancy.lock().on_report(report, sent);
         self.shared.packetizer.lock().set_parity_permille(permille);
-        let changed = self.shared.rate.lock().on_report(report, sent, path);
-        if let Some(bps) = changed {
-            self.shared.apply_bitrate(bps);
+        let decision = self.shared.rate.lock().on_report(report, sent, path)?;
+        tracing::debug!(
+            stream = %self.id,
+            verdict = ?decision.verdict,
+            target_bps = decision.target_bps,
+            capped = decision.capped,
+            loss_permille = decision.window.loss_permille(),
+            queue_max = decision.window.queue_max,
+            hold_max_ms = decision.window.hold_max.as_millis(),
+            stalled_ms = decision.window.stalled_ms,
+            stalls = decision.window.stalls,
+            "rate decision"
+        );
+        if decision.changed {
+            self.shared.apply_bitrate(decision.target_bps);
         }
+        Some(decision)
     }
 
     /// The bitrate the controller is asking the encoder for right now.

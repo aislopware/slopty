@@ -279,6 +279,25 @@ pub struct ReceiverReport {
     pub acked_ltr: [u64; 4],
     /// Number of valid entries in `acked_ltr`.
     pub acked_ltr_len: u8,
+    /// Milliseconds of the window during which nothing at all arrived on the stream past the
+    /// reassembler's stall gap (a stall in progress at report time counts up to now). Loss
+    /// counted while this is non-zero is the link holding packets, not dropping them.
+    pub stalled_ms: u16,
+    /// Stalls that released in the window (packets held, then delivered together).
+    pub stalls: u16,
+}
+
+/// What the host's bitrate controller made of its last decision window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RateVerdict {
+    /// Loss, queueing or hold time: the target was cut.
+    Cut,
+    /// The window held a stall: the target is frozen, the window's loss discarded.
+    Stall,
+    /// Nothing wrong, nothing to grow into yet (cooldown after a cut, or the ceiling).
+    Steady,
+    /// Clean: the target grew.
+    Grow,
 }
 
 /// Cursor appearance, sent when it changes.
@@ -354,5 +373,16 @@ pub enum ScreenEvent {
     Clipboard {
         /// The host's clipboard text.
         text: String,
+    },
+    /// The bitrate controller decided (about twice a second per stream).
+    Rate {
+        /// Stream.
+        stream: StreamId,
+        /// Encoder target after the decision, bits per second.
+        target_bps: u32,
+        /// What the decision was.
+        verdict: RateVerdict,
+        /// The QUIC congestion window, not the verdict, is what holds the target down.
+        capped: bool,
     },
 }

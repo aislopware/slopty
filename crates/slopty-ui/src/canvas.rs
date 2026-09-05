@@ -816,6 +816,13 @@ impl CanvasView {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
             }
+            ScreenEvent::Rate { stream, target_bps, verdict, capped } => {
+                for view in self.screens.values() {
+                    if view.read(cx).stream() == stream {
+                        view.update(cx, |v, _| v.set_rate(target_bps, verdict, capped));
+                    }
+                }
+            }
             ScreenEvent::Cursor { .. } | ScreenEvent::ListingChanged => {}
         }
         cx.notify();

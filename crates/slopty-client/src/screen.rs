@@ -172,6 +172,12 @@ pub struct ScreenStats {
     pub audio_packets: u64,
     /// Opus packets missing from the sequence (or too late to play).
     pub audio_lost: u64,
+    /// Stalls that released: nothing arrived for a stall gap, then everything at once.
+    pub stalls: u64,
+    /// Time spent stalled, milliseconds (released stalls plus the one in progress).
+    pub stalled_ms: u64,
+    /// The link is stalled right now (as of the last report).
+    pub stalled: bool,
 }
 
 /// Playback for one stream, created on its first audio packet.
@@ -448,10 +454,14 @@ impl Worker {
     }
 
     async fn report(&mut self) {
-        let report = self.reassembler.take_report(0);
+        let now = Instant::now();
+        let report = self.reassembler.take_report(now, 0);
         let stats = self.reassembler.stats();
         self.counters.frames_fec = stats.frames_fec;
         self.counters.frames_lost = stats.frames_lost;
+        self.counters.stalls = stats.stalls;
+        self.counters.stalled_ms = stats.stalled_ms;
+        self.counters.stalled = self.reassembler.stalled(now);
         self.stats.send_replace(self.counters);
         let stream = self.stream;
         let _gone =

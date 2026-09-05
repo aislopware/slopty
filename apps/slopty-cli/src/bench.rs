@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use slopty_client::{HostLink, LinkEvent};
 use slopty_core::WindowId;
-use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{CaptureTarget, Quality, RateVerdict, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
 use slopty_proto::{ClientMsg, HostMsg};
 
@@ -223,6 +223,8 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     let mut gaps_us: Vec<u64> = Vec::new();
     let mut first_frame: Option<Instant> = None;
     let mut last_arrival: Option<Instant> = None;
+    // The host's bitrate decisions as they arrive: (seconds into the run, target, verdict).
+    let mut rate: Vec<(f64, u32, RateVerdict, bool)> = Vec::new();
     loop {
         tokio::select! {
             changed = frames.changed() => {
@@ -257,6 +259,15 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
                         eprintln!("disconnected: {why}");
                         break;
                     }
+                    Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Rate {
+                        stream: s,
+                        target_bps,
+                        verdict,
+                        capped,
+                    }))) if s == stream => {
+                        let at = opened_at.elapsed().as_secs_f64();
+                        rate.push((at, target_bps, verdict, capped));
+                    }
                     Some(_other) => {}
                     None => break,
                 }
@@ -284,6 +295,13 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.refreshes,
         stats.decode_errors
     );
+    println!(
+        "  stalls {} ({} ms stalled){}",
+        stats.stalls,
+        stats.stalled_ms,
+        if stats.stalled { "  stalled at the end" } else { "" }
+    );
+    println!("  host target over time (Mbit/s): {}", rate_trajectory(&rate));
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
     println!("  quic path (client side): {}", link.health());
@@ -294,6 +312,54 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     drop(link);
     endpoint.close().await;
     Ok(())
+}
+
+/// One run of identical decisions in the trajectory.
+struct RateRun {
+    at: f64,
+    bps: u32,
+    verdict: RateVerdict,
+    capped: bool,
+    count: usize,
+}
+
+/// The host's decisions as `target(verdict)@s`, `/cwnd` when the congestion window rather
+/// than the verdict set the target; runs of identical decisions fold into one with a count.
+fn rate_trajectory(rate: &[(f64, u32, RateVerdict, bool)]) -> String {
+    if rate.is_empty() {
+        return "no decisions received".to_owned();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut run: Option<RateRun> = None;
+    for &(at, bps, verdict, capped) in rate {
+        match run {
+            Some(ref mut r) if r.bps == bps && r.verdict == verdict && r.capped == capped => {
+                r.count = r.count.saturating_add(1);
+            }
+            _ => {
+                if let Some(r) = run.take() {
+                    out.push(rate_entry(&r));
+                }
+                run = Some(RateRun { at, bps, verdict, capped, count: 1 });
+            }
+        }
+    }
+    if let Some(r) = run {
+        out.push(rate_entry(&r));
+    }
+    out.join(" → ")
+}
+
+fn rate_entry(run: &RateRun) -> String {
+    let verdict = match run.verdict {
+        RateVerdict::Cut => "cut",
+        RateVerdict::Stall => "hold",
+        RateVerdict::Steady => "steady",
+        RateVerdict::Grow => "grow",
+    };
+    let capped = if run.capped { "/cwnd" } else { "" };
+    let times = if run.count > 1 { format!("×{}", run.count) } else { String::new() };
+    format!("{:.1}({verdict}{capped}{times})@{:.1}s", f64::from(run.bps) / 1e6, run.at)
 }
 
 /// `min / p50 / p90 / max` in milliseconds.

@@ -29,8 +29,8 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, ScreenInput, ScreenRequest, ScrollPhase,
-    VideoCodec,
+    CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput, ScreenRequest,
+    ScrollPhase, VideoCodec,
 };
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -102,6 +102,8 @@ pub struct ScreenView {
     hud: Option<Hud>,
     /// Link RTT from the canvas, for the overlay.
     rtt: Option<Duration>,
+    /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
+    rate: Option<(u32, RateVerdict, bool)>,
     _pump: Task<()>,
 }
 
@@ -115,6 +117,17 @@ struct Hud {
 
 /// How often the overlay's rates are recomputed.
 const HUD_PERIOD: Duration = Duration::from_millis(1000);
+
+/// The controller's verdict as the overlay words it.
+#[must_use]
+pub const fn verdict_label(verdict: RateVerdict) -> &'static str {
+    match verdict {
+        RateVerdict::Cut => "cut",
+        RateVerdict::Stall => "hold (stall)",
+        RateVerdict::Steady => "steady",
+        RateVerdict::Grow => "grow",
+    }
+}
 
 /// A modifier the phone key bar can arm for the next key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,6 +233,7 @@ impl ScreenView {
             marked: None,
             hud: None,
             rtt: None,
+            rate: None,
             _pump: pump,
         }
     }
@@ -269,6 +283,17 @@ impl ScreenView {
         self.rtt = rtt;
     }
 
+    /// The host's latest bitrate decision, shown in the overlay.
+    pub const fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
+        self.rate = Some((target_bps, verdict, capped));
+    }
+
+    /// The host's latest bitrate decision: target, verdict, whether the cwnd cap holds it.
+    #[must_use]
+    pub const fn rate(&self) -> Option<(u32, RateVerdict, bool)> {
+        self.rate
+    }
+
     /// Recompute the overlay's rates when a second has passed; returns the text to draw.
     fn hud_text(&mut self) -> Option<String> {
         let hud = self.hud.as_mut()?;
@@ -285,8 +310,20 @@ impl ScreenView {
                 || "rtt –".to_owned(),
                 |d| format!("rtt {:.1} ms", d.as_secs_f64() * 1e3),
             );
+            let stall = if stats.stalled { "stalled" } else { "flowing" };
+            let rate = self.rate.map_or_else(
+                || "target –".to_owned(),
+                |(bps, verdict, capped)| {
+                    format!(
+                        "target {:.1} Mb/s {}{}",
+                        f64::from(bps) / 1e6,
+                        verdict_label(verdict),
+                        if capped { " (cwnd)" } else { "" }
+                    )
+                },
+            );
             hud.text = format!(
-                "{}×{} @{:.2}  ·  {fps:.0} fps  ·  {mbps:.2} Mb/s  ·  {rtt}  ·  fec {} lost {} nack {} refresh {}  ·  audio {} lost {}",
+                "{}×{} @{:.2}  ·  {fps:.0} fps  ·  {mbps:.2} Mb/s  ·  {rtt}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}",
                 self.size.0,
                 self.size.1,
                 self.quality.scale,
@@ -294,6 +331,8 @@ impl ScreenView {
                 stats.frames_lost,
                 stats.nacks,
                 stats.refreshes,
+                stats.stalls,
+                stats.stalled_ms,
                 stats.audio_packets,
                 stats.audio_lost,
             );

@@ -9,7 +9,7 @@ mod golden {
     };
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
+    use slopty_proto::screen::{Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest};
     use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -112,6 +112,41 @@ mod golden {
         let refresh = Feedback::Refresh { stream: StreamId(7), last_good_frame: 300 };
         let bytes = codec::encode_body(&refresh).expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
+    }
+
+    #[test]
+    fn receiver_report_and_rate() {
+        snap(
+            "client_screen_report",
+            &ClientMsg::Screen(ScreenRequest::Report {
+                stream: StreamId(7),
+                report: ReceiverReport {
+                    frames_ok: 30,
+                    frames_fec: 1,
+                    frames_lost: 2,
+                    datagrams_lost: 9,
+                    last_host_send_ts_us: 0x0102_0304,
+                    hold_p50: slopty_core::Duration::from_millis(4),
+                    hold_p95: slopty_core::Duration::from_millis(30),
+                    owd_jitter: slopty_core::Duration::from_micros(700),
+                    queue_depth: 1,
+                    late_frames: 3,
+                    acked_ltr: [0xABCD, 0, 0, 0],
+                    acked_ltr_len: 1,
+                    stalled_ms: 180,
+                    stalls: 1,
+                },
+            }),
+        );
+        snap(
+            "host_screen_rate",
+            &HostMsg::Screen(ScreenEvent::Rate {
+                stream: StreamId(7),
+                target_bps: 9_000_000,
+                verdict: RateVerdict::Stall,
+                capped: true,
+            }),
+        );
     }
 
     #[test]
