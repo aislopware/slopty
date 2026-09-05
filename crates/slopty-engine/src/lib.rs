@@ -34,6 +34,9 @@ pub enum EngineError {
     /// A size was rejected (zero columns/rows or zero cell metrics).
     #[error("invalid terminal size: {0}")]
     InvalidSize(&'static str),
+    /// A search pattern did not compile.
+    #[error("invalid pattern: {0}")]
+    Pattern(String),
 }
 
 /// Side effects the VT state machine produced while consuming PTY output.
@@ -88,8 +91,10 @@ pub trait VtEngine {
     /// Current terminal modes the client needs (prediction gating, wheel routing).
     fn modes(&self) -> Result<TermModes, EngineError>;
 
-    /// Find `needle` in the retained history and the screen (see [`search::find`]).
-    fn search(&self, needle: &str, max: u32) -> Result<search::Found, EngineError>;
+    /// Find `needle` in the retained history and the screen (see [`search::find`]);
+    /// `regex` treats it as a pattern and fails with [`EngineError::Pattern`] when it does
+    /// not compile.
+    fn search(&self, needle: &str, regex: bool, max: u32) -> Result<search::Found, EngineError>;
 
     /// Encode a key event into `out`. Appends nothing for keys the terminal does not encode.
     fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError>;

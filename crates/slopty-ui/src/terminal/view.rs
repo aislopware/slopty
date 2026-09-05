@@ -88,6 +88,10 @@ struct Search {
     sent: Instant,
     /// The next reply should jump to its newest hit (the needle just changed).
     reveal: bool,
+    /// The needle is a regular expression.
+    regex: bool,
+    /// The host could not compile the regex.
+    invalid: Option<String>,
     _subscription: gpui::Subscription,
 }
 
@@ -158,6 +162,8 @@ pub struct TerminalView {
     touch_selecting: bool,
     /// The search bar, while open.
     search: Option<Search>,
+    /// The search mode the next bar opens with (regex or plain).
+    search_regex: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -210,6 +216,7 @@ impl TerminalView {
             selecting: false,
             touch_selecting: false,
             search: None,
+            search_regex: false,
         }
     }
 
@@ -236,6 +243,8 @@ impl TerminalView {
                 current: None,
                 sent: Instant::now(),
                 reveal: false,
+                regex: self.search_regex,
+                invalid: None,
                 _subscription: subscription,
             });
         }
@@ -285,11 +294,39 @@ impl TerminalView {
             return;
         }
         search.needle = needle;
+        self.restart_search(cx);
+    }
+
+    /// Drop the hits and ask again (the needle or the mode changed).
+    fn restart_search(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
         search.matches.clear();
         search.total = 0;
         search.current = None;
+        search.invalid = None;
         search.reveal = true;
         self.send_search(cx);
+    }
+
+    /// Flip the search between plain text and regex; remembered for the next search bar.
+    fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        search.regex = !search.regex;
+        self.search_regex = search.regex;
+        self.restart_search(cx);
+    }
+
+    /// The host rejected the regex.
+    fn search_invalid(&mut self, needle: &str, message: String, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        if needle != search.needle {
+            return;
+        }
+        search.matches.clear();
+        search.total = 0;
+        search.current = None;
+        search.invalid = Some(message);
+        cx.notify();
     }
 
     fn send_search(&mut self, cx: &mut Context<Self>) {
@@ -300,7 +337,8 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.send(TermRequest::Search { needle, max: SEARCH_MAX });
+        let regex = search.regex;
+        self.send(TermRequest::Search { needle, max: SEARCH_MAX, regex });
     }
 
     /// Move `by` hits (wrapping) and scroll the new one into view.
@@ -359,6 +397,7 @@ impl TerminalView {
         }
         // Keep the user on the same hit across a refresh when it is still there.
         let on = search.current.and_then(|c| search.matches.get(c)).copied();
+        search.invalid = None;
         search.total = total;
         search.matches = matches;
         search.current = on.and_then(|hit| search.matches.iter().position(|m| *m == hit));
@@ -681,6 +720,9 @@ impl TerminalView {
                 Effect::Matches { needle, total, matches } => {
                     self.matches_arrived(&needle, total, matches, cx);
                 }
+                Effect::SearchInvalid { needle, message } => {
+                    self.search_invalid(&needle, message, cx);
+                }
             }
         }
         cx.notify();
@@ -987,6 +1029,8 @@ impl TerminalView {
         let s = &self.theme.surfaces;
         let count: SharedString = if search.needle.is_empty() {
             SharedString::default()
+        } else if search.invalid.is_some() {
+            "bad regex".into()
         } else if search.matches.is_empty() {
             "none".into()
         } else {
@@ -1019,6 +1063,18 @@ impl TerminalView {
             .on_action(cx.listener(Self::close_find))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(div().w(px(180.0)).child(Input::new(&search.input)))
+            .child(
+                div()
+                    .id("terminal-search-regex")
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_color(hsla(if search.regex { s.canvas } else { s.text_muted }))
+                    .when(search.regex, |el| el.bg(hsla(s.accent)))
+                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                    .child(".*")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
+            )
             .child(div().min_w(px(40.0)).text_color(hsla(s.text_muted)).child(count))
             .child(
                 div()

@@ -67,7 +67,9 @@ Returning from the alternate screen restores the parked primary anchor, so the c
 
 **Search** is a host request (`TermRequest::Search` → `TermEvent::Matches`): the engine renders
 the retained rows as plain text with libghostty's formatter and maps hits back to cells, so the
-whole 50k-line history is searchable without the client ever holding it.
+whole 50k-line history is searchable without the client ever holding it. `regex: true` runs the
+needle through the `regex` crate instead of the literal matcher; a bad pattern comes back as
+`TermEvent::SearchInvalid`.
 
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader

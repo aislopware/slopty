@@ -485,12 +485,15 @@ impl Actor {
                 }
                 Ok(())
             }
-            TermRequest::Search { needle, max } => {
-                match self.engine.search(&needle, max.min(MAX_SEARCH_MATCHES)) {
+            TermRequest::Search { needle, max, regex } => {
+                match self.engine.search(&needle, regex, max.min(MAX_SEARCH_MATCHES)) {
                     Ok(found) => self.send_to(
                         client,
                         TermEvent::Matches { needle, total: found.total, matches: found.matches },
                     ),
+                    Err(slopty_engine::EngineError::Pattern(message)) => {
+                        self.send_to(client, TermEvent::SearchInvalid { needle, message });
+                    }
                     Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
                 }
                 Ok(())

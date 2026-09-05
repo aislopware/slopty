@@ -18,37 +18,99 @@ pub struct Found {
     pub matches: Vec<SearchMatch>,
 }
 
-/// Find `needle` in `text`, whose first line is absolute line `base`.
+/// What to look for: plain text with smart case, or a regular expression.
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    /// Substring; `folded` is the needle lower-cased when the search is case-insensitive.
+    Plain {
+        /// The needle, lower-cased when `insensitive`.
+        needle: String,
+        /// Match case-insensitively (the needle had no upper-case letter).
+        insensitive: bool,
+    },
+    /// A compiled regex (smart case folded into the pattern).
+    Regex(regex::Regex),
+}
+
+impl Pattern {
+    /// Build a pattern; a regex that does not compile is the error message.
+    pub fn new(needle: &str, regex: bool) -> Result<Self, String> {
+        let insensitive = !needle.chars().any(char::is_uppercase);
+        if regex {
+            let source = if insensitive { format!("(?i){needle}") } else { needle.to_owned() };
+            return regex::RegexBuilder::new(&source)
+                .size_limit(1 << 20)
+                .build()
+                .map(Self::Regex)
+                .map_err(|e| e.to_string());
+        }
+        let needle = if insensitive { fold(needle) } else { needle.to_owned() };
+        Ok(Self::Plain { needle, insensitive })
+    }
+
+    /// Whether the pattern can match anything at all.
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Plain { needle, .. } => needle.is_empty(),
+            Self::Regex(re) => re.as_str().is_empty(),
+        }
+    }
+
+    /// Hits in one line as `(first char, char count)`; empty matches are skipped.
+    fn hits(&self, line: &str) -> Vec<(usize, usize)> {
+        match self {
+            Self::Plain { needle, insensitive } => {
+                let folded: String;
+                let haystack = if *insensitive {
+                    folded = fold(line);
+                    &folded
+                } else {
+                    line
+                };
+                if !haystack.contains(&**needle) {
+                    return Vec::new();
+                }
+                let count = needle.chars().count();
+                haystack
+                    .match_indices(&**needle)
+                    .map(|(byte, _)| (char_index(haystack, byte), count))
+                    .collect()
+            }
+            Self::Regex(re) => re
+                .find_iter(line)
+                .filter(|m| !m.as_str().is_empty())
+                .map(|m| (char_index(line, m.start()), m.as_str().chars().count()))
+                .collect(),
+        }
+    }
+}
+
+/// Chars before byte offset `byte`.
+fn char_index(s: &str, byte: usize) -> usize {
+    s.get(..byte).map_or(0, |head| head.chars().count())
+}
+
+/// Find `pattern` in `text`, whose first line is absolute line `base`.
 ///
 /// Smart case: a needle without an upper-case letter matches case-insensitively. Hits never
 /// span rows (soft-wrapped lines are searched row by row).
 #[must_use]
-pub fn find(text: &str, needle: &str, base: LineIndex, max: u32) -> Found {
-    if needle.is_empty() {
+pub fn find(text: &str, pattern: &Pattern, base: LineIndex, max: u32) -> Found {
+    if pattern.is_empty() {
         return Found::default();
     }
-    let insensitive = !needle.chars().any(char::is_uppercase);
-    let needle: String = if insensitive { fold(needle) } else { needle.to_owned() };
-    let needle_chars = needle.chars().count();
     let mut hits: Vec<SearchMatch> = Vec::new();
     let mut total: u32 = 0;
     let keep = usize::try_from(max).unwrap_or(usize::MAX);
     for (row, line) in text.split('\n').enumerate() {
-        let folded: String;
-        let haystack = if insensitive {
-            folded = fold(line);
-            &folded
-        } else {
-            line
-        };
-        if !haystack.contains(&*needle) {
+        let found = pattern.hits(line);
+        if found.is_empty() {
             continue;
         }
         let index = LineIndex(base.0.saturating_add(u64::try_from(row).unwrap_or(u64::MAX)));
         let widths = Widths::new(line);
-        for (byte, _) in haystack.match_indices(&*needle) {
-            let first = haystack.get(..byte).map_or(0, |head| head.chars().count());
-            let (col, len) = widths.span(first, needle_chars);
+        for (first, count) in found {
+            let (col, len) = widths.span(first, count);
             total = total.saturating_add(1);
             hits.push(SearchMatch { line: index, col, len });
         }
@@ -106,6 +168,33 @@ mod tests {
 
     fn m(line: u64, col: u16, len: u16) -> SearchMatch {
         SearchMatch { line: LineIndex(line), col, len }
+    }
+
+    fn find(text: &str, needle: &str, base: LineIndex, max: u32) -> Found {
+        super::find(text, &Pattern::new(needle, false).expect("plain"), base, max)
+    }
+
+    fn find_re(text: &str, needle: &str, base: LineIndex, max: u32) -> Found {
+        super::find(text, &Pattern::new(needle, true).expect("regex"), base, max)
+    }
+
+    #[test]
+    fn regex_hits_with_smart_case_and_columns() {
+        let text = "The fox\n\nfox FOX\nfx";
+        let found = find_re(text, "f.x", LineIndex(10), 100);
+        assert_eq!(found.total, 3);
+        assert_eq!(found.matches, vec![m(10, 4, 3), m(12, 0, 3), m(12, 4, 3)]);
+        let found = find_re(text, "F[A-Z]X", LineIndex(10), 100);
+        assert_eq!(found.matches, vec![m(12, 4, 3)]);
+        // Variable-length matches report their own length; empty matches are skipped.
+        let found = find_re("aaa b", "a+|x*", LineIndex(0), 100);
+        assert_eq!(found.matches, vec![m(0, 0, 3)]);
+    }
+
+    #[test]
+    fn bad_regex_is_an_error_and_plain_never_is() {
+        assert!(Pattern::new("(", true).is_err());
+        assert!(Pattern::new("(", false).is_ok());
     }
 
     #[test]

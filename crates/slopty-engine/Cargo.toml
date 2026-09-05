@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 libghostty-vt.workspace = true
+regex.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-proto.workspace = true

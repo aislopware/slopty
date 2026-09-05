@@ -78,7 +78,14 @@ mod golden {
             "client_search",
             &ClientMsg::Term {
                 session: session(),
-                req: TermRequest::Search { needle: "fox".to_owned(), max: 2000 },
+                req: TermRequest::Search { needle: "fox".to_owned(), max: 2000, regex: false },
+            },
+        );
+        snap(
+            "host_search_invalid",
+            &TermEvent::SearchInvalid {
+                needle: "(".to_owned(),
+                message: "unclosed group".to_owned(),
             },
         );
         snap(

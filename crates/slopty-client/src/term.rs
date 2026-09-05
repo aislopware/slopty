@@ -34,6 +34,13 @@ pub enum Effect {
         /// The newest hits, oldest first.
         matches: Vec<SearchMatch>,
     },
+    /// The regex in a search did not compile.
+    SearchInvalid {
+        /// The needle it answers.
+        needle: String,
+        /// Why.
+        message: String,
+    },
 }
 
 /// One row as the UI should draw it.
@@ -207,6 +214,9 @@ impl TermState {
             TermEvent::Error(e) => vec![Effect::Error(e)],
             TermEvent::Matches { needle, total, matches } => {
                 vec![Effect::Matches { needle, total, matches }]
+            }
+            TermEvent::SearchInvalid { needle, message } => {
+                vec![Effect::SearchInvalid { needle, message }]
             }
         }
     }

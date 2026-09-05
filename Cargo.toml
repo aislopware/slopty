@@ -40,6 +40,7 @@ slopty-agent = { path = "crates/slopty-agent" }
 # core
 anyhow = "1.0.104"
 thiserror = "2.0.20"
+regex = "1.13.1"
 bitflags = { version = "2.13.1", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
 futures-core = "0.3.34"

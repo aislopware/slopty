@@ -547,12 +547,13 @@ impl VtEngine for GhosttyEngine {
         self.modes_inner()
     }
 
-    fn search(&self, needle: &str, max: u32) -> Result<search::Found, EngineError> {
+    fn search(&self, needle: &str, regex: bool, max: u32) -> Result<search::Found, EngineError> {
         if needle.is_empty() {
             return Ok(search::Found::default());
         }
+        let pattern = search::Pattern::new(needle, regex).map_err(EngineError::Pattern)?;
         let text = self.plain_text()?;
-        Ok(search::find(&text, needle, LineIndex(self.base), max))
+        Ok(search::find(&text, &pattern, LineIndex(self.base), max))
     }
 
     fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
@@ -957,17 +958,17 @@ mod scrollback_tests {
         let mut e = engine(50_000);
         write_lines(&mut e, 200);
         e.write(b"needle on screen");
-        let found = e.search("needle", 100).unwrap();
+        let found = e.search("needle", false, 100).unwrap();
         assert_eq!(found.total, 1);
         let total = e.total_lines().unwrap();
         // The needle sits on the cursor row: the newest line.
         assert_eq!(found.matches[0].line, LineIndex(total - 1));
         assert_eq!((found.matches[0].col, found.matches[0].len), (0, 6));
-        let found = e.search("line 7", 100).unwrap();
+        let found = e.search("line 7", false, 100).unwrap();
         // "line 7", "line 70".."line 79", "line 7x" not written beyond 199: 1 + 10 = 11.
         assert_eq!(found.total, 11);
         assert_eq!(found.matches[0].line, LineIndex(7));
-        assert_eq!(e.search("", 10).unwrap(), search::Found::default());
+        assert_eq!(e.search("", false, 10).unwrap(), search::Found::default());
     }
 
     #[test]

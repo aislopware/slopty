@@ -143,12 +143,15 @@ pub enum TermRequest {
         text: String,
     },
     /// Find `needle` in the whole retained history plus the screen. Case-insensitive unless
-    /// the needle has an upper-case letter. Answered with `TermEvent::Matches`.
+    /// the needle has an upper-case letter. Answered with `TermEvent::Matches`, or
+    /// `TermEvent::SearchInvalid` when a regex does not compile.
     Search {
-        /// Text to find; empty clears.
+        /// Text (or pattern) to find; empty clears.
         needle: String,
         /// At most this many matches come back (the newest ones).
         max: u32,
+        /// `needle` is a regular expression (Rust `regex` syntax, no look-around).
+        regex: bool,
     },
 }
 
@@ -245,5 +248,12 @@ pub enum TermEvent {
         total: u32,
         /// The newest hits, oldest first.
         matches: Vec<SearchMatch>,
+    },
+    /// `TermRequest::Search` with `regex` asked for a pattern that does not compile.
+    SearchInvalid {
+        /// The needle in question.
+        needle: String,
+        /// The compiler's complaint.
+        message: String,
     },
 }

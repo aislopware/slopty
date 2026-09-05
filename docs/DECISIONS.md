@@ -337,11 +337,21 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   hit paints exactly over its cells (wide characters count two). Smart case (no upper-case
   letter → case-insensitive) with a char-for-char fold so indices stay aligned; hits never span
   a soft-wrapped row. Rejected: libghostty-vt has no text search of its own (its "search"
-  functions are word-selection helpers), and a regex engine is a later step.
+  functions are word-selection helpers).
   UI: the field is a gpui-kit `Input` inside a `TerminalSearch` key context, so `escape` is
   bound there only and Esc in the grid still reaches the program; `TerminalView::key_down`
   also drops keys while that field is focused. Verified on macOS: 123 hits, stepping into
   history scrolls the hit to the viewport centre, Esc/✕ hand the keys back.
+- ✅ **Regex search is a flag on the same request** (2026-09-05, protocol 5).
+  `TermRequest::Search { needle, max, regex }` compiles the needle with the `regex` crate
+  (1.13.1, linear-time, `size_limit` 1 MiB so a pathological pattern cannot blow up the host);
+  smart case becomes a `(?i)` prefix, so plain and regex mode agree on casing. Hits are
+  reported in chars and then mapped to cells exactly like plain hits; empty matches (`a*`)
+  are skipped rather than painting zero-width highlights. An invalid pattern answers
+  `TermEvent::SearchInvalid { needle, message }` instead of an empty `Matches`, so the client
+  can tell "no hits" from "bad regex" (the bar shows `bad regex`). The `.*` toggle in the
+  search bar restarts the search in the other mode and is lit with the accent when on.
+  Verified on macOS: `item[13]` plain → none, regex → 4/4, `item(` → bad regex.
 - ✅ **Scrollback is bounded by lines, not libghostty's 10 KB byte default** (2026-09-05).
   `Terminal.zig` defaults `max_scrollback_bytes` to 10_000; the engine had only raised the
   line limit, so every session kept about one page (~900 rows). `set_scrollback_max_bytes(None)`
