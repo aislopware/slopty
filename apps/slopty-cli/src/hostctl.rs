@@ -20,6 +20,9 @@ pub enum HostCmd {
     Paired,
     /// Check the daemon's permissions (Screen Recording, Accessibility), reach, port and links.
     Doctor,
+    /// Screen streams open right now (and the last few closed) with the host-side counters:
+    /// capture and encode latency, capture path, drops.
+    Screens,
     /// Revoke a paired client.
     Revoke {
         /// Endpoint id (hex).
@@ -60,6 +63,7 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
         HostCmd::Status => CtlRequest::Status,
         HostCmd::Paired => CtlRequest::Paired,
         HostCmd::Doctor => CtlRequest::Doctor,
+        HostCmd::Screens => CtlRequest::Screens,
         HostCmd::Revoke { endpoint } => CtlRequest::Revoke { endpoint },
         HostCmd::Install(opts) => return service::install(&opts).await,
         HostCmd::Uninstall { data_dir } => return service::uninstall(data_dir.as_deref()),
@@ -88,6 +92,26 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
             print!("{}", doctor_report(&health));
             if !(health.screen_recording && health.post_events) {
                 bail!("permissions missing; see above");
+            }
+        }
+        CtlReply::Screens { live, closed } => {
+            for (state, list) in [("live", live), ("closed", closed)] {
+                for s in list {
+                    println!(
+                        "{state}  client {}  stream {}  {:?}\n  capture {}  encode {}\n  captured {} (crop path {})  dropped {}  encoded {}  queue full {}  bitrate {} bps",
+                        s.client,
+                        s.stream,
+                        s.target,
+                        s.stats.capture.describe(),
+                        s.stats.encode.describe(),
+                        s.stats.captured,
+                        s.stats.cropped,
+                        s.stats.dropped,
+                        s.stats.encoded,
+                        s.stats.queue_full,
+                        s.stats.bitrate_bps
+                    );
+                }
             }
         }
         CtlReply::Ok { changed } => println!("{}", if changed { "done" } else { "no change" }),

@@ -11,14 +11,16 @@
 //! [`ScreenStream`] methods. When the queue is full the capture callback drops whole frames
 //! rather than letting latency build up; the client notices the gap and asks for a refresh.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use slopty_capture::{
-    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, PixelFormat, Rect,
+    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, Crop, PixelFormat, Rect,
     Shareable, Target, host_now_us,
 };
 use slopty_codec::audio::OpusEncoder;
@@ -146,8 +148,85 @@ pub const fn frame_fits(free: usize, held: usize, target_bps: u64, fps: u16) -> 
     (held as u64) <= limit
 }
 
+/// p50 / p95 / max of a latency over the last [`LATENCY_WINDOW`] samples, microseconds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Quantiles {
+    /// Samples in the window.
+    pub n: u32,
+    /// Median.
+    pub p50_us: u64,
+    /// 95th percentile.
+    pub p95_us: u64,
+    /// Worst in the window.
+    pub max_us: u64,
+}
+
+impl Quantiles {
+    /// Quantiles of `samples` (any order).
+    #[must_use]
+    pub fn of(samples: &[u64]) -> Self {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let last = sorted.len().saturating_sub(1);
+        let at = |q: f64| -> u64 {
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "an index below 2^53"
+            )]
+            let i = (last as f64 * q).round() as usize;
+            sorted.get(i.min(last)).copied().unwrap_or(0)
+        };
+        Self {
+            n: u32::try_from(sorted.len()).unwrap_or(u32::MAX),
+            p50_us: at(0.5),
+            p95_us: at(0.95),
+            max_us: sorted.last().copied().unwrap_or(0),
+        }
+    }
+
+    /// `p50 / p95 / max ms (n)`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        #[expect(clippy::cast_precision_loss, reason = "microseconds well below 2^53")]
+        let ms = |us: u64| us as f64 / 1e3;
+        format!(
+            "{:.2} / {:.2} / {:.2} ms (n={})",
+            ms(self.p50_us),
+            ms(self.p95_us),
+            ms(self.max_us),
+            self.n
+        )
+    }
+}
+
+/// Samples the latency quantiles are computed over: 10 s at 60 fps.
+const LATENCY_WINDOW: usize = 600;
+
+/// A ring of the last [`LATENCY_WINDOW`] latency samples.
+#[derive(Debug, Default)]
+struct LatencyRing(VecDeque<u64>);
+
+impl LatencyRing {
+    fn push(&mut self, us: u64) {
+        if self.0.len() >= LATENCY_WINDOW {
+            self.0.pop_front();
+        }
+        self.0.push_back(us);
+    }
+
+    fn quantiles(&self) -> Quantiles {
+        let (a, b) = self.0.as_slices();
+        let mut all = Vec::with_capacity(a.len().saturating_add(b.len()));
+        all.extend_from_slice(a);
+        all.extend_from_slice(b);
+        Quantiles::of(&all)
+    }
+}
+
 /// Counters for logs and telemetry.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ScreenStats {
     /// Frames ScreenCaptureKit delivered.
     pub captured: u64,
@@ -169,6 +248,90 @@ pub struct ScreenStats {
     pub audio_packets: u64,
     /// Bitrate the controller last asked the encoder for.
     pub bitrate_bps: u64,
+    /// Capture latency: the window server's display time of a frame → ScreenCaptureKit's
+    /// callback (what SCK adds), over the last [`LATENCY_WINDOW`] frames.
+    pub capture: Quantiles,
+    /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
+    pub encode: Quantiles,
+    /// Frames ScreenCaptureKit delivered through the display-crop path (a window served as
+    /// a `sourceRect` of its display rather than through the window filter).
+    pub cropped: u64,
+}
+
+/// One stream as the control socket lists it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ScreenSummary {
+    /// The client that opened it.
+    pub client: String,
+    /// Stream id on that connection.
+    pub stream: u32,
+    /// What it captures.
+    pub target: CaptureTarget,
+    /// Counters (final ones for a closed stream).
+    pub stats: ScreenStats,
+}
+
+/// Closed streams the registry remembers.
+const CLOSED_KEEP: usize = 8;
+
+/// Every live stream in the daemon plus the last few closed ones, for the control socket.
+#[derive(Clone, Default, Debug)]
+pub struct Registry {
+    inner: Arc<Mutex<RegistryInner>>,
+}
+
+#[derive(Default, Debug)]
+struct RegistryInner {
+    live: Vec<(String, CaptureTarget, StatsHandle)>,
+    closed: VecDeque<ScreenSummary>,
+}
+
+impl Registry {
+    /// Track a stream `client` opened.
+    pub fn insert(
+        &self,
+        client: &impl std::fmt::Display,
+        target: CaptureTarget,
+        handle: StatsHandle,
+    ) {
+        self.inner.lock().live.push((client.to_string(), target, handle));
+    }
+
+    /// The stream closed: keep its final counters.
+    pub fn remove(&self, client: &impl std::fmt::Display, id: StreamId) {
+        let client = client.to_string();
+        let mut inner = self.inner.lock();
+        let Some(at) = inner.live.iter().position(|(c, _, h)| *c == client && h.id() == id) else {
+            return;
+        };
+        let (client, target, handle) = inner.live.remove(at);
+        if inner.closed.len() >= CLOSED_KEEP {
+            inner.closed.pop_front();
+        }
+        inner.closed.push_back(ScreenSummary {
+            client,
+            stream: id.0,
+            target,
+            stats: handle.stats(),
+        });
+    }
+
+    /// Live streams with their counters right now, then the closed ones (oldest first).
+    #[must_use]
+    pub fn summaries(&self) -> (Vec<ScreenSummary>, Vec<ScreenSummary>) {
+        let inner = self.inner.lock();
+        let live = inner
+            .live
+            .iter()
+            .map(|(client, target, handle)| ScreenSummary {
+                client: client.clone(),
+                stream: handle.id().0,
+                target: *target,
+                stats: handle.stats(),
+            })
+            .collect();
+        (live, inner.closed.iter().cloned().collect())
+    }
 }
 
 /// How long an enumeration of shareable content is reused. A client lists, picks and opens
@@ -209,6 +372,7 @@ pub async fn warm_up() -> Result<Duration, ScreenError> {
             codec: VideoCodec::Hevc,
             fps: 1,
             bitrate_bps: 100_000,
+            rate_control: slopty_codec::RateControl::LowLatency,
         },
         |_packet| {},
     )?;
@@ -223,6 +387,7 @@ pub async fn warm_up() -> Result<Duration, ScreenError> {
         format: PixelFormat::Nv12,
         queue_depth: 1,
         audio: true,
+        crop: None,
     };
     let (tx, rx) = oneshot::channel();
     let capture = Capture::start(
@@ -270,10 +435,20 @@ struct Counters {
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
     bitrate_bps: AtomicU64,
+    cropped: AtomicU64,
+    capture: Mutex<LatencyRing>,
+    encode: Mutex<LatencyRing>,
+    /// `(pts, submitted at)` of frames inside the encoder, oldest first.
+    in_flight: Mutex<VecDeque<(u64, u64)>>,
 }
 
+/// Frames the encoder may hold before the oldest submit record is forgotten (the encoder
+/// runs with `MaxFrameDelayCount` 0, so this is only a bound against a callback that never
+/// comes).
+const IN_FLIGHT_MAX: usize = 16;
+
 impl Counters {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             audio_packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
@@ -285,6 +460,33 @@ impl Counters {
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
             bitrate_bps: AtomicU64::new(0),
+            cropped: AtomicU64::new(0),
+            capture: Mutex::new(LatencyRing::default()),
+            encode: Mutex::new(LatencyRing::default()),
+            in_flight: Mutex::new(VecDeque::with_capacity(IN_FLIGHT_MAX)),
+        }
+    }
+
+    /// A frame went into the encoder at `now`.
+    fn submitted(&self, pts_us: u64, now: u64) {
+        let mut in_flight = self.in_flight.lock();
+        if in_flight.len() >= IN_FLIGHT_MAX {
+            in_flight.pop_front();
+        }
+        in_flight.push_back((pts_us, now));
+    }
+
+    /// The encoder returned the frame with `pts_us` at `now`: record its encode latency.
+    fn returned(&self, pts_us: u64, now: u64) {
+        let submitted = {
+            let mut in_flight = self.in_flight.lock();
+            let at = in_flight.iter().position(|&(pts, _)| pts == pts_us);
+            let found = at.and_then(|i| in_flight.remove(i)).map(|(_, at)| at);
+            drop(in_flight);
+            found
+        };
+        if let Some(at) = submitted {
+            self.encode.lock().push(now.saturating_sub(at));
         }
     }
 
@@ -300,7 +502,35 @@ impl Counters {
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
             audio_packets: self.audio_packets.load(Ordering::Relaxed),
             bitrate_bps: self.bitrate_bps.load(Ordering::Relaxed),
+            capture: self.capture.lock().quantiles(),
+            encode: self.encode.lock().quantiles(),
+            cropped: self.cropped.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// A handle on one stream's counters that outlives the [`ScreenStream`]'s owner borrow, for
+/// the daemon's control socket (`slopty bench screen` reads the host side through it).
+#[derive(Clone)]
+pub struct StatsHandle(Arc<Shared>);
+
+impl std::fmt::Debug for StatsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatsHandle").field("stream", &self.0.id).finish()
+    }
+}
+
+impl StatsHandle {
+    /// The stream.
+    #[must_use]
+    pub fn id(&self) -> StreamId {
+        self.0.id
+    }
+
+    /// Counters right now.
+    #[must_use]
+    pub fn stats(&self) -> ScreenStats {
+        self.0.counters.snapshot()
     }
 }
 
@@ -331,6 +561,8 @@ struct Shared {
     last_push_us: AtomicU64,
     /// Capture frame rate, for the held-bytes limit.
     fps: std::sync::atomic::AtomicU16,
+    /// Whether frames come through the display-crop path right now.
+    cropped: std::sync::atomic::AtomicBool,
     out: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     counters: Counters,
@@ -368,6 +600,10 @@ impl Shared {
     /// ScreenCaptureKit delivered a frame.
     fn on_frame(&self, frame: &CapturedFrame) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
+        self.counters.capture.lock().push(frame.latency_us);
+        if self.cropped.load(Ordering::Relaxed) {
+            self.counters.cropped.fetch_add(1, Ordering::Relaxed);
+        }
         let fits = frame_fits(
             self.out.capacity(),
             self.budget.held(),
@@ -388,12 +624,14 @@ impl Shared {
                 acked_ltr: std::mem::take(&mut pending.acked),
             }
         };
+        self.counters.submitted(frame.capture_ts_us, host_now_us());
         let outcome = self
             .encoder
             .read()
             .as_ref()
             .map(|encoder| encoder.encode(frame.image.as_cv(), frame.capture_ts_us, &options));
         if let Some(Err(e)) = outcome {
+            self.counters.returned(frame.capture_ts_us, host_now_us());
             tracing::warn!(stream = %self.id, error = %e, "encode failed");
             let mut pending = self.pending.lock();
             pending.keyframe |= options.force_keyframe;
@@ -454,6 +692,7 @@ impl Shared {
     /// VideoToolbox produced an access unit.
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = host_now_us();
+        self.counters.returned(packet.pts_us, now);
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
         if encoded == 0 || packet.keyframe {
@@ -509,6 +748,57 @@ fn build_encoder(shared: &Weak<Shared>, config: EncoderConfig) -> Result<Encoder
     })
 }
 
+/// How a window target is served by ScreenCaptureKit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowPath {
+    /// `SCContentFilter(desktopIndependentWindow:)`: the window alone, wherever it is.
+    Filter,
+    /// The display filter with `sourceRect` at the window's frame: the composited desktop
+    /// cropped, which ScreenCaptureKit serves without the per-window pass.
+    DisplayCrop,
+}
+
+/// Whether windows are served as a crop of their display when they are entirely on one and
+/// nothing of another process overlaps them. `SLOPTY_WINDOW_CAPTURE=window|crop` overrides
+/// it (the measurement and support knob).
+const CROP_WINDOWS: bool = true;
+
+fn crop_windows() -> bool {
+    match std::env::var("SLOPTY_WINDOW_CAPTURE").as_deref() {
+        Ok("window") => false,
+        Ok("crop") => true,
+        _other => CROP_WINDOWS,
+    }
+}
+
+/// The crop a window on the display-crop path wants right now, or `None` when it must go
+/// through the window filter (off one display, partly off-screen, or something of another
+/// process on top of it).
+fn wanted_crop(id: slopty_core::WindowId, bounds: &Rect, point_scale: f64) -> Option<Crop> {
+    let display = slopty_capture::display_enclosing(bounds)?;
+    let display = slopty_capture::display_bounds(display);
+    let (crop, _pixels) = slopty_capture::crop_for(bounds, &display, point_scale)?;
+    let owner = slopty_capture::window_owner_pid(id)?;
+    (!slopty_capture::occluded(id, bounds, owner)).then_some(crop)
+}
+
+/// Resolve a target, choosing the path for a window.
+fn resolve(
+    content: &Shareable,
+    target: CaptureTarget,
+) -> Result<(Target, WindowPath), ScreenError> {
+    if let CaptureTarget::Window(id) = target
+        && crop_windows()
+        && let Some(bounds) = slopty_capture::window_bounds(id)
+        && let Some(crop) = Target::resolve_crop(content, id)?
+        && let Some(owner) = slopty_capture::window_owner_pid(id)
+        && !slopty_capture::occluded(id, &bounds, owner)
+    {
+        return Ok((crop, WindowPath::DisplayCrop));
+    }
+    Ok((Target::resolve(content, target)?, WindowPath::Filter))
+}
+
 /// Capture and encoder settings for a target at a requested quality.
 fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConfig) {
     let scale =
@@ -523,9 +813,16 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     let codec = quality.codec;
     let format =
         if codec == VideoCodec::HevcMain10 { PixelFormat::P010 } else { PixelFormat::Nv12 };
-    let capture = CaptureConfig { width, height, fps, format, queue_depth: 2, audio: true };
-    let encoder =
-        EncoderConfig { width, height, codec, fps, bitrate_bps: quality.bitrate_bps.max(100_000) };
+    let capture =
+        CaptureConfig { width, height, fps, format, queue_depth: 2, audio: true, crop: None };
+    let encoder = EncoderConfig {
+        width,
+        height,
+        codec,
+        fps,
+        bitrate_bps: quality.bitrate_bps.max(100_000),
+        rate_control: slopty_codec::RateControl::LowLatency,
+    };
     (capture, encoder)
 }
 
@@ -549,6 +846,12 @@ pub struct ScreenStream {
     opened_at: Instant,
     /// The last [`SourceState`] the client was told, so only changes are sent.
     source_reported: Option<SourceState>,
+    /// The enumeration the target was resolved from; filters for a path switch come from it.
+    content: Arc<Shareable>,
+    /// How a window is served right now.
+    path: WindowPath,
+    /// Last known bounds of the target, global points.
+    bounds: Option<Rect>,
 }
 
 /// How long a stream may produce no frame at all before the client is told the target is idle.
@@ -583,8 +886,9 @@ impl ScreenStream {
         let t0 = Instant::now();
         let content = shareable().await?;
         let enumerated = t0.elapsed();
-        let resolved = Target::resolve(&content, target)?;
-        let (capture_config, encoder_config) = configs(resolved.pixel_size(), &quality);
+        let (resolved, path) = resolve(&content, target)?;
+        let (mut capture_config, encoder_config) = configs(resolved.pixel_size(), &quality);
+        capture_config.crop = resolved.crop();
 
         let shared = Arc::new(Shared {
             id,
@@ -597,6 +901,7 @@ impl ScreenStream {
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(host_now_us()),
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
+            cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             out,
             budget,
             counters: Counters::new(),
@@ -627,6 +932,8 @@ impl ScreenStream {
             enumerate_ms = enumerated.as_millis(),
             encoder_ms = encoder_built.as_millis(),
             total_ms = t0.elapsed().as_millis(),
+            ?path,
+            crop = ?capture_config.crop,
             "capture started"
         );
 
@@ -660,6 +967,9 @@ impl ScreenStream {
             quality,
             opened_at: Instant::now(),
             source_reported: None,
+            content,
+            path,
+            bounds: slopty_capture::target_bounds(target),
         };
         Ok((stream, opened))
     }
@@ -676,17 +986,30 @@ impl ScreenStream {
         self.target
     }
 
+    /// How a window is served right now (`Filter` for a display target).
+    #[must_use]
+    pub const fn path(&self) -> WindowPath {
+        self.path
+    }
+
     /// Counters.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
         self.shared.counters.snapshot()
     }
 
+    /// A handle on the counters for the daemon's registry.
+    #[must_use]
+    pub fn stats_handle(&self) -> StatsHandle {
+        StatsHandle(Arc::clone(&self.shared))
+    }
+
     /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
     /// capture; a bitrate-only change is applied in place.
     pub fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
         self.quality = *quality;
-        let (capture_config, encoder_config) = configs(self.native, quality);
+        let (mut capture_config, encoder_config) = configs(self.native, quality);
+        capture_config.crop = self.capture_config.crop;
         if capture_config == self.capture_config
             && encoder_config.codec == self.encoder_config.codec
         {
@@ -705,20 +1028,31 @@ impl ScreenStream {
         self.reconfigure(capture_config, encoder_config)
     }
 
-    /// Follow the target's size: a window the user resized on the host gets a stream of its new
-    /// size (fresh encoder, keyframe) and the client hears `Geometry`. Cheap when nothing
-    /// changed (one WindowServer query); call it a few times a second.
+    /// Follow the target: a window the user resized on the host gets a stream of its new
+    /// size (fresh encoder, keyframe) and the client hears `Geometry`; one on the display-crop
+    /// path that moved gets its crop moved, and one that went under another window (or off
+    /// its display) falls back to the window filter until it is clear again. Cheap when
+    /// nothing changed (a WindowServer query or three); call it a few times a second.
     pub fn check_geometry(&mut self) -> Result<Option<ScreenEvent>, ScreenError> {
         let Some(rect) = slopty_capture::target_bounds(self.target) else { return Ok(None) };
+        let moved = self.bounds != Some(rect);
+        self.bounds = Some(rect);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let px = |points: f64| (points * self.point_scale).round().clamp(2.0, 16_384.0) as u32;
         let native = (px(rect.w), px(rect.h));
-        if native == self.native {
+        let resized = native != self.native;
+        if let CaptureTarget::Window(id) = self.target
+            && crop_windows()
+        {
+            self.follow_window(id, &rect, moved || resized);
+        }
+        if !resized {
             return Ok(None);
         }
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
         self.native = native;
-        let (capture_config, encoder_config) = configs(native, &self.quality);
+        let (mut capture_config, encoder_config) = configs(native, &self.quality);
+        capture_config.crop = self.capture_config.crop;
         self.reconfigure(capture_config, encoder_config)?;
         Ok(Some(ScreenEvent::Geometry {
             stream: self.id,
@@ -750,6 +1084,75 @@ impl ScreenStream {
         tracing::debug!(stream = %self.id, ?state, "capture source state");
         self.source_reported = Some(state);
         Some(ScreenEvent::Source { stream: self.id, state })
+    }
+
+    /// Keep a window on the right path: crop where it is now, or the window filter while
+    /// something covers it. `changed` says the bounds differ from last time (a move or a
+    /// resize); occlusion is checked every time since other windows move too.
+    fn follow_window(&mut self, id: slopty_core::WindowId, rect: &Rect, changed: bool) {
+        let wanted = wanted_crop(id, rect, self.point_scale);
+        match (self.path, wanted) {
+            (WindowPath::DisplayCrop, Some(crop)) => {
+                if changed && self.capture_config.crop != Some(crop) {
+                    self.capture_config.crop = Some(crop);
+                    self.update_capture();
+                }
+            }
+            (WindowPath::DisplayCrop, None) => {
+                // To the window filter: clear the crop first, a `sourceRect` on a window
+                // stream would be read in the window's own space.
+                let target = match Target::resolve(&self.content, self.target) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(stream = %self.id, error = %e, "window filter");
+                        return;
+                    }
+                };
+                tracing::info!(stream = %self.id, "window covered or off its display: window filter");
+                self.path = WindowPath::Filter;
+                self.shared.cropped.store(false, Ordering::Relaxed);
+                self.capture_config.crop = None;
+                self.update_capture();
+                self.retarget(&target);
+            }
+            (WindowPath::Filter, Some(crop)) => {
+                let target = match Target::resolve_crop(&self.content, id) {
+                    Ok(Some(t)) => t,
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::warn!(stream = %self.id, error = %e, "display crop");
+                        return;
+                    }
+                };
+                tracing::info!(stream = %self.id, ?crop, "window clear: display crop");
+                self.path = WindowPath::DisplayCrop;
+                self.shared.cropped.store(true, Ordering::Relaxed);
+                self.retarget(&target);
+                self.capture_config.crop = Some(crop);
+                self.update_capture();
+            }
+            (WindowPath::Filter, None) => {}
+        }
+    }
+
+    /// Push `capture_config` to the live stream.
+    fn update_capture(&self) {
+        let id = self.id;
+        self.capture.update(&self.capture_config, move |result| {
+            if let Err(e) = result {
+                tracing::warn!(stream = %id, error = %e, "capture update failed");
+            }
+        });
+    }
+
+    /// Swap the live stream's filter.
+    fn retarget(&self, target: &Target) {
+        let id = self.id;
+        self.capture.retarget(target, move |result| {
+            if let Err(e) = result {
+                tracing::warn!(stream = %id, error = %e, "capture retarget failed");
+            }
+        });
     }
 
     /// Rebuild the encoder and reconfigure the capture for a new size, rate or codec.

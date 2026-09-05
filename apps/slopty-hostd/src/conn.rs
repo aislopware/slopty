@@ -21,7 +21,10 @@ use tokio::task::JoinHandle;
 use crate::Daemon;
 
 /// How often a stream's target is checked for a size change.
-const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
+/// Also how fast a window on the display-crop path follows a drag: the crop lags a move by
+/// one period plus ScreenCaptureKit's ~20 ms configuration update (MEASUREMENTS.md, "capture
+/// floor"), during which one edge of the picture shows the desktop the window left.
+const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 /// How often followed transcripts are re-read for new lines.
 const TRANSCRIPT_PERIOD: std::time::Duration = std::time::Duration::from_millis(400);
 /// Entries the first snapshot of a conversation carries (older ones are not sent).
@@ -447,6 +450,7 @@ impl Peer<'_> {
                 match opened {
                     Ok((stream, event)) => {
                         tracing::info!(client = %self.client, %id, ?target, "screen opened");
+                        self.daemon.screens.insert(&self.client, target, stream.stats_handle());
                         self.screens.insert(id, stream);
                         let _sent = self.out.send(HostMsg::Screen(event)).await;
                     }
@@ -466,6 +470,7 @@ impl Peer<'_> {
                         "screen closing"
                     );
                     stream.close().await;
+                    self.daemon.screens.remove(&self.client, id);
                     let reason = "closed by client".to_owned();
                     let event = ScreenEvent::Closed { stream: id, reason };
                     let _sent = self.out.send(HostMsg::Screen(event)).await;
@@ -573,8 +578,9 @@ impl Peer<'_> {
     }
 
     async fn close_screens(&mut self) {
-        for (_id, stream) in self.screens.drain() {
+        for (id, stream) in self.screens.drain() {
             stream.close().await;
+            self.daemon.screens.remove(&self.client, id);
         }
     }
 

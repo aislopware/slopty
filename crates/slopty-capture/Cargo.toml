@@ -30,5 +30,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 slopty-core.workspace = true
+slopty-proto.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
+objc2-core-video.workspace = true

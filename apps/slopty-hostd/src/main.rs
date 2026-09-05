@@ -74,6 +74,8 @@ pub struct Daemon {
     pub started_at: std::time::Instant,
     /// The UDP port it listens on.
     pub port: u16,
+    /// Screen streams across every connection, for the control socket.
+    pub screens: slopty_host::screen::Registry,
 }
 
 /// How often the pasteboard's change count is read (one Mach call to the pasteboard server).
@@ -133,6 +135,7 @@ async fn main() -> Result<()> {
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
         started_at: std::time::Instant::now(),
         port: args.port,
+        screens: slopty_host::screen::Registry::default(),
     };
     tokio::spawn(watch_pasteboard(daemon.clone()));
     // Agents the hooks never report: the foreground process, the title, the transcript.

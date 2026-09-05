@@ -25,7 +25,7 @@ mod encoder;
 #[cfg(target_vendor = "apple")]
 pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
 #[cfg(target_os = "macos")]
-pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
+pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions, RateControl};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).
 #[derive(Debug, thiserror::Error)]

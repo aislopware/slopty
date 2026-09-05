@@ -11,7 +11,9 @@ use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
     kAudioFormatLinearPCM,
 };
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+};
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMClock, CMSampleBuffer,
     CMTime, CMTimeFlags,
@@ -24,13 +26,15 @@ use objc2_core_video::{
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
     SCCaptureDynamicRange, SCContentFilter, SCDisplay, SCFrameStatus, SCStream,
-    SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput,
-    SCStreamOutputType, SCWindow,
+    SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfo, SCStreamFrameInfoDisplayTime,
+    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use parking_lot::Mutex;
 use slopty_codec::PixelBuffer;
+use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
 
+use crate::geometry::{Crop, Rect};
 use crate::{CaptureError, Shareable};
 
 /// Pixel layout of captured frames.
@@ -59,7 +63,7 @@ impl PixelFormat {
 }
 
 /// Stream settings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CaptureConfig {
     /// Output width in pixels (even).
     pub width: u32,
@@ -73,6 +77,36 @@ pub struct CaptureConfig {
     pub queue_depth: u8,
     /// Also capture the target's audio (48 kHz stereo, this process excluded).
     pub audio: bool,
+    /// Sample only this part of the target (a window's frame on a display target); the
+    /// whole target when `None`.
+    pub crop: Option<Crop>,
+}
+
+/// What a fresh `SCStreamConfiguration` holds before anything is set on it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SckDefaults {
+    /// `queueDepth`.
+    pub queue_depth: isize,
+    /// `minimumFrameInterval` in seconds; `None` when invalid (no cap).
+    pub minimum_frame_interval_s: Option<f64>,
+}
+
+/// Read ScreenCaptureKit's defaults back from a configuration nothing was set on.
+#[must_use]
+pub fn sck_defaults() -> SckDefaults {
+    // SAFETY: plain constructor.
+    let c = unsafe { SCStreamConfiguration::new() };
+    // SAFETY: plain getter on a fresh configuration object.
+    let queue_depth = unsafe { c.queueDepth() };
+    // SAFETY: as above.
+    let interval = unsafe { c.minimumFrameInterval() };
+    let minimum_frame_interval_s =
+        (interval.flags.contains(CMTimeFlags::Valid) && interval.timescale > 0).then(|| {
+            #[expect(clippy::cast_precision_loss, reason = "a small ratio")]
+            let seconds = interval.value as f64 / f64::from(interval.timescale);
+            seconds
+        });
+    SckDefaults { queue_depth, minimum_frame_interval_s }
 }
 
 /// Audio sample rate ScreenCaptureKit is asked for.
@@ -94,10 +128,17 @@ pub struct CapturedAudio {
 pub struct CapturedFrame {
     /// The picture, IOSurface-backed; hand it straight to the encoder.
     pub image: PixelBuffer,
-    /// Capture time on the host clock (`CMClockGetHostTimeClock`), microseconds.
+    /// Capture time on the host clock (`CMClockGetHostTimeClock`), microseconds: the
+    /// sample's presentation timestamp.
     pub capture_ts_us: u64,
-    /// Time between capture and this callback, microseconds.
+    /// When the window server displayed the frame (`SCStreamFrameInfoDisplayTime`), on the
+    /// same clock; `None` when the attachment is missing.
+    pub display_ts_us: Option<u64>,
+    /// Time between the presentation timestamp and this callback, microseconds.
     pub age_us: u64,
+    /// Capture latency: display time → this callback, microseconds (falls back to `age_us`
+    /// without a display time). What ScreenCaptureKit itself adds.
+    pub latency_us: u64,
 }
 
 /// What to capture, resolved from a [`Shareable`] snapshot.
@@ -106,6 +147,10 @@ pub struct Target {
     filter: Retained<SCContentFilter>,
     pixel_size: (u32, u32),
     point_scale: f32,
+    /// The window's place on its display when this is the display-crop path.
+    crop: Option<Crop>,
+    /// The display's bounds in global points for the crop path.
+    display: Option<Rect>,
 }
 
 // SAFETY: `SCContentFilter` is an immutable description object that ScreenCaptureKit reads
@@ -118,6 +163,7 @@ impl std::fmt::Debug for Target {
         f.debug_struct("Target")
             .field("kind", &self.kind)
             .field("pixel_size", &self.pixel_size)
+            .field("crop", &self.crop)
             .finish_non_exhaustive()
     }
 }
@@ -138,13 +184,40 @@ impl Target {
         }
     }
 
+    /// Resolve a window as a crop of the display it sits on: the display filter (which
+    /// ScreenCaptureKit serves from the composited frame, without the per-window pass) with
+    /// `sourceRect` at the window's frame. `Ok(None)` when the window is not entirely on one
+    /// display; the caller keeps the window filter then.
+    pub fn resolve_crop(content: &Shareable, id: WindowId) -> Result<Option<Self>, CaptureError> {
+        crate::ensure_core_graphics();
+        let kind = CaptureTarget::Window(id);
+        let Some(bounds) = crate::geometry::window_bounds(id) else {
+            return Err(CaptureError::NotFound(kind));
+        };
+        let Some(display_id) = crate::geometry::display_enclosing(&bounds) else {
+            return Ok(None);
+        };
+        let display = content.display(display_id).ok_or(CaptureError::NotFound(kind))?;
+        let mut target = Self::display(kind, &display);
+        let display_rect = crate::geometry::display_bounds(display_id);
+        let Some((crop, pixel_size)) =
+            crate::geometry::crop_for(&bounds, &display_rect, f64::from(target.point_scale))
+        else {
+            return Ok(None);
+        };
+        target.crop = Some(crop);
+        target.display = Some(display_rect);
+        target.pixel_size = pixel_size;
+        Ok(Some(target))
+    }
+
     fn window(kind: CaptureTarget, window: &SCWindow) -> Self {
         // SAFETY: `SCContentFilter` has no subclassing or thread requirements for this init.
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
         };
         let (pixel_size, point_scale) = filter_pixel_size(&filter);
-        Self { kind, filter, pixel_size, point_scale }
+        Self { kind, filter, pixel_size, point_scale, crop: None, display: None }
     }
 
     fn display(kind: CaptureTarget, display: &SCDisplay) -> Self {
@@ -158,7 +231,19 @@ impl Target {
             )
         };
         let (pixel_size, point_scale) = filter_pixel_size(&filter);
-        Self { kind, filter, pixel_size, point_scale }
+        Self { kind, filter, pixel_size, point_scale, crop: None, display: None }
+    }
+
+    /// The window's place on its display when this is the display-crop path.
+    #[must_use]
+    pub const fn crop(&self) -> Option<Crop> {
+        self.crop
+    }
+
+    /// The display's bounds in global points when this is the display-crop path.
+    #[must_use]
+    pub const fn display_bounds(&self) -> Option<Rect> {
+        self.display
     }
 
     /// The target this resolves.
@@ -259,12 +344,16 @@ impl Output {
         // SAFETY: valid sample buffer.
         let pts = unsafe { sample.presentation_time_stamp() };
         let capture_ts_us = micros(pts).unwrap_or(0);
+        let display_ts_us = display_time(sample);
         let now_us = host_now_us();
+        let age_us = now_us.saturating_sub(capture_ts_us);
         let image: CFRetained<CVPixelBuffer> = image;
         (self.ivars().sink)(CapturedFrame {
             image: PixelBuffer::from_retained(image),
             capture_ts_us,
-            age_us: now_us.saturating_sub(capture_ts_us),
+            display_ts_us,
+            age_us,
+            latency_us: display_ts_us.map_or(age_us, |t| now_us.saturating_sub(t)),
         });
     }
 }
@@ -403,21 +492,35 @@ fn interleave(
     out
 }
 
-/// `SCStreamFrameInfoStatus` from the sample's first attachment dictionary.
-fn frame_status(sample: &CMSampleBuffer) -> Option<SCFrameStatus> {
+/// A numeric `SCStreamFrameInfo*` entry from the sample's first attachment dictionary.
+fn frame_info(sample: &CMSampleBuffer, key: &SCStreamFrameInfo) -> Option<i64> {
     // SAFETY: valid sample buffer; `false` never allocates.
     let array = unsafe { sample.sample_attachments_array(false) }?;
     // SAFETY: CoreMedia documents the array's elements as CFDictionaries keyed by CFString.
     let array: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
         unsafe { CFRetained::cast_unchecked(array) };
     let dict = array.get(0)?;
-    // SAFETY: framework-provided constant string.
-    let key_ns: &NSString = unsafe { SCStreamFrameInfoStatus };
-    let key_ptr: NonNull<NSString> = NonNull::from(key_ns);
+    let key_ptr: NonNull<NSString> = NonNull::from(key);
     // SAFETY: `NSString` and `CFString` are toll-free bridged; the pointee is a constant.
     let key: &CFString = unsafe { key_ptr.cast::<CFString>().as_ref() };
-    let status = dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()?;
+    dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
+}
+
+/// `SCStreamFrameInfoStatus` from the sample's first attachment dictionary.
+fn frame_status(sample: &CMSampleBuffer) -> Option<SCFrameStatus> {
+    // SAFETY: framework-provided constant string.
+    let key = unsafe { SCStreamFrameInfoStatus };
+    let status = frame_info(sample, key)?;
     Some(SCFrameStatus(isize::try_from(status).ok()?))
+}
+
+/// `SCStreamFrameInfoDisplayTime` (mach absolute time) on the host clock, microseconds.
+fn display_time(sample: &CMSampleBuffer) -> Option<u64> {
+    // SAFETY: framework-provided constant string.
+    let key = unsafe { SCStreamFrameInfoDisplayTime };
+    let ticks = u64::try_from(frame_info(sample, key)?).ok()?;
+    // SAFETY: CoreMedia rule: converts `mach_absolute_time` units to the host time clock.
+    micros(unsafe { CMClock::make_host_time_from_system_units(ticks) })
 }
 
 fn micros(time: CMTime) -> Option<u64> {
@@ -534,6 +637,18 @@ impl Capture {
         unsafe { self.stream.updateConfiguration_completionHandler(&configuration, Some(&block)) }
     }
 
+    /// Swap the content filter on the live stream (window filter ⇄ display crop); the
+    /// configuration's crop must be updated separately with [`Self::update`].
+    pub fn retarget(
+        &self,
+        target: &Target,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        let block = completion(done);
+        // SAFETY: valid stream and filter; the block is copied by the framework.
+        unsafe { self.stream.updateContentFilter_completionHandler(&target.filter, Some(&block)) }
+    }
+
     /// Stop; `done` runs once ScreenCaptureKit has torn the stream down.
     pub fn stop(&self, done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
         let block = completion(done);
@@ -625,6 +740,17 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
         c.setCaptureDynamicRange(SCCaptureDynamicRange::SDR);
+    }
+    if let Some(crop) = config.crop {
+        let rect = CGRect {
+            origin: CGPoint { x: crop.x, y: crop.y },
+            size: CGSize { width: crop.w, height: crop.h },
+        };
+        // SAFETY: plain property write on the fresh configuration object; `sourceRect` is
+        // documented in points of the display's logical coordinate system.
+        unsafe {
+            c.setSourceRect(rect);
+        }
     }
     c
 }

@@ -22,6 +22,9 @@ pub enum CtlRequest {
     },
     /// Health: permissions, reach, port, connected clients (`slopty host doctor`).
     Doctor,
+    /// Live screen streams and their host-side counters (`slopty bench screen` reads the
+    /// capture and encode latency through this on loopback).
+    Screens,
     /// A coding-agent hook fired inside a session (relayed by `slopty hook`).
     Hook {
         /// The session the hook ran in (`SLOPTY_SESSION`).
@@ -92,6 +95,13 @@ pub enum CtlReply {
     },
     /// Health report.
     Doctor(Health),
+    /// Screen streams.
+    Screens {
+        /// Open right now.
+        live: Vec<crate::screen::ScreenSummary>,
+        /// Closed recently, oldest first, with their final counters.
+        closed: Vec<crate::screen::ScreenSummary>,
+    },
     /// Done.
     Ok {
         /// Whether anything changed.

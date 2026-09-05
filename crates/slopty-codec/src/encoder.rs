@@ -15,18 +15,22 @@ use objc2_core_media::{
 };
 use objc2_core_video::CVPixelBuffer;
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, kVTCompressionPropertyKey_AllowFrameReordering,
-    kVTCompressionPropertyKey_AllowOpenGOP, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_EnableLTR,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
+    VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionCopySupportedPropertyDictionary,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
+    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MaxFrameDelayCount,
     kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
+    kVTCompressionPropertyKey_MinAllowedFrameQP,
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-    kVTEncodeFrameOptionKey_AcknowledgedLTRTokens, kVTEncodeFrameOptionKey_ForceKeyFrame,
-    kVTEncodeFrameOptionKey_ForceLTRRefresh, kVTProfileLevel_H264_High_AutoLevel,
-    kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_HEVC_Main10_AutoLevel,
-    kVTPropertyNotSupportedErr, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
+    kVTCompressionPropertyKey_VBVBufferDuration, kVTCompressionPropertyKey_VBVMaxBitRate,
+    kVTCompressionPropertyKey_VariableBitRate, kVTEncodeFrameOptionKey_AcknowledgedLTRTokens,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTEncodeFrameOptionKey_ForceLTRRefresh,
+    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTProfileLevel_HEVC_Main10_AutoLevel, kVTPropertyNotSupportedErr,
+    kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
@@ -34,6 +38,19 @@ use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
 use crate::{CodecError, annexb};
+
+/// Which rate-control mode the session runs in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RateControl {
+    /// `EnableLowLatencyRateControl` in the encoder specification (infinite GOP, no
+    /// reordering, LTR available) with `AverageBitRate` + `DataRateLimits`: the ruled mode.
+    #[default]
+    LowLatency,
+    /// macOS 26's `VariableBitRate` + `VBVMaxBitRate` + `VBVBufferDuration` on a session
+    /// *without* low-latency rate control (the header says they are incompatible with it).
+    /// Measured against `LowLatency` in MEASUREMENTS.md; not used by the host.
+    Vbv,
+}
 
 /// Encoder settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,6 +65,8 @@ pub struct EncoderConfig {
     pub fps: u16,
     /// Target bitrate, bits per second.
     pub bitrate_bps: u32,
+    /// Rate-control mode.
+    pub rate_control: RateControl,
 }
 
 /// Per-frame requests.
@@ -125,15 +144,20 @@ impl Encoder {
             codec: config.codec,
             pending_refresh: AtomicBool::new(false),
         });
-        let spec = CFDictionary::<CFString, CFType>::from_slices(
-            &[
-                // SAFETY: framework-provided constant string.
-                unsafe { kVTVideoEncoderSpecification_EnableLowLatencyRateControl },
-                // SAFETY: framework-provided constant string.
-                unsafe { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder },
-            ],
-            &[cf::boolean(true), cf::boolean(true)],
-        );
+        // SAFETY: framework-provided constant string.
+        let low_latency_key = unsafe { kVTVideoEncoderSpecification_EnableLowLatencyRateControl };
+        // SAFETY: framework-provided constant string.
+        let hardware_key =
+            unsafe { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder };
+        let spec = match config.rate_control {
+            RateControl::LowLatency => CFDictionary::<CFString, CFType>::from_slices(
+                &[low_latency_key, hardware_key],
+                &[cf::boolean(true), cf::boolean(true)],
+            ),
+            RateControl::Vbv => {
+                CFDictionary::<CFString, CFType>::from_slices(&[hardware_key], &[cf::boolean(true)])
+            }
+        };
         let codec_type = match config.codec {
             VideoCodec::Hevc | VideoCodec::HevcMain10 => kCMVideoCodecType_HEVC,
             VideoCodec::H264 => kCMVideoCodecType_H264,
@@ -183,6 +207,17 @@ impl Encoder {
 
     fn set(&self, key: &CFString, value: &CFType, call: &'static str) -> Result<(), CodecError> {
         cf::set_property(&self.session, key, value, call)
+    }
+
+    /// Set one public `kVTCompressionPropertyKey_*` on the live session; `call` names it in
+    /// the error. For experiments and benches: the host's property set lives in `configure`.
+    pub fn set_property(
+        &self,
+        key: &CFString,
+        value: &CFType,
+        call: &'static str,
+    ) -> Result<(), CodecError> {
+        self.set(key, value, call)
     }
 
     /// Set a property that some encoders do not implement; unsupported is logged, not fatal.
@@ -292,19 +327,94 @@ impl Encoder {
 
     /// Change the target bitrate on the fly (bits per second).
     pub fn set_bitrate(&self, bps: u32) -> Result<(), CodecError> {
-        // SAFETY: framework-provided constant string.
-        let average_key = unsafe { kVTCompressionPropertyKey_AverageBitRate };
-        self.set(average_key, &cf::int(i64::from(bps)), "AverageBitRate")?;
-        // Hard cap per second: 1.25× the average, in bytes.
-        let bytes_per_second = i64::from(bps).saturating_mul(5) / 32;
-        let limits = CFArray::<CFNumber>::from_retained_objects(&[
-            cf::int(bytes_per_second),
-            cf::float(1.0),
-        ]);
-        // SAFETY: framework-provided constant string.
-        let limits_key = unsafe { kVTCompressionPropertyKey_DataRateLimits };
-        self.set_optional(limits_key, limits.as_opaque(), "DataRateLimits");
+        match self.config.rate_control {
+            RateControl::LowLatency => {
+                // SAFETY: framework-provided constant string.
+                let average_key = unsafe { kVTCompressionPropertyKey_AverageBitRate };
+                self.set(average_key, &cf::int(i64::from(bps)), "AverageBitRate")?;
+                // Hard cap per second: 1.25× the average, in bytes.
+                let bytes_per_second = i64::from(bps).saturating_mul(5) / 32;
+                let limits = CFArray::<CFNumber>::from_retained_objects(&[
+                    cf::int(bytes_per_second),
+                    cf::float(1.0),
+                ]);
+                // SAFETY: framework-provided constant string.
+                let limits_key = unsafe { kVTCompressionPropertyKey_DataRateLimits };
+                self.set_optional(limits_key, limits.as_opaque(), "DataRateLimits");
+            }
+            RateControl::Vbv => {
+                // SAFETY: framework-provided constant string.
+                let vbr_key = unsafe { kVTCompressionPropertyKey_VariableBitRate };
+                self.set(vbr_key, &cf::int(i64::from(bps)), "VariableBitRate")?;
+                // The same 1.25× peak as the low-latency mode's data-rate limit.
+                let peak = i64::from(bps).saturating_mul(5) / 4;
+                // SAFETY: framework-provided constant string.
+                let peak_key = unsafe { kVTCompressionPropertyKey_VBVMaxBitRate };
+                self.set(peak_key, &cf::int(peak), "VBVMaxBitRate")?;
+                // Two frames of buffer: the smallest model that still lets a frame differ
+                // from the average (the default is 2.5 s, a delay this pipeline cannot pay).
+                let duration = 2.0 / f64::from(self.config.fps.max(1));
+                // SAFETY: framework-provided constant string.
+                let duration_key = unsafe { kVTCompressionPropertyKey_VBVBufferDuration };
+                self.set(duration_key, &cf::float(duration), "VBVBufferDuration")?;
+            }
+        }
         Ok(())
+    }
+
+    /// Try the optional quality keys on this session and report each `OSStatus` (0 =
+    /// accepted, `kVTPropertyNotSupportedErr` = this encoder has no such knob): the probe
+    /// behind the DECISIONS entry. Leaves the accepted ones set, so call it on a throwaway
+    /// session.
+    #[must_use]
+    pub fn probe_quality_keys(&self) -> Vec<(&'static str, i32)> {
+        let keys: [(&CFString, CFRetained<CFNumber>, &'static str); 2] = [
+            (
+                // SAFETY: framework-provided constant string.
+                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
+                cf::int(45),
+                "MaxAllowedFrameQP",
+            ),
+            (
+                // SAFETY: framework-provided constant string.
+                unsafe { kVTCompressionPropertyKey_MinAllowedFrameQP },
+                cf::int(10),
+                "MinAllowedFrameQP",
+            ),
+        ];
+        keys.iter()
+            .map(|(key, value, name)| {
+                let status = match self.set(key, value, name) {
+                    Ok(()) => 0,
+                    Err(CodecError::Os { status, .. }) => status,
+                    Err(_other) => -1,
+                };
+                (*name, status)
+            })
+            .collect()
+    }
+
+    /// Property keys the session says it supports (`VTSessionCopySupportedPropertyDictionary`).
+    #[must_use]
+    pub fn supported_properties(&self) -> Vec<String> {
+        let ptr: NonNull<CFType> = NonNull::from(self.session.as_ref());
+        // SAFETY: a `VTCompressionSessionRef` is a `VTSessionRef` (VTSession.h); read only.
+        let session: &VTSession = unsafe { ptr.cast::<VTSession>().as_ref() };
+        let mut raw: *const CFDictionary = ptr::null();
+        // SAFETY: valid session and out pointer; the dictionary comes back +1 (Copy rule).
+        let status =
+            unsafe { VTSessionCopySupportedPropertyDictionary(session, NonNull::from(&mut raw)) };
+        let Some(raw) = NonNull::new(raw.cast_mut()) else {
+            tracing::debug!(status, "no supported-property dictionary");
+            return Vec::new();
+        };
+        // SAFETY: +1 reference from the copy call, keyed by `CFString`s (VTSession.h).
+        let dict: CFRetained<CFDictionary<CFString, CFType>> =
+            unsafe { CFRetained::from_raw(raw.cast()) };
+        let (keys, _values) = dict.to_vecs();
+        let mut names: Vec<String> = keys.iter().map(ToString::to_string).collect();
+        names.sort_unstable();
+        names
     }
 
     /// Submit one picture. `pts_us` is echoed on the packet; use the capture timestamp.

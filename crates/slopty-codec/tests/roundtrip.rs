@@ -80,6 +80,7 @@ mod tests {
                 codec: VideoCodec::Hevc,
                 fps: 60,
                 bitrate_bps: 4_000_000,
+                rate_control: slopty_codec::RateControl::LowLatency,
             },
             move |packet| {
                 let _sent = ptx.send((Instant::now(), packet));

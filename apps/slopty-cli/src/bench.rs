@@ -328,6 +328,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
     println!("  quic path (client side): {}", link.health());
+    print_host_side(stream).await;
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
     drop(handle);
@@ -335,6 +336,27 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     drop(link);
     endpoint.close().await;
     Ok(())
+}
+
+/// The host's own view of the stream (capture and encode latency, the capture path) when a
+/// hostd answers on this machine's control socket; nothing when there is none (a remote
+/// host) or the stream is not its.
+async fn print_host_side(stream: slopty_core::StreamId) {
+    use slopty_host::ctl::{CtlReply, CtlRequest};
+    let Ok(CtlReply::Screens { live, .. }) = crate::hostctl::call(CtlRequest::Screens).await else {
+        println!("  host side: no local hostd answered (remote host, or not the one streaming)");
+        return;
+    };
+    let Some(s) = live.iter().find(|s| s.stream == stream.0) else {
+        println!("  host side: local hostd is not the one streaming to us");
+        return;
+    };
+    println!("  host capture (display time → SCK callback): {}", s.stats.capture.describe());
+    println!("  host encode (submit → VideoToolbox callback): {}", s.stats.encode.describe());
+    println!(
+        "  host captured {} (display-crop path {}), dropped {}, encoded {}, queue full {}",
+        s.stats.captured, s.stats.cropped, s.stats.dropped, s.stats.encoded, s.stats.queue_full
+    );
 }
 
 /// One run of identical decisions in the trajectory.

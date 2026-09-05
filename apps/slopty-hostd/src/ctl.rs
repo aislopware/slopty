@@ -74,6 +74,10 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             sessions: daemon.host.summaries().await.len(),
             uptime_secs: daemon.started_at.elapsed().as_secs(),
         }),
+        CtlRequest::Screens => {
+            let (live, closed) = daemon.screens.summaries();
+            CtlReply::Screens { live, closed }
+        }
         CtlRequest::Paired => {
             let store = daemon.listener.store();
             let paired = store
