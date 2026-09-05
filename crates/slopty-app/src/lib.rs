@@ -744,9 +744,13 @@ pub fn open_workspace(
                         }
                         CanvasEvent::NeedsYou(n) => {
                             ws.needs_you = *n;
+                            slopty_platform::set_badge(*n);
                             cx.notify();
                         }
-                        CanvasEvent::Attention(_session) => slopty_platform::attention(),
+                        CanvasEvent::Attention(_session) => {
+                            slopty_platform::attention();
+                            slopty_platform::bounce();
+                        }
                         CanvasEvent::Bell(_session) => {}
                     },
                 ));
@@ -755,6 +759,7 @@ pub fn open_workspace(
                 ws.subscriptions.push(cx.observe(&canvas, |_ws, _canvas, cx| cx.notify()));
                 ws.canvas = Some(canvas.clone());
                 ws.needs_you = 0;
+                slopty_platform::set_badge(0);
                 ws.host_name.clone_from(&ack.name);
                 "connected".clone_into(&mut ws.status);
                 cx.notify();

@@ -66,6 +66,44 @@ pub fn attention() {
     }
 }
 
+/// Show how many sessions are waiting on the human on the app icon.
+///
+/// The Dock badge on macOS (cleared at zero). iOS keeps the count inside the app; its icon
+/// badge needs notification authorisation, which nothing else here asks for.
+///
+/// Main thread only (AppKit); called from GPUI's main-thread callbacks. Off it, this is a no-op.
+pub fn set_badge(count: usize) {
+    #[cfg(target_os = "macos")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
+        let tile = objc2_app_kit::NSApplication::sharedApplication(mtm).dockTile();
+        tile.setBadgeLabel(label.as_deref());
+        tracing::debug!(count, badge = ?tile.badgeLabel(), "dock badge");
+    } else {
+        tracing::warn!(count, "dock badge skipped: not on the main thread");
+    }
+    #[cfg(target_os = "ios")]
+    tracing::trace!(count, "icon badge needs notification authorisation; kept in-app");
+}
+
+/// Bounce the Dock icon until the app is activated.
+///
+/// macOS only, and a no-op when the app is already active. Pairs with [`attention`] for an
+/// agent that needs the human.
+#[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
+pub fn bounce() {
+    #[cfg(target_os = "macos")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if !app.isActive() {
+            // The returned request id is only for cancelling early; the activation cancels it.
+            let request = app
+                .requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::CriticalRequest);
+            tracing::trace!(request, "dock bounce");
+        }
+    }
+}
+
 /// Put the process in the `Playback` audio session category, mixing with other apps.
 ///
 /// Remote-window audio then plays through the ring switch and alongside music. macOS has no

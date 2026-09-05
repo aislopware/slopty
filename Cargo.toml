@@ -189,6 +189,9 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSRunningApplication",
     "NSPasteboard",
+    "NSApplication",
+    "NSDockTile",
+    "NSResponder",
     "libc",
 ] }
 objc2-audio-toolbox = { version = "=0.3.2", default-features = false, features = [

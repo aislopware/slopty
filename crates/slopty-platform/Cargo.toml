@@ -16,5 +16,8 @@ objc2-audio-toolbox.workspace = true
 objc2-foundation.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit.workspace = true
+
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true

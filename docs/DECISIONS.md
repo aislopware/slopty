@@ -662,6 +662,19 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   on iOS (`objc2-audio-toolbox`, `AudioServices` feature; AudioToolbox.framework linked in the
   iOS spec). No `UNUserNotificationCenter`: it needs a signed bundle with the notification
   entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle.
+- ✅ **Dock badge + bounce on macOS** (2026-09-05). `CanvasEvent::NeedsYou(n)` also calls
+  `slopty_platform::set_badge(n)` (`NSApplication.dockTile.badgeLabel`, cleared at 0 and on
+  every reconnect), and `Attention` adds `slopty_platform::bounce()`
+  (`requestUserAttention(NSCriticalRequest)`, skipped when the app `isActive`, so a user looking
+  at the canvas gets only the sound). Both need no bundle or entitlement, unlike
+  `UNUserNotificationCenter`. iOS: no-ops — the icon badge needs notification authorisation and
+  the connection dies in the background anyway, so the in-app "N need you" pill is the signal.
+  Verified 2026-09-05 with a synthetic `PermissionRequest` through `slopty hook`: the tile
+  shows "1" (bare binary and bundle alike), `PostToolUse` clears it. Gotcha: `cargo build -p
+  slopty-app` builds only the library crate; the binary is `cargo build -p slopty --bin
+  slopty-app`. GPUI's `show_system_notification` exists in the fork but is disabled outside a
+  bundle ("system notifications disabled: not running from an app bundle") — next step for
+  banners now that `cargo xtask bundle` exists.
 - ✅ Answering a permission prompt from the badge (verified 2026-09-05 against Claude Code
   2.1.261 driven under a pty in `default` permission mode): the prompt is a numbered menu with
   the first entry highlighted — `❯ 1. Yes · 2. Yes, and always allow access to <dir> from this
