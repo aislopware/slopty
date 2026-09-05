@@ -100,6 +100,15 @@ enum Cmd {
 /// Benchmarks.
 #[derive(Subcommand, Debug)]
 enum BenchCmd {
+    /// Keystroke round trip: a byte to a `cat` session on the host, timed to the first frame back.
+    Echo {
+        /// Host name or endpoint id prefix.
+        #[arg(long)]
+        host: Option<String>,
+        /// Samples.
+        #[arg(long, default_value_t = 30)]
+        count: u32,
+    },
     /// Stream a window or display and report what arrived.
     Screen {
         /// Host name or endpoint id prefix.
@@ -156,6 +165,9 @@ async fn main() -> Result<()> {
         }
         Cmd::Attach { host, session } => attach::attach(&data_dir, host.as_deref(), &session).await,
         Cmd::Ping { host, count } => client::ping(&data_dir, host.as_deref(), count).await,
+        Cmd::Bench { cmd: BenchCmd::Echo { host, count } } => {
+            bench::echo(&data_dir, host.as_deref(), count).await
+        }
         Cmd::Bench {
             cmd: BenchCmd::Screen { host, list, window, display, seconds, scale, fps, mbit },
         } => {

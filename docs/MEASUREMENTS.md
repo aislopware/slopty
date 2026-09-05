@@ -273,3 +273,55 @@ instead of halving on every loss, so the 30 Mbit/s target is no longer window-bo
 give-up in the BBR3 run was a 525 ms stall, past `max_hold` (500 ms) — the receiver policy,
 not the window. Rtt and delivered fps are unchanged at this bitrate; the real test is a higher
 bitrate, still to be measured.
+
+Follow-up, main display 1920×1080 with the same scrolling window on it, 15 s, two runs per
+controller back to back (`SLOPTY_CC=bbr3|cubic` on hostd):
+
+| controller | fps         | gap max          | client lost / NACK / refresh | host QUIC lost pkts | host cwnd at close |
+| ---------- | ----------- | ---------------- | ---------------------------- | ------------------- | ------------------ |
+| BBR3       | 58.0 / 49.7 | 165 / 1584 ms    | 0/48/0, 25/150/32            | 9 / 74              | 15.6 / 9.5 KB      |
+| Cubic      | 50.4 / 53.0 | 2044 / 1101 ms   | 19/175/26, 7/61/9            | 74 / 32             | 22.5 / 35.3 KB     |
+
+Three of the four runs hit one- to two-second outages with dozens of real losses; the link,
+not the controller, decided them (the earlier clean BBR3 window runs and the perfect BBR3
+display run are the same code). Neither controller shows an advantage at this bitrate, so
+BBR3 stays the default for its behaviour under loss and the override remains for the next
+round on a better-behaved link (or a wired client). An outage longer than `max_hold` costs
+one refresh per frame in flight — the 25–32 refreshes in the bad runs — which is the intended
+floor: the stream restarts from a keyframe the moment the link is back.
+
+## 2026-09-05 — `slopty bench echo` (pure-Rust keystroke round trip), debug build
+
+Replaces the Python `pty.fork()` driver above. The CLI opens a `/bin/cat` session over the
+normal client link, sends one byte at a time and times it to the first `TermEvent::Frame`
+back, so the number is transport + host engine + the host's coalescing window, with no
+terminal emulation or repaint on the measuring side.
+
+| path                                            | min  | p50  | p90   | max   | QUIC rtt |
+| ----------------------------------------------- | ---- | ---- | ----- | ----- | -------- |
+| loopback (mac-studio → its own hostd)           | 3.6  | 4.9  | 5.9   | 11.7  | 2.6 ms   |
+| macbook-pro over Wi-Fi + mesh, quiet link       | 12.1 | 13.8 | 15.6  | 106.0 | 12 ms    |
+| same, taken during a bad Wi-Fi phase            | 12.5 | 78.9 | 132.2 | 451.5 | 86 ms    |
+
+```sh
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench echo --count 30
+```
+
+On a quiet link the round trip is one QUIC rtt plus ~2 ms (engine + coalescing); the bad-phase
+row is the same binary minutes earlier while the radio was stalling, kept to show the spread
+a Wi-Fi client sees.
+
+## 2026-09-05 — release build, loopback
+
+`cargo build --release -p slopty-hostd -p slopty-ptyd -p slopty-cli`, hostd restarted from
+`target/release`, same benches as above on mac-studio.
+
+| bench                                        | debug (earlier today)        | release                      |
+| -------------------------------------------- | ---------------------------- | ---------------------------- |
+| `bench echo` p50 / p90 / max                 | 4.9 / 5.9 / 11.7 ms          | 4.4 / 4.8 / 5.1 ms           |
+| `bench screen` window 927 capture→decoded p50 / p90 | 10.9 / 15.8 ms        | 11.5 / 16.5 ms               |
+| `bench screen` fps                           | 53–58                        | 57.5                         |
+
+The pipeline is bound by ScreenCaptureKit, VideoToolbox and the coalescing window, not by
+optimisation level; release mostly trims the tail of the echo distribution. Development stays
+on debug builds (the `dev` profile already runs with `opt-level` tuned for the codecs).

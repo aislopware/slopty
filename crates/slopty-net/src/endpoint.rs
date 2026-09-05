@@ -69,9 +69,7 @@ const DATAGRAM_BUFFER: usize = 4 << 20;
 pub fn transport_config() -> QuicTransportConfig {
     let idle = IdleTimeout::try_from(IDLE_TIMEOUT).ok();
     QuicTransportConfig::builder()
-        .congestion_controller_factory(std::sync::Arc::new(
-            noq_proto::congestion::Bbr3Config::default(),
-        ))
+        .congestion_controller_factory(congestion_controller())
         .max_idle_timeout(idle)
         .keep_alive_interval(KEEP_ALIVE)
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
@@ -79,6 +77,25 @@ pub fn transport_config() -> QuicTransportConfig {
         .max_concurrent_bidi_streams(VarInt::from_u32(16))
         .max_concurrent_uni_streams(VarInt::from_u32(256))
         .build()
+}
+
+/// Environment override for the congestion controller: `cubic`, `bbr3` or `newreno`.
+pub const CC_ENV: &str = "SLOPTY_CC";
+
+/// The congestion controller factory: [`CC_ENV`] if set and known, else BBR3.
+fn congestion_controller()
+-> std::sync::Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync + 'static> {
+    use noq_proto::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
+    let choice = std::env::var(CC_ENV).unwrap_or_default();
+    match choice.as_str() {
+        "cubic" => std::sync::Arc::new(CubicConfig::default()),
+        "newreno" => std::sync::Arc::new(NewRenoConfig::default()),
+        "bbr3" | "" => std::sync::Arc::new(Bbr3Config::default()),
+        other => {
+            tracing::warn!(%other, "unknown {CC_ENV}; using bbr3");
+            std::sync::Arc::new(Bbr3Config::default())
+        }
+    }
 }
 
 /// UDP port a host binds unless told otherwise (`slopty-hostd --port`).
