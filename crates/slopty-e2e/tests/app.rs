@@ -11,7 +11,7 @@ mod tests {
 
     use slopty_e2e::harness::{TRANSCRIPT_LINES, artifacts_dir};
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
-    use slopty_e2e::{Command, Stack};
+    use slopty_e2e::{Button, Command, Stack};
 
     /// How long a host round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
@@ -417,6 +417,113 @@ mod tests {
         stack.shutdown().await;
     }
 
+    /// The relay command a settings document registers, from the first entry that is ours.
+    fn relay_command(settings: &str) -> String {
+        let doc: serde_json::Value = serde_json::from_str(settings).expect("settings are JSON");
+        doc["hooks"]
+            .as_object()
+            .expect("a hooks map")
+            .values()
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(|group| group.get("hooks")?.as_array())
+            .flatten()
+            .find(|entry| slopty_agent::hooks::is_relay(entry))
+            .and_then(|entry| entry.get("command")?.as_str())
+            .expect("a relay entry")
+            .to_owned()
+    }
+
+    /// The "hooks" pill, clicked the way a human clicks it, ends in hostd writing Claude
+    /// Code's settings — in the *harness's* home, which is the only home these daemons have.
+    ///
+    /// The click goes through the accessibility tree: the pill publishes its bounds there
+    /// because it is a button with a label, which is also how a screen reader reaches it.
+    #[tokio::test]
+    async fn the_hooks_pill_installs_the_relay_in_the_harness_home() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch_with_fake_claude("e2e-host").await.unwrap();
+        // Before anything else: the daemons' home is the run's own directory, so this test
+        // cannot touch the developer's `~/.claude` even if the wiring were wrong.
+        let home = stack.path("home");
+        let settings = home.join(".claude").join("settings.json");
+        assert!(
+            settings.starts_with(stack.dir.path()),
+            "the harness owns HOME: {}",
+            settings.display()
+        );
+        assert!(!settings.exists(), "and starts without settings: {}", settings.display());
+
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        stack
+            .driver
+            .wait_for("the first shell", STEP, |d| {
+                d.status == "connected" && d.item("terminal").is_some()
+            })
+            .await
+            .unwrap();
+
+        // ⌘⇧T starts the fake `claude`; with no hook firing the host has to guess, which is
+        // exactly when the pill is offered.
+        stack.driver.keys("cmd-shift-t").await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the hooks pill on the guessed agent", STEP, |d| {
+                d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("process"))
+                    && d.a11y_node("Button", Some("install hooks")).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!dump.hooks_offered, "not offered until it is clicked");
+
+        let [x, y, w, h] =
+            dump.a11y_node("Button", Some("install hooks")).expect("the pill").bounds;
+        stack
+            .driver
+            .ok(&Command::Click { x: x + w / 2.0, y: y + h / 2.0, button: Button::Left, count: 1 })
+            .await
+            .unwrap();
+        stack
+            .driver
+            .wait_for("the offer to retire", STEP, |d| {
+                d.hooks_offered && d.a11y_node("Button", Some("install hooks")).is_none()
+            })
+            .await
+            .unwrap();
+
+        // hostd writes the file; give it the same grace the driver gives the app.
+        let deadline = std::time::Instant::now() + STEP;
+        while !settings.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(settings.exists(), "hostd wrote {}", settings.display());
+
+        let registered = slopty_agent::hooks::registered(&settings).unwrap();
+        assert_eq!(
+            registered.len(),
+            slopty_agent::HOOK_EVENTS.len(),
+            "every event relays: {registered:?}"
+        );
+        let written = std::fs::read_to_string(&settings).unwrap();
+        assert!(written.contains("slopty"), "the relay is the slopty beside the host: {written}");
+        assert!(written.contains("hook"), "and it is the hook subcommand: {written}");
+
+        // Installing the same relay again over what the daemon wrote changes nothing. (The
+        // pill itself retires after one click, so a second *click* is not reachable through
+        // the UI.) The command has to be the daemon's own — `install` repoints a relay that
+        // moved — so read it back out of the file the daemon wrote.
+        let relay = relay_command(&written);
+        assert!(relay.ends_with("slopty"), "the relay beside the host: {relay}");
+        let outcome = slopty_agent::hooks::install_at(&settings, &relay).unwrap();
+        assert_eq!(outcome, slopty_agent::hooks::Outcome::Unchanged);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), written, "byte for byte");
+
+        stack.fake_claude_stage("quit").unwrap();
+        stack.shutdown().await;
+    }
+
     #[tokio::test]
     async fn notes_and_zoom_change_the_canvas_as_dumped() {
         if !gated() {
@@ -446,6 +553,48 @@ mod tests {
 
         let frame = drv.render(&render_path).await.unwrap();
         assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // ⌘⇧R tidies the canvas into a block per repository. The shell has a working
+        // directory and the note does not, so there are two blocks, each under a heading a
+        // screen reader can read.
+        let scattered = dump.item("note").unwrap().bounds;
+        drv.keys("cmd-shift-r").await.unwrap();
+        let dump = drv
+            .wait_for("the arrangement", STEP, |d| {
+                d.a11y_node("Heading", Some("no repository")).is_some()
+            })
+            .await
+            .unwrap();
+        let headings =
+            dump.a11y.iter().filter(|n| n.role == "Heading" && n.label.is_some()).count();
+        assert!(headings >= 2, "one heading per repository, and one for the note: {headings}");
+        let tidied = dump.item("note").unwrap().bounds;
+        let moved = tidied.iter().zip(scattered).any(|(a, b)| (a - b).abs() > 0.5);
+        assert!(moved, "the note was tidied: {scattered:?} -> {tidied:?}");
+
+        // The shell's heading is its checkout's name, which differs from machine to machine;
+        // close it so the golden is only what every run has.
+        let terminal = dump.item("terminal").expect("the first shell");
+        drv.ok(&Command::Click {
+            x: terminal.center().0,
+            y: terminal.center().1,
+            button: Button::Left,
+            count: 1,
+        })
+        .await
+        .unwrap();
+        drv.keys("cmd-w").await.unwrap();
+        drv.wait_for("the shell to go", STEP, |d| d.item("terminal").is_none()).await.unwrap();
+        drv.keys("cmd-shift-r").await.unwrap();
+        drv.wait_for("the note alone under its heading", STEP, |d| {
+            d.items.len() == 1 && d.a11y_node("Heading", Some("no repository")).is_some()
+        })
+        .await
+        .unwrap();
+
+        let arranged = stack.path("arrange-by-repo.png");
+        let frame = stack.driver.render(&arranged).await.unwrap();
+        assert_matches("arrange-by-repo", &frame, TOLERANCE, &artifacts_dir()).unwrap();
         stack.shutdown().await;
     }
 

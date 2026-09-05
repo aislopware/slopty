@@ -32,6 +32,7 @@ objc2-foundation.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+slopty-agent.workspace = true
 slopty-media.workspace = true
 slopty-pty.workspace = true
 image.workspace = true
