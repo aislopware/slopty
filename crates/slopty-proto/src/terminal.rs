@@ -75,6 +75,9 @@ pub struct SessionSummary {
     pub title: String,
     /// Current working directory if known (OSC 7).
     pub cwd: Option<String>,
+    /// The repository [`Self::cwd`] is in, if any: the directory holding its `.git` entry.
+    /// Only the host can resolve it, and a client that groups by repository must not guess.
+    pub repo: Option<String>,
     /// Current size.
     pub cols: u16,
     /// Current size.
@@ -206,7 +209,12 @@ pub enum TermEvent {
     /// Title changed.
     Title(String),
     /// Working directory changed.
-    Cwd(String),
+    Cwd {
+        /// The new directory.
+        path: String,
+        /// The repository it is in, resolved by the host. `None` outside a repository.
+        repo: Option<String>,
+    },
     /// BEL.
     Bell,
     /// The program wrote to the system clipboard (OSC 52 / OSC 1337 Copy). Text only, at

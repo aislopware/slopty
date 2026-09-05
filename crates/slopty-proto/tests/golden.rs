@@ -152,6 +152,45 @@ mod golden {
         );
     }
 
+    /// Where a session runs: the directory it reports and the repository the host resolved it
+    /// to (protocol 14). The canvas groups shells by that root, so it is wire-visible.
+    #[test]
+    fn session_place() {
+        use slopty_proto::terminal::{SessionState, SessionSummary};
+        snap(
+            "host_session_opened",
+            &HostMsg::SessionOpened(SessionSummary {
+                id: session(),
+                title: "zsh".to_owned(),
+                cwd: Some("/w/slopty/crates/ui".to_owned()),
+                repo: Some("/w/slopty".to_owned()),
+                cols: 80,
+                rows: 24,
+                state: SessionState::Running,
+                viewers: 1,
+                command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
+            }),
+        );
+        snap(
+            "host_term_cwd",
+            &HostMsg::Term {
+                session: session(),
+                event: TermEvent::Cwd {
+                    path: "/w/slopty/crates/ui".to_owned(),
+                    repo: Some("/w/slopty".to_owned()),
+                },
+            },
+        );
+        // Outside any repository the root is absent, and the client falls back to the cwd.
+        snap(
+            "host_term_cwd_no_repo",
+            &HostMsg::Term {
+                session: session(),
+                event: TermEvent::Cwd { path: "/tmp".to_owned(), repo: None },
+            },
+        );
+    }
+
     #[test]
     fn transcript() {
         use slopty_proto::agent::{

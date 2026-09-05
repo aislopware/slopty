@@ -139,7 +139,7 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                             }
                             Effect::Error(e) => tracing::warn!(error = %e, "host error"),
                             Effect::Title(_)
-                            | Effect::Cwd(_)
+                            | Effect::Cwd { .. }
                             | Effect::ClipboardWrite(_)
                             | Effect::Matches { .. }
                             | Effect::SearchInvalid { .. } => {}

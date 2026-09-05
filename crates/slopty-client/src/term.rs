@@ -15,8 +15,13 @@ pub enum Effect {
     Bell,
     /// The title changed.
     Title(String),
-    /// The cwd changed.
-    Cwd(String),
+    /// The cwd changed, with the repository the host resolved it to.
+    Cwd {
+        /// The new directory.
+        path: String,
+        /// Its repository root, if it is in one.
+        repo: Option<String>,
+    },
     /// The program wrote to the clipboard.
     ClipboardWrite(String),
     /// The child exited.
@@ -64,6 +69,7 @@ pub struct TermState {
     view_offset: u64,
     title: Option<String>,
     cwd: Option<String>,
+    repo: Option<String>,
     exited: Option<i32>,
     driving: bool,
     resync_pending: bool,
@@ -85,6 +91,7 @@ impl TermState {
             view_offset: 0,
             title: None,
             cwd: None,
+            repo: None,
             exited: None,
             driving: false,
             resync_pending: false,
@@ -126,6 +133,12 @@ impl TermState {
     #[must_use]
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// The repository the cwd is in, as the host resolved it.
+    #[must_use]
+    pub fn repo(&self) -> Option<&str> {
+        self.repo.as_deref()
     }
 
     /// Exit status once the child is gone.
@@ -188,9 +201,10 @@ impl TermState {
                 self.title = Some(t.clone());
                 vec![Effect::Title(t)]
             }
-            TermEvent::Cwd(c) => {
-                self.cwd = Some(c.clone());
-                vec![Effect::Cwd(c)]
+            TermEvent::Cwd { path, repo } => {
+                self.cwd = Some(path.clone());
+                self.repo.clone_from(&repo);
+                vec![Effect::Cwd { path, repo }]
             }
             TermEvent::Bell => vec![Effect::Bell],
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],

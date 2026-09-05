@@ -166,6 +166,7 @@ impl Host {
                     command.first().cloned().unwrap_or_else(|| "shell".to_owned())
                 }),
                 cwd: snap.cwd,
+                repo: snap.repo,
                 cols: snap.size.cols,
                 rows: snap.size.rows,
                 state,

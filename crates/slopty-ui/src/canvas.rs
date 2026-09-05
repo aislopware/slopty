@@ -515,11 +515,13 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// A session changed directory (OSC 7). The opening summary is only where the shell
-    /// *started*; arrange-by-repo groups on where it is now.
-    pub fn session_moved(&mut self, session: SessionId, cwd: String) {
+    /// A session changed directory (OSC 7), and the host says which repository that is in.
+    /// The opening summary is only where the shell *started*; arrange-by-repo groups on where
+    /// it is now.
+    pub fn session_moved(&mut self, session: SessionId, cwd: String, repo: Option<String>) {
         if let Some(summary) = self.sessions.get_mut(&session) {
             summary.cwd = Some(cwd);
+            summary.repo = repo;
         }
     }
 
@@ -1111,7 +1113,9 @@ impl CanvasView {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
                     TerminalViewEvent::Title(_) => cx.notify(),
-                    TerminalViewEvent::Cwd(cwd) => this.session_moved(sid, cwd.clone()),
+                    TerminalViewEvent::Cwd { path, repo } => {
+                        this.session_moved(sid, path.clone(), repo.clone());
+                    }
                     TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
                     TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
                 },
@@ -1500,6 +1504,7 @@ impl CanvasView {
                 id: item.id,
                 rect: item.rect,
                 cwd: self.cwd_of(item),
+                repo: self.repo_of(item),
                 // The z order is the recency the canvas already keeps: raising an item on
                 // focus is what makes it the most recent.
                 activity: u64::from(item.z),
@@ -1524,6 +1529,17 @@ impl CanvasView {
         match item.kind {
             ItemKind::Terminal { session } => {
                 self.sessions.get(&session).and_then(|s| s.cwd.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// The repository of an item's session, as the host resolved it. What arrange groups on;
+    /// `None` outside a repository, or from a host older than protocol 14.
+    fn repo_of(&self, item: &CanvasItem) -> Option<String> {
+        match item.kind {
+            ItemKind::Terminal { session } => {
+                self.sessions.get(&session).and_then(|s| s.repo.clone())
             }
             _ => None,
         }
@@ -2530,10 +2546,30 @@ mod tests {
         rect: Rect,
         version: u64,
     ) -> ItemId {
-        host_opens_in(view, cx, session, by, rect, version, None)
+        host_opens_in(view, cx, session, by, rect, version, Where::default())
     }
 
-    /// [`host_opens`], with a working directory for the session (what arrange groups on).
+    /// Where a test session runs: what OSC 7 said, and the repository the host resolved it to.
+    /// Protocol 14 sends both; a host older than that sends only the first.
+    #[derive(Clone, Copy, Default)]
+    struct Where<'a> {
+        cwd: Option<&'a str>,
+        repo: Option<&'a str>,
+    }
+
+    impl<'a> Where<'a> {
+        /// A host that resolved the repository, which is what arrange keys on.
+        const fn rooted(cwd: &'a str, repo: &'a str) -> Self {
+            Self { cwd: Some(cwd), repo: Some(repo) }
+        }
+
+        /// A directory with no repository behind it: the fallback the heuristic still covers.
+        const fn loose(cwd: &'a str) -> Self {
+            Self { cwd: Some(cwd), repo: None }
+        }
+    }
+
+    /// [`host_opens`], saying where the session runs (what arrange groups on).
     #[expect(clippy::too_many_arguments, reason = "a test fixture, not an interface")]
     fn host_opens_in(
         view: &Entity<CanvasView>,
@@ -2542,7 +2578,7 @@ mod tests {
         by: ClientId,
         rect: Rect,
         version: u64,
-        cwd: Option<&str>,
+        at: Where<'_>,
     ) -> ItemId {
         let item = CanvasItem {
             id: ItemId::new(),
@@ -2556,7 +2592,8 @@ mod tests {
         let summary = SessionSummary {
             id: session,
             title: "shell".into(),
-            cwd: cwd.map(str::to_owned),
+            cwd: at.cwd.map(str::to_owned),
+            repo: at.repo.map(str::to_owned),
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -3144,12 +3181,33 @@ mod tests {
             Rect { x: 40.0, y: 900.0, w: 300.0, h: 200.0 },
             Rect { x: 2200.0, y: 400.0, w: 300.0, h: 200.0 },
         ];
-        let root =
-            host_opens_in(&view, cx, SessionId::new(), host, scattered[0], 1, Some("/w/app"));
-        let deep =
-            host_opens_in(&view, cx, SessionId::new(), host, scattered[1], 2, Some("/w/app/src"));
-        let other =
-            host_opens_in(&view, cx, SessionId::new(), host, scattered[2], 3, Some("/w/tools"));
+        let root = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            scattered[0],
+            1,
+            Where::loose("/w/app"),
+        );
+        let deep = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            scattered[1],
+            2,
+            Where::loose("/w/app/src"),
+        );
+        let other = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            scattered[2],
+            3,
+            Where::loose("/w/tools"),
+        );
         while rx.try_recv().is_ok() {}
 
         cx.update(|window, _cx| window.set_a11y_active(true));
@@ -3196,7 +3254,7 @@ mod tests {
         let (view, _rx, host, cx) = canvas(cx);
         let stay = SessionId::new();
         let moves = SessionId::new();
-        host_opens_in(&view, cx, stay, host, SHELL, 1, Some("/w/app"));
+        host_opens_in(&view, cx, stay, host, SHELL, 1, Where::rooted("/w/app", "/w/app"));
         let wanderer = host_opens_in(
             &view,
             cx,
@@ -3204,7 +3262,7 @@ mod tests {
             host,
             Rect { x: 900.0, y: 40.0, w: 300.0, h: 200.0 },
             2,
-            Some("/w/app/src"),
+            Where::rooted("/w/app/src", "/w/app"),
         );
 
         cx.simulate_keystrokes("cmd-shift-r");
@@ -3215,9 +3273,14 @@ mod tests {
             "one repository while both are in it"
         );
 
-        // The shell announces its new directory the way the host relays OSC 7.
+        // The shell announces its new directory the way the host relays OSC 7, with the
+        // repository the host resolved for it.
         view.update_in(cx, |c, _window, cx| {
-            c.term_event(moves, TermEvent::Cwd("/w/tools".into()), cx);
+            c.term_event(
+                moves,
+                TermEvent::Cwd { path: "/w/tools/src".into(), repo: Some("/w/tools".into()) },
+                cx,
+            );
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-shift-r");
@@ -3271,7 +3334,8 @@ mod tests {
     #[gpui::test]
     fn an_emptied_repository_loses_its_heading(cx: &mut TestAppContext) {
         let (view, _rx, host, cx) = canvas(cx);
-        let stays = host_opens_in(&view, cx, SessionId::new(), host, SHELL, 1, Some("/w/app"));
+        let stays =
+            host_opens_in(&view, cx, SessionId::new(), host, SHELL, 1, Where::loose("/w/app"));
         let goes = host_opens_in(
             &view,
             cx,
@@ -3279,7 +3343,7 @@ mod tests {
             host,
             Rect { x: 2200.0, y: 400.0, w: 300.0, h: 200.0 },
             2,
-            Some("/w/tools"),
+            Where::loose("/w/tools"),
         );
 
         cx.update(|window, _cx| window.set_a11y_active(true));
@@ -3315,5 +3379,67 @@ mod tests {
             c.camera().to_screen(c.doc.get(stays).expect("still there").rect)
         });
         assert!(on_screen.w > VIEWPORT.0 / 2.0, "the survivor fills the view: {on_screen:?}");
+    }
+
+    /// Protocol 14: two shells in sibling subdirectories of one checkout are one block, which
+    /// the cwd heuristic could not see, and a worktree of the same project is its own.
+    #[gpui::test]
+    fn the_hosts_repository_root_decides_the_blocks(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        let a = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            SHELL,
+            1,
+            Where::rooted("/w/slopty/crates/a", "/w/slopty"),
+        );
+        let b = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            Rect { x: 900.0, y: 40.0, w: 300.0, h: 200.0 },
+            2,
+            Where::rooted("/w/slopty/crates/b", "/w/slopty"),
+        );
+        let worktree = host_opens_in(
+            &view,
+            cx,
+            SessionId::new(),
+            host,
+            Rect { x: 1800.0, y: 600.0, w: 300.0, h: 200.0 },
+            3,
+            Where::rooted("/w/slopty-wt/regex/crates/a", "/w/slopty-wt/regex"),
+        );
+
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-r");
+        cx.run_until_parked();
+
+        let headings = view.read_with(cx, |c, _| c.headings().to_vec());
+        assert_eq!(
+            headings.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            ["regex", "slopty"],
+            "the worktree is its own repository, and it was raised last"
+        );
+        let slopty = headings.iter().find(|h| h.label == "slopty").expect("the checkout");
+        assert_eq!(slopty.items.len(), 2, "the siblings are one block: {:?}", slopty.items);
+        let regex = headings.iter().find(|h| h.label == "regex").expect("the worktree");
+        assert_eq!(regex.items, vec![worktree]);
+
+        // Side by side, in one row, is what "one block" means on the canvas.
+        let (ra, rb) = view
+            .read_with(cx, |c, _| (c.doc.get(a).expect("a").rect, c.doc.get(b).expect("b").rect));
+        assert!((ra.y - rb.y).abs() < f32::EPSILON, "{ra:?} {rb:?}");
+
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        for label in ["slopty", "regex"] {
+            assert!(
+                tree.iter().any(|n| n.role == "Heading" && n.label.as_deref() == Some(label)),
+                "a heading a screen reader can read: {tree:?}"
+            );
+        }
     }
 }

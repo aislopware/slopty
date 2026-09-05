@@ -51,6 +51,8 @@ pub struct Snapshot {
     pub title: Option<String>,
     /// Cwd from OSC 7, if any.
     pub cwd: Option<String>,
+    /// The repository that cwd is in, resolved when it last changed.
+    pub repo: Option<String>,
     /// Size.
     pub size: TermSize,
     /// Attached clients.
@@ -222,6 +224,8 @@ struct Actor {
     driver: Option<ClientId>,
     title: Option<String>,
     cwd: Option<String>,
+    /// [`crate::repo::root_of`] of `cwd`, resolved once per change rather than per summary.
+    repo: Option<String>,
     exited: Option<i32>,
     /// Highest key seq written to the PTY.
     written_seq: u64,
@@ -264,6 +268,7 @@ impl Actor {
             driver: None,
             title: None,
             cwd: None,
+            repo: None,
             exited: None,
             written_seq: 0,
             ack_seq: 0,
@@ -335,8 +340,11 @@ impl Actor {
                     self.broadcast(&TermEvent::Title(t));
                 }
                 EngineEvent::Cwd(c) => {
+                    // A handful of `stat` calls, only when the shell says it moved. This is
+                    // the actor's own thread, which holds the PTY master and nothing else.
+                    self.repo = crate::repo::root_of_str(&c);
                     self.cwd = Some(c.clone());
-                    self.broadcast(&TermEvent::Cwd(c));
+                    self.broadcast(&TermEvent::Cwd { path: c, repo: self.repo.clone() });
                 }
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
@@ -448,7 +456,10 @@ impl Actor {
                     self.send_to(client, TermEvent::Title(t.clone()));
                 }
                 if let Some(c) = &self.cwd {
-                    self.send_to(client, TermEvent::Cwd(c.clone()));
+                    self.send_to(
+                        client,
+                        TermEvent::Cwd { path: c.clone(), repo: self.repo.clone() },
+                    );
                 }
                 match self.engine.full_frame(self.ack_seq) {
                     Ok(frame) => self.send_to(client, TermEvent::Frame(frame)),
@@ -479,6 +490,7 @@ impl Actor {
                 let _ignored = reply.send(Snapshot {
                     title: self.title.clone(),
                     cwd: self.cwd.clone(),
+                    repo: self.repo.clone(),
                     size: self.engine.size(),
                     viewers: u16::try_from(self.viewers.len()).unwrap_or(u16::MAX),
                     exited: self.exited,

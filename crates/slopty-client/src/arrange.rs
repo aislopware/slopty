@@ -3,12 +3,15 @@
 //! Pure geometry — no document, no camera, no clock — so the interesting parts (determinism,
 //! no overlaps, sizes preserved, the order blocks come out in) are ordinary unit tests.
 //!
-//! The repo key is derived from the terminal's working directory, which the host already
-//! sends (`SessionSummary.cwd`, from OSC 7). Nothing here touches a filesystem: two shells
-//! belong to the same repo when one's directory contains the other's, which is right for the
-//! common case (a shell at the root and shells in its subdirectories) and wrong for a set of
-//! shells that are all in sibling subdirectories of the same repo with none at the root. The
-//! exact answer is the git root, which only the host can resolve; see DECISIONS.
+//! The repo key is the repository root the **host** resolved for the session
+//! (`SessionSummary.repo` / `TermEvent::Cwd { repo }`, protocol 14): only the machine the
+//! shell runs on can see its `.git`. Nothing here touches a filesystem.
+//!
+//! A host that sends no root — an older one, or a directory outside any repository — falls
+//! back to the cwd heuristic this module started with: two shells belong together when one's
+//! directory contains the other's. That is right for a shell at a checkout's root plus shells
+//! in its subdirectories, and wrong for shells in sibling subdirectories with none at the
+//! root, which is exactly why the root is on the wire now.
 
 use slopty_core::ItemId;
 use slopty_proto::canvas::Rect;
@@ -31,6 +34,9 @@ pub struct Arrangeable {
     pub rect: Rect,
     /// Working directory of the item's session, if it has one.
     pub cwd: Option<String>,
+    /// The repository root the host resolved for that directory, if it is in one. When this is
+    /// set it *is* the key; [`Arrangeable::cwd`] is only the fallback for a host that sent none.
+    pub repo: Option<String>,
     /// Higher is more recent. Orders the blocks, and the items inside a block.
     pub activity: u64,
 }
@@ -84,12 +90,18 @@ fn contains(root: &str, path: &str) -> bool {
             && (root.ends_with('/') || path.as_bytes().get(root.len()) == Some(&b'/')))
 }
 
-/// The key two items must share to land in the same block: the shallowest working directory
-/// among them that contains this one.
+/// The key two items must share to land in the same block.
 ///
-/// Items without a directory share the "no repository" key, an empty string, which sorts last.
-fn repo_key(cwd: Option<&str>, all: &[&str]) -> String {
-    let Some(path) = cwd.map(clean).filter(|p| !p.is_empty()) else {
+/// The host's repository root when there is one. Otherwise the shallowest working directory
+/// among the roots-less items that contains this one — the heuristic, kept for hosts that send
+/// no root.
+///
+/// Items with neither share the "no repository" key, an empty string, which sorts last.
+fn repo_key(item: &Arrangeable, all: &[&str]) -> String {
+    if let Some(root) = item.repo.as_deref().map(clean).filter(|r| !r.is_empty()) {
+        return root.to_owned();
+    }
+    let Some(path) = item.cwd.as_deref().map(clean).filter(|p| !p.is_empty()) else {
         return String::new();
     };
     all.iter()
@@ -115,13 +127,16 @@ pub fn label_for(key: &str) -> String {
 /// starts at.
 #[must_use]
 pub fn arrange_by_repo(items: &[Arrangeable], origin: (f32, f32)) -> Arrangement {
+    // The heuristic only ever looks at the items the host gave no root for: a shell whose
+    // repository is known must not drag a rootless neighbour into its block by path alone.
     let cleaned: Vec<&str> = items
         .iter()
+        .filter(|i| i.repo.is_none())
         .filter_map(|i| i.cwd.as_deref().map(clean))
         .filter(|p| !p.is_empty())
         .collect();
     let mut keyed: Vec<(String, &Arrangeable)> =
-        items.iter().map(|item| (repo_key(item.cwd.as_deref(), &cleaned), item)).collect();
+        items.iter().map(|item| (repo_key(item, &cleaned), item)).collect();
     // Blocks by most recent activity, then by key so a tie is still deterministic.
     keyed.sort_by(|(ak, a), (bk, b)| {
         b.activity.cmp(&a.activity).then_with(|| ak.cmp(bk)).then_with(|| a.id.cmp(&b.id))
@@ -193,11 +208,24 @@ fn place_block(
 mod tests {
     use super::*;
 
+    /// An item from a host that sends no repository root: the fallback path.
     fn item(cwd: Option<&str>, activity: u64, size: (f32, f32)) -> Arrangeable {
         Arrangeable {
             id: ItemId::new(),
             rect: Rect { x: 999.0, y: -999.0, w: size.0, h: size.1 },
             cwd: cwd.map(str::to_owned),
+            repo: None,
+            activity,
+        }
+    }
+
+    /// An item as protocol 14 delivers it: the host resolved the root.
+    fn rooted(cwd: &str, repo: &str, activity: u64) -> Arrangeable {
+        Arrangeable {
+            id: ItemId::new(),
+            rect: Rect { x: 999.0, y: -999.0, w: 200.0, h: 100.0 },
+            cwd: Some(cwd.to_owned()),
+            repo: Some(repo.to_owned()),
             activity,
         }
     }
@@ -299,6 +327,43 @@ mod tests {
     }
 
     /// Paths that merely share a prefix of characters are different repositories.
+    /// The host's root decides, not the paths: two sibling subdirectories with nothing at the
+    /// root are one block, which the cwd heuristic could never see.
+    #[test]
+    fn sibling_directories_of_one_repository_are_one_block() {
+        let items = vec![
+            rooted("/w/slopty/crates/a", "/w/slopty", 30),
+            rooted("/w/slopty/crates/b", "/w/slopty", 20),
+            rooted("/w/slopty-wt/regex/crates/a", "/w/slopty-wt/regex", 10),
+        ];
+        let out = arrange_by_repo(&items, (0.0, 0.0));
+        assert_eq!(
+            out.headings.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            ["slopty", "regex"],
+            "a worktree is its own repository"
+        );
+        let (a, b) = (out.place(items[0].id).unwrap(), out.place(items[1].id).unwrap());
+        assert!((a.y - b.y).abs() < f32::EPSILON, "the siblings share a row: {a:?} {b:?}");
+        assert_eq!(out.headings[0].items.len(), 2);
+        assert_eq!(out.headings[1].items, vec![items[2].id]);
+    }
+
+    /// A host that sends roots for some sessions and not others (a shell outside any
+    /// repository) keeps them apart: the heuristic must not swallow a rooted neighbour.
+    #[test]
+    fn a_rootless_shell_does_not_join_a_rooted_block() {
+        let items = vec![
+            rooted("/w/slopty/crates/a", "/w/slopty", 30),
+            item(Some("/w/slopty/notes"), 20, (200.0, 100.0)),
+        ];
+        let out = arrange_by_repo(&items, (0.0, 0.0));
+        assert_eq!(
+            out.headings.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            ["slopty", "notes"],
+            "the rootless one is its own block, keyed on its own directory"
+        );
+    }
+
     #[test]
     fn a_shared_prefix_is_not_a_shared_repository() {
         let items = vec![
