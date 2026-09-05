@@ -991,10 +991,11 @@ Takeaways:
   row's frame count and frame size are whatever the desktop drew during those 5 s; the
   *one-per-frame* column exists so the parity comparison survives that.
 
-Not measured here: a scrolling terminal window as the capture target (the test cannot drive the
-desktop, and driving the app's own UI to make it draw is the app self-test's job), the loss path
-over the mesh, and group parity shared across consecutive small frames (not implemented — the
-minimum measured well enough not to need a wire change).
+A scrolling terminal as the capture target is measured in the app self-test now (the app drives a
+flooding shell and captures the display it fills; see "a scrolling terminal under injected loss"
+below). Still not measured here: the loss path over the mesh, and group parity shared across
+consecutive small frames (not implemented — the minimum measured well enough not to need a wire
+change).
 
 ## 2026-09-06 — the apply path under a 20-shell flood (mac-studio, e2e app build)
 
@@ -1199,10 +1200,17 @@ the host switches that stream to the **display-crop** path. (An earlier version 
 said that hiding the window then does not stop the stream. That was measured on a stale helper
 binary whose window never hid; see the next section for what actually happens.)
 
-Not measured: the same guard on iOS (the helper is an AppKit window on the host's machine, which
-the simulator case shares, but the run was not made), and a target that draws once and then hides
-— `check_source` latches on `encoded > 0`, so that case reports `Live` forever and only the cap
-protects the client.
+The same guard with the phone as the viewer is measured now: the AppKit helper is on the host's
+Mac (the simulator shares that machine), the phone captures it and the host counts what the phone
+asks for. Over the relay the phone asked for **0 refreshes** (the host's idle hint, sent inside
+its 400 ms grace, reached the phone before its first refresh interval — well inside the cap of
+12); the host then flips the stream back to `Live` when the window draws again, without a reopen.
+An idle source sends no frames, so this needs no video decode on the simulator, only the picker
+and the refresh loop (`crates/slopty-e2e/tests/pair.rs`,
+`the_refresh_guard_holds_with_the_phone_asking_with_the_simulator`,
+`SLOPTY_SCREEN_E2E=1 cargo xtask e2e pair-ios --sim iphone`). Still not measured: a target that
+draws once and then hides — `check_source` latches on `encoded > 0`, so that case reports `Live`
+forever and only the cap protects the client.
 
 ## 2026-09-06 — font truth: the cell from the font's own tables (macOS app self-test, debug)
 
@@ -1725,3 +1733,63 @@ rustfilt < /tmp/sample-chrome-after3.raw > /tmp/sample-chrome-after3.txt
 python3 /tmp/sample-children.py /tmp/sample-chrome-after3.txt "Window>::draw"
 python3 /tmp/sample-attrib.py /tmp/sample-chrome-after3.txt rasterize_glyph paint_glyph_scaled shape_text
 ```
+
+### The Mac and the phone on one host (`cargo xtask e2e pair-ios`)
+
+The same host with the second client in the simulator, the a/b/c/g subset the phone supports
+(`crates/slopty-e2e/tests/pair.rs::the_mac_and_the_phone_share_a_host_with_the_simulator`). Run
+once on each device; the app is built and installed on the simulator by the recipe:
+
+```sh
+cargo xtask e2e pair-ios --sim iphone
+cargo xtask e2e pair-ios --sim ipad
+```
+
+| behaviour | iPhone simulator (26.5) | iPad simulator (26.5) |
+|---|---|---|
+| (a) shell opened on the Mac, shown on the phone | 0 ms after the Mac | 0 ms after the Mac |
+| (b) typed on the phone into a shell, read on the Mac | `phone-42` echoed back | `phone-42` echoed back |
+| (c) permission badge (hook played to hostd) | on both, "1 needs you" | on both, "1 needs you" |
+| (g) ⌘W on the Mac closes the shell on both | closed on both | closed on both |
+
+The phone fits two desktop-sized items at a card zoom (0.49), so a shell it types into is first
+revealed — that zooms one item up to a live grid (`reveal_session`, clamped to `CARD_ZOOM` 0.6),
+which a click cannot, and the soft keyboard then routes to it. The harness gained a `Reveal`
+test-socket command for exactly this; over the relay the run is ~51 s each.
+
+## 2026-09-06 — a scrolling terminal under injected loss (mac-studio, e2e app build, loopback)
+
+The run MEASUREMENTS "the path under load" said could not be driven from the hostd loss test,
+because that test captures the machine's own still desktop and cannot change it. The app self-test
+can: it floods a shell (`/bin/sh -c 'i=0; while :; do printf …; done'`) so its window is a
+scrolling terminal, then captures the display that window fills. Loss is injected on the app's own
+receive path from a fixed seed (`SLOPTY_E2E_DROP_PERMILLE`), one app process per rate, 5 s each;
+the recovery counters are the client's own `ScreenStats`, surfaced in `dump.screens[].recovery`.
+
+```sh
+SLOPTY_SCREEN_E2E=1 cargo xtask e2e app   # or the case alone:
+SLOPTY_APP_E2E=1 SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_BIN_DIR=$PWD/target/debug \
+  cargo nextest run -p slopty-e2e --test app --no-capture -E 'test(a_scrolling_window_recovers)'
+```
+
+Debug, ~58 fps (busy frames: ~1600–1800 data fragments over the 5 s, so frames are tens of
+fragments — the regime where the one-parity-fragment minimum costs ~0):
+
+| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 ‰   | 277 | 0  | 0 | 0 | 1580 (0)   | 1707 | 236 | 1 / 1 | 0 | 17.2 ms |
+| 20 ‰  | 292 | 29 | 0 | 0 | 1778 (33)  | 1951 | 254 | 2 / 1 | 0 | 17.2 ms |
+| 50 ‰  | 288 | 62 | 8 | 0 | 1789 (75)  | 1881 | 294 | 8 / 1 | 1 | 17.3 ms |
+| 100 ‰ | 288 | 95 | 5 | 1 | 1625 (127) | 1696 | 392 | 6 / 2 | 0 | 17.3 ms |
+
+Takeaways, against the still-desktop table above:
+
+* **Busy frames are recovered the same way, and lose almost nothing.** Parity repairs the bulk
+  (29 / 62 / 95 frames at 20 / 50 / 100 ‰), a retransmission mops up the rest; one frame was lost
+  at 100 ‰, the two-fragment tail a frame plus one parity cannot cover. The verdict is a rate
+  under one frame in a hundred, as in the hostd test.
+* **The capture is the display the app's flood fills, not the app's own window**: the window
+  picker does not offer the app its own windows, so a self-test cannot target its own window. The
+  display target still carries the app-driven scrolling content — the point the hostd test could
+  not reach — plus whatever else is on the desktop. A cleaner isolation (a dedicated scrolling
+  helper window, or a second app viewing the first's window) is left for a follow-up.

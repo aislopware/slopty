@@ -686,7 +686,16 @@ mod tests {
         );
         assert!(lag <= PROPAGATION_LIMIT, "the phone lagged by {lag:?}");
 
-        // (b) typed on the phone into the first shell (its active item), read on the Mac.
+        // (b) typed on the phone into the first shell, read on the Mac. The second shell left
+        // the phone fitted to two desktop-sized items at a card zoom, so reveal this one first:
+        // that zooms it up to a live grid (a plain click cannot) and the soft keyboard routes
+        // to it.
+        b.reveal(&first).await.unwrap();
+        b.wait_for("the phone's grid to take the keyboard", STEP, |d| {
+            d.focused == format!("terminal:{first}")
+        })
+        .await
+        .unwrap();
         b.type_text("echo phone-$((6*7))").await.unwrap();
         b.keys("enter").await.unwrap();
         a.wait_for("the phone's echo on the Mac", STEP, |d| {
@@ -712,6 +721,80 @@ mod tests {
         let gone = |d: &Dump| d.item_for_session(&session).is_none();
         a.wait_for("closed on the Mac", STEP, gone).await.unwrap();
         b.wait_for("closed on the phone", STEP, gone).await.unwrap();
+        pair.shutdown().await;
+    }
+
+    /// The refresh guard with the phone as the viewer. The idle-window helper is an AppKit
+    /// window on the host's Mac (the simulator shares that machine); the phone captures it, and
+    /// because it never draws the phone asks the host for refreshes. The host counts what
+    /// actually arrived and it stops at the receiver's cap — the same guard the Mac app self
+    /// -test proves, now with the phone doing the asking. An idle source sends no frames, so this
+    /// needs no video decode on the simulator, only the picker and the refresh loop. Needs
+    /// `SLOPTY_SCREEN_E2E` for the capture.
+    #[tokio::test]
+    async fn the_refresh_guard_holds_with_the_phone_asking_with_the_simulator() {
+        let Some(simulator) = simulator() else { return };
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("skipped: the guard needs SLOPTY_SCREEN_E2E=1 (Screen Recording)");
+            return;
+        }
+        let mut pair = Stack::launch_pair_with_simulator("e2e-guard-ios", simulator).await.unwrap();
+        let idle = pair.stack.start_idle_window().await.unwrap();
+
+        // ⌘O on the phone lists the host's on-screen windows; find the idle window's row.
+        let ends = format!(", {}", idle.title());
+        let phone = &mut pair.b.driver;
+        phone.keys("cmd-o").await.unwrap();
+        let dump = phone
+            .wait_for("the idle window in the phone's picker", STEP, |d| {
+                d.a11y.iter().any(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&ends))
+                })
+            })
+            .await
+            .unwrap();
+        let button = dump
+            .a11y
+            .iter()
+            .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with(&ends)))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y))
+            .clone();
+
+        // Off screen before the stream opens: captured, drawing nothing.
+        idle.hide().unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let [x, y, w, h] = button.bounds;
+        phone.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+        phone
+            .wait_for("the phone sees the window is not drawing", STEP, |d| {
+                d.screens.iter().any(|s| s.source == "idle")
+            })
+            .await
+            .unwrap();
+
+        // What the host was asked for over the next stretch: a handful, then silence, inside
+        // the receiver's cap — read from the host's own count of what arrived.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let screens = pair.stack.host_screens().await.unwrap();
+        let refreshes: u64 =
+            screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
+        let cap = u64::from(slopty_media::Config::default().refresh_max_repeats);
+        println!(
+            "MEASURE (guard) pair ios: {refreshes} refresh requests from the phone for an idle window, cap {cap}"
+        );
+        assert!(refreshes <= cap, "the phone kept asking: {refreshes} > cap {cap}");
+
+        // Drawing again flips the host's source hint back to live for the phone's stream (the
+        // picture itself needs a decoder this simulator may not have, so only the hint, which
+        // the guard turns on, is asserted).
+        idle.show().unwrap();
+        pair.b
+            .driver
+            .wait_for("the host calls the window live again", STEP, |d| {
+                d.screens.iter().any(|s| s.source == "live")
+            })
+            .await
+            .unwrap();
         pair.shutdown().await;
     }
 }

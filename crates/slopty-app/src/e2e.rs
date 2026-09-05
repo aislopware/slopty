@@ -19,7 +19,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
     ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
-use slopty_core::ItemId;
+use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
     Button, Command, ConversationInfo, Dump, FaceInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
     Reply, ScreenInfo, TerminalInfo, WindowInfo,
@@ -304,6 +304,16 @@ fn apply(
             slopty_ui::frames::reset(cx);
             Reply::Ok
         }
+        Command::Reveal { session } => {
+            let Ok(session) = session.parse::<SessionId>() else {
+                return Reply::Error { message: format!("not a session id: {session}") };
+            };
+            let Some(canvas) = workspace.read(cx).active_canvas() else {
+                return Reply::Error { message: "no active canvas".into() };
+            };
+            canvas.update(cx, |canvas, cx| canvas.reveal_session(session, cx));
+            Reply::Ok
+        }
         Command::AddDisplay => {
             let Some(canvas) = workspace.read(cx).active_canvas() else {
                 return Reply::Error { message: "no active canvas".into() };
@@ -391,11 +401,29 @@ fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     let pacing = view.pacing();
     let size = view.size();
+    let s = view.stats();
     let source = match view.source_state() {
         slopty_proto::screen::SourceState::Idle => "idle",
         slopty_proto::screen::SourceState::Live => "live",
     };
+    let recovery = slopty_e2e::RecoveryInfo {
+        frames: s.frames,
+        frames_fec: s.frames_fec,
+        frames_retransmit: s.frames_retransmit,
+        frames_lost: s.frames_lost,
+        datagrams_lost: s.datagrams_lost,
+        data_shards: s.data_shards,
+        parity_shards: s.parity_shards,
+        parity_permille: s.parity_permille,
+        nacks: s.nacks,
+        refreshes: s.refreshes,
+        datagrams: s.datagrams,
+        bytes: s.bytes,
+        stalls: s.stalls,
+        stalled_ms: s.stalled_ms,
+    };
     ScreenInfo {
+        recovery,
         source: source.to_owned(),
         item: item.to_string(),
         stream: view.stream().0,

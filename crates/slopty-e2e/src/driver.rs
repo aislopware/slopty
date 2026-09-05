@@ -145,6 +145,16 @@ impl Driver {
         self.ok(&Command::FramesReset).await
     }
 
+    /// Bring `session`'s terminal into view, active and holding the keyboard (a phone zooms the
+    /// card up to a live grid, which a click cannot).
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or there is no canvas.
+    pub async fn reveal(&mut self, session: &str) -> Result<()> {
+        self.ok(&Command::Reveal { session: session.to_owned() }).await
+    }
+
     /// The app's state.
     ///
     /// # Errors

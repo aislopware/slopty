@@ -125,6 +125,13 @@ pub enum Command {
     },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
+    /// Bring a session's terminal into view, make it active and give it the keyboard, as
+    /// tapping a waiting badge does. On a phone this zooms the card up to a live grid (clamped
+    /// to `CARD_ZOOM`), which a plain click cannot, so the soft keyboard can route to it.
+    Reveal {
+        /// The session id (`terminal:<id>` without the prefix), as the dump reports it.
+        session: String,
+    },
     /// Add the host's first display to the active canvas, as picking it would (the host
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
@@ -468,6 +475,45 @@ pub struct ScreenInfo {
     /// or `idle` (it has produced no frame at all, so no refresh can help).
     #[serde(default)]
     pub source: String,
+    /// Loss-recovery counters from the client's `ScreenStats`, for the injected-loss table.
+    #[serde(default)]
+    pub recovery: RecoveryInfo,
+}
+
+/// The client's loss-recovery counters for one stream.
+///
+/// A subset of `slopty_client`'s `ScreenStats`, so an app self-test can build the injected-loss
+/// table the in-process host test does. All are cumulative over the stream's life.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct RecoveryInfo {
+    /// Frames delivered to the decoder.
+    pub frames: u64,
+    /// Frames recovered by parity (FEC).
+    pub frames_fec: u64,
+    /// Frames that needed a retransmission (NACK).
+    pub frames_retransmit: u64,
+    /// Frames given up on.
+    pub frames_lost: u64,
+    /// Data fragments that never arrived.
+    pub datagrams_lost: u64,
+    /// Data fragments the host cut the frames into.
+    pub data_shards: u64,
+    /// Parity fragments the host added.
+    pub parity_shards: u64,
+    /// Parity as observed on the wire, thousandths of the data fragments.
+    pub parity_permille: u16,
+    /// NACKs sent.
+    pub nacks: u64,
+    /// Refresh requests sent.
+    pub refreshes: u64,
+    /// Datagrams seen.
+    pub datagrams: u64,
+    /// Bytes received in datagrams (video, cursor, audio, parity).
+    pub bytes: u64,
+    /// Stalls that released (silence past the stall gap, then datagrams again).
+    pub stalls: u64,
+    /// Time spent stalled, milliseconds.
+    pub stalled_ms: u64,
 }
 
 /// A terminal's conversation view.

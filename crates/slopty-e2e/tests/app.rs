@@ -691,4 +691,95 @@ mod tests {
         );
         stack.shutdown().await;
     }
+
+    /// A scrolling terminal as the capture target under injected loss: the app floods a shell so
+    /// its window is busy, captures the display that window fills, and the stream comes back over
+    /// loopback with a fixed fraction of its datagrams dropped on the app's receive path
+    /// (`SLOPTY_E2E_DROP_PERMILLE`, one app process per rate). This is the run the hostd loss
+    /// test could not drive (it captures the still desktop it cannot change); here the app self
+    /// -test drives the content. Recovery is read from the client's own `ScreenStats`, surfaced
+    /// in `dump.screens[].recovery`. Needs the screen-recording grant.
+    #[tokio::test]
+    async fn a_scrolling_window_recovers_from_injected_loss() {
+        if !gated_on_capture() {
+            return;
+        }
+        // A shell that prints as fast as it can, so the captured window changes every frame.
+        let flood = "i=0; while :; do printf '%06d the quick brown fox jumps over the lazy dog\\n' \"$i\"; i=$((i+1)); done";
+        let mut rows = Vec::new();
+        for permille in [0_u32, 20, 50, 100] {
+            let value = permille.to_string();
+            let mut stack = Stack::launch_with("e2e-loss", &[("SLOPTY_E2E_DROP_PERMILLE", &value)])
+                .await
+                .unwrap();
+            stack.driver.ok(&Command::Resize { width: 1200.0, height: 800.0 }).await.unwrap();
+            stack
+                .driver
+                .wait_for("the first shell", STEP, |d| {
+                    d.status == "connected" && d.item("terminal").is_some()
+                })
+                .await
+                .unwrap();
+            // Flood a shell so the app's window is a scrolling terminal, then capture the
+            // display it fills. The picker does not offer the app its own window, so the target
+            // is the display the flooding window sits on — the app self-test still drives the
+            // content (a shell printing as fast as it can) the hostd loss test could not.
+            stack.driver.open(&["/bin/sh", "-c", flood], 1).await.unwrap();
+            stack.driver.add_display().await.unwrap();
+
+            // Let it stream: at least 5 s of frames, as the hostd loss table samples.
+            stack
+                .driver
+                .wait_for("the window streaming", STEP, |d| d.screens.iter().any(|s| s.frames > 5))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let dump = stack.driver.dump().await.unwrap();
+            assert_eq!(dump.screens.len(), 1, "one capture: {dump:#?}");
+            rows.push((permille, dump.screens[0].clone()));
+            stack.shutdown().await;
+        }
+
+        // The loss table (client-side recovery counters, one app process per rate).
+        println!(
+            "\nMEASURE (loss) app self-test: a scrolling window under injected loss (loopback, debug)"
+        );
+        println!(
+            "| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 ms |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+        for (permille, s) in &rows {
+            let r = &s.recovery;
+            println!(
+                "| {permille} ‰ | {} | {} | {} | {} | {} ({}) | {} | {} | {} / {} | {} | {:.1} |",
+                r.frames,
+                r.frames_fec,
+                r.frames_retransmit,
+                r.frames_lost,
+                r.datagrams,
+                r.datagrams_lost,
+                r.bytes / 1000,
+                r.parity_permille,
+                r.nacks,
+                r.refreshes,
+                r.stalls,
+                slopty_e2e::FrameInfo::ms(s.interval_p50_us),
+            );
+        }
+
+        // Verdicts: every rate reassembled frames; nothing was lost with no loss injected; loss
+        // is recovered (parity or a retransmission repairs frames) once it is injected.
+        for (permille, s) in &rows {
+            let r = &s.recovery;
+            assert!(r.frames >= 1, "{permille} ‰ reassembled nothing: {s:#?}");
+            if *permille == 0 {
+                assert_eq!(r.frames_lost, 0, "0 ‰ still lost a frame: {s:#?}");
+            } else {
+                assert!(
+                    r.frames_fec + r.frames_retransmit > 0,
+                    "{permille} ‰ injected loss repaired nothing: {s:#?}"
+                );
+            }
+        }
+    }
 }
