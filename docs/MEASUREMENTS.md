@@ -156,3 +156,52 @@ The formatter is ~20× cheaper per row than the cell walk, one line per row (int
 rows kept, trailing blank rows dropped), so search runs on the host over the whole retained
 history per keystroke. Same run found the 10 KB byte cap on scrollback (60k rows written,
 904 retained), fixed in a1b8798.
+
+## 2026-09-05 — screen stream over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
+
+Setup: `slopty-hostd --direct-only` on mac-studio (Ethernet LAN), `slopty bench screen` on
+macbook-pro over Wi-Fi. The LAN is not reachable from the MacBook, so iroh picked the direct path
+over the WireGuard mesh (`100.107.14.250`, `SLOPTY_DIRECT_ONLY=1`); idle `slopty ping` on that
+path: app rtt min/median/max 6.4 / 9.1 / 12.5 ms, QUIC rtt 10.9 ms, `ping` 0 % loss. Same
+targets as the loopback run above (main display 1920×1080, Ghostty window 900×500 scrolling
+`seq`). The capture→decoded column is meaningless here — two clocks ~903 s apart — so only
+fps, arrival gap, loss and QUIC rtt are recorded; "encoded" is the host's `ScreenStats` line in
+the hostd log, "decoded" the client's count.
+
+| run                                  | encoded → decoded | fps  | arrival gap p50 / p90 / max | datagrams | FEC / lost / NACK / refresh | QUIC rtt while streaming |
+| ------------------------------------ | ----------------- | ---- | --------------------------- | --------- | --------------------------- | ------------------------ |
+| main display, mostly still           | 254 → 254         | 26.0 | 20.0 / 119.4 / 175.0 ms     | 625       | 0 / 0 / 1 / 0               | 17.3 ms                  |
+| Ghostty window 900×500, scrolling    | 586 → 567         | 57.7 | 15.9 / 22.8 / 290.9 ms      | 3598      | 2 / 5 / 29 / 5              | 44.3 ms                  |
+| main display, Ghostty scrolling on it| 557 → 547         | 55.6 | 16.9 / 23.2 / 191.0 ms      | 3296      | 0 / 1 / 13 / 1              | 14.1 ms                  |
+
+Commands (on macbook-pro, binary copied with `gzip -1 -c target/debug/slopty | ssh macbook-pro
+'gunzip -c > /tmp/slopty-bench/slopty'`, paired once with `slopty pair <ticket>`):
+
+```sh
+export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1
+/tmp/slopty-bench/slopty ping --count 15
+/tmp/slopty-bench/slopty bench screen --list
+/tmp/slopty-bench/slopty bench screen --display 6 --seconds 10
+/tmp/slopty-bench/slopty bench screen --window 927 --seconds 10   # seq 1 20000000 running in it
+```
+
+Takeaways:
+
+* The still-display row is capture-bound, not network-bound: SCK delivered 254 frames and all
+  254 arrived; the 119 ms p90 gap is the desktop not changing.
+* Under load the path carries ~55–58 fps at ~4 Mbit/s (≈3.5k datagrams of ≤1.2 KB in 10 s) —
+  the encoder is nowhere near the 30 Mbit/s target, so every loss here is Wi-Fi loss, not
+  congestion. About 2–3 % of frames never reach the decoder (19 of 586, 10 of 557); NACKs
+  recover most datagrams, parity recovered 2, and 5 refreshes were needed on the window run,
+  each costing a ~200–300 ms arrival gap (the max column). Frame-level delivery is what a
+  Parsec-class stream needs to be tuned for next: more parity per frame on a lossy path and/or
+  a shorter NACK deadline before giving up.
+* QUIC rtt rises from 11 ms idle to 44 ms while the window stream runs (Wi-Fi queueing under
+  the mesh's userspace WireGuard); the display run stayed at 14 ms. Worth re-checking with
+  pacing once the bitrate goes up.
+* A target that never produces a frame (a hidden Ghostty window, id 924) leaves the client in
+  "need refresh": it re-sends `RequestRefresh` every `refresh_repeat` + 2 rtt (79 in 10 s). Cheap
+  (one datagram each) but pointless; a capped retry or a host-side "no frames yet" hint would
+  stop it.
+
+Not yet measured: LTE from the phone, a release build, and the arrival→present hold in the GPUI app.
