@@ -360,6 +360,18 @@ pub fn dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The `TERMINFO` a spawned child needs, if any.
+///
+/// `Some` exactly when the database was overridden: the child looks entries up itself, and
+/// [`dirs`] is then answering from a directory ncurses knows nothing about, so `TERM` and the
+/// search path would disagree — the shell would advertise `xterm-ghostty` and then fail to find
+/// it. `None` means the ordinary places, which ncurses already searches; the caller clears any
+/// inherited `TERMINFO` in that case.
+#[must_use]
+pub fn child_database() -> Option<PathBuf> {
+    std::env::var_os(DIR_ENV).map(PathBuf::from)
+}
+
 /// Whether a compiled `xterm-ghostty` entry is already on the system.
 ///
 /// ncurses files an entry under the first letter of its name, or under that letter's hex code

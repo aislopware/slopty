@@ -114,7 +114,12 @@ impl Pty {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slopty");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        cmd.env_remove("TERMINFO");
+        // `TERM` and the search path have to agree: when the database is ours, point the child
+        // at it; otherwise clear whatever we inherited and let ncurses use the usual places.
+        match crate::terminfo::child_database() {
+            Some(dir) => cmd.env("TERMINFO", dir),
+            None => cmd.env_remove("TERMINFO"),
+        };
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

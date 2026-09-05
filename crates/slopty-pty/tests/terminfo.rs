@@ -70,5 +70,21 @@ mod terminfo_entry {
 
         let again = terminfo::install(&database).await.expect("a second run is a no-op");
         assert_eq!(again, terminfo::Installed::Already);
+
+        // `TERM` and the child's search path agree: we answered from a database ncurses does
+        // not know about, so the child is pointed at it.
+        assert_eq!(terminfo::child_database().as_deref(), Some(database.as_path()));
+    }
+
+    /// Without the override the child is told nothing: `default_term` answered from the places
+    /// ncurses searches by itself, so an inherited `TERMINFO` is cleared rather than replaced.
+    #[test]
+    fn without_an_override_the_child_gets_no_terminfo() {
+        // SAFETY: nextest gives every test its own process; nothing else reads the environment.
+        unsafe {
+            std::env::remove_var(terminfo::DIR_ENV);
+        }
+        assert_eq!(terminfo::child_database(), None);
+        assert!(terminfo::dirs().len() > 1, "the ordinary places: {:?}", terminfo::dirs());
     }
 }
