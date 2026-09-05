@@ -69,12 +69,14 @@ pub mod actions {
             NextAttention,
             /// Silence or resume the active remote window's audio on this client.
             ToggleMute,
+            /// Show or hide the stream stats overlay on every remote window.
+            ToggleStats,
         ]
     );
 }
 pub use actions::{
     AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ToggleMute,
-    ZoomIn, ZoomOut, ZoomReset,
+    ToggleStats, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -104,6 +106,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-1", FitAll, CTX),
         KeyBinding::new("cmd-shift-a", NextAttention, CTX),
         KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
+        KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
     ]
 }
@@ -252,6 +255,10 @@ pub struct CanvasView {
     picker: Option<Entity<WindowPicker>>,
     /// A `List` is in flight for the picker.
     picker_wanted: bool,
+    /// The stats overlay is on (applies to windows opened later too).
+    show_stats: bool,
+    /// Latest link RTT, handed to windows opened later.
+    rtt: Option<std::time::Duration>,
     /// Viewport origin (window coordinates) and size, recorded each frame.
     viewport: (Point<Pixels>, Size<Pixels>),
     /// Fit every item into the viewport on the next frame (once the viewport is known).
@@ -319,6 +326,8 @@ impl CanvasView {
             open_screen,
             picker: None,
             picker_wanted: false,
+            show_stats: false,
+            rtt: None,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
             reveal_pending: None,
@@ -466,6 +475,15 @@ impl CanvasView {
         }
     }
 
+    /// ⌘⇧I: the stats overlay on every remote window (fps, bitrate, RTT, loss).
+    pub fn toggle_stats(&mut self, _: &ToggleStats, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_stats = !self.show_stats;
+        for view in self.screens.values() {
+            view.update(cx, |v, cx| v.set_hud(self.show_stats, cx));
+        }
+        cx.notify();
+    }
+
     /// ⌘⇧M: silence or resume the active remote window's audio (this client only).
     pub fn toggle_mute(&mut self, _: &ToggleMute, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.active_screen() {
@@ -610,9 +628,13 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// Link RTT (fanned out to every terminal's predictor).
-    pub fn set_rtt(&self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+    /// Link RTT (fanned out to every terminal's predictor and every window's overlay).
+    pub fn set_rtt(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+        self.rtt = rtt;
         for view in self.terminals.values() {
+            view.update(cx, |v, _| v.set_rtt(rtt));
+        }
+        for view in self.screens.values() {
             view.update(cx, |v, _| v.set_rtt(rtt));
         }
     }
@@ -640,6 +662,13 @@ impl CanvasView {
                 let opened =
                     crate::screen::Opened { stream, target, size: (width, height), quality };
                 let view = cx.new(|cx| ScreenView::new(opened, handle, out, theme, cx));
+                let (show_stats, rtt) = (self.show_stats, self.rtt);
+                view.update(cx, |v, cx| {
+                    v.set_rtt(rtt);
+                    if show_stats {
+                        v.set_hud(true, cx);
+                    }
+                });
                 self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
                     match event {
                         crate::screen::ScreenViewEvent::Pressed => this.activate(id, cx),
@@ -1624,6 +1653,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::fit_all))
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::find_in_active))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))

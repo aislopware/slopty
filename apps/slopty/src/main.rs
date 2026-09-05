@@ -35,7 +35,7 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 fn menus() -> Vec<Menu> {
     use slopty_ui::canvas::{
         AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, ToggleMute,
-        ZoomIn, ZoomOut, ZoomReset,
+        ToggleStats, ZoomIn, ZoomOut, ZoomReset,
     };
     use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
     vec![
@@ -64,6 +64,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Next Agent Needing You", NextAttention),
             MenuItem::action("Mute Window", ToggleMute),
+            MenuItem::action("Stream Stats", ToggleStats),
             MenuItem::separator(),
             MenuItem::action("Close Item", CloseItem),
         ]),

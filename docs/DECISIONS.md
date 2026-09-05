@@ -155,6 +155,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   26.5; a real click opens it). Right-button events now go through the HID tap even for
   window streams — the host pointer moves for those, the price of a menu — and Ghostty's
   menu opens from the Mac app and from a phone long press (verified 2026-09-05).
+- ✅ **Stream stats overlay** (2026-09-05). Parsec's overlay is how people judge a remote
+  desktop, so ⌘⇧I draws one per window from the client's own counters (`ScreenStats` gained
+  `bytes`; rates are deltas over ~1 s, computed in `ScreenView::hud_text` on render since a
+  window re-renders on every frame anyway). Global, not per window, and it carries over to
+  windows opened later. First reading on loopback: a 450×250 @0.50 idle Ghostty window ran
+  54 fps at 0.11 Mb/s, RTT 1.7 ms, zero loss.
 
 - ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
   document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).

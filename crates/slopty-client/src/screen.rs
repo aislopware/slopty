@@ -166,6 +166,8 @@ pub struct ScreenStats {
     pub decode_errors: u64,
     /// Datagrams seen.
     pub datagrams: u64,
+    /// Bytes received in datagrams (video, cursor, audio, parity).
+    pub bytes: u64,
     /// Opus packets played.
     pub audio_packets: u64,
     /// Opus packets missing from the sequence (or too late to play).
@@ -381,6 +383,8 @@ impl Worker {
 
     fn ingest(&mut self, datagram: &Bytes) {
         self.counters.datagrams = self.counters.datagrams.saturating_add(1);
+        let len = u64::try_from(datagram.len()).unwrap_or(u64::MAX);
+        self.counters.bytes = self.counters.bytes.saturating_add(len);
         let now = Instant::now();
         match self.reassembler.ingest(datagram, now) {
             Ingest::Video => self.deliver(),

@@ -202,7 +202,9 @@ the item. It is also a text input (`EntityInputHandler`): on iOS a tap raises th
 keyboard and committed text goes to the host one key per character through
 `ScreenView::press` (press + release, armed ⌃/⌘ from the phone key bar applied); the bar over
 a window is esc, tab, ⌃, ⌘, arrows, `/`, copy, paste (⌘C/⌘V on the host, so the host's
-pasteboard flows back through clipboard sync).
+pasteboard flows back through clipboard sync). ⌘⇧I (Canvas ▸ Stream Stats) overlays every
+window with its stream size and scale, fps, Mb/s, link RTT and the FEC/lost/NACK/refresh and
+audio counters, re-sampled once a second from `ScreenStats`.
 
 **Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
 ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,

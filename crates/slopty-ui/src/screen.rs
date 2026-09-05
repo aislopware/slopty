@@ -23,7 +23,7 @@ use gpui::{
     ScrollWheelEvent, Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase,
     UTF16Selection, Window, canvas, div, point, px, surface,
 };
-use slopty_client::{CursorState, ScreenHandle};
+use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_codec::DecodedFrame;
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
@@ -98,8 +98,23 @@ pub struct ScreenView {
     sticky: Modifiers,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
+    /// The stats overlay (⌘⇧I).
+    hud: Option<Hud>,
+    /// Link RTT from the canvas, for the overlay.
+    rtt: Option<Duration>,
     _pump: Task<()>,
 }
+
+/// Rates for the stats overlay, re-sampled about once a second.
+#[derive(Clone, Debug)]
+struct Hud {
+    sampled_at: Instant,
+    sample: ScreenStats,
+    text: String,
+}
+
+/// How often the overlay's rates are recomputed.
+const HUD_PERIOD: Duration = Duration::from_millis(1000);
 
 /// A modifier the phone key bar can arm for the next key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -195,6 +210,8 @@ impl ScreenView {
             host_clipboard: None,
             sticky: Modifiers::default(),
             marked: None,
+            hud: None,
+            rtt: None,
             _pump: pump,
         }
     }
@@ -219,8 +236,63 @@ impl ScreenView {
 
     /// Receiver counters.
     #[must_use]
-    pub fn stats(&self) -> slopty_client::ScreenStats {
+    pub fn stats(&self) -> ScreenStats {
         self.handle.stats()
+    }
+
+    /// Show or hide the stats overlay.
+    pub fn set_hud(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.hud = on.then(|| Hud {
+            sampled_at: Instant::now(),
+            sample: self.handle.stats(),
+            text: "…".to_owned(),
+        });
+        cx.notify();
+    }
+
+    /// Whether the stats overlay is showing.
+    #[must_use]
+    pub const fn hud(&self) -> bool {
+        self.hud.is_some()
+    }
+
+    /// Link RTT, shown in the overlay.
+    pub const fn set_rtt(&mut self, rtt: Option<Duration>) {
+        self.rtt = rtt;
+    }
+
+    /// Recompute the overlay's rates when a second has passed; returns the text to draw.
+    fn hud_text(&mut self) -> Option<String> {
+        let hud = self.hud.as_mut()?;
+        let now = Instant::now();
+        let elapsed = now.duration_since(hud.sampled_at);
+        if elapsed >= HUD_PERIOD {
+            let stats = self.handle.stats();
+            let secs = elapsed.as_secs_f64();
+            #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
+            let fps = stats.frames.saturating_sub(hud.sample.frames) as f64 / secs;
+            #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
+            let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
+            let rtt = self.rtt.map_or_else(
+                || "rtt –".to_owned(),
+                |d| format!("rtt {:.1} ms", d.as_secs_f64() * 1e3),
+            );
+            hud.text = format!(
+                "{}×{} @{:.2}  ·  {fps:.0} fps  ·  {mbps:.2} Mb/s  ·  {rtt}  ·  fec {} lost {} nack {} refresh {}  ·  audio {} lost {}",
+                self.size.0,
+                self.size.1,
+                self.quality.scale,
+                stats.frames_fec,
+                stats.frames_lost,
+                stats.nacks,
+                stats.refreshes,
+                stats.audio_packets,
+                stats.audio_lost,
+            );
+            hud.sample = stats;
+            hud.sampled_at = now;
+        }
+        Some(hud.text.clone())
     }
 
     /// Whether the host has sent any audio for this stream (the mute control is pointless
@@ -618,6 +690,20 @@ impl Render for ScreenView {
             },
         );
 
+        let hud = self.hud_text().map(|text| {
+            div()
+                .absolute()
+                .top(px(4.0))
+                .right(px(4.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .bg(crate::colors::hsla_alpha(self.theme.surfaces.panel, 0.85))
+                .text_size(px(10.0))
+                .text_color(hsla(self.theme.surfaces.text))
+                .font_family(self.theme.typography.ui_family.clone())
+                .child(text)
+        });
         div()
             .id("screen")
             .track_focus(&self.focus)
@@ -638,6 +724,7 @@ impl Render for ScreenView {
             .child(picture)
             .child(record_bounds)
             .children(self.cursor_overlay())
+            .children(hud)
     }
 }
 
