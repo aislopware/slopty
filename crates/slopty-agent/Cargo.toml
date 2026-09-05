@@ -11,6 +11,7 @@ description = "Slopty agent tracking: Claude Code hook events → per-session ag
 workspace = true
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true

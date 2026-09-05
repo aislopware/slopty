@@ -63,10 +63,23 @@ pub struct AgentEvent {
     pub attention: bool,
 }
 
-/// One entry of an agent's conversation, as the client shows it. Tool results, thinking and
-/// the agent's bookkeeping lines are not entries: the conversation view reads like a chat.
+/// One entry of an agent's conversation, as the client shows it: what was said, when.
+///
+/// The agent's bookkeeping records and sidechains (subagents talking to themselves) are not
+/// entries. Long texts (tool results, thinking, tool input) are cut on the host to a readable
+/// size ([`Clipped`]), so the wire never carries a whole file.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum TranscriptEntry {
+pub struct TranscriptEntry {
+    /// When the record was written, in milliseconds since the Unix epoch, when the record
+    /// says.
+    pub at: Option<u64>,
+    /// What it is.
+    pub body: TranscriptBody,
+}
+
+/// What one [`TranscriptEntry`] holds.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TranscriptBody {
     /// What the human typed.
     User {
         /// Prompt text.
@@ -77,13 +90,46 @@ pub enum TranscriptEntry {
         /// The message.
         markdown: String,
     },
+    /// What the agent thought before answering; shown collapsed.
+    Thinking {
+        /// The thinking, clipped.
+        text: Clipped,
+    },
     /// A tool the agent called.
     ToolUse {
         /// Tool name (`Bash`, `Edit`, …).
         name: String,
         /// One line about the call: the command, the file, the pattern.
         summary: String,
+        /// The whole input as pretty JSON, clipped; shown on expand.
+        input: Clipped,
     },
+    /// What a tool returned.
+    ToolResult {
+        /// The tool that produced it, when the call was seen.
+        tool: Option<String>,
+        /// The result text, clipped.
+        output: Clipped,
+        /// The tool failed.
+        is_error: bool,
+    },
+}
+
+/// Text cut on the host to a readable size, with a count of what was dropped.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Clipped {
+    /// The kept text (whole lines, from the start).
+    pub text: String,
+    /// Lines dropped after `text`; zero when nothing was cut.
+    pub more_lines: u32,
+}
+
+impl Clipped {
+    /// Text that fits as it is.
+    #[must_use]
+    pub const fn whole(text: String) -> Self {
+        Self { text, more_lines: 0 }
+    }
 }
 
 /// Client → host: start or stop following a session's conversation.

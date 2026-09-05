@@ -19,9 +19,13 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
     ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
-use slopty_e2e::{Button, Command, Dump, HostInfo, ItemInfo, Reply, TerminalInfo, WindowInfo};
+use slopty_e2e::{
+    Button, Command, ConversationInfo, Dump, HostInfo, ItemInfo, Reply, TerminalInfo, WindowInfo,
+};
+use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
+use slopty_ui::terminal::conversation::Attention;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
@@ -288,6 +292,40 @@ fn render(_window: &mut Window, _path: &str) -> Reply {
     Reply::Error { message: "built without the `e2e` feature; no renderer access".into() }
 }
 
+/// The agent's state as one word, as the dump lists it.
+fn agent_line(status: &AgentStatus) -> String {
+    match status {
+        AgentStatus::None => "none".to_owned(),
+        AgentStatus::Idle => "idle".to_owned(),
+        AgentStatus::Working => "working".to_owned(),
+        AgentStatus::Tool { tool } => format!("tool:{tool}"),
+        AgentStatus::Blocked(BlockReason::Permission { tool }) => {
+            format!("blocked:permission:{tool}")
+        }
+        AgentStatus::Blocked(BlockReason::Question) => "blocked:question".to_owned(),
+        AgentStatus::Blocked(BlockReason::Elicitation) => "blocked:elicitation".to_owned(),
+        AgentStatus::Blocked(BlockReason::IdlePrompt) => "blocked:idle".to_owned(),
+        AgentStatus::Done => "done".to_owned(),
+    }
+}
+
+/// One line for a conversation entry, as the dump lists them.
+fn entry_line(entry: &TranscriptEntry) -> String {
+    let first = |text: &str| text.lines().next().unwrap_or_default().to_owned();
+    match &entry.body {
+        TranscriptBody::User { text } => format!("user: {}", first(text)),
+        TranscriptBody::Assistant { markdown } => format!("assistant: {}", first(markdown)),
+        TranscriptBody::Thinking { .. } => "thinking".to_owned(),
+        TranscriptBody::ToolUse { name, summary, .. } => format!("tool {name}: {summary}"),
+        TranscriptBody::ToolResult { tool, output, is_error } => format!(
+            "result {}{}: {}",
+            tool.as_deref().unwrap_or("?"),
+            if *is_error { " failed" } else { "" },
+            first(&output.text)
+        ),
+    }
+}
+
 impl Workspace {
     /// Everything a test may want to know, read from the entities.
     fn dump(&self, window: &Window, cx: &App) -> Dump {
@@ -359,12 +397,28 @@ impl Workspace {
                 }
                 let size = view.size();
                 let cursor = view.cursor();
+                let conversation = view.conversation().map(|c| ConversationInfo {
+                    entries: c.entries().iter().map(entry_line).collect(),
+                    composer: c.composer_text(cx),
+                    composer_focused: c.composer_focus(cx).is_focused(window),
+                    pinned: c.pinned(),
+                    attention: view.attention().map(|a| match a {
+                        Attention::Permission { tool, answered: None } => {
+                            format!("permission:{tool}")
+                        }
+                        Attention::Permission { answered: Some(true), .. } => "allowed".to_owned(),
+                        Attention::Permission { answered: Some(false), .. } => "denied".to_owned(),
+                        Attention::Prompt => "prompt".to_owned(),
+                    }),
+                });
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
                     title: view.title().map(str::to_owned),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
                     rows: view.rows(),
+                    agent: view.agent_status().map(agent_line),
+                    conversation,
                 });
             }
         }

@@ -17,7 +17,7 @@ use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
+use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptFollow, TranscriptUpdate};
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::Theme;
@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
-use crate::terminal::conversation::Conversation;
+use crate::terminal::conversation::{Attention, Conversation};
 use crate::terminal::element::{CellMetrics, TerminalElement};
 use crate::terminal::url;
 
@@ -151,6 +151,12 @@ pub enum TerminalViewEvent {
     Bell,
     /// The child exited.
     Exited(i32),
+    /// The conversation's Allow / Deny row was pressed: the canvas types the answer, as for
+    /// the title-bar badge.
+    Answered {
+        /// Allow (Enter) or deny (Esc).
+        allowed: bool,
+    },
 }
 
 /// One session's view.
@@ -184,6 +190,12 @@ pub struct TerminalView {
     search: Option<Search>,
     /// The agent's conversation shown in place of the grid (see [`Conversation`]).
     conversation: Option<Conversation>,
+    /// The agent's state in this session, as the host last reported it.
+    agent: Option<AgentStatus>,
+    /// The conversation's row answered a permission; cleared by the host's next report.
+    answered: Option<bool>,
+    /// Put the caret in the composer on the next frame (the agent asked something).
+    focus_composer: bool,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
 }
@@ -241,20 +253,109 @@ impl TerminalView {
             touch_selecting: false,
             search: None,
             conversation: None,
+            agent: None,
+            answered: None,
+            focus_composer: false,
             search_regex: false,
         }
     }
 
     /// ⌘⇧L or the title-bar pill: show the agent's conversation instead of the grid, or the
-    /// grid again. The host is told to start or stop tailing the transcript.
-    pub fn toggle_conversation(&mut self, cx: &mut Context<Self>) {
+    /// grid again. The host is told to start or stop tailing the transcript. The composer
+    /// takes the keyboard with the conversation; the grid takes it back.
+    pub fn toggle_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let follow = self.conversation.is_none();
-        self.conversation = follow.then(Conversation::new);
+        if follow {
+            let conversation = Conversation::new(window, cx);
+            conversation.focus_composer(window, cx);
+            self.conversation = Some(conversation);
+        } else {
+            self.conversation = None;
+            self.focus.focus(window, cx);
+        }
         let msg = ClientMsg::Transcript(TranscriptFollow { session: self.session, follow });
         if let Err(e) = self.out.try_send(msg) {
             tracing::warn!(session = %self.session, error = %e, "outbound queue");
         }
         cx.notify();
+    }
+
+    /// ↩ in the composer (or its send button): the text goes into the session as a paste,
+    /// then Enter; an empty composer sends the bare Enter, which accepts whatever the agent
+    /// is offering.
+    pub fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conversation) = &self.conversation else { return };
+        let text = conversation.take_composer_text(window, cx);
+        if !text.trim().is_empty() {
+            self.send(TermRequest::Paste(text));
+        }
+        let enter = Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "enter".to_owned(),
+            key_char: None,
+        };
+        self.press(enter, cx);
+    }
+
+    /// The conversation's Allow / Deny: remembered until the host reports the agent's next
+    /// state, and handed to the canvas, which types the same key as the title-bar badge.
+    pub fn answer(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if self.answered.is_some() {
+            return;
+        }
+        self.answered = Some(allowed);
+        cx.emit(TerminalViewEvent::Answered { allowed });
+        cx.notify();
+    }
+
+    /// The host's word on the agent in this session (`None`: no agent). A question or an
+    /// elicitation puts the caret in the composer when the conversation is on.
+    pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
+        self.answered = None;
+        if self.conversation.is_some()
+            && matches!(
+                status,
+                Some(AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation))
+            )
+        {
+            self.focus_composer = true;
+        }
+        self.agent = status;
+        cx.notify();
+    }
+
+    /// The agent's state as last reported.
+    #[must_use]
+    pub const fn agent_status(&self) -> Option<&AgentStatus> {
+        self.agent.as_ref()
+    }
+
+    /// What the conversation shows above its composer: the pending permission with its
+    /// answers, or that the agent waits for a reply.
+    #[must_use]
+    pub fn attention(&self) -> Option<Attention> {
+        match self.agent.as_ref()? {
+            AgentStatus::Blocked(BlockReason::Permission { tool }) => {
+                Some(Attention::Permission { tool: tool.clone(), answered: self.answered })
+            }
+            AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation) => {
+                Some(Attention::Prompt)
+            }
+            _ => None,
+        }
+    }
+
+    /// Open or fold an entry's long part (thinking, tool input, the rest of a result).
+    pub fn toggle_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(conversation) = &mut self.conversation {
+            conversation.toggle(ix);
+            cx.notify();
+        }
+    }
+
+    /// Whether the composer holds the keyboard.
+    fn composer_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.conversation.as_ref().is_some_and(|c| c.composer_focus(cx).is_focused(window))
     }
 
     /// The conversation on show, if any.
@@ -274,10 +375,10 @@ impl TerminalView {
     fn toggle_conversation_action(
         &mut self,
         _: &ToggleConversation,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_conversation(cx);
+        self.toggle_conversation(window, cx);
     }
 
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.
@@ -946,6 +1047,19 @@ impl TerminalView {
         {
             return;
         }
+        // Typing in the composer stays there; Esc and Control keys (⌃C above all) keep their
+        // terminal meaning, so the agent can be interrupted without leaving the chat.
+        if self.composer_focused(window, cx) {
+            let k = &event.keystroke;
+            if !(k.key == "escape" || k.modifiers.control) {
+                if k.key == "enter" && !k.modifiers.shift {
+                    // The composer's Enter action submitted and let the action through; the
+                    // key must not also type a newline into it.
+                    cx.stop_propagation();
+                }
+                return;
+            }
+        }
         self.selection = None;
         if event.is_held {
             self.key_seq = self.key_seq.wrapping_add(1);
@@ -964,6 +1078,10 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The conversation's list scrolls itself.
+        if self.conversation.is_some() {
+            return;
+        }
         let lines = match event.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => {
@@ -987,6 +1105,10 @@ impl TerminalView {
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The conversation's controls (composer, folds, buttons) take their own clicks.
+        if self.conversation.is_some() {
+            return;
+        }
         self.focus.focus(window, cx);
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
@@ -1039,6 +1161,9 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.conversation.is_some() {
+            return;
+        }
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers.platform, cx);
         if !self.selecting {
@@ -1201,7 +1326,7 @@ impl EntityInputHandler for TerminalView {
 
 impl TerminalView {
     /// The search bar: field, "n/total", close. Sits over the top-right corner of the grid.
-    fn render_search(&self, search: &Search, cx: &Context<Self>) -> impl IntoElement {
+    fn render_search(&self, search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let count: SharedString = if search.needle.is_empty() {
             SharedString::default()
@@ -1287,12 +1412,27 @@ impl TerminalView {
                         this.close_find(&CloseFind, window, cx);
                     })),
             )
+            .into_any_element()
     }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
+        if std::mem::take(&mut self.focus_composer) && self.conversation.is_some() {
+            // Focus moves after this update, not from inside the render.
+            cx.defer_in(window, |this, window, cx| {
+                if let Some(conversation) = &this.conversation {
+                    conversation.focus_composer(window, cx);
+                }
+            });
+        }
+        let attention = self.attention();
+        let ui_size = self.theme.typography.ui_size;
+        let conversation = self
+            .conversation
+            .as_ref()
+            .map(|c| c.render(attention.as_ref(), &self.theme, ui_size, cx));
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         div()
             .id("terminal")
@@ -1318,10 +1458,8 @@ impl Render for TerminalView {
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .map(|el| match &self.conversation {
-                Some(conversation) => {
-                    el.child(conversation.render(&self.theme, self.theme.typography.ui_size))
-                }
+            .map(|el| match conversation {
+                Some(conversation) => el.child(conversation),
                 None => el.child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom)),
             })
             .children(search)
@@ -1332,6 +1470,7 @@ impl Render for TerminalView {
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Line, RowUpdate, SemanticMark, Style, TermModes};
+    use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
@@ -1355,6 +1494,28 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
+    }
+
+    fn user(text: &str) -> TranscriptEntry {
+        TranscriptEntry { at: None, body: TranscriptBody::User { text: text.to_owned() } }
+    }
+
+    fn assistant(markdown: &str) -> TranscriptEntry {
+        TranscriptEntry {
+            at: None,
+            body: TranscriptBody::Assistant { markdown: markdown.to_owned() },
+        }
+    }
+
+    fn tool(command: &str) -> TranscriptEntry {
+        TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                name: "Bash".to_owned(),
+                summary: command.to_owned(),
+                input: Clipped::whole(format!("{{\n  \"command\": \"{command}\"\n}}")),
+            },
+        }
     }
 
     fn marked(text: &str, mark: SemanticMark) -> Line {
@@ -1576,8 +1737,6 @@ mod tests {
     /// grid back and stops the follow.
     #[gpui::test]
     fn the_conversation_replaces_the_grid_and_follows_the_transcript(cx: &mut TestAppContext) {
-        use slopty_proto::agent::TranscriptEntry;
-
         let (view, mut rx, cx) = terminal(cx);
         while rx.try_recv().is_ok() {}
         assert!(cx.debug_bounds("conversation").is_none());
@@ -1593,20 +1752,10 @@ mod tests {
         let snapshot = TranscriptUpdate {
             session,
             reset: true,
-            entries: vec![
-                TranscriptEntry::User { text: "fix it".to_owned() },
-                TranscriptEntry::Assistant { markdown: "On it.".to_owned() },
-            ],
+            entries: vec![user("fix it"), assistant("On it.")],
         };
         view.update(cx, |v, cx| v.transcript_update(snapshot, cx));
-        let more = TranscriptUpdate {
-            session,
-            reset: false,
-            entries: vec![TranscriptEntry::ToolUse {
-                name: "Bash".to_owned(),
-                summary: "cargo test".to_owned(),
-            }],
-        };
+        let more = TranscriptUpdate { session, reset: false, entries: vec![tool("cargo test")] };
         view.update(cx, |v, cx| v.transcript_update(more, cx));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.conversation().map(|c| c.entries().len())), Some(3));
@@ -1620,6 +1769,254 @@ mod tests {
         ));
         assert!(cx.debug_bounds("conversation").is_none(), "the grid is back");
         assert!(view.read_with(cx, |v, _| v.conversation().is_none()));
+    }
+
+    /// Whether the composer has the window's focus.
+    fn composer_focused(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| view.read(cx).composer_focused(window, cx))
+    }
+
+    /// Every key the terminal received, oldest first, with the paste texts in between.
+    fn drain_input(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                    let mut name = format!("{:?}", key.code).to_lowercase();
+                    if let Some(rest) = name.strip_prefix("key") {
+                        name = rest.to_owned();
+                    }
+                    if key.mods.contains(slopty_proto::input::Mods::CTRL) {
+                        name.insert_str(0, "ctrl-");
+                    }
+                    out.push(name);
+                }
+                ClientMsg::Term { req: TermRequest::Paste(text), .. } => {
+                    out.push(format!("paste:{text}"));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// With the conversation on, typing lands in the composer and ↩ sends the text into the
+    /// session as a paste followed by Enter, then clears it; ⇧↩ breaks a line instead; an
+    /// empty ↩ is a bare Enter; Esc and ⌃C keep their terminal meaning; ⌘⇧L brings the grid
+    /// back with the keyboard.
+    #[gpui::test]
+    fn the_composer_types_into_the_session(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        cx.simulate_keystrokes("cmd-shift-l");
+        cx.run_until_parked();
+        let _follow = drain_input(&mut rx);
+        assert!(cx.debug_bounds("composer").is_some(), "the composer is drawn");
+        assert!(composer_focused(&view, cx));
+
+        cx.simulate_keystrokes("h i shift-enter y");
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("hi\ny"));
+        assert!(drain_input(&mut rx).is_empty(), "typing stays in the composer");
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(drain_input(&mut rx), ["paste:hi\ny", "enter"]);
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some(""), "the composer is empty again");
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(drain_input(&mut rx), ["enter"], "an empty submit is a bare Enter");
+
+        cx.simulate_keystrokes("escape ctrl-c");
+        assert_eq!(drain_input(&mut rx), ["escape", "ctrl-c"], "terminal keys pass through");
+        assert!(composer_focused(&view, cx), "and keep the caret");
+
+        cx.simulate_keystrokes("cmd-shift-l");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer").is_none());
+        assert!(!composer_focused(&view, cx));
+        cx.simulate_keystrokes("x");
+        assert!(drain_input(&mut rx).contains(&"x".to_owned()), "the grid has the keys");
+    }
+
+    /// A permission puts an Allow / Deny row above the composer; pressing one raises
+    /// `Answered` (the canvas types the key) and the row says so until the host reports the
+    /// next state; a question puts the caret in the composer.
+    #[gpui::test]
+    fn the_attention_row_answers_a_permission(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&answers);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::Answered { allowed } = event {
+                    seen.borrow_mut().push(*allowed);
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("cmd-shift-l");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-attention").is_none());
+
+        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+        view.update(cx, |v, cx| v.set_agent_status(Some(blocked), cx));
+        cx.run_until_parked();
+        let allow = cx.debug_bounds("conversation-allow").expect("Allow is drawn");
+        assert!(cx.debug_bounds("conversation-deny").is_some());
+        cx.simulate_click(allow.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*answers.borrow(), [true]);
+        assert!(cx.debug_bounds("conversation-allow").is_none(), "one tap, one answer");
+        assert!(cx.debug_bounds("conversation-attention").is_some(), "the row says allowed");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.attention()),
+            Some(Attention::Permission { tool: "Bash".to_owned(), answered: Some(true) })
+        );
+
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-attention").is_none(), "the next state clears it");
+
+        // The grid has the focus; a question moves the caret to the composer.
+        cx.update(|window, cx| {
+            let grid = view.read(cx).focus.clone();
+            window.focus(&grid, cx);
+        });
+        cx.run_until_parked();
+        assert!(!composer_focused(&view, cx));
+        let question = AgentStatus::Blocked(BlockReason::Question);
+        view.update(cx, |v, cx| v.set_agent_status(Some(question), cx));
+        cx.run_until_parked();
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx));
+        assert_eq!(view.read_with(cx, |v, _| v.attention()), Some(Attention::Prompt));
+    }
+
+    /// The list follows the tail until the reader scrolls up; then new entries leave the view
+    /// where it is and a "↓ latest" pill appears, which pins it again; a reset pins too.
+    #[gpui::test]
+    fn the_list_stays_pinned_until_the_reader_scrolls_up(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        let many: Vec<TranscriptEntry> = (0..60).map(|i| assistant(&format!("line {i}"))).collect();
+        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
+            session,
+            reset,
+            entries,
+        };
+        view.update(cx, |v, cx| v.transcript_update(update(true, many.clone()), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
+        assert!(cx.debug_bounds("conversation-latest").is_none());
+        let last = cx.debug_bounds("conversation-entry-59").expect("the last entry is in view");
+        let list = cx.debug_bounds("conversation").expect("drawn");
+        assert!(last.bottom() <= list.bottom());
+
+        // Wheel up (positive y) over the list.
+        let at = list.center();
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(0.0, 6.0)),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
+        assert!(cx.debug_bounds("conversation-latest").is_some(), "the pill offers the way back");
+        assert!(cx.debug_bounds("conversation-entry-59").is_none(), "the tail scrolled away");
+
+        view.update(cx, |v, cx| v.transcript_update(update(false, vec![user("more")]), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
+        assert!(cx.debug_bounds("conversation-entry-60").is_none(), "no yank");
+
+        let pill = cx.debug_bounds("conversation-latest").expect("pill");
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
+        assert!(cx.debug_bounds("conversation-latest").is_none());
+        assert!(cx.debug_bounds("conversation-entry-60").is_some(), "back at the bottom");
+
+        // Scroll up again, then a reset (new transcript) pins.
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(0.0, 6.0)),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
+        view.update(cx, |v, cx| v.transcript_update(update(true, many), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
+        assert!(cx.debug_bounds("conversation-entry-59").is_some());
+    }
+
+    /// Thinking and a tool's input start folded and open on a click; a result shows its
+    /// first lines and the rest on a click; the fold state survives appends and not resets.
+    #[gpui::test]
+    fn folds_open_on_a_click(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        let thinking = TranscriptEntry {
+            at: None,
+            body: TranscriptBody::Thinking { text: Clipped::whole("deep\nthought".to_owned()) },
+        };
+        let result = TranscriptEntry {
+            at: Some(1_788_602_400_000),
+            body: TranscriptBody::ToolResult {
+                tool: Some("Bash".to_owned()),
+                output: Clipped { text: "1\n2\n3\n4\n5\n6".to_owned(), more_lines: 7 },
+                is_error: false,
+            },
+        };
+        let update = TranscriptUpdate {
+            session,
+            reset: true,
+            entries: vec![thinking, tool("cargo test"), result],
+        };
+        view.update(cx, |v, cx| v.transcript_update(update, cx));
+        cx.run_until_parked();
+        let folded = cx.debug_bounds("conversation-entry-0").expect("thinking");
+        let tool_folded = cx.debug_bounds("conversation-entry-1").expect("tool");
+        let result_folded = cx.debug_bounds("conversation-entry-2").expect("result");
+
+        cx.simulate_click(folded.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(0))));
+        let open = cx.debug_bounds("conversation-entry-0").expect("thinking");
+        assert!(open.size.height > folded.size.height, "{open:?} vs {folded:?}");
+
+        // The tool's header is its first line; the input opens under it.
+        let header = point(tool_folded.center().x, tool_folded.top() + px(6.0));
+        cx.simulate_click(header, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(1))));
+        let open = cx.debug_bounds("conversation-entry-1").expect("tool");
+        assert!(open.size.height > tool_folded.size.height);
+
+        let header = point(result_folded.center().x, result_folded.top() + px(6.0));
+        cx.simulate_click(header, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let open = cx.debug_bounds("conversation-entry-2").expect("result");
+        assert!(open.size.height > result_folded.size.height);
+
+        // Clicking the header again folds; an append keeps the folds, a reset drops them.
+        let header = point(open.center().x, open.top() + px(6.0));
+        cx.simulate_click(header, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(2))));
+        let more = TranscriptUpdate { session, reset: false, entries: vec![user("ok")] };
+        view.update(cx, |v, cx| v.transcript_update(more, cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(0))));
+        let again = TranscriptUpdate { session, reset: true, entries: vec![user("ok")] };
+        view.update(cx, |v, cx| v.transcript_update(again, cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(0))));
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the host

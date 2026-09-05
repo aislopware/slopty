@@ -116,23 +116,55 @@ mod golden {
 
     #[test]
     fn transcript() {
-        use slopty_proto::agent::{TranscriptEntry, TranscriptFollow, TranscriptUpdate};
+        use slopty_proto::agent::{
+            Clipped, TranscriptBody, TranscriptEntry, TranscriptFollow, TranscriptUpdate,
+        };
         snap(
             "client_transcript_follow",
             &ClientMsg::Transcript(TranscriptFollow { session: session(), follow: true }),
         );
+        let at = |ms: u64| Some(1_788_000_000_000_u64.saturating_add(ms));
         snap(
             "host_transcript",
             &HostMsg::Transcript(TranscriptUpdate {
                 session: session(),
                 reset: true,
                 entries: vec![
-                    TranscriptEntry::User { text: "fix it".to_owned() },
-                    TranscriptEntry::ToolUse {
-                        name: "Bash".to_owned(),
-                        summary: "cargo test".to_owned(),
+                    TranscriptEntry {
+                        at: at(0),
+                        body: TranscriptBody::User { text: "fix it".to_owned() },
                     },
-                    TranscriptEntry::Assistant { markdown: "Done: **2** tests.".to_owned() },
+                    TranscriptEntry {
+                        at: at(1000),
+                        body: TranscriptBody::Thinking {
+                            text: Clipped::whole("The build is red.".to_owned()),
+                        },
+                    },
+                    TranscriptEntry {
+                        at: at(1000),
+                        body: TranscriptBody::ToolUse {
+                            name: "Bash".to_owned(),
+                            summary: "cargo test".to_owned(),
+                            input: Clipped::whole("{\n  \"command\": \"cargo test\"\n}".to_owned()),
+                        },
+                    },
+                    TranscriptEntry {
+                        at: at(2500),
+                        body: TranscriptBody::ToolResult {
+                            tool: Some("Bash".to_owned()),
+                            output: Clipped {
+                                text: "running 2 tests\ntest a ... ok".to_owned(),
+                                more_lines: 3,
+                            },
+                            is_error: false,
+                        },
+                    },
+                    TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::Assistant {
+                            markdown: "Done: **2** tests.".to_owned(),
+                        },
+                    },
                 ],
             }),
         );

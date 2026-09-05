@@ -542,6 +542,10 @@ impl CanvasView {
         let session = event.session;
         // Whatever the host says next supersedes a pending badge answer.
         self.answered.remove(&session);
+        if let Some(view) = self.terminals.get(&session) {
+            let status = (event.status != AgentStatus::None).then(|| event.status.clone());
+            view.update(cx, |v, cx| v.set_agent_status(status, cx));
+        }
         if event.status == AgentStatus::None {
             self.agents.remove(&session);
         } else {
@@ -1014,9 +1018,16 @@ impl CanvasView {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
                     TerminalViewEvent::Title(_) => cx.notify(),
+                    TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
+                    TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
                 },
             ));
             self.send(ClientMsg::Term { session: *session, req: TermRequest::Attach { size } });
+            // A view born after the host reported the agent (a woken item) starts with its state.
+            if let Some(agent) = self.agents.get(session) {
+                let status = agent.status.clone();
+                view.update(cx, |v, cx| v.set_agent_status(Some(status), cx));
+            }
             self.terminals.insert(*session, view);
             if self.active.is_none() {
                 self.active = self.doc.item_for_session(*session).map(|i| i.id);
@@ -1928,9 +1939,9 @@ fn chat_button(
         .child("chat")
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |_this, _ev, _w, cx| {
+            cx.listener(move |_this, _ev, window, cx| {
                 cx.stop_propagation();
-                view.update(cx, TerminalView::toggle_conversation);
+                view.update(cx, |v, cx| v.toggle_conversation(window, cx));
             }),
         )
         .into_any_element()

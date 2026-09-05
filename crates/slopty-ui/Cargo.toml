@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true

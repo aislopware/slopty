@@ -1,23 +1,32 @@
 //! Reading a Claude Code transcript (JSONL): the last thing the assistant said, and the
 //! conversation as entries a client can show ([`Tail`]).
 //!
-//! Each line is one record; assistant turns look like
-//! `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"…"},…]}}`,
-//! user turns carry a string or `text`/`tool_result` blocks, and the many other record types
-//! (`summary`, `attachment`, `file-history-snapshot`, `system`…) are bookkeeping. Sidechains
+//! Each line is one record with a `timestamp`; assistant turns look like
+//! `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"
+//! },{"type":"text","text":"…"},{"type":"tool_use","id":"…","name":"Bash","input":{…}}]}}`,
+//! user turns carry a string, `text` blocks, or `tool_result` blocks (`tool_use_id`, `content`
+//! as a string or text blocks, `is_error`), and the many other record types (`summary`,
+//! `attachment`, `file-history-snapshot`, `system`…) are bookkeeping. Sidechains
 //! (`isSidechain`) are subagents talking to themselves and are skipped everywhere.
 //! [`last_assistant_line`] reads only the file's tail: a transcript grows to megabytes, and
 //! the answer is always in the last few records.
 
+use std::collections::HashMap;
 use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
-use slopty_proto::agent::TranscriptEntry;
+use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry};
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
 /// run to tens of kilobytes.
 const TAIL_BYTES: u64 = 256 * 1024;
+/// Whole lines kept of a tool result, a thinking block or a tool input ([`clip`]).
+pub const CLIP_LINES: usize = 40;
+/// Characters kept of the same, whichever cap is hit first.
+pub const CLIP_CHARS: usize = 4_000;
+/// Tool ids remembered for naming their results; past this the table starts over.
+const TOOL_NAMES_MAX: usize = 512;
 
 /// The last non-empty line of the last assistant text block in the transcript at `path`.
 /// `None` when the file cannot be read or holds no assistant text in its tail.
@@ -79,6 +88,25 @@ pub struct Tail {
     offset: u64,
     /// The last line seen without its newline, waiting for the rest.
     partial: String,
+    /// Tool calls seen, so their results can be named.
+    tools: ToolNames,
+}
+
+/// `tool_use` ids → tool names, bounded.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ToolNames(HashMap<String, String>);
+
+impl ToolNames {
+    fn remember(&mut self, id: &str, name: &str) {
+        if self.0.len() >= TOOL_NAMES_MAX {
+            self.0.clear();
+        }
+        self.0.insert(id.to_owned(), name.to_owned());
+    }
+
+    fn name(&self, id: &str) -> Option<String> {
+        self.0.get(id).cloned()
+    }
 }
 
 /// What one [`Tail::read`] found.
@@ -122,18 +150,24 @@ impl Tail {
         };
         let (complete, rest) = text.split_at(end);
         rest.get(1..).unwrap_or_default().clone_into(&mut self.partial);
-        Ok(Read { entries: entries(complete), restarted })
+        Ok(Read { entries: entries_named(&mut self.tools, complete), restarted })
     }
 }
 
-/// The conversation entries in complete JSONL lines, in order.
+/// The conversation entries in complete JSONL lines, in order. Results of tool calls in
+/// the same text are named; for a growing file use [`Tail`], which remembers them across
+/// reads.
 #[must_use]
 pub fn entries(jsonl: &str) -> Vec<TranscriptEntry> {
-    jsonl.lines().flat_map(line_entries).collect()
+    entries_named(&mut ToolNames::default(), jsonl)
 }
 
-/// The entries one record contributes (none for bookkeeping, sidechains and tool results).
-fn line_entries(line: &str) -> Vec<TranscriptEntry> {
+fn entries_named(tools: &mut ToolNames, jsonl: &str) -> Vec<TranscriptEntry> {
+    jsonl.lines().flat_map(|line| line_entries(tools, line)).collect()
+}
+
+/// The entries one record contributes (none for bookkeeping and sidechains).
+fn line_entries(tools: &mut ToolNames, line: &str) -> Vec<TranscriptEntry> {
     let Ok(record) = serde_json::from_str::<Value>(line) else { return Vec::new() };
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
         return Vec::new();
@@ -142,39 +176,74 @@ fn line_entries(line: &str) -> Vec<TranscriptEntry> {
     let Some(content) = record.get("message").and_then(|m| m.get("content")) else {
         return Vec::new();
     };
-    match kind {
-        Some("user") => user_entries(content),
-        Some("assistant") => assistant_entries(content),
-        _ => Vec::new(),
-    }
-}
-
-/// A user record: what the human typed. Tool results ride in user records too and are
-/// skipped, as are the app's own injected texts (`<command-name>`, `<system-reminder>`…).
-fn user_entries(content: &Value) -> Vec<TranscriptEntry> {
-    let texts: Vec<&str> = match content {
-        Value::String(s) => vec![s.as_str()],
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect(),
+    let at = record.get("timestamp").and_then(Value::as_str).and_then(timestamp_millis);
+    let bodies = match kind {
+        Some("user") => user_bodies(tools, content),
+        Some("assistant") => assistant_bodies(tools, content),
         _ => Vec::new(),
     };
-    texts
-        .into_iter()
-        .map(str::trim)
-        .filter(|t| !t.is_empty() && !t.starts_with('<'))
-        .map(|t| TranscriptEntry::User { text: t.to_owned() })
+    bodies.into_iter().map(|body| TranscriptEntry { at, body }).collect()
+}
+
+/// An RFC 3339 record timestamp as milliseconds since the Unix epoch.
+fn timestamp_millis(text: &str) -> Option<u64> {
+    let at = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+    u64::try_from(at.timestamp_millis()).ok()
+}
+
+/// A user record: what the human typed, and the results of the tools the agent called (they
+/// ride in user records too). The app's own injected texts (`<command-name>`,
+/// `<system-reminder>`…) are skipped.
+fn user_bodies(tools: &ToolNames, content: &Value) -> Vec<TranscriptBody> {
+    let blocks = match content {
+        Value::String(s) => return user_text(s).into_iter().collect(),
+        Value::Array(blocks) => blocks,
+        _ => return Vec::new(),
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("text") => user_text(block.get("text")?.as_str()?),
+            Some("tool_result") => Some(TranscriptBody::ToolResult {
+                tool: block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| tools.name(id)),
+                output: clip(&block_text(block.get("content"))),
+                is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            }),
+            _ => None,
+        })
         .collect()
 }
 
-/// An assistant record: its text blocks and tool calls, in order; thinking is skipped.
-fn assistant_entries(content: &Value) -> Vec<TranscriptEntry> {
+/// A typed prompt, unless empty or one of the app's injected texts.
+fn user_text(text: &str) -> Option<TranscriptBody> {
+    let t = text.trim();
+    (!t.is_empty() && !t.starts_with('<')).then(|| TranscriptBody::User { text: t.to_owned() })
+}
+
+/// The text of a `content` field: a string, or the `text` of each text block joined by
+/// blank lines.
+fn block_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+/// An assistant record: its thinking, text blocks and tool calls, in order.
+fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBody> {
     let blocks = match content {
         Value::String(s) => {
             return trimmed(s)
-                .map(|markdown| vec![TranscriptEntry::Assistant { markdown }])
+                .map(|markdown| vec![TranscriptBody::Assistant { markdown }])
                 .unwrap_or_default();
         }
         Value::Array(blocks) => blocks,
@@ -184,15 +253,61 @@ fn assistant_entries(content: &Value) -> Vec<TranscriptEntry> {
         .iter()
         .filter_map(|block| match block.get("type").and_then(Value::as_str) {
             Some("text") => trimmed(block.get("text")?.as_str()?)
-                .map(|markdown| TranscriptEntry::Assistant { markdown }),
+                .map(|markdown| TranscriptBody::Assistant { markdown }),
+            Some("thinking") => trimmed(block.get("thinking")?.as_str()?)
+                .map(|text| TranscriptBody::Thinking { text: clip(&text) }),
             Some("tool_use" | "server_tool_use") => {
                 let name = block.get("name")?.as_str()?.to_owned();
-                let summary = tool_summary(&name, block.get("input"));
-                Some(TranscriptEntry::ToolUse { name, summary })
+                if let Some(id) = block.get("id").and_then(Value::as_str) {
+                    tools.remember(id, &name);
+                }
+                let input = block.get("input");
+                let summary = tool_summary(&name, input);
+                let input = clip(&input.map(pretty).unwrap_or_default());
+                Some(TranscriptBody::ToolUse { name, summary, input })
             }
             _ => None,
         })
         .collect()
+}
+
+/// A tool input as the agent wrote it, indented.
+fn pretty(input: &Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_default()
+}
+
+/// Cut `text` to at most [`CLIP_LINES`] whole lines and [`CLIP_CHARS`] characters, counting
+/// the lines dropped; one line longer than the cap is cut mid-way with an ellipsis.
+#[must_use]
+pub fn clip(text: &str) -> Clipped {
+    let text = text.trim_end();
+    let mut kept = String::new();
+    let mut lines = text.lines();
+    let mut count = 0_usize;
+    let mut chars = 0_usize;
+    for line in lines.by_ref() {
+        let len = line.chars().count();
+        if count >= CLIP_LINES || chars.saturating_add(len) > CLIP_CHARS {
+            if kept.is_empty() {
+                // The very first line is too long on its own: keep its head.
+                let head: String = line.chars().take(CLIP_CHARS.saturating_sub(1)).collect();
+                kept = format!("{}…", head.trim_end());
+                return Clipped {
+                    text: kept,
+                    more_lines: u32::try_from(lines.count()).unwrap_or(u32::MAX),
+                };
+            }
+            let more = lines.count().saturating_add(1);
+            return Clipped { text: kept, more_lines: u32::try_from(more).unwrap_or(u32::MAX) };
+        }
+        if count > 0 {
+            kept.push('\n');
+        }
+        kept.push_str(line);
+        count = count.saturating_add(1);
+        chars = chars.saturating_add(len);
+    }
+    Clipped::whole(kept)
 }
 
 /// One line saying what a tool call is about: the command, the file, the pattern, the URL,
@@ -236,15 +351,19 @@ mod tests {
     use super::*;
 
     const TAIL: &str = concat!(
-        r#"{"type":"user","message":{"role":"user","content":"fix it"}}"#,
+        r#"{"type":"user","timestamp":"2026-09-05T10:00:00.000Z","message":{"role":"user","content":"fix it"}}"#,
         "\n",
-        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Looking at the build.\n\nRunning the tests now."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        r#"{"type":"assistant","timestamp":"2026-09-05T10:00:01.500Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Looking at the build.\n\nRunning the tests now."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
         "\n",
         r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}"#,
         "\n",
         r#"{"type":"progress","data":{}}"#,
         "\n",
     );
+
+    fn user(at: Option<u64>, text: &str) -> TranscriptEntry {
+        TranscriptEntry { at, body: TranscriptBody::User { text: text.to_owned() } }
+    }
 
     #[test]
     fn finds_the_last_main_thread_text() {
@@ -260,46 +379,110 @@ mod tests {
     }
 
     #[test]
-    fn entries_read_like_a_chat() {
+    fn entries_read_like_a_chat_with_timestamps() {
         let got = entries(TAIL);
+        let at = Some(1_788_602_401_500);
         assert_eq!(
             got,
             vec![
-                TranscriptEntry::User { text: "fix it".to_owned() },
-                TranscriptEntry::Assistant {
-                    markdown: "Looking at the build.\n\nRunning the tests now.".to_owned()
+                user(Some(1_788_602_400_000), "fix it"),
+                TranscriptEntry {
+                    at,
+                    body: TranscriptBody::Thinking { text: Clipped::whole("hm".to_owned()) }
                 },
-                TranscriptEntry::ToolUse {
-                    name: "Bash".to_owned(),
-                    summary: "cargo test".to_owned()
+                TranscriptEntry {
+                    at,
+                    body: TranscriptBody::Assistant {
+                        markdown: "Looking at the build.\n\nRunning the tests now.".to_owned()
+                    }
+                },
+                TranscriptEntry {
+                    at,
+                    body: TranscriptBody::ToolUse {
+                        name: "Bash".to_owned(),
+                        summary: "cargo test".to_owned(),
+                        input: Clipped::whole("{\n  \"command\": \"cargo test\"\n}".to_owned()),
+                    }
                 },
             ],
             "{got:#?}"
         );
-        // Tool results, injected texts and unknown records are not entries.
-        let noise = concat!(
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+    }
+
+    #[test]
+    fn tool_results_are_named_after_their_call_and_injected_texts_are_not_entries() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/a.rs","old_string":"x"}},{"type":"tool_use","id":"t3","name":"Mystery","input":{"n":1,"why":"because"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"},{"type":"tool_result","tool_use_id":"t3","content":[{"type":"text","text":"boom"},{"type":"text","text":"bang"}],"is_error":true},{"type":"tool_result","tool_use_id":"t9","content":""}]}}"#,
             "\n",
             r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
             "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"  "},{"type":"text","text":"and then?"}]}}"#,
+            "\n",
             r#"{"type":"summary","summary":"s"}"#,
             "\n",
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/a.rs","old_string":"x"}},{"type":"tool_use","id":"t3","name":"Mystery","input":{"n":1,"why":"because"}}]}}"#,
-            "\n",
         );
+        let got = entries(jsonl);
         assert_eq!(
-            entries(noise),
+            got.iter().map(|e| e.body.clone()).collect::<Vec<_>>(),
             vec![
-                TranscriptEntry::ToolUse {
+                TranscriptBody::ToolUse {
                     name: "Edit".to_owned(),
-                    summary: "src/a.rs".to_owned()
+                    summary: "src/a.rs".to_owned(),
+                    input: Clipped::whole(
+                        "{\n  \"file_path\": \"src/a.rs\",\n  \"old_string\": \"x\"\n}".to_owned()
+                    ),
                 },
-                TranscriptEntry::ToolUse {
+                TranscriptBody::ToolUse {
                     name: "Mystery".to_owned(),
-                    summary: "because".to_owned()
+                    summary: "because".to_owned(),
+                    input: Clipped::whole("{\n  \"n\": 1,\n  \"why\": \"because\"\n}".to_owned()),
                 },
-            ]
+                TranscriptBody::ToolResult {
+                    tool: Some("Edit".to_owned()),
+                    output: Clipped::whole("ok".to_owned()),
+                    is_error: false,
+                },
+                TranscriptBody::ToolResult {
+                    tool: Some("Mystery".to_owned()),
+                    output: Clipped::whole("boom\n\nbang".to_owned()),
+                    is_error: true,
+                },
+                TranscriptBody::ToolResult {
+                    tool: None,
+                    output: Clipped::default(),
+                    is_error: false,
+                },
+                TranscriptBody::User { text: "and then?".to_owned() },
+            ],
+            "{got:#?}"
         );
+        assert!(got.iter().all(|e| e.at.is_none()), "no timestamps in these records");
+    }
+
+    #[test]
+    fn long_texts_are_clipped_with_a_count_of_what_was_dropped() {
+        assert_eq!(clip("  a\nb  \n\n"), Clipped::whole("  a\nb".to_owned()));
+        assert_eq!(clip(""), Clipped::default());
+
+        let many: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let got = clip(&many.join("\n"));
+        assert_eq!(got.text.lines().count(), CLIP_LINES);
+        assert!(got.text.ends_with("line 39"), "{}", got.text);
+        assert_eq!(got.more_lines, 60);
+
+        // The character cap cuts at a whole line too.
+        let wide: Vec<String> = (0..10).map(|i| format!("{i}{}", "x".repeat(999))).collect();
+        let got = clip(&wide.join("\n"));
+        assert_eq!(got.text.lines().count(), 4, "4 × 1000 chars fit, the fifth does not");
+        assert_eq!(got.more_lines, 6);
+
+        // One monster line keeps its head and an ellipsis.
+        let got = clip(&format!("{}\nnext", "y".repeat(5000)));
+        assert_eq!(got.text.chars().count(), CLIP_CHARS);
+        assert!(got.text.ends_with('…'));
+        assert_eq!(got.more_lines, 1);
     }
 
     #[test]
@@ -312,22 +495,35 @@ mod tests {
         let (first, rest) = TAIL.split_at(TAIL.find('\n').expect("newline") + 30);
         std::fs::write(&path, first).expect("write");
         let read = tail.read(&path).expect("read");
-        assert_eq!(read.entries, vec![TranscriptEntry::User { text: "fix it".to_owned() }]);
+        assert_eq!(read.entries, vec![user(Some(1_788_602_400_000), "fix it")]);
         assert!(!read.restarted);
 
         let mut appended = std::fs::read(&path).expect("read back");
         appended.extend_from_slice(rest.as_bytes());
         std::fs::write(&path, &appended).expect("append");
         let read = tail.read(&path).expect("read");
-        assert_eq!(read.entries.len(), 2, "{read:#?}");
-        assert!(matches!(read.entries[0], TranscriptEntry::Assistant { .. }));
+        assert_eq!(read.entries.len(), 3, "{read:#?}");
+        assert!(matches!(read.entries[1].body, TranscriptBody::Assistant { .. }));
         assert_eq!(tail.read(&path).expect("read"), Read::default(), "nothing new");
+
+        // A result arriving in a later read is still named after its call.
+        let result = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+            "\n"
+        );
+        appended.extend_from_slice(result.as_bytes());
+        std::fs::write(&path, &appended).expect("append");
+        let read = tail.read(&path).expect("read");
+        assert!(
+            matches!(&read.entries[..], [TranscriptEntry { body: TranscriptBody::ToolResult { tool: Some(t), .. }, .. }] if t == "Bash"),
+            "{read:#?}"
+        );
 
         // A shorter file is a new transcript: start over and say so.
         std::fs::write(&path, first).expect("rewrite");
         let read = tail.read(&path).expect("read");
         assert!(read.restarted);
-        assert_eq!(read.entries, vec![TranscriptEntry::User { text: "fix it".to_owned() }]);
+        assert_eq!(read.entries, vec![user(Some(1_788_602_400_000), "fix it")]);
     }
 
     #[test]

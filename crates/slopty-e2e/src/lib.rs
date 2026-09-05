@@ -222,6 +222,29 @@ pub struct TerminalInfo {
     pub cursor: [u16; 2],
     /// The visible rows, top to bottom, trailing spaces trimmed.
     pub rows: Vec<String>,
+    /// The coding agent's state as the host reports it: `idle`, `working`, `tool:<name>`,
+    /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
+    /// `blocked:idle`, `done`; `None` without an agent.
+    pub agent: Option<String>,
+    /// The agent's conversation, while it is shown in place of the grid.
+    pub conversation: Option<ConversationInfo>,
+}
+
+/// A terminal's conversation view.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct ConversationInfo {
+    /// One line per entry, oldest first: `user: …`, `assistant: …`, `thinking`,
+    /// `tool <name>: <summary>`, `result <name>: <first line>` (`failed` after the name of a
+    /// failed one).
+    pub entries: Vec<String>,
+    /// What is written in the composer.
+    pub composer: String,
+    /// The composer holds the keyboard.
+    pub composer_focused: bool,
+    /// The list follows new entries (the reader has not scrolled up).
+    pub pinned: bool,
+    /// The row above the composer: `permission:<tool>`, `allowed`, `denied`, `prompt`.
+    pub attention: Option<String>,
 }
 
 impl Dump {
