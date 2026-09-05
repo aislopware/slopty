@@ -1708,10 +1708,14 @@ mod tests {
         order_ms: u128,
         /// Ordered out → the host has left the crop path.
         swap_ms: u128,
-        /// Crop frames sent after the window was ordered out: how many pictures of the
-        /// rectangle the client could have seen. It says nothing about what was in them —
-        /// ScreenCaptureKit delivers the crop at the configured rate whether the rectangle
-        /// changed or not, which the `Nothing` control shows.
+        /// Crop frames sent after the window was *asked* to go, counted from a reading taken
+        /// before the request: nothing between the two can escape it. This is the one the guard
+        /// is written on, and it includes the frames the still-visible window earns while the
+        /// helper takes its own tick to act.
+        after_hide: u64,
+        /// The same from a reading taken once AppKit reported the window gone. Tighter, and
+        /// reported rather than asserted: the reading is a round trip to the control socket, so
+        /// frames served in that gap are missing from it.
         after_order: u64,
         /// Datagrams per hundred crop frames while the target is up and repainting: what a
         /// rectangle with a flashing window in it costs to encode.
@@ -1848,6 +1852,14 @@ mod tests {
         let watching_from = std::time::Instant::now();
         tokio::time::sleep(Duration::from_secs(1)).await;
 
+        // The counter as it stands before anything is asked. Everything the crop serves from
+        // here on is measured against this, because a reading taken *after* the order is one
+        // round trip to the control socket late, and the frames served in that gap would go
+        // uncounted — a slow reply would let any number of them through while the guard read
+        // zero.
+        let before_hide = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+            .await
+            .expect("the stream is still live");
         std::fs::write(markers.join("hide"), b"").unwrap();
         let hidden_at = std::time::Instant::now();
         // When the window was really ordered out, as AppKit saw it: the marker is only a
@@ -1923,6 +1935,7 @@ mod tests {
         let run = HideRun {
             order_ms,
             swap_ms,
+            after_hide: swapped.cropped.saturating_sub(before_hide.cropped),
             after_order: swapped.cropped.saturating_sub(at_order.cropped),
             bits_visible,
             bits_after_order: per_hundred(
@@ -1955,17 +1968,15 @@ mod tests {
         }
         let run = crop_hide(Behind::SameApplication).await;
 
-        // A ceiling on a gap this layer cannot close, not the rule. Every way of asking the
-        // WindowServer whether a window is on screen keeps saying yes for ~270 ms after AppKit
-        // has ordered it out (MEASUREMENTS.md, "how late a hide is"), and a display crop keeps
-        // delivering that rectangle throughout: ~370 ms of crop frames at 60 Hz, 12-17 measured.
-        // The bound is what a regression would have to beat; the statement that no frame gets
-        // through once the host does know is the unit test
+        // A ceiling on a gap this layer cannot close, not the rule, and counted from before the
+        // hide was even asked for so that nothing in between escapes it. Two things fill it: the
+        // helper's own tick before it orders the window out, and the ~270 ms in which every way
+        // of asking the WindowServer still says the window is on screen (MEASUREMENTS.md, "how
+        // late a hide is"). At 60 Hz that is around thirty frames; sixty is what a regression
+        // would have to beat. The statement that no frame gets through once the host does know
+        // is the unit test
         // (`a_frame_captured_while_the_target_is_hidden_is_withheld`), not this.
-        assert!(
-            run.after_order <= 30,
-            "crop frames sent after the window was ordered out: {run:?}"
-        );
+        assert!(run.after_hide <= 60, "crop frames sent after the window was asked to go: {run:?}");
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
         assert_dark_and_still(&run);
