@@ -596,7 +596,7 @@ impl ScreenStream {
     }
 
     /// Give the streamed window's application keyboard focus on the host.
-    pub fn focus(&self) -> Result<(), ScreenError> {
+    pub fn focus(&mut self) -> Result<(), ScreenError> {
         Ok(self.injector.focus()?)
     }
 

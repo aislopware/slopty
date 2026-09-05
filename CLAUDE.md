@@ -37,3 +37,16 @@ hypothesis until DECISIONS.md marks it verified.
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
+
+## Live tests
+- Anything that posts real events, captures the screen or spawns the daemons is gated
+  (`SLOPTY_SCREEN_E2E`, `SLOPTY_INPUT_E2E`) and runs only through `cargo xtask e2e
+  host|screen|input|all`, which gives the daemons their own data dir under `target/e2e/`.
+  The assertions live inside those tests; do not drive a check by hand from a session
+  (synthetic keys into a pid, per-window screenshots, reading screenshots back). That
+  combination reads as surveillance tooling and got several sessions flagged.
+- Input logic is tested without the desktop: `slopty_input::Injector` posts through a
+  `Backend`, and `Recorder` is the fake one. Add unit tests there, not live ones.
+- Never read, grep or dump old Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`)
+  into a session: they replay the flagged pattern. To investigate a flag, look at metadata
+  only (timestamps, tool names, `model_refusal_fallback`), never at the payloads.

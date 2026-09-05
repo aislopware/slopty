@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
 mod bundle;
+mod e2e;
 mod gate;
 mod icon;
 mod ime;
@@ -52,6 +53,8 @@ enum Cmd {
         #[arg(long)]
         quick: bool,
     },
+    /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
+    E2e(e2e::E2eOpts),
     /// Format everything (rustfmt nightly if present, taplo).
     Fmt,
     /// Clippy on all targets and all triples with `-D warnings`.
@@ -112,6 +115,7 @@ fn main() -> Result<()> {
         Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         Cmd::Gate { fix, quick } => gate::run(&sh, gate::Options { fix, quick }),
+        Cmd::E2e(opts) => e2e::run(&sh, &opts),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),
         Cmd::Test { args } => gate::test(&sh, &args),

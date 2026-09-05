@@ -341,7 +341,7 @@ impl Peer<'_> {
                 }
             }
             ScreenRequest::Focus(stream) => {
-                if let Some(s) = self.screens.get(&stream)
+                if let Some(s) = self.screens.get_mut(&stream)
                     && let Err(e) = s.focus()
                 {
                     tracing::debug!(client = %self.client, %stream, error = %e, "focus");

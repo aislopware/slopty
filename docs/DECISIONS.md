@@ -582,6 +582,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   Keys carry the client's text via `CGEventKeyboardSetUnicodeString`, so host and client
   layouts need not agree; bare modifier keys post as `FlagsChanged`. Needs post-event
   (Accessibility) access: `slopty-hostd` preflights at start-up, warns, and asks once.
+- ✅ **The injector decides, a `Backend` posts** (2026-09-05). `Injector<B: Backend>` maps
+  pixels to points, tracks held buttons and flags, picks the route (`Pid` vs `Hid`; right
+  clicks always `Hid`) and activation, and hands a `Post { route, flags, event }` to the
+  backend. `System` builds the `CGEvent`; `Recorder` keeps the `Post`s. The whole decision
+  path is unit-tested against `Recorder` under `cargo gate` with no Accessibility grant and
+  no real event. The one live test (`SLOPTY_INPUT_E2E`) checks only that a display-stream
+  move lands, and runs via `cargo xtask e2e input`. Hand-driven checks (keys into a pid +
+  window screenshots + reading them back) are banned: see `CLAUDE.md` ▸ Live tests.
 - ⚠️ **macOS delivers keyboard events only to the active app.** Events posted to an inactive
   pid queue up and all land the moment the app activates (observed macOS 26.5: four probe keys
   arrived as `echoecho` after activation). So the injector activates the owner
