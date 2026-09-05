@@ -1,9 +1,12 @@
 //! `TerminalElement`: paints a `TermState` as cell-aligned text runs and quads.
 //!
-//! Per row: one shaped line with a run per style change, background quads for non-default
-//! backgrounds, and the cursor. Shaping is cached across frames and views by the content hash
-//! of each word (a row split at its plain spaces), so a word shaped once serves every row it
-//! appears in.
+//! Per row: the words (a row split at its plain spaces), each shaped once at the base font
+//! size and painted glyph by glyph at the zoomed size, background quads for non-default
+//! backgrounds, underlines and strikethroughs where the font puts them, and the cursor. Shaping
+//! is cached across frames and views by the content hash of each word, and the cache is
+//! independent of the zoom: a zoom step re-shapes nothing, it repaints the same glyph ids at
+//! another size (positions come from the cell grid, and a fixed-pitch font's advances scale
+//! with the size).
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -115,6 +118,9 @@ pub struct Prepared {
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
     /// sequence number), for the keystroke → paint meter.
     shown: Vec<u64>,
+    /// Painted size over the shaped (base) size, and the font size to paint the words at.
+    zoom: f32,
+    font_size: Pixels,
 }
 
 #[derive(Debug)]
@@ -123,8 +129,8 @@ struct PreparedRow {
     quads: Vec<(u16, u16, Hsla)>,
     /// Underlines and strikethroughs, at ghostty's offsets rather than GPUI's.
     decorations: Vec<Decoration>,
-    /// The row's words, each shaped on its own and placed at its start column.
-    segments: Vec<(u16, Rc<ShapedLine>)>,
+    /// The row's words, each shaped on its own at the base size and placed at its start column.
+    segments: Vec<(u16, Rc<Word>)>,
     /// Columns of the link under a ⌘-hover, underlined over the text.
     link: Option<(u16, u16)>,
     /// Colour of the command-block separator drawn along the row's top edge.
@@ -140,15 +146,21 @@ struct Decoration {
     /// Distance from the top of the row to the top of the stroke.
     y: Pixels,
     thickness: Pixels,
+    /// A curly underline: GPUI draws the wave, at this position and thickness.
+    wavy: bool,
 }
 
 /// Add one cell's worth of stroke, joining it to the run to its left when they match.
 ///
 /// A cell contributes at most three strokes (two for a double underline, one strikethrough),
 /// so the run this one continues, if any, is within the last few.
-fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line) {
+fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line, wavy: bool) {
     let joins = |d: &&mut Decoration| {
-        d.end == col && d.color == color && d.y == line.y && d.thickness == line.thickness
+        d.end == col
+            && d.color == color
+            && d.y == line.y
+            && d.thickness == line.thickness
+            && d.wavy == wavy
     };
     if let Some(run) = out.iter_mut().rev().take(3).find(joins) {
         run.end = col.saturating_add(1);
@@ -160,6 +172,7 @@ fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line)
         color,
         y: line.y,
         thickness: line.thickness,
+        wavy,
     });
 }
 
@@ -217,18 +230,22 @@ impl IntoElement for TerminalElement {
     }
 }
 
-/// Shaped-word cache keyed by (text + styles + size + palette) hash, kept on the App as a
-/// global so it survives across frames and views.
+/// The cell geometry derived for one family, size and scale: the grid in points, the whole-pixel
+/// metrics and the face they came from.
+type Derived = (Grid, metrics::Metrics, metrics::Face);
+
+/// Shaped-word cache keyed by (text + styles + palette) hash, kept on the App as a global so it
+/// survives across frames and views. Words are shaped at the base size only.
 #[derive(Default)]
 struct ShapeCache {
-    lines: HashMap<u64, Rc<ShapedLine>>,
+    lines: HashMap<u64, Rc<Word>>,
     generation: u64,
     touched: HashMap<u64, u64>,
     /// The frame the last sweep ran in, so twenty terminals in one frame sweep once.
     frame: Option<u64>,
     /// The derived grid per (family, font size, scale, line-height multiplier): deriving it
     /// walked the font system every frame for nothing.
-    grids: HashMap<(String, u32, u32, u32), (Grid, metrics::Metrics, metrics::Face)>,
+    grids: HashMap<(String, u32, u32, u32), Derived>,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -242,7 +259,7 @@ impl ShapeCache {
         font: &Font,
         font_size: Pixels,
         height_mult: f32,
-    ) -> (Grid, metrics::Metrics, metrics::Face) {
+    ) -> Derived {
         let key = (
             family.to_owned(),
             f32::from(font_size).to_bits(),
@@ -300,23 +317,18 @@ fn segment_hash(base: u64, cells: &[Cell]) -> u64 {
     h.finish()
 }
 
-/// A cell whose shaped run paints nothing: a narrow blank without a curly underline (its
-/// background is a quad and a straight underline or strikethrough is a [`Decoration`], both
-/// drawn from the cells, not from the run). Rows are split into words at these.
+/// A cell whose glyphs paint nothing: a narrow blank (its background is a quad and any
+/// underline or strikethrough is a [`Decoration`], both drawn from the cells, not from the
+/// shaped word). Rows are split into words at these.
 fn plain_space(cell: &Cell) -> bool {
-    cell.width == CellWidth::Narrow
-        && matches!(cell.text.as_str(), "" | " ")
-        && cell.style.underline != Underline::Curly
+    cell.width == CellWidth::Narrow && matches!(cell.text.as_str(), "" | " ")
 }
 
 /// A cell shaped on its own: a digit. Counters, timestamps and sizes make most of a streaming
 /// row's unique text, and no coding font ligates digits, so each digit is one cached glyph
-/// instead of a fresh word every frame. A curly-underlined digit stays in its word so GPUI
-/// draws the wave in one piece.
+/// instead of a fresh word every frame.
 fn stands_alone(cell: &Cell) -> bool {
-    cell.width == CellWidth::Narrow
-        && cell.text.as_ascii().is_some_and(|b| b.is_ascii_digit())
-        && cell.style.underline != Underline::Curly
+    cell.width == CellWidth::Narrow && cell.text.as_ascii().is_some_and(|b| b.is_ascii_digit())
 }
 
 /// The words of a row: maximal runs of cells that are not plain spaces, digits on their own,
@@ -349,18 +361,47 @@ fn segments(cells: &[Cell]) -> Vec<(u16, &[Cell])> {
     out
 }
 
+/// A word shaped once, at the base font size with the base cell width forced, and what
+/// painting it at any size needs: the glyph runs (through the shaped line) and the colour of
+/// each byte of its text.
+#[derive(Debug)]
+struct Word {
+    line: ShapedLine,
+    /// `(end byte, colour)` per style run, in text order.
+    colors: Vec<(usize, Hsla)>,
+}
+
+impl Word {
+    /// Colour of the glyph at byte `index` of the text.
+    fn color_at(&self, index: usize) -> Hsla {
+        self.colors
+            .iter()
+            .find(|(end, _)| index < *end)
+            .or_else(|| self.colors.last())
+            .map_or(gpui::black(), |(_, color)| *color)
+    }
+}
+
+/// Where a glyph shaped at the base size goes when the word is painted at `zoom` times it:
+/// its shaped position scales with the size (a fixed-pitch advance is linear in the size) from
+/// the word's origin on the baseline.
+fn glyph_origin(origin: Point<Pixels>, shaped: Point<Pixels>, zoom: f32) -> Point<Pixels> {
+    point(origin.x + shaped.x * zoom, origin.y + shaped.y * zoom)
+}
+
 /// Shape one word of `cells` (wide cells followed by a spacer so advances line up under the
 /// forced cell width).
 fn shape_cells(
     text_system: &gpui::WindowTextSystem,
     cells: &[Cell],
     font_size: Pixels,
-    grid: &Grid,
+    cell_width: Pixels,
     family: &str,
     palette: &TerminalPalette,
-) -> ShapedLine {
+) -> Word {
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::new();
+    let mut colors: Vec<(usize, Hsla)> = Vec::new();
     let mut current: Option<(CellStyle, usize)> = None;
     for cell in cells {
         if !cell.width.draws_text() {
@@ -381,16 +422,21 @@ fn shape_cells(
             }
             _ => {
                 if let Some((style, acc)) = current.take() {
-                    runs.push(text_run(acc, family, &style, palette, grid.underline));
+                    let run = text_run(acc, family, &style, palette);
+                    colors.push((text.len().saturating_sub(len), run.color));
+                    runs.push(run);
                 }
                 current = Some((cell.style, len));
             }
         }
     }
     if let Some((style, acc)) = current.take() {
-        runs.push(text_run(acc, family, &style, palette, grid.underline));
+        let run = text_run(acc, family, &style, palette);
+        colors.push((text.len(), run.color));
+        runs.push(run);
     }
-    text_system.shape_line(SharedString::from(text), font_size, &runs, Some(grid.cell_width))
+    let line = text_system.shape_line(SharedString::from(text), font_size, &runs, Some(cell_width));
+    Word { line, colors }
 }
 
 fn mono_font(family: &str, style: &CellStyle) -> Font {
@@ -423,30 +469,15 @@ fn underline_color(style: &CellStyle, palette: &TerminalPalette, text: Hsla) -> 
     }
 }
 
-/// A run of same-styled cells.
-///
-/// Straight underlines and strikethroughs are left off the run and painted from ghostty's
-/// metrics instead, because GPUI puts them at offsets of its own. A curly underline stays with
-/// the run: drawing a wave is GPUI's alone, and it only reads the thickness from here.
-fn text_run(
-    len: usize,
-    family: &str,
-    style: &CellStyle,
-    palette: &TerminalPalette,
-    underline: metrics::Line,
-) -> TextRun {
-    let color = cell_color(style, palette);
-    let curly = (style.underline == Underline::Curly).then(|| UnderlineStyle {
-        thickness: underline.thickness,
-        color: Some(underline_color(style, palette, color)),
-        wavy: true,
-    });
+/// A run of `len` bytes in `style`. Underlines of every kind and strikethroughs are
+/// [`Decoration`]s drawn from the cells, so the run carries only the font and the colour.
+fn text_run(len: usize, family: &str, style: &CellStyle, palette: &TerminalPalette) -> TextRun {
     TextRun {
         len,
         font: mono_font(family, style),
-        color,
+        color: cell_color(style, palette),
         background_color: None,
-        underline: curly,
+        underline: None,
         strikethrough: None,
     }
 }
@@ -459,23 +490,6 @@ fn pick_family(window: &Window, candidates: &[String]) -> String {
         .find(|family| installed.iter().any(|name| name == *family))
         .cloned()
         .unwrap_or_else(|| fonts::MONO_FAMILY.to_owned())
-}
-
-/// Where to hand a shaped line to GPUI so its baseline lands on `baseline`.
-///
-/// GPUI centres a line in the box it is given — `(line_height - ascent - descent) / 2 + ascent`
-/// down from the origin (`text_system/line.rs`) — which is close to, but not, where the font's
-/// metrics put the baseline. Offsetting the origin by the difference is exact, and uses the
-/// shaped line's own ascent and descent, so a row that fell back to another font still lines up.
-fn text_origin_y(
-    row_y: Pixels,
-    line_height: Pixels,
-    baseline: Pixels,
-    ascent: Pixels,
-    descent: Pixels,
-) -> Pixels {
-    let centred = (line_height - ascent - descent) / 2.0 + ascent;
-    row_y + baseline - centred
 }
 
 /// A cell length for the wire, with a fallback for nonsense.
@@ -666,20 +680,22 @@ impl Element for TerminalElement {
             let link = view.link_highlight();
 
             cache.sweep(crate::frames::index(cx));
-            let base = hash_base(focused, font_size, &family, palette);
+            let base = hash_base(focused, base_size, &family, palette);
             // Rows above the oldest line the host still has: a `~` filler, shaped once.
-            let mut filler: Option<Rc<ShapedLine>> = None;
+            let mut filler: Option<Rc<Word>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             for (i, row) in rows_view.iter().enumerate() {
                 let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
                 let Some(line) = row.line else {
                     let filler = filler.get_or_insert_with(|| {
-                        Rc::new(text_system.shape_line(
+                        let line = text_system.shape_line(
                             "~".into(),
-                            font_size,
-                            &[text_run(1, &family, &CellStyle::DEFAULT, palette, grid.underline)],
-                            Some(cell_width),
-                        ))
+                            base_size,
+                            &[text_run(1, &family, &CellStyle::DEFAULT, palette)],
+                            Some(base_cell_width),
+                        );
+                        let colors = vec![(1, cell_color(&CellStyle::DEFAULT, palette))];
+                        Rc::new(Word { line, colors })
                     });
                     prepared_rows.push(PreparedRow {
                         y,
@@ -710,22 +726,23 @@ impl Element for TerminalElement {
                         }
                     }
                     // Underline and strikethrough go where the font says, not where GPUI
-                    // would put them; a curly underline is drawn by GPUI with the run.
+                    // would put them; a curly underline is GPUI's wave at that position.
                     let text = cell_color(&cell.style, palette);
-                    if !matches!(cell.style.underline, Underline::None | Underline::Curly) {
+                    if cell.style.underline != Underline::None {
                         let color = underline_color(&cell.style, palette, text);
-                        stroke(&mut decorations, col, color, grid.underline);
+                        let wavy = cell.style.underline == Underline::Curly;
+                        stroke(&mut decorations, col, color, grid.underline, wavy);
                         if cell.style.underline == Underline::Double {
                             // The second stroke sits one stroke's gap above the first.
                             let above = metrics::Line {
                                 y: grid.underline.y - grid.underline.thickness * 2.0,
                                 thickness: grid.underline.thickness,
                             };
-                            stroke(&mut decorations, col, color, above);
+                            stroke(&mut decorations, col, color, above, false);
                         }
                     }
                     if cell.style.flags.contains(StyleFlags::STRIKETHROUGH) {
-                        stroke(&mut decorations, col, text, grid.strikethrough);
+                        stroke(&mut decorations, col, text, grid.strikethrough, false);
                     }
                 }
                 // The selection paints over cell backgrounds and under the text.
@@ -757,8 +774,8 @@ impl Element for TerminalElement {
                             Rc::new(shape_cells(
                                 &text_system,
                                 cells,
-                                font_size,
-                                &grid,
+                                base_size,
+                                base_cell_width,
                                 &family,
                                 palette,
                             ))
@@ -802,13 +819,7 @@ impl Element for TerminalElement {
             let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
                 .iter()
                 .map(|p| {
-                    let mut run = text_run(
-                        p.text.len(),
-                        &family,
-                        &CellStyle::DEFAULT,
-                        palette,
-                        grid.underline,
-                    );
+                    let mut run = text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette);
                     run.color.a = 0.75;
                     run.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
@@ -830,8 +841,7 @@ impl Element for TerminalElement {
                 .collect();
             // The input method's composition, underlined at the cursor (what Terminal.app does).
             if let Some(text) = marked.filter(|_| cursor_visible) {
-                let mut run =
-                    text_run(text.len(), &family, &CellStyle::DEFAULT, palette, grid.underline);
+                let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(run.color),
@@ -853,6 +863,8 @@ impl Element for TerminalElement {
             Prepared {
                 metrics,
                 grid,
+                zoom,
+                font_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
                 background: hsla(palette.bg),
@@ -934,32 +946,50 @@ impl Element for TerminalElement {
             };
             window.paint_quad(quad);
         }
-        for row in &prepared.rows {
-            for (col, segment) in &row.segments {
-                // GPUI centres the line in its own box; nudge it so its baseline is the derived
-                // one and the glyphs sit on the same line as the decorations under them.
-                let y = text_origin_y(
-                    row.y,
-                    m.line_height,
-                    grid.baseline,
-                    segment.ascent,
-                    segment.descent,
-                );
-                let x = m.origin.x + m.cell_width * f32::from(*col);
-                if let Err(e) =
-                    segment.paint(point(x, y), m.line_height, TextAlign::Left, None, window, cx)
-                {
-                    tracing::debug!(error = %e, "paint row");
+        // The words: every glyph at the derived baseline, from the base-size shaping, at the
+        // zoomed size. Nothing is shaped here and the word cache never sees the zoom. One
+        // layer for all of them: a primitive outside a layer costs a bounds-tree insert of its
+        // own (GPUI gives each line it paints a layer for the same reason), and the glyphs
+        // still land above the quads painted before and below what is painted after.
+        let (zoom, font_size) = (prepared.zoom, prepared.font_size);
+        window.paint_layer(bounds, |window| {
+            for row in &prepared.rows {
+                let baseline = row.y + grid.baseline;
+                for (col, word) in &row.segments {
+                    let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
+                    for run in &word.line.layout().runs {
+                        for glyph in &run.glyphs {
+                            let at = glyph_origin(origin, glyph.position, zoom);
+                            let painted = if glyph.is_emoji {
+                                window.paint_emoji(at, run.font_id, glyph.id, font_size)
+                            } else {
+                                let color = word.color_at(glyph.index);
+                                window.paint_glyph(at, run.font_id, glyph.id, font_size, color)
+                            };
+                            if let Err(e) = painted {
+                                tracing::debug!(error = %e, "paint glyph");
+                            }
+                        }
+                    }
                 }
             }
-        }
+        });
         // Underlines and strikethroughs, over the glyphs, where the font's metrics put them.
         for row in &prepared.rows {
             for deco in &row.decorations {
                 let x = m.origin.x + m.cell_width * f32::from(deco.start);
                 let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
-                let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
-                window.paint_quad(fill(bounds, deco.color));
+                if deco.wavy {
+                    let style = UnderlineStyle {
+                        thickness: deco.thickness,
+                        color: Some(deco.color),
+                        wavy: true,
+                    };
+                    window.paint_underline(point(x, row.y + deco.y), w, &style);
+                } else {
+                    let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
+                    window.paint_quad(fill(bounds, deco.color));
+                }
             }
         }
         // The ⌘-hover link underline joins them, in the text colour.
@@ -1035,25 +1065,30 @@ mod tests {
         }
     }
 
-    /// The glyphs go on the baseline the metrics derived, not the one GPUI would centre on.
-    /// `JetBrains Mono` 13 pt at DPR 2: a 17 pt row with a 13.5 pt baseline, where GPUI's own
-    /// centring (ascent 13.325, descent 3.575) would put it at 13.375.
+    /// A word shaped at 13 pt with an 8 pt cell forced paints at 26 pt with the glyphs 16 pt
+    /// apart, from the same shaping: the position scales, the origin is the cell grid's.
     #[test]
-    fn the_text_sits_on_the_derived_baseline() {
-        let (row_y, line_height) = (px(100.0), px(17.0));
-        let (ascent, descent) = (px(13.325), px(3.575));
-        let centred = (line_height - ascent - descent) / 2.0 + ascent;
-        assert!((f32::from(centred) - 13.375).abs() < 1e-4, "{centred:?}");
+    fn a_glyph_shaped_at_the_base_size_lands_on_the_zoomed_cell() {
+        let origin = point(px(100.0), px(50.0));
+        assert_eq!(glyph_origin(origin, point(px(0.0), px(0.0)), 2.0), origin);
+        assert_eq!(glyph_origin(origin, point(px(8.0), px(0.0)), 2.0), point(px(116.0), px(50.0)));
+        assert_eq!(glyph_origin(origin, point(px(24.0), px(0.0)), 0.5), point(px(112.0), px(50.0)));
+        assert_eq!(glyph_origin(origin, point(px(8.0), px(0.0)), 1.0), point(px(108.0), px(50.0)));
+    }
 
-        // The derived baseline is the lower of the two, so the line is nudged down by 0.125.
-        let y = text_origin_y(row_y, line_height, px(13.5), ascent, descent);
-        assert!((f32::from(y) - 100.125).abs() < 1e-4, "{y:?}");
-        // Which is to say: painting there puts the baseline exactly where it was derived.
-        assert!((f32::from(y + centred - row_y) - 13.5).abs() < 1e-4);
-
-        // A row that fell back to a taller face is corrected by its own amount.
-        let tall = text_origin_y(row_y, line_height, px(13.5), px(15.0), px(4.0));
-        assert!(tall < y, "{tall:?} vs {y:?}");
+    /// The colour of a glyph is the colour of the style run its byte falls in.
+    #[test]
+    fn a_word_remembers_the_colour_of_every_byte() {
+        let red = gpui::red();
+        let blue = gpui::blue();
+        let word = Word { line: ShapedLine::default(), colors: vec![(2, red), (5, blue)] };
+        assert_eq!(word.color_at(0), red);
+        assert_eq!(word.color_at(1), red);
+        assert_eq!(word.color_at(2), blue);
+        assert_eq!(word.color_at(4), blue);
+        assert_eq!(word.color_at(9), blue, "past the end: the last run");
+        let empty = Word { line: ShapedLine::default(), colors: Vec::new() };
+        assert_eq!(empty.color_at(0), gpui::black());
     }
 
     fn cells(text: &str) -> Vec<Cell> {
@@ -1078,14 +1113,18 @@ mod tests {
         let mut row = cells("12");
         row[0].style.underline = Underline::Curly;
         row[1].style.underline = Underline::Curly;
-        assert_eq!(segments(&row).len(), 1, "a curly-underlined number is one piece");
+        assert_eq!(
+            segments(&row).len(),
+            2,
+            "a curly underline changes nothing: it is a decoration"
+        );
     }
 
     #[test]
-    fn only_a_curly_underline_keeps_a_space_in_its_word() {
+    fn no_decoration_keeps_a_space_in_its_word() {
         let mut row = cells("a b");
         row[1].style.underline = Underline::Curly;
-        assert_eq!(segments(&row).len(), 1, "GPUI draws the wave with the run");
+        assert_eq!(segments(&row).len(), 2, "the wave is a decoration drawn from the cells");
         let mut row = cells("a b");
         row[1].style.underline = Underline::Single;
         assert_eq!(segments(&row).len(), 2, "a straight underline is a decoration quad");
