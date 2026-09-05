@@ -237,7 +237,8 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
                 first_frame.get_or_insert(now);
                 // The wire carries the low 32 bits of the host clock in microseconds.
                 #[expect(clippy::cast_possible_truncation, reason = "low 32 bits by design")]
-                let (now_lo, pts_lo) = (slopty_capture::host_now_us() as u32, frame.pts_us as u32);
+                let (now_lo, pts_lo) =
+                    (slopty_capture::host_now_us() as u32, frame.stamp.pts_us as u32);
                 // ScreenCaptureKit stamps a frame with its display time, which can sit a
                 // fraction of a millisecond ahead of "now"; clamp those to zero.
                 let lat = i64::from(now_lo.wrapping_sub(pts_lo).cast_signed()).max(0);

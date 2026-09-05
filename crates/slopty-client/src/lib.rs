@@ -8,13 +8,17 @@
 //!   and [`canvas::Camera`] (pan/zoom mapping).
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
 //!   published as its newest frame plus the host's cursor position.
+//! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
+//!   numbers the overlay and the tests read.
 
 pub mod canvas;
 pub mod link;
+pub mod pacing;
 pub mod screen;
 pub mod term;
 
 pub use canvas::{Camera, CanvasChange, CanvasDoc};
 pub use link::{HostLink, LinkEvent, warm_up_decoder};
-pub use screen::{CursorState, ScreenHandle, ScreenStats};
+pub use pacing::{Clock, FrameStamp, Pace, Pacer, PacingStats, SystemClock};
+pub use screen::{CursorState, Presentable, ScreenHandle, ScreenStats};
 pub use term::{Effect, TermState, ViewRow};

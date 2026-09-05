@@ -25,6 +25,8 @@ use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::pacing::FrameStamp;
+
 /// Datagrams buffered per attached stream before the task must drain them.
 const STREAM_DEPTH: usize = 2048;
 /// Datagrams kept for a stream nobody has attached yet.
@@ -143,6 +145,41 @@ impl ScreenRouter {
     }
 }
 
+/// Frames whose arrival instant is remembered while the decoder works on them. VideoToolbox is
+/// asynchronous and gives the callback nothing but the presentation timestamp, so the worker
+/// parks the stamp under that timestamp and the callback picks it back up. Two frames' worth of
+/// a second is plenty; anything older has been answered or dropped.
+const ARRIVALS: usize = 128;
+
+/// A decoded picture together with the timing that got it here, which is what the element needs
+/// to pace and to say how old what it paints is.
+#[derive(Debug)]
+pub struct Presentable {
+    /// The picture.
+    pub frame: DecodedFrame,
+    /// Arrival of the datagram that completed the frame, and when the decoder returned it.
+    pub stamp: FrameStamp,
+}
+
+/// Arrival instants parked by presentation timestamp for the decoder callback.
+#[derive(Debug, Default)]
+struct Arrivals(VecDeque<(u64, Instant)>);
+
+impl Arrivals {
+    fn park(&mut self, pts_us: u64, arrived: Instant) {
+        if self.0.len() >= ARRIVALS {
+            self.0.pop_front();
+        }
+        self.0.push_back((pts_us, arrived));
+    }
+
+    /// The arrival of the frame with this timestamp, and everything older forgotten with it.
+    fn take(&mut self, pts_us: u64) -> Option<Instant> {
+        let at = self.0.iter().position(|&(pts, _)| pts == pts_us)?;
+        self.0.drain(..=at).next_back().map(|(_pts, t)| t)
+    }
+}
+
 /// Where the host's pointer is, in stream pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct CursorState {
@@ -231,7 +268,7 @@ impl Audio {
 #[derive(Debug)]
 pub struct ScreenHandle {
     stream: StreamId,
-    frames: watch::Receiver<Option<Arc<DecodedFrame>>>,
+    frames: watch::Receiver<Option<Arc<Presentable>>>,
     cursor: watch::Receiver<CursorState>,
     stats: watch::Receiver<ScreenStats>,
     /// Audio is decoded but not played while set (shared with the worker).
@@ -247,9 +284,11 @@ impl ScreenHandle {
         self.stream
     }
 
-    /// Newest decoded frame; `changed().await` wakes when a new one lands.
+    /// Newest decoded frame; `changed().await` wakes when a new one lands. The channel keeps
+    /// only the newest, which is the presentation policy: a frame the element never got to
+    /// paint is stale by the time it would have.
     #[must_use]
-    pub fn frames(&self) -> watch::Receiver<Option<Arc<DecodedFrame>>> {
+    pub fn frames(&self) -> watch::Receiver<Option<Arc<Presentable>>> {
         self.frames.clone()
     }
 
@@ -317,15 +356,23 @@ pub fn spawn_screen(
     let muted = Arc::new(AtomicBool::new(false));
     let first_decoded = Arc::new(Mutex::new(None));
     let decoded_at = Arc::clone(&first_decoded);
+    let arrivals = Arc::new(Mutex::new(Arrivals::default()));
+    let parked = Arc::clone(&arrivals);
     let decoder = Decoder::new(codec, move |frame| {
-        decoded_at.lock().get_or_insert_with(Instant::now);
-        let _no_receiver = frames_tx.send(Some(Arc::new(frame)));
+        let decoded = Instant::now();
+        decoded_at.lock().get_or_insert(decoded);
+        // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
+        // that outlived the ring) is still shown; its timing simply does not enter the ring.
+        let arrived = parked.lock().take(frame.pts_us).unwrap_or(decoded);
+        let stamp = FrameStamp { pts_us: frame.pts_us, arrived, decoded };
+        let _no_receiver = frames_tx.send(Some(Arc::new(Presentable { frame, stamp })));
     });
     let worker = Worker {
         stream,
         datagrams,
         reassembler: Reassembler::new(stream, Config::default(), Instant::now()),
         decoder,
+        arrivals,
         out: uplink.control,
         feedback: uplink.feedback,
         rtt: uplink.rtt,
@@ -346,6 +393,8 @@ struct Worker {
     datagrams: mpsc::Receiver<Arrival>,
     reassembler: Reassembler,
     decoder: Decoder,
+    /// Arrival instants parked for the decoder callback, keyed by presentation timestamp.
+    arrivals: Arc<Mutex<Arrivals>>,
     out: mpsc::Sender<ClientMsg>,
     feedback: Box<dyn Fn(Bytes) -> bool + Send>,
     rtt: Box<dyn Fn() -> Option<Duration> + Send>,
@@ -417,6 +466,10 @@ impl Worker {
             if !self.actions() {
                 break;
             }
+            // The tick's own `drain` can release a frame that was queued behind a lost one, and
+            // on a still screen the next datagram is a heartbeat half a stall gap away: without
+            // this the picture would wait for it.
+            self.deliver();
         }
         tracing::debug!(stream = %self.stream, "screen worker finished");
     }
@@ -456,6 +509,9 @@ impl Worker {
                 self.counters.hold_max = frame.hold;
             }
             let pts = u64::from(frame.info.capture_ts_us);
+            // Park the arrival before submitting: VideoToolbox may call back on another thread
+            // before `decode` returns.
+            self.arrivals.lock().park(pts, frame.arrived);
             match self.decoder.decode(&frame.data, pts) {
                 Ok(()) => {
                     if let Some(token) = frame.info.ltr_token {
@@ -528,6 +584,40 @@ fn encode_feedback(feedback: Feedback) -> Bytes {
         refresh @ Feedback::Refresh { .. } => refresh,
     };
     slopty_proto::codec::encode_body(&whole).map(Bytes::from).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod arrival_tests {
+    use super::*;
+
+    /// The decoder's callback finds the arrival its frame was parked under, and the frames
+    /// before it are forgotten with it (the decoder never goes back).
+    #[test]
+    fn a_parked_arrival_comes_back_with_its_frame_and_clears_the_older_ones() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch.checked_add(Duration::from_millis(ms)).unwrap();
+        let mut arrivals = Arrivals::default();
+        for i in 0..4_u64 {
+            arrivals.park(i * 1_000, at(i * 16));
+        }
+        assert_eq!(arrivals.take(2_000), Some(at(32)));
+        assert_eq!(arrivals.take(1_000), None, "older frames went with it");
+        assert_eq!(arrivals.take(3_000), Some(at(48)));
+        assert_eq!(arrivals.take(3_000), None, "taken once");
+    }
+
+    /// The ring is bounded: a decoder that never calls back cannot grow it.
+    #[test]
+    fn the_ring_forgets_the_oldest_arrivals() {
+        let epoch = Instant::now();
+        let mut arrivals = Arrivals::default();
+        for i in 0..(u64::try_from(ARRIVALS).unwrap() + 10) {
+            arrivals.park(i, epoch);
+        }
+        assert_eq!(arrivals.0.len(), ARRIVALS);
+        assert_eq!(arrivals.take(0), None);
+        assert_eq!(arrivals.take(u64::try_from(ARRIVALS).unwrap()), Some(epoch));
+    }
 }
 
 #[cfg(test)]
