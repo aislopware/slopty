@@ -352,7 +352,12 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     println!("  host target over time (Mbit/s): {}", rate_trajectory(&rate));
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
-    println!("  quic path (client side): {}", link.health());
+    // The client's own window, not the media one. This connection carries receiver reports and
+    // NACKs and nothing else, so BBR never measures a delivery rate on it and parks the window
+    // at its four-packet floor for the whole run. Reading that number as the stream's send
+    // window is a mistake that has been made here before; the host's window is in its own log
+    // (`SLOPTY_PATH_TRACE_MS`), not in this line.
+    println!("  quic path (client→host, feedback only): {}", link.health());
     print_host_side(session.client, stream).await;
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
@@ -363,11 +368,16 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     // The self-check: on a quiet loopback stream nothing can hold a datagram, so the answer is
     // zero, and the attribution above says which reading produced anything else.
     if let Some(max) = bench.max_stalls {
+        // A stall that is still on when the run ends never released, so it never reached the
+        // counter: `stalled_ms` is its only trace. Counting released stalls alone would pass the
+        // worst case there is — a link that stopped and stayed stopped — and it passed a run
+        // that reported `stalls 0 (66 ms stalled)` (MEASUREMENTS.md, 2026-09-06).
+        let counted = stats.stalls.saturating_add(u64::from(stats.stalled));
         anyhow::ensure!(
-            stats.stalls <= max,
-            "{} stalls ({} ms stalled) over {} s, more than the {max} allowed",
-            stats.stalls,
+            counted <= max && (max > 0 || stats.stalled_ms == 0),
+            "{counted} stalls ({} ms stalled{}) over {} s, more than the {max} allowed",
             stats.stalled_ms,
+            if stats.stalled { ", still stalled at the end" } else { "" },
             bench.seconds
         );
     }
