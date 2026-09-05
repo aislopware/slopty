@@ -751,6 +751,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   host is an `mpsc` pair: the test asserts what the canvas sent and feeds back the
   `CanvasSync` deltas and `Frame`s a host would. GPUI's `TestPlatform` has no accessibility
   tree yet; exposing accesskit for dumps is a later fork change.
+- ✅ **`cargo xtask e2e` builds with `--bins`, never `--bin slopty-app`** (2026-09-05). A `--bin`
+  filter applies to every `-p` on the command line, so the daemons and the CLI were not rebuilt
+  and a stale `slopty-hostd` answered `ProtocolVersion { host: 9 }` to a protocol-11 app: every
+  suite failed at pairing within a second. `--bins` builds each selected package's binaries.
 - ⚠️ **GPUI drops keystrokes when the focused element is not in the frame** (found by the
   app self-test 2026-09-05: ⌘W dead after ⌘1). Below `CARD_ZOOM` the terminals are drawn as
   cards without their views, so the focused `TerminalView` handle had no node in the
@@ -1148,6 +1152,46 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `<data dir>/run/` (not `$TMPDIR`, which launchd children may not share) and the CLI's
   socket lookup falls back to that path when it exists. `install` re-bootstraps (bootout
   first, so a stale socket file never wedges the bind) and waits up to 10 s for a ticket.
+- ✅ **Conversation view: richer entries, protocol 11** (2026-09-05). `TranscriptEntry` became
+  `{ at, body }` with `TranscriptBody::{User, Assistant, Thinking, ToolUse, ToolResult}` and
+  a `Clipped { text, more_lines }` for the long parts. The host clips thinking, tool input and
+  tool output to 40 whole lines or 4 000 characters (`slopty_agent::transcript::clip`), whichever
+  first: a `Read` of a 40-line file or a `cargo test` tail fits, a minified one-line blob is
+  cut at 4 000 characters with an ellipsis, and the wire never carries a whole file while the
+  reader still sees how much was dropped. Results are named after their `tool_use_id` by a
+  bounded table in the `Tail` (512 ids, then it starts over), since Claude Code batches several
+  calls before their results. Timestamps ride as Unix milliseconds and the client shows local
+  "HH:MM" (`chrono`, already in the tree). Goldens `host_transcript` (every variant) and
+  `client_hello` re-accepted; PROTOCOL_VERSION 10 → 11.
+- ✅ **The composer types into the pty; no new wire message** (2026-09-05). ↩ sends the text
+  as `TermRequest::Paste` (the host brackets it when the program asked, so Claude Code takes a
+  multi-line message as one prompt) followed by the same `TermRequest::Key` Enter the keyboard
+  sends, then clears. A `ClientMsg::Prompt` would have needed the host to know which program
+  reads the pty and how it wants its input; typing keeps one input path, keeps slash commands
+  and `@file` exactly as if typed, and works for any prompt the agent shows (an empty ↩ is a
+  bare Enter that accepts it). Esc and Control keys keep their terminal meaning from inside the
+  composer so ⌃C interrupts without leaving the chat; gpui-kit's input binds ⌃C to Copy only
+  off macOS, so on iOS a hardware ⌃C in the composer copies and the key bar's ⌃ + C is the
+  interrupt. Allow / Deny in the view raise `TerminalViewEvent::Answered` and the canvas types
+  Enter / Esc through `allow_agent` / `deny_agent`, one answer per state, exactly as the badge.
+- ✅ **Collapse defaults** (2026-09-05). Thinking and tool input start folded (they explain a
+  step, they are not the step); a tool result shows its first 4 lines (`RESULT_PREVIEW_LINES`)
+  because the head of a result is usually the verdict ("running 2 tests", "error[E0308]"), and
+  opens to the whole clipped text with the dropped-line count. Folds live in the client (a
+  `HashSet` of indices) and survive appends, a reset drops them with the entries. The list
+  uses gpui's `FollowMode::Tail`: it stops following on a wheel-up, resumes when scrolled back
+  to the bottom, and the "↓ latest" pill (`scroll_to_end` + `Tail`) is the shortcut.
+- ✅ **Playing an agent in the self-tests: hook JSON to hostd's control socket, never typed
+  into the shell** (2026-09-05). hostd already takes `CtlRequest::Hook { session, payload }`
+  on its control socket (what `slopty hook` relays), so `Stack::play_hook` writes the fixture
+  transcript (`harness::TRANSCRIPT`, never a real `~/.claude/projects` file) under the run's
+  temp dir and sends the payload there from the test process, with the session id read from
+  the dump. A first version typed `printf … | slopty hook` into the shell under test and
+  waited for the state to change: synthetic keys running a command in a shell and reading the
+  result back is the surveillance-shaped pattern CLAUDE.md forbids, and it got that session
+  flagged. Keys over the test socket drive the app's own UI only (⌘⇧L, the composer, the
+  buttons); the one line the composer sends is a shell comment, so the shell echoes it and runs
+  nothing. The same path drives the simulator, since hostd stays on the Mac.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.

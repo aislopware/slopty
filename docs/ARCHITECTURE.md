@@ -240,14 +240,44 @@ instead of the grid: the "chat" pill in its title bar or ⌘⇧L (`ToggleConvers
 `slopty_agent::transcript::Tail` on the session's `transcript_path` (from the hook payloads),
 sends the last 200 entries as a `HostMsg::Transcript` with `reset: true`, then polls the file
 every 400 ms off the blocking pool and sends only the appended entries (a truncated or
-replaced file resets again). Entries are `TranscriptEntry::{User, Assistant, ToolUse}` built
-from the JSONL records (`user` text, `assistant` text blocks as markdown, `tool_use` blocks
-summarised to the command / file / pattern / query the tool was given; sidechain rows are
-skipped). The client keeps them in `slopty_ui::terminal::conversation::Conversation`, a
-bottom-aligned gpui `list` with `TextView::markdown` for assistant turns, and shows it in
-place of `TerminalElement` while it is on; ⌘⇧L again drops it and sends `follow: false`,
-which closes the tail on the host. Keys still go to the session, so the human can answer the
-agent while reading. Headless test: `the_conversation_replaces_the_grid_and_follows_the_transcript`.
+replaced file resets again). An entry is `TranscriptEntry { at, body }`: the record's
+`timestamp` in Unix milliseconds and a `TranscriptBody::{User, Assistant, Thinking, ToolUse,
+ToolResult}` built from the JSONL records — `user` text, `assistant` text blocks as markdown,
+`thinking` blocks, `tool_use` blocks with a one-line summary (the command / file / pattern /
+query the tool was given) and the whole input as pretty JSON, `tool_result` blocks with
+`is_error` and named after their `tool_use_id` (the `Tail` remembers the last 512 calls).
+Thinking, tool input and tool output are `Clipped` on the host: the first 40 whole lines or
+4 000 characters, whichever comes first, and the count of lines dropped, so the wire never
+carries a whole file. Sidechain rows and the app's injected texts are skipped. The client
+keeps them in `slopty_ui::terminal::conversation::Conversation`: a bottom-aligned gpui `list`
+in `FollowMode::Tail` (pinned to the newest entry until the reader scrolls up, then a
+"↓ latest" pill re-pins; a reset re-pins) with `TextView::markdown` for assistant turns,
+"HH:MM" local-time stamps on prompts and answers, and folds that open on a click — thinking
+and tool input start folded, a result shows its first 4 lines. Under the list sits the
+**composer**, a gpui-kit `TextareaState` growing from one to six rows: ↩ sends the text into
+the session as `TermRequest::Paste` followed by an Enter key (an empty ↩ sends the bare
+Enter, so a prompt can be accepted; slash commands and `@file` go through as typed), ⇧↩
+breaks a line. While the composer has the keyboard, `TerminalView::key_down` lets only Esc and
+Control keys (⌃C above all) through to the session; ⌘ shortcuts and ⌘⇧L keep their meaning
+through the action path. Above the composer the **attention row** shows the agent's
+`AgentStatus` when it waits: `Blocked(Permission)` draws Allow / Deny, which raise
+`TerminalViewEvent::Answered` so the canvas types the same Enter / Esc the title-bar badge
+does (`allow_agent` / `deny_agent`), then reads "allowed" / "denied" until the host's next
+report; `Blocked(Question | Elicitation)` moves the caret into the composer. The canvas hands
+every `AgentEvent` to its view (`set_agent_status`). ⌘⇧L again drops the view, sends
+`follow: false` (which closes the tail on the host) and gives the grid the keyboard back. On
+iOS the composer sits inside the item above the key bar and the workspace's safe-area /
+keyboard insets, and focusing it raises the soft keyboard through the same input handler as
+the grid. Tests: JSONL → entry mapping and clipping in `slopty-agent` (fixtures, never a real
+transcript); headless `the_conversation_replaces_the_grid_and_follows_the_transcript`,
+`the_composer_types_into_the_session`, `the_attention_row_answers_a_permission`,
+`the_list_stays_pinned_until_the_reader_scrolls_up`, `folds_open_on_a_click`; the app
+self-test `the_conversation_view_reads_and_answers_the_agent` (a fixture transcript named by
+`Stop` and `PermissionRequest` hooks the test hands to hostd over its control socket, never
+typed into the shell; goldens `conversation.png` and `conversation-permission.png`) and the
+simulator's `the_conversation_view_on_the_simulator` (dump only: the fork's iOS platform has
+no `render_to_image`, so there are no simulator goldens); the dump lists the entries, the composer, its focus, the pin and
+the attention row (`ConversationInfo`) and the agent's state (`TerminalInfo.agent`).
 
 ## 6. UI
 
@@ -297,7 +327,8 @@ history is not fetched first; ⌘↓ past the newest prompt goes back to followi
 ⌘⇧C copies the last finished command's output (`TermState::last_command_output`: the
 `Output` rows right above the newest prompt start, blank tail trimmed; nothing without shell
 integration). Headless `#[gpui::test]`s in `terminal/view.rs` read the separators back from
-`painted_quads()` and drive the bindings with `simulate_keystrokes`.
+`painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
+for the conversation view (§5), whose composer takes the typing.
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
