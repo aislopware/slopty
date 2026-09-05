@@ -30,6 +30,17 @@ pub struct Stack {
     pub driver: Driver,
     /// ptyd, hostd, app; killed on drop.
     pub children: Vec<Child>,
+    /// The simulator the app runs in, when it does; the app is terminated there on shutdown.
+    pub simulator: Option<Simulator>,
+}
+
+/// A booted iOS simulator and the app installed in it.
+#[derive(Debug, Clone)]
+pub struct Simulator {
+    /// `simctl` device UDID.
+    pub udid: String,
+    /// The app's bundle identifier.
+    pub bundle_id: String,
 }
 
 /// Where the binaries are.
@@ -81,6 +92,65 @@ async fn wait_for_path(path: &Path, child: &mut Child, what: &str) -> Result<()>
     }
 }
 
+/// Wait for a socket path from a process that is not our child (the simulator's).
+async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
+    let waited = tokio::time::timeout(STARTUP, async {
+        while !path.exists() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    match waited {
+        Ok(()) => Ok(()),
+        Err(_elapsed) => bail!("{what} did not create {} within {STARTUP:?}", path.display()),
+    }
+}
+
+/// The daemons of a stack: ptyd and hostd (named `host_name`) under `root`, and the ticket
+/// hostd printed.
+async fn daemons(root: &Path, host_name: &str, log: &str) -> Result<(Vec<Child>, String)> {
+    let ptyd_sock = root.join("ptyd.sock");
+    let mut ptyd = Command::new(bin("slopty-ptyd")?)
+        .arg("--socket")
+        .arg(&ptyd_sock)
+        .env("RUST_LOG", log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn slopty-ptyd")?;
+    wait_for_path(&ptyd_sock, &mut ptyd, "slopty-ptyd").await?;
+
+    let ctl_sock = root.join("hostd.sock");
+    let mut hostd = Command::new(bin("slopty-hostd")?)
+        .arg("--ptyd-socket")
+        .arg(&ptyd_sock)
+        .arg("--ctl-socket")
+        .arg(&ctl_sock)
+        .arg("--data-dir")
+        .arg(root.join("host"))
+        .arg("--print-ticket")
+        .arg("--port")
+        .arg("0")
+        .env("RUST_LOG", log)
+        .env("SLOPTY_HOST_NAME", host_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn slopty-hostd")?;
+    let stdout = hostd.stdout.take().context("hostd stdout")?;
+    let mut ticket = String::new();
+    tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut ticket))
+        .await
+        .context("hostd did not print a ticket in time")??;
+    let ticket = ticket.trim().to_owned();
+    anyhow::ensure!(!ticket.is_empty(), "hostd printed an empty ticket");
+    Ok((vec![ptyd, hostd], ticket))
+}
+
 impl Stack {
     /// Start ptyd, hostd (named `host_name`) and the app; pair the app with the host and wait
     /// until its canvas is up.
@@ -92,46 +162,7 @@ impl Stack {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-
-        let ptyd_sock = root.join("ptyd.sock");
-        let mut ptyd = Command::new(bin("slopty-ptyd")?)
-            .arg("--socket")
-            .arg(&ptyd_sock)
-            .env("RUST_LOG", &log)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty-ptyd")?;
-        wait_for_path(&ptyd_sock, &mut ptyd, "slopty-ptyd").await?;
-
-        let ctl_sock = root.join("hostd.sock");
-        let mut hostd = Command::new(bin("slopty-hostd")?)
-            .arg("--ptyd-socket")
-            .arg(&ptyd_sock)
-            .arg("--ctl-socket")
-            .arg(&ctl_sock)
-            .arg("--data-dir")
-            .arg(root.join("host"))
-            .arg("--print-ticket")
-            .arg("--port")
-            .arg("0")
-            .env("RUST_LOG", &log)
-            .env("SLOPTY_HOST_NAME", host_name)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty-hostd")?;
-        let stdout = hostd.stdout.take().context("hostd stdout")?;
-        let mut ticket = String::new();
-        tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut ticket))
-            .await
-            .context("hostd did not print a ticket in time")??;
-        let ticket = ticket.trim().to_owned();
-        anyhow::ensure!(!ticket.is_empty(), "hostd printed an empty ticket");
+        let (mut children, ticket) = daemons(root, host_name, &log).await?;
 
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;
@@ -149,11 +180,54 @@ impl Stack {
             .spawn()
             .context("spawn slopty-app")?;
         wait_for_path(&app_sock, &mut app, "slopty-app").await?;
-        let mut driver = Driver::connect(&app_sock).await?;
-        driver.ok(&crate::Command::Ping).await?;
+        children.push(app);
+        let driver = Driver::connect(&app_sock).await?;
+        Self::pair(Self { dir, ticket, driver, children, simulator: None }).await
+    }
 
-        let children = vec![ptyd, hostd, app];
-        let mut stack = Self { dir, ticket, driver, children };
+    /// Start ptyd and hostd here and the app in a booted simulator (`simctl launch` with the
+    /// socket and data dir in its environment; the simulator shares this file system), then
+    /// pair and wait as [`Self::launch`] does.
+    ///
+    /// # Errors
+    ///
+    /// When a daemon is missing, `simctl` fails, or the app does not bind its socket in time.
+    pub async fn launch_on_simulator(host_name: &str, simulator: Simulator) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
+        let root = dir.path();
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let (children, ticket) = daemons(root, host_name, &log).await?;
+
+        let app_dir = root.join("app");
+        std::fs::create_dir_all(&app_dir)?;
+        let app_sock = root.join("app.sock");
+        let launch = Command::new("xcrun")
+            .args(["simctl", "launch", "--terminate-running-process"])
+            .arg(&simulator.udid)
+            .arg(&simulator.bundle_id)
+            .env("SIMCTL_CHILD_RUST_LOG", &log)
+            .env("SIMCTL_CHILD_SLOPTY_DATA_DIR", &app_dir)
+            .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
+            .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status();
+        // `launch` blocks while the simulator is still booting; the xtask waits for
+        // `bootstatus` first, so a long wait here is a broken simulator, not a slow one.
+        let launched = tokio::time::timeout(STARTUP, launch)
+            .await
+            .context("simctl launch did not return (is the simulator booted?)")?
+            .context("xcrun simctl launch")?;
+        anyhow::ensure!(launched.success(), "simctl launch failed: {launched}");
+        wait_for_socket(&app_sock, "the app in the simulator").await?;
+        let driver = Driver::connect(&app_sock).await?;
+        Self::pair(Self { dir, ticket, driver, children, simulator: Some(simulator) }).await
+    }
+
+    /// Ping, pair with the host and wait for the connection.
+    async fn pair(mut stack: Self) -> Result<Self> {
+        stack.driver.ok(&crate::Command::Ping).await?;
         stack.driver.ok(&crate::Command::Pair { ticket: stack.ticket.clone() }).await?;
         stack
             .driver
@@ -173,6 +247,15 @@ impl Stack {
     /// Ask the app to quit, then kill whatever is left.
     pub async fn shutdown(mut self) {
         let _quit = self.driver.call(&crate::Command::Quit).await;
+        if let Some(simulator) = &self.simulator {
+            let _terminated = Command::new("xcrun")
+                .args(["simctl", "terminate", &simulator.udid, &simulator.bundle_id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
         for child in &mut self.children {
             let _killed = child.start_kill();
             let _reaped = child.wait().await;

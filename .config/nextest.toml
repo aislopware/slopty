@@ -25,3 +25,8 @@ store-failure-output = true
 [[profile.default.overrides]]
 filter = 'test(/^(proptest|fuzz|slow)_/)'
 slow-timeout = { period = "120s", terminate-after = 2 }
+
+# The simulator self-test: boot, launch, pair and a real shell take minutes, not seconds.
+[[profile.default.overrides]]
+filter = 'package(slopty-e2e) & binary(ios)'
+slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }

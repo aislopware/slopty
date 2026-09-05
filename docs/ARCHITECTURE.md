@@ -230,9 +230,24 @@ control.
 GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit tracks) plus
 gpui-kit (fork: `aislopware/gpui-kit`, one commit re-pointing deps). The iOS backend is zed PR
 #63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
-video), `Window::insets()` (safe area, keyboard) and a native pinch recognizer; one finger
-taps and pans through gpui core's touch recognizer, two fingers pinch-zoom, both landing in the
-same canvas handlers the Mac uses.
+video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
+pointers; one finger taps and pans through gpui core's touch recognizer, two fingers
+pinch-zoom, both landing in the same canvas handlers the Mac uses. A keyboard attached to an
+iPad or iPhone arrives as `pressesBegan`/`pressesEnded` on the metal view (the first responder
+whenever no text input is): every key that is not plain text (arrows, escape, function keys,
+enter, tab, backspace, ⌃/⌥/⌘ chords) becomes the same `Keystroke` the Mac backend would build,
+so the Mac keymaps and the terminal's key encoder work unchanged; plain characters keep going
+through the text system (`insertText:`, IME) while a text input has focus. UIKit does not
+repeat presses, so the window repeats a held key itself (400 ms, then every 50 ms, delivered
+as `is_held`). A trackpad or mouse hovers as `MouseMove` and scrolls as `ScrollWheel` with
+phases (a `UIPanGestureRecognizer` limited to indirect scrolls, so direct drags stay with the
+touch recognizer); while a keyboard is attached (`GCKeyboard.coalescedKeyboard`, polled once a
+second with the settings) the key bar hides, since every key on it is under the fingers; `UIApplicationSupportsIndirectInputEvents` is set so clicks are pointer
+events rather than synthesised touches. The bundle targets iPhone and iPad
+(`TARGETED_DEVICE_FAMILY 1,2`, every iPad orientation, so Split View and Stage Manager can
+resize the window; the canvas re-fits on resize like any window);
+`cargo xtask ios sim --sim ipad` boots an iPad Pro 13-inch simulator beside the iPhone one, and
+`cargo xtask e2e ios --sim ipad` drives the app there over its test socket.
 Design tokens in `slopty-theme` (Warp-like: surface ladder, hairline borders, one accent).
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
@@ -310,12 +325,12 @@ way the CLI does and the host's connect loop starts.
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
-| `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness, numeric golden diff (`cargo xtask e2e app`) | dev |
+| `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff (`cargo xtask e2e app\|ios`) | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
-| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim\|device` generates the Xcode project | client |
+| `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
 | `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
-| `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|host|screen|input|all` for the self-test and the gated live tests) | dev |
+| `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|ios|host|screen|input|all` for the self-test and the gated live tests) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-host`.

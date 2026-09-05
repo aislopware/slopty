@@ -29,8 +29,11 @@ pub enum Case {
     Screen,
     /// One pointer move on the main display and back. Needs Accessibility for the test binary.
     Input,
-    /// All of the above.
+    /// All of the above (not `ios`, which needs a simulator).
     All,
+    /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
+    /// through its test socket: pair, open a shell, type, read the rows back.
+    Ios,
 }
 
 /// Options.
@@ -48,6 +51,9 @@ pub struct E2eOpts {
     /// `RUST_LOG` for the daemons and tests.
     #[arg(long, default_value = "info")]
     log: String,
+    /// Which simulator the `ios` case uses.
+    #[arg(long, value_enum, default_value_t)]
+    sim: crate::ios::SimKind,
 }
 
 /// One nextest invocation.
@@ -91,6 +97,9 @@ const INPUT: &[Suite] = &[Suite {
     filter: "",
 }];
 
+const IOS: &[Suite] =
+    &[Suite { gate: Some("SLOPTY_IOS_E2E"), package: "slopty-e2e", test: "ios", filter: "" }];
+
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let suites: Vec<&Suite> = match opts.case {
         Case::App => APP.iter().collect(),
@@ -98,6 +107,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
         Case::All => APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).collect(),
+        Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
         .data_dir
@@ -129,6 +139,18 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             "cargo build -p slopty-ptyd -p slopty-hostd -p slopty --bin slopty-app --features slopty/e2e"
         ),
     )?;
+
+    // The iOS case also needs the app in a booted simulator; the test launches it there.
+    let _simulator_env = (opts.case == Case::Ios)
+        .then(|| -> Result<_> {
+            let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
+            let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
+            Ok((
+                sh.push_env("SLOPTY_SIM_UDID", udid),
+                sh.push_env("SLOPTY_SIM_BUNDLE_ID", crate::ios::BUNDLE_ID),
+            ))
+        })
+        .transpose()?;
 
     let mut failed = Vec::new();
     for suite in &suites {

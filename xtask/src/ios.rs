@@ -13,7 +13,7 @@ use xshell::{Shell, cmd};
 use crate::tools::step;
 
 /// Bundle identifier of the iOS app.
-const BUNDLE_ID: &str = "dev.aislopware.slopty";
+pub const BUNDLE_ID: &str = "dev.aislopware.slopty";
 /// Product / scheme name.
 const PRODUCT: &str = "Slopty";
 /// Deployment target (the project floor).
@@ -79,6 +79,25 @@ pub struct IosOpts {
     /// Which simulator `sim` uses (`SLOPTY_SIM_UDID` overrides both).
     #[arg(long, value_enum, default_value_t)]
     sim: SimKind,
+    /// Build with the `e2e` feature (test-socket renderer access; `cargo xtask e2e ios` sets it).
+    #[arg(long)]
+    e2e: bool,
+}
+
+impl IosOpts {
+    /// Options for the simulator self-test: debug build with the `e2e` feature.
+    #[must_use]
+    pub fn for_e2e(sim: SimKind, log: &str) -> Self {
+        Self {
+            release: false,
+            log: log.to_owned(),
+            direct_only: false,
+            no_run: false,
+            device: None,
+            sim,
+            e2e: true,
+        }
+    }
 }
 
 /// One SDK flavour.
@@ -151,7 +170,13 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let root = crate::tools::repo_root()?;
     let profile = if opts.release { "release" } else { "debug" };
     let triple = sdk.triple();
-    let cargo_flags: &[&str] = if opts.release { &["--release"] } else { &[] };
+    let mut cargo_flags: Vec<&str> = Vec::new();
+    if opts.release {
+        cargo_flags.push("--release");
+    }
+    if opts.e2e {
+        cargo_flags.extend(["--features", "slopty-ios/e2e"]);
+    }
     {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
         step(
@@ -295,13 +320,33 @@ settings:
     )
 }
 
-/// Boot the simulator (creating it on first use), install and launch with the console attached.
-fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
-    let udid = simulator_udid(sh, opts.sim)?;
-    let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().quiet();
+/// Build for the simulator, boot it (creating it on first use) and install the app; returns
+/// the simulator's UDID. `cargo xtask e2e ios` launches the app itself, with its own environment.
+///
+/// # Errors
+///
+/// When the build, the boot or the install fails.
+pub fn install_on_simulator(sh: &Shell, opts: &IosOpts) -> Result<String> {
+    let app = build(sh, Sdk::Simulator, opts)?;
+    let udid = boot_and_install(sh, &app, opts.sim)?;
+    Ok(udid)
+}
+
+/// Boot the simulator for `kind` (creating it on first use) and install `app`.
+fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String> {
+    let udid = simulator_udid(sh, kind)?;
+    let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().ignore_stderr().quiet();
     boot.run()?;
+    // A device created a moment ago is still booting; `launch` on it blocks for minutes.
+    step("simctl bootstatus", &cmd!(sh, "xcrun simctl bootstatus {udid} -b"))?;
     step("open Simulator.app", &cmd!(sh, "open -a Simulator"))?;
     step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))?;
+    Ok(udid)
+}
+
+/// Boot the simulator, install and launch with the console attached.
+fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
+    let udid = boot_and_install(sh, app, opts.sim)?;
     let _log = sh.push_env("SIMCTL_CHILD_RUST_LOG", &opts.log);
     let _direct =
         sh.push_env("SIMCTL_CHILD_SLOPTY_DIRECT_ONLY", u8::from(opts.direct_only).to_string());

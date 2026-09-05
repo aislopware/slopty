@@ -10,6 +10,11 @@ description = "Slopty iOS app: the static library the UIKit shell links"
 [lints]
 workspace = true
 
+[features]
+default = [  ]
+# The test socket's renderer access, as `slopty/e2e` (`cargo xtask e2e ios`). Off otherwise.
+e2e = [ "slopty-app/e2e" ]
+
 [lib]
 name = "slopty_ios"
 path = "src/lib.rs"
