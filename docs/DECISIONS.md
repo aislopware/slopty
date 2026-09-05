@@ -1996,7 +1996,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   returns on its own when the window draws again (MEASUREMENTS.md, "the refresh guard end to
   end"). The host now counts them: `ScreenStats::refreshes`, over the control socket as
   `slopty host screens` — a client-side counter would only say what the client believes it sent.
-  Known limit the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
+  Known limits the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
   a window that draws once and *then* hides stays `Live` forever and only the cap protects the
-  receiver.
+  receiver; and once a stream has switched to the display-crop path, hiding the window does not
+  stop it — the crop keeps sending that patch of desktop (MEASUREMENTS.md, same section). The app
+  case gates on `SLOPTY_SCREEN_E2E` as well as `SLOPTY_APP_E2E`: it is the only case in that
+  suite that asks the machine for anything.
 

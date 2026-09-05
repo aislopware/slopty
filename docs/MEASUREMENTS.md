@@ -1132,7 +1132,7 @@ the loss table above shows 0 stalls at every injected rate on a quiet machine.
 ```sh
 SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
   --test e2e a_window_that_never_draws --no-capture
-cargo xtask e2e app        # a_remote_window_that_never_draws_waits_instead_of_asking_forever
+SLOPTY_SCREEN_E2E=1 cargo xtask e2e app   # the app case needs the grant too, and says so
 ```
 
 The target is a window the test owns (`slopty-idle-window`, a 240×160 AppKit window with no
@@ -1148,6 +1148,13 @@ ScreenCaptureKit has nothing at all to deliver. Nothing on the desktop is touche
   for the first frame…".
 * Recovery → the helper orders the window back in and repaints; frames arrive with no refresh,
   no reopen and no help from the client, and the placeholder goes.
+
+Seen while writing the test and worth its own look: once the window is visible and unobstructed
+the host switches that stream to the **display-crop** path, and hiding the window again does not
+stop the stream — the crop keeps sending that patch of desktop. The first hide (before the stream
+opens) goes through the window filter and sends nothing, which is why the guard works at all.
+`ScreenStream::window_gone` only fires when the window leaves the list entirely, and a hidden
+window is still in it.
 
 Not measured: the same guard on iOS (the helper is an AppKit window on the host's machine, which
 the simulator case shares, but the run was not made), and a target that draws once and then hides

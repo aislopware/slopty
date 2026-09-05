@@ -1,8 +1,9 @@
 //! The real app, driven from inside: pair with a host, open a shell, type, read the rows back,
 //! render frames with the app's own renderer and compare them with the goldens.
 //!
-//! Runs only with `SLOPTY_APP_E2E=1` (`cargo xtask e2e app`), since it launches the app;
-//! it needs no permission from the machine.
+//! Runs only with `SLOPTY_APP_E2E=1` (`cargo xtask e2e app`), since it launches the app. Every
+//! case but one needs no permission from the machine; the one that captures a window says so and
+//! skips without `SLOPTY_SCREEN_E2E`.
 
 #[cfg(test)]
 mod tests {
@@ -27,6 +28,19 @@ mod tests {
     fn gated() -> bool {
         if std::env::var_os("SLOPTY_APP_E2E").is_none() {
             eprintln!("skipped: set SLOPTY_APP_E2E=1 (or run `cargo xtask e2e app`)");
+            return false;
+        }
+        true
+    }
+
+    /// [`gated`], plus the screen-recording grant hostd needs to capture anything. The rest of
+    /// this suite asks the machine for nothing, so a case that captures gates on both.
+    fn gated_on_capture() -> bool {
+        if !gated() {
+            return false;
+        }
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("skipped: capturing a window needs SLOPTY_SCREEN_E2E=1 and the grant");
             return false;
         }
         true
@@ -441,7 +455,7 @@ mod tests {
     /// arrives without the client doing anything.
     #[tokio::test]
     async fn a_remote_window_that_never_draws_waits_instead_of_asking_forever() {
-        if !gated() {
+        if !gated_on_capture() {
             return;
         }
         let mut stack = Stack::launch("e2e-host").await.unwrap();

@@ -91,16 +91,18 @@ mod macos {
         let mut ticks: u32 = 0;
         loop {
             pump();
-            if taken(&dir, "quit") {
+            if dir.join("quit").exists() {
                 break;
             }
-            if shown && taken(&dir, "hide") {
+            if consume(&dir, "hide") {
                 shown = false;
                 window.orderOut(None);
+                note(&dir, "hide", window.isVisible());
             }
-            if !shown && taken(&dir, "show") {
+            if consume(&dir, "show") {
                 shown = true;
                 window.orderFrontRegardless();
+                note(&dir, "show", window.isVisible());
             }
             if shown {
                 // Something to capture: a window whose colour never changes is a window
@@ -118,10 +120,17 @@ mod macos {
         Ok(())
     }
 
-    /// Whether the marker is there. The file is left in place: `hide` and `show` are states, and
-    /// the test may look at them afterwards.
-    fn taken(dir: &Path, marker: &str) -> bool {
-        dir.join(marker).exists()
+    /// Leave what AppKit thinks of the window after an order, so a test that disagrees with the
+    /// host's window list can tell the two apart.
+    fn note(dir: &Path, action: &str, visible: bool) {
+        let _written = std::fs::write(dir.join("state"), format!("{action} visible={visible}\n"));
+    }
+
+    /// Whether the marker was there, taking it away if it was. They are events, not states: a
+    /// `hide` left lying around would order the window out again on the tick after every `show`,
+    /// and a second `hide` after that would have nothing to write.
+    fn consume(dir: &Path, marker: &str) -> bool {
+        std::fs::remove_file(dir.join(marker)).is_ok()
     }
 
     /// Let AppKit run for [`TICK`], so the window server sees the window and its repaints.

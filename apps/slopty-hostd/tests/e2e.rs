@@ -1142,8 +1142,15 @@ mod tests {
         };
         let mut on_relay = false;
         let mut stretch = 0.0_f64;
+        // Wall clock between samples, not the nominal step: under the saturation this harness
+        // applies the ticks slip, and charging a fixed step per sample would under-report the
+        // very stretches it is here to measure.
+        let mut sampled_at = std::time::Instant::now();
         while tokio::time::Instant::now() < deadline {
             ticks.tick().await;
+            let now = std::time::Instant::now();
+            let since = now.saturating_duration_since(sampled_at).as_secs_f64();
+            sampled_at = now;
             row.samples = row.samples.saturating_add(1);
             if let Some(rtt) = link.rtt() {
                 let ms = rtt.as_secs_f64() * 1e3;
@@ -1158,8 +1165,8 @@ mod tests {
                         row.to_relay = row.to_relay.saturating_add(1);
                         eprintln!("flap {}: on a relay; paths: {}", shape.name(), link.paths());
                     }
-                    stretch += step.as_secs_f64();
-                    row.relay_total_s += step.as_secs_f64();
+                    stretch += since;
+                    row.relay_total_s += since;
                     row.relay_max_s = row.relay_max_s.max(stretch);
                 }
                 Some(false) if on_relay => {
@@ -1317,6 +1324,40 @@ mod tests {
         assert!(live, "the host never took the idle hint back");
         assert!(back.frames > 0, "no picture after the window drew again: {back:?}");
 
+        // Hiding again sticks: the markers are events the helper consumes, so a stale `hide`
+        // cannot order the window out on the tick after every `show`, and a stale `show` cannot
+        // undo this one. The host's own window list is the evidence — not the stream, which by
+        // now runs through the display-crop path and keeps sending whatever is on that patch of
+        // desktop whether the window is there or not.
+        std::fs::write(markers.join("hide"), b"").unwrap();
+        // Polled, because the host reuses an enumeration for `SHAREABLE_TTL`: one listing taken
+        // just before the hide would still say the window is up.
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .expect("a deadline inside the clock");
+        let mut listed = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+            let windows = loop {
+                match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                    LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing {
+                        windows, ..
+                    })) => {
+                        break windows;
+                    }
+                    _other => {}
+                }
+            };
+            listed = windows.into_iter().find(|w| w.title == title);
+            if listed.as_ref().is_some_and(|w| !w.on_screen) {
+                break;
+            }
+        }
+        let listed = listed.expect("the idle window still in the list");
+        let state = std::fs::read_to_string(markers.join("state")).unwrap_or_default();
+        assert!(!listed.on_screen, "the second hide did not stick: {listed:?}; helper: {state}");
+
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
         drop(screen);
@@ -1324,21 +1365,21 @@ mod tests {
         endpoint.close().await;
     }
 
-    /// [`bin`] for a binary whose package is not named after it.
+    /// [`bin`] for a binary whose package is not named after it, built every time rather than
+    /// only when it is missing: this one is a test fixture that changes with the test, and a
+    /// stale copy left beside the daemons would quietly test the previous version of it.
     fn bin_of(package: &str, name: &str) -> PathBuf {
         let hostd = PathBuf::from(env!("CARGO_BIN_EXE_slopty-hostd"));
         let path = hostd.with_file_name(name);
-        if !path.exists() {
-            let release = hostd.parent().is_some_and(|dir| dir.ends_with("release"));
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            build.args(["build", "-p", package, "--bin", name]);
-            if release {
-                build.arg("--release");
-            }
-            let status = build.status().expect("run cargo");
-            assert!(status.success(), "build {name}");
+        let release = hostd.parent().is_some_and(|dir| dir.ends_with("release"));
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut build = std::process::Command::new(cargo);
+        build.args(["build", "-p", package, "--bin", name]);
+        if release {
+            build.arg("--release");
         }
+        let status = build.status().expect("run cargo");
+        assert!(status.success(), "build {name}");
         path
     }
 }
