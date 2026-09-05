@@ -525,8 +525,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   attached session opened by the host, first message `StreamHeader { session }`; datagrams for
   media. Transport config: idle 45 s, keep-alive 5 s, 4 MiB datagram buffers.
 - ✅ **Congestion controller**: noq default (Cubic); BBR3 measured 2026-09-05 (MEASUREMENTS.md),
-  revisit once noq marks it stable. The media path runs its own bitrate controller on top
-  (see Video, "Adaptive bitrate").
+  revisit once noq marks it stable (superseded 2026-09-05: BBR3 installed as default for both
+  roles with `SLOPTY_CC=cubic` override; see line 683). The media path runs its own bitrate
+  controller on top (see Video, "Adaptive bitrate").
 - ✅ **ACKs within 2 ms, not QUIC's 25** (2026-09-05, `slopty_net::endpoint::MAX_ACK_DELAY`
   via `AckFrequencyConfig`, both roles). Media leaves the host as one burst per frame; BBR
   sizes the congestion window from bandwidth × min RTT, which on loopback is one or two
@@ -1018,8 +1019,8 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   format (`assert_eq!` in `draw_surfaces`) and samples the two planes as R8/RG8. Any other
   format would either abort the app or need a colour-space conversion on the client.
 - ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
-  present on arrival. 🔬 slop-desk measured vsync-locked = +2 frames at 60 fps; re-measure with
-  our harness before ruling.
+  present on arrival (superseded 2026-09-05: slop-desk vsync-locked hypothesis settled by
+  present-on-arrival measurement without buffering; see ruling below).
 - ✅ **Present on arrival, and the presentation path is measured rather than assumed**
   (2026-09-05). A decoded frame goes up on the first paint after the decoder returns it and is
   never queued for a later one. The alternative — a one-frame playout buffer, which is what a
@@ -1543,7 +1544,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   user picked in System Settings, respects their volume) and `AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)`
   on iOS (`objc2-audio-toolbox`, `AudioServices` feature; AudioToolbox.framework linked in the
   iOS spec). No `UNUserNotificationCenter`: it needs a signed bundle with the notification
-  entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle.
+  entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle
+  (superseded 2026-09-05: bundled app ships via `cargo xtask bundle` with GPUI `SystemNotification`
+  banners; see "Notification-centre banners for agents" below).
 - ✅ **Dock badge + bounce on macOS** (2026-09-05). `CanvasEvent::NeedsYou(n)` also calls
   `slopty_platform::set_badge(n)` (`NSApplication.dockTile.badgeLabel`, cleared at 0 and on
   every reconnect), and `Attention` adds `slopty_platform::bounce()`

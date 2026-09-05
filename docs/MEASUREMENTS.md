@@ -139,8 +139,9 @@ turned out to be the encoder, not SCK's window path; see "capture floor" below (
 which also moves windows onto the display-crop path.* The 60 fps cap yields ~50–53 delivered
 fps on a 60 Hz display.
 
-Not yet measured here: a real lossy/jittery path (Wi-Fi, LTE) and a release build. Arrival →
-present is measured in "start-up over iroh on a quiet machine, and arrival → present" below.
+Not yet measured here: a real lossy/jittery path (Wi-Fi, LTE) (release build measured 2026-09-05 in
+"capture floor" and 2026-09-06 in "stall attribution, parity overhead and a release row" below).
+Arrival → present is measured in "start-up over iroh on a quiet machine, and arrival → present" below.
 
 ## 2026-09-05 — capture floor: display vs window vs display-crop, queueDepth, encode (debug + release)
 
@@ -312,7 +313,8 @@ Takeaways:
   (one datagram each) but pointless; a capped retry or a host-side "no frames yet" hint would
   stop it.
 
-Not yet measured: LTE from the phone, a release build, and the arrival→present hold in the GPUI app.
+Not yet measured: LTE from the phone (release build measured 2026-09-05/2026-09-06 below; arrival→present
+hold measured in "start-up over iroh on a quiet machine, and arrival → present" below).
 
 ## 2026-09-05 — stalls, not drops: feedback datagrams and stall-aware deadlines on the mesh path
 
@@ -923,7 +925,7 @@ Takeaways:
   the loss; only the recovery columns compare across rows.
 
 Not measured here: the loss path over the mesh with the new controller (needs a second machine
-and a busy screen), and the refresh storm guard end to end (a hidden window over the socket).
+and a busy screen) (refresh storm guard end-to-end verified 2026-09-06; see "The refresh guard end to end" below).
 
 ## 2026-09-06 — stall attribution, parity overhead and a release row (loopback)
 
