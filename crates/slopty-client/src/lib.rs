@@ -11,6 +11,7 @@
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
 //!   numbers the overlay and the tests read.
 
+pub mod arrange;
 pub mod canvas;
 pub mod link;
 pub mod pacing;

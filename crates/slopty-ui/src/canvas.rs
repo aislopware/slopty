@@ -20,7 +20,10 @@ use gpui::{
     SharedString, Size, StatefulInteractiveElement as _, Styled as _, SystemNotification,
     SystemNotificationAction, Window, canvas, div, fill, outline, point, px, size,
 };
-use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
+use slopty_client::arrange::{self, Arrangeable, Heading};
+use slopty_client::canvas::{
+    CARD_ZOOM, Camera, CanvasDoc, FLIGHT, Flight, GAP, TERMINAL_SIZE, snap,
+};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason, TranscriptUpdate};
@@ -68,6 +71,10 @@ pub mod actions {
             ZoomReset,
             /// Fit every item in the viewport.
             FitAll,
+            /// Fit the active item in the viewport.
+            ZoomToItem,
+            /// Tidy the canvas into one block of items per repository.
+            ArrangeByRepo,
             /// Reveal the next terminal whose agent is waiting on the human.
             NextAttention,
             /// Silence or resume the active remote window's audio on this client.
@@ -83,8 +90,8 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewNote, NewTerminal,
-    NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
+    AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewNote,
+    NewTerminal, NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -112,6 +119,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd--", ZoomOut, CTX),
         KeyBinding::new("cmd-0", ZoomReset, CTX),
         KeyBinding::new("cmd-1", FitAll, CTX),
+        KeyBinding::new("cmd-2", ZoomToItem, CTX),
+        KeyBinding::new("cmd-shift-r", ArrangeByRepo, CTX),
         KeyBinding::new("cmd-shift-a", NextAttention, CTX),
         KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
         KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
@@ -277,6 +286,14 @@ pub struct CanvasView {
     viewport: (Point<Pixels>, Size<Pixels>),
     /// Fit every item into the viewport on the next frame (once the viewport is known).
     fit_pending: bool,
+    /// A camera move in progress, advanced once per frame by the render loop.
+    flight: Option<Flight>,
+    /// When the last frame ran, so a flight advances by real elapsed time.
+    frame_at: Option<std::time::Instant>,
+    /// Whether camera moves are animated. Off under the self-test, where a frame is a step.
+    animate: bool,
+    /// Repository headings from the last [`CanvasView::arrange_by_repo`], in canvas units.
+    headings: Vec<Heading>,
     /// Bring this item into view on the next frame (one we just created).
     reveal_pending: Option<ItemId>,
     drag: Option<Drag>,
@@ -346,6 +363,10 @@ impl CanvasView {
             rtt: None,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
+            flight: None,
+            frame_at: None,
+            animate: true,
+            headings: Vec::new(),
             reveal_pending: None,
             drag: None,
             minimap: None,
@@ -1341,18 +1362,146 @@ impl CanvasView {
         self.zoom_by(1.0 / ZOOM_STEP, cx);
     }
 
-    /// ⌘0
+    /// ⌘0: back to 100 %, keeping the active item in the middle (or, with nothing active,
+    /// whatever the viewport is centred on).
     pub fn zoom_reset(&mut self, _: &ZoomReset, _window: &mut Window, cx: &mut Context<Self>) {
-        let (_, vp) = self.viewport;
-        let factor = 1.0 / self.camera.zoom;
-        self.camera.zoom_at(factor, f32::from(vp.width) / 2.0, f32::from(vp.height) / 2.0);
-        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
-        cx.notify();
+        let viewport = self.viewport_size();
+        let target = self.active_rect().map_or_else(
+            || {
+                let mut camera = self.camera;
+                camera.zoom_at(1.0 / camera.zoom, viewport.0 / 2.0, viewport.1 / 2.0);
+                camera
+            },
+            |rect| Camera::centred_on(rect, viewport, 1.0),
+        );
+        self.fly_to(target, cx);
     }
 
     /// ⌘1
     pub fn fit_all(&mut self, _: &FitAll, _window: &mut Window, cx: &mut Context<Self>) {
         self.fit_now(cx);
+    }
+
+    /// ⌘2: fit the active item, with the padding ⌘1 uses. Nothing active is nothing to do —
+    /// ⌘1 is the action for "show me everything".
+    pub fn zoom_to_item(&mut self, _: &ZoomToItem, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(rect) = self.active_rect() {
+            let target = Camera::fitted([rect], self.viewport_size());
+            self.fly_to(target, cx);
+        }
+    }
+
+    /// The active item's rect, which is what ⌘2 and ⌘0 work on. There is no multi-selection on
+    /// the canvas yet; when there is, this is where it joins.
+    fn active_rect(&self) -> Option<Rect> {
+        self.active.and_then(|id| self.doc.get(id)).map(|item| item.rect)
+    }
+
+    /// The viewport in canvas-independent points.
+    fn viewport_size(&self) -> (f32, f32) {
+        let (_, vp) = self.viewport;
+        (f32::from(vp.width), f32::from(vp.height))
+    }
+
+    /// Whether camera moves are animated. The self-test turns this off so a dump right after
+    /// an action sees where the camera ended up, not where it was passing through.
+    pub const fn set_animation(&mut self, on: bool) {
+        self.animate = on;
+    }
+
+    /// Where the camera is heading, while it is on its way there.
+    #[must_use]
+    pub fn flying_to(&self) -> Option<Camera> {
+        self.flight.as_ref().map(Flight::target)
+    }
+
+    /// The repository headings the last arrange left, in canvas units.
+    #[must_use]
+    pub fn headings(&self) -> &[Heading] {
+        &self.headings
+    }
+
+    /// Move the camera to `target`, over [`FLIGHT`] seconds unless animation is off.
+    fn fly_to(&mut self, target: Camera, cx: &mut Context<Self>) {
+        let viewport = self.viewport_size();
+        if !self.animate || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+            self.flight = None;
+            self.camera = target;
+        } else {
+            self.flight = Some(Flight::new(self.camera, target, viewport, FLIGHT));
+            self.frame_at = None;
+        }
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    /// Advance a flight by the time since the last frame. Called from the canvas element's
+    /// prepaint, which is the only clock the UI has: no timers, and a still canvas costs
+    /// nothing because a landed flight stops asking for frames.
+    fn advance_flight(&mut self, cx: &mut Context<Self>) {
+        let Some(flight) = self.flight.as_mut() else {
+            self.frame_at = None;
+            return;
+        };
+        let now = std::time::Instant::now();
+        #[expect(clippy::cast_possible_truncation, reason = "a frame is milliseconds")]
+        let dt = self.frame_at.map_or(0.0, |then| now.duration_since(then).as_secs_f64() as f32);
+        self.frame_at = Some(now);
+        self.camera = flight.advance(dt);
+        let done = flight.done();
+        if done {
+            self.flight = None;
+            self.frame_at = None;
+        }
+        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
+        cx.notify();
+    }
+
+    /// ⌘⇧R: one block of items per repository, the most recently used on the left, and the
+    /// camera opened out to show the result.
+    ///
+    /// Not undoable: the canvas has no undo stack, here or for a drag.
+    pub fn arrange_by_repo(
+        &mut self,
+        _: &ArrangeByRepo,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items: Vec<Arrangeable> = self
+            .doc
+            .by_z()
+            .into_iter()
+            .map(|item| Arrangeable {
+                id: item.id,
+                rect: item.rect,
+                cwd: self.cwd_of(item),
+                // The z order is the recency the canvas already keeps: raising an item on
+                // focus is what makes it the most recent.
+                activity: u64::from(item.z),
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let arrangement = arrange::arrange_by_repo(&items, (GAP, GAP));
+        for (id, rect) in &arrangement.places {
+            if self.doc.get(*id).is_some_and(|item| item.rect != *rect) {
+                self.propose(CanvasOp::Place { id: *id, rect: *rect });
+            }
+        }
+        let target = Camera::fitted(arrangement.rects(), self.viewport_size());
+        self.headings = arrangement.headings;
+        self.fly_to(target, cx);
+    }
+
+    /// The working directory of an item's session, for grouping. Only terminals have one.
+    fn cwd_of(&self, item: &CanvasItem) -> Option<String> {
+        match item.kind {
+            ItemKind::Terminal { session } => {
+                self.sessions.get(&session).and_then(|s| s.cwd.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Fit every item on the next frame, when the viewport size is known. Used right after
@@ -1363,11 +1512,10 @@ impl CanvasView {
     }
 
     fn fit_now(&mut self, cx: &mut Context<Self>) {
-        let (_, vp) = self.viewport;
-        let rects: Vec<Rect> = self.doc.items().map(|i| i.rect).collect();
-        self.camera.fit(rects, (f32::from(vp.width), f32::from(vp.height)));
-        cx.emit(CanvasEvent::Zoom(self.camera.zoom));
-        cx.notify();
+        let rects: Vec<Rect> =
+            self.doc.items().map(|i| i.rect).chain(self.headings.iter().map(|h| h.rect)).collect();
+        let target = Camera::fitted(rects, self.viewport_size());
+        self.fly_to(target, cx);
     }
 
     // ----- pointer -------------------------------------------------------------------------
@@ -1472,19 +1620,26 @@ impl CanvasView {
     /// item or the one under a drag. Before the first paint the viewport is unknown and
     /// everything draws.
     fn draws(&self, item: &CanvasItem) -> bool {
-        let (_, vp) = self.viewport;
-        let (w, h) = (f32::from(vp.width), f32::from(vp.height));
-        if w <= 0.0 || h <= 0.0 || self.active == Some(item.id) {
+        if self.active == Some(item.id) {
             return true;
         }
         let dragged = match self.drag {
             Some(Drag::Move { id, .. } | Drag::Resize { id, .. }) => id == item.id,
             _ => false,
         };
-        if dragged {
+        dragged || self.on_screen(item.rect)
+    }
+
+    /// Whether `rect`, in canvas units, touches the viewport at the current camera. An unknown
+    /// viewport draws everything: culling against a size we have not measured would hide the
+    /// first frame.
+    fn on_screen(&self, rect: Rect) -> bool {
+        let (_, vp) = self.viewport;
+        let (w, h) = (f32::from(vp.width), f32::from(vp.height));
+        if w <= 0.0 || h <= 0.0 {
             return true;
         }
-        let s = self.camera.to_screen(item.rect);
+        let s = self.camera.to_screen(rect);
         s.x < w && s.y < h && s.x + s.w > 0.0 && s.y + s.h > 0.0
     }
 
@@ -1824,6 +1979,34 @@ impl CanvasView {
     /// The overview in the bottom-right corner: every item as a block, the viewport as an
     /// outline. Painted straight from the document each frame; the mapping is kept for
     /// hit-testing.
+    /// The heading over a repository block: the repository's name, in canvas coordinates so it
+    /// pans and zooms with the items under it.
+    fn render_heading(&self, heading: &Heading) -> gpui::AnyElement {
+        let s = self.camera.to_screen(heading.rect);
+        let k = self.camera.zoom.clamp(0.25, 1.0);
+        let theme = &self.theme;
+        div()
+            .id(ElementId::from(SharedString::from(format!("heading-{}", heading.key))))
+            .debug_selector({
+                let label = heading.label.clone();
+                move || format!("heading-{label}")
+            })
+            .role(Role::Heading)
+            .aria_label(heading.label.clone())
+            .absolute()
+            .left(px(s.x))
+            .top(px(s.y))
+            .w(px(s.w.max(1.0)))
+            .h(px(s.h))
+            .flex()
+            .items_end()
+            .text_size(px(theme.typography.small() * k))
+            .text_color(hsla(theme.surfaces.text_muted))
+            .font_family(theme.typography.ui_family.clone())
+            .child(heading.label.clone())
+            .into_any_element()
+    }
+
     fn render_minimap(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let camera = self.camera;
@@ -1931,6 +2114,7 @@ impl Render for CanvasView {
                     if std::mem::take(&mut this.fit_pending) && !this.is_empty() {
                         this.fit_now(cx);
                     }
+                    this.advance_flight(cx);
                     if let Some(rect) =
                         this.reveal_pending.take().and_then(|id| this.doc.get(id)).map(|i| i.rect)
                     {
@@ -1951,7 +2135,14 @@ impl Render for CanvasView {
         let empty = self.is_empty();
         // Only what the viewport shows is built: an off-screen terminal's element would still
         // shape and lay out every row. The active item and the one being dragged always are,
-        // so focus and a drag never land on an element that was not drawn.
+        // so focus and a drag never land on an element that was not drawn. A block's heading
+        // is culled the same way, on its own rect — it is a label on the canvas, not chrome.
+        let headings: Vec<gpui::AnyElement> = self
+            .headings
+            .iter()
+            .filter(|h| self.on_screen(h.rect))
+            .map(|h| self.render_heading(h))
+            .collect();
         let rendered: Vec<gpui::AnyElement> = items
             .iter()
             .filter(|item| self.draws(item))
@@ -1979,6 +2170,8 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::fit_all))
+            .on_action(cx.listener(Self::zoom_to_item))
+            .on_action(cx.listener(Self::arrange_by_repo))
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
@@ -1992,6 +2185,7 @@ impl Render for CanvasView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(record_bounds)
+            .children(headings)
             .children(rendered)
             .children(minimap)
             .children(picker)
@@ -2280,7 +2474,11 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let factory: ScreenFactory =
                 Arc::new(|_stream, _codec| panic!("this canvas opens no screens"));
-            let view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            // A headless frame is a step, not a moment: the flight itself is unit-tested in
+            // `slopty_client::canvas` with a clock of its own, so these tests assert where the
+            // camera lands. `a_camera_move_is_a_flight` turns it back on.
+            view.set_animation(false);
             window.focus(&view.focus, cx);
             view
         });
@@ -2303,6 +2501,20 @@ mod tests {
         rect: Rect,
         version: u64,
     ) -> ItemId {
+        host_opens_in(view, cx, session, by, rect, version, None)
+    }
+
+    /// [`host_opens`], with a working directory for the session (what arrange groups on).
+    #[expect(clippy::too_many_arguments, reason = "a test fixture, not an interface")]
+    fn host_opens_in(
+        view: &Entity<CanvasView>,
+        cx: &mut VisualTestContext,
+        session: SessionId,
+        by: ClientId,
+        rect: Rect,
+        version: u64,
+        cwd: Option<&str>,
+    ) -> ItemId {
         let item = CanvasItem {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
@@ -2315,7 +2527,7 @@ mod tests {
         let summary = SessionSummary {
             id: session,
             title: "shell".into(),
-            cwd: None,
+            cwd: cwd.map(str::to_owned),
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -2823,5 +3035,128 @@ mod tests {
         let bounds = cx.debug_bounds(selector("item", far)).expect("far item drawn after the pan");
         assert!(f32::from(bounds.origin.x) < VIEWPORT.0, "{bounds:?}");
         assert!(cx.debug_bounds(selector("item", near)).is_none(), "near item is off-screen now");
+    }
+
+    /// ⌘2 fills the viewport with the active item; ⌘0 goes back to 100 % without losing it.
+    /// Neither does anything a mouse could not, but both do it in one key.
+    #[gpui::test]
+    fn zoom_to_the_active_item_and_back_to_full_size(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        let a = host_opens(&view, cx, SessionId::new(), host, SHELL, 1);
+        let far = Rect { x: 4000.0, y: 2500.0, w: 300.0, h: 200.0 };
+        let b = host_opens(&view, cx, SessionId::new(), host, far, 2);
+
+        cx.simulate_keystrokes("cmd-1");
+        cx.run_until_parked();
+        let all = view.read_with(cx, |c, _| c.zoom());
+        assert!(all < CARD_ZOOM, "fit-all is zoomed out: {all}");
+
+        let card = cx.debug_bounds(selector("item", b)).expect("the far item is drawn");
+        cx.simulate_click(card.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(b));
+
+        cx.simulate_keystrokes("cmd-2");
+        cx.run_until_parked();
+        let (zoom, on_screen) = view.read_with(cx, |c, _| {
+            (c.zoom(), c.camera().to_screen(c.doc.get(b).expect("still there").rect))
+        });
+        assert!(zoom > all, "the one item fills more of the viewport: {zoom} vs {all}");
+        assert!(
+            on_screen.x >= 0.0
+                && on_screen.y >= 0.0
+                && on_screen.x + on_screen.w <= VIEWPORT.0 + 1.0
+                && on_screen.y + on_screen.h <= VIEWPORT.1 + 1.0,
+            "the item is inside the viewport: {on_screen:?}"
+        );
+
+        cx.simulate_keystrokes("cmd-0");
+        cx.run_until_parked();
+        let (zoom, on_screen) = view.read_with(cx, |c, _| {
+            (c.zoom(), c.camera().to_screen(c.doc.get(b).expect("still there").rect))
+        });
+        assert!((zoom - 1.0).abs() < 1e-3, "100 %: {zoom}");
+        let (cx_, cy_) = (on_screen.x + on_screen.w / 2.0, on_screen.y + on_screen.h / 2.0);
+        assert!((cx_ - VIEWPORT.0 / 2.0).abs() < 1.0, "still in the middle: {on_screen:?}");
+        assert!((cy_ - VIEWPORT.1 / 2.0).abs() < 1.0, "still in the middle: {on_screen:?}");
+        assert!(view.read_with(cx, |c, _| c.doc.get(a).is_some()), "nothing moved");
+    }
+
+    /// With animation on, a camera action starts a flight instead of jumping: the camera is
+    /// still where it was and knows where it is going. How it gets there is
+    /// `slopty_client::canvas`'s flight, which has a clock of its own in its own tests.
+    #[gpui::test]
+    fn a_camera_move_is_a_flight(cx: &mut TestAppContext) {
+        let (view, _rx, host, cx) = canvas(cx);
+        host_opens(&view, cx, SessionId::new(), host, SHELL, 1);
+        let before = view.read_with(cx, |c, _| c.camera());
+        view.update_in(cx, |c, _window, cx| {
+            c.set_animation(true);
+            cx.notify();
+        });
+
+        cx.simulate_keystrokes("cmd-1");
+        let (now, target) = view.read_with(cx, |c, _| (c.camera(), c.flying_to()));
+        let target = target.expect("a flight is in progress");
+        assert_ne!(target, before, "it is going somewhere");
+        assert!(
+            now == before || (now.zoom - target.zoom).abs() > f32::EPSILON,
+            "the camera has not jumped to the target: {now:?}"
+        );
+    }
+
+    /// ⌘⇧R puts each repository's shells in their own block, most recent on the left, and
+    /// leaves a heading over each one that a screen reader can read.
+    #[gpui::test]
+    fn arrange_gathers_the_shells_of_a_repository(cx: &mut TestAppContext) {
+        let (view, mut rx, host, cx) = canvas(cx);
+        let scattered = [
+            Rect { x: 1200.0, y: 30.0, w: 300.0, h: 200.0 },
+            Rect { x: 40.0, y: 900.0, w: 300.0, h: 200.0 },
+            Rect { x: 2200.0, y: 400.0, w: 300.0, h: 200.0 },
+        ];
+        let root =
+            host_opens_in(&view, cx, SessionId::new(), host, scattered[0], 1, Some("/w/app"));
+        let deep =
+            host_opens_in(&view, cx, SessionId::new(), host, scattered[1], 2, Some("/w/app/src"));
+        let other =
+            host_opens_in(&view, cx, SessionId::new(), host, scattered[2], 3, Some("/w/tools"));
+        while rx.try_recv().is_ok() {}
+
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-r");
+        cx.run_until_parked();
+
+        let rects = view.read_with(cx, |c, _| {
+            [root, deep, other].map(|id| c.doc.get(id).expect("still there").rect)
+        });
+        for (moved, was) in rects.iter().zip(scattered) {
+            assert_ne!((moved.x, moved.y), (was.x, was.y), "everything was tidied");
+            assert!((moved.w - was.w).abs() < f32::EPSILON, "sizes are kept");
+        }
+        // The two shells of one repository share a row, and the repository raised last is the
+        // leftmost block, so the newest work is where the eye starts.
+        assert!((rects[0].y - rects[1].y).abs() < f32::EPSILON, "{rects:?}");
+        assert!(rects[2].x < rects[0].x.min(rects[1].x), "{rects:?}");
+
+        let headings = view.read_with(cx, |c, _| c.headings().to_vec());
+        assert_eq!(
+            headings.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            ["tools", "app"],
+            "the most recently raised repository leads"
+        );
+        // The host was asked to move them, not told.
+        let moves = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| matches!(msg, ClientMsg::Canvas(CanvasOp::Place { .. })))
+            .count();
+        assert_eq!(moves, 3, "one Place per item");
+
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        for label in ["app", "tools"] {
+            assert!(
+                tree.iter().any(|n| n.role == "Heading" && n.label.as_deref() == Some(label)),
+                "a heading a screen reader can read: {tree:?}"
+            );
+        }
     }
 }

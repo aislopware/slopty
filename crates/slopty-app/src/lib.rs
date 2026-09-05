@@ -405,8 +405,17 @@ impl Workspace {
                 let Ok(Some(canvas)) = this.update(cx, |ws, cx| {
                     let theme = ws.theme.clone();
                     let sessions = ack.sessions.clone();
-                    let canvas =
-                        cx.new(|cx| CanvasView::new(me, sender, sessions, open_screen, theme, cx));
+                    let canvas = cx.new(|cx| {
+                        #[cfg_attr(not(feature = "e2e"), expect(unused_mut, reason = "the self-test is the only caller that mutates it"))]
+                        let mut canvas =
+                            CanvasView::new(me, sender, sessions, open_screen, theme, cx);
+                        // Under the self-test a frame is a step, not a moment: a camera still
+                        // flying when `dump` runs would report where it was passing through.
+                        // The tests assert the destination.
+                        #[cfg(feature = "e2e")]
+                        canvas.set_animation(false);
+                        canvas
+                    });
                     let events = cx.subscribe(&canvas, move |ws, _canvas, event, cx| match event {
                         CanvasEvent::Zoom(z) => {
                             if let Some(slot) = ws.slot_mut(id) {

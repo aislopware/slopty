@@ -250,6 +250,49 @@ impl Camera {
         self.pan(dx, dy);
     }
 
+    /// The camera [`Self::fit`] would leave, without moving this one.
+    #[must_use]
+    pub fn fitted(rects: impl IntoIterator<Item = Rect>, viewport: (f32, f32)) -> Self {
+        let mut camera = Self::default();
+        camera.fit(rects, viewport);
+        camera
+    }
+
+    /// The camera that puts `r`'s centre in the middle of the viewport at `zoom`.
+    ///
+    /// What ⌘0 wants: 100 % without losing the thing being looked at.
+    #[must_use]
+    pub fn centred_on(r: Rect, viewport: (f32, f32), zoom: f32) -> Self {
+        let zoom = if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { 1.0 };
+        let (vw, vh) = viewport;
+        Self {
+            x: (r.x + r.w / 2.0) - vw / zoom / 2.0,
+            y: (r.y + r.h / 2.0) - vh / zoom / 2.0,
+            zoom,
+        }
+    }
+
+    /// Interpolate towards `to`. `t` is clamped to `0..=1`.
+    ///
+    /// Zoom moves geometrically (a camera going 0.25 → 1 spends half the flight under 0.5, as
+    /// the eye reads it) while the top-left corner is derived from the interpolated *centre*,
+    /// so the thing in the middle of the viewport stays in the middle instead of swinging.
+    #[must_use]
+    pub fn lerp(self, to: Self, t: f32, viewport: (f32, f32)) -> Self {
+        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 1.0 };
+        let (vw, vh) = viewport;
+        let centre = |c: Self| (c.x + vw / c.zoom / 2.0, c.y + vh / c.zoom / 2.0);
+        let (fx, fy) = centre(self);
+        let (tx, ty) = centre(to);
+        let zoom = if self.zoom > 0.0 && to.zoom > 0.0 {
+            self.zoom * (to.zoom / self.zoom).powf(t)
+        } else {
+            to.zoom
+        };
+        let (cx, cy) = ((tx - fx).mul_add(t, fx), (ty - fy).mul_add(t, fy));
+        Self { x: cx - vw / zoom / 2.0, y: cy - vh / zoom / 2.0, zoom }
+    }
+
     /// Fit `rects` into a `(w, h)` viewport with padding, centred.
     pub fn fit(&mut self, rects: impl IntoIterator<Item = Rect>, viewport: (f32, f32)) {
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
@@ -271,6 +314,63 @@ impl Camera {
         self.zoom = zoom;
         self.x = x0 - (vw / zoom - w) / 2.0;
         self.y = y0 - (vh / zoom - h) / 2.0;
+    }
+}
+
+/// How long a camera move takes, in seconds. Long enough to read as movement, short enough
+/// that a second ⌘2 never feels queued.
+pub const FLIGHT: f32 = 0.18;
+
+/// Cubic ease-out: fast off the mark, settling at the end. `t` is clamped to `0..=1`.
+#[must_use]
+pub fn ease_out(t: f32) -> f32 {
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 1.0 };
+    let inv = 1.0 - t;
+    (-inv).mul_add(inv * inv, 1.0)
+}
+
+/// A camera move in progress: pure, driven by whoever has a clock.
+///
+/// The UI advances it once per frame with the time since the last one, which is why there is
+/// no timer anywhere: the render loop is the clock, and a test can be its own.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Flight {
+    from: Camera,
+    to: Camera,
+    viewport: (f32, f32),
+    elapsed: f32,
+    duration: f32,
+}
+
+impl Flight {
+    /// A flight from `from` to `to` over `duration` seconds.
+    #[must_use]
+    pub fn new(from: Camera, to: Camera, viewport: (f32, f32), duration: f32) -> Self {
+        let duration = if duration.is_finite() && duration > 0.0 { duration } else { 0.0 };
+        Self { from, to, viewport, elapsed: 0.0, duration }
+    }
+
+    /// Where it ends.
+    #[must_use]
+    pub const fn target(&self) -> Camera {
+        self.to
+    }
+
+    /// Whether the flight has landed.
+    #[must_use]
+    pub fn done(&self) -> bool {
+        self.elapsed >= self.duration
+    }
+
+    /// Advance by `dt` seconds and return where the camera is now. A landed flight returns its
+    /// target exactly, so the last frame is never a rounding error away from it.
+    pub fn advance(&mut self, dt: f32) -> Camera {
+        let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+        self.elapsed += dt;
+        if self.done() {
+            return self.to;
+        }
+        self.from.lerp(self.to, ease_out(self.elapsed / self.duration), self.viewport)
     }
 }
 
@@ -395,5 +495,80 @@ mod tests {
             let s = cam.to_screen(r);
             assert!(s.x >= 0.0 && s.y >= 0.0 && s.x + s.w <= 800.0 && s.y + s.h <= 600.0, "{s:?}");
         }
+    }
+
+    /// The camera flies with a fake clock: an ease-out that starts fast, lands exactly on the
+    /// target, and keeps whatever is in the middle of the viewport in the middle.
+    #[test]
+    fn a_flight_eases_out_and_lands_on_its_target() {
+        let vp = (800.0, 600.0);
+        let from = Camera { x: 0.0, y: 0.0, zoom: 1.0 };
+        let to = Camera::centred_on(Rect { x: 2000.0, y: 1000.0, w: 400.0, h: 300.0 }, vp, 0.5);
+        let mut flight = Flight::new(from, to, vp, FLIGHT);
+
+        let quarter = flight.advance(FLIGHT / 4.0);
+        assert!(!flight.done());
+        // Ease-out: a quarter of the time is more than a quarter of the way there.
+        let progress = (quarter.x - from.x) / (to.x - from.x);
+        assert!(progress > 0.25 && progress < 1.0, "{progress}");
+
+        let mid = flight.advance(FLIGHT / 4.0);
+        assert!(mid.x > quarter.x, "still moving: {mid:?} after {quarter:?}");
+        assert!(mid.zoom < from.zoom && mid.zoom > to.zoom, "zoom follows: {mid:?}");
+
+        let landed = flight.advance(FLIGHT);
+        assert!(flight.done());
+        assert_eq!(landed, to, "the last frame is the target exactly");
+        assert_eq!(flight.advance(1.0), to, "and stays there");
+    }
+
+    /// Mid-flight the viewport centre travels straight from one centre to the other, so a
+    /// zoom-out and a pan read as one movement instead of a swing.
+    #[test]
+    fn the_middle_of_the_viewport_goes_straight_there() {
+        let vp = (800.0, 600.0);
+        let from = Camera { x: 0.0, y: 0.0, zoom: 2.0 };
+        let to = Camera { x: 900.0, y: 300.0, zoom: 0.5 };
+        let centre = |c: Camera| (c.x + vp.0 / c.zoom / 2.0, c.y + vp.1 / c.zoom / 2.0);
+        let (fx, fy) = centre(from);
+        let (tx, ty) = centre(to);
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0_f32] {
+            let (cx, cy) = centre(from.lerp(to, t, vp));
+            assert!((cx - (tx - fx).mul_add(t, fx)).abs() < 0.01, "at {t}: {cx}");
+            assert!((cy - (ty - fy).mul_add(t, fy)).abs() < 0.01, "at {t}: {cy}");
+        }
+        // Zoom moves geometrically: halfway through, the scale is the geometric mean.
+        let half = from.lerp(to, 0.5, vp).zoom;
+        assert!((half - (2.0_f32 * 0.5).sqrt()).abs() < 0.01, "{half}");
+    }
+
+    /// ⌘0: 100 % without losing what is being looked at.
+    #[test]
+    fn reset_keeps_the_item_in_the_middle() {
+        let vp = (800.0, 600.0);
+        let item = Rect { x: 100.0, y: 50.0, w: 400.0, h: 300.0 };
+        let cam = Camera::centred_on(item, vp, 1.0);
+        assert!((cam.zoom - 1.0).abs() < f32::EPSILON);
+        let screen = cam.to_screen(item);
+        assert!((screen.x + screen.w / 2.0 - vp.0 / 2.0).abs() < 0.01, "{screen:?}");
+        assert!((screen.y + screen.h / 2.0 - vp.1 / 2.0).abs() < 0.01, "{screen:?}");
+
+        // And the same at another zoom, since ⌘2 lands through the same constructor.
+        let closer = Camera::centred_on(item, vp, 0.5);
+        let screen = closer.to_screen(item);
+        assert!((screen.x + screen.w / 2.0 - vp.0 / 2.0).abs() < 0.01, "{screen:?}");
+    }
+
+    /// `fitted` is `fit` without moving the camera it was called on.
+    #[test]
+    fn fitted_is_fit_without_the_side_effect() {
+        let vp = (800.0, 600.0);
+        let rects = [
+            Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+            Rect { x: 900.0, y: 400.0, w: 200.0, h: 200.0 },
+        ];
+        let mut moved = Camera::default();
+        moved.fit(rects, vp);
+        assert_eq!(Camera::fitted(rects, vp), moved);
     }
 }
