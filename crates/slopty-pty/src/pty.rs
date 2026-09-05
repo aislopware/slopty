@@ -228,19 +228,58 @@ fn write_fd(fd: &OwnedFd, data: &[u8]) -> io::Result<usize> {
 }
 
 /// `(program, args, arg0)`: an empty command means the login shell run as a login shell
-/// (`argv[0] = "-zsh"`), like Terminal.app.
+/// (`argv[0] = "-zsh"`), like Terminal.app. A bare program name the daemon cannot find on its
+/// own `PATH` (a `LaunchAgent` inherits launchd's `/usr/bin:/bin:…`) runs the way the user's
+/// terminal would run it: through the login shell, interactive, so the rc files' `PATH` and
+/// aliases apply (`claude` is often an alias).
 fn resolve_command(command: &[String]) -> (String, Vec<String>, Option<String>) {
+    let shell = login_shell();
     if let Some((program, args)) = command.split_first() {
-        return (program.clone(), args.to_vec(), None);
+        if program.contains('/') || on_path(program) {
+            return (program.clone(), args.to_vec(), None);
+        }
+        let line = command.iter().map(|word| shell_quote(word)).collect::<Vec<_>>().join(" ");
+        return (shell, vec!["-lic".to_owned(), line], None);
     }
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
     let base = Path::new(&shell)
         .file_name()
         .map_or_else(|| "sh".to_owned(), |n| n.to_string_lossy().into_owned());
     (shell, Vec::new(), Some(format!("-{base}")))
+}
+
+/// `$SHELL`, else the account's shell from the passwd database (a `LaunchAgent` gets no
+/// `SHELL`), else zsh.
+fn login_shell() -> String {
+    if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
+        return shell;
+    }
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.shell.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_owned())
+}
+
+/// Whether `program` is an executable file on this process's `PATH`.
+fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            std::fs::metadata(dir.join(program))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
+/// Single-quote a word for a POSIX or fish shell.
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty()
+        && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&b))
+    {
+        return word.to_owned();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 fn home_dir() -> PathBuf {
@@ -330,5 +369,26 @@ mod tests {
         assert!(arg0.unwrap().starts_with('-'));
         let (p, a, explicit_arg0) = resolve_command(&["/bin/ls".to_owned(), "-l".to_owned()]);
         assert_eq!((p.as_str(), a.len(), explicit_arg0), ("/bin/ls", 1, None));
+    }
+
+    #[test]
+    fn bare_program_on_path_runs_directly() {
+        let (p, a, arg0) = resolve_command(&["ls".to_owned(), "-l".to_owned()]);
+        assert_eq!((p.as_str(), a.as_slice(), arg0), ("ls", &["-l".to_owned()][..], None));
+    }
+
+    #[test]
+    fn unknown_bare_program_goes_through_the_login_shell() {
+        let (p, a, arg0) = resolve_command(&["slopty-no-such-tool".to_owned(), "it's".to_owned()]);
+        assert_eq!(p, login_shell());
+        assert_eq!(a, vec!["-lic".to_owned(), "slopty-no-such-tool 'it'\\''s'".to_owned()]);
+        assert_eq!(arg0, None);
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_words_alone() {
+        assert_eq!(shell_quote("--flag=1"), "--flag=1");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
     }
 }
