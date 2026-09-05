@@ -277,13 +277,14 @@ way the CLI does and the host's connect loop starts.
 | `slopty-client` | client session state, canvas document | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
-| `slopty-ui` | GPUI elements and views | client |
+| `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
+| `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness, numeric golden diff (`cargo xtask e2e app`) | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
 | `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim\|device` generates the Xcode project | client |
 | `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
-| `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e` for the gated live tests) | dev |
+| `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|host|screen|input|all` for the self-test and the gated live tests) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-host`.

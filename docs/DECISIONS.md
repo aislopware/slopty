@@ -416,6 +416,12 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   disconnect until the close was spawned onto the runtime and joined (crash report
   2026-09-04). Rule: anything from iroh/tokio-time runs via `runtime.spawn`, GPUI tasks only
   await join handles and channels.
+- ⚠️ **One iroh endpoint per process** (found by the app self-test 2026-09-05). The app used to
+  bind an endpoint to pair, close it, and bind a second one with the same secret key to
+  connect; the second dial hung until the step timeout (the host never saw its packets;
+  iroh's discovery/relay state for that key was still the old endpoint's). `slopty-app::net`
+  keeps a process-wide `OnceCell<Endpoint>` used by both `pair_host` and `connect_to`, and
+  never closes it.
 
 ## Video
 
@@ -632,6 +638,41 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
   `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
   unverified; verify with a ⌘ chord once the daemon is signed).
+
+## Testing
+
+- ✅ **Four layers, each answering one question, fastest first** (2026-09-05). Unit tests for
+  logic behind traits with fakes (`slopty_input::Recorder`); headless GPUI tests in
+  `slopty-ui` (`#[gpui::test]`, `VisualTestContext`) for layout, focus, key bindings and what
+  the scene paints; the app self-test (`crates/slopty-e2e`, `cargo xtask e2e app`) for the
+  wiring of daemons + app + network + real PTY; the gated live desktop tests for capture
+  and event posting. A behaviour is pinned at the lowest layer that can see it; the layers
+  above only prove the seams. `CLAUDE.md` ▸ Tests is the operating guide.
+- ✅ **The app tests itself over a control socket instead of being driven from outside**
+  (2026-09-05). With `SLOPTY_TEST_SOCKET` set (feature `slopty/e2e`) the app serves JSON lines:
+  `pair`, `keys`, `type`, `click`, `scroll`, `resize`, `dump`, `render`, `quit`. Input goes
+  through `Window::dispatch_keystroke`/`dispatch_event`, so bindings, focus and listeners run
+  exactly as for a user, and every command settles on the next frame before it answers.
+  `dump` is the app's own model of its window (items with window bounds, focus owner, zoom,
+  terminal rows); `render` is `Window::render_to_image` (fork, `test-support`), the app
+  painting its own window, diffed numerically against a golden with a 24-value channel slack
+  and a 1 % pixel tolerance. No external process ever posts events into the app or captures
+  it, and nobody has to look at the images: the numbers and the `.diff.png` path are the
+  verdict. Two real bugs surfaced on the first run (below).
+- ✅ **Headless UI tests read the scene like a DOM** (2026-09-05). Item roots carry
+  `.debug_selector("item-<uuid>")` and the canvas root `"canvas"`; `cx.debug_bounds` gives
+  their laid-out bounds, `window.painted_quads()` the borders and colours the frame actually
+  produced, and `simulate_click(bounds.center())`/`simulate_keystrokes` drive them. The fake
+  host is an `mpsc` pair: the test asserts what the canvas sent and feeds back the
+  `CanvasSync` deltas and `Frame`s a host would. GPUI's `TestPlatform` has no accessibility
+  tree yet; exposing accesskit for dumps is a later fork change.
+- ⚠️ **GPUI drops keystrokes when the focused element is not in the frame** (found by the
+  app self-test 2026-09-05: ⌘W dead after ⌘1). Below `CARD_ZOOM` the terminals are drawn as
+  cards without their views, so the focused `TerminalView` handle had no node in the
+  dispatch tree and nothing, not even canvas bindings, ran. `CanvasView::keep_focus_rendered`
+  moves focus to the canvas while in card mode and back to the active terminal when the
+  grids return; the headless test `zooming_out_to_cards_hands_the_keyboard_to_the_canvas_and_back`
+  pins it.
 
 ## Tooling (versions verified on crates.io / GitHub 2026-09-04)
 

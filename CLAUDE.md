@@ -38,15 +38,31 @@ hypothesis until DECISIONS.md marks it verified.
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
 
-## Live tests
-- Anything that posts real events, captures the screen or spawns the daemons is gated
-  (`SLOPTY_SCREEN_E2E`, `SLOPTY_INPUT_E2E`) and runs only through `cargo xtask e2e
-  host|screen|input|all`, which gives the daemons their own data dir under `target/e2e/`.
-  The assertions live inside those tests; do not drive a check by hand from a session
-  (synthetic keys into a pid, per-window screenshots, reading screenshots back). That
-  combination reads as surveillance tooling and got several sessions flagged.
-- Input logic is tested without the desktop: `slopty_input::Injector` posts through a
-  `Backend`, and `Recorder` is the fake one. Add unit tests there, not live ones.
+## Tests (four layers, fastest first)
+1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`
+   for the injector, `Camera`/`CanvasDoc` in `slopty-client`). Runs under `cargo gate`.
+2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui`: a `VisualTestContext` window with real
+   layout, `simulate_keystrokes`/`simulate_click`, a channel for the host. Read the UI like
+   a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
+   for colours and borders, view accessors (`rows()`, `zoom()`, `active_item()`). No pixels,
+   no process, runs under `cargo gate`. Every canvas/terminal behaviour gets a test here first.
+3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`, gate `SLOPTY_APP_E2E`):
+   launches ptyd + hostd + the app (built with `--features slopty/e2e`) in a temp dir, pairs
+   them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
+   dump, render). `dump` is the structured state (items, focus, zoom, terminal rows);
+   `render` is GPUI drawing its own window to a PNG, compared numerically with
+   `crates/slopty-e2e/golden` (`--accept` rewrites goldens). Nothing touches another app.
+4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
+   `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
+   The assertions live inside those tests.
+
+Rules for a session:
+- Never drive a check by hand (synthetic keys into a pid, per-window screenshots, reading
+  screenshots back). That combination reads as surveillance tooling and got several sessions
+  flagged. Add a test at the lowest layer that can see the behaviour and run it.
+- Never open an image in a session, not even one the app rendered itself. Read the diff
+  numbers (`differing/total`) and the `.diff.png` path from the test output; the golden
+  workflow exists so the model never has to look at pixels.
 - Never read, grep or dump old Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`)
   into a session: they replay the flagged pattern. To investigate a flag, look at metadata
   only (timestamps, tool names, `model_refusal_fallback`), never at the payloads.
