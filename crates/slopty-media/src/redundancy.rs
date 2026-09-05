@@ -75,10 +75,12 @@ impl Redundancy {
     ///
     /// A window the receiver spent stalled is not evidence about loss: the link was holding
     /// packets, not dropping them, and the missing fragments it reports usually arrive with the
-    /// release. Those windows leave the estimate alone (the same rule the bitrate controller's
-    /// `Stall` verdict follows).
+    /// release. Those windows leave the estimate alone — both halves of it, exactly as the
+    /// bitrate controller's `Stall` verdict does: `stalls` counts the stalls that *released* in
+    /// the window, and a stall that releases just after the previous report charged its duration
+    /// reports `stalls > 0` with `stalled_ms == 0`.
     pub fn on_report(&mut self, report: &ReceiverReport, datagrams_sent: u32) -> u16 {
-        if report.stalled_ms == 0 {
+        if report.stalled_ms == 0 && report.stalls == 0 {
             let sent = u64::from(datagrams_sent.max(report.datagrams_lost).max(1));
             // In `u64`: `lost * 1000` overflows `u32` above ~4.3 million datagrams, and a
             // saturated numerator would read as *less* loss the worse the window was.
@@ -249,7 +251,9 @@ mod tests {
     }
 
     /// A stalled window is the link holding packets, not dropping them: the fragments it reports
-    /// missing usually arrive with the release, so they must not buy parity.
+    /// missing usually arrive with the release, so they must not buy parity. Both halves of the
+    /// signal count — a stall that releases just after the previous report charged its duration
+    /// leaves `stalled_ms` at zero and only the `stalls` counter to go on.
     #[test]
     fn a_stalled_window_does_not_move_the_estimate() {
         let mut r = Redundancy::new();
@@ -262,6 +266,15 @@ mod tests {
             r.on_report(&stalled, 300);
         }
         assert_eq!(r.loss_permille(), quiet, "a stall is not loss");
+        assert_eq!(r.permille(), Redundancy::MIN);
+
+        // The stall released a hair after the last report: its duration was charged there, so
+        // this window carries the delayed fragments and nothing but the counter to explain them.
+        let released = ReceiverReport { stalled_ms: 0, stalls: 1, ..report(120, 0) };
+        for _ in 0..10 {
+            r.on_report(&released, 300);
+        }
+        assert_eq!(r.loss_permille(), quiet, "a released stall is not loss either");
         assert_eq!(r.permille(), Redundancy::MIN);
     }
 
