@@ -2,15 +2,18 @@
 //!
 //! Runs only with `SLOPTY_IOS_E2E=1` (`cargo xtask e2e ios [--sim iphone|ipad]`): the daemons
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
-//! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. One test, phone or tablet:
-//! a shell opens, its rows come back, typed text echoes, and the terminal is sized for the
-//! screen it is on (a phone shrinks it to the viewport, an iPad keeps the desktop size).
+//! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. Two tests, phone or
+//! tablet: a shell opens, its rows come back, typed text echoes, and the terminal is sized for
+//! the screen it is on (a phone shrinks it to the viewport, an iPad keeps the desktop size);
+//! and a played Claude Code session (its hook handed to hostd from the test) shows its
+//! conversation, inside the screen above the key bar, with a composer that types into the
+//! shell.
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::harness::{Simulator, Stack};
+    use slopty_e2e::harness::{Simulator, Stack, TRANSCRIPT_LINES};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
@@ -75,6 +78,75 @@ mod tests {
         assert!(dump.items.iter().any(|i| i.id != term.id && i.active), "{dump:#?}");
         drv.keys("cmd-w").await.unwrap();
         drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+        stack.shutdown().await;
+    }
+
+    /// The conversation view on the phone or the tablet: a hook handed to hostd (on the Mac)
+    /// over its control socket names the fixture transcript, ⌘⇧L shows every entry with the
+    /// composer above the key bar and focused, and the composer's text reaches the shell on
+    /// Enter.
+    #[tokio::test]
+    async fn the_conversation_view_on_the_simulator() {
+        let Some(simulator) = simulator() else { return };
+        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the first shell with a prompt", STEP, |d| {
+                d.status == "connected"
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await
+            .unwrap();
+        let session = dump.terminals[0].session.clone();
+        stack.play_hook(&session, "Stop", r#","last_assistant_message":"Fixed.""#).await.unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the agent to be seen", STEP, |d| {
+            d.terminals.iter().any(|t| t.agent.as_deref() == Some("done"))
+        })
+        .await
+        .unwrap();
+
+        drv.keys("cmd-shift-l").await.unwrap();
+        let dump = drv
+            .wait_for("the conversation with every entry", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.conversation
+                        .as_ref()
+                        .is_some_and(|c| c.entries.len() == TRANSCRIPT_LINES.len())
+                })
+            })
+            .await
+            .unwrap();
+        let conversation = dump.terminals[0].conversation.clone().unwrap();
+        assert_eq!(conversation.entries, TRANSCRIPT_LINES, "{dump:#?}");
+        assert!(conversation.composer_focused && conversation.pinned, "{conversation:?}");
+        // The item (and the composer at its bottom) stays inside the screen, above the key
+        // bar and the home indicator.
+        let term = dump.item("terminal").unwrap();
+        let [x, y, w, h] = term.bounds;
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + w <= dump.window.width + 1.0 && y + h < dump.window.height,
+            "{term:?} in {}x{}",
+            dump.window.width,
+            dump.window.height
+        );
+
+        drv.type_text("# from the composer").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the shell to echo the composer's line", STEP, |d| {
+                !d.rows_containing("from the composer").is_empty()
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.terminals[0].conversation.as_ref().unwrap().composer, "");
+
+        // No `render` here: the iOS platform of the GPUI fork has no `render_to_image` yet, so
+        // the frame is checked through the dump (layout, focus, entries), not a golden.
+        drv.keys("cmd-shift-l").await.unwrap();
+        drv.wait_for("the grid back", STEP, |d| d.terminals[0].conversation.is_none())
+            .await
+            .unwrap();
         stack.shutdown().await;
     }
 }

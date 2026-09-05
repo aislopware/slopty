@@ -9,7 +9,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 use crate::driver::Driver;
@@ -18,6 +20,29 @@ use crate::driver::Driver;
 const STARTUP: Duration = Duration::from_secs(30);
 /// Socket poll interval.
 const POLL: Duration = Duration::from_millis(50);
+
+/// A Claude Code transcript in the JSONL shape the hooks name: one exchange with thinking, a
+/// tool call, its result and the answer (a fixture, never a real session's file).
+pub const TRANSCRIPT: &str = concat!(
+    r#"{"type":"user","timestamp":"2026-09-05T10:00:00.000Z","message":{"role":"user","content":"fix the failing test"}}"#,
+    "\n",
+    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The assertion compares the wrong field."},{"type":"text","text":"Looking at the test."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test -p demo"}}]}}"#,
+    "\n",
+    r#"{"type":"user","timestamp":"2026-09-05T10:00:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"running 2 tests\ntest a ... ok\ntest b ... FAILED"}]}}"#,
+    "\n",
+    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Fixed: `b` compared **id** with *name*.\n\n- one edit\n- both tests pass"}]}}"#,
+    "\n",
+);
+
+/// The lines [`TRANSCRIPT`] shows as, in the dump's words.
+pub const TRANSCRIPT_LINES: [&str; 6] = [
+    "user: fix the failing test",
+    "thinking",
+    "assistant: Looking at the test.",
+    "tool Bash: cargo test -p demo",
+    "result Bash: running 2 tests",
+    "assistant: Fixed: `b` compared **id** with *name*.",
+];
 
 /// The running stack.
 #[derive(Debug)]
@@ -90,6 +115,22 @@ async fn wait_for_path(path: &Path, child: &mut Child, what: &str) -> Result<()>
         Ok(result) => result,
         Err(_elapsed) => bail!("{what} did not create {} within {STARTUP:?}", path.display()),
     }
+}
+
+/// One request over hostd's control socket at `path` (newline-delimited JSON, one request
+/// per connection), and its reply.
+async fn ctl(path: &Path, request: &Value) -> Result<Value> {
+    let stream = UnixStream::connect(path)
+        .await
+        .with_context(|| format!("connect to hostd at {}", path.display()))?;
+    let (rd, mut wr) = stream.into_split();
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    wr.write_all(&line).await?;
+    wr.shutdown().await?;
+    let mut reply = String::new();
+    BufReader::new(rd).read_line(&mut reply).await?;
+    serde_json::from_str(reply.trim()).context("hostd's reply is not JSON")
 }
 
 /// Wait for a socket path from a process that is not our child (the simulator's).
@@ -242,6 +283,36 @@ impl Stack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// The transcript a played agent writes ([`Self::play_hook`]).
+    #[must_use]
+    pub fn transcript_path(&self) -> PathBuf {
+        self.path("agent.jsonl")
+    }
+
+    /// Play a Claude Code hook in `session` (the id from the dump): write [`TRANSCRIPT`] under
+    /// the run's directory and hand hostd the payload for `event` (plus `fields`, more JSON
+    /// members) naming it over its control socket, exactly what `slopty hook` relays from the
+    /// agent's shell. Nothing is typed into the shell: the agent is simulated from the test.
+    ///
+    /// # Errors
+    ///
+    /// When the transcript cannot be written or hostd refuses the hook.
+    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
+        let transcript = self.transcript_path();
+        std::fs::write(&transcript, TRANSCRIPT)?;
+        let payload = format!(
+            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
+            transcript.display()
+        );
+        let request = json!({ "cmd": "hook", "session": session, "payload": payload });
+        let reply = ctl(&self.path("hostd.sock"), &request).await?;
+        anyhow::ensure!(
+            reply.get("reply").and_then(Value::as_str) == Some("ok"),
+            "hostd refused the hook: {reply}"
+        );
+        Ok(())
     }
 
     /// Ask the app to quit, then kill whatever is left.

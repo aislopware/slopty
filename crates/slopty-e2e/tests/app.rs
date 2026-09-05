@@ -8,7 +8,7 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::harness::artifacts_dir;
+    use slopty_e2e::harness::{TRANSCRIPT_LINES, artifacts_dir};
     use slopty_e2e::snapshot::assert_matches;
     use slopty_e2e::{Command, Stack};
 
@@ -142,6 +142,113 @@ mod tests {
         let dump =
             drv.wait_for("the first shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
         assert!(dump.items.iter().all(|i| i.id != term.id), "{dump:#?}");
+        stack.shutdown().await;
+    }
+
+    /// A played Claude Code session (its hooks handed to hostd over the control socket from
+    /// this test, its transcript a fixture): ⌘⇧L shows the conversation with every entry, the
+    /// composer's text reaches the shell only on Enter, a permission puts the Allow / Deny row
+    /// up, and ⌘⇧L brings the grid and the keyboard back.
+    #[tokio::test]
+    async fn the_conversation_view_reads_and_answers_the_agent() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-host").await.unwrap();
+        let render_path = stack.path("conversation.png");
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the first shell with a prompt", STEP, |d| {
+                d.status == "connected"
+                    && d.focus.as_deref() == Some("terminal")
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await
+            .unwrap();
+        let session = dump.terminals[0].session.clone();
+
+        // The agent's `Stop` hook names the transcript; the host now knows the session runs
+        // Claude Code.
+        stack.play_hook(&session, "Stop", r#","last_assistant_message":"Fixed.""#).await.unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the agent to be seen", STEP, |d| {
+            d.terminals.iter().any(|t| t.agent.as_deref() == Some("done"))
+        })
+        .await
+        .unwrap();
+
+        // ⌘⇧L: the conversation replaces the grid, the host streams the transcript, and the
+        // composer has the keyboard.
+        drv.keys("cmd-shift-l").await.unwrap();
+        let dump = drv
+            .wait_for("the conversation with every entry", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.conversation
+                        .as_ref()
+                        .is_some_and(|c| c.entries.len() == TRANSCRIPT_LINES.len())
+                })
+            })
+            .await
+            .unwrap();
+        let conversation = dump.terminals[0].conversation.clone().unwrap();
+        assert_eq!(conversation.entries, TRANSCRIPT_LINES, "{dump:#?}");
+        assert!(conversation.composer_focused && conversation.pinned, "{conversation:?}");
+        assert_eq!(conversation.attention, None);
+
+        // Typed text lands in the composer, not in the shell; Enter sends it into the shell
+        // (a comment: the shell echoes it at its prompt and runs nothing) and clears it.
+        drv.type_text("# from the composer").await.unwrap();
+        let dump = drv
+            .wait_for("the composer text", STEP, |d| {
+                d.terminals[0]
+                    .conversation
+                    .as_ref()
+                    .is_some_and(|c| c.composer == "# from the composer")
+            })
+            .await
+            .unwrap();
+        assert!(
+            dump.rows_containing("from the composer").is_empty(),
+            "nothing reached the shell yet"
+        );
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the shell to echo the composer's line", STEP, |d| {
+                !d.rows_containing("from the composer").is_empty()
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.terminals[0].conversation.as_ref().unwrap().composer, "");
+
+        let frame = drv.render(&render_path).await.unwrap();
+        assert!(foreground_fraction(&frame) > 0.01, "frame is blank");
+        assert_matches("conversation", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // A permission request puts the Allow / Deny row above the composer (the headless test
+        // presses the buttons; here the frame is the check).
+        stack.play_hook(&session, "PermissionRequest", r#","tool_name":"Bash""#).await.unwrap();
+        let drv = &mut stack.driver;
+        let dump = drv
+            .wait_for("the permission row", STEP, |d| {
+                d.terminals[0]
+                    .conversation
+                    .as_ref()
+                    .is_some_and(|c| c.attention.as_deref() == Some("permission:Bash"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.terminals[0].agent.as_deref(), Some("blocked:permission:Bash"));
+        let frame = drv.render(&stack.dir.path().join("permission.png")).await.unwrap();
+        assert_matches("conversation-permission", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // ⌘⇧L again: the grid is back with the keyboard.
+        drv.keys("cmd-shift-l").await.unwrap();
+        drv.wait_for("the grid back with the keyboard", STEP, |d| {
+            d.terminals[0].conversation.is_none() && d.focused == format!("terminal:{session}")
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 
