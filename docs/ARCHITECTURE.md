@@ -541,9 +541,12 @@ own repository), caches it per session and sends it as `SessionSummary.repo` and
 all, falls back to the client's containment heuristic over the working directories.
 Headings draw in canvas coordinates with role `Heading`, so they pan, zoom and read aloud.
 
-**Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph
-runs shaped per row and cached by content hash, background quads, cursor, selection,
-underlines and strikethroughs at the offsets §2's metrics derive, ⌘-hover link underline) with a hairline over every prompt-start row but the first line: the
+**Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (each
+row's words shaped once at the base size and cached by content hash, their glyphs painted one
+by one at the zoomed size through `Window::paint_glyph` from the fork's `ShapedLine::layout`,
+so a zoom step shapes nothing; background quads, cursor, selection, underlines — the curly one
+as GPUI's wave — and strikethroughs at the offsets §2's metrics derive, ⌘-hover link
+underline) with a hairline over every prompt-start row but the first line: the
 command-block separator, the foreground at 18 % alpha, or the theme's `surfaces.error` token
 at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`). Terminal-context bindings: ⌘C /
@@ -562,10 +565,13 @@ viewport (`draws`; the active and any dragged item always), each as a card below
 or as its view above it, then the minimap from every item's rectangle, the overlays and the
 `frames::probe()` element last. The terminal element's prepaint reads the view's rows in place,
 splits each into words (plain spaces and digits are the boundaries) and looks every word up in
-the `ShapeCache` global — an `Rc<ShapedLine>` per (text, styles, size, family, palette, focus),
-swept once per frame — so a frame of streaming output shapes only the words it has never seen;
-paint places each word at column × cell width, over the row's background quads and under the
-cursor, the link underline and the prediction overlay. Host events reach the canvas from the
+the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plus its per-byte
+colours) per (text, styles, family, palette, focus), never per zoom, swept once per frame — so
+a frame of streaming output shapes only the words it has never seen and a zoom step shapes
+nothing; paint puts every glyph of a word at column × cell width plus its shaped position
+scaled by the zoom, on the derived baseline, through `Window::paint_glyph` at the zoomed font
+size (the fork's `ShapedLine::layout` hands out the runs), over the row's background quads and
+under the cursor, the link underline and the prediction overlay. Host events reach the canvas from the
 link loop in one update per frame (the first after a quiet spell at once), so twenty streaming
 sessions cost one notify a frame; a session itself never sends more than 125 frames a second
 (`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,

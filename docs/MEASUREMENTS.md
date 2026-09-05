@@ -1182,3 +1182,63 @@ No golden accepted: nothing in the scenes is underlined or struck through, the l
 zero, so the cell, baseline and glyph positions are the ones before. The change shows only
 under an underline (one pixel lower, 1 device pixel thick at 1×, 2 at 2×; DECISIONS "The
 font's own line gap and underline").
+
+## 2026-09-06 — the zoom hitch: words shaped once at the base size, glyphs painted at the zoom
+
+Scenarios (a) and (b) of `cargo xtask e2e smooth` (20 flooding shells; pan at zoom 1, and
+⌘-scroll zoom fit → 200 % → fit at 120 steps/s; 5 s each) on three trees: **A** `ae91c0d`
+(smooth's tree plus font truth), **B0** `4b9c619` (the element paints each word's base-size
+glyph runs at the zoomed size, one `paint_glyph` per glyph, no layer) and **B** `b1b77b2` (the
+same inside one `paint_layer`). Draw ms p50 / p95 / p99 / max · frames over 16.7 ms; `procs`
+is `pgrep -fl "cargo|rustc" | wc -l` when the run started. Other sessions were building the
+whole night (`/tmp/glyphs-ab-quiet.sh` waited for a quiet moment and alternated A, B, A, B; the
+quiet moment lasted one run each time), so **every column past p50 is load**: the same tree
+swings 4.1 → 36.0 ms p95 between runs. p50 is the column that transfers.
+
+| run | tree | procs | (a) pan | (b) zoom |
+| --- | --- | --- | --- | --- |
+| A | ae91c0d | 24 | **1.2** / 4.4 / 12.2 / 50.8 · 3 | **1.1** / 5.3 / 27.7 / 223.4 · 5 |
+| A1 | ae91c0d | 18 | 1.4 / 36.0 / 106.5 / 127.9 · 24 | 1.7 / 44.7 / 162.6 / 643.0 · 15 |
+| A2 | ae91c0d | 0 | 1.2 / 4.1 / 11.1 / 52.2 · 3 | 1.2 / 8.0 / 35.0 / 335.2 · 13 |
+| A3 | ae91c0d | 8 | 1.2 / 3.2 / 6.4 / 56.3 · 1 | 1.1 / 6.1 / 17.5 / 268.7 · 5 |
+| A4 | ae91c0d | 5 | 1.3 / 9.4 / 38.6 / 60.6 · 16 | 1.4 / 16.4 / 43.5 / 376.8 · 15 |
+| A5 | ae91c0d | 18 | 1.3 / 12.1 / 79.7 / 94.1 · 13 | 1.5 / 58.6 / 139.2 / 621.5 · 22 |
+| B0 | 4b9c619 | 15 | **1.7** / 8.9 / 25.7 / 79.9 · 6 | 1.4 / 7.9 / 36.2 / 295.8 · 7 |
+| B0-1 | 4b9c619 | 22 | 1.7 / 24.7 / 57.9 / 133.8 · 22 | 1.2 / 16.1 / 108.4 / 687.3 · 12 |
+| B0-2 | 4b9c619 | 107 | 1.7 / 5.8 / 31.4 / 87.2 · 5 | 1.3 / 12.7 / 46.3 / 289.8 · 14 |
+| B0-3 | 4b9c619 | 33 | 1.7 / 9.6 / 24.0 / 56.4 · 11 | 1.6 / 9.1 / 42.3 / 315.6 · 7 |
+| B4 | b1b77b2 | 17 | **1.0** / 3.8 / 8.3 / 31.6 · 2 | **1.3** / 10.6 / 44.2 / 307.9 · 13 |
+| B5 | b1b77b2 | 38 | 1.1 / 10.6 / 49.4 / 70.9 · 10 | 1.1 / 12.2 / 65.6 / 750.6 · 10 |
+
+Read across p50: B0 cost 0.5 ms a frame at zoom 1 in all four runs (1.7 against 1.2–1.4), the
+bounds-tree insert per bare primitive; B gives it back (1.0–1.1 against 1.2–1.4, the cheapest
+pan of the night) and the zoom p50 is the pan p50. The zoom p99 / max did not reach the
+brief's 16.7 ms on any tree in any run — including A3 at 8 processes (17.5 / 268.7) — and the
+sample below says why: with shaping gone, the zoom frame is prepaint's per-cell loops over all
+twenty visible grids (a pan at zoom 1 sees three) plus the flood's apply, not text. **No zoom
+guard**: a limit that the same tree fails and passes by load would only flap. Re-run on an idle
+machine before ruling further: `pgrep -fl "cargo|rustc" | wc -l` must be 0 for the whole run.
+
+What the main thread does during the zoom cycle on B0 (`sample <pid> 4` while (b) runs, 23
+build processes alongside; `/tmp/glyphs-sample-zoom.raw`, 2176 samples on the main thread;
+inclusive share of the highest frame naming the symbol; on B the `paint_glyph` row loses its
+`BoundsTree::insert`, 268 samples = 12 %):
+
+| stage | share |
+| --- | --- |
+| drawing (`flush_effects`) | 36 % |
+| of which prepaint (per-cell loops: quads, decorations, word keys) | 26 % |
+| of which `paint_glyph` (all of it scene insertion, `insert_primitive` 11 %) | 12 % |
+| of which shaping (`shape_line`, only words never seen) | **2.5 %** (41–48 % in the samples above) |
+| of which glyph rasterisation (`rasterize_glyph` + `raster_bounds`) | 1.1 % |
+| applying host frames (`TermState` 15.5 %, `Vec<Cell>` copies 15 %, `slopty_grid` drops 10 %) | 33 % |
+
+Shaping is gone from the zoom; the draw that remains is per-cell bookkeeping and the scene,
+and a third of the thread is the flood itself (the `Arc<Line>` item in DECISIONS). The
+rasteriser is not worth quantising the size for.
+
+```sh
+pgrep -fl "cargo|rustc" | wc -l
+cargo xtask e2e smooth > /tmp/glyphs-smooth-after.log 2>&1; grep MEASURE /tmp/glyphs-smooth-after.log
+sh /tmp/glyphs-sample-zoom.sh      # scenario (b) alone with `sample` on the app's main thread
+```

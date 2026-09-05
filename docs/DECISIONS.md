@@ -387,13 +387,43 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   It is now an inline `[u8; 22]` with a length, or a `Box<str>` past that (a ZWJ emoji
   sequence): still 24 bytes, same wire form (a string), equality and hash by content because
   the representation is canonical. `smallvec` left the workspace with it.
+- ✅ **Words are shaped at the base size only and painted glyph by glyph at the zoom**
+  (2026-09-06, fork commit `876a96f`). A `ShapedLine` is tied to the size it was shaped at, so
+  every zoom step re-shaped every visible word and the card → grid flip at `CARD_ZOOM` shaped
+  twenty grids in one frame (the p99 / max of scenario (b) above). Now the word cache is keyed
+  without the zoom (`hash_base(focused, base_size, family, palette)`), `shape_cells` shapes at
+  the theme's size with the base cell width forced, and `paint` walks each word's glyph runs
+  (`ShapedLine::layout()`, the fork's accessor; `LineLayout` / `ShapedRun` / `ShapedGlyph` were
+  already public) and calls `Window::paint_glyph` / `paint_emoji` at the zoomed font size, at
+  `origin + shaped position × zoom` on the derived baseline (`glyph_origin`, unit-tested). Sound
+  because, under the forced cell width, a glyph's shaped x is cluster index × base cell and the
+  zoomed grid is the base grid × zoom, so the positions are the grid's either way; the glyph
+  ids are the font's and do not depend on the size. All the glyphs go in **one `paint_layer`**
+  per element: a primitive painted outside a layer takes a bounds-tree insert of its own for
+  its order (`Scene::insert_primitive`), which is why GPUI gives every line it paints a layer;
+  the first cut painted bare and cost 0.5 ms p50 per pan frame at zoom 1 (1.2 → 1.7 ms in
+  every run, load or not; `BoundsTree::insert` 12 % of the main thread in the sample), the
+  layer gives it back. The word carries its per-byte colours
+  (`Word::colors`, `color_at`, unit-tested) since GPUI's decoration runs are `pub(crate)`;
+  every underline, the curly one included, is a `Decoration` drawn from the cells (the wave
+  through `Window::paint_underline` at the font's underline position, where it used to sit at
+  GPUI's `baseline + 0.618 · descent`), so segmentation no longer has a curly special case.
+  Pixel-identical at zoom 1 (goldens: terminal 1576 / 540000 in the prompt rows, the run-to-run
+  variance; the rest 0). Rasterisation at the zoomed size is what GPUI did already, per size
+  and subpixel variant, so the atlas grows with the number of distinct sizes a pinch passes
+  through exactly as before; the sample says it is 0.6 % of the main thread and the ruling is
+  **no size quantisation** (the brief's fallback of shaping at the nearest whole-pixel cell
+  is not needed and would blur less than it would cost in code). What the main thread does
+  during the zoom cycle now (`sample`, MEASUREMENTS "zoom hitch"): shaping 2.5 % (was 41–48 %),
+  `paint_glyph` 12 % (all scene insertion), prepaint's per-cell loops 26 %, applying the
+  flood 33 %. Draw numbers before / after in MEASUREMENTS: p50 pan 1.2–1.4 → 1.0–1.1 ms,
+  zoom 1.1–1.5 → 1.1–1.3 ms; the p99 / max of the zoom cycle stayed over 16.7 ms on every tree
+  (prepaint over twenty visible grids plus the flood, on a machine that was never idle), so
+  the smooth guard gains **no zoom limit** for now.
 - 🔬 **Not done, with the numbers that would justify it**: sharing a `Line` between screen and
-  scrollback (`Arc<Line>`) instead of copying it — the scrollback's B-tree churn is the next
-  largest apply cost under a flood; size-independent glyph painting (shape once at a reference
-  size, paint glyph ids at any size through `Window::paint_glyph`) so a pinch does not
-  re-shape every visible word at every step — `ShapedLine`'s layout is `pub(crate)` in GPUI, so
-  this means the element paints glyphs itself. Both wait for a scenario in MEASUREMENTS to be
-  over budget after the fixes above.
+  scrollback (`Arc<Line>`) instead of copying it — applying the flood is a third of the main
+  thread during the zoom (`Vec<Cell>` copies 15 %, `slopty_grid` drops 10 %), the largest
+  remaining cost now that the zoom shapes nothing.
 
 ## Terminal
 
