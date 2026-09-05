@@ -91,9 +91,13 @@ fn typos(sh: &Shell, fix: bool) -> Result<()> {
     step("typos", &cmd!(sh, "typos {write...}"))
 }
 
+/// Only the tracked TOML files: left to its own globs taplo walks `target/` and the vendored
+/// trees before its `exclude` list applies, which took ~90 s.
 fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     let check: &[&str] = if apply { &[] } else { &["--check"] };
-    step("taplo", &cmd!(sh, "taplo fmt {check...}"))
+    let files = cmd!(sh, "git ls-files *.toml").read()?;
+    let files: Vec<&str> = files.lines().collect();
+    step("taplo", &cmd!(sh, "taplo fmt {check...} {files...}"))
 }
 
 /// Every commit since the last tag (or the root) follows Conventional Commits.
