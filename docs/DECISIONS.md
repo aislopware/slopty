@@ -86,8 +86,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (lines missing from the scrollback cache copy as empty); ⌘V sends the clipboard as
   `TermRequest::Paste`, which the host brackets when the program asked for it. Any key, a
   resize or an epoch change (reflow, alt screen) clears the selection. Bindings live in the
-  "Terminal" key context (`slopty_ui::terminal::key_bindings`). No double-click word / triple
-  line selection yet.
+  "Terminal" key context (`slopty_ui::terminal::key_bindings`). Double-click selects the word
+  (run of non-blank cells), triple-click the line. On touch a plain drag pans the canvas (GPUI
+  recognises it as a scroll), so the terminal element claims GPUI's *long press* instead
+  (`window.prevent_default()` at `Started`): hold to select the word under the finger, keep
+  holding and move to extend, as iOS text views do.
 
 - ✅ **Input methods in terminals.** In the fork, `prefers_ime_for_printable_keys` follows
   `accepts_text_input` (true for `TerminalView`), so with the input handler installed macOS
@@ -132,7 +135,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   character, including text arriving through `replace_text_in_range`) is sent with the control
   modifier, then it disarms. Covered by `sticky_control_applies_to_the_next_key_only`; verified
   on the simulator 2026-09-05 (⌃ + `c` interrupts `sleep 30`, arrows recall history). The bar
-  only renders while a terminal is the canvas's active item.
+  only renders while a terminal is the canvas's active item. Its last key is the clipboard:
+  "copy" while the terminal has a selection (long-press selects; a plain drag pans the
+  canvas), "paste" otherwise, since the phone has no ⌘C/⌘V.
 
 - ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
   document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).

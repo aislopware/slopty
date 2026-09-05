@@ -228,6 +228,7 @@ impl Workspace {
     fn key_bar(&self, terminal: &Entity<TerminalView>, cx: &Context<Self>) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let armed = terminal.read(cx).sticky_control();
+        let has_selection = terminal.read(cx).selection().is_some();
         let mut bar = div()
             .h(px(KEY_BAR_H))
             .w_full()
@@ -277,6 +278,34 @@ impl Workspace {
                     }),
             );
         }
+        // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
+        let target = terminal.clone();
+        bar = bar.child(
+            div()
+                .id("key-clipboard")
+                .flex_1()
+                .h(px(KEY_BAR_H - 10.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .text_color(hsla(if has_selection { s.canvas } else { s.text }))
+                .bg(hsla(if has_selection { s.accent } else { s.canvas }))
+                .active(|el| el.opacity(0.7))
+                .child(if has_selection { "copy" } else { "paste" })
+                .on_click(move |_ev, window, cx| {
+                    target.update(cx, |t, cx| {
+                        if has_selection {
+                            // Copy, then the key reads "paste" again.
+                            t.copy(&slopty_ui::terminal::Copy, window, cx);
+                            t.clear_selection(cx);
+                        } else {
+                            t.paste_clipboard(&slopty_ui::terminal::Paste, window, cx);
+                        }
+                    });
+                }),
+        );
         bar.into_any_element()
     }
 

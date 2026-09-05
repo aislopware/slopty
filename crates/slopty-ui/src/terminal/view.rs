@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Autocapitalize, Bounds, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, Styled as _, TextInputAction, TextInputConfiguration, UTF16Selection, Window,
-    div, point, size,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, Keystroke, LongPressEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, Styled as _, TextInputAction, TextInputConfiguration,
+    TouchPhase, UTF16Selection, Window, div, point, size,
 };
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
@@ -111,6 +111,8 @@ pub struct TerminalView {
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
     selecting: bool,
+    /// A long press claimed the touch; moving the finger extends the selection.
+    touch_selecting: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -161,6 +163,7 @@ impl TerminalView {
             sticky_control: false,
             selection: None,
             selecting: false,
+            touch_selecting: false,
         }
     }
 
@@ -168,6 +171,87 @@ impl TerminalView {
     #[must_use]
     pub const fn selection(&self) -> Option<Selection> {
         self.selection
+    }
+
+    /// The word under `col` on line `index` as inclusive columns: the run of non-blank cells
+    /// around it, or just the cell when it is blank.
+    fn word_at(&self, index: LineIndex, col: u16) -> (u16, u16) {
+        let Some(line) = self.state.line(index) else { return (col, col) };
+        let blank = |c: u16| {
+            line.cells
+                .get(usize::from(c))
+                .is_none_or(|cell| cell.width.draws_text() && cell.text.as_str().trim().is_empty())
+        };
+        if blank(col) {
+            return (col, col);
+        }
+        let mut start = col;
+        while start > 0 && !blank(start.wrapping_sub(1)) {
+            start = start.wrapping_sub(1);
+        }
+        let mut end = col;
+        while !blank(end.wrapping_add(1)) {
+            end = end.wrapping_add(1);
+        }
+        (start, end)
+    }
+
+    /// Select `cols` of line `index`: the word at `col` for two clicks, the line for more.
+    fn select_by_clicks(&mut self, index: LineIndex, col: u16, clicks: usize) {
+        let (start, end) = if clicks == 2 {
+            self.word_at(index, col)
+        } else {
+            (0, self.state.size().cols.saturating_sub(1))
+        };
+        self.selection = Some(Selection { anchor: (index, start), head: (index, end) });
+    }
+
+    /// A touch long press over the terminal. On the phone a plain drag pans the canvas, so
+    /// selection follows the platform convention: hold to select the word under the finger,
+    /// keep holding and move to extend it. Returns whether the press was claimed (the element
+    /// then keeps the gesture away from the canvas).
+    pub fn long_press(
+        &mut self,
+        event: &LongPressEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match event.phase {
+            TouchPhase::Started => {
+                let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.start_position))
+                else {
+                    return false;
+                };
+                self.focus.focus(window, cx);
+                self.select_by_clicks(self.state.index_at_row(row), col, 2);
+                self.touch_selecting = true;
+                cx.notify();
+                true
+            }
+            TouchPhase::Moved => {
+                if !self.touch_selecting {
+                    return false;
+                }
+                if let Some((col, row)) = self.metrics.map(|m| m.cell_at_clamped(event.position))
+                    && let Some(selection) = &mut self.selection
+                {
+                    let head = (self.state.index_at_row(row), col);
+                    if selection.head != head {
+                        selection.head = head;
+                        cx.notify();
+                    }
+                }
+                true
+            }
+            TouchPhase::Ended => std::mem::take(&mut self.touch_selecting),
+            TouchPhase::Cancelled => {
+                if std::mem::take(&mut self.touch_selecting) {
+                    self.selection = None;
+                    cx.notify();
+                }
+                false
+            }
+        }
     }
 
     /// The selected text: trailing blanks trimmed per line, lines joined with newlines. Lines
@@ -200,6 +284,13 @@ impl TerminalView {
             index = index.next();
         }
         Some(out)
+    }
+
+    /// Drop the selection.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// ⌘C: the selection to the clipboard (nothing selected: nothing happens).
@@ -463,9 +554,16 @@ impl TerminalView {
         // every terminal); everything else is reported to the program.
         let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);
         if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
-            let at = (self.state.index_at_row(row), col);
-            self.selection = Some(Selection { anchor: at, head: at });
-            self.selecting = true;
+            let index = self.state.index_at_row(row);
+            if event.click_count >= 2 {
+                // Word, then line; the selection stands until the next click.
+                self.select_by_clicks(index, col, event.click_count);
+                self.selecting = false;
+            } else {
+                let at = (index, col);
+                self.selection = Some(Selection { anchor: at, head: at });
+                self.selecting = true;
+            }
             cx.notify();
             return;
         }
@@ -730,6 +828,16 @@ mod tests {
             view.selection =
                 Some(Selection { anchor: (LineIndex(102), 4), head: (LineIndex(100), 6) });
             assert_eq!(view.selected_text().as_deref(), Some("wor\nsecond\nthird"));
+            // Two clicks take the word, three the line, a blank cell only itself.
+            view.select_by_clicks(LineIndex(100), 7, 2);
+            assert_eq!(view.selected_text().as_deref(), Some("wor"));
+            view.select_by_clicks(LineIndex(100), 5, 2);
+            assert_eq!(
+                view.selection.map(Selection::ordered),
+                Some(((LineIndex(100), 5), (LineIndex(100), 5)))
+            );
+            view.select_by_clicks(LineIndex(102), 0, 3);
+            assert_eq!(view.selected_text().as_deref(), Some("third row"));
         });
     }
 
