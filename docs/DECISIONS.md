@@ -476,6 +476,43 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   as one transform instead of a re-laid-out tree) and the apply. No zoom guard: B1 and B2 ran
   at 120 and 42 build processes and still beat main's quiet runs, which is the load telling
   the guard what it would flap on.
+- ✅ **Text in motion paints from a raster ladder; chrome labels are shaped once** (2026-09-06,
+  fork `9fa23ead`, `perf(ui): paint zooming text from a raster ladder, shape chrome labels
+  once`). The third demangled look at a zoom-step draw (MEASUREMENTS "third look") split the
+  "29 % layout" honestly: 6 % was the chrome's text shaped again at every step (GPUI's text
+  element shapes at the painted size and every step is a new size), 11 % taffy over the whole
+  window's tree and the rest the per-frame tree build — GPUI rebuilds elements and the taffy
+  tree every frame regardless (`layout_engine.clear()` in `Window::draw`), so nothing is laid
+  out *because* bounds change, and there is no scaled-layer transform to hand a cached layout
+  to (only SVG paths take a `TransformationMatrix`). What the same look found instead:
+  **glyph rasterisation at 14 % of the draw** — every step a new font size, every glyph a fresh
+  raster and atlas upload, and an atlas that never evicts growing with the number of steps.
+  The sprite shader maps an atlas tile onto arbitrary bounds, so the fork gained
+  `Window::paint_glyph_scaled(origin, font, glyph, raster_size, font_size, color)` (rasterise
+  at one size, stretch to another, grayscale AA). The canvas marks a frame **in motion** while
+  the camera zoom differs from the one drawn last frame and until an 80 ms settle timer that
+  every change restarts has fired (`SETTLE`, the note's generation pattern); in motion, the
+  terminal glyphs and the chrome labels paint from the nearest rung of an
+  eight-per-octave size ladder (`fonts::raster_rung`, within ±4.4 %), stretched — a pinch
+  from 30 % to 200 % rasterises ~22 sizes instead of one per step — and the settled frame
+  paints exact. Asking for the settle frame right after each frame in motion was tried first
+  and doubled a gesture's frames (one settle per step, each rasterising exact at an
+  intermediate size: zoom p99 32 ms against main's 9); a frame the flood asks for between two
+  reports must stay on the ladder too, or it rasterises an intermediate size exact. The item
+  chrome's text (title, pills, badge, block headings) is a `ChromeText` element: shaped once
+  at its base size in a per-app cache swept per frame, sized by arithmetic (`shaped width ×
+  k`, no taffy measure callback), painted glyph by glyph at `base × k` with GPUI's own
+  baseline and x-advance arithmetic — identical at `k = 1` — and its own ellipsis. Numbers
+  (draw ms p50/p95/p99/max · dropped, alternated against main on the same machine, noise 0–36):
+  zoom **7.3–9.8 ms p99** in all four runs of the tree against main's 13.2–56.7 (main's best,
+  on an idle machine, 9.1–10.7); dropped frames 1–5 against 3–34; pan unchanged; after-sample
+  `rasterize_glyph` 14 % → 3.9 % of the thread, `paint_glyph` exact 0 in motion, chrome
+  `shape_text` 0. **The user's bar — a pinch with twenty terminals that drops no frame — is met
+  at p99 on this machine when it is idle and at 14–36 build processes**; the max frame
+  (27–59 ms, 1–5 dropped of ~480) is the apply landing on a frame. Still no zoom guard in the
+  smooth test: the same tree's max swings 27 → 59 with load. Not done, with the number: caching
+  an item's taffy layout across steps (a retained-layout fork hook for ~9 % of a draw shared by
+  the whole window's tree) and flattening the item tree.
 
 ## Terminal
 

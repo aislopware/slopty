@@ -598,7 +598,15 @@ a frame of streaming output shapes only the words it has never seen and a zoom s
 nothing; paint puts every glyph of a word at column × cell width plus its shaped position
 scaled by the zoom, on the derived baseline, through `Window::paint_glyph` at the zoomed font
 size (the fork's `ShapedLine::layout` hands out the runs), over the row's background quads and
-under the cursor, the link underline and the prediction overlay. Host events reach the canvas from the
+under the cursor, the link underline and the prediction overlay. While the canvas zoom is **in
+motion** (it differs from the zoom drawn last frame, until an 80 ms settle timer fires) the
+canvas tells every terminal view and chrome label so, and they paint from the nearest rung of
+an eight-per-octave raster ladder stretched to the painted size (`fonts::raster_rung`, the
+fork's `Window::paint_glyph_scaled`) instead of rasterising every glyph at each intermediate
+size; the settled frame paints exact. The item chrome's text — title, pills, badge, block
+headings — is `slopty_ui::chrome_text::ChromeText`: shaped once at its base size (a per-app
+cache), sized by arithmetic rather than a taffy measure callback, painted glyph by glyph at
+`base × k` with GPUI's baseline and advance arithmetic, ellipsis included. Host events reach the canvas from the
 link loop in one update per frame (the first after a quiet spell at once), so twenty streaming
 sessions cost one notify a frame; a session itself never sends more than 125 frames a second
 (`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,

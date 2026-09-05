@@ -1666,3 +1666,62 @@ whether the host's heartbeat is late because `cursor_loop` calls `target_bounds`
 — the stamps say the beats *were* late, but that file belongs to another branch; and why QUIC
 sits at the 5808-byte cwnd floor on loopback while the controller asks for 30 Mbit/s, which is
 what run 3's stalls are and is the next thing worth chasing.
+## 2026-09-06 — the zoom hitch, third look: the chrome's share, the raster per step, text in motion
+
+`sample <pid> 4` on the main thread during scenario (b), demangled (`rustfilt`); inclusive
+share of a **draw** (`Window::draw`'s children) unless said otherwise. Before: main 7556564
+(`/tmp/sample-chrome-before.txt`, 27 build processes, 2363 samples, draw 1059). After:
+`8582c08` (`/tmp/sample-chrome-after3.txt`, idle machine, 2110 samples, draw 853). A sampled
+run's MEASURE rows are not numbers.
+
+| stage | before | after |
+| --- | --- | --- |
+| paint | 42 % | 33 % |
+| of which terminal glyphs | 32 % (`rasterize_glyph` **14 %**, scene insertion the rest) | 18 % (all `paint_glyph_scaled`; `rasterize_glyph` 3.9 % of the thread, was 7.5 %) |
+| of which chrome text | 5.5 % (its rasters 3 %) | `ChromeText::paint` ≈ 5 % |
+| prepaint (the flood's words) | 22 % | 23 % |
+| `request_layout` (tree build; chrome `shape_text` 6 % before) | 16 % | 19 % (no shaping in it) |
+| taffy `compute_layout` (the whole window) | 11 % | 9 % |
+| Metal | 5 % | 6 % |
+
+Of the "29 % layout" the chrome's own share was the 6 % text re-shaped per step plus its
+measure leaves; GPUI rebuilds the element and taffy trees every frame (`layout_engine.clear()`
+in `Window::draw`), so nothing is laid out *because* the bounds change — the tree walk is per
+frame, about ten taffy nodes per item, and a zoom step only adds the text shaping. What the
+look found instead was the raster per step.
+
+Draw ms p50 / p95 / p99 / max · frames over 16.7 ms · dropped, `cargo xtask e2e smooth`,
+alternated A B A B, `noise` = `pgrep -fl "cargo|rustc|xcodebuild|clang" | wc -l` at the start
+of the run. A = main, B = the tree named. Round 1 (`/tmp/chrome-ab.log`) is the first cut,
+whose settle frame followed every frame in motion; round 2 (`/tmp/chrome-ab2.log`) settles on
+an 80 ms timer; round 3 (`/tmp/chrome-ab3.log`) also keeps the frames between two reports on
+the ladder.
+
+| round · run | tree | noise | (a) pan | (b) zoom |
+| --- | --- | --- | --- | --- |
+| 1 · A1 | main 1960c99 | 0 | 0.8 / 3.4 / 5.8 / 6.8 · 0 · 0 | 1.0 / 4.2 / **9.1** / 42.0 · 2 · 4 |
+| 1 · B1 | a0c59dd | 14 | 0.8 / 3.6 / 7.7 / 60.9 · 2 · 4 | 1.0 / 7.1 / 32.0 / 76.2 · 11 · 18 (every 4.9 ms: a settle frame per step) |
+| 1 · A2 | main 1960c99 | 3 | 0.8 / 3.7 / 6.9 / 51.2 · 1 · 3 | 0.9 / 5.0 / **10.7** / 25.7 · 2 · 2 |
+| 1 · B2 | a0c59dd | 2 | 0.8 / 4.0 / 8.3 / 13.5 · 0 · 0 | 1.0 / 6.4 / 13.9 / 58.9 · 6 · 11 |
+| 2 · A1 | main 2f82f2d | 22 | 0.9 / 4.4 / 12.0 / 47.0 · 2 · 3 | 1.2 / 9.5 / 46.6 / 67.9 · 11 · 19 |
+| 2 · B1 | 0045325 | 14 | 0.8 / 3.5 / 14.1 / 29.0 · 3 · 3 | 0.9 / 3.9 / **7.9** / 43.5 · 1 · 2 |
+| 2 · A2 | main 2f82f2d | 26 | 0.9 / 3.0 / 4.9 / 8.8 · 0 · 0 | 1.0 / 4.7 / 13.2 / 19.7 · 3 · 3 |
+| 2 · B2 | 0045325 | 36 | 0.9 / 4.1 / 12.8 / 26.3 · 4 · 4 | 0.9 / 4.1 / **7.3** / 27.0 · 1 · 1 |
+| 3 · A1 | main 2f82f2d | 7 | 0.9 / 13.3 / 46.5 / 96.1 · 11 · 22 | 1.3 / 19.5 / 43.8 / 96.4 · 20 · 33 |
+| 3 · B1 | 8582c08 | 5 | 0.8 / 2.5 / 4.2 / 7.9 · 0 · 0 | 0.9 / 4.5 / **9.8** / 59.0 · 3 · 5 |
+| 3 · A2 | main 2f82f2d | 14 | 0.9 / 3.1 / 7.7 / 17.4 · 1 · 1 | 1.5 / 16.0 / 56.7 / 108.5 · 17 · 34 |
+| 3 · B2 | 8582c08 | 0 | 0.8 / 3.4 / 9.1 / 18.8 · 1 · 1 | 0.8 / 4.0 / **8.6** / 34.0 · 2 · 3 |
+
+Read the zoom column: on an idle machine main already sits at 9–11 ms p99 (round 1) — the
+34–86 ms of the earlier sections was load — and the final tree holds 7.3–9.8 ms p99 in all
+four of its runs at 0–36 build processes, where main swings 13–57; dropped frames 1–5 against
+3–34, the pan unchanged. The max (27–59 ms) is the apply landing on a frame and moves with
+load on both trees, so the smooth test still has no zoom limit.
+
+```sh
+pgrep -fl "cargo|rustc|xcodebuild|clang" | wc -l
+zsh /tmp/chrome-ab.sh            # A, B, A, B, then the after-sample of scenario (b)
+rustfilt < /tmp/sample-chrome-after3.raw > /tmp/sample-chrome-after3.txt
+python3 /tmp/sample-children.py /tmp/sample-chrome-after3.txt "Window>::draw"
+python3 /tmp/sample-attrib.py /tmp/sample-chrome-after3.txt rasterize_glyph paint_glyph_scaled shape_text
+```
