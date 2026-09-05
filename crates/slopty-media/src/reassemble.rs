@@ -45,7 +45,11 @@ pub struct Config {
     /// Most frames tracked at once; the oldest is dropped beyond this.
     pub max_pending: usize,
     /// How often a refresh request is repeated while no refresh frame arrives (plus two RTTs).
+    /// Each unanswered repeat doubles the wait, up to [`Self::refresh_repeat_max`], so a target
+    /// that produces no frames at all (a hidden window) is not asked eight times a second.
     pub refresh_repeat: Duration,
+    /// Longest wait between refresh repeats.
+    pub refresh_repeat_max: Duration,
     /// Longest an incomplete frame is held while nothing at all arrives on the stream (a
     /// stalled link); past this it is lost even though the deadline logic would keep waiting.
     pub max_hold: Duration,
@@ -63,6 +67,7 @@ impl Default for Config {
             grace: Duration::from_millis(10),
             max_pending: 64,
             refresh_repeat: Duration::from_millis(100),
+            refresh_repeat_max: Duration::from_secs(2),
             max_hold: Duration::from_millis(500),
             stall_gap: Duration::from_millis(50),
         }
@@ -273,6 +278,8 @@ pub struct Reassembler {
     decoder: Option<ReedSolomonDecoder>,
     actions: Vec<Action>,
     refresh_requested_at: Option<Instant>,
+    /// Unanswered refresh repeats in a row (backoff exponent).
+    refresh_repeats: u32,
     stats: ReassemblerStats,
     window: Window,
     jitter_us: i64,
@@ -312,6 +319,7 @@ impl Reassembler {
             decoder: None,
             actions: Vec::new(),
             refresh_requested_at: Some(now),
+            refresh_repeats: 0,
             stats: ReassemblerStats::default(),
             window: Window::default(),
             jitter_us: 0,
@@ -382,6 +390,7 @@ impl Reassembler {
     }
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
+        self.refresh_repeats = 0;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());
         let total = data_count.saturating_add(usize::from(header.parity_count));
@@ -700,9 +709,15 @@ impl Reassembler {
             self.lose(frame, missing, now);
         }
         if !in_order {
-            let repeat = self.cfg.refresh_repeat.saturating_add(rtt.saturating_mul(2));
+            let backoff = self
+                .cfg
+                .refresh_repeat
+                .saturating_mul(1_u32 << self.refresh_repeats.min(16))
+                .min(self.cfg.refresh_repeat_max);
+            let repeat = backoff.saturating_add(rtt.saturating_mul(2));
             if self.refresh_requested_at.is_none_or(|t| now.saturating_duration_since(t) >= repeat)
             {
+                self.refresh_repeats = self.refresh_repeats.saturating_add(1);
                 self.request_refresh(now);
             }
         }

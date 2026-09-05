@@ -365,6 +365,18 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   per launch meant re-pairing after every restart. A port in use is a hard error (a silent
   fallback to a random port would bring the problem back); tests pass `--port 0`.
 
+- ✅ **BBR3 congestion control on the QUIC connection** (2026-09-05). Cubic (noq's default)
+  cut the host's window to 13–20 KB after 5–9 real losses in 15 s on the Wi-Fi/mesh path;
+  at a 10 ms round trip that caps the stream near 10 Mbit/s, a third of the 30 Mbit/s target,
+  and media datagrams sit in the send buffer waiting for the window. noq ships BBR3
+  (`noq_proto::congestion::Bbr3Config`, a direct workspace dependency since iroh does not
+  re-export the module); `transport_config()` installs it for both roles. See
+  MEASUREMENTS.md for the before/after window sizes.
+- ✅ **Refresh repeats back off** (2026-09-05). A target that never produces a frame (a hidden
+  window) left the receiver in "need refresh", re-asking every `refresh_repeat` + 2 rtt — 79
+  requests in 10 s. Each unanswered repeat now doubles the wait up to `refresh_repeat_max`
+  (2 s); any video datagram resets it, so a live stream still recovers at the fast cadence.
+
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report

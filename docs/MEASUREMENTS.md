@@ -257,3 +257,19 @@ RUST_LOG=warn,slopty_media=debug,slopty_client=debug SLOPTY_DATA_DIR=/tmp/slopty
 grep 'frame lost\|nack' <client log>
 grep 'nack\|screen closing' <hostd log>      # path=rtt … cwnd … congestion … lost … space …
 ```
+
+## 2026-09-05 — BBR3 vs Cubic on the mesh path (host window), debug build
+
+Same bench as above (window 927 scrolling, 15 s, macbook-pro → mac-studio over the mesh),
+host path stats from hostd's `screen closing` line. Two runs each.
+
+| congestion control | cwnd at close        | QUIC lost pkts | client: lost / NACK / refresh | gap max        |
+| ------------------ | -------------------- | -------------- | ----------------------------- | -------------- |
+| Cubic (default)    | 13 660 / 20 326 B    | 9 / 6          | 0 / 23 / 0, 0 / 23 / 0        | 166 / 162 ms   |
+| BBR3               | 2 000 610 / 22 010 B | 5 / 5          | 1 / 16 / 1, 0 / 45 / 0        | 525 / 241 ms   |
+
+BBR3 keeps probing (2 MB window mid-run, back to ~22 KB in its probe-RTT phase at the end)
+instead of halving on every loss, so the 30 Mbit/s target is no longer window-bound. The one
+give-up in the BBR3 run was a 525 ms stall, past `max_hold` (500 ms) — the receiver policy,
+not the window. Rtt and delivered fps are unchanged at this bitrate; the real test is a higher
+bitrate, still to be measured.

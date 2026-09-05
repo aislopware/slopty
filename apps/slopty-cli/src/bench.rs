@@ -197,6 +197,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.decode_errors
     );
     println!("  quic paths: {}", link.paths());
+    println!("  quic path (client side): {}", link.health());
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
     drop(handle);

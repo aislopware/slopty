@@ -220,6 +220,12 @@ impl HostLink {
         slopty_net::endpoint::describe_paths(&self.conn)
     }
 
+    /// The selected path's congestion picture (this side's sending), for diagnostics.
+    #[must_use]
+    pub fn health(&self) -> String {
+        slopty_net::endpoint::describe_health(&self.conn)
+    }
+
     /// Give the connection up from another task: the QUIC close makes the control reader
     /// fail, which surfaces as [`LinkEvent::Disconnected`] so the owner's reconnect path runs.
     /// Unlike [`close`](Self::close) the tasks keep running until that event is delivered.

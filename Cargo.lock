@@ -8172,6 +8172,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "iroh-tickets",
+ "noq-proto",
  "postcard",
  "serde",
  "serde_json",

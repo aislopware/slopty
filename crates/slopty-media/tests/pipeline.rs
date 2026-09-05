@@ -316,6 +316,23 @@ mod tests {
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
         assert!(h.tick().is_empty());
+        // Each unanswered repeat doubles the wait: the second one is not due one period later.
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert!(h.tick().is_empty(), "backoff");
+        h.advance(cfg().refresh_repeat);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        // Over ten seconds a silent target sees a handful of requests, not eighty.
+        let mut sent = 0;
+        for _ in 0..1000 {
+            h.advance(Duration::from_millis(10));
+            sent += h.tick().len();
+        }
+        assert!(sent <= 6, "{sent} refresh repeats in 10 s");
+        // A frame arriving resets the backoff.
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        assert_eq!(h.drain().len(), 1);
+        assert_eq!(h.rx.stats().refreshes, 2 + u64::try_from(sent).unwrap());
     }
 
     #[test]

@@ -60,10 +60,18 @@ const KEEP_ALIVE: Duration = Duration::from_secs(5);
 const DATAGRAM_BUFFER: usize = 4 << 20;
 
 /// Transport config shared by both roles.
+///
+/// Congestion control is BBR3 (model-based: pacing at the measured bottleneck rate) rather
+/// than the Cubic default: on the Wi-Fi/mesh path Cubic cut the window to 13–20 KB after a
+/// handful of real losses per 15 s, which at a 10 ms round trip caps a media stream near
+/// 10 Mbit/s — a third of the 30 Mbit/s target (MEASUREMENTS.md, 2026-09-05).
 #[must_use]
 pub fn transport_config() -> QuicTransportConfig {
     let idle = IdleTimeout::try_from(IDLE_TIMEOUT).ok();
     QuicTransportConfig::builder()
+        .congestion_controller_factory(std::sync::Arc::new(
+            noq_proto::congestion::Bbr3Config::default(),
+        ))
         .max_idle_timeout(idle)
         .keep_alive_interval(KEEP_ALIVE)
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
