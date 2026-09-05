@@ -12,7 +12,9 @@ mod geometry;
 mod stream;
 
 pub use content::{Shareable, enumerate};
-pub use geometry::{Rect, pointer_location, target_bounds, window_bounds, window_owner_pid};
+pub use geometry::{
+    Rect, can_capture, pointer_location, target_bounds, window_bounds, window_owner_pid,
+};
 pub use stream::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, Capture, CaptureConfig, CapturedAudio, CapturedFrame,
     PixelFormat, Target, host_now_us,

@@ -82,6 +82,10 @@ interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
 sockets under `<data dir>/run/` and logs in `~/Library/Logs/Slopty`, bootstraps them, and
 prints a pairing ticket; `uninstall` and `service` undo and report. The CLI finds the
 installed socket by itself, so `slopty host ticket` works without launchd's environment.
+`slopty host doctor` asks the running daemon about itself (`CtlRequest::Doctor` →
+`Health`): Screen Recording and Accessibility as *that binary* sees them (TCC grants are per
+executable, so the report names the path to add), reach, port, connected clients, sessions;
+exit status 1 while a permission is missing, so it can gate a setup script.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),

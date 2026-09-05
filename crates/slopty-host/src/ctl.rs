@@ -20,6 +20,8 @@ pub enum CtlRequest {
         /// Endpoint id (hex).
         endpoint: String,
     },
+    /// Health: permissions, reach, port, connected clients (`slopty host doctor`).
+    Doctor,
     /// A coding-agent hook fired inside a session (relayed by `slopty hook`).
     Hook {
         /// The session the hook ran in (`SLOPTY_SESSION`).
@@ -27,6 +29,29 @@ pub enum CtlRequest {
         /// The hook's stdin, verbatim JSON.
         payload: String,
     },
+}
+
+/// What `slopty host doctor` shows: the daemon's own view of its permissions and links.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Health {
+    /// Daemon version.
+    pub version: String,
+    /// Path of the daemon binary (which is what TCC grants permissions to).
+    pub exe: String,
+    /// Screen Recording granted (windows and displays can be streamed).
+    pub screen_recording: bool,
+    /// Accessibility / post-event access granted (remote-window input is delivered).
+    pub post_events: bool,
+    /// `Anywhere` or `DirectOnly`.
+    pub reach: String,
+    /// Bound UDP port.
+    pub port: u16,
+    /// Clients connected right now.
+    pub clients: usize,
+    /// Sessions ptyd holds.
+    pub sessions: usize,
+    /// Seconds since the daemon started.
+    pub uptime_secs: u64,
 }
 
 /// One paired client, as listed.
@@ -65,6 +90,8 @@ pub enum CtlReply {
         /// The list.
         paired: Vec<PairedSummary>,
     },
+    /// Health report.
+    Doctor(Health),
     /// Done.
     Ok {
         /// Whether anything changed.

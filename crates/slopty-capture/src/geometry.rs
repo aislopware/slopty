@@ -8,8 +8,9 @@ use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect,
 };
 use objc2_core_graphics::{
-    CGDisplayBounds, CGEvent, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCreateDescriptionFromArray, kCGWindowBounds, kCGWindowOwnerPID,
+    CGDisplayBounds, CGEvent, CGPreflightScreenCaptureAccess,
+    CGRectMakeWithDictionaryRepresentation, CGWindowListCreateDescriptionFromArray,
+    kCGWindowBounds, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
@@ -100,4 +101,11 @@ pub fn window_owner_pid(id: WindowId) -> Option<i32> {
     let pid = description.get(key)?;
     let pid: CFRetained<CFNumber> = pid.downcast().ok()?;
     pid.as_i32()
+}
+
+/// Whether this process has Screen Recording (TCC) access; without it ScreenCaptureKit
+/// returns no windows and every stream fails to start. Answers without prompting.
+#[must_use]
+pub fn can_capture() -> bool {
+    CGPreflightScreenCaptureAccess()
 }

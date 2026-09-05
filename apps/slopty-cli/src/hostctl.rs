@@ -18,6 +18,8 @@ pub enum HostCmd {
     Status,
     /// Paired clients.
     Paired,
+    /// Check the daemon's permissions (Screen Recording, Accessibility), reach, port and links.
+    Doctor,
     /// Revoke a paired client.
     Revoke {
         /// Endpoint id (hex).
@@ -57,6 +59,7 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
         HostCmd::Ticket => CtlRequest::Ticket,
         HostCmd::Status => CtlRequest::Status,
         HostCmd::Paired => CtlRequest::Paired,
+        HostCmd::Doctor => CtlRequest::Doctor,
         HostCmd::Revoke { endpoint } => CtlRequest::Revoke { endpoint },
         HostCmd::Install(opts) => return service::install(&opts).await,
         HostCmd::Uninstall { data_dir } => return service::uninstall(data_dir.as_deref()),
@@ -79,6 +82,12 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
         CtlReply::Paired { paired } => {
             for p in paired {
                 println!("{}  {}  {}", p.endpoint, p.name, p.client);
+            }
+        }
+        CtlReply::Doctor(health) => {
+            print!("{}", doctor_report(&health));
+            if !(health.screen_recording && health.post_events) {
+                bail!("permissions missing; see above");
             }
         }
         CtlReply::Ok { changed } => println!("{}", if changed { "done" } else { "no change" }),
@@ -104,4 +113,58 @@ pub async fn call_at(path: &std::path::Path, req: CtlRequest) -> Result<CtlReply
     let mut reply = String::new();
     BufReader::new(rd).read_line(&mut reply).await?;
     Ok(serde_json::from_str(reply.trim())?)
+}
+
+/// The doctor's checklist. Permissions are granted to the daemon *binary*, so the report
+/// names the path to add in System Settings.
+fn doctor_report(h: &slopty_host::ctl::Health) -> String {
+    let mark = |ok: bool| if ok { "✔" } else { "✘" };
+    let screen = if h.screen_recording {
+        String::new()
+    } else {
+        "  → System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording: add the \
+         daemon binary above, then `slopty host install` (or restart the daemon)"
+            .to_owned()
+    };
+    let post = if h.post_events {
+        String::new()
+    } else {
+        "  → System Settings ▸ Privacy & Security ▸ Accessibility: add the daemon binary above"
+            .to_owned()
+    };
+    let lines = [
+        format!("slopty-hostd {}  ({})", h.version, h.exe),
+        format!("up {} s · reach {} · udp {}", h.uptime_secs, h.reach, h.port),
+        format!("{} Screen Recording{screen}", mark(h.screen_recording)),
+        format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
+        format!("{} clients connected, {} sessions", h.clients, h.sessions),
+    ];
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_report_names_the_binary_and_flags_missing_permissions() {
+        let h = slopty_host::ctl::Health {
+            version: "0.3.0".to_owned(),
+            exe: "/opt/slopty/bin/slopty-hostd".to_owned(),
+            screen_recording: true,
+            post_events: false,
+            reach: "DirectOnly".to_owned(),
+            port: 45550,
+            clients: 2,
+            sessions: 3,
+            uptime_secs: 61,
+        };
+        let report = doctor_report(&h);
+        assert!(report.contains("/opt/slopty/bin/slopty-hostd"));
+        assert!(report.contains("✔ Screen Recording"));
+        assert!(report.contains("✘ Accessibility"));
+        assert!(report.contains("2 clients connected, 3 sessions"));
+    }
 }

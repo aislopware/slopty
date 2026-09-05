@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
-use slopty_host::ctl::{CtlReply, CtlRequest, PairedSummary};
+use slopty_host::ctl::{CtlReply, CtlRequest, Health, PairedSummary};
 use slopty_proto::HostMsg;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -61,6 +61,19 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             name: daemon.name.clone(),
             sessions: daemon.host.summaries().await,
         },
+        CtlRequest::Doctor => CtlReply::Doctor(Health {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            exe: std::env::current_exe()
+                .map_or_else(|_| "?".to_owned(), |p| p.display().to_string()),
+            screen_recording: slopty_capture::can_capture(),
+            post_events: slopty_input::can_post(),
+            reach: format!("{:?}", daemon.listener.reach()),
+            port: daemon.port,
+            // Every connection subscribes to the event broadcast, plus the daemon's own keep.
+            clients: daemon.events.receiver_count().saturating_sub(1),
+            sessions: daemon.host.summaries().await.len(),
+            uptime_secs: daemon.started_at.elapsed().as_secs(),
+        }),
         CtlRequest::Paired => {
             let store = daemon.listener.store();
             let paired = store

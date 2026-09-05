@@ -68,6 +68,10 @@ pub struct Daemon {
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// The host's pasteboard, synced with remote-window clients.
     pub pasteboard: Arc<slopty_input::Pasteboard>,
+    /// When the daemon came up (for `doctor`).
+    pub started_at: std::time::Instant,
+    /// The UDP port it listens on.
+    pub port: u16,
 }
 
 /// How often the pasteboard's change count is read (one Mach call to the pasteboard server).
@@ -125,6 +129,8 @@ async fn main() -> Result<()> {
         canvas,
         agents: Arc::default(),
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
+        started_at: std::time::Instant::now(),
+        port: args.port,
     };
     tokio::spawn(watch_pasteboard(daemon.clone()));
 
