@@ -29,6 +29,14 @@ pub enum Case {
     Screen,
     /// One pointer move on the main display and back. Needs Accessibility for the test binary.
     Input,
+    /// Frame-time budget: 20 streaming shells panned and zoomed, a display stream beside
+    /// shells (only when `SLOPTY_SCREEN_E2E` is also set), typing with and without the
+    /// local echo; prints the percentiles and fails when panning is over budget. No
+    /// permissions needed for the shell scenarios.
+    Smooth,
+    /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
+    /// indicative only, the simulator has no GPU-backed display link.
+    SmoothIos,
     /// All of the above (not `ios`, which needs a simulator).
     All,
     /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
@@ -70,13 +78,25 @@ struct Suite {
     test: &'static str,
     /// Test name filter, empty for the whole target.
     filter: &'static str,
+    /// One test at a time: the frame-time scenarios measure a quiet machine.
+    serial: bool,
 }
 
-const APP: &[Suite] =
-    &[Suite { gate: Some("SLOPTY_APP_E2E"), package: "slopty-e2e", test: "app", filter: "" }];
+const APP: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_APP_E2E"),
+    package: "slopty-e2e",
+    test: "app",
+    filter: "",
+    serial: false,
+}];
 
-const HOST: &[Suite] =
-    &[Suite { gate: None, package: "slopty-hostd", test: "e2e", filter: "shell_round_trip" }];
+const HOST: &[Suite] = &[Suite {
+    gate: None,
+    package: "slopty-hostd",
+    test: "e2e",
+    filter: "shell_round_trip",
+    serial: false,
+}];
 
 const SCREEN: &[Suite] = &[
     Suite {
@@ -84,19 +104,28 @@ const SCREEN: &[Suite] = &[
         package: "slopty-capture",
         test: "geometry",
         filter: "",
+        serial: false,
+    },
+    Suite {
+        gate: Some("SLOPTY_SCREEN_E2E"),
+        package: "slopty-host",
+        test: "screen",
+        filter: "",
+        serial: false,
     },
     Suite {
         gate: Some("SLOPTY_SCREEN_E2E"),
         package: "slopty-capture",
         test: "latency",
         filter: "",
+        serial: false,
     },
-    Suite { gate: Some("SLOPTY_SCREEN_E2E"), package: "slopty-host", test: "screen", filter: "" },
     Suite {
         gate: Some("SLOPTY_SCREEN_E2E"),
         package: "slopty-hostd",
         test: "e2e",
         filter: "screen_stream",
+        serial: false,
     },
 ];
 
@@ -105,10 +134,32 @@ const INPUT: &[Suite] = &[Suite {
     package: "slopty-input",
     test: "inject",
     filter: "",
+    serial: false,
 }];
 
-const IOS: &[Suite] =
-    &[Suite { gate: Some("SLOPTY_IOS_E2E"), package: "slopty-e2e", test: "ios", filter: "" }];
+const IOS: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_IOS_E2E"),
+    package: "slopty-e2e",
+    test: "ios",
+    filter: "",
+    serial: false,
+}];
+
+const SMOOTH: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_SMOOTH_E2E"),
+    package: "slopty-e2e",
+    test: "smooth",
+    filter: "on_the_mac",
+    serial: true,
+}];
+
+const SMOOTH_IOS: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
+    package: "slopty-e2e",
+    test: "smooth",
+    filter: "on_the_simulator",
+    serial: true,
+}];
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let suites: Vec<&Suite> = match opts.case {
@@ -116,7 +167,9 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Host => HOST.iter().collect(),
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
-        Case::All => APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).collect(),
+        Case::Smooth => SMOOTH.iter().collect(),
+        Case::SmoothIos => SMOOTH_IOS.iter().collect(),
+        Case::All => APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).chain(SMOOTH).collect(),
         Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
@@ -159,7 +212,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     )?;
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
-    let _simulator_env = (opts.case == Case::Ios)
+    let _simulator_env = matches!(opts.case, Case::Ios | Case::SmoothIos)
         .then(|| -> Result<_> {
             let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
             let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
@@ -175,10 +228,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         let _gate = suite.gate.map(|gate| sh.push_env(gate, "1"));
         let (package, test) = (suite.package, suite.test);
         let filter: &[&str] = if suite.filter.is_empty() { &[] } else { &[suite.filter] };
+        let threads: &[&str] = if suite.serial { &["--test-threads", "1"] } else { &[] };
         let title = format!("{package} {test} {}", suite.filter);
         let command = cmd!(
             sh,
-            "cargo nextest run -p {package} --test {test} --no-capture --no-fail-fast {filter...}"
+            "cargo nextest run -p {package} --test {test} --no-capture --no-fail-fast {threads...} {filter...}"
         );
         if step(title.trim(), &command).is_err() {
             failed.push(title);

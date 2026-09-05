@@ -96,7 +96,26 @@ pub enum Command {
         dx: f32,
         /// Vertical lines (positive scrolls the content down, GPUI convention).
         dy: f32,
+        /// Hold ⌘ (the platform modifier): on the canvas that zooms instead of panning.
+        #[serde(default)]
+        zoom: bool,
     },
+    /// Open `count` sessions running `command` (the login shell when empty) on the active
+    /// canvas, as ⌘N does; the host places them. Load for the frame-time scenarios without
+    /// typing anything into a shell.
+    Open {
+        /// Program and arguments.
+        #[serde(default)]
+        command: Vec<String>,
+        /// How many.
+        #[serde(default = "one")]
+        count: u32,
+    },
+    /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
+    FramesReset,
+    /// Add the host's first display to the active canvas, as picking it would (the host
+    /// needs Screen Recording permission; the stream opens when the item lands).
+    AddDisplay,
     /// Resize the window's content area.
     Resize {
         /// Width in points.
@@ -172,6 +191,67 @@ pub struct Dump {
     pub a11y: Vec<A11yNode>,
     /// `slopty hook install` has already been offered on the active canvas.
     pub hooks_offered: bool,
+    /// The UI's frame times since the last [`Command::FramesReset`].
+    pub frames: FrameInfo,
+}
+
+/// The UI frame-time probe (`slopty_ui::frames`), in microseconds.
+///
+/// How long the window took to draw each frame and how evenly frames came, over the last 1024
+/// frames; the counters run since the last reset. `dropped` counts display slots lost to draws
+/// that ran past the period (a 30 ms draw at 60 Hz loses one); an idle app drops nothing.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct FrameInfo {
+    /// Frames drawn.
+    pub frames: u64,
+    /// Frames whose draw took longer than the display period.
+    pub over_budget: u64,
+    /// Display slots lost to long draws.
+    pub dropped: u64,
+    /// Draw, median.
+    pub draw_p50_us: u64,
+    /// Draw, 95th percentile.
+    pub draw_p95_us: u64,
+    /// Draw, 99th percentile.
+    pub draw_p99_us: u64,
+    /// Worst draw in the ring.
+    pub draw_max_us: u64,
+    /// Interval between frames, median.
+    pub interval_p50_us: u64,
+    /// Interval, 95th percentile.
+    pub interval_p95_us: u64,
+    /// Interval, 99th percentile.
+    pub interval_p99_us: u64,
+    /// The display period the counters are measured against.
+    pub nominal_us: u64,
+}
+
+impl FrameInfo {
+    /// A duration in milliseconds, for the tables.
+    #[must_use]
+    pub fn ms(us: u64) -> f64 {
+        #[expect(clippy::cast_precision_loss, reason = "microseconds well below 2^53")]
+        let out = us as f64 / 1e3;
+        out
+    }
+
+    /// One table row: `p50 / p95 / p99 / max ms · every p50 / p95 ms · n frames, over, dropped`.
+    #[must_use]
+    pub fn row(&self) -> String {
+        format!(
+            "draw {:.1} / {:.1} / {:.1} / {:.1} ms · every {:.1} / {:.1} ms · {} frames, {} over {:.1} ms, {} dropped",
+            Self::ms(self.draw_p50_us),
+            Self::ms(self.draw_p95_us),
+            Self::ms(self.draw_p99_us),
+            Self::ms(self.draw_max_us),
+            Self::ms(self.interval_p50_us),
+            Self::ms(self.interval_p95_us),
+            self.frames,
+            self.over_budget,
+            Self::ms(self.nominal_us),
+            self.dropped,
+        )
+    }
 }
 
 /// One node of the accessibility tree.
@@ -254,6 +334,52 @@ pub struct TerminalInfo {
     pub agent_source: Option<String>,
     /// The agent's conversation, while it is shown in place of the grid.
     pub conversation: Option<ConversationInfo>,
+    /// Keystroke → paint, for keys typed into this terminal.
+    pub latency: LatencyInfo,
+}
+
+/// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
+///
+/// `echo_*` runs from the key to the paint of the first frame the host produced after applying
+/// it; `predicted_*` from the key to the paint that showed the local-echo guess, counted only
+/// while the predictor was drawing.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct LatencyInfo {
+    /// Keys echoed.
+    pub echoed: u64,
+    /// Key → echo paint, median.
+    pub echo_p50_us: u64,
+    /// Same, 95th percentile.
+    pub echo_p95_us: u64,
+    /// Same, worst.
+    pub echo_max_us: u64,
+    /// Keys predicted.
+    pub predicted: u64,
+    /// Key → predicted paint, median.
+    pub predicted_p50_us: u64,
+    /// Same, 95th percentile.
+    pub predicted_p95_us: u64,
+    /// Same, worst.
+    pub predicted_max_us: u64,
+}
+
+impl LatencyInfo {
+    /// One table row.
+    #[must_use]
+    pub fn row(&self) -> String {
+        let ms = FrameInfo::ms;
+        format!(
+            "echo {:.1} / {:.1} / {:.1} ms ({} keys) · predicted {:.1} / {:.1} / {:.1} ms ({} keys)",
+            ms(self.echo_p50_us),
+            ms(self.echo_p95_us),
+            ms(self.echo_max_us),
+            self.echoed,
+            ms(self.predicted_p50_us),
+            ms(self.predicted_p95_us),
+            ms(self.predicted_max_us),
+            self.predicted,
+        )
+    }
 }
 
 /// One remote window or display, and how its pictures reach the screen.

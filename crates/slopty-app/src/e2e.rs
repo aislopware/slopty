@@ -21,8 +21,8 @@ use gpui::{
 };
 use slopty_core::ItemId;
 use slopty_e2e::{
-    Button, Command, ConversationInfo, Dump, HostInfo, ItemInfo, Reply, ScreenInfo, TerminalInfo,
-    WindowInfo,
+    Button, Command, ConversationInfo, Dump, FrameInfo, HostInfo, ItemInfo, LatencyInfo, Reply,
+    ScreenInfo, TerminalInfo, WindowInfo,
 };
 use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
 use slopty_proto::canvas::ItemKind;
@@ -245,16 +245,38 @@ fn apply(
             );
             Reply::Ok
         }
-        Command::Scroll { x, y, dx, dy } => {
+        Command::Scroll { x, y, dx, dy, zoom } => {
             let _scrolled = window.dispatch_event(
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Lines(point(dx, dy)),
-                    modifiers: Modifiers::default(),
+                    modifiers: Modifiers { platform: zoom, ..Modifiers::default() },
                     touch_phase: TouchPhase::Moved,
                 }),
                 cx,
             );
+            Reply::Ok
+        }
+        Command::Open { command, count } => {
+            let Some(canvas) = workspace.read(cx).active_canvas() else {
+                return Reply::Error { message: "no active canvas".into() };
+            };
+            canvas.update(cx, |canvas, cx| {
+                for _ in 0..count {
+                    canvas.open_command(command.clone(), cx);
+                }
+            });
+            Reply::Ok
+        }
+        Command::FramesReset => {
+            slopty_ui::frames::reset(cx);
+            Reply::Ok
+        }
+        Command::AddDisplay => {
+            let Some(canvas) = workspace.read(cx).active_canvas() else {
+                return Reply::Error { message: "no active canvas".into() };
+            };
+            canvas.update(cx, slopty_ui::canvas::CanvasView::add_first_display);
             Reply::Ok
         }
         Command::Resize { width, height } => {
@@ -356,6 +378,39 @@ fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
     }
 }
 
+/// The frame probe's numbers, microseconds.
+fn frame_info(stats: Option<slopty_ui::frames::FrameStats>) -> FrameInfo {
+    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    stats.map_or_else(FrameInfo::default, |s| FrameInfo {
+        frames: s.frames,
+        over_budget: s.over_budget,
+        dropped: s.dropped,
+        draw_p50_us: us(s.draw_p50),
+        draw_p95_us: us(s.draw_p95),
+        draw_p99_us: us(s.draw_p99),
+        draw_max_us: us(s.draw_max),
+        interval_p50_us: us(s.interval_p50),
+        interval_p95_us: us(s.interval_p95),
+        interval_p99_us: us(s.interval_p99),
+        nominal_us: us(s.nominal),
+    })
+}
+
+/// A terminal's keystroke → paint numbers, microseconds.
+fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
+    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    LatencyInfo {
+        echoed: s.echoed,
+        echo_p50_us: us(s.echo_p50),
+        echo_p95_us: us(s.echo_p95),
+        echo_max_us: us(s.echo_max),
+        predicted: s.predicted,
+        predicted_p50_us: us(s.predicted_p50),
+        predicted_p95_us: us(s.predicted_p95),
+        predicted_max_us: us(s.predicted_max),
+    }
+}
+
 /// One line for a conversation entry, as the dump lists them.
 fn entry_line(entry: &TranscriptEntry) -> String {
     let first = |text: &str| text.lines().next().unwrap_or_default().to_owned();
@@ -398,6 +453,7 @@ impl Workspace {
             pairing: self.pairing.is_some(),
             status: self.status_text(),
             notice: self.notice.as_ref().map(|(_seq, text)| text.clone()),
+            frames: frame_info(slopty_ui::frames::stats(cx)),
             ..Dump::default()
         };
         let mut focused = if window.focused(cx).is_some() { "other" } else { "none" }.to_owned();
@@ -486,6 +542,7 @@ impl Workspace {
                         })
                         .map(str::to_owned),
                     conversation,
+                    latency: latency_info(view.latency()),
                 });
             }
         }

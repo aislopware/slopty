@@ -160,7 +160,7 @@ async fn daemons(
     root: &Path,
     host_name: &str,
     log: &str,
-    env: &[(String, String)],
+    env: &[(&str, &str)],
 ) -> Result<(Vec<Child>, String)> {
     let ptyd_sock = root.join("ptyd.sock");
     // ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
@@ -171,7 +171,7 @@ async fn daemons(
     let mut ptyd = Command::new(bin("slopty-ptyd")?)
         .arg("--socket")
         .arg(&ptyd_sock)
-        .envs(env.iter().map(|(k, v)| (k, v)))
+        .envs(env.iter().copied())
         .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
         .env("TERMINFO_DIRS", &terminfo_dirs)
         .env("RUST_LOG", log)
@@ -194,7 +194,7 @@ async fn daemons(
         .arg("--print-ticket")
         .arg("--port")
         .arg("0")
-        .envs(env.iter().map(|(k, v)| (k, v)))
+        .envs(env.iter().copied())
         .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
         .env("TERMINFO_DIRS", &terminfo_dirs)
         .env("RUST_LOG", log)
@@ -274,11 +274,9 @@ impl Stack {
         std::fs::write(fake.join("transcript.jsonl"), TRANSCRIPT)?;
         std::fs::write(fake.join("transcript-done.jsonl"), TRANSCRIPT_DONE)?;
         let path = std::env::var("PATH").unwrap_or_default();
-        let env = vec![
-            ("HOME".to_owned(), home.to_string_lossy().into_owned()),
-            ("PATH".to_owned(), format!("{}:{path}", fake.display())),
-            ("SLOPTY_FAKE_CLAUDE_DIR".to_owned(), fake.to_string_lossy().into_owned()),
-        ];
+        let (home, fake_dir) = (home.to_string_lossy(), fake.to_string_lossy());
+        let path = format!("{}:{path}", fake.display());
+        let env = [("HOME", &*home), ("PATH", &*path), ("SLOPTY_FAKE_CLAUDE_DIR", &*fake_dir)];
         Self::launch_in(dir, host_name, &env).await
     }
 
@@ -293,15 +291,22 @@ impl Stack {
         Ok(())
     }
 
-    async fn launch_with(host_name: &str, env: &[(String, String)]) -> Result<Self> {
+    /// [`Self::launch`] with extra environment for the daemons and the app (`SLOPTY_PREDICT`,
+    /// `SLOPTY_FRAME_HZ`, …); the defaults are applied first, so `env` overrides them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_with(host_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
         Self::launch_in(dir, host_name, env).await
     }
 
+    /// `env` goes to the daemons and the app alike, on top of the defaults.
     async fn launch_in(
         dir: tempfile::TempDir,
         host_name: &str,
-        env: &[(String, String)],
+        env: &[(&str, &str)],
     ) -> Result<Self> {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
@@ -316,6 +321,7 @@ impl Stack {
             .env(crate::SOCKET_ENV, &app_sock)
             // Local echo would put predicted text in the rows before the host confirms it.
             .env("SLOPTY_PREDICT", "never")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -336,6 +342,20 @@ impl Stack {
     ///
     /// When a daemon is missing, `simctl` fails, or the app does not bind its socket in time.
     pub async fn launch_on_simulator(host_name: &str, simulator: Simulator) -> Result<Self> {
+        Self::launch_on_simulator_with(host_name, simulator, &[]).await
+    }
+
+    /// [`Self::launch_on_simulator`] with extra environment for the app, as
+    /// [`Self::launch_with`] (each variable is passed as `SIMCTL_CHILD_<name>`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_on_simulator`].
+    pub async fn launch_on_simulator_with(
+        host_name: &str,
+        simulator: Simulator,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
@@ -354,6 +374,7 @@ impl Stack {
             .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
             // Glass only: the key bar stays in the frame whatever the simulator has attached.
             .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
+            .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())

@@ -13,6 +13,9 @@ use crate::{Button, Command, Dump, Reply};
 /// How often [`Driver::wait_for`] polls.
 const POLL: Duration = Duration::from_millis(100);
 
+/// How long one command may take to be answered (a frame, or a pairing round trip).
+const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One connection to a running app.
 #[derive(Debug)]
 pub struct Driver {
@@ -44,7 +47,12 @@ impl Driver {
         line.push('\n');
         self.writer.write_all(line.as_bytes()).await.context("send")?;
         let mut answer = String::new();
-        let n = self.reader.read_line(&mut answer).await.context("receive")?;
+        // Every reply waits for the app's next frame; one that never comes is the app hung,
+        // and the failure should say on which command.
+        let n = tokio::time::timeout(REPLY_TIMEOUT, self.reader.read_line(&mut answer))
+            .await
+            .with_context(|| format!("no reply to {command:?} within {REPLY_TIMEOUT:?}"))?
+            .context("receive")?;
         if n == 0 {
             bail!("app closed the test socket");
         }
@@ -89,6 +97,43 @@ impl Driver {
     /// When the socket breaks.
     pub async fn click(&mut self, x: f32, y: f32) -> Result<()> {
         self.ok(&Command::Click { x, y, button: Button::Left, count: 1 }).await
+    }
+
+    /// Scroll `dx`, `dy` lines at a window point; with `zoom`, ⌘ is held and the canvas zooms.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn scroll(&mut self, x: f32, y: f32, dx: f32, dy: f32, zoom: bool) -> Result<()> {
+        self.ok(&Command::Scroll { x, y, dx, dy, zoom }).await
+    }
+
+    /// Open `count` sessions running `command` on the active canvas.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or there is no canvas.
+    pub async fn open(&mut self, command: &[&str], count: u32) -> Result<()> {
+        let command = command.iter().map(|s| (*s).to_owned()).collect();
+        self.ok(&Command::Open { command, count }).await
+    }
+
+    /// Add the host's first display to the canvas.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or there is no canvas.
+    pub async fn add_display(&mut self) -> Result<()> {
+        self.ok(&Command::AddDisplay).await
+    }
+
+    /// Start a fresh frame-time window.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn frames_reset(&mut self) -> Result<()> {
+        self.ok(&Command::FramesReset).await
     }
 
     /// The app's state.
