@@ -147,6 +147,14 @@ objc2-core-media = { version = "=0.3.2", default-features = false, features = [
     "objc2-core-video",
     "objc2-core-audio-types",
 ] }
+objc2-application-services = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "AXError",
+    "AXNotificationConstants",
+    "AXUIElement",
+    "HIServices",
+    "libc",
+] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = [
     "std",
     "CVBase",

@@ -34,6 +34,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+objc2-application-services.workspace = true
+objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
 slopty-codec.workspace = true
 serde_json.workspace = true

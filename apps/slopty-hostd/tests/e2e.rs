@@ -1643,6 +1643,37 @@ mod tests {
         if samples.len() < 2 { 0.0 } else { hi - lo }
     }
 
+    /// How many windows the accessibility API says an application has right now, or `None`
+    /// when it will not answer (no Accessibility grant, or the process is gone).
+    ///
+    /// The attribute name is spelled out because there is nothing to import: the `kAX*`
+    /// constants are `#define kAXWindowsAttribute CFSTR("AXWindows")` macros in
+    /// `AXNotificationConstants.h` and `AXAttributeConstants.h`, so no symbol is exported and
+    /// no objc2 binding can offer a static for them. This is a measurement, and the spelling
+    /// stays inside it.
+    fn ax_window_count(pid: i32) -> Option<usize> {
+        use objc2_application_services::{AXError, AXUIElement};
+        use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType};
+
+        // SAFETY: the documented constructor for an application element; it returns +1.
+        let app = unsafe { AXUIElement::new_application(pid) };
+        let attribute = CFString::from_str("AXWindows");
+        let mut value: *const CFType = std::ptr::null();
+        // SAFETY: `app` is a live element and `value` is a valid out-pointer for one
+        // `CFTypeRef` (Accessibility, `AXUIElementCopyAttributeValue`).
+        let status =
+            unsafe { app.copy_attribute_value(&attribute, std::ptr::NonNull::from(&mut value)) };
+        if status != AXError::Success {
+            return None;
+        }
+        let value = std::ptr::NonNull::new(value.cast_mut())?;
+        // SAFETY: the call above returned success, so it stored a +1 reference here, and
+        // `AXWindows` is documented to be an array.
+        let windows: CFRetained<CFArray> =
+            unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(value)) };
+        Some(windows.count().try_into().unwrap_or(usize::MAX))
+    }
+
     /// What sits in the rectangle behind the target while the crop test runs.
     #[derive(Clone, Copy, Debug)]
     enum Behind {
@@ -1925,6 +1956,92 @@ mod tests {
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
         assert_dark_and_still(&run);
+    }
+
+    /// How late each way of noticing a hide is, measured against the same order-out.
+    ///
+    /// The display-crop path leaves a window in the crop until it learns the window has gone,
+    /// and CoreGraphics does not say so for ~270 ms (MEASUREMENTS.md, "how late a hide is").
+    /// This asks whether the accessibility API knows sooner, since it is the one signal that is
+    /// public, documented and not a poll of the same window list. Gated on `SLOPTY_SCREEN_E2E`,
+    /// and it reports rather than asserts a threshold: the number is the point.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn how_late_each_way_of_noticing_a_hide_is() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        // SAFETY: the documented no-argument query; it takes and returns nothing owned.
+        let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
+        let dir = tempfile::tempdir().unwrap();
+        let markers = dir.path().join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let title = format!("slopty late {}", std::process::id());
+        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+            .arg(&markers)
+            .arg(&title)
+            .arg(CROP_ORIGIN)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the idle window");
+        wait_for_marker(&markers.join("ready"), "the idle window").await;
+        let pid = i32::try_from(helper.id().expect("the helper's pid")).expect("a pid");
+
+        // The window as the host would find it, so both signals are asked about the same one.
+        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let target = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { windows, .. })) => {
+                    let found = windows.iter().find(|w| w.title == title);
+                    break found.expect("the window in the listing").id;
+                }
+                _other => {}
+            }
+        };
+        let windows_before = ax_window_count(pid);
+
+        std::fs::write(markers.join("hide"), b"").unwrap();
+        let asked = std::time::Instant::now();
+        let ordered_out = loop {
+            if std::fs::read_to_string(markers.join("state"))
+                .is_ok_and(|s| s.starts_with("hide visible=false"))
+            {
+                break std::time::Instant::now();
+            }
+            assert!(asked.elapsed() < Duration::from_secs(5), "the helper never hid");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+
+        // Both polled as fast as they can be answered, from the same thread, so neither is
+        // charged for the other. The blocking sleep is deliberate: a timer would round both to
+        // its own resolution.
+        let (mut ax_ms, mut cg_ms) = (None, None);
+        while ax_ms.is_none() || cg_ms.is_none() {
+            let elapsed = ordered_out.elapsed().as_millis();
+            if ax_ms.is_none() && ax_window_count(pid) < windows_before {
+                ax_ms = Some(elapsed);
+            }
+            if cg_ms.is_none() && !slopty_capture::window_on_screen(target) {
+                cg_ms = Some(elapsed);
+            }
+            if ordered_out.elapsed() > Duration::from_secs(3) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        eprintln!(
+            "late: accessibility {ax_ms:?} ms, core graphics {cg_ms:?} ms after the order \
+             (AXIsProcessTrusted = {trusted}, windows before = {windows_before:?})"
+        );
+
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+        link.close();
+        endpoint.close().await;
     }
 
     /// The control for the two tests around it: the same hide with nothing behind the target.
