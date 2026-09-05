@@ -141,8 +141,29 @@ client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffe
 ```
 
 Loss recovery order: FEC (free) → NACK inside the playout window → `ForceLTRRefresh` (small
-P-frame from an acked LTR) → IDR only when no acked LTR exists. Cursor is a separate low-rate
-channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
+P-frame from an acked LTR) → IDR only when no acked LTR exists. The NACK delay is not a
+constant: it is a quarter of the transport's measured round trip, floored at 1 ms and capped at
+20 ms (`slopty_media::NackDelay`), so a loopback link repairs in a millisecond and a 40 ms one
+waits 10 ms rather than asking again for fragments still in flight. Cursor is a separate
+low-rate channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
+
+**Presentation path.** The reassembler stamps every complete frame with the arrival of the
+datagram that finished it (`FrameOut::arrived`); the stream worker parks that instant under the
+frame's presentation timestamp, and the VideoToolbox callback — which is given nothing but that
+timestamp — picks it back up, so a decoded picture reaches the UI as a `Presentable`
+(`CVPixelBuffer` + arrival + decode instants) on a `watch` channel that keeps only the newest.
+In the element a `slopty_client::Pacer` owns the one decision left: **present on arrival**. A
+frame goes up on the first paint after the decoder returns it and is never queued for a later
+one — a queue would buy smoother spacing at the cost of a whole frame of latency on every frame,
+which is the wrong trade for a screen. When the decoder runs ahead of the display the pacer
+*replaces* the frame waiting to be painted instead of lining up behind it (`skipped`); when it
+runs behind, the paint shows the same picture again (`repeats`); a frame not newer than what is
+up is dropped (`late`). The pacer is also the instrument: a ring of the last 240 presented
+frames gives arrival → present p50/p95/max, the decoder's share of it, the spacing of the paints
+and that spacing's jitter — read by the ⌘⇧I overlay's third line (`hud_lines`) and by the app
+self-test's `dump` (`ScreenInfo`). The policy is pure and clock-injected
+(`slopty_client::pacing`), so it is unit-tested without a window; the element only feeds it a
+frame on one side and a paint on the other.
 
 **Audio** rides the same stream: ScreenCaptureKit captures the target's audio (48 kHz stereo,
 this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms packets, 96 kb/s) →
@@ -187,9 +208,12 @@ active app). `slopty-hostd` owns one datagram pump
 per connection (it also measures the QUIC hold and logs every stretch of it) and maps
 `ScreenRequest`s onto the streams it opened for that client. Client side, `HostLink::start`
 warms VideoToolbox's decoder up once per process, the router stamps each datagram with its
-arrival, and the stream worker drains what is queued before running the reassembler's timers;
+arrival, and the stream worker drains what is queued before running the reassembler's timers
+and pushes whatever the timers released straight into the decoder (a frame freed by a loss can
+otherwise wait for the next datagram, which on a still screen is a heartbeat away);
 `ScreenStats` carries hold, jitter and the start-up instants for the ⌘⇧I overlay
-(`hud_lines`) and `slopty bench screen`. Transport: ACKs within 2 ms and a 32-packet initial
+(`hud_lines`) and `slopty bench screen`, and `slopty-client::pacing` carries the arrival →
+present numbers beside them. Transport: ACKs within 2 ms and a 32-packet initial
 window (`slopty-net::endpoint`).
 
 ## 4. Canvas

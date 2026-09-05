@@ -138,8 +138,8 @@ frame. Window capture has a floor of ~8 ms where display capture goes down to <1
 window path composites separately; worth a look if the budget ever needs it. The 60 fps cap
 yields ~50–53 delivered fps on a 60 Hz display.
 
-Not yet measured: the client's arrival→present hold in the GPUI app, a real lossy/jittery path
-(Wi-Fi, LTE), and a release build.
+Not yet measured here: a real lossy/jittery path (Wi-Fi, LTE) and a release build. Arrival →
+present is measured in "start-up over iroh on a quiet machine, and arrival → present" below.
 
 ## 2026-09-05 — libghostty plain-text formatter for terminal search, debug build
 
@@ -577,7 +577,10 @@ samples each):
   under either controller. The stalls and NACKs in the loaded runs did not coincide with a
   QUIC hold; the warm-ups took 630–680 ms in those runs instead of 170–190, i.e. the
   processes were not being scheduled, and the arrival stamps put the silence at the client's
-  reader. Not a transport finding; re-measure on a quiet machine before ruling on it.
+  reader. **Settled on a quiet machine** (rerun below, `frame pacing` branch): 5 samples of
+  3 s, nothing else building, **0 stalls, 0 NACKs, 0 refreshes, 0 lost frames** across every
+  sample. The loaded runs' stalls and NACKs were the scheduler, as the arrival stamps said;
+  nothing on the transport side is owed a change.
 
 ```sh
 SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_codec=debug,slopty_client=debug \
@@ -660,3 +663,75 @@ steps.
 
 nextest's build is the next target if the gate grows: it recompiles the workspace in the `test`
 profile after clippy checked it in `dev`, and sccache does not cache incremental workspace crates.
+
+## 2026-09-05 — start-up over iroh on a quiet machine, and arrival → present (mac-studio, debug)
+
+The rerun the previous section was owed: same `screen_start_up_over_iroh`, same loopback iroh
+path, but nothing else on the machine (`pgrep -fl 'cargo|rustc'` = 2, `top` 71 % idle, no
+sibling build). Each sample is a fresh QUIC connection to the same private hostd, native scale
+at the default quality, streaming display 1 of an otherwise idle desktop. Two runs: 5 × 3 s
+(like-for-like with the "machine quiet" rows above) and 8 × 5 s (more frames, for the
+presentation numbers).
+
+### Start-up, 5 samples × 3 s
+
+| sample | opened | first datagram | first frame | first decoded | hold max | decoded | stalls (stalled) | nack / refresh / lost |
+| ------ | ------ | -------------- | ----------- | ------------- | -------- | ------- | ---------------- | --------------------- |
+| 0      | 130 ms | 131 ms         | 146 ms      | 170 ms        | 1 ms     | 39      | 0 (0 ms)         | 0 / 0 / 0             |
+| 1      | 132 ms | 121 ms         | 132 ms      | 141 ms        | 3 ms     | 78      | 0 (0 ms)         | 0 / 0 / 0             |
+| 2      | 127 ms | 113 ms         | 127 ms      | 136 ms        | 1 ms     | 83      | 0 (0 ms)         | 0 / 0 / 0             |
+| 3      | 123 ms | 113 ms         | 123 ms      | 132 ms        | 2 ms     | 84      | 0 (0 ms)         | 0 / 0 / 0             |
+| 4      | 123 ms | 114 ms         | 123 ms      | 133 ms        | 1 ms     | 83      | 0 (0 ms)         | 0 / 0 / 0             |
+
+The 8 × 5 s run agreed on shape and sat 15–30 ms higher throughout (opened 116–160 ms, first
+decoded 151–170 ms), all of it in host-side `capture started total_ms` (141–159 vs ~115); it
+also picked up one NACK in one sample and a 57–86 ms stall in three. Run-to-run spread on a
+shared desktop, not a trend: the client-side stamps put no silence at the reader in either run.
+
+* **Zero stalls, zero NACKs, zero refreshes, zero lost frames** in every sample of the 3 s run.
+  That is what the previous section was waiting for, and it retires the "machine loaded by
+  another agent's builds" caveat: the stalls and NACKs there were the scheduler, not the link.
+* `opened` 123–132 ms and first decoded 132–141 ms (sample 0: 170 ms, its first keyframe encode
+  is 61 ms against 26–27 ms later) — within a dozen milliseconds of the 115–121 / 123–129 ms
+  measured on the previous branch, i.e. unchanged by this branch's client-side work.
+* Warm-ups in this run: decoder 456 ms, capture 410 ms, both finished long before the first
+  `Open`; `decoder session configured ms=3–4` on every stream, `enumerate_ms=0` on every one.
+
+### Arrival → present
+
+The same runs, driving the app's real presentation path: the element's `slopty_client::Pacer`,
+offered every frame off the same `watch` channel the GPUI element reads, asked to present on a
+60 Hz tokio timer standing in for the display link. Arrival is the datagram that completed the
+frame; present is the paint. A timer is not a display link, so the *interval* jitter carries the
+timer's own and the source's — a still desktop is not a steady 60 fps source, it delivered
+17–24 fps here — but arrival → present does not depend on the timer's regularity.
+
+| run       | samples | arrival → present p50 | p95         | max         | decode p50 | present every | skip | repeat | late |
+| --------- | ------- | --------------------- | ----------- | ----------- | ---------- | ------------- | ---- | ------ | ---- |
+| 5 × 3 s   | 1–4     | 9.0–12.4 ms           | 17.5–19.2 ms | 17.9–21.2 ms | 2.6–2.7 ms | 17.2–17.7 ms  | 3–4  | 100–105 | 0    |
+| 8 × 5 s   | 0–7     | 9.0–12.6 ms           | 17.1–20.4 ms | 18.7–63.5 ms | 2.7–2.9 ms | 17.5–18.9 ms  | 3–11 | 184–213 | 0    |
+
+* **No extra frame of buffering.** A paint interval is 16.7 ms and the decoder takes 2.7 ms, so
+  present-on-arrival predicts p50 ≈ decode + half an interval ≈ 11 ms and p95 ≈ decode + a whole
+  interval ≈ 19 ms. Measured: p50 9.0–12.6, p95 17.1–20.4. A single frame of playout buffering
+  would have added 16.7 ms to both; there is no room for it in these numbers.
+* **`late` is 0 everywhere**: nothing arrives out of order behind `AllowFrameReordering=false`,
+  so the ordering guard costs nothing and catches nothing on this path.
+* `skip` 3–11 per sample: bursts where two frames left the decoder inside one 16.7 ms tick and
+  the older was replaced rather than queued. `repeat` 100–213 is the timer ticking with no new
+  frame — expected at 17–24 source fps against a 60 Hz paint, and the reason `repeat` alone is
+  not a fault signal. The one `max` outlier (63.5 ms, 8 × 5 s sample 7) is the sample that also
+  reported a stall; every other sample's worst frame is inside p95 + 3 ms.
+* `interval_jitter` is ±21–54 ms and says nothing about this branch: it is the *source's*
+  cadence, a desktop that only produces a frame when something changes. It is in the overlay
+  because on a steady source it is the first place a double- or skipped-present shows up.
+
+```sh
+# quiet check first: nothing else building
+pgrep -fl "cargo|rustc" | wc -l && top -l 2 -n 0 -s 1 | grep "CPU usage" | tail -1
+SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 SLOPTY_E2E_SECONDS=3 \
+  RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_codec=debug,slopty_client=debug \
+  cargo nextest run -p slopty-hostd --no-capture screen_start_up > /tmp/startup-quiet.log 2>&1
+grep -E '^\| ' /tmp/startup-quiet.log        # both tables: start-up, then arrival → present
+grep -E 'capture started|keyframe encoded|decoder session|warmed up' /tmp/startup-quiet.log
+```

@@ -694,6 +694,57 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
   present on arrival. 🔬 slop-desk measured vsync-locked = +2 frames at 60 fps; re-measure with
   our harness before ruling.
+- ✅ **Present on arrival, and the presentation path is measured rather than assumed**
+  (2026-09-05). A decoded frame goes up on the first paint after the decoder returns it and is
+  never queued for a later one. The alternative — a one-frame playout buffer, which is what a
+  video player does — buys evenly spaced pictures at the price of a whole frame of latency on
+  *every* frame, and a remote desktop is judged on how long after a keystroke the screen moves,
+  not on how evenly it moves. So the only decision left is what to do when the decoder is ahead
+  of the display, and the answer is drop, not queue: `Pacer::offer` replaces the frame waiting
+  to be painted and counts it (`skipped`) rather than lining up behind it, because by the paint
+  after next that picture would already be wrong. The mechanism was mostly there — the `watch`
+  channel between the worker and the element keeps only the newest frame — but nothing measured
+  it and one path did buffer: a frame the reassembler released inside `tick` (freed when the
+  frame ahead of it was given up on) sat in `ready` until the *next datagram* arrived, which on
+  a still screen is a heartbeat away. The worker now drains after every tick.
+  *Instrument:* the reassembler stamps each complete frame with the arrival of the datagram that
+  finished it (`FrameOut::arrived`), the worker parks that instant under the frame's
+  presentation timestamp (VideoToolbox's callback is handed nothing else to correlate on) and
+  the callback picks it up, so the element receives a `Presentable` and its `Pacer` can close
+  the clock at the paint. A ring of the last 240 presented frames gives arrival → present
+  p50/p95/max, the decoder's share, the paint spacing and its jitter, plus `skipped` /
+  `repeats` / `late` — the third line of the ⌘⇧I overlay and `ScreenInfo` in the app self-test's
+  dump. The policy is pure with an injected clock (`slopty_client::pacing`), so a steady source,
+  a source faster than the display, a source slower than it, a straggler and the ring's own
+  forgetting are all unit tests; the element only feeds it a frame on one side and a paint on
+  the other. Over a live iroh stream (MEASUREMENTS.md, "arrival → present"): p50 9.0–12.6 ms,
+  p95 17.1–20.4 ms, decode 2.6–2.9 ms, `late` 0. A paint interval is 16.7 ms, so
+  present-on-arrival predicts p50 ≈ decode + half an interval and p95 ≈ decode + a whole one;
+  both land there, and a single frame of playout buffering would have added 16.7 ms to each.
+  There is no room in the numbers for a buffer, which is the ruling's evidence.
+  Not built: a jitter-adaptive delay. It would only earn its latency on a link whose delivery
+  jitter exceeds a frame interval, and the same overlay now says whether that is happening.
+- ✅ **NACK delay from the round trip, floor 1 ms, ceiling 20 ms** (2026-09-05). The delay was a
+  fixed 3 ms. It exists only to outlast the spread of one frame's fragments on the wire — they
+  leave the host back to back, so silence after them means loss, not pacing — and that spread
+  scales with the path's delay variation, which scales with its round trip. A constant is
+  therefore wrong at both ends: on loopback (RTT ≈ 0.6 ms) 3 ms is two extra milliseconds
+  before every repair, and on a 40 ms link it fires while the fragments are still in flight and
+  answers a NACK storm with retransmissions nobody was missing.
+  `NackDelay { min: 1 ms, max: 20 ms, divisor: 4 }` makes it `rtt / 4` between the bounds — the
+  reordering tolerance TCP RACK uses (`min_rtt / 4`), for the same reason. The bounds carry more
+  weight than the fraction: without the floor, scheduling noise on a loopback link reads as
+  loss; without the ceiling, a satellite path would hold a repairable frame past the point where
+  the retransmission could still be shown (`max_hold`, 500 ms, still bounds it). The whole loss
+  deadline follows, since it is `delay + retries × (rtt + delay) + grace`: loopback 20.2 → 14.2
+  ms, a 40 ms link 99 → 120 ms. The storm gate from the start-up track is untouched — a retry
+  still needs a datagram to have arrived since the last NACK, the deadline still only counts
+  while newer datagrams are coming in, and an outright stall is still waited out. `tick` derives
+  the delay from the RTT it is handed and caches it, so `stalled` and the resume path (which
+  have no round trip to hand) use the same number. Tested against a table of fake RTTs
+  (loopback / LAN / Wi-Fi / mesh / satellite → 1 / 1 / 3 / 10 / 20 ms), for monotonicity and
+  bounds across a thousand round trips, and end to end in the pipeline tests, which now derive
+  their own advances from the policy.
 - ✅ **Cursor** is a separate channel drawn client-side; capture with `showsCursor = false`.
 - ✅ **Audio**: SCK `capturesAudio` → `opus` 0.4.0 (verified; `audiopus` is dead) → `objc2-avf-audio`.
 
