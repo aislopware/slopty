@@ -3112,6 +3112,16 @@ mod tests {
             Some(AgentStatus::Working)
         );
         assert!(cx.debug_bounds(selector("hooks", item)).is_some());
+        // The pill is laid out at its label's width (an auto-sized wrapper around a
+        // fill-width leaf once collapsed to the dot and its padding, the word only in the
+        // a11y label): wider than dot, gaps and padding by seven glyphs of a small label.
+        let pill = cx.debug_bounds(selector("agent", item)).expect("the pill");
+        let theme = Theme::default();
+        let without_label =
+            theme.spacing.xs.mul_add(2.0, theme.spacing.sm.mul_add(2.0, theme.spacing.xxs));
+        let width = f32::from(pill.size.width);
+        let seven_glyphs = 28.0;
+        assert!(width >= without_label + seven_glyphs, "pill {width} px, chrome {without_label}");
 
         // Taking the offer asks the host to install and never asks again.
         let (x, y) = (offer.center().x, offer.center().y);

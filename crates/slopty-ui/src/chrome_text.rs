@@ -17,8 +17,8 @@ use std::rc::Rc;
 
 use gpui::{
     App, BorrowAppContext as _, Bounds, Element, ElementId, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Pixels, ShapedLine, SharedString, Style, TextRun,
-    Window, point, px, relative,
+    InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Point, ShapedGlyph, ShapedLine,
+    ShapedRun, SharedString, Style, TextRun, Window, point, px, relative,
 };
 
 use crate::fonts;
@@ -164,9 +164,9 @@ struct Place {
 /// Paint one glyph: exact at the painted size, or a stretched ladder raster while zooming.
 fn paint_glyph(
     window: &mut Window,
-    at: gpui::Point<Pixels>,
-    run: &gpui::ShapedRun,
-    glyph: &gpui::ShapedGlyph,
+    at: Point<Pixels>,
+    run: &ShapedRun,
+    glyph: &ShapedGlyph,
     paint: Paint,
 ) {
     let Paint { size, raster, color } = paint;
@@ -182,9 +182,32 @@ fn paint_glyph(
     }
 }
 
-/// Paint `line`'s glyphs at `place`, stopping after `keep` glyphs. The x advances by the shaped
-/// deltas times `k`, as GPUI's own line paint does, so at `k = 1` every glyph lands where the
-/// text element would put it.
+/// Where each of `layout`'s first `keep` glyphs lands at `place`. The x advances by the shaped
+/// deltas times `k` and the y is the baseline plus the glyph's own vertical offset times `k`
+/// (a combining mark, a vertically positioned glyph), as GPUI's own line paint places them, so
+/// at `k = 1` every glyph lands where the text element would put it.
+fn glyph_origins(
+    layout: &LineLayout,
+    place: Place,
+    keep: Option<usize>,
+) -> Vec<(&ShapedRun, &ShapedGlyph, Point<Pixels>)> {
+    let mut x = place.x;
+    let mut prev = px(0.0);
+    let mut out = Vec::new();
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            if keep.is_some_and(|keep| out.len() >= keep) {
+                return out;
+            }
+            x += (glyph.position.x - prev) * place.k;
+            prev = glyph.position.x;
+            out.push((run, glyph, point(x, place.baseline + glyph.position.y * place.k)));
+        }
+    }
+    out
+}
+
+/// Paint `line`'s glyphs at `place`, stopping after `keep` glyphs.
 fn paint_line(
     window: &mut Window,
     line: &ShapedLine,
@@ -192,19 +215,8 @@ fn paint_line(
     keep: Option<usize>,
     paint: Paint,
 ) {
-    let mut x = place.x;
-    let mut prev = px(0.0);
-    let mut painted = 0_usize;
-    for run in &line.layout().runs {
-        for glyph in &run.glyphs {
-            if keep.is_some_and(|keep| painted >= keep) {
-                return;
-            }
-            x += (glyph.position.x - prev) * place.k;
-            prev = glyph.position.x;
-            paint_glyph(window, point(x, place.baseline), run, glyph, paint);
-            painted = painted.saturating_add(1);
-        }
+    for (run, glyph, at) in glyph_origins(line.layout(), place, keep) {
+        paint_glyph(window, at, run, glyph, paint);
     }
 }
 
@@ -274,10 +286,15 @@ impl Element for ChromeText {
             Rc::clone(entry)
         });
 
-        let width =
-            if self.fill { relative(1.0).into() } else { (shaped.line.width * self.k).into() };
+        // The element's own width is always its text's: an auto-sized parent (a pill) grows
+        // to fit it. `fill` caps it at the parent's width, so a title in a bar of definite
+        // width is cut to an ellipsis where it does not fit.
+        let width: gpui::DefiniteLength = (shaped.line.width * self.k).into();
+        let max_width: gpui::Length =
+            if self.fill { relative(1.0).into() } else { gpui::Length::Auto };
         let layout_style = Style {
-            size: gpui::Size { width, height: line_height.into() },
+            size: gpui::Size { width: width.into(), height: line_height.into() },
+            max_size: gpui::Size { width: max_width, height: gpui::Length::Auto },
             flex_shrink: 0.0,
             ..Style::default()
         };
@@ -331,4 +348,47 @@ impl Element for ChromeText {
 #[cfg(test)]
 pub fn cached_labels(cx: &App) -> usize {
     cx.try_global::<ChromeCache>().map_or(0, |cache| cache.lines.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{FontId, GlyphId};
+
+    use super::*;
+
+    /// Two glyphs, the second raised by 2 shaped points (a combining mark's placement).
+    fn layout() -> LineLayout {
+        let glyph = |x: f32, y: f32, index: usize| ShapedGlyph {
+            id: GlyphId(1),
+            position: point(px(x), px(y)),
+            index,
+            is_emoji: false,
+        };
+        LineLayout {
+            font_size: px(10.0),
+            width: px(20.0),
+            ascent: px(8.0),
+            descent: px(2.0),
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs: vec![glyph(0.0, 0.0, 0), glyph(10.0, 2.0, 1)],
+            }],
+            len: 2,
+        }
+    }
+
+    /// A glyph's vertical offset rides on the baseline, scaled with the zoom, at `k = 1` too.
+    #[test]
+    fn a_glyphs_vertical_offset_is_added_to_the_baseline() {
+        let layout = layout();
+        let at_rest = Place { x: px(100.0), baseline: px(50.0), k: 1.0 };
+        let origins: Vec<Point<Pixels>> =
+            glyph_origins(&layout, at_rest, None).into_iter().map(|(_, _, at)| at).collect();
+        assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(110.0), px(52.0))]);
+        let zoomed = Place { x: px(100.0), baseline: px(50.0), k: 2.0 };
+        let origins: Vec<Point<Pixels>> =
+            glyph_origins(&layout, zoomed, None).into_iter().map(|(_, _, at)| at).collect();
+        assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(120.0), px(54.0))]);
+        assert_eq!(glyph_origins(&layout, zoomed, Some(1)).len(), 1, "cut after one glyph");
+    }
 }

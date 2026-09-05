@@ -190,6 +190,42 @@ pub fn separator_color(theme: &Theme, exit: Option<u8>) -> Hsla {
     }
 }
 
+/// How far a row's paint reaches outside its cell box, `(above, below)`, in painted points.
+///
+/// The cell box is the row's layout, not its ink: with a reduced line height
+/// (`mono_line_height` below 1) the glyphs' descenders and the underline and strikethrough
+/// strokes derived from the face sit below the box, and an overline or a tall ascent can sit
+/// above it. Culling on the box alone drops a still-visible underline the moment the box
+/// crosses the clip edge, so the band is padded by this much on either side.
+fn row_overhang(grid: &Grid, face: &metrics::Face, pixel_scale: f32) -> (Pixels, Pixels) {
+    let pixel_scale = if pixel_scale.is_finite() && pixel_scale > 0.0 { pixel_scale } else { 1.0 };
+    #[expect(clippy::cast_possible_truncation, reason = "font units; f32 carries them")]
+    let pts = |device: f64| px(device as f32 / pixel_scale);
+    let ink_top = grid.baseline - pts(face.ascent.max(0.0));
+    let ink_bottom = grid.baseline + pts((-face.descent).max(0.0));
+    let stroke_bottom = |line: metrics::Line| line.y + line.thickness;
+    let below = ink_bottom
+        .max(stroke_bottom(grid.underline))
+        .max(stroke_bottom(grid.strikethrough))
+        .max(stroke_bottom(grid.overline))
+        - grid.line_height;
+    let above = -ink_top.min(grid.overline.y).min(px(0.0));
+    (above.max(px(0.0)), below.max(px(0.0)))
+}
+
+/// Whether a row at `y` can show anything between `clip_top` and `clip_bottom`, its ink and
+/// strokes reaching `overhang` beyond the cell box.
+fn row_in_band(
+    y: Pixels,
+    line_height: Pixels,
+    overhang: (Pixels, Pixels),
+    clip_top: Pixels,
+    clip_bottom: Pixels,
+) -> bool {
+    let (above, below) = overhang;
+    y + line_height + below > clip_top && y - above < clip_bottom
+}
+
 /// The element.
 #[derive(Debug)]
 pub struct TerminalElement {
@@ -726,12 +762,13 @@ impl Element for TerminalElement {
             // no quads, no words, no hashing. Paint walks only the rows prepared here.
             let clip = window.content_mask().bounds.intersect(&bounds);
             let (clip_top, clip_bottom) = (clip.top(), clip.bottom());
+            let overhang = row_overhang(&grid, &face, metrics.pixel_scale);
             // Rows above the oldest line the host still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<Word>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             for (i, row) in rows_view.iter().enumerate() {
                 let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
-                if y + line_height <= clip_top || y >= clip_bottom {
+                if !row_in_band(y, line_height, overhang, clip_top, clip_bottom) {
                     continue;
                 }
                 let Some(line) = row.line else {
@@ -1134,6 +1171,39 @@ mod tests {
                 assert_eq!(m.pixel_at(m.origin), (0, 0));
             }
         }
+    }
+
+    /// A 17 pt cell squeezed to 10 pt (`mono_line_height` 0.6): the descender and the underline
+    /// end below the box, so a row whose box is just above the clip but whose underline is
+    /// inside is still prepared; one whose whole ink is above is not.
+    #[test]
+    fn a_row_is_culled_on_its_ink_not_its_cell_box() {
+        let grid = Grid {
+            cell_width: px(8.0),
+            line_height: px(10.0),
+            baseline: px(9.0),
+            underline: metrics::Line { y: px(11.0), thickness: px(1.0) },
+            strikethrough: metrics::Line { y: px(5.0), thickness: px(1.0) },
+            overline: metrics::Line { y: px(-1.0), thickness: px(1.0) },
+            cursor_thickness: px(1.0),
+        };
+        let face = metrics::Face { ascent: 10.0, descent: -3.0, ..metrics::Face::default() };
+        let (above, below) = row_overhang(&grid, &face, 1.0);
+        assert_eq!((above, below), (px(1.0), px(2.0)), "descender to 12, underline to 12");
+        // Clip from 100: the box of a row at 88..98 is above it, its underline 99..100 is not.
+        let (top, bottom) = (px(100.0), px(300.0));
+        assert!(row_in_band(px(89.0), px(10.0), (above, below), top, bottom), "underline shows");
+        assert!(!row_in_band(px(88.0), px(10.0), (above, below), top, bottom), "nothing shows");
+        assert!(px(89.0) + px(10.0) <= top, "the cell box alone would have culled it");
+        // The bottom edge: a row whose box starts at the clip's end still shows its overline.
+        assert!(row_in_band(px(300.5), px(10.0), (above, below), top, bottom));
+        assert!(!row_in_band(px(301.0), px(10.0), (above, below), top, bottom));
+        // Overhang scales with the zoom (device pixels over `pixel_scale`), never negative.
+        let (a2, b2) = row_overhang(&grid, &face, 2.0);
+        assert_eq!((a2, b2), (px(1.0), px(2.0)), "the strokes, not the face, reach furthest");
+        let tight = metrics::Face { ascent: 5.0, descent: -0.5, ..metrics::Face::default() };
+        let roomy = Grid { underline: metrics::Line { y: px(8.0), thickness: px(1.0) }, ..grid };
+        assert_eq!(row_overhang(&roomy, &tight, 1.0), (px(1.0), px(0.0)));
     }
 
     /// A word shaped at 13 pt with an 8 pt cell forced paints at 26 pt with the glyphs 16 pt
