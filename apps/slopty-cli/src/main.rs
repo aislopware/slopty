@@ -149,6 +149,10 @@ enum BenchCmd {
         /// Bitrate in Mbit/s.
         #[arg(long, default_value_t = 30)]
         mbit: u32,
+        /// Fail the run when the receiver counted more stalls than this. The self-check for a
+        /// quiet loopback stream, where the answer is zero.
+        #[arg(long)]
+        max_stalls: Option<u64>,
     },
 }
 
@@ -197,12 +201,14 @@ async fn main() -> Result<()> {
             bench::echo(&data_dir, host.as_deref(), count).await
         }
         Cmd::Bench {
-            cmd: BenchCmd::Screen { host, list, window, display, seconds, scale, fps, mbit },
+            cmd:
+                BenchCmd::Screen { host, list, window, display, seconds, scale, fps, mbit, max_stalls },
         } => {
             if list {
                 bench::list(&data_dir, host.as_deref()).await
             } else {
-                let spec = bench::ScreenBench { window, display, seconds, scale, fps, mbit };
+                let spec =
+                    bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
                 bench::screen(&data_dir, host.as_deref(), spec).await
             }
         }

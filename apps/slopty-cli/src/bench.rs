@@ -121,6 +121,8 @@ pub struct ScreenBench {
     pub fps: u16,
     /// Bitrate, Mbit/s.
     pub mbit: u32,
+    /// Fail the run when the receiver counted more stalls than this.
+    pub max_stalls: Option<u64>,
 }
 
 /// Print the host's windows and displays.
@@ -324,6 +326,29 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.stalled_ms,
         if stats.stalled { "  stalled at the end" } else { "" }
     );
+    let s = stats.silences;
+    println!(
+        "  silences past the gap: host-quiet {} / covered {}  receiver-dozed {}  in-flight {}  \
+         stamp wrapped {} / backwards {} / absent {}  idle {}  worst gap {} ms, worst doze {} ms",
+        s.host_quiet,
+        s.host_covered,
+        s.receiver_dozed,
+        s.in_flight,
+        s.stamp_wrapped,
+        s.stamp_backwards,
+        s.stamp_absent,
+        s.while_idle,
+        s.gap_ms_max,
+        s.dozed_ms_max
+    );
+    println!(
+        "  ended by: heartbeat {}  video {}  other {}  |  reader lag max {:.1} ms, past the gap {}",
+        s.ended_heartbeat,
+        s.ended_video,
+        s.ended_other,
+        stats.reader_lag_max.as_secs_f64() * 1e3,
+        stats.reader_lag_over_gap
+    );
     println!("  host target over time (Mbit/s): {}", rate_trajectory(&rate));
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
@@ -335,6 +360,17 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(link);
     endpoint.close().await;
+    // The self-check: on a quiet loopback stream nothing can hold a datagram, so the answer is
+    // zero, and the attribution above says which reading produced anything else.
+    if let Some(max) = bench.max_stalls {
+        anyhow::ensure!(
+            stats.stalls <= max,
+            "{} stalls ({} ms stalled) over {} s, more than the {max} allowed",
+            stats.stalls,
+            stats.stalled_ms,
+            bench.seconds
+        );
+    }
     Ok(())
 }
 
