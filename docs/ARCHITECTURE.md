@@ -516,7 +516,14 @@ resize the window; the canvas re-fits on resize like any window);
 `cargo xtask e2e ios --sim ipad` drives the app there over its test socket, including `render`:
 the fork's `gpui_ios` draws the scene offscreen through the shared Metal renderer at the
 layer's drawable size, and the tests diff it against per-device goldens (`ios-phone-*.png`,
-`ios-pad-*.png` under `crates/slopty-e2e/golden`).
+`ios-pad-*.png` under `crates/slopty-e2e/golden`). The same socket also reaches the UIKit
+boundary: `UiKeyPress`, `UiTouch`, `UiPinch`, `UiInsertText` and `UiDeleteBackward` describe a
+`UIPress`, a `touches…:withEvent:` set, a pinch report and the text system's calls by the
+values the metal view reads out of them, and the fork's `gpui_ios::inject` (`test-support`
+only) runs the view's own delivery from that description, so `tests/ios_uikit.rs` proves the
+phone's input path (modifiers, key repeat, the text-system hand-off, gpui core's touch
+recognizer, the pinch) and not just GPUI's dispatch; the pure mappings (HID usage → key,
+`UITouchPhase` → phase, the US layout stand-in) are unit-tested on the host in the fork.
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
 "Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
 `overlay`), one hairline (`border`), three text levels, one accent with its foreground, and

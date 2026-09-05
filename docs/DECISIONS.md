@@ -111,7 +111,63 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   already runs costs nothing and needs no observer lifetime) is true; `key_bar_visible` is the
   pure rule with its table test. The simulator-driven layer exists: `cargo xtask e2e ios`
   drives the app in the simulator over its socket (`crates/slopty-e2e/tests/ios.rs`); the
-  UIKit delivery itself still has no injection layer.
+  UIKit delivery has its own injection layer (next ruling).
+- ✅ **The simulator self-test delivers at the UIKit boundary, from descriptions (2026-09-06,
+  fork commit `53b763a9`).** `Command::Keys` / `Click` enter GPUI's dispatch, so nothing in
+  the fork's UIKit plumbing (`pressesBegan:` on the metal view, `touchesBegan:` phases, the
+  pinch recognizer, `insertText:` / `deleteBackward` on the text input view) was under test.
+  UIKit's objects cannot be made: `UIPress`, `UITouch` and `UIKey` have no public
+  initialiser, subclassing them would still leave `UIEvent` private and the touch phase
+  read-only, and posting through `UIApplication.sendEvent:` needs a `UIEvent` nobody can
+  construct. Ruling: the callbacks are split at the point where they have read their object
+  into plain values (`UiKey` = usage + flags + `characters` + `charactersIgnoringModifiers`;
+  touch id + `UITouchPhase` + point; recognizer state + scale + point; a string) and hand
+  those to one delivery function per kind (`handle_hardware_key`, `deliver_touch`,
+  `deliver_pinch`, `insert_text`, `handle_delete_backward`); `gpui_ios::inject(DescribedInput)`
+  (fork feature `test-support`, so the bundle has none of it) enters the same functions from
+  a *description*. Everything after the unpacking is the phone's real path: the modifier
+  state machine, the key repeat, `is_plain_text` deciding whether the text system types the
+  key (the injector then plays UIKit's part and calls `insert_text`, which is what the
+  responder chain would do), gpui core's touch recognizer, the canvas's pinch handler. The
+  unpacking itself is covered by unit tests of the pure mappings, which moved out of
+  `cfg(target_os = "ios")` so they run on the host (`cargo test -p gpui_ios` in the fork):
+  HID usage + flags → `Keystroke`, raw `UITouchPhase` / `UIGestureRecognizerState` →
+  `TouchPhase`, and the US-layout stand-in that fills `UIKey.characters` for a described
+  press (a described event has no layout engine; the stand-in is what a US keyboard reports,
+  Control folded to the C0 code, Command emptying `characters`). The socket grew
+  `UiKeyPress { usage, modifiers, phase }`, `UiTouch { touches, phase }` (a whole
+  `touches…:withEvent:` set), `UiPinch { scale, x, y, phase }`, `UiInsertText`,
+  `UiDeleteBackward`; the app hands them to `inject` from its async task with no window
+  leased, because the delivery re-enters GPUI's dispatch the way a UIKit callback does
+  (inside `update_window` it would find the window taken); macOS answers an error. The dump
+  stays the only truth (rows, focus, zoom, bounds, a11y). Verified on the iPhone and iPad
+  simulators (`crates/slopty-e2e/tests/ios_uikit.rs`): plain presses are typed by the text
+  system and named ones consumed (`cat -v` shows `^[`, `^[[A`, `^[[C`, `^C`), ⌘⇧L from a
+  press toggles the conversation view, a cancelled press releases the chord, with two shells
+  fitted (⌘N, ⌘1) a tap on the first activates it, a pan with a second resting finger moves
+  the camera by the first finger's travel on its locked axis and flings nothing after a
+  stopped finger, a pinch multiplies the zoom by the product of its steps about the point
+  under the fingers, a `UIKeyInput` composition (`a`, delete, `â`) leaves exactly `â`
+  in `cat -v`, and the key bar's Escape, Up arrow and ⌃ buttons work when tapped at their
+  a11y bounds. Found on the way: (1) the real `insertText:` path held the input handler's
+  `RefCell` borrow across `replace_text_in_range`, which re-enters GPUI, whose
+  `take_input_handler` borrows the same cell — every soft-keyboard character would have
+  panicked the phone the moment a terminal took the keyboard; the first `UiInsertText` hit it
+  and the fork now takes the handler (and the input callback) out of the cell for the call,
+  as the macOS backend does; (2) a real two-finger drag on the device belongs to
+  `UIPinchGestureRecognizer` (`cancelsTouchesInView`), whose translation the canvas ignores,
+  so two fingers zoom and never pan; one finger pans; (3) a tap on bare canvas cannot leave
+  the keyboard on the canvas: `keep_focus_rendered` hands it back to the active terminal on
+  the next frame, so the test asserts activation (the headless twins,
+  `a_finger_tap_activates_what_it_lands_on` and
+  `a_finger_pan_on_bare_canvas_moves_the_content_with_the_finger`, go through gpui's touch
+  recognizer); (4) a finger that keeps reporting after it stops (`UITouchPhaseStationary`
+  events, which the fork maps to `Moved`) makes gpui core's quadratic velocity fit bend
+  backwards and fling the content the wrong way; a real still finger sends nothing, and the
+  40 ms silence is what the recognizer reads as "stopped", so the test rests 100 ms before
+  lifting instead of sending stationary reports. Not modelled: `UITextInput` marked text (the fork's text input
+  view is `UIKeyInput` only, so iOS composes by delete + insert, which is what the test
+  plays), touch force and prediction (a described touch has none), non-US layouts.
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
   things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`
   on iOS), and stand-ins for three CGL symbols (`CGLErrorString`, `CGLGetCurrentContext`,

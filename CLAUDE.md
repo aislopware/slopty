@@ -61,7 +61,11 @@ hypothesis until DECISIONS.md marks it verified.
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with
-   the app in the simulator: the way to check anything on the phone or the tablet.
+   the app in the simulator: the way to check anything on the phone or the tablet. There the
+   socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /
+   `ui_delete_backward` (`Driver::ui_key`, `ui_tap`, `ui_pan`, `ui_pinch`, `ui_insert_text`),
+   delivered at the UIKit boundary by the fork (`tests/ios_uikit.rs`): use them for anything
+   about how the phone's own keyboard, fingers or key bar reach the app.
    `cargo xtask e2e pair` (gate `SLOPTY_PAIR_E2E`, serial) runs two app processes on one host,
    each on its own socket and data dir, to prove many-clients-one-server: a terminal opened on
    one shows on the other, typing on both is serialised, attention badges both, a client dying
