@@ -735,3 +735,65 @@ SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 SLOPTY_E2E_SECONDS=3 \
 grep -E '^\| ' /tmp/startup-quiet.log        # both tables: start-up, then arrival → present
 grep -E 'capture started|keyframe encoded|decoder session|warmed up' /tmp/startup-quiet.log
 ```
+
+## 2026-09-05 — parity, NACK and refresh under injected loss (loopback), debug build
+
+Command (both tables from the same test; the "before" run is the same test with
+`crates/slopty-media/src/redundancy.rs` reverted to its previous controller):
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
+  cargo nextest run -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+grep -E '^\| ' /tmp/loss-after.log
+```
+
+Setup: mac-studio, `screen_under_injected_loss` in `apps/slopty-hostd/tests/e2e.rs` — hostd and
+client in one process over iroh's direct path, main display 1920×1080, 5 s per rate, four rates
+back to back. Loss is injected on the client's receive path (`ScreenRouter::set_loss`) from a
+fixed seed, so a rate always drops the same datagrams of the sequence and two builds compare on
+the same losses. "Parity seen" is parity fragments per thousand data fragments *on the wire*, not
+the controller's ratio: the packetizer always sends at least one parity fragment, which on a
+mostly-still desktop (4–8 fragments per frame) dominates whatever ratio is asked for.
+
+Before — previous controller (symmetric quarter-weight EWMA, no deadband, stalls counted as
+loss):
+
+| drop | frames | by parity | by NACK | lost | NACK / refresh | datagrams (lost) | parity seen | gap p50 / p90 / max |
+| ---- | ------ | --------- | ------- | ---- | -------------- | ---------------- | ----------- | ------------------- |
+| 0 ‰   | 89    | 0         | 0       | 0    | 0 / 0          | 521 (0)          | 310 ‰       | 61.9 / 96.4 / 136.1 ms |
+| 20 ‰  | 129   | 9         | 0       | 0    | 0 / 0          | 608 (11)         | 381 ‰       | 40.3 / 69.0 / 101.2 ms |
+| 50 ‰  | 133   | 16        | 1       | 0    | 1 / 0          | 603 (18)         | 376 ‰       | 25.1 / 72.5 / 95.8 ms  |
+| 100 ‰ | 133   | 28        | 4       | 0    | 4 / 0          | 579 (37)         | 380 ‰       | 39.3 / 68.9 / 107.6 ms |
+
+After — asymmetric controller (rise ½ / fall ⅛, 2 % deadband, stalled windows excluded), same
+NACK and refresh policy:
+
+| drop | frames | by parity | by NACK | lost | NACK / refresh | datagrams (lost) | parity seen | gap p50 / p90 / max |
+| ---- | ------ | --------- | ------- | ---- | -------------- | ---------------- | ----------- | ------------------- |
+| 0 ‰   | 87    | 0         | 0       | 0    | 0 / 0          | 519 (0)          | 331 ‰       | 70.6 / 86.1 / 106.4 ms |
+| 20 ‰  | 120   | 9         | 0       | 0    | 0 / 0          | 579 (11)         | 378 ‰       | 19.6 / 83.4 / 112.6 ms |
+| 50 ‰  | 120   | 13        | 2       | 0    | 2 / 0          | 563 (15)         | 373 ‰       | 19.4 / 83.6 / 100.0 ms |
+| 100 ‰ | 117   | 23        | 3       | 0    | 3 / 0          | 540 (31)         | 385 ‰       | 25.3 / 83.8 / 98.2 ms  |
+
+Takeaways:
+
+* **Nothing is lost and nothing is refreshed up to 100 ‰ datagram loss on this path**, before or
+  after: parity repairs 8–24 % of the frames, one to four NACKs cover the rest, and the arrival
+  gap is the desktop's, not the link's (the 0 ‰ row's 70 ms p50 is a still screen). The NACK
+  give-up deadline is therefore left alone — there are no refreshes to remove at 20–50 ‰, and
+  changing a deadline that no measurement moves would be churn. What this path cannot show is
+  the deadline's RTT-dependent half: loopback answers a NACK in ~1 ms, so a give-up needs a
+  stall, which is what the mesh sections above measure.
+* **The two controllers are indistinguishable here, and that is a property of the source, not
+  of the controllers**: a still desktop at ~5 Mbit/s encodes 4–8 fragments per frame, so the
+  packetizer's one-parity-fragment minimum (170–330 ‰) is always above the ratio either
+  controller asks for (50–200 ‰). The controller only binds on frames of tens of fragments —
+  a busy screen on a lossy path — which this test cannot produce without driving the desktop.
+  Its behaviour is pinned by unit tests (`crates/slopty-media/src/redundancy.rs`: where the
+  ratio settles, how many times it re-cuts the layout, rise/fall asymmetry, a stalled window,
+  degenerate reports) instead.
+* Frame counts differ between rows because the desktop drew different amounts, not because of
+  the loss; only the recovery columns compare across rows.
+
+Not measured here: the loss path over the mesh with the new controller (needs a second machine
+and a busy screen), and the refresh storm guard end to end (a hidden window over the socket).

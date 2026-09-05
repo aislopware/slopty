@@ -1598,3 +1598,51 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   self-test, because the pill's position is not in the dump.
 - ⏸ ACP via `agent-client-protocol` 2.0.0 + `@agentclientprotocol/claude-agent-acp` for structured
   driving — after the PTY path works.
+- ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
+  (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
+  refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —
+  79 requests in 10 s on the mesh run (MEASUREMENTS, "screen stream over the mesh"). A
+  client-side cap alone is the wrong answer: the client cannot tell "nothing drawn yet" from
+  "the link ate my keyframe", and the two want opposite behaviour. So the host answers it —
+  `ScreenEvent::Source { stream, state: Idle | Live }`, sent 400 ms after `Opened` when the
+  encoder has produced no frame (`ScreenStream::check_source`, polled from hostd's geometry
+  loop) and again the instant it produces one. The receiver stops asking while the source is
+  idle (`Reassembler::set_source_live`) and the placeholder says "waiting for the window to
+  draw…" rather than "waiting for the first frame…", which is also the honest thing to show —
+  as a `Role::Status` labelled with that text, since it is the only thing a screen reader has to
+  read while the surface is empty and it changes when the host reports the source. A
+  cap stays as the fallback for a host too silent to send the hint — `refresh_max_repeats` 12,
+  ≈17 s of asking with the backoff — and any datagram on the stream clears both. Wire:
+  `SourceState` + the new `ScreenEvent` variant, goldens `host_screen_source` (new) and
+  `host_screen_rate` / `client_hello` re-accepted, PROTOCOL_VERSION 12 → 13. Tests:
+  `an_idle_source_stops_the_refresh_requests` and `refresh_requests_give_up_after_the_cap`
+  (`crates/slopty-media/tests/pipeline.rs`), `the_placeholder_says_which_end_is_waiting`.
+- ✅ **Parity tracks loss asymmetrically, with a deadband** (2026-09-05). The ratio is
+  `2 × smoothed loss + 5 %`, clamped to 5…50 %, and a report with `frames_lost > 0` raises it to
+  1.5× the current ratio at once (parity was demonstrably not enough for a frame that then cost
+  a refresh). Twice the loss is the bursty-channel rule of thumb: a frame survives only if
+  *every* missing fragment is covered, so the ratio has to beat the mean by enough to absorb its
+  variance. The smoothing is asymmetric — half weight on a rising sample, an eighth on a falling
+  one (~0.4 s to decay at the 50 ms report cadence) — because the mesh traces show loss arriving
+  in clumps between clean seconds, and a symmetric filter spends every clump under-protected and
+  every gap over-protected. A change under 2 % does not move the ratio, since every change
+  re-cuts the frame layout at the packetizer and a ratio that jitters by a fragment per frame
+  buys nothing. Windows the receiver spent stalled are excluded from the estimate, the same rule
+  the bitrate controller's `Stall` verdict follows: a link holding packets is not a link dropping
+  them. Ceiling 50 % because past a half, a smaller picture beats a better-protected one. Six
+  unit tests with a deterministic clumped-loss channel pin all of it; one of them found a real
+  overflow (`lost × 1000` saturating `u32` made a worse window read as *less* loss).
+- ✅ **The NACK give-up deadline stays where it is** (2026-09-05). With the loss hook in place,
+  loopback at 0/20/50/100 ‰ loses no frame and needs no refresh (MEASUREMENTS, "parity, NACK and
+  refresh under injected loss"): there is nothing to tune away, and moving a deadline no
+  measurement moves would be churn. The give-up path that does fire in practice is the stalled
+  one, and that is already handled by the flow-aware deadline and the stall-restart rule
+  measured on the mesh path.
+- ✅ **Loss injection is a router hook, not an env var flip** (2026-09-05).
+  `ScreenRouter::set_loss(permille)` drops that many datagrams per thousand from a fixed-seed
+  LCG before routing, so a rate always drops the same datagrams of the sequence and two builds
+  compare on the same losses; `SLOPTY_E2E_DROP_PERMILLE` (read once at construction) is the
+  entry point for `slopty bench screen`. Setting it per stream rather than through the
+  environment is what lets one test process run three rates back to back — mutating the
+  environment in a multi-threaded process is `unsafe` in Rust 2024, and the drop rate is state
+  the test owns anyway.

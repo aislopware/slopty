@@ -147,6 +147,27 @@ constant: it is a quarter of the transport's measured round trip, floored at 1 m
 waits 10 ms rather than asking again for fragments still in flight. Cursor is a separate
 low-rate channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
 
+**How much parity.** The host's `Redundancy` turns the receiver reports into the ratio the
+packetizer cuts each frame with: parity tracks twice the smoothed datagram loss over a 5 % floor,
+up to a 50 % ceiling (past that a smaller picture beats a better-protected one), and a report
+that says a frame was *lost* buys half again on the spot — parity was demonstrably not enough.
+The smoothing is asymmetric, half weight on a rising sample and an eighth on a falling one,
+because loss arrives in bursts: protection has to be there for the second half of a burst and
+must not be given back by one clean report. A change smaller than 2 % does not move the ratio at
+all, since every change re-cuts the frame layout. Windows the receiver spent stalled are excluded
+from the estimate: a link holding packets and releasing them together is not a link dropping
+them, and the fragments such a window reports missing usually arrive with the release.
+
+**When to stop asking.** A receiver that needs a refresh repeats the request with a doubling
+backoff, which is right for a stream that has stopped and wrong for a target that never started:
+a hidden window produces no frames, so no amount of asking helps. The host answers that directly
+— `ScreenEvent::Source { state: Idle | Live }` (protocol 13), sent 400 ms after `Opened` if the
+encoder has produced nothing and again the moment it does — and the receiver stops asking while
+the source is idle (`Reassembler::set_source_live`), with the element's placeholder saying
+"waiting for the window to draw" instead of "waiting for the first frame". For a host too silent
+to send the hint, `Config::refresh_max_repeats` (12, ≈17 s with the backoff) is the fallback cap;
+any datagram on the stream clears both.
+
 **Presentation path.** The reassembler stamps every complete frame with the arrival of the
 datagram that finished it (`FrameOut::arrived`); the stream worker parks that instant under the
 frame's presentation timestamp, and the VideoToolbox callback — which is given nothing but that
