@@ -2227,7 +2227,7 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   window goes, so every assertion about what is not sent passes for free. The client's own frame
   count is *not* the evidence either: frames sent legitimately while the window was still up are
   still being decoded seconds later, and asserting on them fails for the wrong reason.
-- ⏳ **A hide is ~270 ms late, and the crop sends that rectangle meanwhile** (2026-09-06, open).
+- ✅ **A hide is ~270 ms late, and the crop keeps that latency anyway** (2026-09-06).
   With something repainting behind the target, the same test measures **12–15 crop frames sent
   after AppKit ordered the window out** — not the zero the entry above reports, which was measured
   against an empty rectangle. The cause is not this code: every way of asking CoreGraphics whether
@@ -2242,11 +2242,24 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   not confirm that — its backdrop is a bare executable with no bundle identifier, and copying it
   to a second path did not make ScreenCaptureKit treat it as a second application — so whether a
   genuinely different app can appear in the crop is unresolved.
-  Not decided here, because it trades against a ruled measurement rather than fixing a mistake:
-  `CROP_WINDOWS` is on by default and buys ~6 ms of capture→decoded latency (2026-09-05, "capture
-  floor"). Turning it off closes this window at that cost; leaving it on accepts ~270 ms of the
-  owning application's other windows on every hide. The e2e keeps a ceiling of 30 frames on the
-  gap so a regression in detection cannot pass unnoticed.
+  **The display-crop path stays on by default.** This is one ruled measurement against another,
+  not a mistake to fix: `CROP_WINDOWS` buys ~6 ms of capture→decoded latency (2026-09-05,
+  "capture floor", 9.0 → 1.7/2.6 ms p50), which is the point of the product on that axis, and
+  turning it off would spend that everywhere to close a window that is ~270 ms long, bounded by a
+  CoreGraphics flip no amount of polling beats, and scoped by the filter's construction to the
+  target's own application. Against it stand the guard, which closes the part this side owns, and
+  the e2e's ceiling of 30 frames, which makes a regression in detection visible. Recorded so the
+  trade is re-openable rather than rediscovered.
+  Still open, as follow-up tracks rather than part of this one:
+  * **A faster hide signal than `CGWindowList`.** Worth trying an accessibility observer on the
+    target application (`kAXUIElementDestroyed`, `kAXWindowMiniaturized`,
+    `kAXFocusedWindowChanged`) or `SCShareableContent` change notifications, and measuring
+    order-out → host-knows against the 267–279 ms above. Anything materially under that shrinks
+    the window for free.
+  * **The cross-application fixture.** The filter's application scope is a property of how it is
+    constructed, not something measured here; confirming it needs a second helper that is a real
+    bundle with its own identifier, because a bare executable copied to another path is not a
+    second application to ScreenCaptureKit.
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
   closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops
