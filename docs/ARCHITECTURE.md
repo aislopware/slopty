@@ -315,7 +315,9 @@ or a capture gap does not read as a link stall at the receiver), `slopty-host::s
 path's datagram limit and how many bytes QUIC is holding in its send buffer, and a captured
 frame is dropped rather than encoded while more than two frames' worth wait there
 (`frame_fits`); `warm_up` runs one throwaway capture when hostd comes online and `shareable()`
-keeps its enumeration for 2 s; cursor sampler, which also sends the heartbeats; input injection), `slopty-input` (client
+keeps its enumeration for 2 s; a cursor sampler whose window-server calls all go through the
+blocking pool, and a heartbeat on its own task beside it — a promise about time must not share a
+task with a call that takes it (DECISIONS.md, "The heartbeat has its own task"); input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the

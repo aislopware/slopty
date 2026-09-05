@@ -2468,3 +2468,34 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   not), which is the distinction the rule turns on. Not done: widening `send_ms_lo` past its
   256 ms range — no run has produced a `Stamp::Wrapped` silence, so the protocol bump would be
   paying for a case nothing has shown yet.
+  Amended 2026-09-06: the sentence above about the silences the stamps charged to the host was
+  right, and the entry below is what was behind them — the host really was quiet, for up to
+  242 ms, because its beat was sharing a task with a blocking call.
+- ✅ **The heartbeat has its own task** (2026-09-06, measured). The beat is a promise about time:
+  one every `HEARTBEAT_AFTER` (25 ms), so that a receiver counting a silence of `STALL_GAP`
+  (50 ms) never has to. It was being sent from `cursor_loop`, which every 100 ms also asks the
+  window server where the target is — a round trip this project has measured at up to 90 ms, and
+  which the accessibility work showed is not cheap in general. A beat behind that call is late by
+  several times its own period, which is exactly the failure the beat exists to prevent.
+  Split in two: `beat_loop` touches nothing but atomics and the datagram queue, and `cursor_loop`
+  makes its geometry and pointer calls through `spawn_blocking` so it does not hold a runtime
+  worker either — a blocked worker delays every timer on it, which is the mechanism, not the
+  syscall itself.
+  Measured over a quiet minute, in `ScreenStats`: the median gap is 31 ms either way (the loop
+  checks a 25 ms promise every 8.3 ms, so beats land on tick boundaries) and p95 is 35 ms. What
+  changed is the tail — **242 ms worst before, 45–75 ms after over four runs**, with the late beats that used to
+  appear mid-stream gone. The receiver counts 0 stalls and 0 ms stalled.
+  The counter that found it is worth keeping in mind: the quantiles slide over the last 600 beats,
+  about twenty seconds, so a single 242 ms gap in a sixty-second stream is *not in them* — p95
+  read 35 ms while the stream had a quarter-second hole in it. `beat_gap_worst_us` is an all-time
+  maximum for that reason, and a rule about a promise like this has to be written on the worst
+  case, not on a quantile.
+  Not fixed here: what remains is about 75 ms once a minute, and around a path swap about 108 ms.
+  Neither is this loop — its own geometry call reads p95 5 ms, max 12 ms in the same runs — so
+  the remaining blocking is elsewhere on the runtime, hostd's own `check_geometry` being the
+  candidate, and moving that off a worker means turning a synchronous ScreenCaptureKit path
+  async, which is not a change to make while chasing a tail. The e2e asserts the p95 against
+  `STALL_GAP` and 0 stalls, and deliberately does not assert the worst gap.
+  Tests: `a_slow_geometry_call_does_not_make_the_beat_late` (unit: 300 ms of blocking work beside
+  the beat, cadence kept) and `the_heartbeat_keeps_its_cadence_on_a_quiet_stream` (hostd e2e,
+  `SLOPTY_SCREEN_E2E`, a minute on a stream whose target draws nothing).

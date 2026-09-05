@@ -1446,6 +1446,43 @@ bundle identifier, and the leak measured above says ScreenCaptureKit did not tre
 second path as a second application. Whether a genuinely different bundled app can appear in the
 crop is still open.
 
+## 2026-09-06 — the beat behind the geometry call
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e -E 'test(the_heartbeat_keeps_its_cadence)' --no-capture
+```
+
+A minute on a stream whose target draws nothing, so the stream carries heartbeats and nothing
+else. The window is ordered out *before* the stream opens, so the minute is the steady state
+with no path swap in it. Read from the host's own counters (`ScreenStats::beat_gap`,
+`beat_gap_worst_us`, `bounds`), mac-studio, debug build:
+
+| gap between beats     | before  | after      |
+| ----------------------- | ------- | ---------- |
+| p50                   | 31.4 ms | 31.1 ms    |
+| p95                   | 34.7 ms | 34.6 ms    |
+| max, sliding window   | 75.5 ms | 36.9 ms    |
+| **worst since open**  | **242.1 ms** | **44.5 / 51.8 / 71.3 / 74.6 ms** |
+| beats in the minute   | 1997    | 1993–2004  |
+| receiver: stalls, stalled | 0, 83 ms | 0, 0 ms (all four runs) |
+
+The geometry call in the same loop, over the same runs: p50 0.4–0.7 ms, p95 2.1–5.7 ms, **max
+10.8–92.7 ms**. That maximum is three beats' worth of the promise, and before the split the beat
+waited behind it.
+
+The median does not move and was never the problem: the loop checks a 25 ms promise every
+8.3 ms, so beats land on tick boundaries at ~31 ms whatever else is happening. The tail is the
+whole story, and **the quantiles cannot see it** — they slide over the last 600 beats, about
+twenty seconds of a sixty-second stream, so the run with a 242 ms hole in it reported p95 34.7 ms
+and max 75.5 ms. `beat_gap_worst_us` is an all-time maximum for exactly that reason.
+
+Before the split the late beats appeared mid-stream as well as at the swap (gaps of 165, 108 and
+109 ms in one run, the last at 28 s with nothing else going on). After it, the mid-stream ones
+are gone; what remains is ~75 ms at worst once a minute, and ~108 ms around a path swap. Neither
+is this loop's own geometry call, whose maximum in the same runs is 12 ms: the remaining
+blocking is elsewhere on the runtime, and a blocked worker delays every timer on it.
+
 ## 2026-09-06 — what the crop shows, and which signal knows a hide first
 
 ```sh
