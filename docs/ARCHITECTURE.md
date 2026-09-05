@@ -537,6 +537,25 @@ integration). Headless `#[gpui::test]`s in `terminal/view.rs` read the separator
 `painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
 for the conversation view (§5), whose composer takes the typing.
 
+**Render path and frame time.** One GPUI frame draws the workspace: the top bar, then the
+canvas (`CanvasView::render`), which lays out only the items whose screen rectangle meets the
+viewport (`draws`; the active and any dragged item always), each as a card below `CARD_ZOOM`
+or as its view above it, then the minimap from every item's rectangle, the overlays and the
+`frames::probe()` element last. The terminal element's prepaint reads the view's rows in place,
+splits each into words (plain spaces and digits are the boundaries) and looks every word up in
+the `ShapeCache` global — an `Rc<ShapedLine>` per (text, styles, size, family, palette, focus),
+swept once per frame — so a frame of streaming output shapes only the words it has never seen;
+paint places each word at column × cell width, over the row's background quads and under the
+cursor, the link underline and the prediction overlay. Host events reach the canvas from the
+link loop in one update per frame (the first after a quiet spell at once), so twenty streaming
+sessions cost one notify a frame; a session itself never sends more than 125 frames a second
+(`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,
+`end` in the probe) into a 1024-frame ring with nearest-rank percentiles and a count of the
+frame slots long draws swallowed; it is the fourth line of the ⌘⇧I overlay and the `frames`
+block of the self-test `dump`, and `terminal::latency` stamps each keystroke so `dump` can say
+how long the local echo and the host's echo took to reach a paint. `cargo xtask e2e smooth`
+runs the load scenarios (MEASUREMENTS, "canvas frame time").
+
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
 missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | ui_size`,
@@ -588,7 +607,7 @@ way the CLI does and the host's connect loop starts.
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
 | `slopty-platform` | process-level platform helpers: keep the process out of App Nap and timer coalescing while a session is live, and raise the user's attention | all |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
-| `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff (`cargo xtask e2e app\|ios`) | dev |
+| `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff, frame-time scenarios (`cargo xtask e2e app\|ios\|smooth\|smooth-ios`) | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |

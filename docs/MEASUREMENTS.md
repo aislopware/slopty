@@ -991,3 +991,103 @@ Not measured here: a scrolling terminal window as the capture target (the test c
 desktop, and driving the app's own UI to make it draw is the app self-test's job), the loss path
 over the mesh, and group parity shared across consecutive small frames (not implemented — the
 minimum measured well enough not to need a wire change).
+
+## 2026-09-05 — canvas frame time under streaming load (mac-studio, e2e app build)
+
+The app times its own draws (`slopty_ui::frames`: `begin` at the top of `Workspace::render`,
+`end` in the last-painted element; ring of 1024, nearest-rank percentiles) and the self-test
+reads them back (`dump.frames`). Scenarios in `crates/slopty-e2e/tests/smooth.rs`
+(`cargo xtask e2e smooth`), 5 s each, window 1280×800, N shells running
+`while :; do printf '%06d the quick brown fox … %06x\n' …; done` (every row new every frame,
+the worst case for a content-keyed cache): **(a)** pan at zoom 1, 120 scroll events/s;
+**(b)** ⌘-scroll zoom fit → 200 % → fit, 120 steps/s; **(c)** the first display streaming
+beside 5 shells, pan; **(d)** 60 letters typed at 15/s into the focused shell.
+
+How to read the harness: the `e2e` feature is GPUI `test-support`, under which a dirty window
+is drawn synchronously in `flush_effects` — a "frame" is an update, not a vsync, so `every`
+(the interval between draws) is command cadence, not display cadence, and the product draws
+at most once per display period. Draw percentiles are the numbers that transfer. Debug
+profile (`opt-level = 1`, deps 3). The machine ran other sessions' builds throughout
+(`pgrep -fl "cargo|rustc" | wc -l` was 8–173 between runs), which is where the max columns come
+from; p50/p95 moved little between quiet and busy runs.
+
+### Baseline (main 9d01682 + the probe)
+
+Scenarios (a) and (b) did not complete: the host sent a frame every 2 ms per flooding session
+(500/s × 20), the per-client sink (256) overran and hostd detached the client 19 times in the
+first minute ("client cannot keep up; detaching"); the app answered no `dump` for 30 s. With the
+first two fixes in (host 8 ms pace, link batching) but the link still applying per event, the
+harness drew 13 010 frames in the 5 s zoom (every event a draw), p95 15.4 ms, max 305 ms.
+
+### Draw time per scenario, 20 shells, by fix (ms; p50 / p95 / p99 / max · frames over 16.7 ms)
+
+| state | (a) pan | (b) zoom | log |
+| --- | --- | --- | --- |
+| link paced to one update per frame, input at 120 Hz | 3.2 / 72.2 / 132.1 / 152.9 · 25 | 0.9 / 95.4 / 196.5 / 948.9 · 14 | /tmp/e2e-smooth-paced.log |
+| + words shaped once (row split at spaces, cache swept once per frame) | 1.9 / 34.9 / 57.5 / 78.9 · 26 | 2.9 / 102.1 / 163.2 / 1146 · 21 | /tmp/e2e-smooth-words.log |
+| + digits shaped alone, cell text a copy | **1.1 / 3.9 / 9.7 / 72.7 · 2** | **1.1 / 13.5 / 51.7 / 348.8 · 17** | /tmp/e2e-smooth-digits.log |
+
+Fewer shells, final state: 5 shells (a) 1.1 / 4.0 / 7.1 / 33.1 · 2, (b) 1.8 / 4.9 / 7.2 / 11.2 · 0;
+10 shells (a) 1.1 / 4.0 / 8.3 / 31.4 · 1, (b) 1.2 / 5.0 / 10.5 / 126.8 · 2. Before the word cache
+the same 5-shell pan was 2.3 / 10.3 / 20.0 / 35.0 and 10 shells 2.1 / 10.9 / 47.3 / 81.8.
+
+What the main thread was doing (`sample <pid> 4`, 20 shells, share of main-thread samples;
+`/tmp/sample-app20.raw`, `/tmp/sample-app20b.raw`):
+
+| stage | draw | shaping (`shape_line`) | applying host frames | of which `Vec<Cell>::clone` | scrollback B-tree |
+| --- | --- | --- | --- | --- | --- |
+| paced link, row cache | 67 % | 48 % | 23 % | 11 % | 9 % |
+| word cache | 61 % | 41 % | 31 % | 16 % | 9 % |
+
+Whole-row shaping never hit under a flood (every row is new); words hit for the prose but the
+two counters per row still cost a `shape_line` each, and CoreText's per-call cost dominates a
+short string, so two calls per row were no cheaper than one. Digits shaped alone leave the
+steady state with no shaping at all. The remaining (b) p99/max is the card → grid transition
+at `CARD_ZOOM` (twenty grids appear in one frame, every word at a new size) and the machine.
+
+### Keystroke → paint (scenario d, ms; p50 / p95 / max over 60 keys)
+
+| build | `SLOPTY_PREDICT=never`: host echo | `always`: local echo | `always`: host echo |
+| --- | --- | --- | --- |
+| baseline | 7.4 / 14.3 / 17.1 | 0.8 / 1.6 / 1.9 | 7.6 / 12.7 / 28.3 |
+| final (frames while typing: draw 0.4–0.5 ms p50, 0 over) | 6.2 / 6.9 / 8.5 | 0.6 / 1.9 / 2.8 | 6.5 / 16.4 / 19.8 |
+
+The default policy is `Adaptive`, which draws predictions only once the measured RTT is over
+`SLOW_LINK` (25 ms), so on loopback the default shows the host's echo (7–8 ms p50, one frame)
+and a slow link gets the ~1 ms local echo. Nothing to fix: the local echo path is under 2 ms
+and the host echo is a host round trip plus the next draw.
+
+### Display beside five shells (scenario c)
+
+`/tmp/e2e-smooth-final.log`, the first display captured at native scale and streamed over
+loopback beside 5 flooding shells, pan at 120 events/s: draw 1.1 / 7.7 / 18.4 / 40.9 ms, 9 of
+722 draws over 16.7 ms. The stream's frames mark the window dirty outside the link loop's
+pacing, so the harness drew every 5.9 ms here (the product would still draw once per vsync).
+
+### The iPad simulator (indicative only: software rendering, 60 Hz nominal set by the harness)
+
+`cargo xtask e2e smooth-ios --sim ipad`, iPad Pro 13-inch simulator, 20 flooding shells, `SLOPTY_FRAME_HZ=60`
+(`/tmp/e2e-smooth-ios.log`):
+
+| scenario | draw p50 / p95 / p99 / max (ms) | over 16.7 ms |
+| --- | --- | --- |
+| (a) pan at zoom 1 | 1.0 / 1.3 / 1.5 / 20.5 | 1 of 566 |
+| (b) zoom fit → 200 % → fit | 0.7 / 1.3 / 1.6 / 2.0 | 0 of 547 |
+| (d) frames while typing | 1.0–1.5 / 2.3–2.5 / 2.6–3.5 / 4.1 | 0 |
+
+Keystroke → paint on the simulator: `never` host echo 7.7 / 12.8 / 25.7 ms; `always` local echo 1.6 / 2.4 / 2.7 ms,
+host echo 7.8 / 9.9 / 14.9 ms (p50 / p95 / max, 60 keys). The simulator's window is the device's points at 1× on
+software rendering, so its draws are cheaper than the Mac window's and say nothing about a real iPad's 8.3 ms budget;
+the row is here so a regression in the shared code shows up on both platforms.
+
+```sh
+pgrep -fl "cargo|rustc" | wc -l                         # machine noise, goes in the log
+SLOPTY_SCREEN_E2E=1 cargo xtask e2e smooth > /tmp/e2e-smooth-final.log 2>&1   # (a) (b) (c) (d)
+cargo xtask e2e smooth-ios --sim ipad > /tmp/e2e-smooth-ios.log 2>&1
+grep MEASURE /tmp/e2e-smooth-final.log /tmp/e2e-smooth-ios.log
+# one scenario at another shell count, e.g. 5:
+SLOPTY_SMOOTH_E2E=1 SLOPTY_SMOOTH_SHELLS=5 cargo nextest run -p slopty-e2e --test smooth \
+  --test-threads 1 --no-capture -E 'test(twenty_streaming)'
+# where the main thread is while it runs:
+sample $(pgrep -n -f target/debug/slopty-app) 4 -file /tmp/sample-app.raw
+```

@@ -331,6 +331,69 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   focus ring and the warn-tinted attention row, and gpui-kit's colours after a sync. The app
   goldens (`terminal`, `note`, `conversation`, `conversation-permission`) were re-accepted for
   this ruling; the track report names each with its `differing/total`.
+- ✅ **Frame time is measured by the app itself, not inferred** (2026-09-05). `slopty_ui::frames`
+  is a pure probe (ring of 1024 frames, nearest-rank percentiles, unit-tested with hand-made
+  instants): `begin` at the top of `Workspace::render`, `end` in a zero-size element painted
+  last, so a sample is the whole draw (layout, prepaint, paint) and nothing else. It reports
+  draw p50/p95/p99/max, the interval between draws, how many draws ran over the nominal frame
+  (1/60 s on the Mac, 1/120 s on iOS; `SLOPTY_FRAME_HZ` overrides) and how many frame slots
+  those long draws swallowed (`dropped` = Σ⌊draw/nominal⌋, not interval gaps, because a
+  pause in typing is not a dropped frame). It is the fourth line of the ⌘⇧I overlay and the
+  `frames` block of the self-test `dump`; `frames_reset` starts a window. Keystroke → paint is
+  measured beside it (`terminal::latency`): a key's sequence number is stamped on press and
+  matched at the first paint that shows the local echo (predicted) and the first paint after
+  the host's `input_ack` covers it (echoed); `dump` carries both per terminal. GPUI's own
+  `FrameTiming` sits behind the `profiler` feature (hdrhistogram) and is not built.
+- ✅ **The link applies host events once per frame, in one update** (2026-09-05). The app's
+  link loop used to run a GPUI update per event; a burst of frames from twenty sessions
+  queued a foreground task each and, in the self-test build, drew the window for each (GPUI's
+  `test-support` draws every dirty window inside `flush_effects`). Now the first event after a
+  quiet spell is applied at once and, while events keep arriving, the loop drains up to 256 of
+  them and applies the batch in one `cx.update` at most once per nominal frame. A keystroke on
+  an idle link is not delayed; a flood costs one update and one notify per frame.
+- ✅ **A session sends at most 125 frames a second** (2026-09-05). The host coalesced PTY output
+  for 2 ms and then sent a frame, so a flooding shell produced 500 frames/s per session; twenty
+  of them overran every client's 256-frame sink and hostd detached the client ("cannot keep
+  up") within seconds. `slopty_host::session::MIN_FRAME_INTERVAL` (8 ms) paces a session's
+  frames after the first: a burst after a quiet spell still leaves after `COALESCE`, a flood
+  leaves every 8 ms. No display shows more than 120 Hz; the prediction path is unaffected
+  (the client's local echo does not wait for a frame).
+- ✅ **Only items in the viewport are drawn** (2026-09-05). `CanvasView::draws` culls an item whose
+  screen rectangle is outside the viewport, except the active item and one being dragged or
+  resized (their views must stay in the frame for focus and the gesture). The minimap still
+  reads every item's rectangle, so the culled items stay visible there. Headless test:
+  `items_outside_the_viewport_are_not_drawn_unless_active`.
+- ✅ **Terminal text is shaped per word and cached across frames and views** (2026-09-05). The
+  element used to shape each row as one line and cache it by the row's content hash; under
+  streaming output every row is new every frame, so the cache never hit and a stack sample of
+  the app under twenty flooding shells put 48 % of the main thread in `shape_line`. Rows are
+  now split at plain spaces (blank, narrow, no underline or strikethrough: a background is a
+  quad, not a glyph) and every plain digit stands alone; each piece is shaped on its own with
+  the forced cell width and cached by (text, styles, size, family, palette, focus) as an
+  `Rc<ShapedLine>`, then painted at its start column. Pixel-identical to whole-row shaping:
+  under the forced width every glyph sits at cluster index × cell width, kerning is off, and
+  no coding font ligates across a space or between digits (a decorated digit stays in its
+  word so the underline is one piece). The cache sweeps once per frame (stamped with
+  `frames::index`), not once per element: with four terminals in view the per-element sweep
+  evicted each terminal's rows before it came round again. The `~` filler is shaped once per
+  prepaint. The row loop reads the view's rows in place (no `Line` clones per frame) and the
+  cell is measured once per (family, size, scale), not once per frame. Tests: row splitting
+  (`segments`), column-independent keys, once-per-frame sweep, and the headless
+  `words_are_shaped_once_across_rows_and_frames` (three rows of two words shape two entries; a
+  frame with the same words elsewhere shapes nothing new).
+- ✅ **A cell's text clones as a copy** (2026-09-05). `slopty_grid::CellText` was a
+  `SmallVec<[u8; 8]>`; the client copies every row it receives into its line cache (screen and
+  scrollback both hold it) and `Vec<Cell>::clone` was 16 % of the main thread under the flood.
+  It is now an inline `[u8; 22]` with a length, or a `Box<str>` past that (a ZWJ emoji
+  sequence): still 24 bytes, same wire form (a string), equality and hash by content because
+  the representation is canonical. `smallvec` left the workspace with it.
+- 🔬 **Not done, with the numbers that would justify it**: sharing a `Line` between screen and
+  scrollback (`Arc<Line>`) instead of copying it — the scrollback's B-tree churn is the next
+  largest apply cost under a flood; size-independent glyph painting (shape once at a reference
+  size, paint glyph ids at any size through `Window::paint_glyph`) so a pinch does not
+  re-shape every visible word at every step — `ShapedLine`'s layout is `pub(crate)` in GPUI, so
+  this means the element paints glyphs itself. Both wait for a scenario in MEASUREMENTS to be
+  over budget after the fixes above.
 
 ## Terminal
 
@@ -1237,6 +1300,21 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   filter applies to every `-p` on the command line, so the daemons and the CLI were not rebuilt
   and a stale `slopty-hostd` answered `ProtocolVersion { host: 9 }` to a protocol-11 app: every
   suite failed at pairing within a second. `--bins` builds each selected package's binaries.
+- ✅ **Frame-time scenarios run through the self-test socket, and the harness draws differently
+  from the product** (2026-09-05). `crates/slopty-e2e/tests/smooth.rs` (`cargo xtask e2e
+  smooth`, gate `SLOPTY_SMOOTH_E2E`; `smooth-ios` in the simulator) opens N flooding shells
+  (`open` with a command and a count), pans at 120 scroll events a second (a trackpad's report
+  rate) for 5 s, pinch-zooms fit → 200 % → fit with ⌘-scroll, streams the first display beside
+  five shells (`add_display`, needs `SLOPTY_SCREEN_E2E`), and types 60 letters at 15 a second
+  with `SLOPTY_PREDICT=never` and `always`, reading `dump.frames` and the terminal's key
+  latency back. Two things about the harness to keep in mind when reading its numbers: the
+  `e2e` feature is GPUI `test-support`, under which a dirty window is drawn synchronously
+  inside `flush_effects` rather than from the display link, so "frames" are updates, not
+  vsyncs, and the interval columns are not display cadence; and the machine is shared with
+  other sessions' builds (`pgrep -fl "cargo|rustc" | wc -l` goes in the log). Draw-time
+  percentiles are valid either way. The suite is serial (`--test-threads 1`) because two apps
+  drawing at once halve each other's budget. The one assertion with a limit
+  (`PAN_P95_LIMIT`) fails when the twenty-shell pan's draw p95 exceeds it on the Mac.
 - ⚠️ **GPUI drops keystrokes when the focused element is not in the frame** (found by the
   app self-test 2026-09-05: ⌘W dead after ⌘1). Below `CARD_ZOOM` the terminals are drawn as
   cards without their views, so the focused `TerminalView` handle had no node in the
