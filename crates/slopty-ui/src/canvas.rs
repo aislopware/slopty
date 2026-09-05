@@ -13,10 +13,10 @@ use std::collections::HashMap;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _, Window, canvas, div,
-    fill, outline, point, px, size,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent,
+    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled as _, Window,
+    canvas, div, fill, outline, point, px, size,
 };
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
@@ -108,6 +108,17 @@ const MINIMAP_PAD: f32 = 6.0;
 const ZOOM_STEP: f32 = 1.25;
 /// Largest item a picked window gets on the canvas, in points.
 const MAX_PICKED: (f32, f32) = (1600.0, 1000.0);
+/// Horizontal padding of the badge buttons, in `ui_size` units: a finger needs more than a
+/// pointer.
+const ANSWER_PAD: f32 = if cfg!(target_os = "ios") { 1.0 } else { 0.6 };
+
+/// What the user chose on a blocked agent's badge; shown until the host reports the agent's
+/// next state, so a second tap cannot send a second key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Answer {
+    Allowed,
+    Denied,
+}
 
 /// Things the surrounding chrome may show.
 #[derive(Clone, PartialEq, Debug)]
@@ -201,6 +212,8 @@ pub struct CanvasView {
     sessions: HashMap<SessionId, SessionSummary>,
     /// Coding agents the host has observed, by session.
     agents: HashMap<SessionId, AgentEvent>,
+    /// Badge answers sent but not yet reflected by the host.
+    answered: HashMap<SessionId, Answer>,
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
@@ -271,6 +284,7 @@ impl CanvasView {
             terminals: HashMap::new(),
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             agents: HashMap::new(),
+            answered: HashMap::new(),
             screens: HashMap::new(),
             notes: HashMap::new(),
             pending_opens: HashMap::new(),
@@ -408,6 +422,7 @@ impl CanvasView {
     pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.sessions.remove(&session);
         self.agents.remove(&session);
+        self.answered.remove(&session);
         self.reconcile(cx);
         cx.notify();
     }
@@ -425,6 +440,8 @@ impl CanvasView {
     /// The host observed a coding agent's state in a session.
     pub fn agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
         let session = event.session;
+        // Whatever the host says next supersedes a pending badge answer.
+        self.answered.remove(&session);
         if event.status == AgentStatus::None {
             self.agents.remove(&session);
         } else {
@@ -434,6 +451,55 @@ impl CanvasView {
                 cx.emit(CanvasEvent::Attention(session));
             }
         }
+        cx.notify();
+    }
+
+    /// "allow" on a permission badge. Claude Code's permission prompt is a numbered menu with
+    /// "Yes" highlighted; Enter takes it, exactly as if typed in the terminal.
+    pub fn allow_agent(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.answer_agent(session, "enter", Answer::Allowed, cx);
+    }
+
+    /// "deny" on a permission badge: Esc is the prompt's "No" (it says so on the option).
+    pub fn deny_agent(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.answer_agent(session, "escape", Answer::Denied, cx);
+    }
+
+    fn answer_agent(
+        &mut self,
+        session: SessionId,
+        key: &str,
+        answer: Answer,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.terminals.get(&session) else {
+            // No live view (sleeping item): the best we can do is bring the terminal up.
+            self.reveal_session(session, cx);
+            return;
+        };
+        if self.answered.contains_key(&session) {
+            return;
+        }
+        view.update(cx, |view, cx| {
+            // A Control armed on the phone's key bar is for the next typed key, not for this.
+            if view.sticky_control() {
+                view.set_sticky_control(false, cx);
+            }
+            let keystroke =
+                Keystroke { modifiers: Modifiers::default(), key: key.to_owned(), key_char: None };
+            view.press(keystroke, cx);
+        });
+        self.answered.insert(session, answer);
+        cx.notify();
+    }
+
+    /// Bring a session's terminal into view, make it active and give it the keyboard (the
+    /// "answer" button on a question badge: the reply has to be typed).
+    pub fn reveal_session(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let Some(id) = self.doc.item_for_session(session).map(|i| i.id) else { return };
+        self.activate(id, cx);
+        self.reveal_pending = Some(id);
+        self.pending_focus = Some(session);
         cx.notify();
     }
 
@@ -1058,10 +1124,10 @@ impl CanvasView {
             }
         };
         let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agents.get(&session),
+            ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
             _ => None,
         };
-        let badge = agent.map(|a| agent_badge(a, theme, ui_size));
+        let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, ui_size, cx));
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
         let take = match item.kind {
@@ -1072,9 +1138,8 @@ impl CanvasView {
                 .map(|_| take_button(id, theme, ui_size, cx)),
             _ => None,
         };
-        let needs_human = agent.is_some_and(
-            |a| matches!(&a.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt),
-        );
+        let needs_human = agent
+            .is_some_and(|(session, a)| needs_human(a) && !self.answered.contains_key(&session));
         let border = if needs_human {
             theme.terminal.palette(3)
         } else if focused || active {
@@ -1396,7 +1461,6 @@ impl Render for CanvasView {
     }
 }
 
-/// The agent pill in a terminal's title bar: a coloured dot and a short word or the detail.
 /// What a zoomed-out note card shows: its first non-empty line, clipped.
 fn note_summary(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("empty note");
@@ -1430,43 +1494,142 @@ fn take_button(
         .into_any_element()
 }
 
-fn agent_badge(agent: &AgentEvent, theme: &Theme, ui_size: f32) -> gpui::AnyElement {
-    let (label, color) = match &agent.status {
-        AgentStatus::None => return div().into_any_element(),
-        AgentStatus::Idle => ("claude".to_owned(), theme.surfaces.text_muted),
-        AgentStatus::Working => ("working".to_owned(), theme.surfaces.accent),
-        AgentStatus::Tool { tool } => {
-            (agent.detail.clone().unwrap_or_else(|| tool.clone()), theme.terminal.palette(6))
-        }
+/// Whether the agent is waiting on the human (an idle prompt is not worth an outline).
+fn needs_human(agent: &AgentEvent) -> bool {
+    matches!(&agent.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt)
+}
+
+/// One short line for an agent's state: the badge text, the picker's status column.
+#[must_use]
+pub fn agent_status_text(agent: &AgentEvent) -> String {
+    let detail = agent.detail.as_deref().filter(|d| !d.is_empty());
+    match &agent.status {
+        AgentStatus::None => String::new(),
+        AgentStatus::Idle => "claude".to_owned(),
+        AgentStatus::Working => "working".to_owned(),
+        AgentStatus::Tool { tool } => detail.unwrap_or(tool).to_owned(),
         AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            let what = agent.detail.clone().unwrap_or_else(|| tool.clone());
-            (format!("allow? {what}"), theme.terminal.palette(3))
+            format!("allow? {}", detail.unwrap_or(tool))
         }
         AgentStatus::Blocked(BlockReason::Question) => {
-            ("asking you".to_owned(), theme.terminal.palette(3))
+            format!("asking: {}", detail.unwrap_or("a question"))
         }
         AgentStatus::Blocked(BlockReason::Elicitation) => {
-            ("needs input".to_owned(), theme.terminal.palette(3))
+            format!("needs input: {}", detail.unwrap_or("an answer"))
         }
-        AgentStatus::Blocked(BlockReason::IdlePrompt) => {
-            ("idle".to_owned(), theme.surfaces.text_muted)
-        }
-        AgentStatus::Done => ("done".to_owned(), theme.terminal.palette(2)),
-    };
-    div()
-        .flex()
-        .items_center()
-        .flex_none()
-        .max_w(px(ui_size * 22.0))
-        .overflow_hidden()
-        .gap(px(ui_size * 0.4))
-        .px(px(ui_size * 0.5))
-        .py(px(ui_size * 0.1))
-        .rounded(px(ui_size * 0.5))
-        .bg(hsla_alpha(color, 0.12))
-        .text_size(px(ui_size * 0.9))
-        .text_color(hsla(color))
-        .child(div().flex_none().size(px(ui_size * 0.5)).rounded_full().bg(hsla(color)))
-        .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)))
-        .into_any_element()
+        AgentStatus::Blocked(BlockReason::IdlePrompt) => "idle".to_owned(),
+        AgentStatus::Done => format!("done: {}", detail.unwrap_or("turn finished")),
+    }
+}
+
+impl CanvasView {
+    /// The agent pill in a terminal's title bar: a coloured dot and a short line, plus the
+    /// one-tap answers when the agent is waiting on the human: "allow" / "deny" for a
+    /// permission prompt (Enter / Esc into the terminal), "answer" for a question (bring the
+    /// terminal up so the reply can be typed). A sent answer shows as such until the host
+    /// reports what the agent did next.
+    fn agent_badge(
+        &self,
+        item: ItemId,
+        session: SessionId,
+        agent: &AgentEvent,
+        ui_size: f32,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let answered = self.answered.get(&session).copied();
+        let (label, color) = match (&agent.status, answered) {
+            (AgentStatus::None, _) => return div().into_any_element(),
+            (AgentStatus::Blocked(_), Some(Answer::Allowed)) => {
+                ("allowed".to_owned(), theme.surfaces.text_muted)
+            }
+            (AgentStatus::Blocked(_), Some(Answer::Denied)) => {
+                ("denied".to_owned(), theme.surfaces.text_muted)
+            }
+            (AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt), _) => {
+                (agent_status_text(agent), theme.surfaces.text_muted)
+            }
+            (AgentStatus::Working, _) => (agent_status_text(agent), theme.surfaces.accent),
+            (AgentStatus::Tool { .. }, _) => (agent_status_text(agent), theme.terminal.palette(6)),
+            (AgentStatus::Blocked(_), None) => {
+                (agent_status_text(agent), theme.terminal.palette(3))
+            }
+            (AgentStatus::Done, _) => (agent_status_text(agent), theme.terminal.palette(2)),
+        };
+        let button = |part: &'static str, text: &'static str, accent: bool| {
+            div()
+                .id(element_id(part, item))
+                .flex_none()
+                .h(px(ui_size * 1.7))
+                .flex()
+                .items_center()
+                .px(px(ui_size * ANSWER_PAD))
+                .rounded(px(ui_size * 0.35))
+                .bg(hsla_alpha(
+                    if accent { theme.surfaces.accent } else { theme.surfaces.text_muted },
+                    0.3,
+                ))
+                .text_size(px(ui_size * 0.9))
+                .text_color(hsla(theme.surfaces.text))
+                .cursor_pointer()
+                .child(text)
+        };
+        let buttons: Vec<gpui::AnyElement> = match (&agent.status, answered) {
+            (AgentStatus::Blocked(BlockReason::Permission { .. }), None) => vec![
+                button("allow", "allow", true)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.allow_agent(session, cx);
+                        }),
+                    )
+                    .into_any_element(),
+                button("deny", "deny", false)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.deny_agent(session, cx);
+                        }),
+                    )
+                    .into_any_element(),
+            ],
+            (AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation), None) => vec![
+                button("answer", "answer", true)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.reveal_session(session, cx);
+                        }),
+                    )
+                    .into_any_element(),
+            ],
+            _ => Vec::new(),
+        };
+        let pill = div()
+            .flex()
+            .items_center()
+            .flex_none()
+            .max_w(px(ui_size * if buttons.is_empty() { 22.0 } else { 14.0 }))
+            .overflow_hidden()
+            .gap(px(ui_size * 0.4))
+            .px(px(ui_size * 0.5))
+            .py(px(ui_size * 0.1))
+            .rounded(px(ui_size * 0.5))
+            .bg(hsla_alpha(color, 0.12))
+            .text_size(px(ui_size * 0.9))
+            .text_color(hsla(color))
+            .child(div().flex_none().size(px(ui_size * 0.5)).rounded_full().bg(hsla(color)))
+            .child(div().overflow_hidden().text_ellipsis().child(SharedString::from(label)));
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(ui_size * 0.4))
+            .child(pill)
+            .children(buttons)
+            .into_any_element()
+    }
 }

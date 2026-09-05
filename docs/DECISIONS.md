@@ -581,6 +581,20 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   on iOS (`objc2-audio-toolbox`, `AudioServices` feature; AudioToolbox.framework linked in the
   iOS spec). No `UNUserNotificationCenter`: it needs a signed bundle with the notification
   entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle.
+- ✅ Answering a permission prompt from the badge (verified 2026-09-05 against Claude Code
+  2.1.261 driven under a pty in `default` permission mode): the prompt is a numbered menu with
+  the first entry highlighted — `❯ 1. Yes · 2. Yes, and always allow access to <dir> from this
+  project · 3. Yes, and switch to auto mode · 4. No — Esc to cancel · Tab to amend`. Enter
+  (`\r`) ran the command ("Ran 1 shell command", the file appeared); Esc (`\x1b`) ended the turn
+  with "Interrupted · What should Claude do instead?" and nothing ran. So "allow" = Enter and
+  "deny" = Esc, sent through `TerminalView::press` like the phone's key bar, with a sticky
+  Control disarmed first. Neither key is sent twice: the canvas remembers the answer per session
+  until the next `HostMsg::Agent` for it. Two things learned on the way: text and `\r` written
+  in one burst are taken as a paste (the newline does not submit), and Esc while the model is
+  still thinking interrupts the turn instead of answering — the badge only offers the buttons
+  while the status is `Blocked(Permission)`, which the `PermissionRequest` hook raises after
+  the menu is up. Question / elicitation badges cannot be answered with one key (the reply is
+  text or a pick), so their button reveals and focuses the terminal.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.

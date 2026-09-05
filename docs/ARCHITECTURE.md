@@ -135,6 +135,11 @@ exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stre
 `Done`) and flags `attention` on the transitions worth a sound. The daemon broadcasts each
 change as `HostMsg::Agent` and replays the table to joining clients. The canvas shows the status
 as a pill in the terminal's title bar and outlines the item when the agent needs the human.
+A permission badge carries "allow" / "deny" buttons that type Enter / Esc into that session
+through the terminal view's normal key path (`TermRequest::Key`, nothing new on the wire); a
+question or elicitation badge carries "answer", which reveals and focuses the terminal. The
+pill shows "allowed" / "denied" until the host reports the agent's next state, so one tap sends
+one key.
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`.
 Later: ACP (`agent-client-protocol`) for structured control.
 
