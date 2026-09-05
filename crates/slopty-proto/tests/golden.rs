@@ -115,6 +115,44 @@ mod golden {
     }
 
     #[test]
+    fn agent() {
+        use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+        snap(
+            "host_agent_hook",
+            &HostMsg::Agent(AgentEvent {
+                session: session(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+                agent_session: Some("6f1b".to_owned()),
+                detail: Some("$ cargo test".to_owned()),
+                attention: true,
+                source: AgentSource::Hook,
+            }),
+        );
+        // The same session attributed without hooks: the pill is the same, the source is not.
+        snap(
+            "host_agent_process",
+            &HostMsg::Agent(AgentEvent {
+                session: session(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Idle,
+                agent_session: None,
+                detail: None,
+                attention: false,
+                source: AgentSource::Process,
+            }),
+        );
+        snap("client_install_hooks", &ClientMsg::InstallHooks);
+        snap(
+            "host_hooks_installed",
+            &HostMsg::HooksInstalled {
+                ok: true,
+                message: "hooks installed in /Users/x/.claude/settings.json".to_owned(),
+            },
+        );
+    }
+
+    #[test]
     fn transcript() {
         use slopty_proto::agent::{
             Clipped, TranscriptBody, TranscriptEntry, TranscriptFollow, TranscriptUpdate,

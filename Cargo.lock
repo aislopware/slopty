@@ -8256,6 +8256,7 @@ name = "slopty-pty"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "nix",
  "rustix",
  "serde",

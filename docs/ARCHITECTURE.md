@@ -238,9 +238,37 @@ the source of truth for what is being streamed.
 ## 5. Agents
 
 Claude Code only, for now. "+ agent" / ⌘⇧T opens a terminal running `claude` (a bare name,
-resolved on the host through the login shell). Signals in precedence order: hooks (delivered to `slopty-hostd` over
-its control socket by `slopty hook`, the relay Claude Code runs for each event) → JSONL
-transcript tail → terminal title/OSC → foreground-process presence. Only the first is built.
+resolved on the host through the login shell). Four signals, in precedence order: hooks
+(delivered to `slopty-hostd` over its control socket by `slopty hook`, the relay Claude Code
+runs for each event) → JSONL transcript tail → terminal title/OSC → foreground-process
+presence. All four are built, and `AgentEvent.source` (`AgentSource::{Process, Title,
+Transcript, Hook}`) says which one a status came from, so a `claude` the human started by
+hand — or one running before `slopty hook install` — gets the same pill, badges, attention and
+conversation view as a hooked one.
+
+**The three signals below the hooks** are read by `slopty-hostd`'s own tick (`agents::watch`,
+every 750 ms) and merged by `slopty_agent::Tracker::observe`, which never lets a weaker signal
+overwrite what a stronger one said. `slopty_host`'s session actor answers a `Probe` with the
+title, the OSC 7 cwd and the tty's foreground process; `slopty_pty::process` names that
+process (`tcgetpgrp` for the foreground group, then `proc_pidinfo PROC_PIDTBSDINFO` for the
+name and start time, the `KERN_PROCARGS2` sysctl for `argv` and `PROC_PIDVNODEPATHINFO` for
+its cwd), and `slopty_agent::detect` decides from the name and `argv` alone whether it is
+Claude Code — the native launcher, a `node`/`bun`/`deno` running the npm `cli.js`, or a shell
+running either (the kernel rewrites `argv` for a `#!` script, and `slopty_pty::pty` itself
+starts an unfound `claude` as `zsh -lic claude`). Present → `Idle`; gone → the agent is
+cleared. `slopty_agent::title` maps Claude Code's sparkle frames (`·✢✳∗✻✽`) in the OSC 0/2
+title to working-vs-idle. `slopty_agent::discover` finds the conversation from the session's
+own working directory — Claude Code writes `~/.claude/projects/<cwd with every non-alphanumeric
+character replaced by `-`>/<session uuid>.jsonl`, and the live file is the newest one modified
+at or after the process started — and `transcript::progress` reads `Working` / `Tool` / `Done`
+out of its newest record. The transcript can never report `Blocked`: a permission prompt is
+only written once it has been answered, so blocking stays a hook-only signal. Once a hook has
+spoken for a session, the tick fills gaps only (the transcript path, so ⌘⇧L works either way)
+and neither changes the status nor ends the agent. A session attributed without hooks shows an
+"install hooks" pill beside its agent pill, once per run: `ClientMsg::InstallHooks` asks the
+host to register the relay (`slopty_agent::hooks`, the same code `slopty hook install` runs)
+and `HostMsg::HooksInstalled` comes back as a notice, because the human reading the pill may
+be on a phone.
 
 The host spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_HOSTD_SOCKET=<path>`;
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
@@ -311,7 +339,23 @@ typed into the shell; goldens `conversation.png` and `conversation-permission.pn
 simulator's `the_conversation_view_on_the_simulator` (dump plus the goldens
 `ios-phone-conversation.png` / `ios-pad-conversation.png`, rendered by the fork's iOS
 `render_to_image`); the dump lists the entries, the composer, its focus, the pin and
-the attention row (`ConversationInfo`) and the agent's state (`TerminalInfo.agent`).
+the attention row (`ConversationInfo`) and the agent's state and signal
+(`TerminalInfo.agent`, `TerminalInfo.agent_source`).
+
+**Attribution tests.** Unit: `slopty_agent::detect` (the executable name, `argv[0]`, runtimes
+and shells), `slopty_agent::title` (every sparkle frame), `slopty_agent::discover` (the
+escaped project directory and the newest recent `.jsonl` in a temp home),
+`transcript::progress` (which record means what), and the precedence merge itself
+(`a_hand_started_claude_is_attributed_from_the_process_and_the_title`,
+`hooks_outrank_everything_and_decide_when_the_agent_ends`,
+`a_transcript_read_for_the_first_time_is_not_an_alert`); `slopty_pty::process` reads its own
+process out of the process table and the foreground process of a PTY it spawned. Headless:
+`an_agent_seen_without_hooks_gets_the_pill_and_offers_the_hooks`. App self-test:
+`an_agent_started_without_hooks_is_attributed_from_what_the_host_can_see`, which puts a fake
+`claude` first on ptyd's `PATH` with a `HOME` of its own
+(`Stack::launch_with_fake_claude`), opens it with ⌘⇧T and walks it from stage to stage with
+marker files — the agent is played by the program in the session and by the harness's
+environment, never by typing into the shell under test.
 
 ## 6. UI
 

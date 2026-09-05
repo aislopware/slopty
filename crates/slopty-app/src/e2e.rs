@@ -24,7 +24,7 @@ use slopty_e2e::{
     Button, Command, ConversationInfo, Dump, HostInfo, ItemInfo, Reply, ScreenInfo, TerminalInfo,
     WindowInfo,
 };
-use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
+use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
 use slopty_ui::screen::ScreenView;
@@ -407,6 +407,7 @@ impl Workspace {
         };
         let canvas = canvas.read(cx);
         dump.zoom = canvas.zoom();
+        dump.hooks_offered = canvas.hooks_offered();
         if canvas.focus_handle(cx).is_focused(window) {
             focused = String::from("canvas");
         }
@@ -475,6 +476,15 @@ impl Workspace {
                     cursor: [cursor.col, cursor.row],
                     rows: view.rows(),
                     agent: view.agent_status().map(agent_line),
+                    agent_source: canvas
+                        .agent(session)
+                        .map(|a| match a.source {
+                            AgentSource::Process => "process",
+                            AgentSource::Title => "title",
+                            AgentSource::Transcript => "transcript",
+                            AgentSource::Hook => "hook",
+                        })
+                        .map(str::to_owned),
                     conversation,
                 });
             }

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -63,6 +63,9 @@ pub enum ClientMsg {
     },
     /// Follow or drop an agent session's conversation.
     Transcript(agent::TranscriptFollow),
+    /// Register the `slopty hook` relay in the host's Claude Code settings, so agents there
+    /// report precisely instead of being guessed at; answered with `HostMsg::HooksInstalled`.
+    InstallHooks,
 }
 
 impl ClientMsg {
@@ -77,6 +80,7 @@ impl ClientMsg {
             Self::Screen(_) => "Screen",
             Self::Transcript(_) => "Transcript",
             Self::Ping { .. } => "Ping",
+            Self::InstallHooks => "InstallHooks",
         }
     }
 }
@@ -117,6 +121,13 @@ pub enum HostMsg {
     },
     /// A slice of an agent session's conversation, for a client following it.
     Transcript(agent::TranscriptUpdate),
+    /// Reply to `ClientMsg::InstallHooks`.
+    HooksInstalled {
+        /// The settings file now registers the relay (whether or not this call changed it).
+        ok: bool,
+        /// What happened, for the client's notice.
+        message: String,
+    },
 }
 
 impl HostMsg {
@@ -134,6 +145,7 @@ impl HostMsg {
             Self::Agent(_) => "Agent",
             Self::Transcript(_) => "Transcript",
             Self::Pong { .. } => "Pong",
+            Self::HooksInstalled { .. } => "HooksInstalled",
         }
     }
 }

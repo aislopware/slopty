@@ -153,6 +153,37 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     result
 }
 
+/// Register `slopty hook` in the host's Claude Code settings, for a client that saw an agent
+/// the hooks are not reporting. Answers with the line the client shows as a notice.
+///
+/// The relay to register is the `slopty` binary shipped beside this daemon: in a bundle both
+/// live in `Contents/MacOS`, and in a build tree both live in `target/<profile>`.
+async fn install_hooks() -> (bool, String) {
+    let Some(relay) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("slopty")))
+        .filter(|path| path.exists())
+    else {
+        return (false, "the slopty command is not installed beside the host".to_owned());
+    };
+    let installed = tokio::task::spawn_blocking(move || {
+        let path = slopty_agent::hooks::settings_path(&slopty_agent::hooks::home_dir());
+        let outcome = slopty_agent::hooks::install_at(&path, &relay.to_string_lossy())?;
+        Ok::<_, std::io::Error>((outcome, path))
+    })
+    .await;
+    match installed {
+        Ok(Ok((slopty_agent::hooks::Outcome::Changed, path))) => {
+            (true, format!("hooks installed in {}", path.display()))
+        }
+        Ok(Ok((slopty_agent::hooks::Outcome::Unchanged, _path))) => {
+            (true, "hooks were already installed".to_owned())
+        }
+        Ok(Err(e)) => (false, format!("could not install hooks: {e}")),
+        Err(e) => (false, format!("could not install hooks: {e}")),
+    }
+}
+
 /// Read the client's loss feedback datagrams until the connection ends.
 async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
     loop {
@@ -330,6 +361,11 @@ impl Peer<'_> {
                 } else {
                     self.transcripts.remove(&session);
                 }
+            }
+            ClientMsg::InstallHooks => {
+                let (ok, message) = install_hooks().await;
+                tracing::info!(client = %self.client, ok, %message, "install hooks");
+                let _sent = self.out.send(HostMsg::HooksInstalled { ok, message }).await;
             }
         }
     }

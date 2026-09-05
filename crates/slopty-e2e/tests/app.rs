@@ -265,6 +265,127 @@ mod tests {
         stack.shutdown().await;
     }
 
+    /// A `claude` nobody registered hooks for: "+ agent" starts the fake one the harness put
+    /// on ptyd's `PATH`, and the host attributes it from its foreground process, then its
+    /// title, then the transcript it writes — each signal taking over from the weaker one.
+    /// ⌘⇧L then shows the conversation, which only works because the transcript was found
+    /// rather than named by a hook.
+    #[tokio::test]
+    async fn an_agent_started_without_hooks_is_attributed_from_what_the_host_can_see() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch_with_fake_claude("e2e-host").await.unwrap();
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        stack
+            .driver
+            .wait_for("the first shell", STEP, |d| {
+                d.status == "connected" && d.item("terminal").is_some()
+            })
+            .await
+            .unwrap();
+
+        // ⌘⇧T runs `claude`, which here is the fake: it prints where it runs and waits.
+        stack.driver.keys("cmd-shift-t").await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the agent's terminal", STEP, |d| {
+                d.items.len() == 2 && !d.rows_containing("fake claude in ").is_empty()
+            })
+            .await
+            .unwrap();
+        assert!(!dump.hooks_offered, "nothing has been offered yet");
+
+        // No hook has fired and no title has been painted: the process is the whole signal.
+        let dump = stack
+            .driver
+            .wait_for("the agent seen from its process alone", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.agent.as_deref() == Some("idle")
+                        && t.agent_source.as_deref() == Some("process")
+                })
+            })
+            .await
+            .unwrap();
+        let session = dump
+            .terminals
+            .iter()
+            .find(|t| t.agent.is_some())
+            .map(|t| t.session.clone())
+            .expect("the agent's session");
+
+        // It paints the sparkle title: the cheapest heartbeat there is says a turn started.
+        stack.fake_claude_stage("working").unwrap();
+        stack
+            .driver
+            .wait_for("the title to say a turn is running", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.agent.as_deref() == Some("working")
+                        && t.agent_source.as_deref() == Some("title")
+                })
+            })
+            .await
+            .unwrap();
+
+        // It writes its conversation where Claude Code writes one; the host finds the file
+        // from the session's own working directory and reads the turn out of it.
+        stack.fake_claude_stage("transcript").unwrap();
+        stack
+            .driver
+            .wait_for("the transcript to take over", STEP, |d| {
+                d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("transcript"))
+            })
+            .await
+            .unwrap();
+        stack.fake_claude_stage("done").unwrap();
+        stack
+            .driver
+            .wait_for("the turn to finish", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.agent.as_deref() == Some("done")
+                        && t.agent_source.as_deref() == Some("transcript")
+                })
+            })
+            .await
+            .unwrap();
+
+        // ⌘⇧L reads the same discovered file: the conversation view needs no hooks either.
+        stack.driver.keys("cmd-shift-l").await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the conversation", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.conversation
+                        .as_ref()
+                        .is_some_and(|c| c.entries.len() > TRANSCRIPT_LINES.len())
+                })
+            })
+            .await
+            .unwrap();
+        let conversation = dump
+            .terminals
+            .iter()
+            .find(|t| t.session == session)
+            .and_then(|t| t.conversation.clone())
+            .expect("the agent's conversation");
+        assert_eq!(conversation.entries.first().map(String::as_str), Some(TRANSCRIPT_LINES[0]));
+        assert_eq!(
+            conversation.entries.last().map(String::as_str),
+            Some("assistant: Both tests pass now.")
+        );
+
+        // The fake exits; with it the agent goes, whatever the last signal said.
+        stack.fake_claude_stage("quit").unwrap();
+        stack
+            .driver
+            .wait_for("the agent to go with its process", STEP, |d| {
+                d.terminals.iter().all(|t| t.agent.is_none())
+            })
+            .await
+            .unwrap();
+        stack.shutdown().await;
+    }
+
     #[tokio::test]
     async fn notes_and_zoom_change_the_canvas_as_dumped() {
         if !gated() {

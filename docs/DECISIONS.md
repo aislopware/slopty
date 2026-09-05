@@ -1490,8 +1490,70 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   flagged. Keys over the test socket drive the app's own UI only (⌘⇧L, the composer, the
   buttons); the one line the composer sends is a shell comment, so the shell echoes it and runs
   nothing. The same path drives the simulator, since hostd stays on the Mac.
-- 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
-  did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
-  transcript tail could recover the rest. Not built.
+- ✅ **Attribution without hooks: four signals, strongest wins, hooks never overruled**
+  (2026-09-05). A `claude` the human started by hand — or one running before
+  `slopty hook install` — now gets the same pill, badges, attention and conversation view as a
+  hooked one. `AgentSource` (on the wire, `Process < Title < Transcript < Hook`) says which
+  signal the status came from, and `Tracker::observe` / `observe_progress` refuse to let a
+  weaker one overwrite a stronger one's state. hostd's `agents::watch` reads every session
+  every 750 ms:
+  - **Foreground process.** `tcgetpgrp` on the PTY master names the tty's foreground group;
+    `slopty_pty::process` describes its leader (`proc_pidinfo PROC_PIDTBSDINFO` for the name
+    and start time, the `KERN_PROCARGS2` sysctl for `argv`, `PROC_PIDVNODEPATHINFO` for the
+    cwd) and `slopty_agent::detect` decides, as a pure function over name and `argv`, whether
+    that is Claude Code. Present → `Idle`, gone → the agent is cleared.
+  - **Title.** The sparkle Claude Code paints into OSC 0/2 (`·✢✳∗✻✽`, a table in
+    `slopty_agent::title`) separates a running turn from an idle prompt. Nothing finer is
+    readable from a title, and that is all it is used for.
+  - **Transcript.** `slopty_agent::discover` finds the JSONL from the session's own working
+    directory and `transcript::progress` reads `Working` / `Tool` / `Done` out of the newest
+    record. It can never report `Blocked`: a permission prompt is not written to the
+    transcript until it has been answered. Blocking is what hooks are for, which is why the
+    app still offers to install them.
+- ✅ **`detect::is_claude` reads both the executable name and `argv[0]`, and treats shells and
+  JS runtimes as launchers** (2026-09-05, measured). The two disagree often: `/bin/sh` on
+  macOS is `bash` by executable and `/bin/sh` by `argv[0]` (`slopty-pty`'s
+  `a_ptys_foreground_process_is_the_program_it_runs` pins that), the kernel rewrites `argv`
+  for a `#!` script so `~/.claude/local/claude` shows as `sh <script>`, the npm install shows
+  as `node …/claude-code/cli.js`, and `slopty_pty::pty::resolve_command` itself starts an
+  unfound `claude` as `zsh -lic claude`. So a name or `argv[0]` of `claude` counts outright,
+  and a shell or JS runtime counts when one of its arguments names the agent. A bare login
+  shell (`argv[0] = "-zsh"`) does not, and neither does `sh -c 'echo claude'`.
+- ✅ **The transcript is the newest `.jsonl` in the project directory, modified at or after
+  the agent process started** (2026-09-05, verified against `~/.claude/projects` directory
+  names only, never their contents). Claude Code escapes the working directory by replacing
+  every character that is not an ASCII letter or digit with `-`
+  (`/Users/x/.config` → `-Users-x--config`), which fixes the directory; time picks the file
+  inside it, because the live session is the one still being written and a resumed
+  conversation moves its old file's mtime forward. The start time comes from the process
+  table, so a hostd restart does not make an old conversation look new. Only that one
+  directory is ever read.
+- ✅ **Hooks stay authoritative in both directions** (2026-09-05). Once a hook has spoken for
+  a session, the weaker signals fill gaps only — the transcript path, so ⌘⇧L works whether it
+  was named by a hook or discovered — and can neither change the status nor end the agent:
+  the relay is a separate process, so a hooked session's tty foreground is not the agent's,
+  and the `SessionEnd` hook is what ends it. This is also what keeps the played-hook
+  self-tests honest, since those play hooks into a plain shell.
+- ✅ **A first transcript read never raises attention** (2026-09-05). `Done` alerts only when
+  the previous status was `Working` or `Tool`: the first read of a discovered file is usually
+  a conversation that ended hours ago, and a Dock bounce for it would be a lie.
+- ✅ **"install hooks" is a pill on the title bar of the first unhooked agent, and hostd
+  writes the settings** (2026-09-05). The human whose agent is being guessed at may be on a
+  phone, so `ClientMsg::InstallHooks` asks the host to do it and `HostMsg::HooksInstalled`
+  comes back as a notice. The installer moved from `slopty-cli` into `slopty_agent::hooks` so
+  the CLI and the daemon run the same code; hostd registers the `slopty` binary beside itself
+  (`Contents/MacOS` in a bundle, `target/<profile>` in a build tree). The offer shows once per
+  run and comes back only if the host reports it failed.
+- ✅ **The self-test plays the agent with a fake `claude` on ptyd's `PATH`, never by typing**
+  (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and hostd a `HOME` and a `PATH` of
+  their own and writes a small `claude` script into the run's temp directory; "+ agent"
+  (⌘⇧T) starts it. It paints the sparkle title and writes the fixture JSONL into
+  `$HOME/.claude/projects/<escaped cwd>` exactly where the real one would, and steps from
+  stage to stage when the test creates a marker file, so nothing depends on a sleep. This
+  keeps the rule from the played-hook ruling above: the test drives the app's own UI and the
+  harness's own environment, and never types a command into the shell under test. Not covered
+  end-to-end: clicking the "hooks" pill through to hostd writing `settings.json` — the click
+  is a headless GPUI test and the writer is unit-tested, but the two are not joined in the app
+  self-test, because the pill's position is not in the dump.
 - ⏸ ACP via `agent-client-protocol` 2.0.0 + `@agentclientprotocol/claude-agent-acp` for structured
   driving — after the PTY path works.

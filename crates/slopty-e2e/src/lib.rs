@@ -170,6 +170,8 @@ pub struct Dump {
     /// trimmed to what a screen reader reads. Empty when the app was built without `e2e`.
     #[serde(default)]
     pub a11y: Vec<A11yNode>,
+    /// `slopty hook install` has already been offered on the active canvas.
+    pub hooks_offered: bool,
 }
 
 /// One node of the accessibility tree.
@@ -247,6 +249,9 @@ pub struct TerminalInfo {
     /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
     /// `blocked:idle`, `done`; `None` without an agent.
     pub agent: Option<String>,
+    /// Which signal the host read the agent's state from: `process`, `title`, `transcript`
+    /// or `hook`; `None` without an agent.
+    pub agent_source: Option<String>,
     /// The agent's conversation, while it is shown in place of the grid.
     pub conversation: Option<ConversationInfo>,
 }

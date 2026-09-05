@@ -6,9 +6,11 @@
 //! * [`fdpass`] — `SCM_RIGHTS` transfer of the master over the Unix socket.
 //! * [`client`] — the hostd side of the ptyd socket.
 //! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
+//! * [`process`] — the foreground process of a tty, for attributing agent sessions.
 
 pub mod client;
 pub mod fdpass;
+pub mod process;
 pub mod protocol;
 pub mod pty;
 pub mod ring;

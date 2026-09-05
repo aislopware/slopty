@@ -33,6 +33,7 @@ enum Cmd {
     Reserve { client: ClientId },
     Request { client: ClientId, req: TermRequest },
     Snapshot { reply: oneshot::Sender<Snapshot> },
+    Probe { reply: oneshot::Sender<Probe> },
     Close,
 }
 
@@ -51,6 +52,22 @@ pub struct Snapshot {
     pub exited: Option<i32>,
 }
 
+/// What the host can see of a session without asking anything running in it: the program in
+/// the foreground of its tty, the title it painted, and where it runs.
+///
+/// This is what `slopty_agent` attributes hand-started Claude Code sessions from. It is taken
+/// on the actor's own thread, which is the only one holding the PTY master, and only on the
+/// daemon's agent tick — never per frame.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Probe {
+    /// The foreground process of the session's tty.
+    pub foreground: Option<slopty_pty::process::Foreground>,
+    /// Title from OSC 0/2, if any.
+    pub title: Option<String>,
+    /// Cwd from OSC 7, if any.
+    pub cwd: Option<String>,
+}
+
 /// Cloneable handle to a running session actor.
 #[derive(Clone, Debug)]
 pub struct SessionHandle {
@@ -66,6 +83,7 @@ impl std::fmt::Debug for Cmd {
             Self::Reserve { .. } => "Reserve",
             Self::Request { .. } => "Request",
             Self::Snapshot { .. } => "Snapshot",
+            Self::Probe { .. } => "Probe",
             Self::Close => "Close",
         };
         f.write_str(name)
@@ -118,6 +136,13 @@ impl SessionHandle {
     pub async fn snapshot(&self) -> Result<Snapshot, HostError> {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Snapshot { reply })?;
+        rx.await.map_err(|_gone| HostError::SessionClosed)
+    }
+
+    /// What can be seen of the session from outside it ([`Probe`]).
+    pub async fn probe(&self) -> Result<Probe, HostError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Cmd::Probe { reply })?;
         rx.await.map_err(|_gone| HostError::SessionClosed)
     }
 
@@ -431,6 +456,20 @@ impl Actor {
                     size: self.engine.size(),
                     viewers: u16::try_from(self.viewers.len()).unwrap_or(u16::MAX),
                     exited: self.exited,
+                });
+            }
+            Cmd::Probe { reply } => {
+                // A child that already exited has no foreground process; asking would only
+                // read whatever the kernel put in its place.
+                let foreground = self
+                    .exited
+                    .is_none()
+                    .then(|| slopty_pty::process::foreground(self.master.as_fd()))
+                    .flatten();
+                let _ignored = reply.send(Probe {
+                    foreground,
+                    title: self.title.clone(),
+                    cwd: self.cwd.clone(),
                 });
             }
             Cmd::Close => return false,

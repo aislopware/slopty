@@ -34,6 +34,13 @@ pub const TRANSCRIPT: &str = concat!(
     "\n",
 );
 
+/// [`TRANSCRIPT`] plus the record that ends the turn, for an agent whose state is read off
+/// its transcript rather than its hooks: `stop_reason` is what says a turn finished.
+pub const TRANSCRIPT_DONE: &str = concat!(
+    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:10.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Both tests pass now."}]}}"#,
+    "\n",
+);
+
 /// The lines [`TRANSCRIPT`] shows as, in the dump's words.
 pub const TRANSCRIPT_LINES: [&str; 6] = [
     "user: fix the failing test",
@@ -148,12 +155,18 @@ async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
 }
 
 /// The daemons of a stack: ptyd and hostd (named `host_name`) under `root`, and the ticket
-/// hostd printed.
-async fn daemons(root: &Path, host_name: &str, log: &str) -> Result<(Vec<Child>, String)> {
+/// hostd printed. `env` goes to both, on top of this process's own.
+async fn daemons(
+    root: &Path,
+    host_name: &str,
+    log: &str,
+    env: &[(String, String)],
+) -> Result<(Vec<Child>, String)> {
     let ptyd_sock = root.join("ptyd.sock");
     let mut ptyd = Command::new(bin("slopty-ptyd")?)
         .arg("--socket")
         .arg(&ptyd_sock)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .env("RUST_LOG", log)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -174,6 +187,7 @@ async fn daemons(root: &Path, host_name: &str, log: &str) -> Result<(Vec<Child>,
         .arg("--print-ticket")
         .arg("--port")
         .arg("0")
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .env("RUST_LOG", log)
         .env("SLOPTY_HOST_NAME", host_name)
         .stdin(Stdio::null())
@@ -192,6 +206,32 @@ async fn daemons(root: &Path, host_name: &str, log: &str) -> Result<(Vec<Child>,
     Ok((vec![ptyd, hostd], ticket))
 }
 
+/// A stand-in for the `claude` binary, written into a run's own directory and put first on
+/// ptyd's `PATH` so "+ agent" starts it instead of a real agent.
+///
+/// It behaves like Claude Code where Slopty looks: it paints the sparkle title while a turn
+/// runs and writes its conversation as JSONL under `$HOME/.claude/projects/<escaped cwd>`,
+/// with the same escaping the real one uses. It moves from stage to stage when the test
+/// creates the marker file it is waiting for, so the run never depends on a sleep, and it
+/// registers no hooks at all — which is the whole point.
+const FAKE_CLAUDE: &str = r#"#!/bin/sh
+set -e
+stage() { while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do sleep 0.05; done; }
+echo "fake claude in $PWD"
+stage working
+# OSC 2 with U+2733 EIGHT SPOKED ASTERISK, one of the frames Claude Code paints
+# while a turn runs (`slopty_agent::title::SPINNER`).
+printf '\033]2;\342\234\263 Claude Code\007'
+stage transcript
+project="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
+mkdir -p "$project"
+cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript.jsonl" > "$project/fake-session.jsonl"
+stage done
+cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript-done.jsonl" >> "$project/fake-session.jsonl"
+printf '\033]2;claude\007'
+stage quit
+"#;
+
 impl Stack {
     /// Start ptyd, hostd (named `host_name`) and the app; pair the app with the host and wait
     /// until its canvas is up.
@@ -200,10 +240,62 @@ impl Stack {
     ///
     /// When a binary is missing, a process dies, or the app does not come up in time.
     pub async fn launch(host_name: &str) -> Result<Self> {
+        Self::launch_with(host_name, &[]).await
+    }
+
+    /// [`Self::launch`] with a fake `claude` ([`FAKE_CLAUDE`]) first on the daemons' `PATH`
+    /// and a `HOME` of their own, so "+ agent" opens a session the host must attribute
+    /// without any hook ever firing. Drive it with [`Self::fake_claude_stage`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], plus when the fake cannot be written.
+    pub async fn launch_with_fake_claude(host_name: &str) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-agent-").tempdir()?;
+        let root = dir.path().to_path_buf();
+        let home = root.join("home");
+        let fake = root.join("fake");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&fake)?;
+        let claude = fake.join("claude");
+        std::fs::write(&claude, FAKE_CLAUDE)?;
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&claude, mode)?;
+        std::fs::write(fake.join("transcript.jsonl"), TRANSCRIPT)?;
+        std::fs::write(fake.join("transcript-done.jsonl"), TRANSCRIPT_DONE)?;
+        let path = std::env::var("PATH").unwrap_or_default();
+        let env = vec![
+            ("HOME".to_owned(), home.to_string_lossy().into_owned()),
+            ("PATH".to_owned(), format!("{}:{path}", fake.display())),
+            ("SLOPTY_FAKE_CLAUDE_DIR".to_owned(), fake.to_string_lossy().into_owned()),
+        ];
+        Self::launch_in(dir, host_name, &env).await
+    }
+
+    /// Let the fake `claude` move past the stage it is waiting on (`working`, `transcript`,
+    /// `done`, `quit`).
+    ///
+    /// # Errors
+    ///
+    /// When the marker file cannot be written.
+    pub fn fake_claude_stage(&self, stage: &str) -> Result<()> {
+        std::fs::write(self.dir.path().join("fake").join(stage), b"")?;
+        Ok(())
+    }
+
+    async fn launch_with(host_name: &str, env: &[(String, String)]) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
+        Self::launch_in(dir, host_name, env).await
+    }
+
+    async fn launch_in(
+        dir: tempfile::TempDir,
+        host_name: &str,
+        env: &[(String, String)],
+    ) -> Result<Self> {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (mut children, ticket) = daemons(root, host_name, &log).await?;
+        let (mut children, ticket) = daemons(root, host_name, &log, env).await?;
 
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;
@@ -237,7 +329,7 @@ impl Stack {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (children, ticket) = daemons(root, host_name, &log).await?;
+        let (children, ticket) = daemons(root, host_name, &log, &[]).await?;
 
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;

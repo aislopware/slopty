@@ -5,6 +5,7 @@
 //! process can restart without killing shells. A local control socket lets `slopty` (the CLI)
 //! mint pairing tickets and inspect state.
 
+mod agents;
 mod conn;
 mod ctl;
 mod paths;
@@ -64,7 +65,8 @@ pub struct Daemon {
     pub events: broadcast::Sender<slopty_proto::HostMsg>,
     /// The canvas document.
     pub canvas: CanvasStore,
-    /// Coding agents observed in sessions (fed by `slopty hook` over the control socket).
+    /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
+    /// by [`agents::watch`] for the sessions no hook speaks for.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// The host's pasteboard, synced with remote-window clients.
     pub pasteboard: Arc<slopty_input::Pasteboard>,
@@ -133,6 +135,8 @@ async fn main() -> Result<()> {
         port: args.port,
     };
     tokio::spawn(watch_pasteboard(daemon.clone()));
+    // Agents the hooks never report: the foreground process, the title, the transcript.
+    tokio::spawn(agents::watch(daemon.clone()));
 
     if let Some(mut exits) = daemon.host.take_exits() {
         let host = daemon.host.clone();

@@ -23,7 +23,7 @@ use gpui::{
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, TranscriptUpdate};
+use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason, TranscriptUpdate};
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
@@ -251,6 +251,9 @@ pub struct CanvasView {
     agents: HashMap<SessionId, AgentEvent>,
     /// Badge answers sent but not yet reflected by the host.
     answered: HashMap<SessionId, Answer>,
+    /// `slopty hook install` has been offered to this human once; the offer stops showing
+    /// whether they took it or not, and comes back only if the host reports it failed.
+    hooks_offered: bool,
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
@@ -326,6 +329,7 @@ impl CanvasView {
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             agents: HashMap::new(),
             answered: HashMap::new(),
+            hooks_offered: false,
             screens: HashMap::new(),
             notes: HashMap::new(),
             pending_opens: HashMap::new(),
@@ -575,6 +579,33 @@ impl CanvasView {
             }
         }
         self.count_needs_you(cx);
+        cx.notify();
+    }
+
+    /// What the host last said about a session's agent, source included.
+    #[must_use]
+    pub fn agent(&self, session: SessionId) -> Option<&AgentEvent> {
+        self.agents.get(&session)
+    }
+
+    /// Whether `slopty hook install` has already been offered on this canvas.
+    #[must_use]
+    pub const fn hooks_offered(&self) -> bool {
+        self.hooks_offered
+    }
+
+    /// Ask the host to register `slopty hook` for its Claude Code, so the agents in its
+    /// terminals report precisely instead of being read off their process and their title.
+    /// Offered once per run from the title bar of a session attributed without hooks.
+    pub fn install_hooks(&mut self, cx: &mut Context<Self>) {
+        self.hooks_offered = true;
+        self.send(ClientMsg::InstallHooks);
+        cx.notify();
+    }
+
+    /// The host could not install the hooks: put the offer back so it can be tried again.
+    pub fn hooks_offer_failed(&mut self, cx: &mut Context<Self>) {
+        self.hooks_offered = false;
         cx.notify();
     }
 
@@ -1532,6 +1563,10 @@ impl CanvasView {
             let on = view.read(cx).conversation().is_some();
             Some(chat_button(id, view.clone(), on, theme, k, cx))
         });
+        // An agent the host had to guess at: offer the hooks that would make it precise.
+        let hooks = agent
+            .filter(|(_session, a)| a.source != AgentSource::Hook && !self.hooks_offered)
+            .map(|_agent| hooks_button(id, theme, k, cx));
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
         let take = match item.kind {
@@ -1598,6 +1633,7 @@ impl CanvasView {
             .child(
                 div().flex_1().overflow_hidden().text_ellipsis().child(SharedString::from(title)),
             )
+            .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
             .when_some(badge, gpui::ParentElement::child);
 
@@ -1991,6 +2027,17 @@ fn pill(
         .child(label)
 }
 
+/// The "hooks" pill on an agent the host had to guess at: `slopty hook install` on the host,
+/// so the pill stops being a guess. Shown once, on the first such session.
+fn hooks_button(id: ItemId, theme: &Theme, k: f32, cx: &Context<CanvasView>) -> gpui::AnyElement {
+    let pill = pill("hooks", id, "hooks", theme.surfaces.warn, theme, k)
+        .role(Role::Button)
+        .aria_label("install hooks");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.install_hooks(cx)))
+        .into_any_element()
+}
+
 /// Whether the agent is waiting on the human (an idle prompt is not worth an outline).
 fn needs_human(agent: &AgentEvent) -> bool {
     matches!(&agent.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt)
@@ -2096,6 +2143,7 @@ impl CanvasView {
         };
         let pill = div()
             .id(element_id("agent", item))
+            .debug_selector(move || format!("agent-{}", item.as_uuid()))
             .role(Role::Status)
             .aria_label(SharedString::from(label.clone()))
             .flex()
@@ -2139,7 +2187,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, Style, TermModes};
     use slopty_proto::agent::AgentKind;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
@@ -2419,6 +2467,7 @@ mod tests {
             agent_session: None,
             detail: None,
             attention: true,
+            source: AgentSource::Hook,
         };
         view.update(cx, |v, cx| v.agent_event(blocked.clone(), cx));
         cx.run_until_parked();
@@ -2459,6 +2508,7 @@ mod tests {
             agent_session: None,
             detail: None,
             attention: true,
+            source: AgentSource::Hook,
         };
         view.update(cx, |v, cx| v.agent_event(blocked, cx));
         cx.run_until_parked();
@@ -2507,6 +2557,7 @@ mod tests {
                     agent_session: None,
                     detail: None,
                     attention: false,
+                    source: AgentSource::Hook,
                 },
                 cx,
             );
@@ -2571,5 +2622,75 @@ mod tests {
         assert_eq!(keys, [slopty_proto::input::KeyCode::Escape], "{keys:?}");
         let tree = cx.update(|window, _| crate::a11y::tree(window));
         assert!(!tree.iter().any(|n| n.is("Button", Some("deny"))), "answered: {tree:#?}");
+    }
+
+    /// An agent the host attributed without hooks draws the same pill as a hooked one, and
+    /// offers `slopty hook install` once beside it.
+    #[gpui::test]
+    fn an_agent_seen_without_hooks_gets_the_pill_and_offers_the_hooks(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let item = host_opens(&view, cx, session, me, SHELL, 1);
+        assert!(cx.debug_bounds(selector("agent", item)).is_none(), "a shell has no pill");
+
+        // The host saw a `claude` in the foreground and nothing else: idle, from the process.
+        let seen = |status: AgentStatus, source: AgentSource| AgentEvent {
+            session,
+            kind: AgentKind::ClaudeCode,
+            status,
+            agent_session: None,
+            detail: None,
+            attention: false,
+            source,
+        };
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(seen(AgentStatus::Idle, AgentSource::Process), cx);
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("agent", item)).is_some(), "the pill is drawn");
+        let offer = cx.debug_bounds(selector("hooks", item)).expect("the hooks offer");
+        // The guess and the offer are both spoken: a screen reader hears what the pill says
+        // and reaches the offer as a button.
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some("claude"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Button", Some("install hooks"))), "{tree:#?}");
+
+        // Its title said a turn started: the pill follows, the offer stays.
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(seen(AgentStatus::Working, AgentSource::Title), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |c, _cx| c.agent(session).map(|a| a.status.clone())),
+            Some(AgentStatus::Working)
+        );
+        assert!(cx.debug_bounds(selector("hooks", item)).is_some());
+
+        // Taking the offer asks the host to install and never asks again.
+        let (x, y) = (offer.center().x, offer.center().y);
+        cx.simulate_click(point(x, y), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            drain(&mut rx).contains(&ClientMsg::InstallHooks),
+            "the host was asked to install the hooks"
+        );
+        assert!(view.read_with(cx, |c, _cx| c.hooks_offered()));
+        assert!(cx.debug_bounds(selector("hooks", item)).is_none(), "offered once");
+
+        // A hook now speaks for the same session: the pill is the host's, the offer is moot.
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(seen(AgentStatus::Blocked(BlockReason::Question), AgentSource::Hook), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("agent", item)).is_some());
+        assert!(cx.debug_bounds(selector("hooks", item)).is_none());
+
+        // The agent's process went away: the host says so and the pill goes with it.
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(seen(AgentStatus::None, AgentSource::Process), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("agent", item)).is_none(), "{item:?}");
     }
 }

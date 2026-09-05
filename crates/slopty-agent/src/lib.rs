@@ -14,14 +14,31 @@
 //! question it asked, the elicitation's message, or (on `Stop`) the last line it said, from the
 //! payload's `last_assistant_message`; when a payload carries none of those but names a
 //! transcript, the daemon reads the transcript tail ([`transcript`]) and fills the detail in.
+//!
+//! Hooks are only the strongest of four signals. A `claude` the human started by hand in any
+//! Slopty terminal — or one running before `slopty hook install` — is attributed from what the
+//! host can see anyway: its [`detect`]ed foreground process, the [`title`] it paints, and the
+//! JSONL transcript [`discover`]ed from its working directory. [`Tracker::observe`] merges
+//! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
+//! said and hooks stay authoritative once they speak.
 
+pub mod detect;
+pub mod discover;
+pub mod hooks;
+pub mod title;
 pub mod transcript;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 use slopty_core::SessionId;
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+
+use crate::detect::Program;
+use crate::title::TitleSignal;
+use crate::transcript::Progress;
 
 /// Hook events `slopty hook install` registers. The relay ignores everything else.
 pub const HOOK_EVENTS: [&str; 12] = [
@@ -163,19 +180,54 @@ fn tool_from_message(message: Option<&str>) -> Option<String> {
     (!tool.is_empty()).then(|| tool.to_owned())
 }
 
+/// What the host can see of a session without any help from the agent: the program in the
+/// foreground of its tty, the title that program paints, and the directory it runs in.
+///
+/// Everything here is a fact about the terminal, gathered by the host on a timer; nothing in
+/// it requires the agent to cooperate. A `program` of `None` means the platform would not say
+/// (the lookup failed), which is not the same as "no agent runs here" and never clears one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Observation {
+    /// The foreground process of the session's tty.
+    pub program: Option<Program>,
+    /// The terminal title (OSC 0/2), when the session set one.
+    pub title: Option<String>,
+    /// Where the agent runs: the foreground process's own working directory, else OSC 7.
+    pub cwd: Option<PathBuf>,
+}
+
 /// Per-session agent state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracker {
     status: AgentStatus,
     agent_session: Option<String>,
     detail: Option<String>,
-    /// The conversation file, from the last hook that named one.
+    /// The conversation file, from the last hook that named one or from [`discover`].
     transcript_path: Option<String>,
+    /// Which signal the current status came from.
+    source: AgentSource,
+    /// A hook has spoken for this session: weaker signals stop deciding the status, and the
+    /// foreground process no longer clears the agent (the hooks say when it ends).
+    hooked: bool,
+    /// When an agent process was first seen here; the transcript is the newest file written
+    /// at or after this.
+    first_seen: Option<SystemTime>,
+    /// The agent's working directory, for [`discover::transcript_for`].
+    cwd: Option<PathBuf>,
 }
 
 impl Default for Tracker {
     fn default() -> Self {
-        Self { status: AgentStatus::None, agent_session: None, detail: None, transcript_path: None }
+        Self {
+            status: AgentStatus::None,
+            agent_session: None,
+            detail: None,
+            transcript_path: None,
+            source: AgentSource::Process,
+            hooked: false,
+            first_seen: None,
+            cwd: None,
+        }
     }
 }
 
@@ -184,6 +236,12 @@ impl Tracker {
     #[must_use]
     pub const fn status(&self) -> &AgentStatus {
         &self.status
+    }
+
+    /// Which signal the current status came from.
+    #[must_use]
+    pub const fn source(&self) -> AgentSource {
+        self.source
     }
 
     /// The event describing the current state (for a joining client).
@@ -196,11 +254,13 @@ impl Tracker {
             agent_session: self.agent_session.clone(),
             detail: self.detail.clone(),
             attention: false,
+            source: self.source,
         }
     }
 
     /// Apply one hook; the resulting event when the visible state changed.
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
+        self.hooked = true;
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
         }
@@ -214,15 +274,101 @@ impl Tracker {
             AgentStatus::Done => true,
             _ => false,
         };
-        if status == self.status && detail == self.detail {
+        if status == self.status && detail == self.detail && self.source == AgentSource::Hook {
             return None;
         }
         self.status = status;
         self.detail = detail;
+        self.source = AgentSource::Hook;
         if self.status == AgentStatus::None {
             self.agent_session = None;
         }
         Some(AgentEvent { attention, ..self.event(session) })
+    }
+
+    /// Fold in what the host can see of the session, `seen_at` the moment the agent process
+    /// started (see [`Observation`]).
+    ///
+    /// A foreground process that is not an agent clears the session — unless a hook has
+    /// spoken for it, in which case the hooks decide when it ends. Otherwise the title
+    /// decides working from idle, and the mere presence of the process means [`AgentStatus`]
+    /// `Idle`; neither ever overwrites what the transcript or a hook said.
+    pub fn observe(
+        &mut self,
+        session: SessionId,
+        obs: &Observation,
+        seen_at: SystemTime,
+    ) -> Option<AgentEvent> {
+        let Some(program) = obs.program.as_ref() else {
+            // The platform would not say; that is not evidence of anything.
+            return None;
+        };
+        if !program.is_claude() {
+            if self.hooked || self.status == AgentStatus::None {
+                return None;
+            }
+            *self = Self::default();
+            return Some(self.event(session));
+        }
+        if self.first_seen.is_none() {
+            self.first_seen = Some(seen_at);
+        }
+        if obs.cwd.is_some() {
+            self.cwd.clone_from(&obs.cwd);
+        }
+        if self.source >= AgentSource::Transcript {
+            return None;
+        }
+        let (status, source) = match obs.title.as_deref().and_then(title::signal) {
+            Some(TitleSignal::Working) => (AgentStatus::Working, AgentSource::Title),
+            Some(TitleSignal::Idle) => (AgentStatus::Idle, AgentSource::Title),
+            // No title to read: the process being there is all we know.
+            None => (AgentStatus::Idle, AgentSource::Process),
+        };
+        self.set(session, status, None, source)
+    }
+
+    /// Fold in what the session's transcript says the turn is doing. Ignored once a hook has
+    /// spoken: the hooks report blocking, which the transcript never does.
+    pub fn observe_progress(
+        &mut self,
+        session: SessionId,
+        progress: &Progress,
+    ) -> Option<AgentEvent> {
+        if self.hooked {
+            return None;
+        }
+        self.set(session, progress.status.clone(), progress.detail.clone(), AgentSource::Transcript)
+    }
+
+    /// Move to a state a signal weaker than a hook reported; `None` when nothing visible
+    /// changed.
+    fn set(
+        &mut self,
+        session: SessionId,
+        status: AgentStatus,
+        detail: Option<String>,
+        source: AgentSource,
+    ) -> Option<AgentEvent> {
+        if status == self.status && detail == self.detail && source == self.source {
+            return None;
+        }
+        // Without hooks a finished turn is only news when we watched it run: a transcript read
+        // for the first time is usually a conversation that ended hours ago.
+        let attention = status == AgentStatus::Done
+            && matches!(self.status, AgentStatus::Working | AgentStatus::Tool { .. });
+        self.status = status;
+        self.detail = detail;
+        self.source = source;
+        Some(AgentEvent { attention, ..self.event(session) })
+    }
+
+    /// Where to look for the transcript of an agent whose file is not known yet.
+    fn discovery(&self) -> Option<(PathBuf, SystemTime)> {
+        if self.transcript_path.is_some() || self.status == AgentStatus::None {
+            return None;
+        }
+        Some((self.cwd.clone()?, self.first_seen?))
     }
 
     /// Replace the detail (something recovered after the hook, such as a transcript line).
@@ -309,6 +455,74 @@ impl AgentTable {
         event
     }
 
+    /// Feed one round of what the host can see of a session ([`Tracker::observe`]).
+    pub fn observe(
+        &mut self,
+        session: SessionId,
+        obs: &Observation,
+        seen_at: SystemTime,
+    ) -> Option<AgentEvent> {
+        // A session with nothing agent-like in it must not grow an entry on every tick.
+        if !self.sessions.contains_key(&session)
+            && !obs.program.as_ref().is_some_and(Program::is_claude)
+        {
+            return None;
+        }
+        let tracker = self.sessions.entry(session).or_default();
+        let event = tracker.observe(session, obs, seen_at);
+        if tracker.status() == &AgentStatus::None {
+            self.sessions.remove(&session);
+        }
+        event
+    }
+
+    /// Feed what a session's transcript says the turn is doing
+    /// ([`Tracker::observe_progress`]).
+    pub fn observe_progress(
+        &mut self,
+        session: SessionId,
+        progress: &Progress,
+    ) -> Option<AgentEvent> {
+        self.sessions.get_mut(&session)?.observe_progress(session, progress)
+    }
+
+    /// Sessions running an agent whose transcript has not been found yet, with the directory
+    /// it runs in and the moment it was first seen ([`discover::transcript_for`]).
+    #[must_use]
+    pub fn undiscovered(&self) -> Vec<(SessionId, PathBuf, SystemTime)> {
+        self.sessions
+            .iter()
+            .filter_map(|(id, t)| t.discovery().map(|(cwd, since)| (*id, cwd, since)))
+            .collect()
+    }
+
+    /// Drop every agent whose session the host no longer runs, and say so: a session that
+    /// went away takes its agent with it whatever its last signal said.
+    pub fn retain(&mut self, live: &[SessionId]) -> Vec<AgentEvent> {
+        let mut gone = Vec::new();
+        self.sessions.retain(|session, _tracker| {
+            if live.contains(session) {
+                return true;
+            }
+            gone.push(Tracker::default().event(*session));
+            false
+        });
+        gone
+    }
+
+    /// Every session with an agent in it.
+    #[must_use]
+    pub fn sessions_with_agents(&self) -> Vec<SessionId> {
+        self.sessions.keys().copied().collect()
+    }
+
+    /// Record the transcript a session's agent writes, found without a hook.
+    pub fn set_transcript_path(&mut self, session: SessionId, path: &Path) {
+        if let Some(tracker) = self.sessions.get_mut(&session) {
+            tracker.transcript_path = Some(path.to_string_lossy().into_owned());
+        }
+    }
+
     /// Put a recovered detail on a session's agent (see [`wants_transcript`]); the next
     /// snapshot carries it. Returns whether anything changed.
     pub fn set_detail(&mut self, session: SessionId, detail: &str) -> bool {
@@ -322,8 +536,8 @@ impl AgentTable {
 
     /// Where the session's conversation is written, once a hook has said.
     #[must_use]
-    pub fn transcript_path(&self, session: SessionId) -> Option<std::path::PathBuf> {
-        self.sessions.get(&session)?.transcript_path.as_deref().map(std::path::PathBuf::from)
+    pub fn transcript_path(&self, session: SessionId) -> Option<PathBuf> {
+        self.sessions.get(&session)?.transcript_path.as_deref().map(PathBuf::from)
     }
 
     /// Current state of every session with an agent, for a joining client.
@@ -566,6 +780,156 @@ mod tests {
             )
             .expect("blocks");
         assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Permission { tool: String::new() }));
+    }
+
+    /// What the host sees of a terminal running `program` with `title`.
+    fn seen(program: &str, title: Option<&str>) -> Observation {
+        Observation {
+            program: Some(Program::named(program)),
+            title: title.map(str::to_owned),
+            cwd: Some(PathBuf::from("/tmp/project")),
+        }
+    }
+
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(1_000_000))
+            .expect("a time in range")
+    }
+
+    #[test]
+    fn a_hand_started_claude_is_attributed_from_the_process_and_the_title() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        // A shell is not an agent, and an empty tracker has nothing to clear.
+        assert_eq!(t.observe(sid, &seen("zsh", Some("~/project")), now()), None);
+
+        // The process alone: the agent is there, idle, and the pill can be drawn.
+        let e = t.observe(sid, &seen("claude", None), now()).expect("the process");
+        assert_eq!(e.status, AgentStatus::Idle);
+        assert_eq!(e.source, AgentSource::Process);
+        assert!(!e.attention);
+        assert_eq!(t.observe(sid, &seen("claude", None), now()), None, "nothing changed");
+
+        // Its title says a turn is running.
+        let e = t.observe(sid, &seen("claude", Some("✳ Claude Code")), now()).expect("the title");
+        assert_eq!((e.status, e.source), (AgentStatus::Working, AgentSource::Title));
+        let e = t.observe(sid, &seen("claude", Some("claude")), now()).expect("back to idle");
+        assert_eq!((e.status, e.source), (AgentStatus::Idle, AgentSource::Title));
+
+        // The transcript outranks the title and says what the turn is doing.
+        let tool = Progress {
+            status: AgentStatus::Tool { tool: "Bash".to_owned() },
+            detail: Some("cargo test".to_owned()),
+        };
+        let e = t.observe_progress(sid, &tool).expect("the transcript");
+        assert_eq!(e.status, AgentStatus::Tool { tool: "Bash".to_owned() });
+        assert_eq!(e.source, AgentSource::Transcript);
+        assert_eq!(e.detail.as_deref(), Some("cargo test"));
+        assert_eq!(
+            t.observe(sid, &seen("claude", Some("claude")), now()),
+            None,
+            "a title never overwrites the transcript"
+        );
+
+        // A finished turn we watched run is worth the human's attention.
+        let done = Progress { status: AgentStatus::Done, detail: Some("Fixed.".to_owned()) };
+        let e = t.observe_progress(sid, &done).expect("done");
+        assert!(e.attention);
+
+        // The process goes away: so does the agent.
+        let e = t.observe(sid, &seen("zsh", Some("~/project")), now()).expect("gone");
+        assert_eq!(e.status, AgentStatus::None);
+    }
+
+    #[test]
+    fn a_transcript_read_for_the_first_time_is_not_an_alert() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.observe(sid, &seen("claude", None), now()).expect("the process");
+        let done = Progress { status: AgentStatus::Done, detail: Some("Hours ago.".to_owned()) };
+        let e = t.observe_progress(sid, &done).expect("done");
+        assert_eq!(e.status, AgentStatus::Done);
+        assert!(!e.attention, "the turn ended before we ever looked");
+    }
+
+    #[test]
+    fn hooks_outrank_everything_and_decide_when_the_agent_ends() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.observe(sid, &seen("claude", Some("✳ Claude Code")), now()).expect("the title");
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch x"}}"#,
+                ),
+            )
+            .expect("the hook");
+        assert_eq!(e.source, AgentSource::Hook);
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }));
+
+        // Neither weaker signal may talk over a blocked agent, and neither may end it: the
+        // hooks are relayed by a process that is not always the session's foreground one.
+        assert_eq!(t.observe(sid, &seen("claude", Some("claude")), now()), None);
+        let progress = Progress { status: AgentStatus::Working, detail: None };
+        assert_eq!(t.observe_progress(sid, &progress), None);
+        assert_eq!(t.observe(sid, &seen("zsh", Some("~/project")), now()), None);
+        assert_eq!(
+            t.status(),
+            &AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() })
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_says_nothing_changes_nothing() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.observe(sid, &seen("claude", None), now()).expect("the process");
+        let blind = Observation { program: None, title: None, cwd: None };
+        assert_eq!(t.observe(sid, &blind, now()), None);
+        assert_eq!(t.status(), &AgentStatus::Idle);
+    }
+
+    #[test]
+    fn the_table_asks_for_a_transcript_once_and_only_for_agents() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let mut table = AgentTable::default();
+        table.observe(a, &seen("claude", None), now());
+        table.observe(b, &seen("zsh", None), now());
+        assert_eq!(table.snapshot().len(), 1, "only the agent has an entry");
+        assert_eq!(table.undiscovered(), vec![(a, PathBuf::from("/tmp/project"), now())]);
+        table.set_transcript_path(a, Path::new("/tmp/a.jsonl"));
+        assert!(table.undiscovered().is_empty(), "asked for once");
+        assert_eq!(table.transcript_path(a).as_deref(), Some(Path::new("/tmp/a.jsonl")));
+
+        // The conversation the tail then reads drives the pill.
+        let progress = Progress { status: AgentStatus::Working, detail: Some("fix it".to_owned()) };
+        let e = table.observe_progress(a, &progress).expect("progress");
+        assert_eq!(e.source, AgentSource::Transcript);
+        assert_eq!(table.observe_progress(b, &progress), None, "no agent, no progress");
+
+        // The agent exits and the table forgets it.
+        table.observe(a, &seen("zsh", None), now());
+        assert!(table.snapshot().is_empty());
+    }
+
+    #[test]
+    fn a_session_the_host_no_longer_runs_takes_its_agent_with_it() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let mut table = AgentTable::default();
+        table.observe(a, &seen("claude", None), now());
+        table.apply(b, &hook(r#"{"hook_event_name":"SessionStart"}"#));
+        assert_eq!(table.retain(&[a, b]), Vec::new(), "both still run");
+        let gone = table.retain(&[b]);
+        assert_eq!(gone.len(), 1, "{gone:#?}");
+        assert_eq!((gone[0].session, gone[0].status.clone()), (a, AgentStatus::None));
+        assert_eq!(table.snapshot().len(), 1);
+        // Even a hooked agent goes when its terminal does; no `SessionEnd` ever arrives.
+        assert_eq!(table.retain(&[]).len(), 1);
+        assert!(table.snapshot().is_empty());
     }
 
     #[test]

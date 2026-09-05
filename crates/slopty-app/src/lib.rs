@@ -538,6 +538,13 @@ impl Workspace {
                         LinkEvent::Control(HostMsg::Transcript(update)) => {
                             canvas.update(cx, |c, cx| c.transcript_update(update, cx));
                         }
+                        LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
+                            let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
+                            if !ok {
+                                // The offer stays on the title bar so it can be tried again.
+                                canvas.update(cx, CanvasView::hooks_offer_failed);
+                            }
+                        }
                         LinkEvent::Control(_) => {}
                         LinkEvent::Disconnected(why) => {
                             let _set = this.update(cx, |ws, cx| {

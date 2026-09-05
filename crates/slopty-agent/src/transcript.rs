@@ -16,7 +16,7 @@ use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
-use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry};
+use slopty_proto::agent::{AgentStatus, Clipped, TranscriptBody, TranscriptEntry};
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
 /// run to tens of kilobytes.
@@ -117,6 +117,24 @@ pub struct Read {
     /// The file was replaced or truncated: the reader started over from its beginning, and
     /// whatever the caller showed before is stale.
     pub restarted: bool,
+    /// What the newest record says the agent is doing ([`progress`]); `None` when nothing in
+    /// this read moved the turn on.
+    pub progress: Option<Progress>,
+}
+
+/// What the transcript's newest record says the agent is doing.
+///
+/// This is the second-strongest attribution signal, used when no hook has spoken for the
+/// session. The records say what a turn is doing, never what it is waiting for: a permission
+/// prompt is not written to the transcript until it has been answered, so a tail can report
+/// [`AgentStatus::Working`], [`AgentStatus::Tool`] and [`AgentStatus::Done`], and never
+/// [`AgentStatus::Blocked`]. Only the hooks report blocking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    /// The status the record implies.
+    pub status: AgentStatus,
+    /// One line about it, already [`crate::truncate`]d.
+    pub detail: Option<String>,
 }
 
 impl Tail {
@@ -138,7 +156,7 @@ impl Tail {
             *self = Self::default();
         }
         if len == self.offset {
-            return Ok(Read { entries: Vec::new(), restarted });
+            return Ok(Read { restarted, ..Read::default() });
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut text = std::mem::take(&mut self.partial);
@@ -146,12 +164,107 @@ impl Tail {
         self.offset = len;
         let Some(end) = text.rfind('\n') else {
             self.partial = text;
-            return Ok(Read { entries: Vec::new(), restarted });
+            return Ok(Read { restarted, ..Read::default() });
         };
         let (complete, rest) = text.split_at(end);
         rest.get(1..).unwrap_or_default().clone_into(&mut self.partial);
-        Ok(Read { entries: entries_named(&mut self.tools, complete), restarted })
+        Ok(Read {
+            entries: entries_named(&mut self.tools, complete),
+            restarted,
+            progress: progress(complete),
+        })
     }
+}
+
+/// What the newest record of `jsonl` says the agent is doing, or `None` when none of the
+/// complete lines is a main-thread turn record.
+#[must_use]
+pub fn progress(jsonl: &str) -> Option<Progress> {
+    jsonl.lines().rev().find_map(line_progress)
+}
+
+/// The progress one record implies; `None` for bookkeeping, sidechains and empty turns.
+fn line_progress(line: &str) -> Option<Progress> {
+    let record: Value = serde_json::from_str(line).ok()?;
+    if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let message = record.get("message")?;
+    let content = message.get("content")?;
+    match record.get("type").and_then(Value::as_str)? {
+        // A prompt, or the result of a tool the agent called: either way the turn is running.
+        "user" => Some(Progress {
+            status: AgentStatus::Working,
+            detail: user_prompt(content).map(|t| crate::truncate(&t)),
+        }),
+        "assistant" => assistant_progress(message, content),
+        _ => None,
+    }
+}
+
+/// The human's own words in a user record, if it holds any (a record of nothing but tool
+/// results, or one of the app's injected texts, has none).
+fn user_prompt(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(s) => s.as_str(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .find_map(|b| b.get("text").and_then(Value::as_str))?,
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() || text.starts_with('<') {
+        return None;
+    }
+    text.lines().next().map(|line| line.trim().to_owned())
+}
+
+/// An assistant record: the tool it is calling, or the answer that ended the turn.
+fn assistant_progress(message: &Value, content: &Value) -> Option<Progress> {
+    let blocks = match content {
+        Value::String(s) => {
+            return last_line(s).map(|l| Progress {
+                status: AgentStatus::Working,
+                detail: Some(crate::truncate(&l)),
+            });
+        }
+        Value::Array(blocks) => blocks,
+        _ => return None,
+    };
+    let tool = blocks
+        .iter()
+        .rev()
+        .find(|b| {
+            matches!(b.get("type").and_then(Value::as_str), Some("tool_use" | "server_tool_use"))
+        })
+        .and_then(|b| Some((b.get("name")?.as_str()?.to_owned(), b.get("input"))));
+    let text = blocks
+        .iter()
+        .rev()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .find_map(|b| b.get("text").and_then(Value::as_str))
+        .and_then(last_line);
+    // `end_turn` is the only record that says the agent handed control back; a record with a
+    // tool call is the agent running one, and anything else is still streaming.
+    let ended = matches!(
+        message.get("stop_reason").and_then(Value::as_str),
+        Some("end_turn" | "stop_sequence" | "max_tokens")
+    );
+    if ended {
+        return Some(Progress {
+            status: AgentStatus::Done,
+            detail: text.map(|t| crate::truncate(&t)),
+        });
+    }
+    if let Some((name, input)) = tool {
+        let summary = tool_summary(&name, input);
+        return Some(Progress {
+            status: AgentStatus::Tool { tool: name },
+            detail: Some(summary).filter(|s| !s.is_empty()),
+        });
+    }
+    text.map(|t| Progress { status: AgentStatus::Working, detail: Some(crate::truncate(&t)) })
 }
 
 /// The conversation entries in complete JSONL lines, in order. Results of tool calls in
@@ -459,6 +572,74 @@ mod tests {
             "{got:#?}"
         );
         assert!(got.iter().all(|e| e.at.is_none()), "no timestamps in these records");
+    }
+
+    #[test]
+    fn the_newest_record_says_what_the_turn_is_doing() {
+        // The fixture ends on the tool call the assistant made.
+        assert_eq!(
+            progress(TAIL),
+            Some(Progress {
+                status: AgentStatus::Tool { tool: "Bash".to_owned() },
+                detail: Some("cargo test".to_owned()),
+            })
+        );
+        // A prompt starts a turn and names it.
+        let prompt =
+            r#"{"type":"user","message":{"role":"user","content":"fix the build\nplease"}}"#;
+        assert_eq!(
+            progress(prompt),
+            Some(Progress {
+                status: AgentStatus::Working,
+                detail: Some("fix the build".to_owned()),
+            })
+        );
+        // A tool result is the turn continuing, with nothing to say for itself.
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        assert_eq!(progress(result), Some(Progress { status: AgentStatus::Working, detail: None }));
+        // `end_turn` is the turn handing control back, with the last line it said.
+        let done = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"All green.\n\nDone: two edits."}]}}"#;
+        assert_eq!(
+            progress(done),
+            Some(Progress {
+                status: AgentStatus::Done,
+                detail: Some("Done: two edits.".to_owned()),
+            })
+        );
+        // Streaming text without a stop reason is still working.
+        let streaming = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Looking at it."}]}}"#;
+        assert_eq!(
+            progress(streaming),
+            Some(Progress {
+                status: AgentStatus::Working,
+                detail: Some("Looking at it.".to_owned()),
+            })
+        );
+        // Bookkeeping, sidechains and the app's injected texts move nothing on.
+        assert_eq!(progress(r#"{"type":"summary","summary":"s"}"#), None);
+        assert_eq!(progress(""), None);
+        let sidechain = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"subagent"}]}}"#;
+        assert_eq!(progress(sidechain), None);
+        let injected = r#"{"type":"user","message":{"role":"user","content":"<system-reminder>x</system-reminder>"}}"#;
+        assert_eq!(
+            progress(injected),
+            Some(Progress { status: AgentStatus::Working, detail: None })
+        );
+    }
+
+    #[test]
+    fn a_tail_reports_the_progress_of_what_it_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let mut tail = Tail::default();
+        std::fs::write(&path, TAIL).expect("write");
+        let read = tail.read(&path).expect("read");
+        assert_eq!(
+            read.progress.map(|p| p.status),
+            Some(AgentStatus::Tool { tool: "Bash".to_owned() })
+        );
+        // Nothing new: nothing to say (the caller keeps the status it had).
+        assert_eq!(tail.read(&path).expect("read").progress, None);
     }
 
     #[test]

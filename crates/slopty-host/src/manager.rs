@@ -12,7 +12,7 @@ use slopty_pty::{PtydClient, SpawnSpec};
 use tokio::sync::mpsc;
 
 use crate::HostError;
-use crate::session::{self, SessionHandle, SessionStart};
+use crate::session::{self, Probe, SessionHandle, SessionStart};
 
 /// Scrollback lines the engine retains per session.
 pub const SCROLLBACK_LINES: u32 = 50_000;
@@ -172,6 +172,26 @@ impl Host {
                 viewers: snap.viewers,
                 command,
             });
+        }
+        out
+    }
+
+    /// What can be seen of every live session from outside it ([`Probe`]): the daemon's agent
+    /// tick reads this to attribute sessions no hook has spoken for.
+    pub async fn probe(&self) -> Vec<(SessionId, Probe)> {
+        let handles: Vec<(SessionId, SessionHandle)> = self
+            .inner
+            .sessions
+            .lock()
+            .iter()
+            .filter(|(_id, e)| e.exited.is_none())
+            .map(|(id, e)| (*id, e.handle.clone()))
+            .collect();
+        let mut out = Vec::with_capacity(handles.len());
+        for (id, handle) in handles {
+            if let Ok(probe) = handle.probe().await {
+                out.push((id, probe));
+            }
         }
         out
     }

@@ -46,6 +46,25 @@ pub enum AgentStatus {
     Done,
 }
 
+/// Which signal the host read the status from, weakest first.
+///
+/// The host watches four signals and keeps the strongest one that has spoken for a session:
+/// the foreground process only says an agent is there, the terminal title tells working from
+/// idle, the JSONL transcript names the turn and the tool, and the hooks say everything
+/// including what the agent is blocked on. A client shows the same pill for all four; the
+/// source is what tells it whether offering "install hooks" would buy the human anything.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub enum AgentSource {
+    /// The session's foreground process is the agent's; nothing else is known.
+    Process,
+    /// The terminal title (OSC 0/2) said working or idle.
+    Title,
+    /// The agent's JSONL transcript said what the turn is doing.
+    Transcript,
+    /// A Claude Code hook said, the only signal that reports blocking.
+    Hook,
+}
+
 /// Host → client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
@@ -61,6 +80,8 @@ pub struct AgentEvent {
     pub detail: Option<String>,
     /// Whether this transition should raise attention (sound, badge) or is a quiet correction.
     pub attention: bool,
+    /// Where the status came from.
+    pub source: AgentSource,
 }
 
 /// One entry of an agent's conversation, as the client shows it: what was said, when.
