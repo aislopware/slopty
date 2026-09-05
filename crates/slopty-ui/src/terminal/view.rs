@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Autocapitalize, Bounds, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
-    TextInputAction, TextInputConfiguration, UTF16Selection, Window, div, point, size,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, Styled as _, TextInputAction, TextInputConfiguration, UTF16Selection, Window,
+    div, point, size,
 };
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
-use slopty_grid::Cursor;
+use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
@@ -20,6 +21,63 @@ use tokio::sync::mpsc;
 
 use crate::keys;
 use crate::terminal::element::{CellMetrics, TerminalElement};
+
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        terminal,
+        [
+            /// Copy the selection.
+            Copy,
+            /// Paste the clipboard into the session.
+            Paste,
+        ]
+    );
+}
+pub use actions::{Copy, Paste};
+
+/// Key bindings for the terminal context.
+#[must_use]
+pub fn key_bindings() -> Vec<KeyBinding> {
+    const CTX: Option<&str> = Some("Terminal");
+    vec![KeyBinding::new("cmd-c", Copy, CTX), KeyBinding::new("cmd-v", Paste, CTX)]
+}
+
+/// A drag selection between two cells, in absolute line indices so it survives scrolling.
+/// Both ends are inclusive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Selection {
+    /// Where the drag started.
+    pub anchor: (LineIndex, u16),
+    /// Where the pointer is.
+    pub head: (LineIndex, u16),
+}
+
+impl Selection {
+    /// `(start, end)` in reading order.
+    #[must_use]
+    pub fn ordered(self) -> ((LineIndex, u16), (LineIndex, u16)) {
+        if self.head < self.anchor { (self.head, self.anchor) } else { (self.anchor, self.head) }
+    }
+
+    /// The selected columns on line `index` as `start..end`, if the line is inside the
+    /// selection; a line in the middle is selected edge to edge.
+    #[must_use]
+    pub fn columns(self, index: LineIndex, cols: u16) -> Option<std::ops::Range<u16>> {
+        let (start, end) = self.ordered();
+        if index < start.0 || index > end.0 {
+            return None;
+        }
+        let from = if index == start.0 { start.1 } else { 0 };
+        let to = if index == end.0 { end.1.saturating_add(1).min(cols) } else { cols };
+        (from < to).then_some(from..to)
+    }
+}
 
 /// Things the surrounding UI may want to react to.
 #[derive(Clone, Debug)]
@@ -49,6 +107,10 @@ pub struct TerminalView {
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
+    /// Text selected with the mouse.
+    selection: Option<Selection>,
+    /// The left button is down and moving it extends the selection.
+    selecting: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -97,7 +159,63 @@ impl TerminalView {
             predictor: Predictor::new(policy_from_env()),
             marked: None,
             sticky_control: false,
+            selection: None,
+            selecting: false,
         }
+    }
+
+    /// The mouse selection, if any.
+    #[must_use]
+    pub const fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    /// The selected text: trailing blanks trimmed per line, lines joined with newlines. Lines
+    /// not in the scrollback cache come out empty.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = selection.ordered();
+        let cols = self.state.size().cols;
+        let mut out = String::new();
+        let mut index = start.0;
+        loop {
+            if index != start.0 {
+                out.push('\n');
+            }
+            if let Some(range) = selection.columns(index, cols)
+                && let Some(line) = self.state.line(index)
+            {
+                let mut text = String::new();
+                for cell in line.cells.iter().skip(usize::from(range.start)).take(range.len()) {
+                    if cell.width.draws_text() {
+                        text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
+                    }
+                }
+                out.push_str(text.trim_end());
+            }
+            if index >= end.0 {
+                break;
+            }
+            index = index.next();
+        }
+        Some(out)
+    }
+
+    /// ⌘C: the selection to the clipboard (nothing selected: nothing happens).
+    pub fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text().filter(|t| !t.is_empty()) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    /// ⌘V: the clipboard into the session (the host brackets it when the program asked).
+    pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        self.selection = None;
+        self.state.scroll_to_bottom();
+        self.send(TermRequest::Paste(text));
+        cx.notify();
     }
 
     /// Session id.
@@ -204,6 +322,7 @@ impl TerminalView {
     /// Feed an event from the link.
     pub fn apply(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let reconcile = matches!(event, TermEvent::Frame(_));
+        let epoch_before = self.state.epoch();
         if let TermEvent::Frame(frame) = &event {
             tracing::trace!(
                 session = %self.session,
@@ -218,8 +337,13 @@ impl TerminalView {
         }
         if matches!(event, TermEvent::Resized { .. }) {
             self.predictor.flush();
+            self.selection = None;
         }
         let effects = self.state.apply(event);
+        if self.state.epoch() != epoch_before {
+            // Line numbering changed (reflow, reset, alt screen): the selection means nothing.
+            self.selection = None;
+        }
         if reconcile {
             let outcome = self.predictor.on_frame(
                 self.state.screen(),
@@ -290,6 +414,7 @@ impl TerminalView {
         if event.keystroke.modifiers.platform {
             return;
         }
+        self.selection = None;
         if event.is_held {
             self.key_seq = self.key_seq.wrapping_add(1);
             let key = keys::key_event(self.key_seq, &event.keystroke, true);
@@ -334,6 +459,17 @@ impl TerminalView {
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
         };
+        // Left button selects unless the program asked for the mouse (⇧ overrides, as in
+        // every terminal); everything else is reported to the program.
+        let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);
+        if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
+            let at = (self.state.index_at_row(row), col);
+            self.selection = Some(Selection { anchor: at, head: at });
+            self.selecting = true;
+            cx.notify();
+            return;
+        }
+        self.selection = None;
         let button = match event.button {
             MouseButton::Left => ProtoButton::Left,
             MouseButton::Right => ProtoButton::Right,
@@ -350,6 +486,37 @@ impl TerminalView {
             px,
             py,
         }));
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.selecting = false;
+            return;
+        }
+        let Some((col, row)) = self.metrics.map(|m| m.cell_at_clamped(event.position)) else {
+            return;
+        };
+        let head = (self.state.index_at_row(row), col);
+        if let Some(selection) = &mut self.selection
+            && selection.head != head
+        {
+            selection.head = head;
+            cx.notify();
+        }
+    }
+
+    fn mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        // A click without a drag selects nothing.
+        if self.selection.is_some_and(|s| s.anchor == s.head) {
+            self.selection = None;
+        }
+        cx.notify();
     }
 }
 
@@ -485,12 +652,18 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         div()
             .id("terminal")
+            .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::paste_clipboard))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom))
     }
 }
@@ -498,9 +671,67 @@ impl Render for TerminalView {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use slopty_proto::terminal::TermRequest;
+    use slopty_grid::{Line, RowUpdate, Style, TermModes};
+    use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
+
+    #[test]
+    fn selection_columns_cover_edges_and_middle_lines() {
+        let s = Selection { anchor: (LineIndex(7), 5), head: (LineIndex(5), 2) };
+        assert_eq!(s.columns(LineIndex(4), 10), None);
+        assert_eq!(s.columns(LineIndex(5), 10), Some(2..10));
+        assert_eq!(s.columns(LineIndex(6), 10), Some(0..10));
+        assert_eq!(s.columns(LineIndex(7), 10), Some(0..6));
+        assert_eq!(s.columns(LineIndex(8), 10), None);
+        let one = Selection { anchor: (LineIndex(1), 3), head: (LineIndex(1), 3) };
+        assert_eq!(one.columns(LineIndex(1), 10), Some(3..4));
+    }
+
+    /// A drag across three rows copies the cells between the ends, trailing blanks trimmed.
+    #[gpui::test]
+    fn selected_text_spans_rows_and_trims(cx: &mut TestAppContext) {
+        let (tx, _rx) = mpsc::channel(8);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx)
+        });
+        view.update_in(cx, |view, _window, cx| {
+            let rows = ["hello wor", "second", "third row"];
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(100),
+                    total_lines: 103,
+                    input_ack: 0,
+                    updates: rows
+                        .iter()
+                        .enumerate()
+                        .map(|(row, text)| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: Line::from_text(text, 10, Style::DEFAULT),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+            assert_eq!(view.selected_text(), None);
+            view.selection =
+                Some(Selection { anchor: (LineIndex(100), 6), head: (LineIndex(102), 4) });
+            assert_eq!(view.selected_text().as_deref(), Some("wor\nsecond\nthird"));
+            // Backwards drags read the same.
+            view.selection =
+                Some(Selection { anchor: (LineIndex(102), 4), head: (LineIndex(100), 6) });
+            assert_eq!(view.selected_text().as_deref(), Some("wor\nsecond\nthird"));
+        });
+    }
 
     /// An input method previews its composition at the cursor and nothing reaches the host
     /// until it commits; the commit goes out as raw bytes and clears the preview.

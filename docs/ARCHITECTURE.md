@@ -47,7 +47,8 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - A slow link never falls behind a fast program: the host coalesces to one diff per tick.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
-  ranges are fetched, prefetched around the viewport.
+  ranges are fetched, prefetched around the viewport. Mouse selection is client-side too
+  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`); nothing reaches the host.
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (first to attach; anyone can take it with the

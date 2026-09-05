@@ -439,6 +439,7 @@ pub fn open_workspace(
         tracing::error!(error = %e, "bundled fonts");
     }
     cx.bind_keys(slopty_ui::canvas::key_bindings());
+    cx.bind_keys(slopty_ui::terminal::key_bindings());
     // gpui-kit widgets (the pairing input) follow their own theme; Slopty is dark only.
     gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     let theme = Theme::default();

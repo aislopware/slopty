@@ -281,6 +281,24 @@ impl TermState {
             .collect()
     }
 
+    /// The absolute index of view row `row` (0 = top of the viewport).
+    #[must_use]
+    pub const fn index_at_row(&self, row: u16) -> LineIndex {
+        LineIndex(self.first_visible.0.saturating_sub(self.view_offset).saturating_add(row as u64))
+    }
+
+    /// The line at an absolute index: on screen, or in the scrollback cache.
+    #[must_use]
+    pub fn line(&self, index: LineIndex) -> Option<&Line> {
+        if index >= self.first_visible {
+            let row =
+                usize::try_from(index.0.saturating_sub(self.first_visible.0)).unwrap_or(usize::MAX);
+            self.screen.lines().get(row)
+        } else {
+            self.scrollback.get(index)
+        }
+    }
+
     /// The rows to draw, top to bottom.
     #[must_use]
     pub fn view(&self) -> Vec<ViewRow<'_>> {

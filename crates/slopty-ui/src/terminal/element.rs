@@ -52,6 +52,19 @@ impl CellMetrics {
         (col < self.cols && row < self.rows).then_some((col, row))
     }
 
+    /// The nearest cell to `pos`, for drags that leave the grid.
+    #[must_use]
+    pub fn cell_at_clamped(&self, pos: Point<Pixels>) -> (u16, u16) {
+        let x = f32::from(pos.x - self.origin.x).max(0.0);
+        let y = f32::from(pos.y - self.origin.y).max(0.0);
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped ≥ 0")]
+        let (col, row) = (
+            (x / f32::from(self.cell_width)).floor() as u16,
+            (y / f32::from(self.line_height)).floor() as u16,
+        );
+        (col.min(self.cols.saturating_sub(1)), row.min(self.rows.saturating_sub(1)))
+    }
+
     /// Pixel offset within the content area (clamped at 0).
     #[must_use]
     pub fn pixel_at(&self, pos: Point<Pixels>) -> (u32, u32) {
@@ -291,6 +304,10 @@ impl Element for TerminalElement {
                 view.marked().map(str::to_owned),
             )
         };
+        let (selection, top_index, grid_cols) = {
+            let view = self.view.read(cx);
+            (view.selection(), view.state().index_at_row(0), view.state().size().cols)
+        };
         let palette = &theme.terminal;
         // Resolving the family walks every installed font; do it once per view.
         let family = known_family.unwrap_or_else(|| {
@@ -374,6 +391,15 @@ impl Element for TerminalElement {
                         }
                         quads.push((col, col.saturating_add(1), color));
                     }
+                }
+                // The selection paints over cell backgrounds and under the text.
+                if let Some(range) = selection.and_then(|s| {
+                    let index = slopty_grid::LineIndex(
+                        top_index.0.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                    );
+                    s.columns(index, grid_cols)
+                }) {
+                    quads.push((range.start, range.end, hsla(palette.selection)));
                 }
                 let shaped = if let Some(s) = cache.lines.get(&key) {
                     s.clone()

@@ -4,4 +4,4 @@ mod element;
 mod view;
 
 pub use element::{CellMetrics, Prepared, TerminalElement};
-pub use view::{TerminalView, TerminalViewEvent};
+pub use view::{Copy, Paste, Selection, TerminalView, TerminalViewEvent, key_bindings};

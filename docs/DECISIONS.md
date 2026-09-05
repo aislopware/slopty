@@ -78,6 +78,17 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `Camera::reveal`ed on the next frame (pan if they fit, else zoom out no further than
   `CARD_ZOOM` and anchor top-left), because the host's `free_slot` places them to the right of
   everything, off a phone's screen.
+- ✅ **Mouse selection, ⌘C, ⌘V.** Left-drag selects cells; the selection is stored as
+  absolute line indices (`Selection { anchor, head }`, both inclusive) so it survives scrolling
+  and is painted as a quad under the text from the same prepaint pass. When the program has
+  mouse tracking on, clicks are reported to it instead and ⇧-drag forces a selection (what
+  every terminal does). ⌘C copies the selected cells with trailing blanks trimmed per line
+  (lines missing from the scrollback cache copy as empty); ⌘V sends the clipboard as
+  `TermRequest::Paste`, which the host brackets when the program asked for it. Any key, a
+  resize or an epoch change (reflow, alt screen) clears the selection. Bindings live in the
+  "Terminal" key context (`slopty_ui::terminal::key_bindings`). No double-click word / triple
+  line selection yet.
+
 - ✅ **Input methods in terminals.** In the fork, `prefers_ime_for_printable_keys` follows
   `accepts_text_input` (true for `TerminalView`), so with the input handler installed macOS
   routes printable keys through the active input method. `TerminalView` keeps the marked text
