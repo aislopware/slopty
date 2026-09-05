@@ -2351,7 +2351,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `slopty host screens` — a client-side counter would only say what the client believes it sent.
   Known limit the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
   a window that draws once and *then* hides stays `Live` forever and only the cap protects the
-  receiver. The app case gates on `SLOPTY_SCREEN_E2E` as well as `SLOPTY_APP_E2E`: it is the only
+  receiver (superseded 2026-09-06: `SourceTracker` follows recent frames, resetting to `Idle` after
+  2 s quiet or immediately on off-screen; see "The source state follows the frames, not the first
+  one" below). The app case gates on `SLOPTY_SCREEN_E2E` as well as `SLOPTY_APP_E2E`: it is the only
   case in that suite that asks the machine for anything. (This entry first also claimed that a
   hidden window on the display-crop path keeps streaming the desktop behind it. It does not; see
   the crop-path ruling below.)

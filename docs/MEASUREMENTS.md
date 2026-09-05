@@ -1210,7 +1210,9 @@ and the refresh loop (`crates/slopty-e2e/tests/pair.rs`,
 `the_refresh_guard_holds_with_the_phone_asking_with_the_simulator`,
 `SLOPTY_SCREEN_E2E=1 cargo xtask e2e pair-ios --sim iphone`). Still not measured: a target that
 draws once and then hides — `check_source` latches on `encoded > 0`, so that case reports `Live`
-forever and only the cap protects the client.
+forever and only the cap protects the client (superseded 2026-09-06: `SourceTracker` follows
+recent frames, reporting `Idle` after 2 s quiet or when off-screen; see DECISIONS, "The source
+state follows the frames, not the first one").
 
 ## 2026-09-06 — font truth: the cell from the font's own tables (macOS app self-test, debug)
 
