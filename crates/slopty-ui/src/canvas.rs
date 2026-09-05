@@ -1914,6 +1914,19 @@ impl Render for CanvasView {
         let record_bounds = canvas(
             move |bounds, _window, cx| {
                 entity.update(cx, |this, cx| {
+                    // This frame culled against the previous viewport; a resize that exposes
+                    // an item needs one more frame to draw it. A notify while drawing only
+                    // marks the view, so it goes through a deferred effect, which runs once
+                    // the frame is done and dirties the window.
+                    if this.viewport.1 != bounds.size {
+                        let canvas = cx.weak_entity();
+                        cx.defer(move |cx| {
+                            // A released canvas has nothing left to redraw.
+                            if let Some(canvas) = canvas.upgrade() {
+                                canvas.update(cx, |_, cx| cx.notify());
+                            }
+                        });
+                    }
                     this.viewport = (bounds.origin, bounds.size);
                     if std::mem::take(&mut this.fit_pending) && !this.is_empty() {
                         this.fit_now(cx);
@@ -2752,6 +2765,30 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds(selector("agent", item)).is_none(), "{item:?}");
+    }
+
+    /// A resize that brings a culled item into the viewport draws it on the next frame with
+    /// no other event: the frame that learns the new size asks for another.
+    #[gpui::test]
+    fn a_resize_that_exposes_a_culled_item_draws_it(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let near = host_opens(&view, cx, a, me, SHELL, 1);
+        let beyond = Rect { x: VIEWPORT.0 + 100.0, y: 0.0, ..SHELL };
+        let far = host_opens(&view, cx, b, me, beyond, 2);
+        view.update(cx, |c, cx| {
+            c.activate(near, cx);
+            c.camera = Camera { x: 0.0, y: 0.0, zoom: 1.0 };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("item", far)).is_none(), "off-screen item culled");
+
+        // Widen the window past the item: nothing else happens, and it is there.
+        cx.simulate_resize(size(px(VIEWPORT.0 + 800.0), px(VIEWPORT.1)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("item", far)).is_some(), "exposed by the resize");
+        assert!(cx.debug_bounds(selector("item", near)).is_some());
     }
 
     #[gpui::test]
