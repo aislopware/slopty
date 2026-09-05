@@ -347,3 +347,33 @@ run plus 3 bytes of header. Ruling in DECISIONS.md (Terminal, "Links: OSC 8 firs
 The pipeline is bound by ScreenCaptureKit, VideoToolbox and the coalescing window, not by
 optimisation level; release mostly trims the tail of the echo distribution. Development stays
 on debug builds (the `dev` profile already runs with `opt-level` tuned for the codecs).
+
+## 2026-09-05 — adaptive bitrate on the mesh path (Wi-Fi MacBook Pro → Mac Studio), debug build
+
+First run of `slopty_media::RateController` (12 Mbit/s start, cwnd cap, cut/grow on the
+receiver reports). The mesh was in a bad state this afternoon (control rtt 14–39 ms against
+~10 ms in the morning runs, arrival-gap max 5.7 s), so the numbers are about the controller's
+behaviour, not the ceiling of the link.
+
+| stream (20 s)                | fps  | gap p50 / p90 / max     | FEC / lost / NACK / refresh | host target over time (Mbit/s)                          |
+| ---------------------------- | ---- | ----------------------- | --------------------------- | ------------------------------------------------------- |
+| Display 6, 1920×1080, 60 fps | 16.2 | 32.5 / 65.7 / 5680.2 ms | 19 / 50 / 269 / 83          | 12 → 9.0 (cwnd 22 KB / 14 ms) → 7.8 → 3.2 → 1.0 → 1.5 → 1.1 → 1.0 |
+
+Host side: captured 1146, encoded 1146, datagrams 4643, `queue_full` 0 — nothing dropped on
+the host; the client's path stats still said `lost 0 pkts`. So the losses the client counted
+were stalls again (packets held, then released), and the controller answered a stall the only
+way it can, by cutting to the floor. That is the right move for a congested link and the
+wrong one for a stalled one (sending less does not clear a Wi-Fi stall). Follow-up: let the
+reassembler's `flowing` state ride in the `ReceiverReport` so a stall freezes the controller
+instead of cutting it (protocol change; not done here).
+
+A window that does not change on screen (`--window 1880`, an idle Ghostty) produced
+`captured 0` for 20 s: ScreenCaptureKit delivers nothing while the content is static, which
+the client reports as refresh requests. Not a regression; bench a moving window or the display.
+
+```sh
+# on macbook-pro, paired with the Mac Studio's manual hostd (SLOPTY_PORT 45550)
+export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
+/tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
+# on the host: RUST_LOG=info,slopty_host=debug hostd → grep 'bitrate\|stream closed'
+```

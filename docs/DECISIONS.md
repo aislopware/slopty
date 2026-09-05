@@ -266,8 +266,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **One connection per client**: bidi control stream opened by the client; one uni stream per
   attached session opened by the host, first message `StreamHeader { session }`; datagrams for
   media. Transport config: idle 45 s, keep-alive 5 s, 4 MiB datagram buffers.
-- 🔬 **Congestion controller**: noq default (Cubic). Media path runs its own delay-gradient
-  bitrate controller on top; revisit BBR once noq marks it stable.
+- ✅ **Congestion controller**: noq default (Cubic); BBR3 measured 2026-09-05 (MEASUREMENTS.md),
+  revisit once noq marks it stable. The media path runs its own bitrate controller on top
+  (see Video, "Adaptive bitrate").
 
 - ✅ **QUIC datagrams, not raw UDP over a WireGuard mesh** (re-examined 2026-09-04 when the
   status bar showed ~100 ms). A QUIC datagram is one UDP packet plus ~30 bytes of header and one
@@ -444,6 +445,25 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   defaults `minimumFrameInterval` to 1/60 — measure.
 - ✅ **FEC**: `reed-solomon-simd` 3.1.0 (NEON), systematic RS per frame, redundancy adaptive
   (~20 % default, Sunshine's number). NACK inside the playout window before LTR refresh.
+- ✅ **Adaptive bitrate** (`slopty_media::RateController`, 2026-09-05). The client's
+  `Quality::bitrate_bps` is a ceiling, not a rate: a stream starts at min(ceiling, 12 Mbit/s)
+  and the host judges every 10 receiver reports (~0.5 s at the client's 50 ms cadence).
+  Overuse — datagram loss > 2 %, present queue ≥ 3, or hold p95 > 60 ms — cuts to 75 % and
+  holds 4 decisions; a clean window (loss ≤ 0.5 %, queue ≤ 1, hold p95 ≤ 25 ms) grows by an
+  eighth (≥ 0.5 Mbit/s); everything else stays. On top, the selected QUIC path's window caps
+  the target at 90 % of `cwnd × 8 / rtt` (`slopty_net::endpoint::selected_path`): datagrams are
+  congestion-controlled, so sending past cwnd only fills the host queue (`queue_full`).
+  Applied with `VTCompressionSession` `AverageBitRate` in place (no encoder rebuild, no IDR);
+  a `SetQuality` or resize re-clamps under the new ceiling and keeps the controller's place.
+  Floor 1 Mbit/s. Rejected: GCC's Kalman delay-gradient estimator — the receiver already
+  measures hold time and queue depth directly, which is the same signal without the filter;
+  and TWCC-style per-packet feedback, which the 50 ms report already approximates.
+  `ScreenStats.bitrate_bps` shows the last target in the close log. First mesh run in
+  MEASUREMENTS.md: the cap took the start from 12 to 9 Mbit/s and a stalling afternoon link
+  drove the target to the floor.
+- ⏸ Stall-aware bitrate: a Wi-Fi stall looks like loss to the controller and gets a cut it
+  does not deserve. Carry the reassembler's `flowing` flag in `ReceiverReport` (protocol bump)
+  and freeze the controller while the path is stalled.
 - ✅ **Packet layout** (`slopty-media`, 2026-09-04): body = 16-byte `FramePrefix` (bitstream
   length, capture µs, LTR token) ‖ bitstream ‖ zero pad, cut into *balanced* fragments (all the
   same even size ≤ 1184 B, so padding ≤ 2 B per fragment and the RS shard size is inferred from

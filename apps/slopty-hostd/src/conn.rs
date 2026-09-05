@@ -321,7 +321,16 @@ impl Peer<'_> {
             }
             ScreenRequest::Report { stream, report } => {
                 if let Some(s) = self.screens.get(&stream) {
-                    s.report(&report);
+                    let path =
+                        slopty_net::endpoint::selected_path(&self.conn).map(|(rtt, cwnd)| {
+                            slopty_host::screen::PathSample {
+                                rtt: slopty_core::Duration::from_micros(
+                                    u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX),
+                                ),
+                                cwnd,
+                            }
+                        });
+                    s.report(&report, path);
                 }
             }
             ScreenRequest::Input { stream, input } => {

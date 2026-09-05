@@ -24,8 +24,10 @@ use slopty_codec::audio::OpusEncoder;
 use slopty_codec::{CodecError, EncodedPacket, Encoder, EncoderConfig, FrameOptions};
 use slopty_core::StreamId;
 use slopty_input::{Injector, InputError};
+pub use slopty_media::PathSample;
 use slopty_media::{
-    EncodedFrame, MediaError, Packetizer, Redundancy, audio_datagram, cursor_datagram,
+    EncodedFrame, MediaError, Packetizer, RateController, Redundancy, audio_datagram,
+    cursor_datagram,
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
@@ -115,6 +117,8 @@ pub struct ScreenStats {
     pub latency_sum_us: u64,
     /// Opus packets sent.
     pub audio_packets: u64,
+    /// Bitrate the controller last asked the encoder for.
+    pub bitrate_bps: u64,
 }
 
 /// Enumerate shareable content.
@@ -149,6 +153,7 @@ struct Counters {
     queue_full: AtomicU64,
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
+    bitrate_bps: AtomicU64,
 }
 
 impl Counters {
@@ -162,6 +167,7 @@ impl Counters {
             queue_full: AtomicU64::new(0),
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
+            bitrate_bps: AtomicU64::new(0),
         }
     }
 
@@ -175,6 +181,7 @@ impl Counters {
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
             audio_packets: self.audio_packets.load(Ordering::Relaxed),
+            bitrate_bps: self.bitrate_bps.load(Ordering::Relaxed),
         }
     }
 }
@@ -199,6 +206,7 @@ struct Shared {
     pending: Mutex<Pending>,
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
+    rate: Mutex<RateController>,
     /// `datagrams_sent` at the previous receiver report.
     sent_at_report: AtomicU64,
     out: mpsc::Sender<Bytes>,
@@ -207,6 +215,19 @@ struct Shared {
 }
 
 impl Shared {
+    /// Point the live encoder at `bps` (a rebuild picks the controller's target up again).
+    fn apply_bitrate(&self, bps: u32) {
+        let result = self.encoder.read().as_ref().map(|e| e.set_bitrate(bps));
+        match result {
+            Some(Ok(())) => {
+                self.counters.bitrate_bps.store(u64::from(bps), Ordering::Relaxed);
+                tracing::debug!(stream = %self.id, bps, "bitrate");
+            }
+            Some(Err(e)) => tracing::warn!(stream = %self.id, bps, error = %e, "set bitrate"),
+            None => {}
+        }
+    }
+
     /// Queue a datagram; a full queue drops it (video is unreliable by design).
     fn push(&self, datagram: Bytes) -> bool {
         match self.out.try_send(datagram) {
@@ -419,6 +440,7 @@ impl ScreenStream {
             pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
             packetizer: Mutex::new(Packetizer::new(id)),
             redundancy: Mutex::new(Redundancy::new()),
+            rate: Mutex::new(RateController::new(encoder_config.bitrate_bps)),
             sent_at_report: AtomicU64::new(0),
             out,
             budget,
@@ -426,6 +448,8 @@ impl ScreenStream {
         });
         let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
         *shared.encoder.write() = Some(encoder);
+        let start = shared.rate.lock().target_bps();
+        shared.apply_bitrate(start);
 
         let (started_tx, started_rx) = oneshot::channel();
         let sink = Arc::clone(&shared);
@@ -501,9 +525,13 @@ impl ScreenStream {
             && encoder_config.codec == self.encoder_config.codec
         {
             if encoder_config.bitrate_bps != self.encoder_config.bitrate_bps {
-                if let Some(encoder) = self.shared.encoder.read().as_ref() {
-                    encoder.set_bitrate(encoder_config.bitrate_bps)?;
-                }
+                // The client moved its ceiling; the controller keeps its place under it.
+                let target = {
+                    let mut rate = self.shared.rate.lock();
+                    rate.set_max(encoder_config.bitrate_bps);
+                    rate.target_bps()
+                };
+                self.shared.apply_bitrate(target);
                 self.encoder_config = encoder_config;
             }
             return Ok(());
@@ -542,6 +570,12 @@ impl ScreenStream {
         let weak = Arc::downgrade(&self.shared);
         let encoder = build_encoder(&weak, encoder_config)?;
         *self.shared.encoder.write() = Some(encoder);
+        let target = {
+            let mut rate = self.shared.rate.lock();
+            rate.set_max(encoder_config.bitrate_bps);
+            rate.target_bps()
+        };
+        self.shared.apply_bitrate(target);
         self.shared.pending.lock().keyframe = true;
         let id = self.id;
         self.capture.update(&capture_config, move |result| {
@@ -566,8 +600,9 @@ impl ScreenStream {
         Ok(self.injector.focus()?)
     }
 
-    /// Fold in a receiver report: LTR acks feed the encoder, loss feeds the parity ratio.
-    pub fn report(&self, report: &ReceiverReport) {
+    /// Fold in a receiver report: LTR acks feed the encoder, loss feeds the parity ratio, and
+    /// loss, queueing and the QUIC path (`path`) drive the bitrate.
+    pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) {
         let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
         self.shared.pending.lock().acked.extend(acked);
         let sent_total = self.shared.packetizer.lock().datagrams_sent();
@@ -575,6 +610,16 @@ impl ScreenStream {
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
         let permille = self.shared.redundancy.lock().on_report(report, sent);
         self.shared.packetizer.lock().set_parity_permille(permille);
+        let changed = self.shared.rate.lock().on_report(report, sent, path);
+        if let Some(bps) = changed {
+            self.shared.apply_bitrate(bps);
+        }
+    }
+
+    /// The bitrate the controller is asking the encoder for right now.
+    #[must_use]
+    pub fn bitrate_bps(&self) -> u32 {
+        self.shared.rate.lock().target_bps()
     }
 
     /// The client lost a frame it cannot recover: make the next frame stand on its own.

@@ -14,6 +14,7 @@
 
 mod cursor;
 mod packetize;
+mod rate;
 mod reassemble;
 mod redundancy;
 
@@ -22,6 +23,7 @@ pub use packetize::{
     DEFAULT_PARITY_PERMILLE, EncodedFrame, HISTORY_FRAMES, Layout, MAX_DATA_FRAGMENTS,
     MAX_PARITY_FRAGMENTS, MIN_PAYLOAD, Packetizer, SentFrame, audio_datagram, layout,
 };
+pub use rate::{PathSample, RateController};
 pub use reassemble::{
     Action, Config, FrameInfo, FrameOut, Ignored, Ingest, Reassembler, ReassemblerStats,
 };

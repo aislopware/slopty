@@ -146,7 +146,8 @@ reported back by the poller.
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;
-`Redundancy` → parity ratio; pure, no clocks, property tested), `slopty-host::screen`
+`Redundancy` → parity ratio; `RateController` → encoder bitrate from the reports and the QUIC
+path's cwnd/rtt; pure, no clocks, tested), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
 path's datagram limit; cursor sampler; input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,

@@ -232,6 +232,15 @@ pub fn describe_health(conn: &iroh::endpoint::Connection) -> String {
     )
 }
 
+/// The selected path's smoothed rtt and congestion window, for the media rate controller.
+#[must_use]
+pub fn selected_path(conn: &iroh::endpoint::Connection) -> Option<(Duration, u64)> {
+    conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| {
+        let s = p.stats();
+        (s.rtt, s.cwnd)
+    })
+}
+
 /// Log every path change on `conn` at info level until the connection closes.
 ///
 /// Opened, closed (with the path's final stats) and selected. Path flaps are the first thing
