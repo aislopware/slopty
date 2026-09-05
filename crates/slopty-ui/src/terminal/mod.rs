@@ -1,5 +1,6 @@
 //! The terminal: a view entity that owns the session state and an element that paints it.
 
+pub mod conversation;
 mod element;
 pub mod url;
 mod view;

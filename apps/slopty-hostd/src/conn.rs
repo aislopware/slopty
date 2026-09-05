@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use slopty_agent::transcript::Tail;
 use slopty_core::{ClientId, SessionId, StreamId};
 use slopty_host::HostError;
 use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, listing};
@@ -10,6 +11,7 @@ use slopty_host::session::ClientSink;
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
+use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
 use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
@@ -20,6 +22,10 @@ use crate::Daemon;
 
 /// How often a stream's target is checked for a size change.
 const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
+/// How often followed transcripts are re-read for new lines.
+const TRANSCRIPT_PERIOD: std::time::Duration = std::time::Duration::from_millis(400);
+/// Entries the first snapshot of a conversation carries (older ones are not sent).
+const TRANSCRIPT_SNAPSHOT: usize = 200;
 
 /// Events buffered per attached session before the client is considered stuck.
 const SINK_DEPTH: usize = 256;
@@ -85,16 +91,24 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         pump,
         paths,
         feedback,
+        transcripts: HashMap::new(),
     };
 
     // Window resizes on the host are polled: ScreenCaptureKit keeps scaling the old output
     // size until the capture is reconfigured.
     let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
     geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut transcripts = tokio::time::interval(TRANSCRIPT_PERIOD);
+    transcripts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             _ = geometry.tick(), if !peer.screens.is_empty() => {
                 if !peer.check_geometry().await {
+                    break Ok("writer gone");
+                }
+            }
+            _ = transcripts.tick(), if !peer.transcripts.is_empty() => {
+                if !peer.poll_transcripts().await {
                     break Ok("writer gone");
                 }
             }
@@ -197,6 +211,8 @@ struct Peer<'d> {
     pump: JoinHandle<()>,
     paths: JoinHandle<()>,
     feedback: JoinHandle<()>,
+    /// Conversations this client follows, with the reader's position in each file.
+    transcripts: HashMap<SessionId, Tail>,
 }
 
 impl Drop for Peer<'_> {
@@ -250,7 +266,57 @@ impl Peer<'_> {
                 Err(e) => self.report(SessionId::nil(), &e).await,
             },
             ClientMsg::Screen(req) => self.screen(req).await,
+            ClientMsg::Transcript(TranscriptFollow { session, follow }) => {
+                if follow {
+                    self.transcripts.insert(session, Tail::default());
+                    let _alive = self.poll_transcripts().await;
+                } else {
+                    self.transcripts.remove(&session);
+                }
+            }
         }
+    }
+
+    /// Read every followed transcript for new lines and send what appeared. The first read of
+    /// a file (and a read after the file was replaced) is a snapshot of its last entries.
+    /// Returns `false` when the client's writer is gone.
+    async fn poll_transcripts(&mut self) -> bool {
+        let sessions: Vec<SessionId> = self.transcripts.keys().copied().collect();
+        for session in sessions {
+            let Some(path) = self.daemon.agents.lock().transcript_path(session) else {
+                // No hook has named the file yet; try again on the next tick.
+                continue;
+            };
+            let Some(mut tail) = self.transcripts.remove(&session) else { continue };
+            let first = tail == Tail::default();
+            let read = tokio::task::spawn_blocking(move || {
+                let read = tail.read(&path);
+                (tail, read)
+            })
+            .await;
+            let Ok((tail, read)) = read else { continue };
+            self.transcripts.insert(session, tail);
+            let read = match read {
+                Ok(read) => read,
+                Err(e) => {
+                    tracing::warn!(%session, error = %e, "transcript read");
+                    continue;
+                }
+            };
+            let reset = first || read.restarted;
+            if read.entries.is_empty() && !reset {
+                continue;
+            }
+            let mut entries = read.entries;
+            if reset && entries.len() > TRANSCRIPT_SNAPSHOT {
+                entries.drain(..entries.len().saturating_sub(TRANSCRIPT_SNAPSHOT));
+            }
+            let update = TranscriptUpdate { session, reset, entries };
+            if self.out.send(HostMsg::Transcript(update)).await.is_err() {
+                return false;
+            }
+        }
+        true
     }
 
     async fn screen(&mut self, req: ScreenRequest) {

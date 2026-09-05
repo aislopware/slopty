@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -61,6 +61,8 @@ pub enum ClientMsg {
         /// Sender's monotonic clock, echoed back untouched.
         sent_at: slopty_core::MonoTime,
     },
+    /// Follow or drop an agent session's conversation.
+    Transcript(agent::TranscriptFollow),
 }
 
 impl ClientMsg {
@@ -73,6 +75,7 @@ impl ClientMsg {
             Self::OpenSession(_) => "OpenSession",
             Self::Canvas(_) => "Canvas",
             Self::Screen(_) => "Screen",
+            Self::Transcript(_) => "Transcript",
             Self::Ping { .. } => "Ping",
         }
     }
@@ -112,6 +115,8 @@ pub enum HostMsg {
         /// The client's timestamp from the ping.
         sent_at: slopty_core::MonoTime,
     },
+    /// A slice of an agent session's conversation, for a client following it.
+    Transcript(agent::TranscriptUpdate),
 }
 
 impl HostMsg {
@@ -127,6 +132,7 @@ impl HostMsg {
             Self::Canvas(_) => "Canvas",
             Self::Screen(_) => "Screen",
             Self::Agent(_) => "Agent",
+            Self::Transcript(_) => "Transcript",
             Self::Pong { .. } => "Pong",
         }
     }

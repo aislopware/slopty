@@ -993,6 +993,25 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `$SHELL -lic '<quoted words>'` (interactive login shell: rc files, aliases, job control);
   a path or a name found on `PATH` still execs directly. Covered by
   `unknown_bare_program_goes_through_the_login_shell`.
+- ✅ **Conversation view from the transcript, not from hooks** (2026-09-05). The hook stream
+  says what state the agent is in; it never carries what was said. The JSONL transcript does
+  (every record the CLI writes, tool calls included), and its path arrives with the first hook
+  payload, so the daemon tails that file for the sessions a client asked about and nothing
+  else. Wire: `ClientMsg::Transcript(TranscriptFollow)` to start/stop following,
+  `HostMsg::Transcript(TranscriptUpdate { reset, entries })` with a 200-entry snapshot on
+  reset and appended slices afterwards; entries are already reduced to
+  `User{text}` / `Assistant{markdown}` / `ToolUse{name, summary}` on the host so the phone
+  never parses JSONL and the wire stays small. `PROTOCOL_VERSION` 9 → 10, goldens
+  `client_transcript_follow`, `host_transcript`. Polling at 400 ms rather than FSEvents: the
+  file grows in bursts of whole lines, a 400 ms lag is invisible next to the model's own
+  latency, and one `Tail` per followed session (byte offset + the partial last line) costs a
+  `metadata` call per tick. The view swaps the grid rather than splitting the card because
+  the card is already the unit the canvas lays out and zooms; the grid is one ⌘⇧L away.
+  Verified by `slopty_agent::transcript` unit tests (13: tail across appends, truncation,
+  partial lines, every tool summary) and the headless
+  `the_conversation_replaces_the_grid_and_follows_the_transcript`. Not done: rendering
+  `tool_result` bodies, thinking blocks, and typing into the conversation (keys still go to
+  the terminal underneath).
 - ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
   linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
   flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the

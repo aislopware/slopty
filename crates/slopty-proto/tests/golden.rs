@@ -115,6 +115,30 @@ mod golden {
     }
 
     #[test]
+    fn transcript() {
+        use slopty_proto::agent::{TranscriptEntry, TranscriptFollow, TranscriptUpdate};
+        snap(
+            "client_transcript_follow",
+            &ClientMsg::Transcript(TranscriptFollow { session: session(), follow: true }),
+        );
+        snap(
+            "host_transcript",
+            &HostMsg::Transcript(TranscriptUpdate {
+                session: session(),
+                reset: true,
+                entries: vec![
+                    TranscriptEntry::User { text: "fix it".to_owned() },
+                    TranscriptEntry::ToolUse {
+                        name: "Bash".to_owned(),
+                        summary: "cargo test".to_owned(),
+                    },
+                    TranscriptEntry::Assistant { markdown: "Done: **2** tests.".to_owned() },
+                ],
+            }),
+        );
+    }
+
+    #[test]
     fn receiver_report_and_rate() {
         snap(
             "client_screen_report",

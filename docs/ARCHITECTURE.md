@@ -233,6 +233,21 @@ is posted; clicking it activates the app and reveals the session
 (`CanvasView::notification_response`). Later: ACP (`agent-client-protocol`) for structured
 control.
 
+**Conversation view.** A terminal that runs a Claude Code session can show the conversation
+instead of the grid: the "chat" pill in its title bar or ⌘⇧L (`ToggleConversation`) sends
+`ClientMsg::Transcript(TranscriptFollow { session, follow: true })`; the daemon opens a
+`slopty_agent::transcript::Tail` on the session's `transcript_path` (from the hook payloads),
+sends the last 200 entries as a `HostMsg::Transcript` with `reset: true`, then polls the file
+every 400 ms off the blocking pool and sends only the appended entries (a truncated or
+replaced file resets again). Entries are `TranscriptEntry::{User, Assistant, ToolUse}` built
+from the JSONL records (`user` text, `assistant` text blocks as markdown, `tool_use` blocks
+summarised to the command / file / pattern / query the tool was given; sidechain rows are
+skipped). The client keeps them in `slopty_ui::terminal::conversation::Conversation`, a
+bottom-aligned gpui `list` with `TextView::markdown` for assistant turns, and shows it in
+place of `TerminalElement` while it is on; ⌘⇧L again drops it and sends `follow: false`,
+which closes the tail on the host. Keys still go to the session, so the human can answer the
+agent while reading. Headless test: `the_conversation_replaces_the_grid_and_follows_the_transcript`.
+
 ## 6. UI
 
 GPUI (fork: `aislopware/zed` branch `slopty`, pinned to the zed commit gpui-kit tracks) plus

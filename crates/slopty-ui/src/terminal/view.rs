@@ -17,6 +17,7 @@ use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
+use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::Theme;
@@ -24,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
+use crate::terminal::conversation::Conversation;
 use crate::terminal::element::{CellMetrics, TerminalElement};
 use crate::terminal::url;
 
@@ -60,11 +62,13 @@ mod actions {
             NextPrompt,
             /// Copy the output of the last command.
             CopyLastOutput,
+            ToggleConversation,
         ]
     );
 }
 pub use actions::{
     CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt,
+    ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -80,6 +84,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-up", PrevPrompt, CTX),
         KeyBinding::new("cmd-down", NextPrompt, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
+        KeyBinding::new("cmd-shift-l", ToggleConversation, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
         KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
     ]
@@ -177,6 +182,8 @@ pub struct TerminalView {
     touch_selecting: bool,
     /// The search bar, while open.
     search: Option<Search>,
+    /// The agent's conversation shown in place of the grid (see [`Conversation`]).
+    conversation: Option<Conversation>,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
 }
@@ -233,8 +240,44 @@ impl TerminalView {
             cmd_held: false,
             touch_selecting: false,
             search: None,
+            conversation: None,
             search_regex: false,
         }
+    }
+
+    /// ⌘⇧L or the title-bar pill: show the agent's conversation instead of the grid, or the
+    /// grid again. The host is told to start or stop tailing the transcript.
+    pub fn toggle_conversation(&mut self, cx: &mut Context<Self>) {
+        let follow = self.conversation.is_none();
+        self.conversation = follow.then(Conversation::new);
+        let msg = ClientMsg::Transcript(TranscriptFollow { session: self.session, follow });
+        if let Err(e) = self.out.try_send(msg) {
+            tracing::warn!(session = %self.session, error = %e, "outbound queue");
+        }
+        cx.notify();
+    }
+
+    /// The conversation on show, if any.
+    #[must_use]
+    pub const fn conversation(&self) -> Option<&Conversation> {
+        self.conversation.as_ref()
+    }
+
+    /// A slice of the transcript from the host; ignored once the conversation is hidden.
+    pub fn transcript_update(&mut self, update: TranscriptUpdate, cx: &mut Context<Self>) {
+        if let Some(conversation) = &mut self.conversation {
+            conversation.apply(update);
+            cx.notify();
+        }
+    }
+
+    fn toggle_conversation_action(
+        &mut self,
+        _: &ToggleConversation,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_conversation(cx);
     }
 
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.
@@ -1266,6 +1309,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::prev_prompt))
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
+            .on_action(cx.listener(Self::toggle_conversation_action))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -1274,7 +1318,12 @@ impl Render for TerminalView {
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom))
+            .map(|el| match &self.conversation {
+                Some(conversation) => {
+                    el.child(conversation.render(&self.theme, self.theme.typography.ui_size))
+                }
+                None => el.child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom)),
+            })
             .children(search)
     }
 }
@@ -1293,7 +1342,10 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<TerminalView>, mpsc::Receiver<ClientMsg>, &mut VisualTestContext) {
         let (tx, rx) = mpsc::channel(64);
-        cx.update(|cx| cx.bind_keys(key_bindings()));
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys(key_bindings());
+        });
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
             let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
@@ -1517,6 +1569,57 @@ mod tests {
             view.select_by_clicks(LineIndex(102), 0, 3);
             assert_eq!(view.selected_text().as_deref(), Some("third row"));
         });
+    }
+
+    /// ⌘⇧L swaps the grid for the conversation and asks the host to follow the transcript;
+    /// the host's slices fill it (a reset replaces, an append extends); ⌘⇧L again brings the
+    /// grid back and stops the follow.
+    #[gpui::test]
+    fn the_conversation_replaces_the_grid_and_follows_the_transcript(cx: &mut TestAppContext) {
+        use slopty_proto::agent::TranscriptEntry;
+
+        let (view, mut rx, cx) = terminal(cx);
+        while rx.try_recv().is_ok() {}
+        assert!(cx.debug_bounds("conversation").is_none());
+
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientMsg::Transcript(TranscriptFollow { session: s, follow: true })) if s == session
+        ));
+        assert!(cx.debug_bounds("conversation").is_some(), "the conversation is drawn");
+
+        let snapshot = TranscriptUpdate {
+            session,
+            reset: true,
+            entries: vec![
+                TranscriptEntry::User { text: "fix it".to_owned() },
+                TranscriptEntry::Assistant { markdown: "On it.".to_owned() },
+            ],
+        };
+        view.update(cx, |v, cx| v.transcript_update(snapshot, cx));
+        let more = TranscriptUpdate {
+            session,
+            reset: false,
+            entries: vec![TranscriptEntry::ToolUse {
+                name: "Bash".to_owned(),
+                summary: "cargo test".to_owned(),
+            }],
+        };
+        view.update(cx, |v, cx| v.transcript_update(more, cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.conversation().map(|c| c.entries().len())), Some(3));
+        let bounds = cx.debug_bounds("conversation").expect("drawn");
+        assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+
+        cx.simulate_keystrokes("cmd-shift-l");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientMsg::Transcript(TranscriptFollow { follow: false, .. }))
+        ));
+        assert!(cx.debug_bounds("conversation").is_none(), "the grid is back");
+        assert!(view.read_with(cx, |v, _| v.conversation().is_none()));
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the host

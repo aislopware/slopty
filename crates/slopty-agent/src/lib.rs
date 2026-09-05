@@ -169,11 +169,13 @@ pub struct Tracker {
     status: AgentStatus,
     agent_session: Option<String>,
     detail: Option<String>,
+    /// The conversation file, from the last hook that named one.
+    transcript_path: Option<String>,
 }
 
 impl Default for Tracker {
     fn default() -> Self {
-        Self { status: AgentStatus::None, agent_session: None, detail: None }
+        Self { status: AgentStatus::None, agent_session: None, detail: None, transcript_path: None }
     }
 }
 
@@ -201,6 +203,9 @@ impl Tracker {
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
+        }
+        if hook.transcript_path.is_some() {
+            self.transcript_path.clone_from(&hook.transcript_path);
         }
         let (status, detail) = self.next(hook)?;
         let was_blocked = matches!(self.status, AgentStatus::Blocked(_));
@@ -313,6 +318,12 @@ impl AgentTable {
     /// The session's terminal went away.
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
+    }
+
+    /// Where the session's conversation is written, once a hook has said.
+    #[must_use]
+    pub fn transcript_path(&self, session: SessionId) -> Option<std::path::PathBuf> {
+        self.sessions.get(&session)?.transcript_path.as_deref().map(std::path::PathBuf::from)
     }
 
     /// Current state of every session with an agent, for a joining client.

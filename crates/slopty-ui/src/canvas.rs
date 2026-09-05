@@ -22,7 +22,7 @@ use gpui::{
 use slopty_client::canvas::{CARD_ZOOM, Camera, CanvasDoc, GAP, TERMINAL_SIZE, snap};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, TranscriptUpdate};
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
@@ -965,6 +965,13 @@ impl CanvasView {
         self.active = Some(id);
     }
 
+    /// A slice of an agent session's conversation, for the terminal showing it.
+    pub fn transcript_update(&self, update: TranscriptUpdate, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(&update.session) {
+            view.update(cx, |v, cx| v.transcript_update(update, cx));
+        }
+    }
+
     /// A session-stream event.
     pub fn term_event(&self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
         match (self.terminals.get(&session), event) {
@@ -1479,6 +1486,12 @@ impl CanvasView {
             _ => None,
         };
         let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, ui_size, cx));
+        // A session with an agent offers its conversation in place of the grid.
+        let chat = agent.and_then(|(session, _)| {
+            let view = self.terminals.get(&session)?;
+            let on = view.read(cx).conversation().is_some();
+            Some(chat_button(id, view.clone(), on, theme, ui_size, cx))
+        });
         // Another client's size rules this PTY: offer to take it (on the active item only, so
         // a wall of cards stays readable).
         let take = match item.kind {
@@ -1538,6 +1551,7 @@ impl CanvasView {
             .child(
                 div().flex_1().overflow_hidden().text_ellipsis().child(SharedString::from(title)),
             )
+            .when_some(chat, gpui::ParentElement::child)
             .when_some(badge, gpui::ParentElement::child);
 
         let body: gpui::AnyElement = match &item.kind {
@@ -1888,6 +1902,35 @@ fn take_button(
             cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.take_over(id, cx);
+            }),
+        )
+        .into_any_element()
+}
+
+/// The "chat" pill in an agent terminal's title bar: the conversation in place of the grid.
+fn chat_button(
+    id: ItemId,
+    view: Entity<TerminalView>,
+    on: bool,
+    theme: &Theme,
+    ui_size: f32,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    div()
+        .id(element_id("chat", id))
+        .flex_none()
+        .px(px(ui_size * 0.5))
+        .py(px(ui_size * 0.1))
+        .rounded(px(ui_size * 0.35))
+        .bg(hsla_alpha(if on { theme.surfaces.accent } else { theme.surfaces.text_muted }, 0.25))
+        .text_color(hsla(theme.surfaces.text))
+        .cursor_pointer()
+        .child("chat")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_this, _ev, _w, cx| {
+                cx.stop_propagation();
+                view.update(cx, TerminalView::toggle_conversation);
             }),
         )
         .into_any_element()

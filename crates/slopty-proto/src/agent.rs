@@ -62,3 +62,47 @@ pub struct AgentEvent {
     /// Whether this transition should raise attention (sound, badge) or is a quiet correction.
     pub attention: bool,
 }
+
+/// One entry of an agent's conversation, as the client shows it. Tool results, thinking and
+/// the agent's bookkeeping lines are not entries: the conversation view reads like a chat.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TranscriptEntry {
+    /// What the human typed.
+    User {
+        /// Prompt text.
+        text: String,
+    },
+    /// What the agent said (Markdown).
+    Assistant {
+        /// The message.
+        markdown: String,
+    },
+    /// A tool the agent called.
+    ToolUse {
+        /// Tool name (`Bash`, `Edit`, …).
+        name: String,
+        /// One line about the call: the command, the file, the pattern.
+        summary: String,
+    },
+}
+
+/// Client → host: start or stop following a session's conversation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TranscriptFollow {
+    /// Session.
+    pub session: SessionId,
+    /// `true` to receive the transcript (a snapshot, then increments), `false` to stop.
+    pub follow: bool,
+}
+
+/// Host → client: a slice of a session's conversation.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TranscriptUpdate {
+    /// Session.
+    pub session: SessionId,
+    /// `true`: replace everything shown with `entries` (the snapshot after a follow, or a new
+    /// transcript file); `false`: append.
+    pub reset: bool,
+    /// Entries, oldest first.
+    pub entries: Vec<TranscriptEntry>,
+}

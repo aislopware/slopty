@@ -523,6 +523,9 @@ impl Workspace {
                         LinkEvent::Control(HostMsg::Agent(event)) => {
                             canvas.update(cx, |c, cx| c.agent_event(event, cx));
                         }
+                        LinkEvent::Control(HostMsg::Transcript(update)) => {
+                            canvas.update(cx, |c, cx| c.transcript_update(update, cx));
+                        }
                         LinkEvent::Control(_) => {}
                         LinkEvent::Disconnected(why) => {
                             let _set = this.update(cx, |ws, cx| {
