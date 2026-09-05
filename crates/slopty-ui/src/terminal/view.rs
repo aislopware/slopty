@@ -2,25 +2,34 @@
 
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Autocapitalize, Bounds, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, Keystroke, LongPressEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    ScrollDelta, ScrollWheelEvent, Styled as _, TextInputAction, TextInputConfiguration,
-    TouchPhase, UTF16Selection, Window, div, point, size,
+    AppContext as _, Autocapitalize, Bounds, Context, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TextInputAction, TextInputConfiguration,
+    TouchPhase, UTF16Selection, Window, div, point, px, size,
 };
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
-use slopty_proto::terminal::{TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
+use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::terminal::element::{CellMetrics, TerminalElement};
+
+/// Hits asked for per search; the host counts every hit regardless.
+const SEARCH_MAX: u32 = 5_000;
+/// While the search bar is open, output refreshes the hits at most this often.
+const SEARCH_REFRESH: Duration = Duration::from_millis(300);
 
 mod actions {
     #![expect(
@@ -36,16 +45,49 @@ mod actions {
             Copy,
             /// Paste the clipboard into the session.
             Paste,
+            /// Open the search bar (or focus it).
+            Find,
+            /// Go to the next (newer) hit.
+            FindNext,
+            /// Go to the previous (older) hit.
+            FindPrev,
+            /// Close the search bar.
+            CloseFind,
         ]
     );
 }
-pub use actions::{Copy, Paste};
+pub use actions::{CloseFind, Copy, Find, FindNext, FindPrev, Paste};
 
 /// Key bindings for the terminal context.
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
     const CTX: Option<&str> = Some("Terminal");
-    vec![KeyBinding::new("cmd-c", Copy, CTX), KeyBinding::new("cmd-v", Paste, CTX)]
+    vec![
+        KeyBinding::new("cmd-c", Copy, CTX),
+        KeyBinding::new("cmd-v", Paste, CTX),
+        KeyBinding::new("cmd-f", Find, CTX),
+        KeyBinding::new("cmd-g", FindNext, CTX),
+        KeyBinding::new("cmd-shift-g", FindPrev, CTX),
+        // Only while the search field itself is focused: Esc in the grid goes to the program.
+        KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
+    ]
+}
+
+/// The open search bar.
+struct Search {
+    input: Entity<InputState>,
+    /// What the hits are for.
+    needle: String,
+    total: u32,
+    /// Oldest first.
+    matches: Vec<SearchMatch>,
+    /// Index into `matches` of the hit the user is on.
+    current: Option<usize>,
+    /// When the needle was last sent (output refreshes are throttled).
+    sent: Instant,
+    /// The next reply should jump to its newest hit (the needle just changed).
+    reveal: bool,
+    _subscription: gpui::Subscription,
 }
 
 /// A drag selection between two cells, in absolute line indices so it survives scrolling.
@@ -113,6 +155,8 @@ pub struct TerminalView {
     selecting: bool,
     /// A long press claimed the touch; moving the finger extends the selection.
     touch_selecting: bool,
+    /// The search bar, while open.
+    search: Option<Search>,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -164,7 +208,166 @@ impl TerminalView {
             selection: None,
             selecting: false,
             touch_selecting: false,
+            search: None,
         }
+    }
+
+    /// ⌘F: open the search bar, or put the caret back in it with the text selected.
+    pub fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("find"));
+            let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
+                InputEvent::Change => this.search_changed(cx),
+                InputEvent::PressEnter { shift, .. } => {
+                    if *shift {
+                        this.step_match(-1, cx);
+                    } else {
+                        this.step_match(1, cx);
+                    }
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            });
+            self.search = Some(Search {
+                input,
+                needle: String::new(),
+                total: 0,
+                matches: Vec::new(),
+                current: None,
+                sent: Instant::now(),
+                reveal: false,
+                _subscription: subscription,
+            });
+        }
+        if let Some(search) = &self.search {
+            search.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// ⌘G / Enter.
+    pub fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_match(1, cx);
+    }
+
+    /// ⌘⇧G / ⇧Enter.
+    pub fn find_prev(&mut self, _: &FindPrev, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_match(-1, cx);
+    }
+
+    /// Esc in the search field: close it and give the keys back to the program.
+    pub fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Whether the search bar is open.
+    #[must_use]
+    pub const fn finding(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The hits to paint (oldest first) and which one is current.
+    #[must_use]
+    pub fn search_highlights(&self) -> Option<(&[SearchMatch], Option<usize>)> {
+        self.search.as_ref().map(|s| (s.matches.as_slice(), s.current))
+    }
+
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let needle = search.input.read(cx).value().to_string();
+        if needle == search.needle {
+            return;
+        }
+        search.needle = needle;
+        search.matches.clear();
+        search.total = 0;
+        search.current = None;
+        search.reveal = true;
+        self.send_search(cx);
+    }
+
+    fn send_search(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        search.sent = Instant::now();
+        let needle = search.needle.clone();
+        if needle.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.send(TermRequest::Search { needle, max: SEARCH_MAX });
+    }
+
+    /// Move `by` hits (wrapping) and scroll the new one into view.
+    fn step_match(&mut self, by: i64, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        if search.matches.is_empty() {
+            return;
+        }
+        let n = search.matches.len();
+        let at = search.current.map_or_else(
+            || if by > 0 { 0 } else { n.saturating_sub(1) },
+            |c| {
+                let next = i64::try_from(c).unwrap_or(0).saturating_add(by);
+                let n = i64::try_from(n).unwrap_or(1);
+                usize::try_from(next.rem_euclid(n)).unwrap_or(0)
+            },
+        );
+        search.current = Some(at);
+        self.reveal_current(cx);
+    }
+
+    /// Scroll so the current hit sits in the viewport (centred when it was off screen).
+    fn reveal_current(&mut self, cx: &mut Context<Self>) {
+        let Some(hit) =
+            self.search.as_ref().and_then(|s| s.current.and_then(|c| s.matches.get(c))).copied()
+        else {
+            return;
+        };
+        let rows = u64::from(self.state.size().rows);
+        let top = self.state.index_at_row(0);
+        let visible = hit.line >= top && hit.line.0 < top.0.saturating_add(rows);
+        if !visible {
+            // Offset counts up from the bottom: the first visible line when following output.
+            let first_visible = top.0.saturating_add(self.state.view_offset());
+            let wanted_top = hit.line.0.saturating_sub(rows / 2);
+            let offset = first_visible.saturating_sub(wanted_top);
+            for effect in self.state.scroll_to(offset) {
+                if let Effect::Request(req) = effect {
+                    self.send(req);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn matches_arrived(
+        &mut self,
+        needle: &str,
+        total: u32,
+        matches: Vec<SearchMatch>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = &mut self.search else { return };
+        if needle != search.needle {
+            return;
+        }
+        // Keep the user on the same hit across a refresh when it is still there.
+        let on = search.current.and_then(|c| search.matches.get(c)).copied();
+        search.total = total;
+        search.matches = matches;
+        search.current = on.and_then(|hit| search.matches.iter().position(|m| *m == hit));
+        if search.current.is_none() && !search.matches.is_empty() {
+            search.current = Some(search.matches.len().saturating_sub(1));
+        }
+        if std::mem::take(&mut search.reveal) {
+            self.reveal_current(cx);
+        }
+        cx.notify();
     }
 
     /// The mouse selection, if any.
@@ -432,8 +635,20 @@ impl TerminalView {
         }
         let effects = self.state.apply(event);
         if self.state.epoch() != epoch_before {
-            // Line numbering changed (reflow, reset, alt screen): the selection means nothing.
+            // Line numbering changed (reflow, reset, alt screen): the selection means nothing,
+            // and neither do the search hits.
             self.selection = None;
+            if let Some(search) = &mut self.search {
+                search.matches.clear();
+                search.current = None;
+            }
+        }
+        if reconcile
+            && let Some(search) = &self.search
+            && !search.needle.is_empty()
+            && search.sent.elapsed() >= SEARCH_REFRESH
+        {
+            self.send_search(cx);
         }
         if reconcile {
             let outcome = self.predictor.on_frame(
@@ -462,6 +677,9 @@ impl TerminalView {
                 }
                 Effect::Cwd(_) => {}
                 Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "host"),
+                Effect::Matches { needle, total, matches } => {
+                    self.matches_arrived(&needle, total, matches, cx);
+                }
             }
         }
         cx.notify();
@@ -500,9 +718,17 @@ impl TerminalView {
         }
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Cmd shortcuts belong to the app.
         if event.keystroke.modifiers.platform {
+            return;
+        }
+        // Typing in the search field must never reach the program.
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window))
+        {
             return;
         }
         self.selection = None;
@@ -745,16 +971,98 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+impl TerminalView {
+    /// The search bar: field, "n/total", close. Sits over the top-right corner of the grid.
+    fn render_search(&self, search: &Search, cx: &Context<Self>) -> impl IntoElement {
+        let s = &self.theme.surfaces;
+        let count: SharedString = if search.needle.is_empty() {
+            SharedString::default()
+        } else if search.matches.is_empty() {
+            "none".into()
+        } else {
+            let at = search.current.map_or(0, |c| c.saturating_add(1));
+            let more = if search.total > SEARCH_MAX { "+" } else { "" };
+            format!("{at}/{}{more}", search.total).into()
+        };
+        div()
+            .id("terminal-search")
+            .key_context("TerminalSearch")
+            .absolute()
+            .top(px(6.0))
+            // A phone-wide terminal can be wider than the screen; its left edge is the part
+            // that is on screen (the "take" pill sits there for the same reason).
+            .when(cfg!(target_os = "ios"), |bar| bar.left(px(6.0)))
+            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(6.0)))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .bg(hsla(s.panel))
+            .border_1()
+            .border_color(hsla(s.accent))
+            .shadow_md()
+            .text_size(px(12.0))
+            .text_color(hsla(s.text))
+            .font_family(self.theme.typography.ui_family.clone())
+            .on_action(cx.listener(Self::close_find))
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .child(div().w(px(180.0)).child(Input::new(&search.input)))
+            .child(div().min_w(px(40.0)).text_color(hsla(s.text_muted)).child(count))
+            .child(
+                div()
+                    .id("terminal-search-prev")
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_color(hsla(s.text_muted))
+                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                    .child("↑")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(-1, cx))),
+            )
+            .child(
+                div()
+                    .id("terminal-search-next")
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_color(hsla(s.text_muted))
+                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                    .child("↓")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(1, cx))),
+            )
+            .child(
+                div()
+                    .id("terminal-search-close")
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_color(hsla(s.text_muted))
+                    .hover(|st| st.bg(hsla_alpha(s.text, 0.1)))
+                    .child("✕")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_find(&CloseFind, window, cx);
+                    })),
+            )
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
+        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         div()
             .id("terminal")
             .key_context("Terminal")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_prev))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -763,6 +1071,7 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(TerminalElement::new(cx.entity(), focused).zoom(self.zoom))
+            .children(search)
     }
 }
 

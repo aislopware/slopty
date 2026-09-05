@@ -1,7 +1,7 @@
 //! Terminal session state on the client.
 
 use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, TermModes};
-use slopty_proto::terminal::{Frame, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest, TermSize};
 
 /// Lines kept client-side. Newest-first eviction; the host retains 50k.
 pub const CACHE_LINES: usize = 20_000;
@@ -25,6 +25,15 @@ pub enum Effect {
     Exited(i32),
     /// The host reported an error for a request.
     Error(String),
+    /// Search hits for `needle`.
+    Matches {
+        /// The needle they answer.
+        needle: String,
+        /// Every hit, listed or not.
+        total: u32,
+        /// The newest hits, oldest first.
+        matches: Vec<SearchMatch>,
+    },
 }
 
 /// One row as the UI should draw it.
@@ -196,6 +205,9 @@ impl TermState {
                 Vec::new()
             }
             TermEvent::Error(e) => vec![Effect::Error(e)],
+            TermEvent::Matches { needle, total, matches } => {
+                vec![Effect::Matches { needle, total, matches }]
+            }
         }
     }
 

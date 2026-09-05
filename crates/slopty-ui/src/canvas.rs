@@ -83,6 +83,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd--", ZoomOut, CTX),
         KeyBinding::new("cmd-0", ZoomReset, CTX),
         KeyBinding::new("cmd-1", FitAll, CTX),
+        KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
     ]
 }
 
@@ -717,6 +718,18 @@ impl CanvasView {
     }
 
     // ----- commands ------------------------------------------------------------------------
+
+    /// ⌘F with the canvas (not a terminal) focused: search in the active terminal.
+    pub fn find_in_active(
+        &mut self,
+        action: &crate::terminal::Find,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.active_terminal() {
+            view.update(cx, |view, cx| view.find(action, window, cx));
+        }
+    }
 
     /// Open a new shell; the host places it.
     pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1355,6 +1368,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::fit_all))
+            .on_action(cx.listener(Self::find_in_active))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_pan))

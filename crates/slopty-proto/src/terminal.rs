@@ -142,6 +142,25 @@ pub enum TermRequest {
         /// Contents.
         text: String,
     },
+    /// Find `needle` in the whole retained history plus the screen. Case-insensitive unless
+    /// the needle has an upper-case letter. Answered with `TermEvent::Matches`.
+    Search {
+        /// Text to find; empty clears.
+        needle: String,
+        /// At most this many matches come back (the newest ones).
+        max: u32,
+    },
+}
+
+/// One search hit, in cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SearchMatch {
+    /// Absolute line.
+    pub line: LineIndex,
+    /// First cell.
+    pub col: u16,
+    /// Cells covered.
+    pub len: u16,
 }
 
 /// One frame: the changed rows since the previous frame (or every row when `full`).
@@ -218,4 +237,13 @@ pub enum TermEvent {
     },
     /// Something went wrong with a request.
     Error(String),
+    /// Reply to `TermRequest::Search`.
+    Matches {
+        /// The needle these are for (replies can cross in flight).
+        needle: String,
+        /// Every hit in the retained history and screen, even those not listed.
+        total: u32,
+        /// The newest hits, oldest first.
+        matches: Vec<SearchMatch>,
+    },
 }

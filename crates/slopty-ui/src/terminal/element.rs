@@ -304,9 +304,13 @@ impl Element for TerminalElement {
                 view.marked().map(str::to_owned),
             )
         };
-        let (selection, top_index, grid_cols) = {
+        let (selection, top_index, grid_cols, hits) = {
             let view = self.view.read(cx);
-            (view.selection(), view.state().index_at_row(0), view.state().size().cols)
+            let hits = view
+                .search_highlights()
+                .map(|(matches, current)| (matches.to_vec(), current))
+                .unwrap_or_default();
+            (view.selection(), view.state().index_at_row(0), view.state().size().cols, hits)
         };
         let palette = &theme.terminal;
         // Resolving the family walks every installed font; do it once per view.
@@ -393,13 +397,25 @@ impl Element for TerminalElement {
                     }
                 }
                 // The selection paints over cell backgrounds and under the text.
-                if let Some(range) = selection.and_then(|s| {
-                    let index = slopty_grid::LineIndex(
-                        top_index.0.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
-                    );
-                    s.columns(index, grid_cols)
-                }) {
+                let index = slopty_grid::LineIndex(
+                    top_index.0.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                );
+                if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
                     quads.push((range.start, range.end, hsla(palette.selection)));
+                }
+                // Search hits, sorted by line: the slice for this row by binary search.
+                let (matches, current) = &hits;
+                let first = matches.partition_point(|m| m.line < index);
+                for (k, m) in matches.iter().skip(first).enumerate() {
+                    if m.line != index {
+                        break;
+                    }
+                    let color = if *current == Some(first.saturating_add(k)) {
+                        palette.search_current
+                    } else {
+                        palette.search_match
+                    };
+                    quads.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
                 }
                 let shaped = if let Some(s) = cache.lines.get(&key) {
                     s.clone()

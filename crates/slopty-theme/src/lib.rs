@@ -41,6 +41,10 @@ pub struct TerminalPalette {
     pub cursor_text: Rgb,
     /// Selection background.
     pub selection: Rgb,
+    /// Background of a search hit.
+    pub search_match: Rgb,
+    /// Background of the search hit the user is on.
+    pub search_current: Rgb,
     /// ANSI 0–15.
     pub ansi: [Rgb; 16],
 }
@@ -54,6 +58,8 @@ impl TerminalPalette {
         cursor: Rgb::hex(0x8AB4F8),
         cursor_text: Rgb::hex(0x0E0F12),
         selection: Rgb::hex(0x2B3A55),
+        search_match: Rgb::hex(0x4A4020),
+        search_current: Rgb::hex(0x8C6A1F),
         ansi: [
             Rgb::hex(0x1A1B1F),
             Rgb::hex(0xF06C75),

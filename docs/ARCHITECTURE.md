@@ -64,6 +64,10 @@ scrolls past the whole scrollback — the frame's `epoch` bumps and clients drop
 Returning from the alternate screen restores the parked primary anchor, so the cache survives
 `vim`/`less` round trips.
 
+**Search** is a host request (`TermRequest::Search` → `TermEvent::Matches`): the engine renders
+the retained rows as plain text with libghostty's formatter and maps hits back to cells, so the
+whole 50k-line history is searchable without the client ever holding it.
+
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
 (handshake through a `watch` pair so the fd is never read by two parties), ships the ring

@@ -7,7 +7,7 @@ mod golden {
     use slopty_grid::{Cursor, CursorShape, Line, RowUpdate, Style, TermModes};
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::terminal::{Frame, TermEvent, TermRequest};
+    use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
 
@@ -69,6 +69,28 @@ mod golden {
     fn ping_pong() {
         snap("client_ping", &ClientMsg::Ping { sent_at: MonoTime::from_nanos(1_000_000) });
         snap("host_pong", &HostMsg::Pong { sent_at: MonoTime::from_nanos(1_000_000) });
+    }
+
+    #[test]
+    fn search() {
+        snap(
+            "client_search",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::Search { needle: "fox".to_owned(), max: 2000 },
+            },
+        );
+        snap(
+            "host_matches",
+            &TermEvent::Matches {
+                needle: "fox".to_owned(),
+                total: 3,
+                matches: vec![
+                    SearchMatch { line: slopty_grid::LineIndex(4), col: 16, len: 3 },
+                    SearchMatch { line: slopty_grid::LineIndex(9), col: 0, len: 3 },
+                ],
+            },
+        );
     }
 
     #[test]

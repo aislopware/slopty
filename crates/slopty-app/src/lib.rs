@@ -310,6 +310,33 @@ impl Workspace {
                     });
                 }),
         );
+        // No ⌘F either: "find" opens the search bar, or closes it while it is open.
+        let target = terminal.clone();
+        let finding = terminal.read(cx).finding();
+        bar = bar.child(
+            div()
+                .id("key-find")
+                .flex_1()
+                .h(px(KEY_BAR_H - 10.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .text_color(hsla(if finding { s.canvas } else { s.text }))
+                .bg(hsla(if finding { s.accent } else { s.canvas }))
+                .active(|el| el.opacity(0.7))
+                .child("find")
+                .on_click(move |_ev, window, cx| {
+                    target.update(cx, |t, cx| {
+                        if finding {
+                            t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
+                        } else {
+                            t.find(&slopty_ui::terminal::Find, window, cx);
+                        }
+                    });
+                }),
+        );
         bar.into_any_element()
     }
 

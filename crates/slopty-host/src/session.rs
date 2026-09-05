@@ -18,6 +18,8 @@ use crate::HostError;
 const COALESCE: Duration = Duration::from_millis(2);
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
+/// Search hits sent back at most; the count still covers every hit.
+const MAX_SEARCH_MATCHES: u32 = 5_000;
 
 /// Where a client's events go. Bounded: a client that cannot keep up gets dropped rather than
 /// stalling the session (it can reattach and receive a full frame).
@@ -479,6 +481,16 @@ impl Actor {
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(4096)) {
                     Ok((start, lines)) => self.send_to(client, TermEvent::Lines { start, lines }),
+                    Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
+                }
+                Ok(())
+            }
+            TermRequest::Search { needle, max } => {
+                match self.engine.search(&needle, max.min(MAX_SEARCH_MATCHES)) {
+                    Ok(found) => self.send_to(
+                        client,
+                        TermEvent::Matches { needle, total: found.total, matches: found.matches },
+                    ),
                     Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
                 }
                 Ok(())

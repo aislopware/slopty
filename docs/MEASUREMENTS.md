@@ -140,3 +140,19 @@ yields ~50–53 delivered fps on a 60 Hz display.
 
 Not yet measured: the client's arrival→present hold in the GPUI app, a real lossy/jittery path
 (Wi-Fi, LTE), and a release build.
+
+## 2026-09-05 — libghostty plain-text formatter for terminal search, debug build
+
+Command: exploration test in `crates/slopty-engine/src/ghostty.rs` (since replaced by
+`scrollback_tests`), `cargo nextest run -p slopty-engine --no-capture`, Mac Studio.
+
+| what | result |
+| --- | --- |
+| `Formatter` (plain, trim, selection over every row), 904 rows × 80 cols | 0.36 ms, 59.6 KB |
+| `str::matches("fox")` over that text | 32 µs, 903 hits |
+| `VtEngine::lines(0, 10_000)` (per-cell FFI) over the same 904 rows | 8.1 ms |
+
+The formatter is ~20× cheaper per row than the cell walk, one line per row (interior blank
+rows kept, trailing blank rows dropped), so search runs on the host over the whole retained
+history per keystroke. Same run found the 10 KB byte cap on scrollback (60k rows written,
+904 retained), fixed in a1b8798.

@@ -303,6 +303,28 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   matches, and `Peer::drop` in hostd uses it; `client_gone` is gone. Regression test
   `stale_connection_detach_keeps_the_reconnected_viewer`.
 
+- ✅ **Terminal search runs on the host** (2026-09-05). The client caches at most 20k lines and
+  the host retains 50k, so searching the client cache would miss most of the history or pull
+  megabytes on every keystroke. `TermRequest::Search { needle, max }` answers with
+  `TermEvent::Matches { needle, total, matches }`: every hit counted, the newest `max` (5 000)
+  listed as `(line, col, len)` in cells. The engine renders the grid as plain text with
+  libghostty's `Formatter` (plain, trim, selection over every row): one line per row, interior
+  blank rows kept, trailing blank rows dropped, 0.36 ms for 904 rows (MEASUREMENTS.md), ~20×
+  cheaper than the per-cell `lines()` walk. Columns come from ghostty's `grapheme_width`, so a
+  hit paints exactly over its cells (wide characters count two). Smart case (no upper-case
+  letter → case-insensitive) with a char-for-char fold so indices stay aligned; hits never span
+  a soft-wrapped row. Rejected: libghostty-vt has no text search of its own (its "search"
+  functions are word-selection helpers), and a regex engine is a later step.
+  UI: the field is a gpui-kit `Input` inside a `TerminalSearch` key context, so `escape` is
+  bound there only and Esc in the grid still reaches the program; `TerminalView::key_down`
+  also drops keys while that field is focused. Verified on macOS: 123 hits, stepping into
+  history scrolls the hit to the viewport centre, Esc/✕ hand the keys back.
+- ✅ **Scrollback is bounded by lines, not libghostty's 10 KB byte default** (2026-09-05).
+  `Terminal.zig` defaults `max_scrollback_bytes` to 10_000; the engine had only raised the
+  line limit, so every session kept about one page (~900 rows). `set_scrollback_max_bytes(None)`
+  in the constructor; tests `the_line_limit_governs_retained_history` (20k of 20k kept) and
+  `history_is_pruned_near_the_line_limit` (page-granular, bounded).
+
 - ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report

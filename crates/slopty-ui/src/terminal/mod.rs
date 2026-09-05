@@ -4,4 +4,7 @@ mod element;
 mod view;
 
 pub use element::{CellMetrics, Prepared, TerminalElement};
-pub use view::{Copy, Paste, Selection, TerminalView, TerminalViewEvent, key_bindings};
+pub use view::{
+    CloseFind, Copy, Find, FindNext, FindPrev, Paste, Selection, TerminalView, TerminalViewEvent,
+    key_bindings,
+};

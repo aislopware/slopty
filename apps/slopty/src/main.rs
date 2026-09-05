@@ -36,7 +36,7 @@ fn menus() -> Vec<Menu> {
     use slopty_ui::canvas::{
         AddWindow, CloseItem, FitAll, NewNote, NewTerminal, ZoomIn, ZoomOut, ZoomReset,
     };
-    use slopty_ui::terminal::{Copy, Paste};
+    use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
     vec![
         Menu::new("Slopty").items([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -50,6 +50,10 @@ fn menus() -> Vec<Menu> {
         Menu::new("Edit").items([
             MenuItem::os_action("Copy", Copy, OsAction::Copy),
             MenuItem::os_action("Paste", Paste, OsAction::Paste),
+            MenuItem::separator(),
+            MenuItem::action("Find…", Find),
+            MenuItem::action("Find Next", FindNext),
+            MenuItem::action("Find Previous", FindPrev),
         ]),
         Menu::new("Canvas").items([
             MenuItem::action("New Shell", NewTerminal),

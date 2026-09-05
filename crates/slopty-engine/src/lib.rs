@@ -17,6 +17,7 @@
 
 pub mod convert;
 pub mod ghostty;
+pub mod search;
 
 pub use ghostty::GhosttyEngine;
 use slopty_grid::{Line, LineIndex, TermModes};
@@ -86,6 +87,9 @@ pub trait VtEngine {
 
     /// Current terminal modes the client needs (prediction gating, wheel routing).
     fn modes(&self) -> Result<TermModes, EngineError>;
+
+    /// Find `needle` in the retained history and the screen (see [`search::find`]).
+    fn search(&self, needle: &str, max: u32) -> Result<search::Found, EngineError>;
 
     /// Encode a key event into `out`. Appends nothing for keys the terminal does not encode.
     fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError>;

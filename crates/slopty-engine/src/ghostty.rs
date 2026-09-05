@@ -3,8 +3,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{Screen as VtScreen, TrackedGridRef};
+use libghostty_vt::selection::Selection;
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
@@ -15,7 +17,7 @@ use slopty_grid::{
 use slopty_proto::input::{KeyEvent, MouseAction, MouseEvent};
 use slopty_proto::terminal::{Frame, TermSize};
 
-use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert};
+use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, search};
 
 /// How long a program may hold synchronized output (mode 2026) before we ship frames anyway.
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -108,6 +110,26 @@ impl GhosttyEngine {
         };
         engine.reanchor()?;
         Ok(engine)
+    }
+
+    /// Every retained row (history then screen) as plain text, one line per row with trailing
+    /// blanks trimmed; blank rows at the very end are omitted. Measured at 0.4 ms for ~900
+    /// rows of 80 columns (see `docs/MEASUREMENTS.md`).
+    fn plain_text(&self) -> Result<String, EngineError> {
+        let total = u32::try_from(self.total_rows()?).unwrap_or(u32::MAX);
+        let last_col = self.size.cols.saturating_sub(1);
+        let start = self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y: 0 }))?;
+        let end = self
+            .term
+            .grid_ref(Point::Screen(PointCoordinate { x: last_col, y: total.saturating_sub(1) }))?;
+        let selection = Selection::new(start, end, false);
+        let options = FormatterOptions::new()
+            .with_format(Format::Plain)
+            .with_trim(true)
+            .with_selection(&selection);
+        let mut formatter = Formatter::new(&self.term, options)?;
+        let bytes = formatter.format_alloc(None)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Current epoch of line numbering.
@@ -525,6 +547,14 @@ impl VtEngine for GhosttyEngine {
         self.modes_inner()
     }
 
+    fn search(&self, needle: &str, max: u32) -> Result<search::Found, EngineError> {
+        if needle.is_empty() {
+            return Ok(search::Found::default());
+        }
+        let text = self.plain_text()?;
+        Ok(search::find(&text, needle, LineIndex(self.base), max))
+    }
+
     fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
         let ev = &mut self.key_ev;
         ev.set_action(convert::key_action(event.action))
@@ -920,6 +950,24 @@ mod scrollback_tests {
         write_lines(&mut e, 20_000);
         let total = e.total_lines().unwrap();
         assert!(total >= 20_000, "kept {total} rows of 20k written");
+    }
+
+    #[test]
+    fn search_covers_history_and_screen_with_absolute_lines() {
+        let mut e = engine(50_000);
+        write_lines(&mut e, 200);
+        e.write(b"needle on screen");
+        let found = e.search("needle", 100).unwrap();
+        assert_eq!(found.total, 1);
+        let total = e.total_lines().unwrap();
+        // The needle sits on the cursor row: the newest line.
+        assert_eq!(found.matches[0].line, LineIndex(total - 1));
+        assert_eq!((found.matches[0].col, found.matches[0].len), (0, 6));
+        let found = e.search("line 7", 100).unwrap();
+        // "line 7", "line 70".."line 79", "line 7x" not written beyond 199: 1 + 10 = 11.
+        assert_eq!(found.total, 11);
+        assert_eq!(found.matches[0].line, LineIndex(7));
+        assert_eq!(e.search("", 10).unwrap(), search::Found::default());
     }
 
     #[test]
