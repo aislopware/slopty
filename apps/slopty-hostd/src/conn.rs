@@ -30,12 +30,14 @@ pub async fn serve(daemon: Daemon, client: AuthenticatedClient) {
     let remote = client.remote;
     let id = client.hello.client;
     tracing::info!(%remote, client = %id, name = %client.hello.name, "client connected");
-    if let Err(e) = run(&daemon, client).await {
-        tracing::info!(%remote, error = %e, "client finished");
+    match run(&daemon, client).await {
+        Ok(why) => tracing::info!(%remote, client = %id, why, "client finished"),
+        Err(e) => tracing::info!(%remote, client = %id, error = %e, "client finished"),
     }
 }
 
-async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetError> {
+/// Serve one connection until it ends; `Ok` carries why it ended.
+async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static str, NetError> {
     let AuthenticatedClient { conn, hello, mut tx, mut rx, .. } = client;
 
     let (out, mut out_rx) = mpsc::channel::<HostMsg>(CONTROL_DEPTH);
@@ -88,13 +90,13 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
         tokio::select! {
             _ = geometry.tick(), if !peer.screens.is_empty() => {
                 if !peer.check_geometry().await {
-                    break Ok(());
+                    break Ok("writer gone");
                 }
             }
             msg = rx.recv() => {
                 let msg = match msg {
                     Ok(m) => m,
-                    Err(NetError::Closed) => break Ok(()),
+                    Err(NetError::Closed) => break Ok("control stream closed"),
                     Err(e) => break Err(e),
                 };
                 peer.handle(msg).await;
@@ -103,22 +105,27 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<(), NetErro
                 match ev {
                     Ok(msg) => {
                         if peer.out.send(msg).await.is_err() {
-                            break Ok(());
+                            break Ok("writer gone");
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(client = %peer.client, lagged = n, "missed host events");
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break Ok("daemon shutting down");
+                    }
                 }
             }
             reason = peer.conn.closed() => {
-                tracing::debug!(client = %peer.client, %reason, "connection closed");
-                break Ok(());
+                tracing::info!(client = %peer.client, %reason, "connection closed");
+                break Ok("connection closed");
             }
         }
     };
     peer.close_screens().await;
+    // Whatever ended the loop, the client must not be left on a live connection nobody
+    // serves; a no-op when the connection is already closed.
+    peer.conn.close(0_u32.into(), b"done");
     drop(peer);
     writer.abort();
     result

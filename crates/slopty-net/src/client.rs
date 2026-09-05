@@ -72,7 +72,7 @@ pub async fn connect(
     let addr = if reach.is_direct_only() { direct_only(addr) } else { addr };
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| NetError::Connect(e.to_string()))?;
     let remote = conn.remote_id();
-    let (send, recv) = conn.open_bi().await.map_err(|e| NetError::Stream(e.to_string()))?;
+    let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ClientMsg>::new(send);
     let mut rx = FramedRecv::<HostMsg>::new(recv);
     tx.send(&ClientMsg::Hello(hello)).await?;
@@ -94,7 +94,7 @@ impl HostConn {
     pub async fn accept_session_stream(
         &self,
     ) -> Result<(StreamHeader, FramedRecv<TermEvent>), NetError> {
-        let recv = self.conn.accept_uni().await.map_err(|e| NetError::Stream(e.to_string()))?;
+        let recv = self.conn.accept_uni().await.map_err(|e| NetError::stream(&e))?;
         let mut header = FramedRecv::<StreamHeader>::new(recv);
         let hdr = header.recv().await?;
         Ok((hdr, header.retype()))

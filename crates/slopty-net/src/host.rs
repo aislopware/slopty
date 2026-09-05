@@ -134,7 +134,7 @@ impl HostListener {
         let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
             .await
             .map_err(|_elapsed| NetError::Protocol("no control stream"))?
-            .map_err(|e| NetError::Stream(e.to_string()))?;
+            .map_err(|e| NetError::stream(&e))?;
         let tx = FramedSend::<HostMsg>::new(send);
         let mut rx = FramedRecv::<ClientMsg>::new(recv);
         let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
@@ -183,7 +183,7 @@ pub async fn open_session_stream(
     conn: &Connection,
     session: SessionId,
 ) -> Result<FramedSend<TermEvent>, NetError> {
-    let send = conn.open_uni().await.map_err(|e| NetError::Stream(e.to_string()))?;
+    let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
     let mut header = FramedSend::<StreamHeader>::new(send);
     header.send(&StreamHeader { session }).await?;
     Ok(header.retype())

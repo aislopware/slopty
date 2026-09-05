@@ -58,3 +58,41 @@ pub enum NetError {
     #[error("trust store: {0}")]
     Store(String),
 }
+
+impl NetError {
+    /// A stream error with its source chain: noq's `ReadError::ConnectionLost` displays as
+    /// just "connection lost", and the reason (timed out, reset, closed by peer) is the part
+    /// worth logging.
+    pub(crate) fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
+        let mut text = e.to_string();
+        let mut source = e.source();
+        while let Some(s) = source {
+            let part = s.to_string();
+            if !text.contains(&part) {
+                text.push_str(": ");
+                text.push_str(&part);
+            }
+            source = s.source();
+        }
+        Self::Stream(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetError;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("connection lost")]
+    struct Lost(#[source] TimedOut);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("timed out")]
+    struct TimedOut;
+
+    #[test]
+    fn stream_error_carries_its_source_chain() {
+        let e = NetError::stream(&Lost(TimedOut));
+        assert_eq!(e.to_string(), "stream: connection lost: timed out");
+    }
+}

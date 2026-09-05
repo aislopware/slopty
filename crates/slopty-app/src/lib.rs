@@ -54,6 +54,10 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 11] = [
 ];
 /// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
 const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
+/// Nothing heard for this long and the connection is given up so the reconnect loop takes
+/// over: a restarted host is back in ~1 s instead of after the transport's 45 s idle timeout.
+/// Three missed keep-alives, the same bar noq uses to abandon a path.
+const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The pairing panel: shown until this installation knows a host.
 #[derive(Debug)]
@@ -579,6 +583,11 @@ pub fn open_workspace(
                     let gap = heard.1.elapsed();
                     let silent = (gap >= SILENCE_WARN).then_some(gap);
                     tracing::debug!(paths = %link.paths(), received, "link paths");
+                    if gap >= SILENCE_DROP {
+                        tracing::warn!(?gap, paths = %link.paths(), "host silent; reconnecting");
+                        link.abandon("host silent");
+                        break;
+                    }
                     rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
                     rtt_workspace.update(cx, |ws, cx| {
                         ws.rtt = rtt;

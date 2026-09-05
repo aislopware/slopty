@@ -209,6 +209,13 @@ impl HostLink {
         slopty_net::endpoint::describe_paths(&self.conn)
     }
 
+    /// Give the connection up from another task: the QUIC close makes the control reader
+    /// fail, which surfaces as [`LinkEvent::Disconnected`] so the owner's reconnect path runs.
+    /// Unlike [`close`](Self::close) the tasks keep running until that event is delivered.
+    pub fn abandon(&self, reason: &str) {
+        self.conn.close(1_u32.into(), reason.as_bytes());
+    }
+
     /// Close the connection and stop the tasks.
     pub fn close(&mut self) {
         self.conn.close(0_u32.into(), b"bye");

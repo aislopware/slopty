@@ -36,12 +36,12 @@ impl<T: Serialize> FramedSend<T> {
     /// Encode and write one message.
     pub async fn send(&mut self, msg: &T) -> Result<(), NetError> {
         let frame = codec::encode(msg)?;
-        self.stream.write_all(&frame).await.map_err(|e| NetError::Stream(e.to_string()))
+        self.stream.write_all(&frame).await.map_err(|e| NetError::stream(&e))
     }
 
     /// Write pre-encoded frames (fan-out: encode once, send to many).
     pub async fn send_raw(&mut self, frame: &[u8]) -> Result<(), NetError> {
-        self.stream.write_all(frame).await.map_err(|e| NetError::Stream(e.to_string()))
+        self.stream.write_all(frame).await.map_err(|e| NetError::stream(&e))
     }
 
     /// Reuse the stream for a different message type (after a header).
@@ -52,7 +52,7 @@ impl<T: Serialize> FramedSend<T> {
 
     /// Finish the stream gracefully.
     pub fn finish(&mut self) -> Result<(), NetError> {
-        self.stream.finish().map_err(|e| NetError::Stream(e.to_string()))
+        self.stream.finish().map_err(|e| NetError::stream(&e))
     }
 }
 
@@ -75,11 +75,7 @@ impl<T: DeserializeOwned> FramedRecv<T> {
             if let Some(msg) = codec::try_decode::<T>(&mut self.buf)? {
                 return Ok(msg);
             }
-            let n = self
-                .stream
-                .read_buf(&mut self.buf)
-                .await
-                .map_err(|e| NetError::Stream(e.to_string()))?;
+            let n = self.stream.read_buf(&mut self.buf).await.map_err(|e| NetError::stream(&e))?;
             if n == 0 {
                 return Err(NetError::Closed);
             }
