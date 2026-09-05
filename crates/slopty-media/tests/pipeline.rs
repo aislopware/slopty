@@ -43,12 +43,26 @@ mod tests {
         tx: Packetizer,
         rx: Reassembler,
         now: Instant,
+        epoch: Instant,
     }
 
     impl Harness {
         fn new() -> Self {
             let now = Instant::now();
-            Self { tx: Packetizer::new(STREAM), rx: Reassembler::new(STREAM, cfg(), now), now }
+            Self {
+                tx: Packetizer::new(STREAM),
+                rx: Reassembler::new(STREAM, cfg(), now),
+                now,
+                epoch: now,
+            }
+        }
+
+        /// The stamp the host puts on every datagram: the low byte of its millisecond clock.
+        /// One clock drives both ends here, so a datagram packetized now and delivered later
+        /// carries the send time, which is what tells a held link from a quiet source.
+        fn send_ms_lo(&self) -> u8 {
+            u8::try_from(self.now.saturating_duration_since(self.epoch).as_millis() % 256)
+                .unwrap_or(0)
         }
 
         fn advance(&mut self, by: Duration) {
@@ -63,7 +77,8 @@ mod tests {
                 ltr_refresh,
                 capture_ts_us: 1_000,
             };
-            self.tx.packetize(&frame, 0).unwrap().clone()
+            let stamp = self.send_ms_lo();
+            self.tx.packetize(&frame, stamp).unwrap().clone()
         }
 
         /// Feed datagrams. Parity arriving after its frame completed is a duplicate, and after
@@ -151,7 +166,7 @@ mod tests {
         let s0 = h.send(&key, true, false);
         let data_count = usize::from(s0.layout.data_count);
         let parity_count = usize::from(s0.layout.parity_count);
-        assert_eq!((data_count, parity_count), (26, 6));
+        assert_eq!((data_count, parity_count), (26, 5));
         // Drop as many data fragments as there is parity, including the first (the prefix).
         let dropped: Vec<usize> = (0..parity_count).collect();
         h.deliver_except(&s0, &dropped);
@@ -161,7 +176,7 @@ mod tests {
         assert!(out[0].info.recovered);
         assert!(h.tick().is_empty(), "nothing to NACK");
         let stats = h.rx.stats();
-        assert_eq!((stats.frames_fec, stats.datagrams_lost), (1, 6));
+        assert_eq!((stats.frames_fec, stats.datagrams_lost), (1, 5));
     }
 
     #[test]
@@ -174,7 +189,7 @@ mod tests {
 
         let p = frame_bytes(2, 30_000);
         let s1 = h.send(&p, false, false);
-        // 26 data + 6 parity; drop 8 data fragments.
+        // 26 data + 5 parity; drop 8 data fragments.
         let dropped: Vec<usize> = vec![0, 3, 4, 10, 11, 12, 20, 25];
         h.deliver_except(&s1, &dropped);
         assert!(h.drain().is_empty());
@@ -185,13 +200,13 @@ mod tests {
         assert_eq!(actions, vec![Action::Nack { frame: 1, fragments: expected.clone() }]);
         assert!(h.tick().is_empty(), "one NACK per round trip");
 
-        // Only two of the retransmissions make it: parity covers the rest.
+        // Only three of the retransmissions make it: parity covers the rest.
         let resent = h.tx.retransmit(1, &expected);
         assert_eq!(resent.len(), 8);
         let (hdr, _) = MediaHeader::parse(&resent[0]).unwrap();
         assert_eq!(hdr.flags & flags::RETRANSMIT, flags::RETRANSMIT);
         h.advance(RTT);
-        h.deliver(&resent[..2]);
+        h.deliver(&resent[..3]);
         let out = h.drain();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, p);
@@ -283,9 +298,11 @@ mod tests {
         h.advance(nack_delay());
         let nack = h.tick();
         assert_eq!(nack.len(), 1);
+        // The host packetizes the next frame straight away; the link holds it for 120 ms with
+        // everything else, which is what makes this a stall rather than a quiet source.
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         h.advance(Duration::from_millis(120));
         // The stall clears with a *later* frame first: frame 1 is not lost on the spot.
-        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         h.deliver(&s2.datagrams);
         assert!(h.tick().is_empty(), "fresh deadline: no loss, no retry yet");
         assert!(h.drain().is_empty(), "frame 2 waits for frame 1");
@@ -315,6 +332,9 @@ mod tests {
         h.deliver(&s0.datagrams);
         h.drain();
         assert_eq!(h.rx.stats().stalls, 0, "the start-up wait is not a release either");
+        // Both of the next frames leave the host now; the link is what holds them back.
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         // 30 ms of silence: an ordinary inter-frame gap, not a stall.
         h.advance(Duration::from_millis(30));
         let r = h.rx.take_report(h.now, 0);
@@ -327,8 +347,8 @@ mod tests {
         let r = h.rx.take_report(h.now, 0);
         assert_eq!((r.stalled_ms, r.stalls), (150, 0), "still on: time, no release yet");
         // 40 ms more, then the link moves again: only the part not yet charged, one release.
+        // The frame was packetized before the silence — the link held it, the host did not.
         h.advance(Duration::from_millis(40));
-        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         h.deliver(&s1.datagrams);
         assert!(!h.rx.stalled(h.now));
         let r = h.rx.take_report(h.now, 0);
@@ -336,7 +356,6 @@ mod tests {
         assert_eq!((h.rx.stats().stalls, h.rx.stats().stalled_ms), (1, 190));
         // A stall that starts and releases inside one window.
         h.advance(Duration::from_millis(80));
-        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         h.deliver(&s2.datagrams);
         let r = h.rx.take_report(h.now, 0);
         assert_eq!((r.stalled_ms, r.stalls), (80, 1));
@@ -367,15 +386,64 @@ mod tests {
         let mut c = RateController::new(30_000_000);
         let decision = (0..64).find_map(|_| c.on_report(&report, 0, None));
         assert_eq!(decision.map(|d| d.verdict), Some(RateVerdict::Grow));
-        // The same 400 ms without heartbeats is a stall, released by the next frame.
+        // The same 400 ms without heartbeats reads as a stall: past the send stamp's 256 ms
+        // range the receiver cannot tell whose silence it was, and takes the pessimistic view.
         h.advance(Duration::from_millis(400));
         assert!(h.rx.stalled(h.now));
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         h.deliver(&s1.datagrams);
         let report = h.rx.take_report(h.now, 0);
-        assert_eq!((report.stalled_ms, report.stalls), (400, 1), "silence from the link");
+        assert_eq!((report.stalled_ms, report.stalls), (400, 1), "silence nobody can account for");
         assert_eq!(h.rx.stats().stalls, 1);
         assert_eq!(h.drain().len(), 1, "the frame after the stall is delivered");
+    }
+
+    /// A gap the host made itself — the capture had nothing to draw and its heartbeat was late
+    /// — is not the link stalling. The send stamp on the datagram that ends the gap says the
+    /// host was quiet for all of it, so nothing is charged and nothing is counted.
+    #[test]
+    fn a_quiet_source_whose_heartbeat_was_late_is_not_a_stall() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        // 150 ms with nothing on the wire at all, then the host draws again and sends.
+        h.advance(Duration::from_millis(150));
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s1.datagrams);
+        assert_eq!(h.drain().len(), 1);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!(
+            (report.stalled_ms, report.stalls),
+            (0, 0),
+            "the host's silence, not the link's"
+        );
+        assert_eq!((h.rx.stats().stalls, h.rx.stats().stalled_ms), (0, 0));
+        // While the host says the source is idle, an unfinished gap is not a stall either.
+        h.rx.set_source_live(false);
+        h.advance(Duration::from_millis(400));
+        assert!(!h.rx.stalled(h.now));
+        assert_eq!(h.rx.take_report(h.now, 0).stalled_ms, 0);
+        h.rx.set_source_live(true);
+        assert!(h.rx.stalled(h.now), "a live source owes the receiver datagrams again");
+    }
+
+    /// A link that holds datagrams is still a stall when the source was a little slow too:
+    /// only the host's own share of the gap is forgiven, the rest is charged.
+    #[test]
+    fn only_the_hosts_share_of_a_gap_is_forgiven() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        // The source takes 20 ms to draw, then the link holds the frame for 150 ms more.
+        h.advance(Duration::from_millis(20));
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.advance(Duration::from_millis(150));
+        h.deliver(&s1.datagrams);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (150, 1), "170 ms of gap, 20 ms of it host");
+        assert_eq!(h.drain().len(), 1);
     }
 
     #[test]
