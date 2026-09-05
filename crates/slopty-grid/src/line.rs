@@ -11,14 +11,43 @@ pub enum SemanticMark {
     /// Not marked.
     #[default]
     Unknown,
-    /// Start of a shell prompt (`OSC 133;A`).
-    Prompt,
-    /// Start of user input (`OSC 133;B`).
+    /// The row a shell prompt starts on (`OSC 133;A`): one per command block.
+    Prompt {
+        /// Exit status of the command that ended just before this prompt (`OSC 133;D;<n>`),
+        /// `None` when no command ran or the shell gave no status. The `D` lands on (or just
+        /// above) the row the next prompt starts on, so this is where the status lives.
+        exit: Option<u8>,
+    },
+    /// User input (`OSC 133;B`).
     Input,
-    /// Start of command output (`OSC 133;C`).
+    /// Command output (`OSC 133;C`), also every row nothing was ever written to.
     Output,
-    /// Continuation of a multi-line prompt.
+    /// A further row of the prompt that started above: a multi-line prompt, or a secondary
+    /// prompt (`OSC 133;A;k=s`).
     PromptContinuation,
+}
+
+impl SemanticMark {
+    /// A prompt row of any kind.
+    #[must_use]
+    pub const fn is_prompt(self) -> bool {
+        matches!(self, Self::Prompt { .. } | Self::PromptContinuation)
+    }
+
+    /// The first row of a command block.
+    #[must_use]
+    pub const fn starts_prompt(self) -> bool {
+        matches!(self, Self::Prompt { .. })
+    }
+
+    /// The status carried by a prompt row.
+    #[must_use]
+    pub const fn exit(self) -> Option<u8> {
+        match self {
+            Self::Prompt { exit } => exit,
+            _ => None,
+        }
+    }
 }
 
 bitflags! {

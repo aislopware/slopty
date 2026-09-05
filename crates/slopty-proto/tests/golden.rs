@@ -4,7 +4,9 @@
 #[cfg(test)]
 mod golden {
     use slopty_core::{ClientId, MonoTime, SessionId, StreamId};
-    use slopty_grid::{Cursor, CursorShape, Hyperlink, Line, RowUpdate, Style, TermModes};
+    use slopty_grid::{
+        Cursor, CursorShape, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes,
+    };
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::screen::{Feedback, ScreenEvent, ScreenRequest};
@@ -123,6 +125,23 @@ mod golden {
     }
 
     #[test]
+    fn lines_with_prompt_marks() {
+        let mut prompt = Line::from_text("$ false", 8, Style::DEFAULT);
+        prompt.mark = SemanticMark::Prompt { exit: Some(1) };
+        let mut cont = Line::from_text("> ", 8, Style::DEFAULT);
+        cont.mark = SemanticMark::PromptContinuation;
+        let mut output = Line::from_text("x", 8, Style::DEFAULT);
+        output.mark = SemanticMark::Output;
+        snap(
+            "host_lines_marks",
+            &TermEvent::Lines {
+                start: slopty_grid::LineIndex(3),
+                lines: vec![prompt, cont, output],
+            },
+        );
+    }
+
+    #[test]
     fn lines_with_links() {
         let mut line = Line::from_text("see https://a.b", 16, Style::DEFAULT);
         line.links.push(Hyperlink { col: 4, len: 11, uri: "https://a.b/".to_owned() });
@@ -181,7 +200,15 @@ mod size_report {
                     line: Line::from_text(&"x".repeat(usize::from(cols)), cols, Style::DEFAULT),
                 })
                 .collect();
-            for (name, updates) in [("blank", blank), ("text", text)] {
+            // Every row a prompt with a status: the worst case for the per-row mark.
+            let prompts: Vec<RowUpdate> = (0..rows)
+                .map(|row| {
+                    let mut line = Line::blank(cols);
+                    line.mark = slopty_grid::SemanticMark::Prompt { exit: Some(1) };
+                    RowUpdate { row, line }
+                })
+                .collect();
+            for (name, updates) in [("blank", blank), ("text", text), ("prompts", prompts)] {
                 let frame = Frame {
                     seq: 1,
                     full: true,

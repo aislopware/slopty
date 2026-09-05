@@ -17,6 +17,7 @@
 
 pub mod convert;
 pub mod ghostty;
+pub mod osc133;
 pub mod search;
 
 pub use ghostty::GhosttyEngine;

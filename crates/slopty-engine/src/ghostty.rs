@@ -1,6 +1,7 @@
 //! [`VtEngine`] backed by libghostty-vt.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
@@ -17,10 +18,14 @@ use slopty_grid::{
 use slopty_proto::input::{KeyEvent, MouseAction, MouseEvent};
 use slopty_proto::terminal::{Frame, TermSize};
 
-use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, search};
+use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
 
 /// How long a program may hold synchronized output (mode 2026) before we ship frames anyway.
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// A prompt row takes the exit status of a `133;D` this many rows above it at most: the shell
+/// may print a blank line or a partial-line marker between the mark and the prompt.
+const EXIT_LOOKBACK_ROWS: u64 = 4;
 
 type Events = Rc<RefCell<Vec<EngineEvent>>>;
 
@@ -49,6 +54,12 @@ pub struct GhosttyEngine {
     scratch: String,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
+    /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
+    osc: osc133::Scanner,
+    /// Exit status reported on an absolute line (the row the cursor was on at the `D`).
+    exit_marks: BTreeMap<u64, Option<u8>>,
+    /// Absolute lines a primary prompt started on (`133;A`).
+    prompt_starts: BTreeSet<u64>,
 }
 
 /// A tracked row plus its absolute index.
@@ -110,6 +121,9 @@ impl GhosttyEngine {
             buttons_down: 0,
             scratch: String::with_capacity(16),
             uri_buf: vec![0; 256],
+            osc: osc133::Scanner::default(),
+            exit_marks: BTreeMap::new(),
+            prompt_starts: BTreeSet::new(),
         };
         engine.reanchor()?;
         Ok(engine)
@@ -170,7 +184,34 @@ impl GhosttyEngine {
     fn bump_epoch(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         self.base = 0;
+        self.exit_marks.clear();
+        self.prompt_starts.clear();
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
+    }
+
+    fn settle_or_bump(&mut self) {
+        if let Err(e) = self.settle() {
+            tracing::error!(error = %e, "engine settle failed; invalidating line numbering");
+            self.bump_epoch();
+        }
+    }
+
+    /// The shell wrote a prompt mark at the cursor: remember which line, and the status.
+    fn record_mark(&mut self, mark: osc133::Mark) {
+        let Ok(y) = self.term.cursor_y() else { return };
+        let Ok(scrollback) = self.term.scrollback_rows() else { return };
+        let line = self.base.saturating_add(scrollback as u64).saturating_add(u64::from(y));
+        // Evicted history can never be read again; drop its marks with it.
+        self.exit_marks = self.exit_marks.split_off(&self.base);
+        self.prompt_starts = self.prompt_starts.split_off(&self.base);
+        match mark {
+            osc133::Mark::PromptStart => {
+                self.prompt_starts.insert(line);
+            }
+            osc133::Mark::CommandEnd { exit } => {
+                self.exit_marks.insert(line, exit);
+            }
+        }
     }
 
     /// After output was consumed: follow the anchor to keep `base` exact, handle screen switches.
@@ -256,6 +297,7 @@ impl GhosttyEngine {
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
         let cursor = Self::cursor(&snapshot)?;
+        let scrollback = self.term.scrollback_rows()? as u64;
         let mut updates = Vec::with_capacity(if full { usize::from(rows) } else { 8 });
 
         let mut row_iter = self.rows_iter.update(&snapshot)?;
@@ -306,11 +348,14 @@ impl GhosttyEngine {
                 }
                 line.links = links.finish(x);
                 line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
+                let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
                 line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
                     convert::semantic_mark(
                         raw.semantic_prompt()
                             .unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
                         first,
+                        self.prompt_starts.contains(&abs),
+                        exit_for(&self.exit_marks, &self.prompt_starts, abs),
                     )
                 });
                 updates.push(RowUpdate { row: y, line });
@@ -321,7 +366,6 @@ impl GhosttyEngine {
         snapshot.set_dirty(Dirty::Clean)?;
 
         let total = self.total_rows()?;
-        let scrollback = self.term.scrollback_rows()? as u64;
         self.seq = self.seq.wrapping_add(1);
         Ok(Some(Frame {
             seq: self.seq,
@@ -392,10 +436,13 @@ impl GhosttyEngine {
         line.links = links.finish(cols);
         if let Some(row) = row_info {
             line.flags.set(LineFlags::WRAPPED, row.is_wrap_continuation()?);
+            let abs = self.base.saturating_add(u64::from(screen_y));
             line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
                 convert::semantic_mark(
                     row.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
                     first,
+                    self.prompt_starts.contains(&abs),
+                    exit_for(&self.exit_marks, &self.prompt_starts, abs),
                 )
             });
         }
@@ -452,6 +499,17 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The status a prompt starting at absolute `line` should carry: the newest `D` on it or within
+/// [`EXIT_LOOKBACK_ROWS`] above it, unless another prompt started in between and took it.
+fn exit_for(marks: &BTreeMap<u64, Option<u8>>, starts: &BTreeSet<u64>, line: u64) -> Option<u8> {
+    let from = line.saturating_sub(EXIT_LOOKBACK_ROWS);
+    let (&at, &exit) = marks.range(from..=line).next_back()?;
+    if starts.range(at..line).next().is_some() {
+        return None;
+    }
+    exit
 }
 
 /// Collects the OSC 8 runs of one row while its cells are walked left to right.
@@ -571,11 +629,17 @@ fn install_callbacks(
 
 impl VtEngine for GhosttyEngine {
     fn write(&mut self, bytes: &[u8]) {
-        self.term.vt_write(bytes);
-        if let Err(e) = self.settle() {
-            tracing::error!(error = %e, "engine settle failed; invalidating line numbering");
-            self.bump_epoch();
+        // Feed up to each prompt mark separately so the cursor row at the mark is exact.
+        let mut rest = bytes;
+        while let Some(found) = self.osc.scan(rest) {
+            let (head, tail) = rest.split_at(found.end.min(rest.len()));
+            self.term.vt_write(head);
+            self.settle_or_bump();
+            self.record_mark(found.mark);
+            rest = tail;
         }
+        self.term.vt_write(rest);
+        self.settle_or_bump();
     }
 
     fn resize(&mut self, size: TermSize) -> Result<(), EngineError> {
@@ -1011,6 +1075,75 @@ mod tests {
         assert_eq!(start, LineIndex(0));
         assert_eq!(lines[0].links[0].uri, "https://x.y/");
         assert_eq!((lines[0].links[0].col, lines[0].links[0].len), (2, 4));
+    }
+
+    #[test]
+    fn prompt_rows_carry_the_previous_commands_exit_status() {
+        let mut e = engine(20, 6);
+        let prompt = b"\x1b]133;A\x07$ \x1b]133;B\x07";
+        e.write(prompt);
+        e.write(b"false\r\n\x1b]133;C\x07");
+        // The shell's precmd: end of the command with its status, then the next prompt.
+        e.write(b"\x1b]133;D;1\x07");
+        e.write(prompt);
+        e.write(b"ls\r\n\x1b]133;C\x07file\r\n");
+        let (d, rest) = (b"\x1b]133;D".as_slice(), b";0\x07".as_slice());
+        // A mark split across two reads, followed by a blank line before the prompt.
+        e.write(d);
+        e.write(rest);
+        e.write(b"\r\n");
+        e.write(prompt);
+        let f = e.full_frame(0).unwrap();
+        let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
+        assert_eq!(marks[0], SemanticMark::Prompt { exit: None }, "nothing ran before it");
+        assert_eq!(marks[1], SemanticMark::Prompt { exit: Some(1) }, "adjacent prompts stay apart");
+        assert_eq!(marks[2], SemanticMark::Output);
+        assert_eq!(marks[3], SemanticMark::Output, "blank line the shell printed");
+        assert_eq!(marks[4], SemanticMark::Prompt { exit: Some(0) }, "status survives the gap");
+        assert_eq!(marks[5], SemanticMark::Output, "never written to");
+        assert!(f.updates[1].line.text().starts_with("$ "));
+        // A two-row prompt right under the last one (no command ran, so no status), scrolling
+        // the first row into history: the second row belongs to the block above it.
+        e.write(b"\r\n\x1b]133;A\x07~\r\n> \x1b]133;B\x07");
+        let f = e.full_frame(0).unwrap();
+        let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
+        assert_eq!(marks[3], SemanticMark::Prompt { exit: Some(0) });
+        assert_eq!(marks[4], SemanticMark::Prompt { exit: None }, "the status above is taken");
+        assert_eq!(marks[5], SemanticMark::PromptContinuation);
+        // The same blocks on the history path.
+        e.write(b"\r\n\r\n\r\n");
+        let (_, lines) = e.lines(LineIndex(0), 7).unwrap();
+        let marks: Vec<SemanticMark> = lines.iter().map(|l| l.mark).collect();
+        assert_eq!(marks[1], SemanticMark::Prompt { exit: Some(1) });
+        assert_eq!(marks[4], SemanticMark::Prompt { exit: Some(0) });
+        assert_eq!(marks[5], SemanticMark::Prompt { exit: None });
+        assert_eq!(marks[6], SemanticMark::PromptContinuation);
+    }
+
+    /// Bytes captured from a real zsh with the integration loaded (synchronized output,
+    /// bracketed paste, the partial-line `%` marker, `D` right before the `A` of the next
+    /// prompt): the output rows stay, the prompts carry the statuses.
+    #[test]
+    fn captured_zsh_bytes_keep_output_rows_and_statuses() {
+        let mut e = engine(80, 12);
+        e.write(b"\x1b[?2026h\x1b[?25h\x1b[?2026l\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A\x07\r\n\x1b[1m/tmp\x1b[0m \r\n> \x1b]133;B\x07\x1b[K\x1b[?2004h");
+        e.write(b"s\x08seq 1 3\x08\x08\x08\x08\x08\x08\x08\x1b[36ms\x1b[36me\x1b[36mq\x1b[39m\x1b[4C\x1b[?2004l\r\r\n\x1b]133;C\x071\r\n2\r\n3\r\n\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m                                                                               \r \r\x1b[?2026h\x1b[?25h\x1b[?2026l\x1b]133;D;0\x07\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A\x07\r\n\x1b[1m/tmp\x1b[0m \r\n> \x1b]133;B\x07\x1b[K\x1b[?2004h");
+        let f = e.full_frame(0).unwrap();
+        let texts: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(&texts[..7], ["", "/tmp ", "> seq 1 3", "1", "2", "3", ""]);
+        e.write(b"f\x08false\x1b[?2004l\r\r\n\x1b]133;C\x07\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m                                                                               \r \r\x1b]133;D;1\x07\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A\x07\r\n\x1b[1m/tmp\x1b[0m exit 1 \r\n> \x1b]133;B\x07\x1b[K\x1b[?2004h");
+        let f = e.full_frame(0).unwrap();
+        let rows: Vec<(String, SemanticMark)> =
+            f.updates.iter().map(|u| (u.line.text(), u.line.mark)).collect();
+        let prompt = |exit| SemanticMark::Prompt { exit };
+        assert_eq!(rows[0], (String::new(), prompt(None)));
+        assert_eq!(rows[1], ("/tmp ".to_owned(), SemanticMark::PromptContinuation));
+        assert_eq!(rows[2].0, "> seq 1 3");
+        assert_eq!(rows[3], ("1".to_owned(), SemanticMark::Output));
+        assert_eq!(rows[6], (String::new(), prompt(Some(0))), "status of seq, D then A");
+        assert_eq!(rows[8].0, "> false");
+        assert_eq!(rows[9], (String::new(), prompt(Some(1))), "status of false");
+        assert_eq!(rows[10], ("/tmp exit 1 ".to_owned(), SemanticMark::PromptContinuation));
     }
 
     #[test]
