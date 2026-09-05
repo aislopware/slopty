@@ -104,6 +104,14 @@ Loss recovery order: FEC (free) → NACK inside the playout window → `ForceLTR
 P-frame from an acked LTR) → IDR only when no acked LTR exists. Cursor is a separate low-rate
 channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
 
+**Audio** rides the same stream: ScreenCaptureKit captures the target's audio (48 kHz stereo,
+this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms packets, 96 kb/s) →
+one `Audio` datagram per packet, no FEC and no NACK (a lost 20 ms is cheaper than a late one).
+The host stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
+The client decodes with `AudioConverter` and plays through an `AudioQueue` fed from a 200 ms
+ring that pads silence on underrun and drops the oldest on overrun (`slopty-codec::audio`);
+iOS puts the app in the `Playback` session category so it plays past the ring switch.
+
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;

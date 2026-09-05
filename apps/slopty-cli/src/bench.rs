@@ -284,6 +284,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.refreshes,
         stats.decode_errors
     );
+    println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic paths: {}", link.paths());
     println!("  quic path (client side): {}", link.health());
 

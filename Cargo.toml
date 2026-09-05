@@ -136,6 +136,7 @@ objc2-core-media = { version = "=0.3.2", default-features = false, features = [
     "CMAttachment",
     "CMSync",
     "objc2-core-video",
+    "objc2-core-audio-types",
 ] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = [
     "std",
@@ -191,6 +192,16 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 objc2-audio-toolbox = { version = "=0.3.2", default-features = false, features = [
     "std",
     "AudioServices",
+    "AudioConverter",
+    "AudioQueue",
+    "objc2-core-audio-types",
+    "objc2-core-foundation",
+] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "AVAudioSession",
+    "AVAudioSessionTypes",
 ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"

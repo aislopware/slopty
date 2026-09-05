@@ -14,6 +14,7 @@ workspace = true
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
+objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 objc2-core-media.workspace = true
@@ -25,6 +26,7 @@ slopty-codec.workspace = true
 slopty-core.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 slopty-core.workspace = true

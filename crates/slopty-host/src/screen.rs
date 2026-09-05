@@ -17,13 +17,16 @@ use std::sync::{Arc, Weak};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use slopty_capture::{
-    Capture, CaptureConfig, CaptureError, CapturedFrame, PixelFormat, Rect, Shareable, Target,
-    host_now_us,
+    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, PixelFormat, Rect,
+    Shareable, Target, host_now_us,
 };
+use slopty_codec::audio::OpusEncoder;
 use slopty_codec::{CodecError, EncodedPacket, Encoder, EncoderConfig, FrameOptions};
 use slopty_core::StreamId;
 use slopty_input::{Injector, InputError};
-use slopty_media::{EncodedFrame, MediaError, Packetizer, Redundancy, cursor_datagram};
+use slopty_media::{
+    EncodedFrame, MediaError, Packetizer, Redundancy, audio_datagram, cursor_datagram,
+};
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
     CaptureTarget, Quality, ReceiverReport, ScreenEvent, ScreenInput, VideoCodec,
@@ -110,6 +113,8 @@ pub struct ScreenStats {
     pub latency_max_us: u64,
     /// Sum of capture-to-packet latencies, microseconds (divide by `encoded`).
     pub latency_sum_us: u64,
+    /// Opus packets sent.
+    pub audio_packets: u64,
 }
 
 /// Enumerate shareable content.
@@ -136,6 +141,7 @@ struct Pending {
 }
 
 struct Counters {
+    audio_packets: AtomicU64,
     captured: AtomicU64,
     dropped: AtomicU64,
     encoded: AtomicU64,
@@ -148,6 +154,7 @@ struct Counters {
 impl Counters {
     const fn new() -> Self {
         Self {
+            audio_packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             encoded: AtomicU64::new(0),
@@ -167,13 +174,28 @@ impl Counters {
             queue_full: self.queue_full.load(Ordering::Relaxed),
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
+            audio_packets: self.audio_packets.load(Ordering::Relaxed),
         }
     }
+}
+
+/// Audio gate: after this long without a sample above [`AUDIO_FLOOR`] the stream stops
+/// sending packets (silent apps cost nothing on the wire; the client pads silence).
+const AUDIO_HOLD_US: u64 = 300_000;
+/// Anything quieter than this is silence (-80 dBFS).
+const AUDIO_FLOOR: f32 = 1e-4;
+
+/// The encoder and the silence gate.
+struct AudioState {
+    encoder: Option<OpusEncoder>,
+    seq: u32,
+    last_loud_us: u64,
 }
 
 struct Shared {
     id: StreamId,
     encoder: RwLock<Option<Encoder>>,
+    audio: Mutex<AudioState>,
     pending: Mutex<Pending>,
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
@@ -227,6 +249,55 @@ impl Shared {
             pending.keyframe |= options.force_keyframe;
             pending.refresh |= options.force_ltr_refresh;
             pending.acked.extend(options.acked_ltr);
+        }
+    }
+
+    /// ScreenCaptureKit delivered PCM: encode and send unless the source has gone quiet.
+    fn on_audio(&self, chunk: &CapturedAudio) {
+        let now = host_now_us();
+        let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
+        for (seq, packet) in packets {
+            if let Some(datagram) = audio_datagram(self.id, seq, send_ms_lo(now), &packet)
+                && self.push(datagram)
+            {
+                self.counters.audio_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
+    fn encode_audio(&self, samples: &[f32], now: u64) -> Option<Vec<(u32, Bytes)>> {
+        let loud = samples.iter().any(|s| s.abs() > AUDIO_FLOOR);
+        let mut audio = self.audio.lock();
+        if loud {
+            audio.last_loud_us = now;
+        } else if now.saturating_sub(audio.last_loud_us) > AUDIO_HOLD_US {
+            return None;
+        }
+        if audio.encoder.is_none() {
+            match OpusEncoder::new() {
+                Ok(encoder) => audio.encoder = Some(encoder),
+                Err(e) => {
+                    tracing::warn!(stream = %self.id, error = %e, "no Opus encoder; audio off");
+                    // Never retried: keep the gate closed for good.
+                    audio.last_loud_us = 0;
+                    return None;
+                }
+            }
+        }
+        let AudioState { encoder: Some(encoder), seq, .. } = &mut *audio else { return None };
+        let mut packets = Vec::new();
+        let encoded = encoder.push(samples, |packet| {
+            *seq = seq.wrapping_add(1);
+            packets.push((*seq, Bytes::copy_from_slice(packet)));
+        });
+        drop(audio);
+        match encoded {
+            Ok(()) => Some(packets),
+            Err(e) => {
+                tracing::debug!(stream = %self.id, error = %e, "opus encode");
+                None
+            }
         }
     }
 
@@ -292,7 +363,7 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     let codec = quality.codec;
     let format =
         if codec == VideoCodec::HevcMain10 { PixelFormat::P010 } else { PixelFormat::Nv12 };
-    let capture = CaptureConfig { width, height, fps, format, queue_depth: 2 };
+    let capture = CaptureConfig { width, height, fps, format, queue_depth: 2, audio: true };
     let encoder =
         EncoderConfig { width, height, codec, fps, bitrate_bps: quality.bitrate_bps.max(100_000) };
     (capture, encoder)
@@ -344,6 +415,7 @@ impl ScreenStream {
         let shared = Arc::new(Shared {
             id,
             encoder: RwLock::new(None),
+            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
             pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
             packetizer: Mutex::new(Packetizer::new(id)),
             redundancy: Mutex::new(Redundancy::new()),
@@ -357,10 +429,12 @@ impl ScreenStream {
 
         let (started_tx, started_rx) = oneshot::channel();
         let sink = Arc::clone(&shared);
+        let audio_sink = Arc::clone(&shared);
         let capture = Capture::start(
             &resolved,
             &capture_config,
             move |frame| sink.on_frame(&frame),
+            Some(Box::new(move |chunk| audio_sink.on_audio(&chunk))),
             on_stop,
             move |result| {
                 let _receiver_gone = started_tx.send(result);

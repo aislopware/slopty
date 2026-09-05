@@ -15,7 +15,10 @@ slopty-proto.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-audio-toolbox.workspace = true
+objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
+parking_lot.workspace = true
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true

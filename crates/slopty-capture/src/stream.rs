@@ -7,8 +7,15 @@ use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2_core_audio_types::{
+    AudioBuffer, AudioBufferList, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
+    kAudioFormatLinearPCM,
+};
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
-use objc2_core_media::{CMClock, CMSampleBuffer, CMTime, CMTimeFlags};
+use objc2_core_media::{
+    CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMClock, CMSampleBuffer,
+    CMTime, CMTimeFlags,
+};
 use objc2_core_video::{
     CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -64,6 +71,22 @@ pub struct CaptureConfig {
     pub format: PixelFormat,
     /// Buffers in flight between ScreenCaptureKit and us; 2 is the latency floor.
     pub queue_depth: u8,
+    /// Also capture the target's audio (48 kHz stereo, this process excluded).
+    pub audio: bool,
+}
+
+/// Audio sample rate ScreenCaptureKit is asked for.
+pub const AUDIO_RATE: u32 = 48_000;
+/// Audio channels ScreenCaptureKit is asked for.
+pub const AUDIO_CHANNELS: u32 = 2;
+
+/// A run of audio from the stream: interleaved stereo float at [`AUDIO_RATE`].
+#[derive(Debug)]
+pub struct CapturedAudio {
+    /// Presentation time on the host clock, microseconds.
+    pub pts_us: u64,
+    /// Interleaved L/R samples.
+    pub samples: Vec<f32>,
 }
 
 /// A frame from the stream.
@@ -173,10 +196,13 @@ fn filter_pixel_size(filter: &SCContentFilter) -> ((u32, u32), f32) {
 }
 
 type FrameSink = Box<dyn Fn(CapturedFrame) + Send + Sync>;
+/// Where audio goes; `None` leaves audio off.
+pub type AudioSink = Box<dyn Fn(CapturedAudio) + Send + Sync>;
 type StopSink = Box<dyn Fn(CaptureError) + Send + Sync>;
 
 struct Ivars {
     sink: FrameSink,
+    audio: Option<AudioSink>,
     on_stop: StopSink,
 }
 
@@ -201,6 +227,10 @@ define_class!(
         ) {
             if kind == SCStreamOutputType::Screen {
                 self.screen_sample(sample);
+            } else if kind == SCStreamOutputType::Audio {
+                self.audio_sample(sample);
+            } else {
+                tracing::trace!(?kind, "other sample");
             }
         }
     }
@@ -214,8 +244,8 @@ define_class!(
 );
 
 impl Output {
-    fn new(sink: FrameSink, on_stop: StopSink) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(Ivars { sink, on_stop });
+    fn new(sink: FrameSink, audio: Option<AudioSink>, on_stop: StopSink) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { sink, audio, on_stop });
         // SAFETY: `NSObject`'s `init` on a freshly allocated instance with ivars set.
         unsafe { msg_send![super(this), init] }
     }
@@ -237,6 +267,140 @@ impl Output {
             age_us: now_us.saturating_sub(capture_ts_us),
         });
     }
+}
+
+impl Output {
+    /// Interleave the sample's PCM and hand it to the audio sink.
+    fn audio_sample(&self, sample: &CMSampleBuffer) {
+        let Some(sink) = &self.ivars().audio else { return };
+        // SAFETY: valid sample buffer.
+        let Some(description) = (unsafe { sample.format_description() }) else {
+            tracing::trace!("audio sample without a format description");
+            return;
+        };
+        // SAFETY: CoreMedia rule: the pointer is into the description, valid while it lives.
+        let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&description) };
+        // SAFETY: as above; null for a non-audio description.
+        let Some(asbd) = (unsafe { asbd.as_ref() }) else {
+            tracing::trace!("audio sample with a non-audio description");
+            return;
+        };
+        let float = asbd.mFormatID == kAudioFormatLinearPCM
+            && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && asbd.mBitsPerChannel == 32;
+        if !float {
+            tracing::warn!(format = asbd.mFormatID, flags = asbd.mFormatFlags, "audio not float32");
+            return;
+        }
+        let non_interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0;
+        let channels = asbd.mChannelsPerFrame.max(1) as usize;
+        // SAFETY: valid sample buffer.
+        let frames = usize::try_from(unsafe { sample.num_samples() }).unwrap_or(0);
+        if frames == 0 {
+            tracing::trace!("empty audio sample");
+            return;
+        }
+        // Ask CoreMedia how big the (flexible) buffer list is, then fetch it.
+        let mut needed: usize = 0;
+        // SAFETY: CoreMedia rule: a null list with a size-out pointer only reports the size.
+        let status = unsafe {
+            sample.audio_buffer_list_with_retained_block_buffer(
+                &raw mut needed,
+                std::ptr::null_mut(),
+                0,
+                None,
+                None,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if needed == 0 {
+            tracing::debug!(status, "audio buffer list size");
+            return;
+        }
+        let words = needed.div_ceil(size_of::<u64>());
+        let mut list: Vec<u64> = vec![0; words];
+        let mut block: *mut CMBlockBuffer = std::ptr::null_mut();
+        // SAFETY: CoreMedia rule: the list is `needed` bytes, 8-byte aligned, which is what the
+        // struct wants; the block buffer comes back retained and is released below.
+        let status = unsafe {
+            sample.audio_buffer_list_with_retained_block_buffer(
+                std::ptr::null_mut(),
+                list.as_mut_ptr().cast::<AudioBufferList>(),
+                needed,
+                None,
+                None,
+                0,
+                &raw mut block,
+            )
+        };
+        if status != 0 {
+            tracing::debug!(status, needed, "audio buffer list");
+            return;
+        }
+        // SAFETY: CoreMedia rule (Copy rule): the out block buffer is +1; owning it here
+        // releases it when we are done reading the list it backs.
+        let _block = NonNull::new(block).map(|p| unsafe { CFRetained::from_raw(p) });
+        let head = list.as_ptr().cast::<AudioBufferList>();
+        // SAFETY: CoreMedia filled a well-formed `AudioBufferList`: the count comes first.
+        let count = usize::try_from(unsafe { (*head).mNumberBuffers }).unwrap_or(0);
+        // SAFETY: `mBuffers` is the flexible array member at the struct's own offset.
+        let first = unsafe { std::ptr::addr_of!((*head).mBuffers) }.cast::<AudioBuffer>();
+        // Never trust the count past the bytes CoreMedia said it wrote.
+        let fit = needed
+            .saturating_sub(std::mem::offset_of!(AudioBufferList, mBuffers))
+            .checked_div(size_of::<AudioBuffer>())
+            .unwrap_or(0);
+        // SAFETY: `count.min(fit)` `AudioBuffer`s follow contiguously inside the `needed` bytes.
+        let entries = unsafe { std::slice::from_raw_parts(first, count.min(fit)) };
+        let samples = interleave(entries, frames, non_interleaved, channels);
+        if samples.is_empty() {
+            return;
+        }
+        // SAFETY: valid sample buffer.
+        let pts = unsafe { sample.presentation_time_stamp() };
+        sink(CapturedAudio { pts_us: micros(pts).unwrap_or(0), samples });
+    }
+}
+
+/// Stereo interleaved samples from ScreenCaptureKit's buffers (mono duplicated, extra
+/// channels dropped).
+fn interleave(
+    entries: &[AudioBuffer],
+    frames: usize,
+    non_interleaved: bool,
+    channels: usize,
+) -> Vec<f32> {
+    let floats = |b: &AudioBuffer| -> &[f32] {
+        let n = usize::try_from(b.mDataByteSize)
+            .unwrap_or(0)
+            .checked_div(size_of::<f32>())
+            .unwrap_or(0);
+        if b.mData.is_null() || n == 0 {
+            return &[];
+        }
+        // SAFETY: CoreMedia rule: `mData` holds `mDataByteSize` bytes of the described
+        // float32 PCM for as long as the block buffer lives (the caller holds it).
+        unsafe { std::slice::from_raw_parts(b.mData.cast::<f32>(), n) }
+    };
+    let mut out = Vec::with_capacity(frames.saturating_mul(2));
+    if non_interleaved {
+        let left = entries.first().map_or(&[][..], floats);
+        let right = entries.get(1).map_or(left, floats);
+        for (i, &l) in left.iter().take(frames).enumerate() {
+            out.push(l);
+            out.push(right.get(i).copied().unwrap_or(l));
+        }
+    } else {
+        let data = entries.first().map_or(&[][..], floats);
+        for frame in data.chunks_exact(channels.max(1)).take(frames) {
+            let l = frame.first().copied().unwrap_or(0.0);
+            let r = frame.get(1).copied().unwrap_or(l);
+            out.push(l);
+            out.push(r);
+        }
+    }
+    out
 }
 
 /// `SCStreamFrameInfoStatus` from the sample's first attachment dictionary.
@@ -304,11 +468,13 @@ impl Capture {
         target: &Target,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame) + Send + Sync + 'static,
+        audio: Option<AudioSink>,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<Self, CaptureError> {
         let configuration = stream_configuration(config);
-        let output = Output::new(Box::new(sink), Box::new(on_stop));
+        let wants_audio = config.audio && audio.is_some();
+        let output = Output::new(Box::new(sink), audio, Box::new(on_stop));
         let delegate: &ProtocolObject<dyn SCStreamDelegate> = ProtocolObject::from_ref(&*output);
         // SAFETY: filter, configuration and delegate are valid; the delegate is retained by the
         // stream (it is also kept alive by `Capture`).
@@ -331,6 +497,17 @@ impl Capture {
             )
         }
         .map_err(|e| CaptureError::from_ns(&e))?;
+        if wants_audio {
+            // SAFETY: valid stream, output and queue.
+            unsafe {
+                stream.addStreamOutput_type_sampleHandlerQueue_error(
+                    handler,
+                    SCStreamOutputType::Audio,
+                    Some(&queue),
+                )
+            }
+            .map_err(|e| CaptureError::from_ns(&e))?;
+        }
         let block = completion(done);
         // SAFETY: the block is copied by the framework; it captures only `Send` data.
         unsafe {
@@ -431,7 +608,19 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
-        c.setCapturesAudio(false);
+        c.setCapturesAudio(config.audio);
+    }
+    // SAFETY: plain property write on the fresh configuration object.
+    unsafe {
+        c.setSampleRate(isize::try_from(AUDIO_RATE).unwrap_or(isize::MAX));
+    }
+    // SAFETY: plain property write on the fresh configuration object.
+    unsafe {
+        c.setChannelCount(isize::try_from(AUDIO_CHANNELS).unwrap_or(isize::MAX));
+    }
+    // SAFETY: plain property write on the fresh configuration object.
+    unsafe {
+        c.setExcludesCurrentProcessAudio(true);
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {

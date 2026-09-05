@@ -17,6 +17,7 @@ use gpui::WindowOptions;
 #[unsafe(no_mangle)]
 pub extern "C" fn slopty_ios_run() -> bool {
     init_logging();
+    slopty_platform::playback_audio_session();
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {

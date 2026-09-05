@@ -5535,6 +5535,20 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6948501a91121d6399b79abaa33a8aa4ea7857fe019f341b8c23ad6e81b79b08"
 dependencies = [
+ "bitflags 2.13.1",
+ "objc2 0.6.4",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-avf-audio"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
+dependencies = [
+ "bitflags 2.13.1",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
@@ -7975,6 +7989,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "objc2 0.6.4",
+ "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",
@@ -7986,6 +8001,7 @@ dependencies = [
  "slopty-core",
  "slopty-proto",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -8031,10 +8047,13 @@ dependencies = [
 name = "slopty-codec"
 version = "0.1.0"
 dependencies = [
+ "objc2-audio-toolbox",
+ "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
  "objc2-video-toolbox",
+ "parking_lot",
  "pretty_assertions",
  "slopty-proto",
  "thiserror 2.0.20",
@@ -8144,6 +8163,7 @@ dependencies = [
  "gpui-kit",
  "gpui_ios",
  "slopty-app",
+ "slopty-platform",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8192,7 +8212,9 @@ version = "0.1.0"
 dependencies = [
  "objc2 0.6.4",
  "objc2-audio-toolbox",
+ "objc2-avf-audio",
  "objc2-foundation 0.3.2",
+ "tracing",
 ]
 
 [[package]]

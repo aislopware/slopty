@@ -65,3 +65,38 @@ pub fn attention() {
         );
     }
 }
+
+/// Put the process in the `Playback` audio session category, mixing with other apps.
+///
+/// Remote-window audio then plays through the ring switch and alongside music. macOS has no
+/// audio session; the call is a no-op there.
+#[cfg_attr(target_os = "macos", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
+pub fn playback_audio_session() {
+    #[cfg(target_os = "ios")]
+    {
+        use objc2_avf_audio::{
+            AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
+        };
+        // SAFETY: AVFoundation rule: the shared session is created on first use from any
+        // thread; the category constant is the framework's own static (null only if the
+        // framework failed to load, which `Option` covers).
+        let session = unsafe { AVAudioSession::sharedInstance() };
+        // SAFETY: as above.
+        let Some(category) = (unsafe { AVAudioSessionCategoryPlayback }) else { return };
+        // SAFETY: category and options are valid for `setCategory:withOptions:error:`.
+        let set = unsafe {
+            session.setCategory_withOptions_error(
+                category,
+                AVAudioSessionCategoryOptions::MixWithOthers,
+            )
+        };
+        if let Err(e) = set {
+            tracing::warn!(error = %e, "audio session category");
+            return;
+        }
+        // SAFETY: activating the configured shared session.
+        if let Err(e) = unsafe { session.setActive_error(true) } {
+            tracing::warn!(error = %e, "audio session activate");
+        }
+    }
+}

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
+use slopty_codec::audio::{OpusDecoder, Player};
 use slopty_codec::{DecodedFrame, Decoder};
 use slopty_core::StreamId;
 use slopty_media::{Action, Config, Ingest, Reassembler};
@@ -165,6 +166,34 @@ pub struct ScreenStats {
     pub decode_errors: u64,
     /// Datagrams seen.
     pub datagrams: u64,
+    /// Opus packets played.
+    pub audio_packets: u64,
+    /// Opus packets missing from the sequence (or too late to play).
+    pub audio_lost: u64,
+}
+
+/// Playback for one stream, created on its first audio packet.
+enum AudioSlot {
+    /// No audio has arrived yet.
+    Unopened,
+    /// Playing.
+    Open(Audio),
+    /// Playback could not start; packets are dropped.
+    Failed,
+}
+
+/// Decoder, player and sequence state.
+struct Audio {
+    decoder: OpusDecoder,
+    player: Player,
+    /// Last sequence played.
+    seq: u32,
+}
+
+impl Audio {
+    fn new() -> Result<Self, slopty_codec::CodecError> {
+        Ok(Self { decoder: OpusDecoder::new()?, player: Player::new()?, seq: 0 })
+    }
 }
 
 /// A live client-side stream. Dropping it stops the task and unroutes the stream; the caller
@@ -256,6 +285,7 @@ pub fn spawn_screen(
         stats: stats_tx,
         cursor_seq: None,
         counters: ScreenStats::default(),
+        audio: AudioSlot::Unopened,
     };
     let task = runtime.spawn(worker.run());
     ScreenHandle { stream, frames, cursor, stats, router: router.clone(), task }
@@ -273,9 +303,41 @@ struct Worker {
     stats: watch::Sender<ScreenStats>,
     cursor_seq: Option<u32>,
     counters: ScreenStats,
+    audio: AudioSlot,
 }
 
 impl Worker {
+    /// Decode and queue one Opus packet; late duplicates are dropped, gaps counted.
+    fn play_audio(&mut self, seq: u32, payload: &Bytes) {
+        if matches!(self.audio, AudioSlot::Unopened) {
+            self.audio = match Audio::new() {
+                Ok(audio) => AudioSlot::Open(audio),
+                Err(e) => {
+                    tracing::warn!(error = %e, "audio playback unavailable");
+                    AudioSlot::Failed
+                }
+            };
+        }
+        let AudioSlot::Open(audio) = &mut self.audio else { return };
+        let gap = seq.wrapping_sub(audio.seq);
+        if audio.seq != 0 && (gap == 0 || gap > u32::MAX / 2) {
+            self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
+            return;
+        }
+        if audio.seq != 0 && gap > 1 {
+            self.counters.audio_lost =
+                self.counters.audio_lost.saturating_add(u64::from(gap.saturating_sub(1)));
+        }
+        audio.seq = seq;
+        match audio.decoder.decode(payload) {
+            Ok(pcm) => {
+                audio.player.push(pcm);
+                self.counters.audio_packets = self.counters.audio_packets.saturating_add(1);
+            }
+            Err(e) => tracing::debug!(stream = %self.stream, error = %e, "opus decode"),
+        }
+    }
+
     async fn run(mut self) {
         let mut report = tokio::time::interval(REPORT_EVERY);
         report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -315,7 +377,8 @@ impl Worker {
                     self.cursor.send_replace(state);
                 }
             }
-            Ingest::Audio { .. } | Ingest::Ignored(_) => {}
+            Ingest::Audio { seq, payload } => self.play_audio(seq, &payload),
+            Ingest::Ignored(_) => {}
         }
     }
 

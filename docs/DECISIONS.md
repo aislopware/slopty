@@ -471,6 +471,34 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ **Cursor** is a separate channel drawn client-side; capture with `showsCursor = false`.
 - ✅ **Audio**: SCK `capturesAudio` → `opus` 0.4.0 (verified; `audiopus` is dead) → `objc2-avf-audio`.
 
+## Audio
+
+- ✅ Opus via Apple's `AudioConverter` (`kAudioFormatOpus`), no libopus: the encoder exists on
+  macOS 26.5 (verified 2026-09-05: `encodes_and_decodes_a_tone` round-trips a 440 Hz tone;
+  the first packet comes back 120 frames short, Opus pre-skip) and the decoder on both
+  platforms. One fixed configuration, 48 kHz stereo float interleaved, 960-frame packets at
+  96 kb/s, so nothing about the format travels on the wire. Playback is an `AudioQueue` with
+  three 20 ms buffers refilled from a mutex-guarded ring (≤200 ms; underrun pads silence and
+  counts, overrun drops the oldest). The input-proc pattern: the proc hands its one slice and
+  then returns a private status (`'SLOP'`) with zero packets, which `FillComplexBuffer`
+  surfaces and the caller treats as "done".
+- ✅ Capture rides the video `SCStream` (`capturesAudio`, `sampleRate 48000`, `channelCount 2`,
+  `excludesCurrentProcessAudio`) with a second stream output of type `Audio` on the same
+  serial queue. `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` returns
+  `kCMSampleBufferError_ArrayTooSmall` (-12737) unless the list is sized by a first call with
+  a null list, so the code asks for the size, allocates 8-byte-aligned words, then fetches;
+  ScreenCaptureKit delivers float32 non-interleaved, which `interleave` folds to L/R.
+- ✅ Transport: one `Kind::Audio` datagram per packet (~240 B), sequence in the frame field,
+  no parity and no retransmit; the client counts gaps as `audio_lost` and the ring pads. Host
+  gate: after 300 ms without a sample above -80 dBFS no packets go out, so the many silent
+  windows on a canvas cost nothing; the first loud chunk reopens it (the 300 ms hold keeps
+  natural pauses from chattering). Measured 2026-09-05 on loopback (display 6, `afplay`
+  Glass.aiff ×3, 5 s): 249 packets sent, 246 received, 0 lost, bench player audible.
+- ⏸ Per-item mute in the UI, a real jitter estimator, and PLC (Apple's decoder takes no
+  empty packet for concealment as far as the test showed; not tried). No `Quality` field for
+  audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes
+  "on" free.
+
 ## Input
 
 - ✅ **`slopty-input` = `CGEvent` injection, one `Injector` per screen stream** (verified end to
