@@ -60,8 +60,12 @@ pub struct Stack {
     pub ticket: String,
     /// Connected to the app's test socket.
     pub driver: Driver,
-    /// ptyd, hostd, app; killed on drop.
+    /// ptyd, hostd, app, and any helper windows; killed on drop.
     pub children: Vec<Child>,
+    /// Which of [`Self::children`] is the app process, so [`Self::kill_app`] kills the app by
+    /// role and not the last-pushed child (e.g. an idle-window helper). `None` in a simulator,
+    /// where the app is not a child here, and between [`Self::kill_app`] and its relaunch.
+    pub app_ix: Option<usize>,
     /// The simulator the app runs in, when it does; the app is terminated there on shutdown.
     pub simulator: Option<Simulator>,
     /// The daemons' log level.
@@ -495,9 +499,11 @@ impl Stack {
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (mut children, ticket) = daemons(root, host_name, &log, env).await?;
         let (app, driver) = spawn_app(root, "app", &log, env).await?;
+        let app_ix = Some(children.len());
         children.push(app);
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::pair(Self { dir, ticket, driver, children, simulator: None, log, app_env }).await
+        Self::pair(Self { dir, ticket, driver, children, app_ix, simulator: None, log, app_env })
+            .await
     }
 
     /// Kill the app (SIGKILL: no goodbye to the host, as a crash or a dead battery would
@@ -508,7 +514,8 @@ impl Stack {
     /// When the process cannot be signalled.
     pub async fn kill_app(&mut self) -> Result<()> {
         anyhow::ensure!(self.simulator.is_none(), "the app runs in a simulator");
-        let mut app = self.children.pop().context("no app process")?;
+        let ix = self.app_ix.take().context("no app process")?;
+        let mut app = self.children.remove(ix);
         app.start_kill().context("kill slopty-app")?;
         let _status = app.wait().await;
         Ok(())
@@ -527,6 +534,7 @@ impl Stack {
         // the new process to bind rather than connecting to the dead one (Connection refused).
         let _removed = std::fs::remove_file(self.dir.path().join("app.sock"));
         let (app, mut driver) = spawn_app(self.dir.path(), "app", &self.log, &env).await?;
+        self.app_ix = Some(self.children.len());
         self.children.push(app);
         driver.ok(&crate::Command::Ping).await?;
         driver
@@ -611,8 +619,17 @@ impl Stack {
         let (children, ticket) = daemons(root, host_name, &log, &[]).await?;
         let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::pair(Self { dir, ticket, driver, children, simulator: Some(simulator), log, app_env })
-            .await
+        Self::pair(Self {
+            dir,
+            ticket,
+            driver,
+            children,
+            app_ix: None,
+            simulator: Some(simulator),
+            log,
+            app_env,
+        })
+        .await
     }
 
     /// Ping, pair with the host and wait for the connection.
