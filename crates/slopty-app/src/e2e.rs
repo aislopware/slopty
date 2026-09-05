@@ -234,6 +234,38 @@ fn apply(
             );
             Reply::Ok
         }
+        Command::Drag { x, y, to_x, to_y } => {
+            let (from, to) = (point(px(x), px(y)), point(px(to_x), px(to_y)));
+            let button = MouseButton::Left;
+            let _down = window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button,
+                    position: from,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            let _moved = window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: to,
+                    pressed_button: Some(button),
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+            let _up = window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button,
+                    position: to,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
         Command::Move { x, y } => {
             let _moved = window.dispatch_event(
                 PlatformInput::MouseMove(MouseMoveEvent {
@@ -468,6 +500,7 @@ impl Workspace {
         };
         let canvas = canvas.read(cx);
         dump.zoom = canvas.zoom();
+        dump.client = canvas.me().to_string();
         dump.hooks_offered = canvas.hooks_offered();
         if canvas.focus_handle(cx).is_focused(window) {
             focused = String::from("canvas");
@@ -483,6 +516,10 @@ impl Workspace {
                 ItemKind::Display { .. } => ("display", None),
                 ItemKind::Note { .. } => ("note", None),
             };
+            let note = match &item.kind {
+                ItemKind::Note { text } => Some(text.clone()),
+                _ => None,
+            };
             let b = canvas.window_bounds(item.rect);
             dump.items.push(ItemInfo {
                 id: item.id.to_string(),
@@ -497,6 +534,7 @@ impl Workspace {
                 ],
                 active: canvas.active_item() == Some(item.id),
                 sleeping: item.sleeping,
+                note,
             });
             if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
                 && let Some(view) = canvas.screen(item.id)
@@ -549,6 +587,7 @@ impl Workspace {
                     conversation,
                     latency: latency_info(view.latency()),
                     face: view.metrics().map(|m| face_info(&m)),
+                    driving: view.driving(),
                 });
             }
         }

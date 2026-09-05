@@ -64,6 +64,31 @@ pub struct Stack {
     pub children: Vec<Child>,
     /// The simulator the app runs in, when it does; the app is terminated there on shutdown.
     pub simulator: Option<Simulator>,
+    /// The daemons' log level.
+    pub log: String,
+    /// Extra environment the app was launched with, so [`Self::relaunch_app`] repeats it.
+    pub app_env: Vec<(String, String)>,
+}
+
+/// A second client of the same host: another app process (or the app in a simulator) with
+/// its own data directory, identity and test socket, paired with a ticket of its own.
+#[derive(Debug)]
+pub struct SecondApp {
+    /// Connected to its test socket.
+    pub driver: Driver,
+    /// The process, when it runs here (killed on drop); `None` in a simulator.
+    pub child: Option<Child>,
+    /// The simulator it runs in, when it does.
+    pub simulator: Option<Simulator>,
+}
+
+/// Two clients on one host: the stack's own app (`a`) and a [`SecondApp`] (`b`).
+#[derive(Debug)]
+pub struct Pair {
+    /// ptyd, hostd and the first app.
+    pub stack: Stack,
+    /// The second app.
+    pub b: SecondApp,
 }
 
 /// The window [`Stack::start_idle_window`] opened: a target that draws nothing until it is
@@ -279,6 +304,127 @@ printf '\033]2;\342\234\263 fix the tests\007'
 stage quit
 "#;
 
+/// Start one app process named `name` under `root` (its data directory is `root/<name>`, its
+/// test socket `root/<name>.sock`) and connect to its socket. `env` overrides the defaults.
+async fn spawn_app(
+    root: &Path,
+    name: &str,
+    log: &str,
+    env: &[(&str, &str)],
+) -> Result<(Child, Driver)> {
+    let app_dir = root.join(name);
+    std::fs::create_dir_all(&app_dir)?;
+    let app_sock = root.join(format!("{name}.sock"));
+    let mut app = Command::new(bin("slopty-app")?)
+        .env("RUST_LOG", log)
+        .env("SLOPTY_DATA_DIR", &app_dir)
+        .env(crate::SOCKET_ENV, &app_sock)
+        // Local echo would put predicted text in the rows before the host confirms it.
+        .env("SLOPTY_PREDICT", "never")
+        .envs(env.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn slopty-app")?;
+    wait_for_path(&app_sock, &mut app, "slopty-app").await?;
+    let driver = connect_with_retry(&app_sock, &mut app).await?;
+    Ok((app, driver))
+}
+
+/// Connect to `sock`, retrying for a few seconds: under heavy load the listener may not accept
+/// in the instant after it binds the socket file (`Connection refused`). A process that has
+/// actually died is caught between attempts and fails fast.
+async fn connect_with_retry(sock: &Path, child: &mut Child) -> Result<Driver> {
+    let deadline = tokio::time::Instant::now().checked_add(STARTUP);
+    loop {
+        match Driver::connect(sock).await {
+            Ok(driver) => return Ok(driver),
+            Err(e) => {
+                if let Some(status) = child.try_wait()? {
+                    bail!("slopty-app exited before it accepted: {status}");
+                }
+                if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                    return Err(e);
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        }
+    }
+}
+
+/// Launch the app in a booted simulator with its socket at `root/<name>.sock` and its data
+/// under `root/<name>` (the simulator shares this file system), and connect to it. Each
+/// variable of `env` is passed as `SIMCTL_CHILD_<name>`.
+async fn spawn_simulator_app(
+    root: &Path,
+    name: &str,
+    log: &str,
+    simulator: &Simulator,
+    env: &[(&str, &str)],
+) -> Result<Driver> {
+    let app_dir = root.join(name);
+    std::fs::create_dir_all(&app_dir)?;
+    let app_sock = root.join(format!("{name}.sock"));
+    let launch = Command::new("xcrun")
+        .args(["simctl", "launch", "--terminate-running-process"])
+        .arg(&simulator.udid)
+        .arg(&simulator.bundle_id)
+        .env("SIMCTL_CHILD_RUST_LOG", log)
+        .env("SIMCTL_CHILD_SLOPTY_DATA_DIR", &app_dir)
+        .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
+        .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
+        // Glass only: the key bar stays in the frame whatever the simulator has attached.
+        .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
+        .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status();
+    // `launch` blocks while the simulator is still booting; the xtask waits for
+    // `bootstatus` first, so a long wait here is a broken simulator, not a slow one.
+    let launched = tokio::time::timeout(STARTUP, launch)
+        .await
+        .context("simctl launch did not return (is the simulator booted?)")?
+        .context("xcrun simctl launch")?;
+    anyhow::ensure!(launched.success(), "simctl launch failed: {launched}");
+    wait_for_socket(&app_sock, "the app in the simulator").await?;
+    let deadline = tokio::time::Instant::now().checked_add(STARTUP);
+    loop {
+        match Driver::connect(&app_sock).await {
+            Ok(driver) => return Ok(driver),
+            Err(_) if deadline.is_some_and(|d| tokio::time::Instant::now() < d) => {
+                tokio::time::sleep(POLL).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Ping, redeem `ticket` and wait for the host to connect.
+async fn pair_driver(driver: &mut Driver, ticket: &str) -> Result<()> {
+    driver.ok(&crate::Command::Ping).await?;
+    driver.ok(&crate::Command::Pair { ticket: ticket.to_owned() }).await?;
+    driver
+        .wait_for("the host to connect", STARTUP, |d| {
+            d.hosts.iter().any(|h| h.active && h.status == "connected")
+        })
+        .await?;
+    Ok(())
+}
+
+/// Mint a fresh pairing ticket over hostd's control socket: tokens are single-use, so every
+/// client after the first needs one of its own.
+async fn mint_ticket(ctl_sock: &Path) -> Result<String> {
+    let reply = ctl(ctl_sock, &json!({ "cmd": "ticket" })).await?;
+    reply
+        .get("ticket")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("hostd did not mint a ticket: {reply}"))
+}
+
 impl Stack {
     /// Start ptyd, hostd (named `host_name`) and the app; pair the app with the host and wait
     /// until its canvas is up.
@@ -348,27 +494,93 @@ impl Stack {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (mut children, ticket) = daemons(root, host_name, &log, env).await?;
-
-        let app_dir = root.join("app");
-        std::fs::create_dir_all(&app_dir)?;
-        let app_sock = root.join("app.sock");
-        let mut app = Command::new(bin("slopty-app")?)
-            .env("RUST_LOG", &log)
-            .env("SLOPTY_DATA_DIR", &app_dir)
-            .env(crate::SOCKET_ENV, &app_sock)
-            // Local echo would put predicted text in the rows before the host confirms it.
-            .env("SLOPTY_PREDICT", "never")
-            .envs(env.iter().copied())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty-app")?;
-        wait_for_path(&app_sock, &mut app, "slopty-app").await?;
+        let (app, driver) = spawn_app(root, "app", &log, env).await?;
         children.push(app);
-        let driver = Driver::connect(&app_sock).await?;
-        Self::pair(Self { dir, ticket, driver, children, simulator: None }).await
+        let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        Self::pair(Self { dir, ticket, driver, children, simulator: None, log, app_env }).await
+    }
+
+    /// Kill the app (SIGKILL: no goodbye to the host, as a crash or a dead battery would
+    /// leave it) and reap it. The daemons keep running; [`Self::relaunch_app`] brings it back.
+    ///
+    /// # Errors
+    ///
+    /// When the process cannot be signalled.
+    pub async fn kill_app(&mut self) -> Result<()> {
+        anyhow::ensure!(self.simulator.is_none(), "the app runs in a simulator");
+        let mut app = self.children.pop().context("no app process")?;
+        app.start_kill().context("kill slopty-app")?;
+        let _status = app.wait().await;
+        Ok(())
+    }
+
+    /// Start the app again on the same data directory (same identity, same socket path): it
+    /// knows the host and connects by itself, no ticket. Waits for the link to be up.
+    ///
+    /// # Errors
+    ///
+    /// When the binary is missing or the app does not connect in time.
+    pub async fn relaunch_app(&mut self) -> Result<()> {
+        let env: Vec<(&str, &str)> =
+            self.app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        // The killed app left its socket file on disk; remove it so `wait_for_path` waits for
+        // the new process to bind rather than connecting to the dead one (Connection refused).
+        let _removed = std::fs::remove_file(self.dir.path().join("app.sock"));
+        let (app, mut driver) = spawn_app(self.dir.path(), "app", &self.log, &env).await?;
+        self.children.push(app);
+        driver.ok(&crate::Command::Ping).await?;
+        driver
+            .wait_for("the relaunched app to reconnect", STARTUP, |d| {
+                d.hosts.iter().any(|h| h.active && h.status == "connected")
+            })
+            .await?;
+        self.driver = driver;
+        Ok(())
+    }
+
+    /// [`Self::launch`] plus a second app on the same host: `b` gets its own data directory,
+    /// identity and socket, and pairs with a ticket minted over hostd's control socket. The
+    /// first app is left to open its first shell before the second comes up, so the two do not
+    /// both find an empty canvas and open one each.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], for either app.
+    pub async fn launch_pair(host_name: &str) -> Result<Pair> {
+        let mut stack = Self::launch(host_name).await?;
+        stack.wait_first_shell().await?;
+        let ticket = mint_ticket(&stack.path("hostd.sock")).await?;
+        let (child, mut driver) = spawn_app(stack.dir.path(), "b", &stack.log, &[]).await?;
+        pair_driver(&mut driver, &ticket).await?;
+        Ok(Pair { stack, b: SecondApp { driver, child: Some(child), simulator: None } })
+    }
+
+    /// [`Self::launch_pair`] with the second app in a booted simulator: the Mac and the phone
+    /// on one host.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_pair`] and [`Self::launch_on_simulator`].
+    pub async fn launch_pair_with_simulator(host_name: &str, simulator: Simulator) -> Result<Pair> {
+        let mut stack = Self::launch(host_name).await?;
+        stack.wait_first_shell().await?;
+        let ticket = mint_ticket(&stack.path("hostd.sock")).await?;
+        let mut driver =
+            spawn_simulator_app(stack.dir.path(), "b", &stack.log, &simulator, &[]).await?;
+        pair_driver(&mut driver, &ticket).await?;
+        Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
+    }
+
+    /// Wait until the first app has its first shell on the canvas with a prompt.
+    async fn wait_first_shell(&mut self) -> Result<()> {
+        self.driver
+            .wait_for("the first shell with a prompt", STARTUP, |d| {
+                d.status == "connected"
+                    && d.item("terminal").is_some()
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await?;
+        Ok(())
     }
 
     /// Start ptyd and hostd here and the app in a booted simulator (`simctl launch` with the
@@ -397,47 +609,16 @@ impl Stack {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (children, ticket) = daemons(root, host_name, &log, &[]).await?;
-
-        let app_dir = root.join("app");
-        std::fs::create_dir_all(&app_dir)?;
-        let app_sock = root.join("app.sock");
-        let launch = Command::new("xcrun")
-            .args(["simctl", "launch", "--terminate-running-process"])
-            .arg(&simulator.udid)
-            .arg(&simulator.bundle_id)
-            .env("SIMCTL_CHILD_RUST_LOG", &log)
-            .env("SIMCTL_CHILD_SLOPTY_DATA_DIR", &app_dir)
-            .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
-            .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
-            // Glass only: the key bar stays in the frame whatever the simulator has attached.
-            .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
-            .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status();
-        // `launch` blocks while the simulator is still booting; the xtask waits for
-        // `bootstatus` first, so a long wait here is a broken simulator, not a slow one.
-        let launched = tokio::time::timeout(STARTUP, launch)
+        let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
+        let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        Self::pair(Self { dir, ticket, driver, children, simulator: Some(simulator), log, app_env })
             .await
-            .context("simctl launch did not return (is the simulator booted?)")?
-            .context("xcrun simctl launch")?;
-        anyhow::ensure!(launched.success(), "simctl launch failed: {launched}");
-        wait_for_socket(&app_sock, "the app in the simulator").await?;
-        let driver = Driver::connect(&app_sock).await?;
-        Self::pair(Self { dir, ticket, driver, children, simulator: Some(simulator) }).await
     }
 
     /// Ping, pair with the host and wait for the connection.
     async fn pair(mut stack: Self) -> Result<Self> {
-        stack.driver.ok(&crate::Command::Ping).await?;
-        stack.driver.ok(&crate::Command::Pair { ticket: stack.ticket.clone() }).await?;
-        stack
-            .driver
-            .wait_for("the host to connect", STARTUP, |d| {
-                d.hosts.iter().any(|h| h.active && h.status == "connected")
-            })
-            .await?;
+        let ticket = stack.ticket.clone();
+        pair_driver(&mut stack.driver, &ticket).await?;
         Ok(stack)
     }
 
@@ -445,6 +626,21 @@ impl Stack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// One request over hostd's control socket (`{"cmd": …}`), and its reply.
+    ///
+    /// # Errors
+    ///
+    /// When hostd cannot be reached or answers something that is not JSON.
+    pub async fn ctl(&self, request: &Value) -> Result<Value> {
+        ctl(&self.path("hostd.sock"), request).await
+    }
+
+    /// hostd's process id (for reading its CPU time).
+    #[must_use]
+    pub fn hostd_pid(&self) -> Option<u32> {
+        self.children.get(1).and_then(Child::id)
     }
 
     /// The transcript a played agent writes ([`Self::play_hook`]).
@@ -536,6 +732,39 @@ impl Stack {
             let _killed = child.start_kill();
             let _reaped = child.wait().await;
         }
+    }
+}
+
+impl SecondApp {
+    /// Ask the app to quit, then kill whatever is left.
+    pub async fn shutdown(mut self) {
+        let _quit = self.driver.call(&crate::Command::Quit).await;
+        if let Some(simulator) = &self.simulator {
+            let _terminated = Command::new("xcrun")
+                .args(["simctl", "terminate", &simulator.udid, &simulator.bundle_id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
+        if let Some(mut child) = self.child.take() {
+            let _killed = child.start_kill();
+            let _reaped = child.wait().await;
+        }
+    }
+}
+
+impl Pair {
+    /// Both drivers at once: `a` (the stack's app) and `b`.
+    pub const fn drivers(&mut self) -> (&mut Driver, &mut Driver) {
+        (&mut self.stack.driver, &mut self.b.driver)
+    }
+
+    /// Shut both apps down, then the daemons.
+    pub async fn shutdown(self) {
+        self.b.shutdown().await;
+        self.stack.shutdown().await;
     }
 }
 

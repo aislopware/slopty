@@ -423,6 +423,12 @@ impl CanvasView {
         self.len() == 0
     }
 
+    /// This client's id on the wire.
+    #[must_use]
+    pub const fn me(&self) -> ClientId {
+        self.me
+    }
+
     /// The terminal view for `session`, if it is on the canvas.
     #[must_use]
     pub fn terminal(&self, session: SessionId) -> Option<&Entity<TerminalView>> {

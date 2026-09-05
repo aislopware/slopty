@@ -99,6 +99,15 @@ impl Driver {
         self.ok(&Command::Click { x, y, button: Button::Left, count: 1 }).await
     }
 
+    /// Press at one window point and release at another.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn drag(&mut self, x: f32, y: f32, to_x: f32, to_y: f32) -> Result<()> {
+        self.ok(&Command::Drag { x, y, to_x, to_y }).await
+    }
+
     /// Scroll `dx`, `dy` lines at a window point; with `zoom`, ⌘ is held and the canvas zooms.
     ///
     /// # Errors

@@ -37,6 +37,15 @@ pub enum Case {
     /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
     /// indicative only, the simulator has no GPU-backed display link.
     SmoothIos,
+    /// Two clients on one host: two app processes on this Mac, each on its own socket, paired
+    /// with the same daemons; a terminal opened on one appears on the other, typing on both is
+    /// serialised, attention badges both, a client dying leaves the other streaming, closing
+    /// and notes propagate. No permissions needed (the display scenario also needs
+    /// `SLOPTY_SCREEN_E2E`).
+    Pair,
+    /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
+    /// the phone on one host.
+    PairIos,
     /// All of the above (not `ios`, which needs a simulator).
     All,
     /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
@@ -153,6 +162,22 @@ const SMOOTH: &[Suite] = &[Suite {
     serial: true,
 }];
 
+const PAIR: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_PAIR_E2E"),
+    package: "slopty-e2e",
+    test: "pair",
+    filter: "on_the_mac",
+    serial: true,
+}];
+
+const PAIR_IOS: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_PAIR_IOS_E2E"),
+    package: "slopty-e2e",
+    test: "pair",
+    filter: "with_the_simulator",
+    serial: true,
+}];
+
 const SMOOTH_IOS: &[Suite] = &[Suite {
     gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
     package: "slopty-e2e",
@@ -169,7 +194,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Input => INPUT.iter().collect(),
         Case::Smooth => SMOOTH.iter().collect(),
         Case::SmoothIos => SMOOTH_IOS.iter().collect(),
-        Case::All => APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).chain(SMOOTH).collect(),
+        Case::Pair => PAIR.iter().collect(),
+        Case::PairIos => PAIR_IOS.iter().collect(),
+        Case::All => {
+            APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).chain(SMOOTH).chain(PAIR).collect()
+        }
         Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
@@ -213,7 +242,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     )?;
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
-    let _simulator_env = matches!(opts.case, Case::Ios | Case::SmoothIos)
+    let _simulator_env = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)
         .then(|| -> Result<_> {
             let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
             let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;

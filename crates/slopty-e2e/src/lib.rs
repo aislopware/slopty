@@ -79,6 +79,18 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
+    /// Press the primary button at a window point, move to another and release: a title-bar
+    /// drag moves an item, a corner drag resizes one.
+    Drag {
+        /// Where the button goes down, x in points.
+        x: f32,
+        /// Where the button goes down, y in points.
+        y: f32,
+        /// Where it comes up, x in points.
+        to_x: f32,
+        /// Where it comes up, y in points.
+        to_y: f32,
+    },
     /// Move the pointer to a window point (no button).
     Move {
         /// Window x in points.
@@ -193,6 +205,9 @@ pub struct Dump {
     pub hooks_offered: bool,
     /// The UI's frame times since the last [`Command::FramesReset`].
     pub frames: FrameInfo,
+    /// This app's client id on the wire (what the host's `screens` listing names).
+    #[serde(default)]
+    pub client: String,
 }
 
 /// The UI frame-time probe (`slopty_ui::frames`), in microseconds.
@@ -310,6 +325,9 @@ pub struct ItemInfo {
     pub active: bool,
     /// Sleeping.
     pub sleeping: bool,
+    /// A note's text, as the document holds it.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One terminal.
@@ -338,6 +356,9 @@ pub struct TerminalInfo {
     pub latency: LatencyInfo,
     /// What the terminal font said about itself, once the grid has been laid out.
     pub face: Option<FaceInfo>,
+    /// This client drives the PTY size (the other clients wear the "take" pill).
+    #[serde(default)]
+    pub driving: bool,
 }
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
@@ -482,6 +503,18 @@ impl Dump {
     #[must_use]
     pub fn item(&self, kind: &str) -> Option<&ItemInfo> {
         self.items.iter().find(|i| i.kind == kind)
+    }
+
+    /// The terminal showing `session`.
+    #[must_use]
+    pub fn terminal(&self, session: &str) -> Option<&TerminalInfo> {
+        self.terminals.iter().find(|t| t.session == session)
+    }
+
+    /// The item showing `session`.
+    #[must_use]
+    pub fn item_for_session(&self, session: &str) -> Option<&ItemInfo> {
+        self.items.iter().find(|i| i.session.as_deref() == Some(session))
     }
 
     /// The first accessibility node with `role` and, when given, `label`.
