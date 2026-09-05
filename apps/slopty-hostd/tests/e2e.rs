@@ -1382,4 +1382,162 @@ mod tests {
         assert!(status.success(), "build {name}");
         path
     }
+
+    /// What a stream must never show: a window on the display-crop path that is hidden stops
+    /// being served from that rectangle at once, so the viewer sees the picture stop rather than
+    /// the desktop behind it.
+    ///
+    /// The target is this test's own window, visible and unobstructed so the host takes the crop
+    /// path, then ordered out. Gated on `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hidden_window_stops_being_served_from_its_crop() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let markers = dir.path().join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let title = format!("slopty crop {}", std::process::id());
+        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+            .arg(&markers)
+            .arg(&title)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the idle window");
+        wait_for_marker(&markers.join("ready"), "the idle window").await;
+
+        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let ctl = dir.path().join("hostd.sock");
+        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let mut link = slopty_client::HostLink::start(host);
+        let mut events = link.events().unwrap();
+        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let target = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { windows, .. })) => {
+                    let found = windows.iter().find(|w| w.title == title);
+                    break found.expect("the crop window in the listing").id;
+                }
+                _other => {}
+            }
+        };
+        link.send(ClientMsg::Screen(ScreenRequest::Open {
+            target: CaptureTarget::Window(target),
+            quality: Quality::default(),
+        }))
+        .await
+        .unwrap();
+        let (stream, codec) = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+                    stream, codec, ..
+                })) => break (stream, codec),
+                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
+                    panic!("open failed: {reason}")
+                }
+                _other => {}
+            }
+        };
+        let screen = link.screen(stream, codec);
+
+        // Visible and unobstructed, so the host serves it as a crop of its display.
+        let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop).await;
+        let cropping = cropping.expect("the host never took the display-crop path");
+
+        // Hide it. From the tick that notices, the crop holds something the viewer never asked
+        // for, so the stream must leave it — and nothing may be served from it afterwards.
+        let asked = cropping.cropped;
+        std::fs::write(markers.join("hide"), b"").unwrap();
+        let hidden_at = std::time::Instant::now();
+        let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop).await;
+        let swap_ms = hidden_at.elapsed().as_millis();
+        let swapped = swapped
+            .expect("a hidden window stayed on the crop path: it streams the desktop behind it");
+        // An upper bound on what could have been of the desktop: every crop frame sent between
+        // asking the window to go and the swap, most of which are still of the visible window
+        // (the helper takes up to its own tick to order out, and the WindowServer a moment more).
+        let between = swapped.cropped.saturating_sub(asked);
+        eprintln!(
+            "hide: filter after {swap_ms} ms, {between} cropped frames sent in between, \
+             {} withheld",
+            swapped.withheld
+        );
+
+        // Nothing more is captured for the client while the window is away: not from the crop
+        // (the rectangle now holds the desktop) and not from the window filter (there is no
+        // window). The count is the host's, so it does not race the client decoding the frames
+        // that were legitimately sent while the window was still up.
+        let settled = swapped;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let after = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+            .await
+            .expect("the stream is still live");
+        assert!(!after.on_crop, "a hidden window went back onto the crop path: {after:?}");
+        assert_eq!(
+            after.encoded, settled.encoded,
+            "frames were still being made for a hidden window: {after:?}"
+        );
+
+        // Showing it again brings the picture back, with no help from the client.
+        let quiet = after.encoded;
+        std::fs::write(markers.join("show"), b"").unwrap();
+        let back = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.encoded > quiet).await;
+        assert!(back.is_some(), "no picture after the window came back");
+
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+        drop(screen);
+        link.close();
+        endpoint.close().await;
+    }
+
+    /// Poll hostd's control socket until one live stream's counters satisfy `want`.
+    async fn wait_for_stats(
+        ctl: &std::path::Path,
+        within: Duration,
+        want: impl Fn(&slopty_host::screen::ScreenStats) -> bool,
+    ) -> Option<slopty_host::screen::ScreenStats> {
+        let deadline =
+            tokio::time::Instant::now().checked_add(within).expect("a deadline inside the clock");
+        while tokio::time::Instant::now() < deadline {
+            for summary in screens(ctl).await {
+                if want(&summary.stats) {
+                    return Some(summary.stats);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// The live streams as `slopty host screens` reads them.
+    async fn screens(ctl: &std::path::Path) -> Vec<slopty_host::screen::ScreenSummary> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let Ok(mut stream) = tokio::net::UnixStream::connect(ctl).await else {
+            return Vec::new();
+        };
+        if stream.write_all(b"{\"cmd\":\"screens\"}\n").await.is_err() {
+            return Vec::new();
+        }
+        let mut line = String::new();
+        if BufReader::new(stream).read_line(&mut line).await.is_err() {
+            return Vec::new();
+        }
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        let live = reply.get("live").cloned().unwrap_or_default();
+        serde_json::from_value(live).unwrap_or_default()
+    }
+
+    /// Wait for a helper to leave a marker file.
+    async fn wait_for_marker(path: &std::path::Path, what: &str) {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(20))
+            .expect("a deadline inside the clock");
+        while !path.exists() {
+            assert!(tokio::time::Instant::now() < deadline, "{what} never came up");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }

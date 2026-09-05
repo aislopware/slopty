@@ -2192,10 +2192,34 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   returns on its own when the window draws again (MEASUREMENTS.md, "the refresh guard end to
   end"). The host now counts them: `ScreenStats::refreshes`, over the control socket as
   `slopty host screens` — a client-side counter would only say what the client believes it sent.
-  Known limits the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
+  Known limit the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
   a window that draws once and *then* hides stays `Live` forever and only the cap protects the
-  receiver; and once a stream has switched to the display-crop path, hiding the window does not
-  stop it — the crop keeps sending that patch of desktop (MEASUREMENTS.md, same section). The app
-  case gates on `SLOPTY_SCREEN_E2E` as well as `SLOPTY_APP_E2E`: it is the only case in that
-  suite that asks the machine for anything.
-
+  receiver. The app case gates on `SLOPTY_SCREEN_E2E` as well as `SLOPTY_APP_E2E`: it is the only
+  case in that suite that asks the machine for anything. (This entry first also claimed that a
+  hidden window on the display-crop path keeps streaming the desktop behind it. It does not; see
+  the crop-path ruling below.)
+- ✅ **What a cropped stream must never show** (2026-09-06). The claim in the entry above — that a
+  window hidden while on the display-crop path keeps streaming the patch of desktop behind it —
+  **was wrong**, and the correction is worth more than the alarm was: it came from a run whose
+  helper binary was stale, so the window under test never actually hid (that is also why
+  `bin_of` now rebuilds every run). Measured properly, hiding a window on the crop path takes the
+  stream off the crop in **0.4–1.4 s** and it encodes nothing at all while the window is away; it
+  does not go back onto the crop, and the picture returns when the window does.
+  What *is* true is that the swap is bookkeeping with a gap in it: the geometry tick decides, then
+  two ScreenCaptureKit callbacks settle, and between the decision and the settle the crop is still
+  live. So the rule is now enforced on the frame path rather than by the transition: `Shared`
+  carries `target_hidden`, set from `window_on_screen` at the **top** of every geometry tick —
+  before `Transitions::settle`, which returns early while a swap is in flight and would otherwise
+  leave the guard stale exactly when it is needed — and `on_frame` drops anything captured while
+  it is set, counting it as `ScreenStats::withheld`. In practice it catches 0–1 frames per hide,
+  which is the honest size of the hole. `ScreenStats` also gained `on_crop` (which path the stream
+  is on right now, as against `cropped`, which counts frames that came that way), because a test
+  cannot otherwise tell "left the crop" from "the desktop happens to be still".
+  Not changed: `window_on_screen` still reads `kCGWindowIsOnscreen`. Deciding it from membership
+  of the on-screen window list instead made no difference to any run, and a change to shared
+  capture semantics with no measurement behind it is not worth landing.
+  Test: `a_hidden_window_stops_being_served_from_its_crop` (`apps/slopty-hostd/tests/e2e.rs`,
+  gate `SLOPTY_SCREEN_E2E`), which drives visible → crop path → hide → show with the idle-window
+  helper and reads the host's counters over the control socket. The client's own frame count is
+  *not* the evidence: frames sent legitimately while the window was still up are still being
+  decoded seconds later, and asserting on them fails for the wrong reason.

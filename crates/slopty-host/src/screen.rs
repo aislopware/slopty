@@ -232,6 +232,9 @@ pub struct ScreenStats {
     pub captured: u64,
     /// Frames dropped because the datagram queue was nearly full.
     pub dropped: u64,
+    /// Frames captured and thrown away because the target was not on screen: the picture was of
+    /// whatever is behind it. Zero on a stream whose target never left the screen.
+    pub withheld: u64,
     /// Encoded frames packetized.
     pub encoded: u64,
     /// Datagrams queued for the transport (data, parity, retransmits, cursor).
@@ -255,9 +258,14 @@ pub struct ScreenStats {
     pub capture: Quantiles,
     /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
     pub encode: Quantiles,
-    /// Frames ScreenCaptureKit delivered through the display-crop path (a window served as
-    /// a `sourceRect` of its display rather than through the window filter).
+    /// Frames sent from the display-crop path (a window served as a `sourceRect` of its display
+    /// rather than through the window filter). Frames the crop delivered after it stopped holding
+    /// the target are not among them — those are [`Self::withheld`].
     pub cropped: u64,
+    /// Whether the stream is on the display-crop path *right now*. The counter above says how
+    /// many frames came that way; this says where the next one will come from, which is what a
+    /// test asking "did the crop go away when the window did" has to look at.
+    pub on_crop: bool,
 }
 
 /// One stream as the control socket lists it.
@@ -429,6 +437,7 @@ struct Counters {
     audio_packets: AtomicU64,
     captured: AtomicU64,
     dropped: AtomicU64,
+    withheld: AtomicU64,
     encoded: AtomicU64,
     datagrams: AtomicU64,
     queue_full: AtomicU64,
@@ -457,6 +466,7 @@ impl Counters {
             audio_packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            withheld: AtomicU64::new(0),
             encoded: AtomicU64::new(0),
             datagrams: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
@@ -499,6 +509,7 @@ impl Counters {
         ScreenStats {
             captured: self.captured.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            withheld: self.withheld.load(Ordering::Relaxed),
             encoded: self.encoded.load(Ordering::Relaxed),
             datagrams: self.datagrams.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
@@ -511,6 +522,8 @@ impl Counters {
             capture: self.capture.lock().quantiles(),
             encode: self.encode.lock().quantiles(),
             cropped: self.cropped.load(Ordering::Relaxed),
+            // Filled by `StatsHandle::stats`, which can see the stream's shared state.
+            on_crop: false,
         }
     }
 }
@@ -536,7 +549,10 @@ impl StatsHandle {
     /// Counters right now.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
-        self.0.counters.snapshot()
+        ScreenStats {
+            on_crop: self.0.cropped.load(Ordering::Relaxed),
+            ..self.0.counters.snapshot()
+        }
     }
 }
 
@@ -569,6 +585,11 @@ struct Shared {
     fps: std::sync::atomic::AtomicU16,
     /// Whether frames come through the display-crop path right now.
     cropped: std::sync::atomic::AtomicBool,
+    /// The target window is not on screen. Nothing ScreenCaptureKit delivers can be a picture of
+    /// it, so nothing is sent: under a display crop the rectangle holds whatever is behind the
+    /// window, and a swap to the window filter that the framework rejected leaves the crop
+    /// running while this side believes otherwise. Set from the geometry tick.
+    target_hidden: std::sync::atomic::AtomicBool,
     out: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     counters: Counters,
@@ -607,6 +628,13 @@ impl Shared {
     fn on_frame(&self, frame: &CapturedFrame) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
         self.counters.capture.lock().push(frame.latency_us);
+        // Before anything is counted as a picture of the target: while the window is off screen
+        // no frame can be one, and a display crop keeps delivering the desktop behind it
+        // (MEASUREMENTS.md, "a hidden window on the crop path").
+        if self.target_hidden.load(Ordering::Relaxed) {
+            self.counters.withheld.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if self.cropped.load(Ordering::Relaxed) {
             self.counters.cropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -789,14 +817,19 @@ pub const fn crop_allowed(on_screen: bool, crop: Option<Crop>, occluded: bool) -
 }
 
 /// The crop a window wants right now, or `None` when it must go through the window filter.
-fn wanted_crop(id: slopty_core::WindowId, bounds: &Rect, point_scale: f64) -> Option<Crop> {
+fn wanted_crop(
+    id: slopty_core::WindowId,
+    bounds: &Rect,
+    point_scale: f64,
+    on_screen: bool,
+) -> Option<Crop> {
     let crop = slopty_capture::display_enclosing(bounds).and_then(|display| {
         let display = slopty_capture::display_bounds(display);
         slopty_capture::crop_for(bounds, &display, point_scale).map(|(crop, _pixels)| crop)
     });
     let owner = slopty_capture::window_owner_pid(id)?;
     let occluded = slopty_capture::occluded(id, bounds, owner);
-    crop_allowed(slopty_capture::window_on_screen(id), crop, occluded)
+    crop_allowed(on_screen, crop, occluded)
 }
 
 /// Resolve a target, choosing the path for a window.
@@ -997,6 +1030,7 @@ impl ScreenStream {
             last_push_us: AtomicU64::new(host_now_us()),
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
+            target_hidden: std::sync::atomic::AtomicBool::new(false),
             out,
             budget,
             counters: Counters::new(),
@@ -1198,6 +1232,8 @@ impl ScreenStream {
         if self.path != WindowPath::DisplayCrop {
             return;
         }
+        // Nothing more goes out while the stop is in flight: the crop outlives the window.
+        self.shared.target_hidden.store(true, Ordering::Relaxed);
         self.stopped = true;
         tracing::info!(stream = %self.id, "window closed under a display crop: stopping");
         let id = self.id;
@@ -1215,6 +1251,12 @@ impl ScreenStream {
     /// ScreenCaptureKit calls settle the transition on a later tick, and a failed one is simply
     /// asked again.
     fn follow_window(&mut self, id: slopty_core::WindowId, rect: &Rect) {
+        // First, and outside everything below: the guard must not depend on the transition state
+        // machine. A swap that ScreenCaptureKit keeps rejecting leaves `settle` busy for as long
+        // as it keeps failing, and those are exactly the ticks where the crop is still running
+        // over a window that is no longer there.
+        let on_screen = slopty_capture::window_on_screen(id);
+        self.shared.target_hidden.store(!on_screen, Ordering::Relaxed);
         match self.transitions.settle() {
             Settled::Busy => return,
             Settled::Idle => {}
@@ -1228,7 +1270,10 @@ impl ScreenStream {
                 tracing::warn!(stream = %self.id, ?path, ?crop, "capture path change failed; retrying");
             }
         }
-        let wanted = wanted_crop(id, rect, self.point_scale);
+        // Keyed on the target, not on the path this side believes it is on: a `retarget` the
+        // framework rejects leaves the crop running while the bookkeeping says window filter,
+        // and every frame it delivers is then a picture of the desktop.
+        let wanted = wanted_crop(id, rect, self.point_scale, on_screen);
         let wanted_path =
             if wanted.is_some() { WindowPath::DisplayCrop } else { WindowPath::Filter };
         if wanted_path == self.path && wanted == self.capture_config.crop {

@@ -1194,11 +1194,9 @@ ScreenCaptureKit has nothing at all to deliver. Nothing on the desktop is touche
   no reopen and no help from the client, and the placeholder goes.
 
 Seen while writing the test and worth its own look: once the window is visible and unobstructed
-the host switches that stream to the **display-crop** path, and hiding the window again does not
-stop the stream — the crop keeps sending that patch of desktop. The first hide (before the stream
-opens) goes through the window filter and sends nothing, which is why the guard works at all.
-`ScreenStream::window_gone` only fires when the window leaves the list entirely, and a hidden
-window is still in it.
+the host switches that stream to the **display-crop** path. (An earlier version of this paragraph
+said that hiding the window then does not stop the stream. That was measured on a stale helper
+binary whose window never hid; see the next section for what actually happens.)
 
 Not measured: the same guard on iOS (the helper is an AppKit window on the host's machine, which
 the simulator case shares, but the run was not made), and a target that draws once and then hides
@@ -1368,3 +1366,31 @@ zsh /tmp/prepaint-ab.sh                 # A, B, A, B then the after-sample
 python3 /tmp/sample-attrib.py /tmp/sample-prepaint-after.txt "TerminalElement as gpui::element::Element>::prepaint" "all_font_names"
 python3 /tmp/sample-children.py /tmp/sample-prepaint-after.txt "Window>::draw"
 ```
+
+## 2026-09-06 — a hidden window on the crop path
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e a_hidden_window_stops --no-capture
+```
+
+The helper's window, visible and unobstructed so the host serves it as a crop of its display,
+then ordered out. Seven runs, mac-studio, debug build:
+
+| what                                                   | measured                  |
+| ------------------------------------------------------ | ------------------------- |
+| hide → the host is off the crop path (`on_crop` false) | 415 / 466–594 / 1380 ms   |
+| crop frames sent between asking it to hide and that    | 13–28 (mostly of the window, which is still up for the first ~100 ms) |
+| frames encoded while the window is away                | **0**                     |
+| frames withheld by the guard (`ScreenStats::withheld`) | 0–1 per hide              |
+| goes back onto the crop while hidden                   | never                     |
+| show → frames again                                    | every run                 |
+
+So the alarm raised in the previous section was false, and the real number is the one in the
+third row. The guard exists for the gap between the geometry tick deciding and ScreenCaptureKit
+acknowledging: it catches at most a frame, which is the size of that gap in practice.
+
+The client's frame count is not usable as evidence here and the test does not assert on it: at
+the moment the host leaves the crop the client is still decoding the frames sent while the window
+was legitimately up, so its count keeps climbing for seconds afterwards for entirely honest
+reasons. Only the host's counters can distinguish the two.
