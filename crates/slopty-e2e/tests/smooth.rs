@@ -101,6 +101,35 @@ mod tests {
         .unwrap()
     }
 
+    /// The flooding terminals of a dump (the interactive shell shows a prompt, not the fox),
+    /// by session, with their rows.
+    fn floods(d: &Dump) -> Vec<(&str, &[String])> {
+        d.terminals
+            .iter()
+            .filter(|t| t.rows.iter().any(|r| r.contains("the quick brown fox")))
+            .map(|t| (t.session.as_str(), t.rows.as_slice()))
+            .collect()
+    }
+
+    /// Every flooding terminal's rows moved between `before` and `after`: cheap draws of a
+    /// frozen or detached session do not count as smooth.
+    fn assert_floods_advanced(before: &Dump, after: &Dump) {
+        let (was, now) = (floods(before), floods(after));
+        assert!(!was.is_empty(), "no flooding terminal in the dump: {before:#?}");
+        assert_eq!(was.len(), now.len(), "a flooding terminal vanished");
+        let stalled: Vec<&str> = was
+            .iter()
+            .filter(|(session, rows)| now.iter().any(|(s, later)| s == session && later == rows))
+            .map(|(session, _)| *session)
+            .collect();
+        assert!(
+            stalled.is_empty(),
+            "output stalled in {} of {}: {stalled:?}",
+            stalled.len(),
+            was.len()
+        );
+    }
+
     /// A trackpad reports at about 120 Hz; the scroll loops post one event per report.
     const INPUT_INTERVAL: Duration = Duration::from_micros(8_333);
 
@@ -126,7 +155,9 @@ mod tests {
             drv.scroll(cx, cy, 0.5 * dir, 0.25 * dir, false).await.unwrap();
             i = i.saturating_add(1);
         }
-        drv.dump().await.unwrap().frames
+        let after = drv.dump().await.unwrap();
+        assert_floods_advanced(&d, &after);
+        after.frames
     }
 
     /// Zoom from the fit-all level to 200 % and back, one ⌘-scroll step (×1.05) per trackpad
@@ -150,9 +181,10 @@ mod tests {
             drv.scroll(cx, cy, 0.0, dir, true).await.unwrap();
             i = i.saturating_add(1);
         }
-        let d = drv.dump().await.unwrap();
-        assert!(d.zoom > 0.05, "{}", d.zoom);
-        d.frames
+        let after = drv.dump().await.unwrap();
+        assert!(after.zoom > 0.05, "{}", after.zoom);
+        assert_floods_advanced(&d, &after);
+        after.frames
     }
 
     /// Type [`TYPED`] letters into the focused shell at [`TYPING_CPS`], then clear the line.
