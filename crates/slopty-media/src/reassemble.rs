@@ -461,9 +461,15 @@ pub struct Reassembler {
     /// The host's send stamp on the last datagram that carried a fresh one, so the silence the
     /// host made itself can be told from the silence the link made (see `link_gap`).
     last_send_ms_lo: Option<u8>,
-    /// When `tick` last ran, so a silence the receiver's own loop slept through is not charged
-    /// to the link (see `dozed`).
+    /// When the receiver's own loop last ran — a `tick` or an `ingest`, since either is proof
+    /// it was scheduled — so a silence it slept through is not charged to the link (see `dozed`).
     last_tick_at: Instant,
+    /// Sleep already banked against the silence in progress. A receiver that wakes after a long
+    /// doze runs whatever its executor polls first, and a ready timer is as likely as the socket:
+    /// if `tick` went first it would move `last_tick_at` to now and the ingest a moment later
+    /// would find nothing slept through and charge the whole gap to the link. `tick` banks the
+    /// stretch here instead, and the arrival that ends the silence spends it.
+    dozed_since_arrival: Duration,
     /// Round trip the last `tick` was given; sizes the gap that counts as a stall.
     last_rtt: Duration,
     /// [`Config::nack_delay`] evaluated for `last_rtt`, so `stalled` and `resume` (which have no
@@ -513,6 +519,7 @@ impl Reassembler {
             any_arrived: false,
             last_send_ms_lo: None,
             last_tick_at: now,
+            dozed_since_arrival: Duration::ZERO,
             last_rtt,
             nack_delay: cfg.nack_delay.for_rtt(last_rtt),
             last_host_ts_us: 0,
@@ -626,6 +633,10 @@ impl Reassembler {
         // next datagram is measured against no stamp at all, which is the pessimistic reading.
         self.last_send_ms_lo = (header.flags & flags::RETRANSMIT == 0).then_some(header.send_ms_lo);
         self.arrived_at = now;
+        // The silence is over and its account is settled: the next one starts from this arrival
+        // with nothing banked and the loop's mark here, not wherever the last `tick` left it.
+        self.dozed_since_arrival = Duration::ZERO;
+        self.last_tick_at = self.last_tick_at.max(now);
         // Anything on the stream — a heartbeat included — proves the host is still there, so the
         // refresh cap starts over; only a video fragment proves the *source* is drawing.
         self.refresh_repeats = 0;
@@ -919,6 +930,12 @@ impl Reassembler {
     /// nothing, then everything — so this part of a silence is evidence about the machine, not
     /// about the network, and is subtracted before anything is charged.
     fn dozed(&self, arrival: Instant) -> Duration {
+        self.dozed_since_arrival.saturating_add(self.dozed_since_tick(arrival))
+    }
+
+    /// The part of [`Self::dozed`] not yet banked by [`Self::tick`]: the stretch since the last
+    /// one beyond the cadence [`Config::tick_period`] promises.
+    fn dozed_since_tick(&self, arrival: Instant) -> Duration {
         arrival.saturating_duration_since(self.last_tick_at).saturating_sub(self.cfg.tick_period)
     }
 
@@ -1008,6 +1025,10 @@ impl Reassembler {
     /// Time-driven policy: NACKs, loss deadlines, refresh repeats. Call every few milliseconds
     /// and after ingesting a batch. `rtt` is the current round-trip estimate.
     pub fn tick(&mut self, now: Instant, rtt: Duration) -> Vec<Action> {
+        // Bank the sleep before moving the mark, or the arrival that ends this silence would
+        // find a tick that just ran and read the whole gap as the link's.
+        self.dozed_since_arrival =
+            self.dozed_since_arrival.saturating_add(self.dozed_since_tick(now));
         self.last_tick_at = self.last_tick_at.max(now);
         self.last_rtt = rtt;
         self.nack_delay = self.cfg.nack_delay.for_rtt(rtt);

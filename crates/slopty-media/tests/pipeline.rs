@@ -615,6 +615,39 @@ mod tests {
         assert_eq!(h.drain().len(), 1);
     }
 
+    /// The same sleep, but the executor polls the ready timer before the socket. `tick` must not
+    /// spend the doze on itself: the arrival a moment later is what settles the silence, and if
+    /// the credit did not survive the tick the whole 200 ms would be charged to the link.
+    #[test]
+    fn a_tick_that_wakes_first_does_not_hand_the_silence_to_the_link() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.advance(Duration::from_millis(200));
+        // The timer wins the race; the datagrams are still in the socket.
+        let _policy = h.tick();
+        h.deliver(&s1.datagrams);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (0, 0), "the tick banked the sleep");
+        let silences = h.rx.stats().silences;
+        assert_eq!((silences.receiver_dozed, silences.in_flight), (1, 0));
+        assert_eq!(silences.dozed_ms_max, 175, "200 ms less the tick the loop owed");
+        assert_eq!(h.drain().len(), 1);
+        // And the credit is spent, not carried. A frame straight away, so the stamp the next
+        // silence is measured against is this instant's and not the one from before the sleep.
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        h.drain();
+        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
+        h.awake(Duration::from_millis(200));
+        h.deliver(&s3.datagrams);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!(report.stalls, 1, "a silence the receiver watched is still a stall");
+        assert_eq!(h.rx.stats().silences.in_flight, 1, "and it is charged to the link");
+    }
+
     #[test]
     fn a_stall_longer_than_max_hold_gives_up() {
         let mut h = Harness::new();
