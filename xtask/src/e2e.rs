@@ -131,12 +131,14 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let _accept = opts.accept.then(|| sh.push_env("SLOPTY_E2E_ACCEPT", "1"));
 
     // Build every binary a suite may spawn up front, so a test never shells out to cargo.
-    // The app carries the `e2e` feature (renderer access for `Render`).
+    // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
+    // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
+    // the daemons stale.
     step(
         "build daemons and app",
         &cmd!(
             sh,
-            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty --bin slopty-app --features slopty/e2e"
+            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty --bins --features slopty/e2e"
         ),
     )?;
 
