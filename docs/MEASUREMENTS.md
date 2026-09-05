@@ -967,8 +967,9 @@ Takeaways:
 * **Stalls: 3 / 2 / 0 / 2 before, 0 / 0 / 0 / 0 after**, on an idle machine at the same four
   rates (the "before" is the table above this one, taken with the same test the night before).
   Every one of them was the receiver reading its own capture's quiet gap as a held link. Now the
-  gap is compared with the host's send stamps and only the link's share is charged, so the gated
-  test asserts its per-rate verdicts again instead of skipping them whenever a row stalled.
+  gap is compared with the host's send stamps and only the link's share is charged. The gated
+  test still skips its per-rate verdicts on a run that stalled — on loopback that is the
+  scheduler holding datagrams — but the skip fires on the rare run rather than on all of them.
 * **A release build is 3× the frame rate of a debug one and changes no verdict.** Nothing is lost
   or refreshed at any rate in release; the numbers that move are throughput (release reached
   ~19 fps on a still desktop against debug's ~8 on the same content) and the arrival gap. Loss

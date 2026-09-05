@@ -495,9 +495,11 @@ impl Reassembler {
             self.stats.stalls = self.stats.stalls.saturating_add(1);
             self.resume(now, gap);
         }
-        if header.flags & flags::RETRANSMIT == 0 {
-            self.last_send_ms_lo = Some(header.send_ms_lo);
-        }
+        // The stamp and `arrived_at` have to name the same datagram, or the next gap subtracts a
+        // host interval that spans a different pair. A retransmission advances the arrival but
+        // carries its original frame's stamp, so it clears the pair instead of updating it: the
+        // next datagram is measured against no stamp at all, which is the pessimistic reading.
+        self.last_send_ms_lo = (header.flags & flags::RETRANSMIT == 0).then_some(header.send_ms_lo);
         self.arrived_at = now;
         // Anything on the stream — a heartbeat included — proves the host is still there, so the
         // refresh cap starts over; only a video fragment proves the *source* is drawing.
@@ -749,14 +751,23 @@ impl Reassembler {
     /// when the beat that would have carried it was late.
     ///
     /// Zero when the stamp cannot be trusted: no previous stamp, a gap past the byte's range,
-    /// or a retransmission (which carries the original frame's stamp). Then the gap is the
-    /// link's, which is the reading this had before.
+    /// a retransmission (which carries the original frame's stamp), or a stamp that reads as
+    /// *older* than the one before it. Then the gap is the link's, which is the reading this
+    /// had before.
+    ///
+    /// The last case is what a reordered or delayed datagram looks like: the subtraction is
+    /// unsigned and wraps, so a stamp 10 ms behind its predecessor reads as 246 ms ahead and
+    /// would forgive a real stall. There is no bit that says which it is, but a host interval
+    /// longer than the arrival gap it is supposed to explain is not evidence of anything —
+    /// the host cannot have spent longer not sending than the receiver spent not receiving —
+    /// so it is thrown away.
     fn host_gap(&self, header: &MediaHeader, gap: Duration) -> Duration {
         if header.flags & flags::RETRANSMIT != 0 || gap >= SEND_STAMP_RANGE {
             return Duration::ZERO;
         }
         let Some(previous) = self.last_send_ms_lo else { return Duration::ZERO };
-        Duration::from_millis(u64::from(header.send_ms_lo.wrapping_sub(previous)))
+        let host_gap = Duration::from_millis(u64::from(header.send_ms_lo.wrapping_sub(previous)));
+        if host_gap > gap { Duration::ZERO } else { host_gap }
     }
 
     /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the

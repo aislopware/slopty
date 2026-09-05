@@ -1874,11 +1874,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   it needs a wire change and it can only repair once the whole group has arrived, which on a
   still window is hundreds of milliseconds — all of that to save a fraction of 150 kbit/s.
 - ✅ **The gated loss test asserts, and says when it cannot** (2026-09-06). Its verdicts used to
-  be skipped whenever any row stalled, which after the stall fix would mean never; a run that
-  cannot be believed is now identified by its arrival gaps instead. Past
-  `Config::max_hold` (500 ms) a frame dies of the scheduler rather than of the injected loss, so
-  a row with a gap that long prints and skips. The frame *count* is not a health signal — a still
-  desktop draws 8 fps because nothing is changing — which an earlier version of this guard got
-  wrong. The loss verdict is a rate (under one frame in a hundred), not zero: a two-fragment
-  frame plus one parity is beyond repair when two of its three datagrams go, and at 50 ‰ that is
-  about one frame in three hundred whatever the policy does.
+  be skipped whenever any row stalled, which before the stall fix meant nearly every run. The
+  skip still keys on the stall count, but the count now means something: host and client share
+  the test's process, so nothing except the scheduler can hold a loopback datagram for a stall
+  gap, and an idle machine reports none. Two guards that look reasonable and are not: the frame
+  *count* (a still desktop draws 8 fps because nothing is changing) and the gaps between
+  *decoded* frames — a recovery bug that starves decode while datagrams keep arriving would then
+  skip every verdict instead of failing one, which is exactly the failure the test exists to
+  catch. The evidence has to be at the datagram level, which is where the stall counter is. The
+  loss verdict is a rate (under one frame in a hundred), not zero: a two-fragment frame plus one
+  parity is beyond repair when two of its three datagrams go, and at 50 ‰ that is about one
+  frame in three hundred whatever the policy does.

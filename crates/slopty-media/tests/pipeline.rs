@@ -428,6 +428,51 @@ mod tests {
         assert!(h.rx.stalled(h.now), "a live source owes the receiver datagrams again");
     }
 
+    /// A retransmission carries the stamp of the frame it is a copy of, so it must not become
+    /// the reference the next gap is measured against: the arrival would be the
+    /// retransmission's and the stamp some older frame's, and the difference between them is
+    /// not a host interval at all.
+    #[test]
+    fn a_retransmission_does_not_leave_its_stamp_behind() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        // 30 ms later a retransmission of that frame lands: under the stall gap, no stall, and
+        // its stamp (frame 0's, so 0 ms) is not the host's latest.
+        h.advance(Duration::from_millis(30));
+        let resent = h.tx.retransmit(0, &[0]);
+        h.deliver(&resent);
+        assert_eq!(h.rx.stats().stalls, 0, "30 ms is not a stall");
+        // 70 ms of silence, then a datagram the host sent 60 ms after frame 0. Paired with the
+        // retransmission's stale stamp the host would look busy for 60 of those 70 ms; paired
+        // with nothing, which is the truth, the whole gap is the link's.
+        h.advance(Duration::from_millis(70));
+        let beat = heartbeat_datagram(STREAM, 1, 60);
+        assert_eq!(h.rx.ingest(&beat, h.now), Ingest::Heartbeat);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (70, 1), "the link held it");
+    }
+
+    /// A datagram whose stamp is older than the one before it — reordered, or delayed past its
+    /// successor — must not read as a long host pause. The subtraction is unsigned and wraps,
+    /// so 10 ms backwards looks like 246 ms forwards, which would forgive any stall.
+    #[test]
+    fn a_stamp_that_goes_backwards_is_not_evidence() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let beat = heartbeat_datagram(STREAM, 1, 100);
+        assert_eq!(h.rx.ingest(&beat, h.now), Ingest::Heartbeat);
+        // 80 ms later, a datagram the host stamped *before* that one.
+        h.advance(Duration::from_millis(80));
+        let late = heartbeat_datagram(STREAM, 2, 90);
+        assert_eq!(h.rx.ingest(&late, h.now), Ingest::Heartbeat);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.stalled_ms, report.stalls), (80, 1), "no free pass from a wrap");
+    }
+
     /// A link that holds datagrams is still a stall when the source was a little slow too:
     /// only the host's own share of the gap is forgiven, the rest is charged.
     #[test]
