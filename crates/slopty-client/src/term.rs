@@ -105,6 +105,12 @@ impl TermState {
         self.size
     }
 
+    /// The scrollback cache: what is held, and how much of it the host still has.
+    #[must_use]
+    pub const fn scrollback(&self) -> &Scrollback {
+        &self.scrollback
+    }
+
     /// The live screen (bottom of the viewport).
     #[must_use]
     pub const fn screen(&self) -> &Screen {
@@ -445,6 +451,24 @@ mod tests {
     use slopty_grid::{RowUpdate, Style};
 
     use super::*;
+
+    /// Applying a frame puts the row in the screen and in the scrollback as **one**
+    /// allocation: a line that scrolls off is moved into history, never copied.
+    #[test]
+    fn an_applied_row_is_one_allocation_in_both_places() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(1, true, 0, 100, 103, &[(0, "one"), (1, "two")])));
+
+        let on_screen = s.screen().lines().first().expect("row 0").clone();
+        let in_history = s.scrollback().shared(LineIndex(100)).expect("cached at its index");
+        assert!(
+            std::sync::Arc::ptr_eq(&on_screen, &in_history),
+            "the screen row and the history entry are the same line"
+        );
+        assert_eq!(on_screen.text(), "one");
+        // Two owners inside the state, plus the two clones this test is holding.
+        assert_eq!(std::sync::Arc::strong_count(&on_screen), 4);
+    }
 
     fn frame(
         seq: u64,

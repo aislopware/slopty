@@ -202,6 +202,45 @@ mod tests {
         assert_eq!(sb.missing(LineIndex(8), 50), vec![(LineIndex(8), 2)], "clamped to total");
     }
 
+    /// The host's extent arrives on every frame; only a real advance may throw lines away.
+    #[test]
+    fn a_repeated_extent_keeps_the_cache() {
+        let mut sb = Scrollback::new(100);
+        sb.set_extent(LineIndex(5), 50);
+        sb.insert(LineIndex(6), l("6"));
+        sb.insert(LineIndex(7), l("7"));
+        for _ in 0..10 {
+            sb.set_extent(LineIndex(5), 60);
+        }
+        assert_eq!(sb.stats().cached, 2, "nothing was dropped by an unchanged oldest");
+        assert_eq!(sb.total(), 60);
+        sb.set_extent(LineIndex(7), 60);
+        assert!(sb.get(LineIndex(6)).is_none(), "an advance does drop what the host dropped");
+        assert!(sb.get(LineIndex(7)).is_some());
+    }
+
+    /// A line the screen also holds is one allocation, not two.
+    #[test]
+    fn a_shared_line_is_not_copied() {
+        let mut sb = Scrollback::new(10);
+        sb.set_extent(LineIndex(0), 10);
+        let line = Arc::new(l("shared"));
+        sb.insert_shared(LineIndex(3), Arc::clone(&line));
+        let back = sb.shared(LineIndex(3)).expect("cached");
+        assert!(Arc::ptr_eq(&line, &back), "the same allocation came back");
+        assert_eq!(Arc::strong_count(&line), 3, "the caller, the cache and `back`");
+        assert_eq!(sb.get(LineIndex(3)).map(Line::text).as_deref(), Some("shared"));
+    }
+
+    #[test]
+    fn a_batch_lands_at_consecutive_indices() {
+        let mut sb = Scrollback::new(10);
+        sb.set_extent(LineIndex(0), 3);
+        sb.insert_batch(LineIndex(0), [l("a"), l("b"), l("c")]);
+        assert_eq!(sb.missing(LineIndex(0), 3), vec![]);
+        assert_eq!(sb.get(LineIndex(2)).map(Line::text).as_deref(), Some("c"));
+    }
+
     #[test]
     fn eviction_is_oldest_first_and_host_extent_wins() {
         let mut sb = Scrollback::new(3);
