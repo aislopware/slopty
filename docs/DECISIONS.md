@@ -582,16 +582,30 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   2 s after `SIGCONT`. Reading the logs afterwards: a killed app's *old* connection still shows
   up on hostd as "connection lost: timed out" 45 s later; that is the stale one, not the new.
   Driving note: cliclick `kp:return` never reaches the app (osascript `keystroke return` does).
-- 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
-  43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
-  prefers a live direct path over relay, so the direct path must have been *closed*, not
-  deselected. `slopty_net::endpoint::log_path_events` now logs opened/closed/selected with the
-  closed path's final stats on both ends, and both binaries default their log filter to
-  `iroh::_events::path=debug`, which carries noq's abandon reason (`TimedOut` = 15 s path idle
-  with 5 s heartbeats, `UnusableAfterNetworkChange`, `RemoteAbandoned`). Not reproduced by a
-  full `cargo xtask gate` on all cores nor by covering the app window for 70 s. Both processes
-  now hold an `NSProcessInfo` latency-critical activity (`slopty-platform::Activity`) as a
-  precaution against App Nap / timer coalescing. Next occurrence: read the reason, then rule.
+- ❌ **Machine load alone does not flap the path** (2026-09-06), closing the 2026-09-04
+  investigation of one connection that went direct → relay-only for 43 s → direct while the
+  machine was compiling. iroh's `BiasedRttPathSelector` always prefers a live direct path, so
+  the direct path had to have been *closed* (noq abandon reasons `TimedOut` = 15 s path idle
+  with 5 s heartbeats, `UnusableAfterNetworkChange`, `RemoteAbandoned`), and the standing
+  hypothesis was that a busy machine starves the QUIC driver task until the heartbeats miss.
+  A harness now says otherwise: `path_flap_under_{cpu,user_initiated_cpu,memory_io}_load`
+  (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_FLAP_E2E`) runs hostd and a client over iroh
+  with relays enabled — both ends hold a relay path *and* a direct path, so there is somewhere
+  to flap to — attaches a shell and a display stream, and hammers the machine for 90 s while
+  sampling the selected path four times a second and keeping noq's own path log. Three shapes,
+  each the whole machine: all-core spinning at default QoS, the same at
+  `QOS_CLASS_USER_INITIATED` (what a build's workers ask for), and memory + I/O (GB-scale
+  writes and reads plus thousands of small files). **None of them closed a path or spent a
+  single sample on the relay**; the worst rtt on the direct path was 6–10 ms against 1.4–1.9 ms
+  idle (MEASUREMENTS.md, "the path under load"). So load is ruled out on its own and nothing in
+  the runtime or thread QoS is changed on the strength of it: no dedicated QUIC runtime, no
+  `pthread_set_qos_class_self_np` on the driver threads, no send-queue priority.
+  What the harness cannot see, and what the ruling therefore does *not* cover: its direct path
+  is loopback on one machine, so it has no NAT rebinding, no Wi-Fi, no WireGuard and no black
+  hole — the 2026-09-04 flap was on the mesh between two machines. The load half of the
+  hypothesis is dead; the network half is untested and needs the second machine. Load is not
+  free either: 19–38 datagram stalls per 90 s appeared under every shape where an idle machine
+  has none, which is the pacer's problem, not the path's.
 
 - ✅ **A dying connection detaches only its own sinks** (2026-09-05). Symptom on the simulator:
   ~45 s after relaunching the app, every terminal stopped updating while the host kept running
@@ -1963,3 +1977,26 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   loss verdict is a rate (under one frame in a hundred), not zero: a two-fragment frame plus one
   parity is beyond repair when two of its three datagrams go, and at 50 ‰ that is about one
   frame in three hundred whatever the policy does.
+- ✅ **The refresh guard is checked against a window the test owns** (2026-09-06). The 2026-09-05
+  ruling ("an idle source stops the refresh requests") was pinned by media unit tests and by one
+  hand-run against a hidden Ghostty window; nothing checked the whole path. It does now, and the
+  awkward part was the target: the guard needs a capture source that produces *no* frame at all,
+  the app's picker lists on-screen windows only, and no window this repo does not own may be
+  touched. So the harness owns one — `slopty-idle-window` (`crates/slopty-e2e/src/bin`), a
+  240×160 AppKit window with no content that orders itself in and out on marker files. On screen
+  it is listed and pickable; ordered out it is still in the host's window list (the host
+  enumerates with `onScreenWindowsOnly: false`) and ScreenCaptureKit has nothing to deliver for
+  it, which is exactly the state the guard is about. Two tests use it:
+  `a_window_that_never_draws_is_reported_idle_and_stops_the_asking`
+  (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) for the host and the receiver, and
+  `a_remote_window_that_never_draws_waits_instead_of_asking_forever`
+  (`crates/slopty-e2e/tests/app.rs`) for the app: ⌘O, pick the row, hide, and then the item's
+  `Role::Status` reads "waiting for the window to draw…" while the host counts what it was
+  actually asked for. **4 refreshes against the cap of 12**, then silence, and the picture
+  returns on its own when the window draws again (MEASUREMENTS.md, "the refresh guard end to
+  end"). The host now counts them: `ScreenStats::refreshes`, over the control socket as
+  `slopty host screens` — a client-side counter would only say what the client believes it sent.
+  Known limit the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
+  a window that draws once and *then* hides stays `Live` forever and only the cap protects the
+  receiver.
+

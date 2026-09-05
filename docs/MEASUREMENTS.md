@@ -1091,3 +1091,66 @@ SLOPTY_SMOOTH_E2E=1 SLOPTY_SMOOTH_SHELLS=5 cargo nextest run -p slopty-e2e --tes
 # where the main thread is while it runs:
 sample $(pgrep -n -f target/debug/slopty-app) 4 -file /tmp/sample-app.raw
 ```
+
+## 2026-09-06 — the path under load, and the refresh guard end to end
+
+Two things this repo had been arguing about without evidence: whether a busy machine is what
+pushed a connection onto a relay for 43 s (DECISIONS, 2026-09-04), and whether the refresh-storm
+guard actually holds outside the media unit tests.
+
+### The path under load
+
+```sh
+SLOPTY_FLAP_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
+  cargo nextest run -p slopty-hostd --test e2e path_flap_under_cpu_load --no-capture
+# … and path_flap_under_user_initiated_cpu_load, path_flap_under_memory_io_load
+```
+
+hostd and a client on this machine over iroh with **relays enabled**, so the connection holds a
+relay path (`aps1-1.relay.n0.iroh.link`, rtt 55 ms) as well as the loopback direct one and has
+somewhere to flap to. One shell and one display stream; the selected path, its rtt and noq's path
+log sampled every 250 ms for 90 s while a load shape owns the machine. Run one at a time (each
+saturates every core), mac-studio, debug build, 2026-09-06 00:45–00:50 local.
+
+| shape                                              | ran           | to relay | rtt worst / last | paths closed | stalls | frames |
+| -------------------------------------------------- | ------------- | -------- | ---------------- | ------------ | ------ | ------ |
+| all-core spin, default QoS                         | 00:45:27–47:02 | none     | 8.4 / 2.8 ms     | none         | 34     | 889    |
+| all-core spin, `QOS_CLASS_USER_INITIATED`          | 00:47:05–48:38 | none     | 6.3 / 2.2 ms     | none         | 19     | 1219   |
+| memory + I/O (GB writes/reads, 2 000 small files)  | 00:48:38–50:16 | none     | 10.0 / 6.4 ms    | none         | 38     | 974    |
+
+Idle rtt on the same direct path before each load: 1.4–1.9 ms. So the whole machine at full tilt
+costs the path a few milliseconds and nothing else — no abandon, no relay sample, not one path
+event in 90 s × 3. The load hypothesis is dead (DECISIONS, "Machine load alone does not flap the
+path"); what is left untested is the network half, which needs the second machine.
+
+The stalls are the interesting leftover: 19–38 datagram stalls per 90 s under load where an idle
+machine's run has none. Those are the pacer's frames arriving in clumps, not the link dropping —
+the loss table above shows 0 stalls at every injected rate on a quiet machine.
+
+### The refresh guard end to end
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e a_window_that_never_draws --no-capture
+cargo xtask e2e app        # a_remote_window_that_never_draws_waits_instead_of_asking_forever
+```
+
+The target is a window the test owns (`slopty-idle-window`, a 240×160 AppKit window with no
+content): on screen while the host lists it, ordered out before the stream opens, so
+ScreenCaptureKit has nothing at all to deliver. Nothing on the desktop is touched.
+
+* Host → `SourceState::Idle` within its 400 ms grace, every time.
+* Client → **4 refresh requests** over the following 3 s and then silence, against the
+  `refresh_max_repeats` cap of 12 and the 79-in-10-s storm this guard was built for
+  (2026-09-05, "screen stream over the mesh"). The count is read from the host's own
+  `ScreenStats::refreshes`, i.e. what actually arrived, not what the client believes it sent.
+* Item → the `Role::Status` placeholder reads "waiting for the window to draw…", not "waiting
+  for the first frame…".
+* Recovery → the helper orders the window back in and repaints; frames arrive with no refresh,
+  no reopen and no help from the client, and the placeholder goes.
+
+Not measured: the same guard on iOS (the helper is an AppKit window on the host's machine, which
+the simulator case shares, but the run was not made), and a target that draws once and then hides
+— `check_source` latches on `encoded > 0`, so that case reports `Live` forever and only the cap
+protects the client.
+
