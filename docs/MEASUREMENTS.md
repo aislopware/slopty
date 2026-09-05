@@ -1877,8 +1877,20 @@ The conclusion survives the correction, for a different reason than the one reco
 Over the five samples: 7 547 holds in all, mean 2.4 ms — and **32 holds of 25 ms or more, 24 of
 them (75 %) with the window at exactly 5 808 bytes.** The stall count follows the long holds run
 for run. Nothing else does: `host captured N, dropped 0, encoded N, queue full 0` in every run,
-`receiver_dozed` 0 everywhere, and the datagram pump — newly instrumented — was never more than
-3 ms behind. The frames are built, they reach the pump at once, and then QUIC sits on them.
+`receiver_dozed` 0 everywhere, and the datagram pump — newly instrumented — never late by more
+than 12 ms. The frames are built, they reach the pump at once, and then QUIC sits on them.
+
+That last number was measured wrong the first time and is corrected here. The pump's backlog
+timer started when `recv` handed over the first datagram, so it timed the *drain* and could not
+see the sleep before it: a pump descheduled for 200 ms while datagrams piled up would wake, drain
+in a millisecond and report one millisecond behind. It now sums the turns it owed to datagrams
+already queued, and records the worst single turn against the 1 ms deadline the loop asks for
+while anything is outstanding — which is the scheduling delay the claim is about, stated
+directly. Re-measured over 3 × 90 s with the corrected instrument: worst turn **12 ms**, **no turn
+past 25 ms in any run**, against QUIC holds of 96–100 ms at `cwnd 5808` in the same logs. The
+conclusion stands; the evidence for it did not, until now. What the instrument still cannot see
+is time a datagram spent queued while the pump had found the queue empty at its previous look —
+that needs a stamp at enqueue, which is a change to the sender's side of the channel.
 
 5 808 B is `BBR.MinPipeCwnd`, `4 * smss`, and the window reaches it in `ProbeRTT`: every
 `probe_rtt_interval` (5 s) without a lower RTT sample, BBR3 clamps the window to

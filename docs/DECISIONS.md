@@ -2536,8 +2536,13 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   entirely. Paired with a **backlog** line in hostd's datagram pump, the host-side twin of
   `receiver_dozed`: a datagram waits either in the pump's channel, because the task did not run,
   or in QUIC's send buffer, because the window holds it, and a receiver sees the same silence for
-  both. The pump was never more than 3 ms behind in any sample, which is what makes the window the
-  answer. The bench's `quic path (client side)` line — the feedback connection, permanently at
+  both. The pump is never late by more than 12 ms in any sample, which is what makes the
+  window the answer. That measurement was wrong when first taken — the timer started when `recv`
+  handed over a datagram, so it timed the drain and not the sleep before it, and a pump
+  descheduled for 200 ms could have reported 1 ms. It now sums the turns owed to datagrams
+  already queued and keeps the worst turn against the 1 ms deadline the loop asks for while work
+  is outstanding; re-measured, no turn past 25 ms in 3 × 90 s against QUIC holds of 96–100 ms in
+  the same logs. Unit test: `a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain`. The bench's `quic path (client side)` line — the feedback connection, permanently at
   `min_pipe_cwnd` because nothing measurable flows on it — is relabelled
   `quic path (client→host, feedback only)`; reading it as the media window is the mistake this
   entry exists to stop.
@@ -2572,3 +2577,18 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   doze it never took. An arrival is proof the loop ran, so it moves the mark too. Test:
   `a_tick_that_wakes_first_does_not_hand_the_silence_to_the_link` — the timer fires before the
   datagrams and the 200 ms is still not a stall, and the next silence, watched, still is one.
+- ✅ **A sleep is forgiven once, and the two shares of a silence are not added** (2026-09-06,
+  `crates/slopty-media/src/reassemble.rs`, from Codex's review of the cadence track). Two ways the
+  doze credit was wrong. **It was spent again in every report**: the bank belongs to the whole
+  silence but a charge only covers the stretch since the last one, so a receiver that slept 200 ms
+  and then sat awake in a stall reported the silence once and zero thereafter — and a rate
+  controller reads a window with no stalled time as healthy and grows into a link that is still
+  holding everything. `charge_stall` now spends what it forgives. **And the host's share and the
+  receiver's were added**, though they are not disjoint: the host's silence runs from the last
+  arrival, and the receiver may have slept through exactly that stretch. A host quiet for 100 ms,
+  then a link holding the next datagram for 100 ms with 75 ms of sleep inside the host's half,
+  read as 25 ms of link time instead of 100 and the stall was missed. Only sleep past the end of
+  the host's silence is credited now, which needs the doze's start as well as its length. Tests:
+  `a_sleep_is_forgiven_once_and_a_stall_that_stays_on_keeps_reporting`,
+  `sleep_inside_the_hosts_own_silence_is_not_forgiven_twice`; both were checked against a mutation
+  of the fix they cover.
