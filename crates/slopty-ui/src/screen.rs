@@ -1,9 +1,12 @@
 //! `ScreenView`: one remote window or display, painted from the newest decoded frame.
 //!
-//! The frame arrives as an IOSurface-backed `CVPixelBuffer` from `slopty-codec`; GPUI's
-//! `surface` element samples it through `CVMetalTextureCache`, so nothing is copied on the
-//! client. The host's cursor is drawn here from the cursor channel (one RTT behind the pointer,
-//! not one video pipeline). Pointer, scroll and key events inside the view go to the host as
+//! The frame arrives as a `slopty_client::Presentable`: an IOSurface-backed `CVPixelBuffer`
+//! plus the instants that got it here. GPUI's `surface` element samples it through
+//! `CVMetalTextureCache`, so nothing is copied on the client, and a `slopty_client::Pacer`
+//! decides when it goes up (present on arrival, never a queue) and measures how long the
+//! journey took. The host's cursor is drawn here from the cursor channel (one RTT behind the
+//! pointer, not one video pipeline). Pointer, scroll and key events inside the view go to the
+//! host as
 //! `ScreenInput` in stream pixels; the host injects them. ⌘ chords the canvas binds (⌘T/⌘O/⌘W,
 //! zoom) never reach the view because GPUI runs key bindings before key listeners; every other
 //! chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also asks the host for a
@@ -23,8 +26,8 @@ use gpui::{
     ScrollWheelEvent, Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase,
     UTF16Selection, Window, canvas, div, point, px, surface,
 };
-use slopty_client::{CursorState, ScreenHandle, ScreenStats};
-use slopty_codec::DecodedFrame;
+use slopty_client::pacing::{Pace, Pacer, PacingStats};
+use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
@@ -75,7 +78,7 @@ pub struct ScreenView {
     target: CaptureTarget,
     handle: ScreenHandle,
     /// Newest frame and its Metal-ready wrapper.
-    latest: Option<(Arc<DecodedFrame>, CVPixelBuffer)>,
+    latest: Option<(Arc<Presentable>, CVPixelBuffer)>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -100,8 +103,9 @@ pub struct ScreenView {
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
     hud: Option<Hud>,
-    /// When the frame on screen came out of the decoder (its age in the overlay).
-    taken_at: Option<Instant>,
+    /// Decides when a decoded frame goes up and measures arrival → present. The element only
+    /// feeds it: a frame on one side, a paint on the other.
+    pacer: Pacer,
     /// Link RTT from the canvas, for the overlay.
     rtt: Option<Duration>,
     /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
@@ -136,14 +140,21 @@ pub struct HudInput<'a> {
     pub rate: Option<(u32, RateVerdict, bool)>,
     /// The receiver's counters.
     pub stats: &'a ScreenStats,
+    /// Arrival → present, from the element's pacer.
+    pub pacing: &'a PacingStats,
 }
 
-/// The two lines of the stats overlay: what is on screen and how it got there.
+/// The three lines of the stats overlay: what is on screen, how it got there, and when.
 ///
 /// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
 /// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
 /// their last fragment (p50 / p95 of the last report), the in-order queue, recovery counts,
-/// stalls, the host's bitrate verdict and audio. Pure so it can be checked without a window.
+/// stalls, the host's bitrate verdict and audio. Line three is the presentation: how long a
+/// frame takes from the arrival of the datagram that completed it to the paint that shows it
+/// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
+/// of it), the spacing of those paints and its jitter, and the two cadence faults —
+/// `skip` (a frame the display never saw) and `repeat` (a paint that showed the picture again).
+/// Pure so it can be checked without a window.
 #[must_use]
 pub fn hud_lines(input: &HudInput<'_>) -> String {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -163,9 +174,11 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
             )
         },
     );
+    let pacing = input.pacing;
     format!(
         "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
-         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}",
+         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}\n\
+         present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}",
         input.size.0,
         input.size.1,
         input.scale,
@@ -183,6 +196,16 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         stats.stalled_ms,
         stats.audio_packets,
         stats.audio_lost,
+        ms(pacing.latency_p50),
+        ms(pacing.latency_p95),
+        ms(pacing.latency_max),
+        ms(pacing.decode_p50),
+        ms(pacing.interval_p50),
+        ms(pacing.interval_jitter),
+        pacing.presented,
+        pacing.skipped,
+        pacing.repeats,
+        pacing.late,
     )
 }
 
@@ -304,7 +327,7 @@ impl ScreenView {
             marked: None,
             hud: None,
             rtt: None,
-            taken_at: None,
+            pacer: Pacer::default(),
             rate: None,
             _pump: pump,
         }
@@ -326,6 +349,12 @@ impl ScreenView {
     #[must_use]
     pub const fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// Stream pixel size of the picture last painted.
+    #[must_use]
+    pub const fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     /// Receiver counters.
@@ -384,9 +413,10 @@ impl ScreenView {
                 fps,
                 mbps,
                 rtt: self.rtt,
-                frame_age: self.taken_at.map(|t| now.saturating_duration_since(t)),
+                frame_age: self.pacer.age(),
                 rate: self.rate,
                 stats: &stats,
+                pacing: &self.pacer.stats(),
             });
             hud.sample = stats;
             hud.sampled_at = now;
@@ -447,23 +477,34 @@ impl ScreenView {
         self.native
     }
 
-    fn take_frame(&mut self, frame: Option<Arc<DecodedFrame>>, cx: &mut Context<Self>) {
+    /// A decoded frame came off the stream. The pacer decides whether it goes up (it always
+    /// does unless it is older than the picture already showing); nothing is queued for a later
+    /// paint, so the frame on screen is always the newest one that had arrived by paint time.
+    fn take_frame(&mut self, frame: Option<Arc<Presentable>>, cx: &mut Context<Self>) {
         let Some(frame) = frame else { return };
-        let raw = std::ptr::from_ref(frame.image.as_cv())
+        if self.pacer.offer(frame.stamp) == Pace::Drop {
+            return;
+        }
+        let raw = std::ptr::from_ref(frame.frame.image.as_cv())
             .cast_mut()
             .cast::<core_video::buffer::__CVBuffer>();
         // SAFETY: `raw` is a live `CVPixelBufferRef` owned by `frame`; `wrap_under_get_rule`
         // takes its own retain, so the wrapper stays valid even if `frame` is dropped first.
         let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw) };
         #[expect(clippy::cast_possible_truncation, reason = "pixel counts")]
-        let size = (frame.image.width() as u32, frame.image.height() as u32);
+        let size = (frame.frame.image.width() as u32, frame.frame.image.height() as u32);
         self.size = size;
         self.latest = Some((frame, buffer));
-        self.taken_at = Some(Instant::now());
         self.frames = self.frames.saturating_add(1);
         if self.frames == 1 {
             cx.emit(ScreenViewEvent::Ready);
         }
+    }
+
+    /// Arrival → present numbers for the last frames (the overlay and the app self-test).
+    #[must_use]
+    pub fn pacing(&self) -> PacingStats {
+        self.pacer.stats()
     }
 
     fn send(&self, req: ScreenRequest) {
@@ -755,6 +796,9 @@ impl Render for ScreenView {
             // Registering as a text input is what raises the soft keyboard on iOS and lets an
             // input method compose; typed text arrives in `replace_text_in_range`.
             move |bounds, (), window, cx| {
+                // The paint pass is the present: this is the only place that knows the picture
+                // actually reached the screen, so it is where the pacer's clock stops.
+                handler.update(cx, |view, _cx| view.pacer.presented());
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
                 window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble {
@@ -960,9 +1004,10 @@ mod tests {
     }
 
     /// The overlay names every number a human needs to judge a stream: age of the picture,
-    /// jitter, how long frames wait for their tail, the queue, recovery, stalls, the verdict.
+    /// jitter, how long frames wait for their tail, the queue, recovery, stalls, the verdict,
+    /// and what the presentation path did with it all.
     #[test]
-    fn hud_shows_age_jitter_hold_and_the_verdict() {
+    fn hud_shows_age_jitter_hold_present_cadence_and_the_verdict() {
         let stats = ScreenStats {
             jitter: Duration::from_micros(1_250),
             hold_p50: Duration::from_millis(2),
@@ -979,6 +1024,19 @@ mod tests {
             audio_lost: 0,
             ..ScreenStats::default()
         };
+        let pacing = PacingStats {
+            presented: 1_204,
+            skipped: 2,
+            repeats: 7,
+            late: 0,
+            latency_p50: Duration::from_micros(5_400),
+            latency_p95: Duration::from_micros(11_900),
+            latency_max: Duration::from_millis(28),
+            decode_p50: Duration::from_micros(2_100),
+            interval_p50: Duration::from_micros(16_667),
+            interval_jitter: Duration::from_micros(1_400),
+            window: 240,
+        };
         let text = hud_lines(&HudInput {
             size: (1920, 1080),
             scale: 1.0,
@@ -988,15 +1046,16 @@ mod tests {
             frame_age: Some(Duration::from_millis(12)),
             rate: Some((19_200_000, RateVerdict::Stall, true)),
             stats: &stats,
+            pacing: &pacing,
         });
-        let (picture, path) = text.split_once('\n').expect("two lines");
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
-            picture,
-            "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms"
-        );
-        assert_eq!(
-            path,
-            "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0"
+            lines,
+            vec![
+                "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms",
+                "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0",
+                "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
+            ]
         );
         let blank = hud_lines(&HudInput {
             size: (0, 0),
@@ -1007,8 +1066,10 @@ mod tests {
             frame_age: None,
             rate: None,
             stats: &ScreenStats::default(),
+            pacing: &PacingStats::default(),
         });
         assert!(blank.contains("rtt –") && blank.contains("age –") && blank.contains("target –"));
+        assert!(blank.contains("present 0.0 / 0.0 / 0.0 ms"), "{blank}");
     }
 
     #[test]

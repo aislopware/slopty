@@ -8299,7 +8299,6 @@ dependencies = [
  "gpui",
  "gpui-kit",
  "slopty-client",
- "slopty-codec",
  "slopty-core",
  "slopty-grid",
  "slopty-predict",

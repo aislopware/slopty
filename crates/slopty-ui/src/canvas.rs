@@ -501,6 +501,12 @@ impl CanvasView {
         }
     }
 
+    /// The stream view of one item, if it has one open.
+    #[must_use]
+    pub fn screen(&self, item: ItemId) -> Option<&Entity<ScreenView>> {
+        self.screens.get(&item)
+    }
+
     /// ⌘⇧I: the stats overlay on every remote window (fps, bitrate, RTT, loss).
     pub fn toggle_stats(&mut self, _: &ToggleStats, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_stats = !self.show_stats;
