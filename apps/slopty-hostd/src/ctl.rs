@@ -93,10 +93,29 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
                 if daemon.host.get(session).is_err() {
                     return CtlReply::Error { message: "no such session".to_owned() };
                 }
-                let event = daemon.agents.lock().apply(session, &hook);
+                let mut event = daemon.agents.lock().apply(session, &hook);
+                // A blocked or finished agent with nothing to say for itself: the transcript
+                // tail has its last line. Read off the runtime's blocking pool; the table lock
+                // is not held meanwhile.
+                if let Some(ev) = &mut event
+                    && slopty_agent::wants_transcript(ev)
+                    && let Some(path) = hook.transcript_path.clone()
+                {
+                    let line = tokio::task::spawn_blocking(move || {
+                        slopty_agent::transcript::last_assistant_line(Path::new(&path))
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(line) = line
+                        && daemon.agents.lock().set_detail(session, &line)
+                    {
+                        ev.detail = Some(slopty_agent::truncate(&line));
+                    }
+                }
                 let changed = event.is_some();
                 if let Some(event) = event {
-                    tracing::debug!(%session, status = ?event.status, "agent");
+                    tracing::debug!(%session, status = ?event.status, detail = ?event.detail, "agent");
                     let _sent = daemon.events.send(HostMsg::Agent(event));
                 }
                 CtlReply::Ok { changed }

@@ -7947,6 +7947,7 @@ dependencies = [
  "serde_json",
  "slopty-core",
  "slopty-proto",
+ "tempfile",
 ]
 
 [[package]]

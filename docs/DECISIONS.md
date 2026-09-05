@@ -605,6 +605,24 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   z or arrival time because it is the one order the user can predict from what they see; the
   picker (⌘O) uses the same order within its "needs you / other agents / shells" ranking. No
   proto change: the count is derived from the `HostMsg::Agent` table the client already has.
+- ✅ What the badge says when the agent waits or stops (verified 2026-09-05, Claude Code 2.1.261
+  inside a Slopty session through `slopty open`, payloads captured with a `tee` hook beside
+  the relay): every event carries `transcript_path`; `Stop` also carries
+  `last_assistant_message` (here "Done. `/tmp/…/opened-enter` was created."), which the docs
+  say to prefer because the transcript file "may lag the in-memory conversation". So the
+  detail comes from the payload first — the `AskUserQuestion` input's first `question`, the
+  `Elicitation` `message`, the `Stop` message's last non-empty line — and only a `Blocked
+  (Question|Elicitation)` or `Done` event that still has no detail makes the daemon read the
+  transcript's last 256 KiB for the newest non-sidechain `assistant` record with a `text`
+  block (`slopty_agent::transcript`, `spawn_blocking`, table lock released meanwhile). The
+  transcript is JSONL of `{"type":"assistant","message":{"content":[{"type":"text",…}]}}`
+  records; `isSidechain: true` rows are subagent chatter and skipped. No wire change: `detail`
+  already existed. Found on the way: the `permission_prompt` Notification that follows a
+  `PermissionRequest` ~6 s later says only "Claude needs your permission" (no "to use X"), and
+  used to replace `Permission{Bash}` + "$ touch …" with `Permission{""}` + nothing; the tracker
+  now keeps the request's tool and detail when the notification names none. After Esc on the
+  menu no `Stop` fires (the turn is interrupted; the next hook is whatever the user does), so
+  the badge keeps saying "denied" until then — acceptable, since the outline is already off.
 - 🔬 Attribution without hooks (a `claude` started before `install`, or in a session the host
   did not spawn): no signal today. `SessionSummary.command` could seed an `Idle` badge; the
   transcript tail could recover the rest. Not built.

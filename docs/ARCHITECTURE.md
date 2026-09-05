@@ -135,8 +135,12 @@ The host spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_HOSTD_SOCKE
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
 exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
 `AgentStatus` (`Idle`, `Working`, `Tool`, `Blocked{Permission|Question|Elicitation|IdlePrompt}`,
-`Done`) and flags `attention` on the transitions worth a sound. The daemon broadcasts each
-change as `HostMsg::Agent` and replays the table to joining clients. The canvas shows the status
+`Done`) and flags `attention` on the transitions worth a sound. `AgentEvent.detail` says what
+the agent wants: the tool call awaiting permission, the question it asked, the elicitation's
+message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload;
+when a payload has none of these but names a transcript, the daemon reads the JSONL tail —
+`slopty_agent::transcript` — off the blocking pool and fills the detail in). The daemon
+broadcasts each change as `HostMsg::Agent` and replays the table to joining clients. The canvas shows the status
 as a pill in the terminal's title bar and outlines the item when the agent needs the human.
 A permission badge carries "allow" / "deny" buttons that type Enter / Esc into that session
 through the terminal view's normal key path (`TermRequest::Key`, nothing new on the wire); a

@@ -9,6 +9,13 @@
 //!
 //! The hook payload is parsed leniently ([`Hook`]): unknown events and unknown fields are
 //! ignored, so a newer Claude Code never breaks the relay.
+//!
+//! When the agent stops or waits on the human, the event's `detail` says what it wants: the
+//! question it asked, the elicitation's message, or (on `Stop`) the last line it said, from the
+//! payload's `last_assistant_message`; when a payload carries none of those but names a
+//! transcript, the daemon reads the transcript tail ([`transcript`]) and fills the detail in.
+
+pub mod transcript;
 
 use std::collections::HashMap;
 
@@ -33,7 +40,7 @@ pub const HOOK_EVENTS: [&str; 12] = [
 ];
 
 /// Longest `detail` string sent to clients.
-const DETAIL_MAX: usize = 60;
+pub const DETAIL_MAX: usize = 60;
 
 /// A Claude Code hook payload, the fields Slopty reads.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -62,6 +69,12 @@ pub struct Hook {
     /// `SessionStart`: `startup|resume|clear|compact|fork`.
     #[serde(default)]
     pub source: Option<String>,
+    /// The conversation transcript (JSONL); on every event in practice.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    /// `Stop`: the text of the turn's final response, so nobody has to read the transcript.
+    #[serde(default)]
+    pub last_assistant_message: Option<String>,
 }
 
 impl Hook {
@@ -89,6 +102,36 @@ impl Hook {
         };
         Some(truncate(&text.unwrap_or_else(|| tool.to_owned())))
     }
+
+    /// The first question of an `AskUserQuestion` call.
+    fn question(&self) -> Option<String> {
+        let question = self
+            .tool_input
+            .as_ref()?
+            .get("questions")?
+            .as_array()?
+            .first()?
+            .get("question")?
+            .as_str()?;
+        Some(truncate(question))
+    }
+
+    /// The last line the assistant said, from a `Stop` payload.
+    fn last_said(&self) -> Option<String> {
+        transcript::last_line(self.last_assistant_message.as_deref()?).map(|l| truncate(&l))
+    }
+}
+
+/// Whether an event's `detail` should be recovered from the transcript when the payload gave
+/// none: the states where the badge is read as "what does it want?".
+#[must_use]
+pub const fn wants_transcript(event: &AgentEvent) -> bool {
+    event.detail.is_none()
+        && matches!(
+            event.status,
+            AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation)
+                | AgentStatus::Done
+        )
 }
 
 fn first_line(s: &str) -> &str {
@@ -102,7 +145,9 @@ fn short_path(p: &str) -> String {
     parts.join("/")
 }
 
-fn truncate(s: &str) -> String {
+/// Clip to [`DETAIL_MAX`] characters with an ellipsis.
+#[must_use]
+pub fn truncate(s: &str) -> String {
     let s = s.trim();
     if s.chars().count() <= DETAIL_MAX {
         return s.to_owned();
@@ -157,7 +202,7 @@ impl Tracker {
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
         }
-        let (status, detail) = Self::next(hook)?;
+        let (status, detail) = self.next(hook)?;
         let was_blocked = matches!(self.status, AgentStatus::Blocked(_));
         let attention = match status {
             AgentStatus::Blocked(_) => !was_blocked,
@@ -175,8 +220,19 @@ impl Tracker {
         Some(AgentEvent { attention, ..self.event(session) })
     }
 
+    /// Replace the detail (something recovered after the hook, such as a transcript line).
+    /// Returns whether it changed.
+    pub fn set_detail(&mut self, detail: &str) -> bool {
+        let detail = Some(truncate(detail)).filter(|d| !d.is_empty());
+        if detail == self.detail {
+            return false;
+        }
+        self.detail = detail;
+        true
+    }
+
     /// The transition for a hook, if it means anything to us.
-    fn next(hook: &Hook) -> Option<(AgentStatus, Option<String>)> {
+    fn next(&self, hook: &Hook) -> Option<(AgentStatus, Option<String>)> {
         let tool = || hook.tool_name.clone().unwrap_or_default();
         Some(match hook.event.as_str() {
             "SessionStart" => (AgentStatus::Idle, None),
@@ -185,7 +241,7 @@ impl Tracker {
                 (AgentStatus::Working, hook.prompt.as_deref().map(first_line).map(truncate))
             }
             "PreToolUse" if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
-                (AgentStatus::Blocked(BlockReason::Question), None)
+                (AgentStatus::Blocked(BlockReason::Question), hook.question())
             }
             "PreToolUse" => (AgentStatus::Tool { tool: tool() }, hook.tool_detail()),
             "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" | "ElicitationResult" => {
@@ -194,12 +250,29 @@ impl Tracker {
             "PermissionRequest" => {
                 (AgentStatus::Blocked(BlockReason::Permission { tool: tool() }), hook.tool_detail())
             }
-            "Elicitation" => (AgentStatus::Blocked(BlockReason::Elicitation), None),
+            "Elicitation" => (
+                AgentStatus::Blocked(BlockReason::Elicitation),
+                hook.message.as_deref().map(first_line).map(truncate),
+            ),
             "Notification" => match hook.notification_type.as_deref()? {
-                "permission_prompt" => {
-                    let tool = tool_from_message(hook.message.as_deref()).unwrap_or_default();
-                    (AgentStatus::Blocked(BlockReason::Permission { tool }), None)
-                }
+                // Follows a `PermissionRequest` a few seconds later and, as of Claude Code
+                // 2.1.261, says only "Claude needs your permission": when the request already
+                // put the tool and its arguments on the badge, keep them.
+                "permission_prompt" => match tool_from_message(hook.message.as_deref()) {
+                    None if matches!(
+                        self.status,
+                        AgentStatus::Blocked(BlockReason::Permission { .. })
+                    ) =>
+                    {
+                        return None;
+                    }
+                    tool => (
+                        AgentStatus::Blocked(BlockReason::Permission {
+                            tool: tool.unwrap_or_default(),
+                        }),
+                        None,
+                    ),
+                },
                 "idle_prompt" => (AgentStatus::Blocked(BlockReason::IdlePrompt), None),
                 "agent_needs_input" => (AgentStatus::Blocked(BlockReason::Question), None),
                 "elicitation_dialog" | "elicitation_url_dialog" => {
@@ -208,7 +281,7 @@ impl Tracker {
                 "elicitation_complete" | "elicitation_response" => (AgentStatus::Working, None),
                 _ => return None,
             },
-            "Stop" => (AgentStatus::Done, None),
+            "Stop" => (AgentStatus::Done, hook.last_said()),
             _ => return None,
         })
     }
@@ -229,6 +302,12 @@ impl AgentTable {
             self.sessions.remove(&session);
         }
         event
+    }
+
+    /// Put a recovered detail on a session's agent (see [`wants_transcript`]); the next
+    /// snapshot carries it. Returns whether anything changed.
+    pub fn set_detail(&mut self, session: SessionId, detail: &str) -> bool {
+        self.sessions.get_mut(&session).is_some_and(|t| t.set_detail(detail))
     }
 
     /// The session's terminal went away.
@@ -388,6 +467,94 @@ mod tests {
         assert_eq!(table.snapshot().len(), 1);
         table.forget(b);
         assert!(table.snapshot().is_empty());
+    }
+
+    #[test]
+    fn blocked_and_done_say_what_they_want() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which framework?","header":"Framework","options":[]}]}}"#,
+                ),
+            )
+            .expect("question");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
+        assert_eq!(e.detail.as_deref(), Some("Which framework?"));
+        assert!(!wants_transcript(&e), "the payload said it");
+
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Elicitation","mcp_server_name":"x","message":"Please provide your credentials","mode":"form"}"#,
+                ),
+            )
+            .expect("elicitation");
+        assert_eq!(e.detail.as_deref(), Some("Please provide your credentials"));
+
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"All green.\n\nDone. `opened-enter` was created."}"#,
+                ),
+            )
+            .expect("stop");
+        assert_eq!(e.status, AgentStatus::Done);
+        assert_eq!(e.detail.as_deref(), Some("Done. `opened-enter` was created."));
+
+        // An older Claude Code without `last_assistant_message`: the daemon asks the transcript.
+        let mut t = Tracker::default();
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"Stop","transcript_path":"/x.jsonl"}"#))
+            .expect("stop");
+        assert_eq!(e.detail, None);
+        assert!(wants_transcript(&e));
+        assert!(t.set_detail("Running the tests now."));
+        assert!(!t.set_detail("Running the tests now."));
+        assert_eq!(t.event(sid).detail.as_deref(), Some("Running the tests now."));
+    }
+
+    #[test]
+    fn a_bare_permission_notification_keeps_the_request_detail() {
+        // Observed with Claude Code 2.1.261: the notification that follows the request says
+        // only "Claude needs your permission".
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch x"}}"#,
+                ),
+            )
+            .expect("permission");
+        assert_eq!(e.detail.as_deref(), Some("$ touch x"));
+        let e = t.apply(
+            sid,
+            &hook(
+                r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission"}"#,
+            ),
+        );
+        assert_eq!(e, None, "nothing to add: the request already said it all");
+        assert_eq!(
+            t.status(),
+            &AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() })
+        );
+        // Without a preceding request the notification still blocks, tool unknown.
+        let mut t = Tracker::default();
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission"}"#,
+                ),
+            )
+            .expect("blocks");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Permission { tool: String::new() }));
     }
 
     #[test]
