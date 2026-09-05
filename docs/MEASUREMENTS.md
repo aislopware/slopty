@@ -67,8 +67,8 @@ PY
 
 Takeaways: the transport adds well under a frame at 120 Hz; the budget is dominated by the
 coalescing window. Next: the same probe over Wi-Fi from macbook-pro and from a phone on LTE, and a
-release build. This ad-hoc Python driver is a stopgap; the harness will be `cargo xtask bench echo`
-per the pure-Rust rule.
+release build. This ad-hoc Python driver is a stopgap; the harness is `slopty bench echo`
+(`apps/slopty-cli/src/bench.rs`), a CLI subcommand, not an xtask.
 
 ## 2026-09-04 — client connect setup time
 

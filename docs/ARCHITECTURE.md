@@ -218,8 +218,8 @@ window (`slopty-net::endpoint`).
 
 ## 4. Canvas
 
-One infinite 2D plane per workspace (kolu model). Items: terminal, remote window, agent card,
-note. Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
+One infinite 2D plane per workspace (kolu model). Items: terminal, remote window, remote display,
+note (`ItemKind` in `crates/slopty-proto/src/canvas.rs`). Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
 at ≥ 0.6×, summary card (title, last lines, agent state) below. Off-screen terminals keep their
 line cache and stop painting; off-screen video pauses decode (kind-aware culling). Layout is a
 document synced through the host so every client sees the same canvas (`slopty-host::canvas`
@@ -436,8 +436,9 @@ audio counters, re-sampled once a second from `ScreenStats`.
 **Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph
 runs shaped per row and cached by content hash, background quads, cursor, selection, ⌘-hover
 link underline) with a hairline over every prompt-start row but the first line: the
-command-block separator, the foreground at 18 % alpha, or the palette's ANSI red at 70 % when
-the row's `Prompt { exit }` is non-zero (`separator_color`). Terminal-context bindings: ⌘C /
+command-block separator, the foreground at 18 % alpha, or the theme's `surfaces.error` token
+at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
+(`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`). Terminal-context bindings: ⌘C /
 ⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output),
@@ -496,6 +497,7 @@ way the CLI does and the host's connect loop starts.
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
+| `slopty-platform` | process-level platform helpers: keep the process out of App Nap and timer coalescing while a session is live, and raise the user's attention | all |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
 | `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff (`cargo xtask e2e app\|ios`) | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |

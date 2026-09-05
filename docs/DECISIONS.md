@@ -109,8 +109,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `slopty_platform::hardware_keyboard_attached()` (GameController's coalesced keyboard, polled
   on the settings tick — GameController posts connect/disconnect notifications, but a poll that
   already runs costs nothing and needs no observer lifetime) is true; `key_bar_visible` is the
-  pure rule with its table test. Not verified by a test: the UIKit delivery
-  itself (no simulator-driven layer exists yet; the iOS self-test socket is the next step).
+  pure rule with its table test. The simulator-driven layer exists: `cargo xtask e2e ios`
+  drives the app in the simulator over its socket (`crates/slopty-e2e/tests/ios.rs`); the
+  UIKit delivery itself still has no injection layer.
 - ✅ **iOS link and launch quirks (verified on the iOS 26.5 simulator, 2026-09-04).** Two extra
   things beyond the framework list: `Network.framework` (iroh's `netdev` uses `nw_path_monitor`
   on iOS), and stand-ins for three CGL symbols (`CGLErrorString`, `CGLGetCurrentContext`,
@@ -665,9 +666,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   section blamed). Rules that follow, each measured in the same test:
   * `slopty_codec::warm_up` builds one HEVC session from canned 64×64 parameter sets;
     `slopty_client::warm_up_decoder` runs it once per process on its own thread and is
-    called at app launch (`open_workspace`), on the CLI's connect, and by the test — not
-    in `HostLink::start`, which comes too late for a client that opens right after
-    connecting. First picture 526 → 319 ms on the first open in a process.
+    called at app launch (`open_workspace`), on the CLI's connect, by `HostLink::start`
+    (`crates/slopty-client/src/link.rs`), and by the test. First picture 526 → 319 ms on
+    the first open in a process.
   * `slopty_host::screen::warm_up` builds and drops a 64×64 HEVC encoder, then starts and
     stops a 64×64 capture of the first display, when hostd comes online. The capture-only
     version did not move the first `Opened` (270–295 ms); the encoder did (→ 127–140 ms):
@@ -1424,9 +1425,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (`prompt_navigation_and_last_output_follow_the_marks`). ⌘↑/⌘↓/⌘⇧C are Terminal-context
   bindings (`PrevPrompt`, `NextPrompt`, `CopyLastOutput`); the separator is a 1 px quad on
   the prompt-start row's top edge from the same prepaint pass as the selection
-  (`separator_color`: fg at 18 %, the palette's ANSI red at 70 % when the status is
-  non-zero; the theme has no separate error token, red is the error tone of every
-  `TerminalPalette`), never on line 0. Search bar and selection are untouched. Headless:
+  (`separator_color`: fg at 18 %, the theme's `surfaces.error` token at
+  `alpha::SEPARATOR_ERROR` (70 %) when the status is non-zero; `crates/slopty-theme/src/lib.rs`,
+  `crates/slopty-ui/src/terminal/element.rs`), never on line 0. Search bar and selection are
+  untouched. Headless:
   `cmd_up_and_down_walk_the_prompts_and_separators_follow` (separator rows and colours read
   from `painted_quads`, the three jumps and the return to following output) and
   `cmd_shift_c_copies_the_last_commands_output` (clipboard untouched without marks).
