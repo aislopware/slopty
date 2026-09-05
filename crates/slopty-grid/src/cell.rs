@@ -3,19 +3,35 @@
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 use crate::Style;
 
-/// Inline storage for cell text. Almost every cell is one BMP scalar (≤ 3 bytes); a grapheme
-/// cluster with ZWJ sequences can be much longer and spills to the heap.
-const INLINE_BYTES: usize = 8;
+/// Inline storage for cell text. Almost every cell is one BMP scalar (≤ 3 bytes); the inline
+/// buffer takes any cluster up to this many bytes, and the rare longer one (a ZWJ emoji
+/// sequence) goes to the heap. Sized so the whole type stays at 24 bytes.
+const INLINE_BYTES: usize = 22;
 
 /// The text of one cell: a single grapheme cluster as segmented by the engine.
 ///
-/// Invariant: always valid UTF-8. Empty text means a blank cell.
-#[derive(Clone, PartialEq, Eq, Hash, Default)]
-pub struct CellText(SmallVec<[u8; INLINE_BYTES]>);
+/// Invariant: always valid UTF-8. Empty text means a blank cell. A clone is a copy unless the
+/// cluster is on the heap: the client copies every row it receives into its line cache and a
+/// flood of output made that copy a visible share of the frame.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CellText(Repr);
+
+/// Canonical: `Inline` for anything that fits (unused bytes zero), `Heap` only past the inline
+/// size, so the derived equality and hash are by content.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Repr {
+    Inline { len: u8, bytes: [u8; INLINE_BYTES] },
+    Heap(Box<str>),
+}
+
+impl Default for CellText {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
 
 impl Serialize for CellText {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -43,47 +59,68 @@ impl<'de> Deserialize<'de> for CellText {
 
 impl CellText {
     /// A blank cell.
-    pub const EMPTY: Self = Self(SmallVec::new_const());
+    pub const EMPTY: Self = Self(Repr::Inline { len: 0, bytes: [0; INLINE_BYTES] });
 
     /// From a single scalar.
     #[must_use]
     pub fn from_char(c: char) -> Self {
         let mut buf = [0_u8; 4];
-        Self(SmallVec::from_slice(c.encode_utf8(&mut buf).as_bytes()))
+        Self::from_cluster(c.encode_utf8(&mut buf))
     }
 
     /// From a grapheme cluster. The caller guarantees `s` is one cluster; this type does not
     /// segment.
     #[must_use]
     pub fn from_cluster(s: &str) -> Self {
-        Self(SmallVec::from_slice(s.as_bytes()))
+        let src = s.as_bytes();
+        if let Ok(len) = u8::try_from(src.len())
+            && src.len() <= INLINE_BYTES
+        {
+            let mut bytes = [0_u8; INLINE_BYTES];
+            if let Some(dst) = bytes.get_mut(..src.len()) {
+                dst.copy_from_slice(src);
+            }
+            return Self(Repr::Inline { len, bytes });
+        }
+        Self(Repr::Heap(Box::from(s)))
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.0 {
+            Repr::Inline { len, bytes } => bytes.get(..usize::from(*len)).unwrap_or(&[]),
+            Repr::Heap(s) => s.as_bytes(),
+        }
     }
 
     /// The text.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        // Every constructor takes `&str`/`char` and deserialisation visits a `str`, so the bytes
-        // are always valid UTF-8; the fallback exists so this can never be a source of UB.
-        core::str::from_utf8(&self.0).unwrap_or("\u{FFFD}")
+        match &self.0 {
+            // Every constructor takes `&str`/`char` and deserialisation visits a `str`, so the
+            // bytes are always valid UTF-8; the fallback exists so this can never be a source
+            // of UB.
+            Repr::Inline { .. } => core::str::from_utf8(self.bytes()).unwrap_or("\u{FFFD}"),
+            Repr::Heap(s) => s,
+        }
     }
 
     /// True for a blank cell.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.bytes().is_empty()
     }
 
     /// Length in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.bytes().len()
     }
 
     /// True when the text is a single ASCII byte (the overwhelmingly common case, and the one
     /// renderers fast-path).
     #[must_use]
     pub fn as_ascii(&self) -> Option<u8> {
-        match self.0.as_slice() {
+        match self.bytes() {
             [b] if b.is_ascii() => Some(*b),
             _ => None,
         }
@@ -218,4 +255,35 @@ mod tests {
     }
 
     use crate::Color;
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_text_is_three_words_and_round_trips_any_cluster() {
+        assert_eq!(size_of::<CellText>(), 24);
+        for s in [
+            "",
+            "a",
+            "é",
+            "日",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            &"x".repeat(INLINE_BYTES),
+            &"y".repeat(INLINE_BYTES + 1),
+        ] {
+            let t = CellText::from_cluster(s);
+            assert_eq!(t.as_str(), s);
+            assert_eq!(t.len(), s.len());
+            assert_eq!(t.is_empty(), s.is_empty());
+            assert_eq!(t.clone(), t);
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(serde_json::from_str::<CellText>(&json).unwrap(), t);
+        }
+        assert_eq!(CellText::from_char('a').as_ascii(), Some(b'a'));
+        assert_eq!(CellText::from_cluster("ab").as_ascii(), None);
+        assert_eq!(CellText::from_cluster("é").as_ascii(), None);
+        assert_eq!(CellText::EMPTY, CellText::default());
+    }
 }
