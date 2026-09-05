@@ -13,6 +13,7 @@ use slopty_core::SessionId;
 use slopty_proto::codec;
 use slopty_pty::fdpass;
 use slopty_pty::protocol::{PTYD_PROTOCOL, PtydEvent, PtydRequest};
+use slopty_pty::shell_integration::ShellIntegration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
@@ -23,19 +24,32 @@ struct State {
     sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
     events: broadcast::Sender<Broadcast>,
     backlog_bytes: usize,
+    /// The shell integration scripts, when they could be written.
+    integration: Option<ShellIntegration>,
     next_conn: AtomicU64,
     shutdown: tokio::sync::Notify,
 }
 
-/// Bind and serve until `Shutdown`.
-pub async fn run(socket: &Path, backlog_bytes: usize) -> Result<()> {
+/// Bind and serve until `Shutdown`. `shell_dir` is where the shell integration scripts go.
+pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Result<()> {
     let listener = bind(socket).await?;
     tracing::info!(path = %socket.display(), pid = std::process::id(), "slopty-ptyd listening");
+    let integration = match slopty_pty::shell_integration::install(shell_dir) {
+        Ok(si) => {
+            tracing::info!(dir = %si.zdotdir.display(), enabled = si.enabled, "shell integration installed");
+            Some(si)
+        }
+        Err(e) => {
+            tracing::warn!(dir = %shell_dir.display(), error = %e, "shell integration not installed");
+            None
+        }
+    };
     let (events, _) = broadcast::channel(256);
     let state = Arc::new(State {
         sessions: Mutex::new(HashMap::new()),
         events,
         backlog_bytes,
+        integration,
         next_conn: AtomicU64::new(1),
         shutdown: tokio::sync::Notify::new(),
     });
@@ -201,8 +215,13 @@ impl Connection {
                 if self.session(id).is_some() {
                     return self.error(Some(id), "session id already exists").await;
                 }
-                match Session::spawn(id, &spec, self.state.backlog_bytes, self.state.events.clone())
-                {
+                match Session::spawn(
+                    id,
+                    &spec,
+                    self.state.backlog_bytes,
+                    self.state.integration.as_ref(),
+                    self.state.events.clone(),
+                ) {
                     Ok(session) => {
                         let pid = session.pid;
                         tracing::info!(session = %id, pid, tty = %session.tty.display(), "spawned");

@@ -5,12 +5,14 @@
 //! * [`protocol`] — messages between hostd and ptyd, framed with [`slopty_proto::codec`].
 //! * [`fdpass`] — `SCM_RIGHTS` transfer of the master over the Unix socket.
 //! * [`client`] — the hostd side of the ptyd socket.
+//! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
 
 pub mod client;
 pub mod fdpass;
 pub mod protocol;
 pub mod pty;
 pub mod ring;
+pub mod shell_integration;
 
 pub use client::PtydClient;
 pub use pty::{Pty, PtyMaster, SpawnSpec};

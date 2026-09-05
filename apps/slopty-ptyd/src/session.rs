@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use slopty_core::SessionId;
 use slopty_proto::terminal::TermSize;
 use slopty_pty::protocol::SessionInfo;
+use slopty_pty::shell_integration::ShellIntegration;
 use slopty_pty::{Pty, PtyMaster, Ring, SpawnSpec};
 use tokio::sync::{broadcast, watch};
 
@@ -62,11 +63,12 @@ impl Session {
         id: SessionId,
         spec: &SpawnSpec,
         backlog_bytes: usize,
+        integration: Option<&ShellIntegration>,
         events: broadcast::Sender<Broadcast>,
     ) -> Result<Arc<Self>, slopty_pty::PtyError> {
         let pty = Pty::open(spec.size)?;
         let tty = pty.slave_path().to_path_buf();
-        let mut child = pty.spawn(spec)?;
+        let mut child = pty.spawn_with(spec, integration)?;
         let pid = child.id().unwrap_or(0);
         let master = Arc::new(PtyMaster::new(pty.into_master())?);
         let (pause, _) = watch::channel(false);

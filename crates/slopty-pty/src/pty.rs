@@ -17,6 +17,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 use crate::PtyError;
+use crate::shell_integration::ShellIntegration;
 
 /// What to run on the PTY.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -85,6 +86,16 @@ impl Pty {
 
     /// Spawn `spec` on this PTY as a new session with the slave as its controlling terminal.
     pub fn spawn(&self, spec: &SpawnSpec) -> Result<tokio::process::Child, PtyError> {
+        self.spawn_with(spec, None)
+    }
+
+    /// [`Pty::spawn`], with `integration` (see [`crate::shell_integration`]) injected when the
+    /// program is a shell it covers.
+    pub fn spawn_with(
+        &self,
+        spec: &SpawnSpec,
+        integration: Option<&ShellIntegration>,
+    ) -> Result<tokio::process::Child, PtyError> {
         let slave = self.slave.try_clone().map_err(|e| PtyError::os("dup slave", e))?;
         let (program, args, arg0) = resolve_command(&spec.command);
 
@@ -99,6 +110,11 @@ impl Pty {
         cmd.env("TERM_PROGRAM", "slopty");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env_remove("TERMINFO");
+        if let Some(integration) = integration {
+            for (k, v) in integration.env_for(&program, &spec.env) {
+                cmd.env(k, v);
+            }
+        }
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }

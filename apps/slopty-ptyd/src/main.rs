@@ -8,7 +8,7 @@
 mod daemon;
 mod session;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
@@ -23,6 +23,10 @@ struct Args {
     /// Bytes of output retained per detached session.
     #[arg(long, default_value_t = slopty_pty::protocol::DEFAULT_BACKLOG_BYTES)]
     backlog_bytes: usize,
+    /// Where the shell integration scripts are written (default: `$SLOPTY_DATA_DIR/shell`, else
+    /// `shell/` next to the socket). `SLOPTY_NO_SHELL_INTEGRATION=1` leaves shells untouched.
+    #[arg(long)]
+    shell_dir: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -36,5 +40,11 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     let socket = args.socket.unwrap_or_else(slopty_pty::protocol::socket_path);
-    daemon::run(&socket, args.backlog_bytes).await
+    let shell_dir = args.shell_dir.unwrap_or_else(|| {
+        std::env::var_os("SLOPTY_DATA_DIR").map_or_else(
+            || socket.parent().unwrap_or_else(|| Path::new(".")).join("shell"),
+            |data| PathBuf::from(data).join("shell"),
+        )
+    });
+    daemon::run(&socket, args.backlog_bytes, &shell_dir).await
 }
