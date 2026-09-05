@@ -1,10 +1,12 @@
 //! Keystroke → paint: how long a typed key takes to show, predicted and echoed.
 //!
 //! The view records each key it sends ([`KeyLatency::pressed`]) and the element reports every
-//! paint ([`KeyLatency::painted`]) with two facts: whether the local-echo overlay is showing
-//! and which key the host had applied in the frame on screen (`Frame::input_ack`). The first
-//! paint with the overlay up after a key is that key's *predicted* time; the first paint whose
-//! frame acknowledges it is its *echoed* time. Pure: callers pass `now`.
+//! paint ([`KeyLatency::painted`]) with two facts: which keys the local-echo overlay is showing
+//! (the predictor stamps each guess with the key's sequence number) and which key the host had
+//! applied in the frame on screen (`Frame::input_ack`). The first paint that shows a key's
+//! guess is that key's *predicted* time; the first paint whose frame acknowledges it is its
+//! *echoed* time. A key the predictor drew nothing for (an arrow, a control key) gets no
+//! predicted time. Pure: callers pass `now`.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -62,16 +64,16 @@ impl KeyLatency {
         }
     }
 
-    /// A frame was painted at `now`: the overlay was `predicting` and the picture on screen
-    /// carries the host's state after key `input_ack`.
-    pub fn painted(&mut self, now: Instant, predicting: bool, input_ack: u64) {
+    /// A frame was painted at `now`: the local-echo overlay showed guesses for the keys in
+    /// `shown` and the picture on screen carries the host's state after key `input_ack`.
+    pub fn painted(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
         let mut keep = VecDeque::with_capacity(self.pending.len());
         for mut key in self.pending.drain(..) {
             let age = now.saturating_duration_since(key.at);
             if age > STALE {
                 continue;
             }
-            if predicting && !key.predicted {
+            if !key.predicted && shown.contains(&key.seq) {
                 key.predicted = true;
                 self.predicted_count = self.predicted_count.saturating_add(1);
                 push(&mut self.predicted, age);
@@ -138,15 +140,15 @@ mod tests {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
         m.pressed(1, t0);
-        m.painted(t0 + 8 * MS, false, 0);
+        m.painted(t0 + 8 * MS, &[], 0);
         assert_eq!(m.stats().echoed, 0, "the frame on screen predates the key");
-        m.painted(t0 + 24 * MS, false, 1);
+        m.painted(t0 + 24 * MS, &[], 1);
         let s = m.stats();
         assert_eq!(s.echoed, 1);
         assert_eq!(s.echo_p50, 24 * MS);
         assert_eq!(s.echo_max, 24 * MS);
         assert_eq!(s.predicted, 0);
-        m.painted(t0 + 40 * MS, false, 1);
+        m.painted(t0 + 40 * MS, &[], 1);
         assert_eq!(m.stats().echoed, 1, "an answered key is not counted twice");
     }
 
@@ -155,12 +157,28 @@ mod tests {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
         m.pressed(7, t0);
-        m.painted(t0 + 5 * MS, true, 6);
-        m.painted(t0 + 21 * MS, true, 6);
-        m.painted(t0 + 38 * MS, false, 7);
+        m.painted(t0 + 5 * MS, &[7], 6);
+        m.painted(t0 + 21 * MS, &[7], 6);
+        m.painted(t0 + 38 * MS, &[], 7);
         let s = m.stats();
         assert_eq!((s.predicted, s.predicted_p50), (1, 5 * MS));
         assert_eq!((s.echoed, s.echo_p50), (1, 38 * MS));
+    }
+
+    /// An arrow pressed while a letter's guess is still on screen is not "predicted": the
+    /// overlay shows the letter's sequence, not the arrow's.
+    #[test]
+    fn a_key_the_predictor_drew_nothing_for_gets_no_predicted_time() {
+        let mut m = KeyLatency::default();
+        let t0 = Instant::now();
+        m.pressed(1, t0);
+        m.painted(t0 + 4 * MS, &[1], 0);
+        m.pressed(2, t0 + 10 * MS);
+        m.painted(t0 + 14 * MS, &[1], 0);
+        m.painted(t0 + 30 * MS, &[], 2);
+        let s = m.stats();
+        assert_eq!((s.predicted, s.predicted_p50, s.predicted_max), (1, 4 * MS, 4 * MS));
+        assert_eq!((s.echoed, s.echo_max), (2, 30 * MS));
     }
 
     #[test]
@@ -168,13 +186,13 @@ mod tests {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
         m.pressed(1, t0);
-        m.painted(t0 + STALE + MS, false, 0);
+        m.painted(t0 + STALE + MS, &[], 0);
         assert_eq!(m.stats().echoed, 0);
         assert!(m.pending.is_empty(), "stale key dropped");
         for i in 1..=100_u64 {
             let at = t0 + Duration::from_secs(10) + Duration::from_millis(i * 100);
             m.pressed(i, at);
-            m.painted(at + Duration::from_millis(i), false, i);
+            m.painted(at + Duration::from_millis(i), &[], i);
         }
         let s = m.stats();
         assert_eq!(s.echoed, 100);

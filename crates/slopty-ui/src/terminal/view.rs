@@ -855,9 +855,10 @@ impl TerminalView {
         Some((pending, self.predictor.cursor(self.state.cursor())))
     }
 
-    /// The element painted a frame: `predicting` says whether the local-echo overlay was up.
-    pub fn painted(&mut self, predicting: bool) {
-        self.latency.painted(Instant::now(), predicting, self.state.input_ack());
+    /// The element painted a frame whose local-echo overlay showed guesses for the keys in
+    /// `shown` (their sequence numbers).
+    pub fn painted(&mut self, shown: &[u64]) {
+        self.latency.painted(Instant::now(), shown, self.state.input_ack());
     }
 
     /// Keystroke → paint percentiles (see [`latency`]).

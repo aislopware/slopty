@@ -106,8 +106,9 @@ pub struct Prepared {
     link: Hsla,
     /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
-    /// The overlay carries predictions (not only a composition).
-    predicting: bool,
+    /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
+    /// sequence number), for the keystroke → paint meter.
+    shown: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -844,7 +845,7 @@ impl Element for TerminalElement {
                 background: hsla(palette.bg),
                 link: hsla(palette.fg),
                 overlay,
-                predicting: !predicted.is_empty(),
+                shown: predicted.iter().map(|p| p.seq).collect(),
             }
         };
         *cx.global_mut::<ShapeCache>() = cache;
@@ -970,8 +971,8 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint prediction");
             }
         }
-        let predicting = prepared.predicting;
-        self.view.update(cx, |view, _cx| view.painted(predicting));
+        let shown = std::mem::take(&mut prepared.shown);
+        self.view.update(cx, |view, _cx| view.painted(&shown));
     }
 }
 
