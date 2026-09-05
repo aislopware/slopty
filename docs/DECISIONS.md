@@ -2356,3 +2356,45 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   2026-09-05), not about pacing. `Shape::None` is kept as the baseline row precisely so the next
   reading of these numbers starts from it.
 
+- ✅ **A stall means the link held datagrams while the receiver was awake to notice** (2026-09-06,
+  measured). "A stall is the link's silence, not the source's" (above) put the send stamps to
+  work, and a quiet loopback stream still reported stalls the host could not have caused: it
+  held no frame, QUIC lost no packet, and every charged silence had **no frame pending** — there
+  was nothing for the link to hold (MEASUREMENTS, "a quiet loopback stream's stalls"). Taking
+  all 13 silences past the gap apart over 270 s named two readings, both the receiver's:
+  * The stamp difference was *discarded* whenever it read longer than the arrival gap it
+    explained. It reads longer routinely: `send_ms_lo` is written when the host builds a
+    datagram, not when QUIC sends it, and the two datagrams either side of a silence wait
+    different amounts in the send queue — 7.3 and 7.6 ms in the runs. Discarding charged the
+    whole silence to the link. The difference is congruent to the host's real interval modulo
+    the byte's 256 ms range, so it is now read as a **signed offset from the arrival gap**: below
+    the midpoint the host covers the silence, above it the datagram overtook its predecessor and
+    is refused exactly as before (`STAMP_SLACK`, `Stamp::{Host, Covered, Backwards}`). Past
+    256 ms the ambiguity is real and the pessimistic reading stands (`Stamp::Wrapped`).
+  * **A receiver that was not scheduled charged its own load to the link.** Nothing distinguishes
+    a held link from an unread socket from inside a task that never ran, and the same runs had
+    the client's stream worker 64–80 datagrams behind by a stall gap or more, worst 149 ms.
+    `Config::tick_period` is now the cadence the owner promises, `Reassembler::tick` records when
+    it kept the promise, and the stretch of a silence beyond it is subtracted before anything is
+    charged (`dozed`). `slopty-client`'s `IDLE_TICK` moved 50 ms → 25 ms so the receiver looks
+    twice per stall gap, for the same reason the host beats twice per gap: at 50 ms a gap slept
+    through entirely still left one whole stall gap charged.
+  What a stall no longer means: "nothing arrived for 50 ms". What it means now: "for a stall gap,
+  the host's own stamps say it was sending and this receiver was awake and saw nothing". Deadlines
+  still restart on any silence nothing could have crossed, receiver-side included, so a NACK
+  written before one still gets its round trip. Result over five 90 s samples: **not one stall
+  charged for want of a reading** — `stamp_wrapped`, `stamp_backwards`, `stamp_absent` and
+  `receiver_dozed` are zero in every sample, where before two of four stalls were the discarded
+  stamp and the other two the descheduled receiver. Two samples report 0 stalls outright (against
+  2 / 0 / 2 before) and the rest report holds the counters stand behind: `stamp=Host(0ns)` with
+  **a fragment of the frame still pending**, on the host's send side (`cwnd 5808`, QUIC's floor,
+  against a 30 Mbit/s target on a 2.9 ms path). Freezing growth on those is right. The self-check
+  is `slopty bench screen --max-stalls 0`. Tests (`crates/slopty-media/tests/pipeline.rs`):
+  `a_stamp_reading_just_past_the_silence_still_belongs_to_the_host`,
+  `heartbeats_late_by_three_beats_are_charged_to_the_sender`,
+  `two_hundred_milliseconds_in_flight_is_one_stall` (which must still be one stall of 200 ms, and
+  still freeze the bitrate controller) and `a_silence_the_receiver_slept_through_is_not_a_stall`;
+  the harness now separates `awake` (time passes, the receiver ticks) from `advance` (it does
+  not), which is the distinction the rule turns on. Not done: widening `send_ms_lo` past its
+  256 ms range — no run has produced a `Stamp::Wrapped` silence, so the protocol bump would be
+  paying for a case nothing has shown yet.

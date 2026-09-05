@@ -1512,3 +1512,110 @@ Host-side fan-out (from `slopty host screens` and `ps` CPU time over 4 s windows
 
 The host encodes once per viewer: the second viewer of the display costs about 0.06 of a core.
 See DECISIONS "Multi-client" for why per-viewer encode is kept.
+
+## 2026-09-06 — a quiet loopback stream's stalls, attributed and removed
+
+`claude/cropsafe` measured a 90 s display stream on loopback with nothing else running and got
+as many stalls as under full CPU load (31 stalls / 3741 ms, host hold p95 0 ms — the host never
+held a frame). If the host held nothing and the link is loopback, the stalls are the receiver's
+reading, not the wire. This section takes every silence past the stall gap apart.
+
+```sh
+# mac-studio, private daemons, own data dir and port; an idle desktop as the target.
+export D=target/e2e-data/stalls && mkdir -p $D/client
+target/debug/slopty-ptyd --socket $D/ptyd.sock &
+RUST_LOG=info,slopty_host=debug SLOPTY_PORT=45571 target/debug/slopty-hostd --direct-only \
+  --ptyd-socket $D/ptyd.sock --ctl-socket $D/hostd.sock > $D/hostd.log 2>&1 &
+TICKET=$(SLOPTY_HOSTD_SOCKET=$D/hostd.sock target/debug/slopty host ticket | tail -1)
+SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
+SLOPTY_DATA_DIR=$D/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug \
+  target/debug/slopty bench screen --display 6 --seconds 90 --max-stalls 0
+```
+
+`--max-stalls` is the self-check the guard lives in: the run exits non-zero if the receiver
+counted more. The `silences past the gap:` and `ended by:` lines are new
+(`ReassemblerStats::silences`), and `reader lag` is how far behind the arrival stamps the
+client's own stream worker was reading (`ScreenStats::reader_lag_max`).
+
+### Before — every silence past the stall gap, 3 × 90 s
+
+| run | fps  | stalls (stalled) | host-quiet | in-flight | stamp overshot (worst) | wrapped | absent | none pending | worst gap | reader lag max / ≥ 50 ms |
+| --- | ---- | ---------------- | ---------- | --------- | ---------------------- | ------- | ------ | ------------ | --------- | ------------------------ |
+| 1   | 17.8 | 2 (289 ms)       | 2          | 1         | 1 (7.6 ms)             | 0       | 0      | 4 of 4       | 245 ms    | 123.3 ms / 76            |
+| 2   | 21.8 | 0 (102 ms)       | 6          | 0         | 0                      | 0       | 0      | 6 of 6       | 54 ms     | 148.7 ms / 80            |
+| 3   | 26.8 | 2 (169 ms)       | 1          | 1         | 1 (7.3 ms)             | 0       | 0      | 3 of 3       | 117 ms    | 113.3 ms / 64            |
+
+13 silences past the gap in 270 s, 4 of them charged. The three buckets the brief asked for:
+
+* **(a) the sender was silent and the stamps said so — 11 of 13.** Nine read cleanly
+  (`host-quiet`); two were thrown away because the host's own interval read *longer* than the
+  arrival gap by 7.3 and 7.6 ms, and the old rule discarded any such reading whole and charged
+  the entire silence to the link. Both became stalls. The overshoot is structural: `send_ms_lo`
+  is written when the host *builds* a datagram, not when QUIC sends it, so two datagrams'
+  build→wire delays differ by a few milliseconds and the difference lands on the subtraction.
+* **(b) the receiver was not scheduled — the other 2.** `gap=245.6 ms host_gap=5 ms ended_by=Audio
+  pending=0` and `gap=117.9 ms host_gap=0 ms ended_by=VideoParity pending=0`. Both read as the
+  link having held datagrams, and on loopback with `lost 0 pkts`, `congestion 0` and cwnd at the
+  floor that is not credible. The same runs read the client's stream worker **64–80 datagrams
+  behind by a stall gap or more, worst 113–149 ms**: this machine descheduled the receiver for
+  longer than a stall while the arrival stamps kept coming from the connection's reader task.
+* **(c) genuinely in flight — 0.** No silence survived once (a) and (b) were named. Every one of
+  the 13 had **no frame pending**: there was nothing for the link to be holding.
+
+The 31 stalls / 90 s of the cropsafe run did not reproduce here; the same shape on this machine
+gives 0–2 per 90 s. The mechanism is the same either way, and the counters now say which.
+
+### After — the same command, five samples
+
+| run | fps  | audio pkts | stalls (stalled) | host-quiet | receiver-dozed | in-flight | stamp wrapped / backwards / absent | none pending | worst gap | reader lag max / ≥ 50 ms |
+| --- | ---- | ---------- | ---------------- | ---------- | -------------- | --------- | ---------------------------------- | ------------ | --------- | ------------------------ |
+| 1   | 18.1 | 3 385      | **0** (0 ms)     | 0          | 0              | 0         | 0 / 0 / 0                          | —            | —         | 235.2 ms / 15            |
+| 2   | 22.2 | 3 396      | **0** (0 ms)     | 1          | 0              | 0         | 0 / 0 / 0                          | 1 of 1       | 52 ms     | 40.0 ms / 0              |
+| 3   | 11.6 | 0          | 25 (2001 ms)     | 1          | 0              | 25        | 0 / 0 / 0                          | 4 of 26      | 123 ms    | 19.7 ms / 0              |
+| 4   | 23.4 | 3 207      | 14 (1118 ms)     | 0          | 0              | 14        | 0 / 0 / 0                          | 0 of 14      | 114 ms    | 90.4 ms / 7              |
+| 5   | 29.0 | 0          | 1 (63 ms)        | 0          | 0              | 1         | 0 / 0 / 0                          | 1 of 1       | 63 ms     | 60.4 ms / 109            |
+
+The invariant is the result, not the count: **across all five samples not one stall was charged
+for want of a reading** — `stamp_wrapped`, `stamp_backwards`, `stamp_absent` and `receiver_dozed`
+are zero everywhere, where before two of four stalls were `stamp_overshot` and the other two were
+the receiver being descheduled. Every stall that remains is `in_flight`, and the debug line says
+why —
+
+```
+gap=93.9ms host_gap=0ns dozed=0ns link_gap=93.9ms stamp=Host(0ns) ended_by=VideoData pending=1
+```
+
+— the host built those fragments together (`Host(0ns)`), the receiver was awake throughout
+(`dozed=0ns`) and **a fragment of the frame was still pending**. That is a hold, and
+`RateVerdict::Stall` freezing on it is correct. What holds them is the host's send side, not the
+network: `cwnd 5808` — QUIC's floor — is about 16 Mbit/s on a 2.9 ms path against a 30 Mbit/s
+target, and runs 3 and 4 spend their whole trajectory in `grow/cwnd` and `hold/cwnd`. Runs 3 and
+5 also carried **no audio at all** (0 packets against ~3 300), so nothing kept the stream's
+datagram cadence under the gap between video frames. Both belong to the rate/transport track; the
+point here is that the counter now says which.
+
+The before and after runs are not paired — the machine and the desktop moved between them, and
+the stall count follows that more than anything else. What does not move is the attribution, and
+that is what the ruling rests on.
+
+Two changes, both in the receiver:
+
+1. **The stamp is read as a signed offset from the arrival gap.** Within the byte's 256 ms range
+   a difference of `d` means either `d` or `d − 256 ms`; the reading nearer the gap is the one
+   meant. Below the midpoint the host accounts for the whole silence (the 7 ms overshoots), above
+   it the datagram overtook its predecessor and buys nothing (the existing reordering guard,
+   unchanged: a stamp 10 ms backwards still reads as 246 ms and is still refused). Gaps past
+   256 ms are still charged — there the ambiguity is real and the pessimistic reading stands.
+2. **Silence the receiver slept through is not charged.** The reassembler is told how often its
+   owner promises to `tick` (`Config::tick_period`) and subtracts the stretch since the last one
+   beyond that promise. A task that never ran cannot tell a held link from an unread socket, and
+   `IDLE_TICK` moved 50 ms → 25 ms so the receiver looks twice per stall gap — the same reason
+   the host beats twice per gap. A gap it slept through entirely used to leave exactly one stall
+   gap charged, which is a stall.
+
+Not measured: the same attribution over the mesh, where a ≥ 256 ms hold is plausible and the
+stamp genuinely cannot resolve it (widening `send_ms_lo` is the fix if that ever shows up);
+whether the host's heartbeat is late because `cursor_loop` calls `target_bounds` on its own task
+— the stamps say the beats *were* late, but that file belongs to another branch; and why QUIC
+sits at the 5808-byte cwnd floor on loopback while the controller asks for 30 Mbit/s, which is
+what run 3's stalls are and is the next thing worth chasing.
