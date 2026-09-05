@@ -333,6 +333,26 @@ postcard encodes `None` as one byte, so an id per cell costs `cols × rows` byte
 with no links; an empty run list costs one byte per row. A linked row costs its URI once per
 run plus 3 bytes of header. Ruling in DECISIONS.md (Terminal, "Links: OSC 8 first").
 
+## 2026-09-05 — OSC 133 marks on the wire: `Prompt { exit }` per row
+
+```
+cargo nextest run -p slopty-proto size_report --no-capture
+```
+
+Same test as the OSC 8 entry above, now with an all-prompt frame, after the
+OSC 8 change.
+
+| frame                              | bytes    | vs. blank |
+| ---------------------------------- | -------- | --------- |
+| 80×24 blank (`Output` rows)        | 13 581 B | —         |
+| 80×24 every row `Prompt{Some(1)}`  | 13 629 B | +48 B     |
+| 200×60 blank                       | 84 382 B | —         |
+| 200×60 every row `Prompt{Some(1)}` | 84 502 B | +120 B    |
+
+A non-prompt row's mark is still the one-byte variant index; a prompt row with a status costs
+three (variant, `Some`, the code). Real screens have one prompt row per command, so the cost is
+a few bytes per frame.
+
 ## 2026-09-05 — release build, loopback
 
 `cargo build --release -p slopty-hostd -p slopty-ptyd -p slopty-cli`, hostd restarted from

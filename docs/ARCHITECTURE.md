@@ -83,6 +83,21 @@ Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, cappe
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
 for a read reply.
 
+**Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh: at every start
+it writes the bundled scripts (`slopty-pty/assets/shell/zsh`, compiled in with `include_str!`,
+so nothing reads the source tree at runtime) under `<data dir>/shell/zsh` and spawns zsh with
+`ZDOTDIR` pointing there; the bootstrap `.zshenv` hands `ZDOTDIR` back to the user, sources
+their own `.zshenv`, and for interactive shells adds precmd/preexec hooks that emit `133;A`
+(in `PS1`), `B`, `C` and `D;<status>`. `SLOPTY_NO_SHELL_INTEGRATION=1` in the daemon's or the
+session's environment opts out (`ShellIntegration::env_for` is then empty); other shells run
+untouched. The engine takes libghostty's per-row prompt flag for the row kind and, because
+the library exposes neither which row an `A` landed on nor the status a `D` carries, scans the
+PTY bytes for those two marks itself (`slopty_engine::osc133::Scanner`, state kept across
+reads so a mark split over two PTY reads is still found) and notes the cursor's absolute line
+at each. Every `Line` then carries a `SemanticMark`: `Prompt { exit }` on the row a prompt
+started (with the previous command's status), `PromptContinuation` for the rest of a
+multi-line prompt, `Input`, `Output`. The client side is in §6.
+
 **PTY custody.** `slopty-ptyd` spawns the child (own session, slave as controlling tty), keeps
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
 (handshake through a `watch` pair so the fd is never read by two parties), ships the ring
@@ -228,6 +243,19 @@ a window is esc, tab, ⌃, ⌘, arrows, `/`, copy, paste (⌘C/⌘V on the host,
 pasteboard flows back through clipboard sync). ⌘⇧I (Canvas ▸ Stream Stats) overlays every
 window with its stream size and scale, fps, Mb/s, link RTT and the FEC/lost/NACK/refresh and
 audio counters, re-sampled once a second from `ScreenStats`.
+
+**Terminal element.** `slopty-ui::terminal` draws the cached lines as one element (glyph
+runs shaped per row and cached by content hash, background quads, cursor, selection, ⌘-hover
+link underline) with a hairline over every prompt-start row but the first line: the
+command-block separator, the foreground at 18 % alpha, or the palette's ANSI red at 70 % when
+the row's `Prompt { exit }` is non-zero (`separator_color`). Terminal-context bindings: ⌘C /
+⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
+the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
+history is not fetched first; ⌘↓ past the newest prompt goes back to following output),
+⌘⇧C copies the last finished command's output (`TermState::last_command_output`: the
+`Output` rows right above the newest prompt start, blank tail trimmed; nothing without shell
+integration). Headless `#[gpui::test]`s in `terminal/view.rs` read the separators back from
+`painted_quads()` and drive the bindings with `simulate_keystrokes`.
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is

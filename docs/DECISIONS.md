@@ -917,6 +917,64 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the phone key bar arms ⌘ for remote windows but not for terminals, so a tap has nothing to
   read; long-press stays selection. `cx.open_url` is `gpui_ios`'s `UIApplication.openURL`
   when that arrives.
+- ✅ **Command blocks from OSC 133, shell integration injected by ptyd** (2026-09-05).
+  *Injection:* the `ZDOTDIR` bootstrap every terminal uses (Kitty, Ghostty, WezTerm); the
+  scripts are Slopty's own (Ghostty's zsh files are GPLv3, inherited from Kitty, so they
+  were not copied). `.zshenv` restores `ZDOTDIR` (the original travels in
+  `SLOPTY_ZSH_ZDOTDIR`), sources the user's `.zshenv`, then `slopty-integration.zsh` for
+  interactive shells; `.zprofile`/`.zshrc`/`.zlogin` load from the user's directory as
+  before. `A` and `B` live inside `PS1` (`%{…%}`) and `A;k=s`/`B` inside `PS2`, so zle
+  redraws keep them; the precmd hook moves itself to the end of `precmd_functions` each
+  time so a theme that rebuilds `PS1` in its own precmd cannot drop them; `C` is printed by
+  preexec, `D;$?` by precmd only when a `C` is open (so a bare Enter reports nothing).
+  Learned: `status` is a read-only zsh special, use another name. `install` writes the
+  scripts (compiled in with `include_str!`) under `$SLOPTY_DATA_DIR/shell` (else `shell/`
+  beside the socket) on every daemon start, rewriting an edited or stale file, so a running
+  install never reads the source tree; it also reads the daemon's environment once into a
+  `ShellIntegration` (`enabled`, the daemon's own `ZDOTDIR`) so the per-spawn decision
+  `env_for` is pure. `Pty::spawn_with` adds the variables only when the resolved program's
+  basename is `zsh` (the login shell, an explicit `zsh`, and the `$SHELL -lic` path from
+  52725da all qualify; `-c` shells load the hooks but never reach precmd, so they print no
+  marks). Opt-out `SLOPTY_NO_SHELL_INTEGRATION=1` (anything but empty or `0`) in the
+  daemon's environment or the session's. bash/fish: not done (bash needs a `--rcfile`
+  wrapper plus `bash-preexec`, fish needs `XDG_DATA_DIRS`; neither is "cheap"). Verified by
+  `an_interactive_zsh_emits_prompt_marks` (real `/bin/zsh -i` on a PTY: A/B/C, `D;1` after
+  `false`, `ZDOTDIR` empty again, the user's `.zshenv` ran),
+  `install_writes_the_bundled_scripts_and_is_idempotent` and
+  `opt_out_from_the_daemon_or_the_session`.
+  *Engine:* libghostty-vt's per-row `semantic_prompt` flag says "prompt row" but cannot
+  separate two prompts on adjacent rows (a command with no output), and the `D` status is
+  not exposed at all. `slopty_engine::osc133::Scanner` watches the bytes (state kept across
+  reads, payloads over 32 bytes dropped, `ESC \` and BEL terminators, `A;k=s`/`k=c` not
+  counted as starts); `write` feeds the terminal up to each mark, settles, and records the
+  cursor's absolute line in `prompt_starts` / `exit_marks` (both pruned below `base`, both
+  cleared with the epoch). A prompt row is `Prompt { exit }` only on a recorded start, else
+  `PromptContinuation`; the status is the newest `D` within 4 rows above the start that no
+  other start already claimed (the shell may print a blank line or the partial-line `%`
+  between `D` and the prompt). Covered by
+  `prompt_rows_carry_the_previous_commands_exit_status` (adjacent prompts, a `D` split
+  across two writes, a gap row, a two-row prompt, the history path) and
+  `captured_zsh_bytes_keep_output_rows_and_statuses` (bytes recorded from a real zsh:
+  synchronized output, the `%` partial-line marker, `D` directly before the next `A`).
+  *Wire:* `SemanticMark::Prompt` grew `exit: Option<u8>`; every other row still costs one
+  byte, a prompt row with a status three (MEASUREMENTS.md: an all-prompt 80×24 frame is
+  48 bytes larger than a blank one). The brief's `End { exit }` variant was not added: the
+  `D` lands on the row the next prompt starts on, so a separate variant would collide with
+  `Prompt` on the same row. `PROTOCOL_VERSION` 6 → 7, golden `host_lines_marks`; the other
+  goldens are unchanged because `Unknown` is still variant 0 and `client_hello` only moved
+  its version byte.
+  *Client/UI:* `TermState::prompt_before/after` walk the cached lines (uncached history is
+  skipped, not fetched), `scroll_to_line` puts a line at the top, `last_command_output` is
+  the run of `Output` rows above the newest prompt start with the blank tail trimmed
+  (`prompt_navigation_and_last_output_follow_the_marks`). ⌘↑/⌘↓/⌘⇧C are Terminal-context
+  bindings (`PrevPrompt`, `NextPrompt`, `CopyLastOutput`); the separator is a 1 px quad on
+  the prompt-start row's top edge from the same prepaint pass as the selection
+  (`separator_color`: fg at 18 %, the palette's ANSI red at 70 % when the status is
+  non-zero; the theme has no separate error token, red is the error tone of every
+  `TerminalPalette`), never on line 0. Search bar and selection are untouched. Headless:
+  `cmd_up_and_down_walk_the_prompts_and_separators_follow` (separator rows and colours read
+  from `painted_quads`, the three jumps and the return to following output) and
+  `cmd_shift_c_copies_the_last_commands_output` (clipboard untouched without marks).
 - ✅ **OSC 52: write only, system clipboard only, ≤ `MAX_CLIPBOARD_BYTES`** (2026-09-05).
   libghostty's `clipboard_write` callback (registered in `install_callbacks` next to the bell)
   hands over a normalised, decoded write; the engine keeps the `text/plain` representation of
