@@ -421,6 +421,7 @@ impl Peer<'_> {
                 self.forget(session);
                 match self.daemon.host.close(session).await {
                     Ok(()) => {
+                        tracing::debug!(client = %self.client, %session, "closed on request");
                         self.daemon.agents.lock().forget(session);
                         let reason = CloseReason::Requested;
                         let _sent =

@@ -6,6 +6,7 @@
 //! through channels only. The platform binaries set up logging, the runtime and the GPUI
 //! application, then call [`open_workspace`].
 
+mod e2e;
 pub mod hosts;
 pub mod net;
 pub mod settings;
@@ -363,7 +364,7 @@ impl Workspace {
                     continue;
                 };
                 failures = 0;
-                let net::Connected { me, ack, sender, mut events, link, endpoint } = connected;
+                let net::Connected { me, ack, sender, mut events, link } = connected;
                 let link = std::sync::Arc::new(link);
                 let screen_link = std::sync::Arc::clone(&link);
                 let open_screen: slopty_ui::screen::ScreenFactory =
@@ -520,10 +521,8 @@ impl Workspace {
                         }
                     }
                 }
+                // Dropping the link closes the connection; the endpoint stays for the retry.
                 drop(link);
-                // iroh's close uses tokio timers, which need a runtime context this GPUI task
-                // does not have; run it on the runtime and wait for the join.
-                let _closed = handle.spawn(async move { endpoint.close().await }).await;
                 cx.background_executor().timer(retry_delay(0)).await;
             }
         })
@@ -1357,6 +1356,11 @@ pub fn open_workspace(
             }
         });
     })?;
+    // The self-test socket, for `cargo xtask e2e app`; never set for a normal launch.
+    if let Some(socket) = std::env::var_os(slopty_e2e::SOCKET_ENV) {
+        let runtime = workspace.read(cx).runtime.clone();
+        e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
+    }
     Ok(())
 }
 

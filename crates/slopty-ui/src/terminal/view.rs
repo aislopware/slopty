@@ -693,6 +693,35 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The visible rows as text, top to bottom, trailing spaces trimmed; a row still being
+    /// fetched is empty. What a self-test reads instead of pixels.
+    #[must_use]
+    pub fn rows(&self) -> Vec<String> {
+        self.state
+            .view()
+            .iter()
+            .map(|row| row.line.map(|l| l.text().trim_end().to_owned()).unwrap_or_default())
+            .collect()
+    }
+
+    /// Program title (OSC 0/2), if set.
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.state.title()
+    }
+
+    /// Grid size.
+    #[must_use]
+    pub const fn size(&self) -> TermSize {
+        self.state.size()
+    }
+
+    /// Cursor position.
+    #[must_use]
+    pub const fn cursor(&self) -> Cursor {
+        self.state.cursor()
+    }
+
     /// Composition in progress, drawn at the cursor by the element.
     #[must_use]
     pub fn marked(&self) -> Option<&str> {
@@ -811,6 +840,7 @@ impl TerminalView {
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Cmd shortcuts belong to the app.
         if event.keystroke.modifiers.platform {
+            tracing::debug!(session = %self.session, key = %event.keystroke.key, "cmd key passed up");
             return;
         }
         // Typing in the search field must never reach the program.

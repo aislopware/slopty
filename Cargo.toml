@@ -37,6 +37,7 @@ slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
 slopty-agent = { path = "crates/slopty-agent" }
 slopty-settings = { path = "crates/slopty-settings" }
+slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 
 # core
 anyhow = "1.0.104"
@@ -220,6 +221,11 @@ gpui = { git = "https://github.com/aislopware/zed.git", branch = "slopty" }
 gpui_ios = { git = "https://github.com/aislopware/zed.git", branch = "slopty", features = [
     "runtime_shaders",
 ] }
+# The platform crate behind `gpui_kit::application()`; named directly only so the `e2e`
+# feature can turn on its `test-support` (`Window::render_to_image` on a real window).
+gpui_platform = { git = "https://github.com/aislopware/zed.git", branch = "slopty" }
+# PNG in/out for the e2e render snapshots; the version gpui already builds.
+image = { version = "0.25.10", default-features = false, features = [ "png" ] }
 gpui-kit = { git = "https://github.com/aislopware/gpui-kit.git", branch = "slopty", default-features = false, features = [
     "component",
     "assets",

@@ -17,6 +17,10 @@ use crate::tools::step;
 /// Which live tests to run.
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Case {
+    /// ptyd + hostd + the real app, driven through its test socket: pair, open a shell, type,
+    /// read the rows back, render frames with the app's own renderer and compare them with
+    /// the goldens. No permissions needed.
+    App,
     /// ptyd + hostd + a paired client over loopback iroh: open a shell, read its output. No
     /// permissions needed.
     Host,
@@ -33,8 +37,11 @@ pub enum Case {
 #[derive(Args, Debug)]
 pub struct E2eOpts {
     /// Which tests.
-    #[arg(value_enum, default_value_t = Case::Host)]
+    #[arg(value_enum, default_value_t = Case::App)]
     case: Case,
+    /// Rewrite the render goldens under `crates/slopty-e2e/golden/` from this run.
+    #[arg(long)]
+    accept: bool,
     /// Data directory for the daemons the tests spawn (default `target/e2e`).
     #[arg(long)]
     data_dir: Option<String>,
@@ -54,6 +61,9 @@ struct Suite {
     /// Test name filter, empty for the whole target.
     filter: &'static str,
 }
+
+const APP: &[Suite] =
+    &[Suite { gate: Some("SLOPTY_APP_E2E"), package: "slopty-e2e", test: "app", filter: "" }];
 
 const HOST: &[Suite] =
     &[Suite { gate: None, package: "slopty-hostd", test: "e2e", filter: "shell_round_trip" }];
@@ -83,10 +93,11 @@ const INPUT: &[Suite] = &[Suite {
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let suites: Vec<&Suite> = match opts.case {
+        Case::App => APP.iter().collect(),
         Case::Host => HOST.iter().collect(),
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
-        Case::All => HOST.iter().chain(SCREEN).chain(INPUT).collect(),
+        Case::All => APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).collect(),
     };
     let data_dir = opts
         .data_dir
@@ -95,16 +106,29 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     std::fs::create_dir_all(format!("{data_dir}/run"))?;
     println!("▶ e2e {:?} (data dir {data_dir})", opts.case);
 
+    let artifacts = format!("{data_dir}/artifacts");
+    std::fs::create_dir_all(&artifacts)?;
+    let bin_dir = sh.current_dir().join("target/debug");
     // Daemons the tests spawn get their own sockets and state; nothing installed is touched.
     let _env = [
         sh.push_env("SLOPTY_DATA_DIR", &data_dir),
         sh.push_env("SLOPTY_PTYD_SOCKET", format!("{data_dir}/run/ptyd.sock")),
         sh.push_env("SLOPTY_HOSTD_SOCKET", format!("{data_dir}/run/hostd.sock")),
+        sh.push_env("SLOPTY_E2E_BIN_DIR", &bin_dir),
+        sh.push_env("SLOPTY_E2E_ARTIFACTS", &artifacts),
         sh.push_env("RUST_LOG", &opts.log),
     ];
+    let _accept = opts.accept.then(|| sh.push_env("SLOPTY_E2E_ACCEPT", "1"));
 
     // Build every binary a suite may spawn up front, so a test never shells out to cargo.
-    step("build daemons", &cmd!(sh, "cargo build -p slopty-ptyd -p slopty-hostd"))?;
+    // The app carries the `e2e` feature (renderer access for `Render`).
+    step(
+        "build daemons and app",
+        &cmd!(
+            sh,
+            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty --bin slopty-app --features slopty/e2e"
+        ),
+    )?;
 
     let mut failed = Vec::new();
     for suite in &suites {
@@ -121,7 +145,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         }
     }
     if failed.is_empty() {
-        println!("✔ e2e {:?}: {} suite(s) passed", opts.case, suites.len());
+        println!(
+            "✔ e2e {:?}: {} suite(s) passed; renders under {artifacts}",
+            opts.case,
+            suites.len()
+        );
         Ok(())
     } else {
         bail!("e2e {:?}: failed {}", opts.case, failed.join(", "))

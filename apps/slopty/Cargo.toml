@@ -10,6 +10,11 @@ description = "Slopty macOS app"
 [lints]
 workspace = true
 
+[features]
+default = [  ]
+# Renderer access for the self-test socket; see `slopty-app`.
+e2e = [ "slopty-app/e2e" ]
+
 [[bin]]
 name = "slopty-app"
 path = "src/main.rs"

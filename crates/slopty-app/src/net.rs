@@ -22,14 +22,29 @@ pub struct Connected {
     pub sender: mpsc::Sender<ClientMsg>,
     /// Inbound link events.
     pub events: mpsc::Receiver<LinkEvent>,
-    /// Keeps the connection's tasks and the endpoint alive; dropping it disconnects.
+    /// Keeps the connection's tasks alive; dropping it disconnects.
     pub link: HostLink,
-    /// Our endpoint; closed on the tokio runtime when the link drops.
-    pub endpoint: slopty_net::Endpoint,
 }
 
 fn identity() -> Result<Identity> {
     Ok(Identity::open(&slopty_settings::data_dir().join("client.json"))?)
+}
+
+/// The app's one endpoint, bound on first use with the installation's key.
+static ENDPOINT: tokio::sync::OnceCell<slopty_net::Endpoint> = tokio::sync::OnceCell::const_new();
+
+/// The process-wide client endpoint (pairing and every host link share it).
+///
+/// One endpoint per process is how iroh is meant to be used: connections come and go on it
+/// independently, the relay handshake happens once, and the host keeps seeing us from the
+/// same socket. Binding a fresh endpoint per attempt with the same key made the dial right
+/// after pairing hang (observed 2026-09-05: the host never saw the second endpoint's packets).
+async fn endpoint(me: &Identity, reach: Reach) -> Result<slopty_net::Endpoint, ConnectError> {
+    ENDPOINT
+        .get_or_try_init(|| bind_client(me.secret().clone(), reach))
+        .await
+        .cloned()
+        .map_err(|e| ConnectError::Other(format!("{e:#}")))
 }
 
 /// Our greeting: which app this is, by platform.
@@ -99,7 +114,7 @@ pub async fn pair_host(ticket: &str) -> Result<Paired> {
     let ticket: PairTicket = ticket.trim().parse().context("parse ticket")?;
     let mut me = identity()?;
     let reach = Reach::from_env();
-    let endpoint = bind_client(me.secret().clone(), reach).await?;
+    let endpoint = endpoint(&me, reach).await?;
     let conn = connect_with_ticket(&endpoint, reach, &ticket, hello(me.client())).await?;
     let name = conn.ack.name.clone();
     let paired_at = std::time::SystemTime::now()
@@ -113,12 +128,10 @@ pub async fn pair_host(ticket: &str) -> Result<Paired> {
         paired_at,
     })?;
     conn.conn.close(0_u32.into(), b"paired");
-    endpoint.close().await;
     Ok(Paired { id, name })
 }
 
-/// Connect to one paired host. Each host gets its own endpoint so links come and go
-/// independently.
+/// Connect to one paired host on the shared endpoint.
 ///
 /// # Errors
 ///
@@ -133,18 +146,17 @@ pub async fn connect_to(id: EndpointId) -> Result<Connected, ConnectError> {
         .find(|(known, _)| *known == id)
         .ok_or_else(|| ConnectError::Other("host forgotten".to_owned()))?;
     let reach = Reach::from_env();
-    let endpoint = bind_client(me.secret().clone(), reach).await.map_err(|e| other(&e))?;
+    let endpoint = endpoint(&me, reach).await?;
+    tracing::debug!(host = %id, addr = ?host.addr, "dialing");
     let conn = match connect(&endpoint, reach, host.addr.clone(), hello(me.client())).await {
         Ok(conn) => conn,
-        Err(e) => {
-            endpoint.close().await;
-            return Err(match e {
-                HandshakeError::Rejected(Rejection::NotPaired) => ConnectError::NotPaired,
-                e => other(&e),
-            });
+        Err(HandshakeError::Rejected(Rejection::NotPaired)) => {
+            return Err(ConnectError::NotPaired);
         }
+        Err(e) => return Err(other(&e)),
     };
     let ack = conn.ack.clone();
+    tracing::debug!(host = %id, name = %ack.name, sessions = ack.sessions.len(), "connected");
     // The switcher shows the stored name until the link is up; keep it current.
     if ack.name != host.name
         && let Err(e) = me.remember(KnownHost { name: ack.name.clone(), ..host })
@@ -154,5 +166,5 @@ pub async fn connect_to(id: EndpointId) -> Result<Connected, ConnectError> {
     let mut link = HostLink::start(conn);
     let events = link.events().ok_or_else(|| ConnectError::Other("events".to_owned()))?;
     let sender = link.sender();
-    Ok(Connected { me: me.client(), ack, sender, events, link, endpoint })
+    Ok(Connected { me: me.client(), ack, sender, events, link })
 }

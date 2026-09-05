@@ -8018,8 +8018,11 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-kit",
+ "gpui_platform",
+ "serde_json",
  "slopty-client",
  "slopty-core",
+ "slopty-e2e",
  "slopty-net",
  "slopty-platform",
  "slopty-proto",
@@ -8118,6 +8121,18 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "slopty-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,374 @@
+//! The self-test socket: drive and observe the running app from inside GPUI.
+//!
+//! Listens on `$SLOPTY_TEST_SOCKET` (only when set; a bundle launched from Finder never
+//! has it) and answers `slopty_e2e::Command`s. Keys go through `Window::dispatch_keystroke`
+//! and pointer events through `Window::dispatch_event`, exactly the path a real keyboard and
+//! mouse take once AppKit has translated them; state comes back as a `Dump` read straight
+//! from the entities; a `Render` asks GPUI's own Metal renderer for the frame (built with
+//! the `e2e` feature). No system event is posted and no screen is captured, so the whole
+//! client is testable on a machine that has granted nothing.
+//!
+//! The listener runs on the tokio runtime; each command crosses to the GPUI thread through a
+//! channel and is applied inside `WindowHandle::update`, so the app sees it like any other
+//! foreground work.
+
+use std::path::PathBuf;
+
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
+    ScrollWheelEvent, TouchPhase, Window, point, px, size,
+};
+use slopty_e2e::{Button, Command, Dump, HostInfo, ItemInfo, Reply, TerminalInfo, WindowInfo};
+use slopty_proto::canvas::ItemKind;
+use slopty_ui::canvas::KeyTarget;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::UnixListener;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::{Workspace, net};
+
+/// A command with the channel its reply goes back on.
+type Request = (Command, oneshot::Sender<Reply>);
+
+/// Start serving `socket` for `workspace` in `window`. Call once, after the window is open.
+pub fn serve(
+    socket: PathBuf,
+    workspace: Entity<Workspace>,
+    window: AnyWindowHandle,
+    runtime: &tokio::runtime::Handle,
+    cx: &App,
+) {
+    let (tx, mut rx) = mpsc::channel::<Request>(16);
+    runtime.spawn(listen(socket, tx));
+    let handle = runtime.clone();
+    cx.spawn(async move |cx| {
+        while let Some((command, reply)) = rx.recv().await {
+            let answer = match command {
+                Command::Pair { ticket } => {
+                    let (done_tx, done_rx) = oneshot::channel();
+                    handle.spawn(async move {
+                        let _sent = done_tx.send(net::pair_host(&ticket).await);
+                    });
+                    match done_rx.await {
+                        Ok(Ok(net::Paired { id, name })) => {
+                            workspace.update(cx, |ws, cx| {
+                                ws.pairing = None;
+                                ws.add_host(id, name, cx);
+                                ws.active = Some(id);
+                                cx.notify();
+                            });
+                            Reply::Ok
+                        }
+                        Ok(Err(e)) => error(&e),
+                        Err(_dropped) => Reply::Error { message: "pairing task died".into() },
+                    }
+                }
+                Command::Render { path } => {
+                    // The frame must be laid out with everything dispatched so far; render
+                    // on the next frame so `Dump` and `Render` agree.
+                    let (done_tx, done_rx) = oneshot::channel();
+                    // `update_window` (not `WindowHandle::update`): the root view must not be
+                    // leased while a dispatched action updates it.
+                    let scheduled = cx.update_window(window, |_root, window, _cx| {
+                        window.refresh();
+                        window.on_next_frame(move |window, _cx| {
+                            let _sent = done_tx.send(render(window, &path));
+                        });
+                    });
+                    match scheduled {
+                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
+                            message: "window closed before the frame".into(),
+                        }),
+                        Err(e) => error(&e),
+                    }
+                }
+                Command::Quit => {
+                    let _sent = reply.send(Reply::Ok);
+                    cx.update(|cx| cx.quit());
+                    continue;
+                }
+                // Input settles on the next frame: focus moved by a click is only in the
+                // dispatch tree once it has been drawn, so a keystroke sent before that would
+                // go nowhere. Reply after the frame, and the driver never races the app.
+                other => {
+                    let (done_tx, done_rx) = oneshot::channel();
+                    let scheduled = cx.update_window(window, |_root, window, cx| {
+                        let answer = apply(&workspace, other, window, cx);
+                        window.refresh();
+                        window.on_next_frame(move |_window, _cx| {
+                            let _sent = done_tx.send(answer);
+                        });
+                    });
+                    match scheduled {
+                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
+                            message: "window closed before the frame".into(),
+                        }),
+                        Err(e) => error(&e),
+                    }
+                }
+            };
+            let _sent = reply.send(answer);
+        }
+    })
+    .detach();
+}
+
+fn error(e: &dyn std::fmt::Display) -> Reply {
+    Reply::Error { message: format!("{e:#}") }
+}
+
+/// Accept connections and relay each line as a command; one reply line per command.
+async fn listen(socket: PathBuf, tx: mpsc::Sender<Request>) {
+    if socket.exists()
+        && let Err(e) = std::fs::remove_file(&socket)
+    {
+        tracing::warn!(path = %socket.display(), error = %e, "stale test socket");
+    }
+    let listener = match UnixListener::bind(&socket) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(path = %socket.display(), error = %e, "bind test socket");
+            return;
+        }
+    };
+    tracing::info!(path = %socket.display(), "test socket listening");
+    loop {
+        let Ok((stream, _addr)) = listener.accept().await else { break };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let answer = match serde_json::from_str::<Command>(&line) {
+                    Ok(command) => {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        if tx.send((command, reply_tx)).await.is_err() {
+                            break;
+                        }
+                        reply_rx.await.unwrap_or_else(|_| Reply::Error {
+                            message: "app dropped the command".into(),
+                        })
+                    }
+                    Err(e) => Reply::Error { message: format!("bad command: {e}") },
+                };
+                let Ok(mut out) = serde_json::to_string(&answer) else { break };
+                out.push('\n');
+                if write.write_all(out.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+/// Apply a synchronous command inside the window.
+fn apply(
+    workspace: &Entity<Workspace>,
+    command: Command,
+    window: &mut Window,
+    cx: &mut App,
+) -> Reply {
+    match command {
+        Command::Ping => Reply::Ok,
+        Command::Keys { keys } => {
+            for text in keys.split_whitespace() {
+                match Keystroke::parse(text) {
+                    Ok(keystroke) => {
+                        let handled = window.dispatch_keystroke(keystroke, cx);
+                        tracing::debug!(keystroke = text, handled, "keys");
+                    }
+                    Err(e) => return Reply::Error { message: format!("{text:?}: {e}") },
+                }
+            }
+            Reply::Ok
+        }
+        Command::Type { text } => {
+            for ch in text.chars() {
+                let keystroke = Keystroke {
+                    modifiers: Modifiers { shift: ch.is_uppercase(), ..Modifiers::default() },
+                    key: ch.to_lowercase().to_string(),
+                    key_char: Some(ch.to_string()),
+                };
+                let _handled = window.dispatch_keystroke(keystroke, cx);
+            }
+            Reply::Ok
+        }
+        Command::Click { x, y, button, count } => {
+            let position = point(px(x), px(y));
+            let button = mouse_button(button);
+            let click_count = usize::try_from(count).unwrap_or(1).max(1);
+            let _moved = window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+            let _down = window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button,
+                    position,
+                    modifiers: Modifiers::default(),
+                    click_count,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            let _up = window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button,
+                    position,
+                    modifiers: Modifiers::default(),
+                    click_count,
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
+        Command::Move { x, y } => {
+            let _moved = window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(x), px(y)),
+                    pressed_button: None,
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
+        Command::Scroll { x, y, dx, dy } => {
+            let _scrolled = window.dispatch_event(
+                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: point(px(x), px(y)),
+                    delta: ScrollDelta::Lines(point(dx, dy)),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
+        Command::Resize { width, height } => {
+            window.resize(size(px(width), px(height)));
+            Reply::Ok
+        }
+        Command::Dump => Reply::Dump(workspace.read(cx).dump(window, cx)),
+        Command::Pair { .. } | Command::Render { .. } | Command::Quit => {
+            Reply::Error { message: "handled elsewhere".into() }
+        }
+    }
+}
+
+const fn mouse_button(button: Button) -> MouseButton {
+    match button {
+        Button::Left => MouseButton::Left,
+        Button::Right => MouseButton::Right,
+        Button::Middle => MouseButton::Middle,
+    }
+}
+
+#[cfg(feature = "e2e")]
+fn render(window: &mut Window, path: &str) -> Reply {
+    match window.render_to_image() {
+        Ok(image) => {
+            let (width, height) = image.dimensions();
+            match image.save(path) {
+                Ok(()) => Reply::Rendered { width, height },
+                Err(e) => Reply::Error { message: format!("write {path}: {e}") },
+            }
+        }
+        Err(e) => Reply::Error { message: format!("render: {e:#}") },
+    }
+}
+
+#[cfg(not(feature = "e2e"))]
+fn render(_window: &mut Window, _path: &str) -> Reply {
+    Reply::Error { message: "built without the `e2e` feature; no renderer access".into() }
+}
+
+impl Workspace {
+    /// Everything a test may want to know, read from the entities.
+    fn dump(&self, window: &Window, cx: &App) -> Dump {
+        let viewport = window.viewport_size();
+        let hosts = self
+            .hosts
+            .iter()
+            .map(|h| HostInfo {
+                name: h.name.clone(),
+                status: h.status.text(),
+                active: self.active == Some(h.id),
+            })
+            .collect();
+        let mut dump = Dump {
+            window: WindowInfo {
+                width: f32::from(viewport.width),
+                height: f32::from(viewport.height),
+                scale: window.scale_factor(),
+                active: window.is_window_active(),
+            },
+            hosts,
+            pairing: self.pairing.is_some(),
+            status: self.status_text(),
+            notice: self.notice.as_ref().map(|(_seq, text)| text.clone()),
+            ..Dump::default()
+        };
+        let mut focused = if window.focused(cx).is_some() { "other" } else { "none" }.to_owned();
+        let Some(canvas) = self.active_canvas() else {
+            dump.focused = focused;
+            return dump;
+        };
+        let canvas = canvas.read(cx);
+        dump.zoom = canvas.zoom();
+        if canvas.focus_handle(cx).is_focused(window) {
+            focused = String::from("canvas");
+        }
+        dump.focus = canvas.active_key_target().map(|t| match t {
+            KeyTarget::Terminal(_) => "terminal".to_owned(),
+            KeyTarget::Screen(_) => "screen".to_owned(),
+        });
+        for item in canvas.items() {
+            let (kind, session) = match &item.kind {
+                ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
+                ItemKind::Window { .. } => ("window", None),
+                ItemKind::Display { .. } => ("display", None),
+                ItemKind::Note { .. } => ("note", None),
+            };
+            let b = canvas.window_bounds(item.rect);
+            dump.items.push(ItemInfo {
+                id: item.id.to_string(),
+                kind: kind.to_owned(),
+                session,
+                rect: [item.rect.x, item.rect.y, item.rect.w, item.rect.h],
+                bounds: [
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                ],
+                active: canvas.active_item() == Some(item.id),
+                sleeping: item.sleeping,
+            });
+            if let ItemKind::Terminal { session } = item.kind
+                && let Some(view) = canvas.terminal(session)
+            {
+                let view = view.read(cx);
+                if view.focus_handle(cx).is_focused(window) {
+                    focused = format!("terminal:{session}");
+                }
+                let size = view.size();
+                let cursor = view.cursor();
+                dump.terminals.push(TerminalInfo {
+                    session: session.to_string(),
+                    title: view.title().map(str::to_owned),
+                    size: [size.cols, size.rows],
+                    cursor: [cursor.col, cursor.row],
+                    rows: view.rows(),
+                });
+            }
+        }
+        dump.focused = focused;
+        dump
+    }
+}

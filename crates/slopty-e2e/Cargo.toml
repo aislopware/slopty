@@ -1,0 +1,30 @@
+[package]
+name = "slopty-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty app self-test: the test-socket protocol, a driver, a daemon+app harness and render snapshots"
+
+[lints]
+workspace = true
+
+[features]
+default = [ "harness" ]
+# The driver, the harness and the snapshot comparison (everything but the protocol types).
+harness = [ "dep:tokio", "dep:image", "dep:anyhow", "dep:tempfile" ]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = [ "process" ] }
+
+[dev-dependencies]
+anyhow.workspace = true
+image.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = [ "process" ] }
