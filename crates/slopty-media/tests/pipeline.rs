@@ -420,6 +420,59 @@ mod tests {
         assert_eq!(h.rx.stats().refreshes, 2 + u64::try_from(sent).unwrap());
     }
 
+    /// The host says the capture source has produced nothing yet: asking it for a refresh
+    /// cannot help, so the receiver stops until the host says the source is live again. This is
+    /// the storm guard — a window that has not drawn used to draw a refresh request every
+    /// backoff period for as long as it stayed hidden.
+    #[test]
+    fn an_idle_source_stops_the_refresh_requests() {
+        let mut h = Harness::new();
+        assert!(h.tick().is_empty(), "the constructor counts as the first request");
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+
+        h.rx.set_source_live(false);
+        assert!(!h.rx.source_live());
+        for _ in 0..1000 {
+            h.advance(Duration::from_millis(10));
+            assert!(h.tick().is_empty(), "an idle source must not be asked again");
+        }
+
+        // The host reports the source live: asking resumes, and from the shortest wait, because
+        // the first frame is now worth waiting for.
+        h.rx.set_source_live(true);
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+    }
+
+    /// Fallback for a host that never sends the hint: the repeats stop on their own. With the
+    /// doubling backoff the cap spans about 17 s of asking, then silence until the stream moves.
+    #[test]
+    fn refresh_requests_give_up_after_the_cap() {
+        let mut h = Harness::new();
+        let mut sent = 0;
+        for _ in 0..6000 {
+            h.advance(Duration::from_millis(10));
+            sent += h.tick().len();
+        }
+        let cap = usize::try_from(cfg().refresh_max_repeats).unwrap();
+        assert_eq!(sent, cap, "{sent} requests in a minute of silence, cap {cap}");
+
+        // A frame arriving is what restarts it: the stream is alive again.
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        assert_eq!(h.drain().len(), 1);
+        let s1 = h.send(&frame_bytes(2, 6_000), false, false);
+        h.deliver(&s1.datagrams[..3]);
+        h.advance(cfg().max_hold);
+        let actions = h.tick();
+        assert_eq!(
+            actions.last(),
+            Some(&Action::RequestRefresh { last_good_frame: 0 }),
+            "{actions:?}"
+        );
+    }
+
     #[test]
     fn garbage_duplicates_and_other_streams_are_ignored() {
         let mut h = Harness::new();

@@ -88,6 +88,12 @@ pub struct Config {
     pub refresh_repeat: Duration,
     /// Longest wait between refresh repeats.
     pub refresh_repeat_max: Duration,
+    /// Unanswered refresh repeats before the receiver stops asking altogether, until something
+    /// arrives on the stream again. The host's [`SourceState`](slopty_proto::screen::SourceState)
+    /// hint is the real answer to a target that produces nothing; this is the fallback for a
+    /// host too old or too silent to send one, so it is generous: with the doubling backoff it
+    /// spans about 17 s of asking.
+    pub refresh_max_repeats: u32,
     /// Longest an incomplete frame is held while nothing at all arrives on the stream (a
     /// stalled link); past this it is lost even though the deadline logic would keep waiting.
     pub max_hold: Duration,
@@ -106,6 +112,7 @@ impl Default for Config {
             max_pending: 64,
             refresh_repeat: Duration::from_millis(100),
             refresh_repeat_max: Duration::from_secs(2),
+            refresh_max_repeats: 12,
             max_hold: Duration::from_millis(500),
             stall_gap: STALL_GAP,
         }
@@ -212,6 +219,10 @@ pub struct ReassemblerStats {
     pub frames_lost: u64,
     /// Fragments that never arrived (counted when a frame resolves).
     pub datagrams_lost: u64,
+    /// Data fragments the host cut frames into (counted once per frame seen).
+    pub data_shards: u64,
+    /// Parity fragments it added to them: the ratio is the parity the host settled on.
+    pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
     /// Refresh requests sent.
@@ -330,8 +341,11 @@ pub struct Reassembler {
     decoder: Option<ReedSolomonDecoder>,
     actions: Vec<Action>,
     refresh_requested_at: Option<Instant>,
-    /// Unanswered refresh repeats in a row (backoff exponent).
+    /// Unanswered refresh repeats in a row (backoff exponent, and the give-up count).
     refresh_repeats: u32,
+    /// What the host last said its capture target is doing. `false` means the target has drawn
+    /// nothing at all, so no refresh can produce a frame and asking is pure noise.
+    source_live: bool,
     stats: ReassemblerStats,
     window: Window,
     jitter_us: i64,
@@ -381,6 +395,7 @@ impl Reassembler {
             actions: Vec::new(),
             refresh_requested_at: Some(now),
             refresh_repeats: 0,
+            source_live: true,
             stats: ReassemblerStats::default(),
             window: Window::default(),
             jitter_us: 0,
@@ -405,6 +420,28 @@ impl Reassembler {
     #[must_use]
     pub const fn awaiting_refresh(&self) -> bool {
         !matches!(self.need, Need::Frame(_))
+    }
+
+    /// The host said whether its capture target is producing pictures.
+    ///
+    /// While it is not, refresh requests stop: a hidden or undrawn window has nothing to refresh
+    /// from, and asking every backoff period for as long as the item is open is the storm this
+    /// exists to prevent. Going live restarts the backoff, so the first refresh after the window
+    /// draws goes out immediately.
+    pub const fn set_source_live(&mut self, live: bool) {
+        if self.source_live != live {
+            self.source_live = live;
+            if live {
+                self.refresh_repeats = 0;
+                self.refresh_requested_at = None;
+            }
+        }
+    }
+
+    /// Whether the host's target is producing pictures, as last reported.
+    #[must_use]
+    pub const fn source_live(&self) -> bool {
+        self.source_live
     }
 
     /// Frames complete and waiting to be taken plus frames still being assembled.
@@ -503,6 +540,12 @@ impl Reassembler {
         });
         if let Slot::Unknown { .. } = slot {
             *slot = Slot::Partial(Partial::new(header, payload.len(), now));
+            self.stats.data_shards =
+                self.stats.data_shards.saturating_add(u64::try_from(data_count).unwrap_or(0));
+            self.stats.parity_shards = self
+                .stats
+                .parity_shards
+                .saturating_add(u64::try_from(total.saturating_sub(data_count)).unwrap_or(0));
         }
         let Slot::Partial(partial) = slot else {
             return Ingest::Ignored(Ignored::Duplicate);
@@ -806,7 +849,7 @@ impl Reassembler {
         for (frame, missing) in lost {
             self.lose(frame, missing, now);
         }
-        if !in_order {
+        if !in_order && self.source_live && self.refresh_repeats < self.cfg.refresh_max_repeats {
             let backoff = self
                 .cfg
                 .refresh_repeat

@@ -300,6 +300,21 @@ pub enum RateVerdict {
     Grow,
 }
 
+/// Whether a stream's capture target is producing pictures.
+///
+/// A window that is hidden, minimised, or has simply not drawn since the stream opened yields no
+/// frames at all, and there is no way for the client to tell that apart from a stream whose
+/// frames are being lost. Without the distinction the receiver sits in "need refresh" and asks
+/// for one every backoff period for as long as the item is open, which no amount of asking can
+/// answer. The host says which it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SourceState {
+    /// Open and capturing, but the target has produced no frame yet. Nothing to refresh from.
+    Idle,
+    /// The target has produced a frame; pictures are on the way.
+    Live,
+}
+
 /// Cursor appearance, sent when it changes.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CursorShape {
@@ -373,6 +388,14 @@ pub enum ScreenEvent {
     Clipboard {
         /// The host's clipboard text.
         text: String,
+    },
+    /// The capture target started or stopped producing pictures. Sent when the state changes,
+    /// so a client that never gets one treats the stream as `Live` (the old behaviour).
+    Source {
+        /// Stream.
+        stream: StreamId,
+        /// What the target is doing.
+        state: SourceState,
     },
     /// The bitrate controller decided (about twice a second per stream).
     Rate {

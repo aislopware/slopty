@@ -13,6 +13,7 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
@@ -31,7 +32,7 @@ use slopty_media::{
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
-    CaptureTarget, Quality, ReceiverReport, ScreenEvent, ScreenInput, VideoCodec,
+    CaptureTarget, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState, VideoCodec,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -43,7 +44,7 @@ pub const DATAGRAM_QUEUE: usize = 4096;
 /// Free queue slots below which a captured frame is dropped instead of encoded.
 const LOW_WATER: usize = 256;
 /// Cursor sample period (120 Hz); a datagram goes out only when the position changed.
-const CURSOR_PERIOD: std::time::Duration = std::time::Duration::from_micros(8_333);
+const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 /// Cursor ticks between re-reads of the target's bounds (10 Hz).
 const BOUNDS_EVERY: u64 = 12;
 
@@ -173,10 +174,10 @@ pub struct ScreenStats {
 /// How long an enumeration of shareable content is reused. A client lists, picks and opens
 /// within a few seconds, and `SCShareableContent` costs 60–75 ms per call (MEASUREMENTS.md,
 /// "start-up on a cold connection"); the second call would return the same objects.
-const SHAREABLE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+const SHAREABLE_TTL: Duration = Duration::from_secs(2);
 
 /// The last enumeration and when it was taken.
-static SHAREABLE: Mutex<Option<(std::time::Instant, Arc<Shareable>)>> = Mutex::new(None);
+static SHAREABLE: Mutex<Option<(Instant, Arc<Shareable>)>> = Mutex::new(None);
 
 /// Enumerate shareable content, reusing an enumeration younger than [`SHAREABLE_TTL`].
 pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
@@ -190,7 +191,7 @@ pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
         let _receiver_gone = tx.send(result);
     });
     let content = Arc::new(rx.await.map_err(|_dropped| ScreenError::Closed)??);
-    *SHAREABLE.lock() = Some((std::time::Instant::now(), Arc::clone(&content)));
+    *SHAREABLE.lock() = Some((Instant::now(), Arc::clone(&content)));
     Ok(content)
 }
 
@@ -199,8 +200,8 @@ pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
 /// The first stream a client opens then does not pay ScreenCaptureKit's first start in this
 /// process: ~300 ms cold against ~115 ms warm (MEASUREMENTS.md, "start-up on a cold
 /// connection").
-pub async fn warm_up() -> Result<std::time::Duration, ScreenError> {
-    let started = std::time::Instant::now();
+pub async fn warm_up() -> Result<Duration, ScreenError> {
+    let started = Instant::now();
     let encoder = Encoder::new(
         EncoderConfig {
             width: 64,
@@ -543,7 +544,19 @@ pub struct ScreenStream {
     point_scale: f64,
     /// Last requested quality; re-applied when the target changes size.
     quality: Quality,
+    /// When capture started, so a target that has drawn nothing can be told apart from one
+    /// that is merely still starting up.
+    opened_at: Instant,
+    /// The last [`SourceState`] the client was told, so only changes are sent.
+    source_reported: Option<SourceState>,
 }
+
+/// How long a stream may produce no frame at all before the client is told the target is idle.
+///
+/// Long enough that a normally starting stream never reports `Idle` first (first frame on
+/// loopback is ~130 ms, MEASUREMENTS.md), short enough that a hidden window costs the receiver
+/// only a couple of refresh requests before it stops asking.
+pub const SOURCE_IDLE_AFTER: Duration = Duration::from_millis(400);
 
 impl std::fmt::Debug for ScreenStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -567,7 +580,7 @@ impl ScreenStream {
         budget: DatagramBudget,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let content = shareable().await?;
         let enumerated = t0.elapsed();
         let resolved = Target::resolve(&content, target)?;
@@ -588,7 +601,7 @@ impl ScreenStream {
             budget,
             counters: Counters::new(),
         });
-        let t_encoder = std::time::Instant::now();
+        let t_encoder = Instant::now();
         let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
         let encoder_built = t_encoder.elapsed();
         *shared.encoder.write() = Some(encoder);
@@ -645,6 +658,8 @@ impl ScreenStream {
             injector,
             point_scale,
             quality,
+            opened_at: Instant::now(),
+            source_reported: None,
         };
         Ok((stream, opened))
     }
@@ -710,6 +725,31 @@ impl ScreenStream {
             width: self.capture_config.width,
             height: self.capture_config.height,
         }))
+    }
+
+    /// Whether the target has drawn anything, when that answer changed since the client was
+    /// last told. Polled beside [`Self::check_geometry`].
+    ///
+    /// A window that is hidden, minimised or has not drawn yields no frames, and the receiver
+    /// cannot tell that from a stream whose frames are all being lost: it sits in "need refresh"
+    /// and asks again every backoff period, forever, for something no refresh can produce
+    /// (MEASUREMENTS.md, "a target that never produces a frame"). Saying so once stops it.
+    pub fn check_source(&mut self) -> Option<ScreenEvent> {
+        let live = self.shared.counters.encoded.load(Ordering::Relaxed) > 0;
+        let state = if live {
+            SourceState::Live
+        } else if self.opened_at.elapsed() >= SOURCE_IDLE_AFTER {
+            SourceState::Idle
+        } else {
+            // Still inside the grace: say nothing rather than call a slow start idle.
+            return None;
+        };
+        if self.source_reported == Some(state) {
+            return None;
+        }
+        tracing::debug!(stream = %self.id, ?state, "capture source state");
+        self.source_reported = Some(state);
+        Some(ScreenEvent::Source { stream: self.id, state })
     }
 
     /// Rebuild the encoder and reconfigure the capture for a new size, rate or codec.

@@ -233,6 +233,13 @@ mod golden {
             }),
         );
         snap(
+            "host_screen_source",
+            &HostMsg::Screen(ScreenEvent::Source {
+                stream: StreamId(7),
+                state: slopty_proto::screen::SourceState::Idle,
+            }),
+        );
+        snap(
             "host_screen_rate",
             &HostMsg::Screen(ScreenEvent::Rate {
                 stream: StreamId(7),

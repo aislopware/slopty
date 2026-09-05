@@ -33,7 +33,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
     CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput, ScreenRequest,
-    ScrollPhase, VideoCodec,
+    ScrollPhase, SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
@@ -110,6 +110,9 @@ pub struct ScreenView {
     rtt: Option<Duration>,
     /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
     rate: Option<(u32, RateVerdict, bool)>,
+    /// What the host says its capture target is doing (`ScreenEvent::Source`). A target that
+    /// has drawn nothing is not a broken stream, and the placeholder should not claim it is.
+    source: SourceState,
     _pump: Task<()>,
 }
 
@@ -207,6 +210,19 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         pacing.repeats,
         pacing.late,
     )
+}
+
+/// What the item says while it has no picture yet.
+///
+/// The two cases look identical to the viewer and are not: a stream still starting up will draw
+/// in a moment, while a window that is hidden, minimised or has never drawn will not draw until
+/// something on the host changes. Saying which is the visible half of the refresh-storm guard.
+#[must_use]
+pub const fn waiting_text(source: SourceState) -> &'static str {
+    match source {
+        SourceState::Live => "waiting for the first frame…",
+        SourceState::Idle => "waiting for the window to draw…",
+    }
 }
 
 /// How often the overlay's rates are recomputed.
@@ -329,6 +345,7 @@ impl ScreenView {
             rtt: None,
             pacer: Pacer::default(),
             rate: None,
+            source: SourceState::Live,
             _pump: pump,
         }
     }
@@ -395,6 +412,23 @@ impl ScreenView {
     /// The host's latest bitrate decision, shown in the overlay.
     pub const fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
         self.rate = Some((target_bps, verdict, capped));
+    }
+
+    /// The host said whether its capture target is drawing. While it is not, the receiver stops
+    /// asking for refreshes (a hidden window has nothing to refresh from) and the placeholder
+    /// says so instead of "waiting for the first frame".
+    pub fn set_source_state(&mut self, state: SourceState, cx: &mut Context<Self>) {
+        if self.source != state {
+            self.source = state;
+            self.handle.set_source_live(state == SourceState::Live);
+            cx.notify();
+        }
+    }
+
+    /// What the host says its capture target is doing.
+    #[must_use]
+    pub const fn source_state(&self) -> SourceState {
+        self.source
     }
 
     /// The host's latest bitrate decision: target, verdict, whether the cwnd cap holds it.
@@ -826,7 +860,13 @@ impl Render for ScreenView {
 
         let picture = self.latest.as_ref().map_or_else(
             || {
+                let text = waiting_text(self.source);
                 div()
+                    // A status, not a picture: it is the only thing a screen reader can be told
+                    // while the surface is empty, and it changes when the host reports the source.
+                    .id("screen-waiting")
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label(text)
                     .size_full()
                     .flex()
                     .items_center()
@@ -834,7 +874,7 @@ impl Render for ScreenView {
                     .text_size(px(self.theme.typography.small()))
                     .text_color(hsla(self.theme.surfaces.text_muted))
                     .font_family(self.theme.typography.ui_family.clone())
-                    .child("waiting for the first frame…")
+                    .child(text)
                     .into_any_element()
             },
             |(_frame, buffer)| {
@@ -1011,6 +1051,15 @@ mod tests {
 
     fn chord(s: &str) -> Keystroke {
         Keystroke::parse(s).expect("keystroke")
+    }
+
+    /// The placeholder distinguishes "the picture has not got here yet" from "the host says its
+    /// target has not drawn": the second is not a network problem and no amount of asking fixes
+    /// it, so the wait must not read like a stall.
+    #[test]
+    fn the_placeholder_says_which_end_is_waiting() {
+        assert_eq!(waiting_text(SourceState::Live), "waiting for the first frame…");
+        assert_eq!(waiting_text(SourceState::Idle), "waiting for the window to draw…");
     }
 
     /// The overlay names every number a human needs to judge a stream: age of the picture,

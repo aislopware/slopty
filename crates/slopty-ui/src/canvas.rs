@@ -871,6 +871,13 @@ impl CanvasView {
                     }
                 }
             }
+            ScreenEvent::Source { stream, state } => {
+                for view in self.screens.values() {
+                    if view.read(cx).stream() == stream {
+                        view.update(cx, |v, cx| v.set_source_state(state, cx));
+                    }
+                }
+            }
             ScreenEvent::Cursor { .. } | ScreenEvent::ListingChanged => {}
         }
         cx.notify();

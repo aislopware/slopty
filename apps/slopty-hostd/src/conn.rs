@@ -549,7 +549,9 @@ impl Peer<'_> {
         }
     }
 
-    /// Tell the client about streams whose target changed size. False once the client is gone.
+    /// Tell the client about streams whose target changed size, and about targets that have
+    /// drawn nothing yet (so the receiver stops asking for a refresh no frame can answer).
+    /// False once the client is gone.
     async fn check_geometry(&mut self) -> bool {
         let mut events = Vec::new();
         for (id, stream) in &mut self.screens {
@@ -560,6 +562,7 @@ impl Peer<'_> {
                     tracing::warn!(client = %self.client, stream = %id, error = %e, "geometry");
                 }
             }
+            events.extend(stream.check_source());
         }
         for event in events {
             if self.out.send(HostMsg::Screen(event)).await.is_err() {

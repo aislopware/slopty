@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use slopty_codec::audio::{OpusDecoder, Player};
 use slopty_codec::{DecodedFrame, Decoder};
 use slopty_core::StreamId;
-use slopty_media::{Action, Config, Ingest, Reassembler};
+use slopty_media::{Action, Config, Ingest, Reassembler, ReassemblerStats};
 use slopty_proto::ClientMsg;
 use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
 use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
@@ -40,14 +40,30 @@ const IDLE_TICK: Duration = Duration::from_millis(50);
 /// RTT assumed before the transport has measured one.
 const DEFAULT_RTT: Duration = Duration::from_millis(20);
 
+/// Seed of the loss-injection sequence. Fixed, so a run at a given drop rate repeats exactly
+/// and two builds can be compared on the same losses.
+const LOSS_SEED: u64 = 0x2545_F491_4F6C_DD1D;
+
 /// Fans incoming datagrams out to per-stream queues.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScreenRouter {
     inner: Arc<Mutex<Routes>>,
-    /// Diagnostic loss injection: drop this many datagrams per thousand, from
-    /// `SLOPTY_DROP_PERMILLE`. Zero in normal use.
-    drop_permille: u32,
+    /// Test-only loss injection: drop this many datagrams per thousand, from
+    /// `SLOPTY_E2E_DROP_PERMILLE` (read once, at construction). Zero in normal use, which is
+    /// the only state the shipped app is ever in — nothing sets the variable but the gated
+    /// tests in `apps/slopty-hostd/tests/e2e.rs`.
+    drop_permille: Arc<AtomicU32>,
     lcg: Arc<AtomicU64>,
+}
+
+impl Default for ScreenRouter {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            drop_permille: Arc::new(AtomicU32::new(0)),
+            lcg: Arc::new(AtomicU64::new(LOSS_SEED)),
+        }
+    }
 }
 
 /// A datagram and when the connection handed it over: the stream worker may be busy (a decode,
@@ -77,22 +93,42 @@ impl Routes {
 }
 
 impl ScreenRouter {
-    /// Empty router. Reads `SLOPTY_DROP_PERMILLE` once for loss injection.
+    /// Empty router. Reads `SLOPTY_E2E_DROP_PERMILLE` once for loss injection.
     #[must_use]
     pub fn new() -> Self {
-        let drop_permille = std::env::var("SLOPTY_DROP_PERMILLE")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .map_or(0, |v| v.min(1000));
-        if drop_permille > 0 {
-            tracing::warn!(drop_permille, "media loss injection is on");
+        Self::with_loss(
+            std::env::var("SLOPTY_E2E_DROP_PERMILLE")
+                .or_else(|_unset| std::env::var("SLOPTY_DROP_PERMILLE"))
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .map_or(0, |v| v.min(1000)),
+        )
+    }
+
+    /// A router that drops `drop_permille` of the datagrams handed to it, from a fixed seed.
+    /// The tests call this directly; the app only ever gets zero.
+    #[must_use]
+    pub fn with_loss(drop_permille: u32) -> Self {
+        let router = Self::default();
+        router.set_loss(drop_permille);
+        router
+    }
+
+    /// Drop this many datagrams per thousand from now on, and restart the sequence so a run at
+    /// a given rate always sees the same losses. Tests only.
+    pub fn set_loss(&self, drop_permille: u32) {
+        let permille = drop_permille.min(1000);
+        self.lcg.store(LOSS_SEED, Ordering::Relaxed);
+        self.drop_permille.store(permille, Ordering::Relaxed);
+        if permille > 0 {
+            tracing::warn!(drop_permille = permille, "media loss injection is on");
         }
-        Self { drop_permille, ..Self::default() }
     }
 
     /// Whether loss injection says to drop this datagram (a 64-bit LCG, no `rand` dependency).
     fn inject_loss(&self) -> bool {
-        if self.drop_permille == 0 {
+        let permille = self.drop_permille.load(Ordering::Relaxed);
+        if permille == 0 {
             return false;
         }
         let next = self
@@ -105,7 +141,7 @@ impl ScreenRouter {
             })
             .unwrap_or(0);
         let roll = u32::try_from((next >> 33) % 1000).unwrap_or(0);
-        roll < self.drop_permille
+        roll < permille
     }
 
     /// Deliver one datagram that arrived at `now` (called by the connection's datagram reader).
@@ -198,8 +234,15 @@ pub struct ScreenStats {
     pub frames: u64,
     /// Frames recovered by FEC.
     pub frames_fec: u64,
+    /// Frames that needed a retransmission.
+    pub frames_retransmit: u64,
     /// Frames given up on.
     pub frames_lost: u64,
+    /// Data fragments that never arrived (counted as each frame resolves).
+    pub datagrams_lost: u64,
+    /// Parity the host is sending, in thousandths of the data fragments, as observed on the
+    /// wire: the receiver's view of what the redundancy controller settled on.
+    pub parity_permille: u16,
     /// NACKs sent.
     pub nacks: u64,
     /// Refresh requests sent.
@@ -273,6 +316,8 @@ pub struct ScreenHandle {
     stats: watch::Receiver<ScreenStats>,
     /// Audio is decoded but not played while set (shared with the worker).
     muted: Arc<AtomicBool>,
+    /// The host's capture target is producing pictures (shared with the worker).
+    source_live: Arc<AtomicBool>,
     router: ScreenRouter,
     task: JoinHandle<()>,
 }
@@ -315,6 +360,18 @@ impl ScreenHandle {
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
     }
+
+    /// The host's `ScreenEvent::Source`: whether the capture target is drawing anything. While
+    /// it is not, the worker stops asking for refreshes no frame could answer.
+    pub fn set_source_live(&self, live: bool) {
+        self.source_live.store(live, Ordering::Relaxed);
+    }
+
+    /// Whether the host's capture target is drawing, as last reported.
+    #[must_use]
+    pub fn source_live(&self) -> bool {
+        self.source_live.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for ScreenHandle {
@@ -354,6 +411,7 @@ pub fn spawn_screen(
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
     let muted = Arc::new(AtomicBool::new(false));
+    let source_live = Arc::new(AtomicBool::new(true));
     let first_decoded = Arc::new(Mutex::new(None));
     let decoded_at = Arc::clone(&first_decoded);
     let arrivals = Arc::new(Mutex::new(Arrivals::default()));
@@ -391,11 +449,12 @@ pub fn spawn_screen(
         counters: ScreenStats::default(),
         audio: AudioSlot::Unopened,
         muted: Arc::clone(&muted),
+        source_live: Arc::clone(&source_live),
         first_decoded,
         capture_clock: CaptureClock::new(),
     };
     let task = runtime.spawn(worker.run());
-    ScreenHandle { stream, frames, cursor, stats, muted, router: router.clone(), task }
+    ScreenHandle { stream, frames, cursor, stats, muted, source_live, router: router.clone(), task }
 }
 
 struct Worker {
@@ -415,6 +474,8 @@ struct Worker {
     audio: AudioSlot,
     /// Decode but do not play while set.
     muted: Arc<AtomicBool>,
+    /// The host says its capture target is producing pictures.
+    source_live: Arc<AtomicBool>,
     /// Set by the decoder callback when the first picture comes back.
     first_decoded: Arc<Mutex<Option<Instant>>>,
     /// Widens the wire's 32-bit capture timestamp, so ordering survives its ~71-minute wrap.
@@ -543,6 +604,7 @@ impl Worker {
 
     /// Run the reassembler's timers; `false` when the connection is gone.
     fn actions(&mut self) -> bool {
+        self.reassembler.set_source_live(self.source_live.load(Ordering::Relaxed));
         let rtt = (self.rtt)().unwrap_or(DEFAULT_RTT);
         for action in self.reassembler.tick(Instant::now(), rtt) {
             let stream = self.stream;
@@ -568,7 +630,10 @@ impl Worker {
         let report = self.reassembler.take_report(now, 0);
         let stats = self.reassembler.stats();
         self.counters.frames_fec = stats.frames_fec;
+        self.counters.frames_retransmit = stats.frames_retransmit;
         self.counters.frames_lost = stats.frames_lost;
+        self.counters.datagrams_lost = stats.datagrams_lost;
+        self.counters.parity_permille = observed_parity(&stats);
         self.counters.stalls = stats.stalls;
         self.counters.stalled_ms = stats.stalled_ms;
         self.counters.stalled = self.reassembler.stalled(now);
@@ -582,6 +647,14 @@ impl Worker {
         let _gone =
             self.out.send(ClientMsg::Screen(ScreenRequest::Report { stream, report })).await;
     }
+}
+
+/// The parity ratio the host is sending, in thousandths of the data fragments, from the frame
+/// layouts seen so far. Zero until a frame arrives.
+fn observed_parity(stats: &ReassemblerStats) -> u16 {
+    let permille =
+        stats.parity_shards.saturating_mul(1000).checked_div(stats.data_shards).unwrap_or(0);
+    u16::try_from(permille).unwrap_or(u16::MAX)
 }
 
 /// Encode loss feedback for one datagram. A fragment list too long for a datagram degrades to
