@@ -274,7 +274,14 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   QUIC itself, no protocol message: the app samples `ConnectionStats.udp_rx.datagrams` once a
   second (`HostLink::received_datagrams`); keep-alive pings make a live host send something
   every 5 s, so a counter that stands still for `SILENCE_WARN` = 8 s turns the RTT readout into
-  a yellow "host silent Ns". Verified 2026-09-05 by `SIGSTOP`ping hostd.
+  a yellow "host silent Ns". Verified 2026-09-05 by `SIGSTOP`ping hostd. Since the same day the
+  app also *gives up* at `SILENCE_DROP` = 15 s (three missed keep-alives, noq's own path bar):
+  `HostLink::abandon` closes the QUIC connection, the control reader reports `Disconnected`,
+  and the normal reconnect loop runs, so a restarted host is back ~2 s after it answers instead
+  of after the 45 s idle timeout. Measured with a frozen hostd: dropped at 15.2 s, reconnected
+  2 s after `SIGCONT`. Reading the logs afterwards: a killed app's *old* connection still shows
+  up on hostd as "connection lost: timed out" 45 s later; that is the stale one, not the new.
+  Driving note: cliclick `kp:return` never reaches the app (osascript `keystroke return` does).
 - 🔬 **Path flap under investigation** (2026-09-04): one connection went direct → relay-only for
   43 s → direct while the machine was compiling. iroh's default `BiasedRttPathSelector` always
   prefers a live direct path over relay, so the direct path must have been *closed*, not
