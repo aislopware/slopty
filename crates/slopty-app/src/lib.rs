@@ -18,7 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::LinkEvent;
 use slopty_proto::HostMsg;
 use slopty_theme::Theme;
-use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewTerminal};
+use slopty_ui::canvas::{CanvasEvent, CanvasView, FitAll, NewNote, NewTerminal};
 use slopty_ui::colors::hsla;
 use slopty_ui::terminal::TerminalView;
 
@@ -285,11 +285,16 @@ impl Workspace {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
         let zoom_pct = (self.zoom * 100.0).round().max(0.0) as u32;
         let label = |text: String| {
-            div().text_size(px(12.0)).text_color(hsla(s.text_muted)).child(SharedString::from(text))
+            div()
+                .flex_none()
+                .text_size(px(12.0))
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(text))
         };
         let button = |id: &'static str, text: &'static str, hint: &'static str| {
             div()
                 .id(id)
+                .flex_none()
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(px(5.0))
@@ -310,6 +315,12 @@ impl Workspace {
                 }
             },
         ));
+        let note_button =
+            button("new-note", "+ note", "⌘⇧N").on_click(cx.listener(|this, _ev, window, cx| {
+                if let Some(canvas) = &this.canvas {
+                    canvas.update(cx, |c, cx| c.new_note(&NewNote, window, cx));
+                }
+            }));
         let fit_button =
             button("fit-all", "fit", "⌘1").on_click(cx.listener(|this, _ev, window, cx| {
                 if let Some(canvas) = &this.canvas {
@@ -329,13 +340,22 @@ impl Workspace {
             .border_b_1()
             .border_color(hsla(s.border))
             .font_family(self.theme.typography.ui_family.clone())
-            .child(div().text_size(px(12.5)).text_color(hsla(s.text)).child(SharedString::from(
-                if self.host_name.is_empty() {
-                    "Slopty".to_owned()
-                } else {
-                    self.host_name.clone()
-                },
-            )))
+            // The host name gives way first: a phone's bar must keep every button.
+            .child(
+                div()
+                    .flex_shrink(1.0)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.5))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(if self.host_name.is_empty() {
+                        "Slopty".to_owned()
+                    } else {
+                        self.host_name.clone()
+                    })),
+            )
             .child(label(self.status.clone()))
             .child(div().flex_1())
             .child(match (self.silent, self.rtt, self.relayed) {
@@ -350,6 +370,7 @@ impl Workspace {
             .child(label(format!("{zoom_pct}%")))
             .child(fit_button)
             .child(new_button)
+            .child(note_button)
     }
 }
 

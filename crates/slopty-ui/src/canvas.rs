@@ -30,6 +30,7 @@ use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
+use crate::note::{NoteView, NoteViewEvent};
 use crate::picker::{PickerEvent, WindowPicker};
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
@@ -47,6 +48,8 @@ pub mod actions {
         [
             /// Open a new shell on the host.
             NewTerminal,
+            /// Put an empty note on the canvas.
+            NewNote,
             /// Put a host window or display on the canvas.
             AddWindow,
             /// Close the active item (terminates its session).
@@ -62,7 +65,7 @@ pub mod actions {
         ]
     );
 }
-pub use actions::{AddWindow, CloseItem, FitAll, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
+pub use actions::{AddWindow, CloseItem, FitAll, NewNote, NewTerminal, ZoomIn, ZoomOut, ZoomReset};
 
 /// Key bindings for the canvas context.
 #[must_use]
@@ -71,6 +74,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-t", NewTerminal, CTX),
         KeyBinding::new("cmd-n", NewTerminal, CTX),
+        KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
         KeyBinding::new("cmd-=", ZoomIn, CTX),
@@ -92,6 +96,8 @@ const TITLE_H: f32 = 28.0;
 const GRIP: f32 = 14.0;
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
+/// Size of a new note.
+const NOTE_SIZE: (f32, f32) = (320.0, 240.0);
 /// Zoom step for ⌘= / ⌘-.
 const ZOOM_STEP: f32 = 1.25;
 /// Largest item a picked window gets on the canvas, in points.
@@ -127,6 +133,7 @@ pub struct CanvasView {
     /// Coding agents the host has observed, by session.
     agents: HashMap<SessionId, AgentEvent>,
     screens: HashMap<ItemId, Entity<ScreenView>>,
+    notes: HashMap<ItemId, Entity<NoteView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// A `List` is in flight to name restored window items.
@@ -147,6 +154,8 @@ pub struct CanvasView {
     active: Option<ItemId>,
     /// A terminal to focus on the next frame (one we just opened).
     pending_focus: Option<SessionId>,
+    /// A note to put the caret in on the next frame (one we just created).
+    pending_focus_note: Option<ItemId>,
     /// Focus the picker on the next frame.
     pending_focus_picker: bool,
     /// Focus the canvas itself on the next frame (after the picker closes).
@@ -192,6 +201,7 @@ impl CanvasView {
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             agents: HashMap::new(),
             screens: HashMap::new(),
+            notes: HashMap::new(),
             pending_opens: HashMap::new(),
             titles_requested: false,
             titles: HashMap::new(),
@@ -204,6 +214,7 @@ impl CanvasView {
             drag: None,
             active: None,
             pending_focus: None,
+            pending_focus_note: None,
             pending_focus_picker: false,
             pending_focus_self: false,
             focus: cx.focus_handle(),
@@ -650,6 +661,64 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// ⌘⇧N: an empty note in the next free slot, revealed and focused right away (the
+    /// document applies our op optimistically; the host's echo changes nothing).
+    pub fn new_note(&mut self, _: &NewNote, _window: &mut Window, cx: &mut Context<Self>) {
+        let rect = self.doc.free_slot(NOTE_SIZE);
+        let id = ItemId::new();
+        let item = CanvasItem {
+            id,
+            kind: ItemKind::Note { text: String::new() },
+            rect,
+            z: self.doc.top_z().saturating_add(1),
+            group: None,
+            sleeping: false,
+        };
+        self.propose(CanvasOp::Upsert(item));
+        self.active = Some(id);
+        self.reveal_pending = Some(id);
+        self.pending_focus_note = Some(id);
+        cx.notify();
+    }
+
+    /// A note's editor settled: write its text into the document.
+    fn commit_note(&mut self, id: ItemId, text: String) {
+        let Some(mut item) = self.doc.get(id).cloned() else { return };
+        item.kind = ItemKind::Note { text };
+        self.propose(CanvasOp::Upsert(item));
+    }
+
+    /// Create editors for note items and drop the ones whose items are gone. Needs the window
+    /// (the editor state does), so it runs from `render`.
+    fn reconcile_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let notes: Vec<(ItemId, String)> = self
+            .doc
+            .items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Note { text } => Some((i.id, text.clone())),
+                _ => None,
+            })
+            .collect();
+        for (id, text) in &notes {
+            if let Some(view) = self.notes.get(id) {
+                let editing = view.read(cx).editing(window, cx);
+                if !editing && view.read(cx).synced() != text {
+                    view.update(cx, |v, cx| v.set_text(text, window, cx));
+                }
+                continue;
+            }
+            let view = cx.new(|cx| NoteView::new(*id, text, window, cx));
+            let item = *id;
+            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+                let NoteViewEvent::Commit(text) = event;
+                this.commit_note(item, text.clone());
+                cx.notify();
+            }));
+            self.notes.insert(*id, view);
+        }
+        self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
+    }
+
     /// ⌘O: ask the host for its windows, then show the picker.
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         self.picker_wanted = true;
@@ -882,7 +951,11 @@ impl CanvasView {
                 let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
                 (format!("display {display}"), focused)
             }
-            ItemKind::Note { .. } => ("note".to_owned(), false),
+            ItemKind::Note { .. } => {
+                let focused =
+                    self.notes.get(&item.id).is_some_and(|v| v.read(cx).editing(window, cx));
+                ("note".to_owned(), focused)
+            }
         };
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agents.get(&session),
@@ -943,8 +1016,8 @@ impl CanvasView {
             )
             .when_some(badge, gpui::ParentElement::child);
 
-        let body: gpui::AnyElement = match item.kind {
-            ItemKind::Terminal { session } => match (card, self.terminals.get(&session)) {
+        let body: gpui::AnyElement = match &item.kind {
+            ItemKind::Terminal { session } => match (card, self.terminals.get(session)) {
                 (false, Some(view)) => {
                     view.update(cx, |v, _| v.set_zoom(zoom));
                     div().flex_1().w_full().overflow_hidden().child(view.clone()).into_any_element()
@@ -972,7 +1045,7 @@ impl CanvasView {
                     .justify_center()
                     .text_size(px(ui_size))
                     .text_color(hsla(theme.surfaces.text_muted))
-                    .child(if self.sessions.contains_key(&session) {
+                    .child(if self.sessions.contains_key(session) {
                         "attaching…"
                     } else {
                         "session ended"
@@ -1007,16 +1080,29 @@ impl CanvasView {
                         .into_any_element(),
                 }
             }
-            ItemKind::Note { .. } => div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(ui_size))
-                .text_color(hsla(theme.surfaces.text_muted))
-                .child("not yet")
-                .into_any_element(),
+            ItemKind::Note { text: note_text } => match (card, self.notes.get(&item.id)) {
+                (false, Some(view)) => {
+                    view.update(cx, |v, _| v.set_zoom(zoom));
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .overflow_hidden()
+                        .font_family(theme.typography.ui_family.clone())
+                        .text_color(hsla(theme.surfaces.text))
+                        .child(view.clone())
+                        .into_any_element()
+                }
+                _ => div()
+                    .flex_1()
+                    .w_full()
+                    .p(px(10.0))
+                    .overflow_hidden()
+                    .text_size(px(11.0))
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .font_family(theme.typography.ui_family.clone())
+                    .child(SharedString::from(note_summary(note_text)))
+                    .into_any_element(),
+            },
         };
 
         let grip = div()
@@ -1074,6 +1160,12 @@ impl Render for CanvasView {
         if std::mem::take(&mut self.pending_focus_self) {
             window.focus(&self.focus, cx);
         }
+        self.reconcile_notes(window, cx);
+        if let Some(id) = self.pending_focus_note.take()
+            && let Some(view) = self.notes.get(&id)
+        {
+            view.update(cx, |v, cx| v.focus(window, cx));
+        }
         let picker = self.picker.clone();
         let items = self.doc.by_z().into_iter().cloned().collect::<Vec<_>>();
         let entity = cx.entity();
@@ -1113,6 +1205,7 @@ impl Render for CanvasView {
             .overflow_hidden()
             .bg(hsla(self.theme.surfaces.canvas))
             .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))
             .on_action(cx.listener(Self::zoom_in))
@@ -1146,6 +1239,12 @@ impl Render for CanvasView {
 }
 
 /// The agent pill in a terminal's title bar: a coloured dot and a short word or the detail.
+/// What a zoomed-out note card shows: its first non-empty line, clipped.
+fn note_summary(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("empty note");
+    line.chars().take(48).collect()
+}
+
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
 fn take_button(
     id: ItemId,

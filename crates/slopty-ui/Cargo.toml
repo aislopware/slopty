@@ -15,6 +15,7 @@ anyhow.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
+gpui-kit.workspace = true
 slopty-client.workspace = true
 slopty-codec.workspace = true
 slopty-core.workspace = true

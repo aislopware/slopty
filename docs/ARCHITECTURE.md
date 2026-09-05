@@ -108,7 +108,8 @@ line cache and stop painting; off-screen video pauses decode (kind-aware culling
 document synced through the host so every client sees the same canvas (`slopty-host::canvas`
 owns it, `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws
 it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface). Remote-window items are
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- are the keyboard surface). Notes (⌘⇧N) are edited
+in place (`slopty-ui::note`) and their text lives in the document. Remote-window items are
 created from the picker (⌘O); `reconcile_screens` opens a stream for every window/display item
 that lacks one and closes streams for items that disappeared, so the document, not the UI, is
 the source of truth for what is being streamed.

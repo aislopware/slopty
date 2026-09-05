@@ -118,6 +118,17 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   on the simulator 2026-09-05 (⌃ + `c` interrupts `sleep 30`, arrows recall history). The bar
   only renders while a terminal is the canvas's active item.
 
+- ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
+  document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).
+  Edits go to the host as an `Upsert` of the whole item after a 400 ms typing pause and on
+  blur; a remote change is applied only while this client is not editing. No merge: notes are
+  short and the canvas has one author at a time in practice. ⌘⇧N / "+ note" places a 320×240
+  note in the next free slot and reveals + focuses it at once: the document applies our op
+  optimistically, and keying that off the host's echo failed on the phone, where a frame
+  rendered (and created the editor) before the echo arrived. Zoomed-out cards show the first
+  non-empty line. Verified on macOS and the iOS simulator 2026-09-05 (text persisted in
+  `canvas.json`).
+
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 - ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font

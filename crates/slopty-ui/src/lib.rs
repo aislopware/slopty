@@ -4,6 +4,7 @@
 //!   painter). Rows are painted straight from the grid; no intermediate widget tree.
 //! * [`canvas`] — the infinite plane: items, camera, drag/zoom, actions.
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
+//! * [`note`] — a sticky note edited in place, text shared through the document.
 //! * [`picker`] — the "add a window" chooser.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
@@ -13,6 +14,7 @@ pub mod canvas;
 pub mod colors;
 pub mod fonts;
 pub mod keys;
+pub mod note;
 pub mod picker;
 pub mod screen;
 pub mod terminal;
