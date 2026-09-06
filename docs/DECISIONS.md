@@ -447,6 +447,17 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   noise from a regression. Not a wire change: `ClientSink` still carries bare `TermEvent`s,
   so the sink → forwarder hop is measured from the flush stamp to `frame sent` rather than
   stamped itself.
+- ✅ **The QUIC legs are quinn's and iroh's own, and stay as they are** (2026-09-06). With
+  the frame flushed inline, a same-machine echo is 0.73 ms p50 on a quiet host, of which
+  everything Slopty does is 0.1 ms and the two QUIC legs are 0.6 (client → hostd 0.42, hostd →
+  client 0.19; MEASUREMENTS.md "the keystroke path, stage by stage"). The suspicion that the
+  legs were tokio wakes of parked workers came from a loaded machine, where
+  `TOKIO_WORKER_THREADS=1` looked 0.1–0.3 ms faster per leg; quiet, the medians are identical
+  and only the tails differ (p90 0.8 against 1.5–2.8 ms). Not changed: the median is the path
+  through iroh's socket task and quinn's endpoint and connection drivers, the same on any
+  worker count, and a smaller pool for the tail is a decision for the flap harness, since the
+  video path packetizes and pumps on the same runtime. The next step on this path, if one is
+  ever needed, is a profile of iroh's send and receive path, not another runtime knob.
 - ✅ **Only items in the viewport are drawn** (2026-09-05). `CanvasView::draws` culls an item whose
   screen rectangle is outside the viewport, except the active item and one being dragged or
   resized (their views must stay in the frame for focus and the gesture). The minimap still

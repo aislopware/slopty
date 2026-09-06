@@ -2398,8 +2398,50 @@ scheduling tails of 1–15 ms — noise this trace can now attribute rather than
 | after 6 (loaded)  | 0.03 / 0.73 ms         | 0.69 ms   | 8.3 ms    | 15.0 ms   |
 
 The stage that was changed is 0.02–0.05 ms in every run, loaded or not; the quiet run's round
-trip is **0.65 ms p50, 0.56 ms min** against 3.1–3.9 ms before. What is left on a quiet
-machine is the two QUIC legs (0.35 + 0.18 ms: quinn's endpoint and connection drivers, the
-UDP send and receive, and a task wake at each end) and 0.1 ms of everything else. Re-measure
-the totals on a quiet machine; the loaded rows are kept because they are what a shared host
-looks like, and the trace is how to tell that from a regression.
+trip is **0.65 ms p50, 0.56 ms min** against 3.1–3.9 ms before. The loaded rows are kept
+because they are what a shared host looks like, and the trace is how to tell that from a
+regression.
+
+Re-measured once the other job had finished (load average 3.2–3.6), three runs:
+
+| stage                              | p50 (3 quiet runs) | p90       |
+| ---------------------------------- | ------------------ | --------- |
+| client → hostd, control stream     | 0.42 ms            | 0.45–0.49 |
+| conn → actor + master write        | 0.03–0.04 ms       | 0.04–0.07 |
+| kernel echo → actor read           | 0.01 ms            | 0.01–0.03 |
+| actor read → frame flushed         | 0.02–0.03 ms       | 0.03–0.05 |
+| sink → forwarder + `stream.send`   | 0.02 ms            | 0.03      |
+| hostd → client, session stream     | 0.18–0.21 ms       | 0.25–0.27 |
+| link events channel → bench task   | 0.02 ms            | 0.02–0.04 |
+| **total**                          | **0.73–0.75 ms**   | 0.80–1.00 |
+
+Everything that is ours is 0.1 ms; the two QUIC legs are 0.6 of the 0.73.
+
+### The two QUIC legs against the runtime's worker count
+
+Same setup, `TOKIO_WORKER_THREADS=1` for hostd and the bench client against the default (one
+worker per core), interleaved within two minutes on the loaded machine (load average 22–31):
+
+| runtime            | client → hostd p50 | hostd → client p50 | total p50 | total min |
+| ------------------ | ------------------ | ------------------ | --------- | --------- |
+| one worker, run 1  | 0.36 ms            | 0.18 ms            | 0.7 ms    | 0.4 ms    |
+| one worker, run 2  | 0.58 ms            | 0.31 ms            | 1.1 ms    | 0.7 ms    |
+| default, run 1     | 0.62 ms            | 0.30 ms            | 1.3 ms    | 0.9 ms    |
+| default, run 2     | 0.71 ms            | 0.35 ms            | 1.4 ms    | 1.0 ms    |
+
+On the loaded machine both legs looked 0.1–0.3 ms shorter with one worker. Quiet (load 3.2,
+interleaved, two runs each) the difference is gone from the medians and lives only in the
+tails:
+
+| runtime, quiet     | client → hostd p50 / p90 | hostd → client p50 / p90 | total p50 / p90 / max |
+| ------------------ | ------------------------ | ------------------------ | --------------------- |
+| one worker, run 1  | 0.41 / 0.47 ms           | 0.20 / 0.26 ms           | 0.8 / 0.8 / 0.9 ms    |
+| one worker, run 2  | 0.40 / 0.45 ms           | 0.19 / 0.25 ms           | 0.7 / 0.8 / 0.9 ms    |
+| default, run 1     | 0.43 / 1.72 ms           | 0.21 / 0.57 ms           | 0.8 / 2.8 / 6.8 ms    |
+| default, run 2     | 0.49 / 0.86 ms           | 0.21 / 0.37 ms           | 0.8 / 1.5 / 6.7 ms    |
+
+So the 0.6 ms of QUIC legs is not the worker count: it is the path through iroh and quinn
+itself (their socket task, endpoint and connection drivers, and one wake at each end), and
+the same on one worker. What the worker count buys is the tail — p90 0.8 against 1.5–2.8 ms,
+max 0.9 against 6.8 — which is worth knowing and not worth a runtime change on the strength
+of two runs (DECISIONS "The QUIC legs are quinn's and iroh's own").
