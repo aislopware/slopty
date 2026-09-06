@@ -10,6 +10,11 @@ gate = "run --quiet --package xtask -- gate"
 [env]
 # libghostty-vt-sys builds from the vendored ghostty tree; never fetches at build time.
 GHOSTTY_SOURCE_DIR = { value = "vendor/ghostty", relative = true }
+# Every profile here keeps line tables (`debug = "line-tables-only"`), which makes cargo hand
+# build scripts `DEBUG=true`, and libghostty-vt-sys reads that as "build the zig library in
+# Debug mode": 50 KB/s of VT parsing in release (MEASUREMENTS 2026-09-06, checkpoint cost). Pin
+# the optimised library for every profile; the Rust side keeps its own debug info.
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
 MACOSX_DEPLOYMENT_TARGET = "26.5"
 IPHONEOS_DEPLOYMENT_TARGET = "26.5"
 

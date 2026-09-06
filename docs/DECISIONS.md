@@ -1825,6 +1825,22 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `a_host_restart_keeps_the_screen` (marker printed, hostd killed after the checkpoint delay,
   a fresh hostd on the same ptyd shows the marker in its full frame and the shell still
   answers). Cost: MEASUREMENTS 2026-09-06 "checkpoint cost".
+- ✅ **libghostty-vt is compiled `ReleaseFast` under every cargo profile** (2026-09-06, found by
+  the checkpoint cost measurement). `libghostty-vt-sys`'s build script picks the zig optimize
+  mode from cargo's `DEBUG` variable, which is `true` whenever the profile keeps any debug info,
+  and every profile here keeps `debug = "line-tables-only"` for symbolised panics, release and
+  dist included. So every Slopty binary ever built parsed VT with a `-Doptimize=Debug` library:
+  50 KB/s, 1.2 ms per 70-column line, a 10k-line `cat` taking 12 s to draw. `.cargo/config.toml`
+  now sets `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast` in `[env]`, which the build script honours
+  over `DEBUG` (`cargo:rerun-if-env-changed` covers it, so the change rebuilds the library); the
+  Rust side keeps its line tables. Ruled against dropping the line tables (they are what makes a
+  crash report readable) and against `ReleaseSafe` (ghostty's own release builds are
+  `ReleaseFast`; its safety checks are debug tooling, not a contract). Before/after in
+  MEASUREMENTS 2026-09-06 "libghostty-vt built ReleaseFast": 12.5 s → 3.6 ms for the same 10k
+  lines. Consequence: every latency number recorded before this date that passed through the
+  parser is an upper bound; the ones that matter (keystroke echo, attach replay) get re-measured
+  as they come up rather than all at once.
+
 ## Multi-client
 
 Proven end to end by the pair suite (`crates/slopty-e2e/tests/pair.rs`, `cargo xtask e2e pair`):

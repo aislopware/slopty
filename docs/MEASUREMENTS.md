@@ -2219,3 +2219,23 @@ binding is as slow, and the cause is the build. Every profile in `Cargo.toml` ke
 included. `.cargo/config.toml` now pins `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast`; the same test
 after the change is the next entry.
 
+## 2026-09-06 — libghostty-vt built ReleaseFast: the same checkpoint_cost run
+
+Same command, same machine, after `.cargo/config.toml` pins `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast`
+(the zig library was `-Doptimize=Debug` under every profile before, see the entry above):
+
+| step | Debug zig (before) | ReleaseFast zig (after) |
+| --- | --- | --- |
+| fill 10 024 lines (651 560 bytes) through the engine | 12.5 s | **3.6 ms** |
+| raw `Terminal::vt_write`, same bytes | 13.2 s | 1.6 ms |
+| format the checkpoint (694 142 bytes) | 22–25 ms | 2.7 ms |
+| replay the checkpoint into a fresh engine | 11.9–12.1 s | 3.4–3.9 ms |
+
+Roughly 3 500× on the VT write path (≈ 180 MB/s now), 8× on the formatter. Every earlier
+latency number that included libghostty-vt parsing (keystroke echo, frame build, scrollback
+replay on attach, the checkpoint replay) was measured with the Debug library and is an upper
+bound; nothing in this repository ever ran the optimised parser until this pin. The engine's own
+overhead over the raw write (3.6 ms vs 1.6 ms for 10k lines: the OSC 133 scan, the anchor
+follow, the alternate-screen scan) is now the larger half and is where the next write-path
+measurement goes.
+
