@@ -7,10 +7,12 @@
 
 #![cfg(target_os = "macos")]
 
+mod ax;
 mod content;
 mod geometry;
 mod stream;
 
+pub use ax::{AxError, HideWatch};
 pub use content::{Shareable, enumerate};
 pub use geometry::{
     Above, Crop, Rect, can_capture, counts_as_occluder, crop_for, display_bounds,

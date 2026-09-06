@@ -16,7 +16,10 @@ hypothesis until DECISIONS.md marks it verified.
   triples), nextest, doc, deny, shear, typos, taplo. Never `#[allow]` a lint without a
   `reason = "..."`; never weaken `[workspace.lints]` to make something compile.
 - Every `unsafe` block has a `// SAFETY:` comment naming the framework or ABI rule it relies on.
-  Apple framework keys/constants come from the objc2 statics, never string literals.
+  Apple framework keys/constants come from the objc2 statics, never string literals. The one
+  carve-out: a constant the SDK defines as a `CFSTR("…")` macro has no exported symbol and no
+  static; spell it once, in a `const` next to its use, with a comment naming the SDK header
+  (DECISIONS.md "Constants the SDK defines as `CFSTR` macros").
 - Wire types live in `slopty-proto` only, with golden byte snapshots (insta) under
   `crates/slopty-proto/tests/snapshots`. A changed snapshot is a protocol change: bump
   `PROTOCOL_VERSION` and accept it with `cargo insta review`.

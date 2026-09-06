@@ -135,6 +135,8 @@ objc2-core-foundation = { version = "=0.3.2", default-features = false, features
     "CFNumber",
     "CFString",
     "CFCGTypes",
+    "CFDate",
+    "CFRunLoop",
 ] }
 objc2-core-media = { version = "=0.3.2", default-features = false, features = [
     "std",

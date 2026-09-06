@@ -1907,6 +1907,11 @@ mod tests {
         while_away: u64,
         /// Frames the guard threw away over the whole hide.
         withheld: u64,
+        /// Frames held on the accessibility API's word alone, before the window list agreed:
+        /// where the hide is caught first once the watch is on (`ScreenStats::suspected`).
+        suspected: u64,
+        /// Accessibility notifications the hide raised on the host (`ScreenStats::suspicions`).
+        suspicions: u64,
         /// How far the decoded picture's brightness moved while the target was up and drawing:
         /// what a window repainting inside the crop looks like from the client, as one number.
         luma_visible: f64,
@@ -2157,6 +2162,8 @@ mod tests {
             ),
             samples_after_order: during.len(),
             withheld: swapped.withheld.saturating_sub(cropping.withheld),
+            suspected: swapped.suspected.saturating_sub(cropping.suspected),
+            suspicions: swapped.suspicions.saturating_sub(cropping.suspicions),
             recovered: back.is_some(),
         };
         eprintln!("{behind:?}: {run:?}");
@@ -2174,18 +2181,19 @@ mod tests {
         }
         let run = crop_hide(Behind::SameApplication).await;
 
-        // A ceiling on a gap this layer cannot close, not the rule, and counted from before the
-        // hide was even asked for so that nothing in between escapes it. Two things fill it: the
-        // helper's own tick before it orders the window out, and the ~270 ms in which every way
-        // of asking the WindowServer still says the window is on screen (MEASUREMENTS.md, "how
-        // late a hide is"). At 60 Hz that is around thirty frames; sixty is what a regression
-        // would have to beat. The statement that no frame gets through once the host does know
-        // is the unit test
-        // (`a_frame_captured_while_the_target_is_hidden_is_withheld`), not this.
+        // A ceiling for a host without the accessibility watch, not the rule, and counted from
+        // before the hide was even asked for so that nothing in between escapes it. Two things
+        // fill it there: the helper's own tick before it orders the window out, and the ~260 ms
+        // in which every way of asking the WindowServer still says the window is on screen
+        // (MEASUREMENTS.md, "how late a hide is"). At 60 Hz that is around thirty frames; sixty
+        // is what a regression would have to beat. With the watch on it is 0–2
+        // (MEASUREMENTS.md, "the accessibility hide watch"), and `assert_the_gap_reached_no_one`
+        // holds it there. The statement that no frame gets through once the host does know is
+        // the unit test (`a_frame_captured_while_the_target_is_hidden_is_withheld`), not this.
         assert!(run.after_hide <= 60, "crop frames sent after the window was asked to go: {run:?}");
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
-        assert_dark_and_still(&run);
+        assert_the_gap_reached_no_one(&run);
     }
 
     /// How long the beat measurement watches a quiet stream.
@@ -2402,7 +2410,30 @@ mod tests {
         let run = crop_hide(Behind::Nothing).await;
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
-        assert_dark_and_still(&run);
+        assert_the_gap_reached_no_one(&run);
+    }
+
+    /// What reaches the client of the ~260 ms between AppKit ordering the window out and the
+    /// window list admitting it: nothing, because the accessibility watch heard the order and
+    /// held every frame (`suspected`), so the pictures decoded in that gap are at most the one
+    /// or two already in flight. On a host without accessibility trust there is no watch, the
+    /// crop runs on through the gap, and the question becomes what it carried: black, and
+    /// still — the answer measured before the watch existed, kept as the fallback so the test
+    /// says something either way.
+    fn assert_the_gap_reached_no_one(run: &HideRun) {
+        if run.suspicions == 0 {
+            eprintln!(
+                "no accessibility hide watch on the host: asserting what the crop sent instead"
+            );
+            assert_dark_and_still(run);
+            return;
+        }
+        assert!(run.suspected >= 1, "the watch fired but held nothing: {run:?}");
+        assert!(run.after_order <= 2, "crop frames sent after the window was ordered out: {run:?}");
+        assert!(
+            run.samples_after_order <= 2,
+            "pictures of the gap after the order reached the client: {run:?}"
+        );
     }
 
     /// What the crop is sending by the time the window has gone from it, whatever is behind:
@@ -2435,8 +2466,9 @@ mod tests {
         assert_eq!(run.while_away, 0, "frames were still being made for a hidden window: {run:?}");
         assert!(run.recovered, "no picture after the window came back: {run:?}");
         // The ruling: the other application's window is repainting in that rectangle for the
-        // whole of the gap, and none of it reaches the client. What does is black.
-        assert_dark_and_still(&run);
+        // whole of the gap, and none of it reaches the client — held by the watch, or black
+        // without one.
+        assert_the_gap_reached_no_one(&run);
     }
 
     /// Poll hostd's control socket until one live stream's counters satisfy `want`.

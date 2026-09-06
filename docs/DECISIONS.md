@@ -2526,30 +2526,54 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   and `a_hidden_window_stops_being_served_from_its_crop` share one driver and differ only in what
   is behind the target; the empty rectangle is kept as the control that makes the other two mean
   anything.
-- ⏳ **The accessibility API knows about a hide 260 ms before core graphics does** (2026-09-06,
-  measured, not wired). Polled every 2 ms from one thread against the same order-out:
-  accessibility answers in **0 ms**, `kCGWindowIsOnscreen` and the on-screen list in
-  **256–266 ms**. The signal that would close the gap exists and is public.
-  It is not wired up, for two reasons that are worth writing down rather than rediscovering.
+- ✅ **The accessibility API knows about a hide 260 ms before core graphics does, and the
+  stream holds frames on its word** (2026-09-06, measured; wired the same day). Polled every
+  2 ms from one thread against the same order-out: accessibility answers in **0 ms**,
+  `kCGWindowIsOnscreen` and the on-screen list in **256–266 ms**. It is now the first guard on
+  the crop path: `slopty_capture::HideWatch` puts an `AXObserver` on the window's application
+  (its own `CFRunLoop` thread; `AXWindowMiniaturized` and `AXApplicationHidden` on the
+  application element, `AXUIElementDestroyed` on every window element — that is what AppKit
+  posts for a window it orders out — and `AXWindowCreated` to put new windows under the same
+  watch). Its callback opens a `SUSPICION_HOLD` of 400 ms on the stream, in which `on_frame`
+  holds every frame (`ScreenStats::suspected`, apart from `withheld` so a hide shows where it
+  was caught); the geometry tick's `target_hidden` is the confirmation that outlives it. With it
+  on, the three crop-hide tests send **0 crop frames after the order** and **0–2 after the
+  hide was asked** (13–28 before), and 0–1 pictures of the gap reach the client
+  (MEASUREMENTS.md, "the accessibility hide watch"). Two things were worth writing down rather
+  than rediscovering:
   * **It cannot name the window.** The public accessibility API exposes no window number for an
     `AXUIElement`; the call that does, `_AXUIElementGetWindow`, is private and out under the
     no-private-API rule. So accessibility can say "a window of that application went" but not
-    "*the* window went", and wiring it means treating any change in the target application's
-    window set as *suspicion*: hold frames at once, let core graphics confirm or deny ~260 ms
-    later. That makes the privacy answer exact and turns a false suspicion into a freeze of up to
-    ~260 ms rather than a leak — but the false-suspicion rate on a real multi-window application
-    is not measured, and it is the number that decides whether this is worth it.
-  * **The constants are string literals.** `kAXWindowsAttribute` and the `kAX*Notification`
-    names are `#define … CFSTR("…")` macros in the SDK headers: no symbol is exported, so no
-    objc2 binding offers a static, and every caller spells them out. That is against the
-    project's "Apple framework keys and constants come from the objc2 statics, never string
-    literals" — a rule written for keys that *do* have statics. The spelling is kept inside the
-    measurement in `apps/slopty-hostd/tests/e2e.rs` so nothing in a library depends on it until
-    that is ruled on.
+    "*the* window went", and the watch treats any such change as *suspicion*: hold frames at
+    once, let core graphics confirm or deny inside the hold. That makes the privacy answer exact
+    and turns a false suspicion — another window of the same application closing or minimising
+    — into a freeze of 400 ms rather than a leak. Focus and main-window changes are *not*
+    suspicions: they fire on every switch between an application's windows and would freeze a
+    multi-window target constantly. The hold is 400 ms because the confirmation is the 256–266 ms
+    lag plus one geometry tick (≈100 ms). The false-suspicion rate on a real multi-window
+    application is still unmeasured; `ScreenStats::suspicions` against `withheld` on a long
+    session is how to read it.
+  * **The constants are string literals.** Ruled in "Constants the SDK defines as `CFSTR`
+    macros" below; the spelling lives once, in `crates/slopty-capture/src/ax.rs`.
+  * **Without accessibility trust there is no watch** (`AxError::NotTrusted`, logged once per
+    stream) and the crop carries black for the ~260 ms, as measured before: the tests assert the
+    hold when `suspicions > 0` and fall back to "dark and still" otherwise, so they say something
+    on either kind of host.
   Also considered and not measured: `SCShareableContent` and the stream delegate are the same
   window-server data core graphics reads, so they cannot be earlier than it; window-server
   notifications are private API and out for that reason; and deciding a hide from the frames
   themselves (the crop going black) is a guess about content that a dark window would trip.
+- ✅ **Constants the SDK defines as `CFSTR` macros are spelled once, next to their use**
+  (2026-09-06). "Apple framework keys and constants come from the objc2 statics, never string
+  literals" is written for constants that have a symbol: the static is the guarantee that the
+  spelling is the SDK's. `kAXWindowsAttribute`, `kAXUIElementDestroyedNotification` and the rest
+  of `HIServices/AX*Constants.h` are `#define … CFSTR("…")` — no symbol is exported, objc2
+  generates nothing for them (`AXNotificationConstants.rs` holds only `AXPriority`), and there is
+  no static to come from. The carve-out: such a constant is a `const &str` in the one module that
+  uses it, with a comment naming the macro and the SDK header, and nothing else in the workspace
+  spells it. A binding that later exports the symbol replaces the `const`. Rejected: a
+  `slopty-apple-constants` crate (a second place for a thing the SDK itself keeps in one header),
+  and a runtime lookup of the header (no).
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
   closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops

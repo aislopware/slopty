@@ -2282,3 +2282,32 @@ ping), so the medians are the honest comparison. What is left under the floor is
 the engine and the channel hops; the flood cap is unchanged (a `yes` still sends one frame per
 8 ms).
 
+
+## 2026-09-06 — the accessibility hide watch: the crop-path gap closed from the other side
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e --test-threads 1 --no-capture -E 'test(a_hidden_window_stops) | \
+  test(what_a_crop_shows_of_an_empty_rectangle) | test(what_a_crop_shows_of_another_application)'
+```
+
+The same three hides as "a hidden window on the crop path" and "how late a hide is", with
+`slopty_capture::HideWatch` on the helper's process (the host is accessibility-trusted; the
+`how_late` measurement in the same run still reads accessibility 0 ms, core graphics 265 ms).
+Two runs of each, mac-studio, debug build:
+
+| behind the target  | crop frames after the order | after the hide was asked | frames held on suspicion | pictures of the gap decoded by the client | suspicions |
+| ------------------ | --------------------------- | ------------------------ | ------------------------ | ----------------------------------------- | ---------- |
+| nothing            | **0**, 0                    | 2, 2                     | 15, 11                   | 0, 0                                      | 1, 1       |
+| same application   | **0**, 0                    | 1, 3                     | 11, 11                   | 1, 0                                      | 1, 1       |
+| another application| **0**, 0                    | 0, 1                     | 9, 12                    | 0, 0                                      | 1, 1       |
+
+Before the watch the second column was 13–28 and the client decoded 4 or more pictures of the
+gap (black ones, but pictures). Now the frames of those ~260 ms are held on the host
+(`ScreenStats::suspected`, 9–15 per hide at 60 Hz ≈ the 150–250 ms until the window list
+agrees and `withheld` takes over) and nothing of the gap goes out; the one picture in the
+same-application run is a frame already in flight when the order happened. `swap_ms` (order →
+off the crop path) is unchanged at 373–473 ms: the watch changes what is *sent* during the
+lag, not the lag. One notification per hide, every time, so nothing else in the helper's
+window set was mistaken for it; the false-suspicion rate of a real multi-window application is
+still to be read from `suspicions` against `withheld` on a long session.

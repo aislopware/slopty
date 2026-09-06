@@ -254,12 +254,19 @@ returns early while a swap is in flight, and `on_frame` drops anything captured 
 and ScreenCaptureKit acknowledging it, in which the crop is still live over a rectangle that now
 holds the desktop; `ScreenStats::on_crop` says which path a stream is on right now, as against
 `cropped`, which counts the frames that came that way, and both readers go through
-`Shared::stats` so neither can publish the counters' placeholder. It does *not* close the larger
-one before it: CoreGraphics keeps reporting a window on screen for ~270 ms after it is ordered
-out, whichever way it is asked, and the crop covers that rectangle throughout. What it carries
-then is black rather than what is behind the window, in every case that has been measured
-including another application's window: DECISIONS.md "A hide is ~270 ms late" and "A crop cannot
-be made to show another application" have the reasons and the numbers. The pure crop geometry (`slopty_capture::crop_for`: window frame →
+`Shared::stats` so neither can publish the counters' placeholder. The larger gap before it —
+CoreGraphics keeps reporting a window on screen for ~260 ms after it is ordered out, whichever
+way it is asked — is closed from the other side: a `slopty_capture::HideWatch` (an `AXObserver`
+on the window's application, on its own `CFRunLoop` thread) hears AppKit order a window out the
+moment it happens, and its callback opens a `SUSPICION_HOLD` (400 ms) during which `on_frame`
+holds every frame (`ScreenStats::suspected`). Accessibility cannot name the window, so the hold is
+a suspicion — any window of that application going raises it — and the geometry tick's
+`target_hidden` is the confirmation that outlives it; a false suspicion costs a 400 ms freeze,
+never a frame of the desktop. Without accessibility trust the watch is simply absent and the
+crop carries black rather than what is behind the window for those ~260 ms, in every case that
+has been measured including another application's window: DECISIONS.md "The accessibility API
+knows about a hide 260 ms before core graphics does" and "A crop cannot be made to show another
+application" have the reasons and the numbers. The pure crop geometry (`slopty_capture::crop_for`: window frame →
 display-relative points, pixels at the display's scale, `None` when not entirely on that
 display) and the occluder rule are unit-tested; DECISIONS.md "Rulings of the crop path" has
 the list. `SLOPTY_WINDOW_CAPTURE=window|crop` on hostd forces a path. Every frame carries the window server's display time

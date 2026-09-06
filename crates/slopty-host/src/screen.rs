@@ -20,8 +20,8 @@ use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use slopty_capture::{
-    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, Crop, PixelFormat, Rect,
-    Shareable, Target, host_now_us,
+    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, Crop, HideWatch,
+    PixelFormat, Rect, Shareable, Target, host_now_us,
 };
 use slopty_codec::audio::OpusEncoder;
 use slopty_codec::{CodecError, EncodedPacket, Encoder, EncoderConfig, FrameOptions};
@@ -49,6 +49,16 @@ const LOW_WATER: usize = 256;
 const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 /// Cursor ticks between re-reads of the target's bounds (10 Hz).
 const BOUNDS_EVERY: u64 = 12;
+
+/// How long frames are held after the accessibility API says a window of the target's
+/// application went away, if the window list has not confirmed it by then.
+///
+/// The accessibility signal cannot name the window, so it is a suspicion; the window list is
+/// the confirmation and it lags the order-out by 256–266 ms (MEASUREMENTS.md, "which signal
+/// knows first"), read on a geometry tick every `BOUNDS_EVERY × CURSOR_PERIOD` ≈ 100 ms. A
+/// false suspicion — another window of the same application closing — costs a freeze this long
+/// and nothing else; a true one is confirmed inside it and never leaks a frame of the desktop.
+pub const SUSPICION_HOLD: Duration = Duration::from_millis(400);
 
 /// Screen pipeline errors.
 #[derive(Debug, thiserror::Error)]
@@ -235,6 +245,14 @@ pub struct ScreenStats {
     /// Frames captured and thrown away because the target was not on screen: the picture was of
     /// whatever is behind it. Zero on a stream whose target never left the screen.
     pub withheld: u64,
+    /// Frames held because the accessibility API had just said a window of the target's
+    /// application went away and the window list had not yet answered (see
+    /// [`SUSPICION_HOLD`]). Counted apart from [`Self::withheld`] so a hide shows where it was
+    /// caught: here in the first ~260 ms, there once core graphics agrees.
+    pub suspected: u64,
+    /// Accessibility notifications that raised a suspicion: a window of the target's
+    /// application hidden, minimised or destroyed, whether or not it was the target.
+    pub suspicions: u64,
     /// Encoded frames packetized.
     pub encoded: u64,
     /// Datagrams queued for the transport (data, parity, retransmits, cursor).
@@ -513,6 +531,8 @@ struct Counters {
     captured: AtomicU64,
     dropped: AtomicU64,
     withheld: AtomicU64,
+    suspected: AtomicU64,
+    suspicions: AtomicU64,
     encoded: AtomicU64,
     datagrams: AtomicU64,
     queue_full: AtomicU64,
@@ -545,6 +565,8 @@ impl Counters {
             captured: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             withheld: AtomicU64::new(0),
+            suspected: AtomicU64::new(0),
+            suspicions: AtomicU64::new(0),
             encoded: AtomicU64::new(0),
             datagrams: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
@@ -591,6 +613,8 @@ impl Counters {
             captured: self.captured.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             withheld: self.withheld.load(Ordering::Relaxed),
+            suspected: self.suspected.load(Ordering::Relaxed),
+            suspicions: self.suspicions.load(Ordering::Relaxed),
             encoded: self.encoded.load(Ordering::Relaxed),
             datagrams: self.datagrams.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
@@ -672,6 +696,10 @@ struct Shared {
     /// window, and a swap to the window filter that the framework rejected leaves the crop
     /// running while this side believes otherwise. Set from the geometry tick.
     target_hidden: std::sync::atomic::AtomicBool,
+    /// `host_now_us()` until which frames are held on the accessibility API's word alone
+    /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
+    /// geometry tick's `target_hidden` is the confirmation that outlives it.
+    suspect_until_us: AtomicU64,
     out: mpsc::Sender<Bytes>,
     budget: DatagramBudget,
     counters: Counters,
@@ -713,6 +741,20 @@ impl Shared {
         }
     }
 
+    /// The accessibility API says a window of the target's application went at `now`: hold
+    /// frames for [`SUSPICION_HOLD`] while the window list catches up.
+    fn suspect(&self, now: u64) {
+        let hold_us = u64::try_from(SUSPICION_HOLD.as_micros()).unwrap_or(u64::MAX);
+        self.suspect_until_us.store(now.saturating_add(hold_us), Ordering::Relaxed);
+        let suspicions = self.counters.suspicions.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(stream = %self.id, suspicions = suspicions.saturating_add(1), "hide suspected");
+    }
+
+    /// Whether a suspicion raised by [`Self::suspect`] is still holding frames at `now`.
+    fn suspected_at(&self, now: u64) -> bool {
+        now < self.suspect_until_us.load(Ordering::Relaxed)
+    }
+
     /// ScreenCaptureKit delivered a frame.
     fn on_frame(&self, frame: &CapturedFrame) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
@@ -722,6 +764,12 @@ impl Shared {
         // (MEASUREMENTS.md, "a hidden window on the crop path").
         if self.target_hidden.load(Ordering::Relaxed) {
             self.counters.withheld.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // And for the ~260 ms before the window list knows, the accessibility API's word: a
+        // window of that application just went, so this may be the desktop already.
+        if self.suspected_at(host_now_us()) {
+            self.counters.suspected.fetch_add(1, Ordering::Relaxed);
             return;
         }
         if self.cropped.load(Ordering::Relaxed) {
@@ -1048,6 +1096,10 @@ pub struct ScreenStream {
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
     beat: JoinHandle<()>,
+    /// The accessibility observer on the window's application, for a window target of a
+    /// trusted host; `None` for a display, an untrusted process or an application that would
+    /// not be observed. Dropped with the stream.
+    hide_watch: Option<HideWatch>,
     /// Client input aimed at this stream, in its pixel coordinates.
     injector: Injector,
     point_scale: f64,
@@ -1118,6 +1170,7 @@ impl ScreenStream {
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
+            suspect_until_us: AtomicU64::new(0),
             out,
             budget,
             counters: Counters::new(),
@@ -1164,6 +1217,7 @@ impl ScreenStream {
         // round trips that have been measured at 90 ms, three beats' worth.
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), target, zoom, point_scale));
+        let hide_watch = hide_watch_for(id, target, &shared).await;
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
         let opened = ScreenEvent::Opened {
@@ -1186,6 +1240,7 @@ impl ScreenStream {
             encoder_config,
             cursor,
             beat,
+            hide_watch,
             injector,
             point_scale,
             quality,
@@ -1541,9 +1596,10 @@ impl ScreenStream {
     }
 
     /// Stop capturing and tear down.
-    pub async fn close(self) {
+    pub async fn close(mut self) {
         self.cursor.abort();
         self.beat.abort();
+        drop(self.hide_watch.take());
         let (tx, rx) = oneshot::channel();
         self.capture.stop(move |result| {
             let _receiver_gone = tx.send(result);
@@ -1553,6 +1609,45 @@ impl ScreenStream {
         }
         let stats = self.stats();
         tracing::info!(stream = %self.id, ?stats, "screen stream closed");
+    }
+}
+
+/// Put a window target's application under the accessibility watch, off the runtime (the
+/// registration is a few window-server round trips). A display has no application to watch;
+/// a host that is not trusted for accessibility, or an application that will not be observed,
+/// gets the window-list check alone, and says so once.
+async fn hide_watch_for(
+    id: StreamId,
+    target: CaptureTarget,
+    shared: &Arc<Shared>,
+) -> Option<HideWatch> {
+    let CaptureTarget::Window(window) = target else {
+        return None;
+    };
+    let weak = Arc::downgrade(shared);
+    let started = tokio::task::spawn_blocking(move || {
+        let pid = slopty_capture::window_owner_pid(window)?;
+        Some(HideWatch::start(pid, move || {
+            if let Some(shared) = weak.upgrade() {
+                shared.suspect(host_now_us());
+            }
+        }))
+    })
+    .await;
+    match started {
+        Ok(Some(Ok(watch))) => {
+            tracing::debug!(stream = %id, "accessibility hide watch on");
+            Some(watch)
+        }
+        Ok(Some(Err(e))) => {
+            tracing::info!(stream = %id, error = %e, "no accessibility hide watch");
+            None
+        }
+        Ok(None) => {
+            tracing::info!(stream = %id, "no accessibility hide watch: window owner unknown");
+            None
+        }
+        Err(_panicked) => None,
     }
 }
 
@@ -1671,6 +1766,7 @@ mod tests {
             fps: std::sync::atomic::AtomicU16::new(60),
             cropped: std::sync::atomic::AtomicBool::new(true),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
+            suspect_until_us: AtomicU64::new(0),
             out,
             budget: DatagramBudget::new(),
             counters: Counters::new(),
@@ -1747,6 +1843,42 @@ mod tests {
             sent = sent.saturating_add(1_u64);
         }
         assert!(sent >= 8, "only {sent} datagrams for {} beats", seen.heartbeats);
+    }
+
+    /// A frame that arrives inside the hold a suspicion opened is kept back and counted as
+    /// suspected, not withheld: the window list has not confirmed anything yet. Once the hold
+    /// lapses without confirmation, frames flow again.
+    #[test]
+    fn a_frame_captured_under_suspicion_is_held_until_the_hold_lapses() {
+        let (shared, _rx) = shared_for_frames();
+        let hold_us = u64::try_from(SUSPICION_HOLD.as_micros()).unwrap();
+        // Built first: the first pixel buffer of a process takes longer than the hold.
+        let frame = a_frame();
+
+        shared.suspect(1_000);
+        assert!(shared.suspected_at(1_000), "the hold opens at once");
+        assert!(shared.suspected_at(1_000 + hold_us - 1), "and lasts the whole hold");
+        assert!(!shared.suspected_at(1_000 + hold_us), "and no longer");
+        assert_eq!(shared.stats().suspicions, 1);
+
+        // A frame now is held as suspected and never reaches the crop count.
+        shared.suspect(host_now_us());
+        shared.on_frame(&frame);
+        let held = shared.stats();
+        assert_eq!((held.captured, held.suspected, held.withheld, held.cropped), (1, 1, 0, 0));
+
+        // Confirmed by the window list: the frame is withheld, the older reason wins.
+        shared.target_hidden.store(true, Ordering::Relaxed);
+        shared.on_frame(&frame);
+        let confirmed = shared.stats();
+        assert_eq!((confirmed.suspected, confirmed.withheld), (1, 1));
+
+        // The hold has lapsed and the window list says on screen: frames flow again.
+        shared.target_hidden.store(false, Ordering::Relaxed);
+        shared.suspect_until_us.store(0, Ordering::Relaxed);
+        shared.on_frame(&frame);
+        let flowing = shared.stats();
+        assert_eq!((flowing.captured, flowing.suspected, flowing.cropped), (3, 1, 1));
     }
 
     /// What the crop must never hand on. The path is decided on the geometry tick, but the
