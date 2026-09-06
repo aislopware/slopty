@@ -100,6 +100,9 @@ impl HostLink {
                     loop {
                         match stream.recv().await {
                             Ok(event) => {
+                                if matches!(event, TermEvent::Frame(_)) {
+                                    tracing::trace!(%session, "frame received");
+                                }
                                 if events.send(LinkEvent::Term { session, event }).await.is_err() {
                                     break;
                                 }

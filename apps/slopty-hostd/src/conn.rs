@@ -479,7 +479,12 @@ impl Peer<'_> {
                 }
                 Err(e) => self.report(SessionId::nil(), &e).await,
             },
-            ClientMsg::Term { session, req } => self.term(session, req).await,
+            ClientMsg::Term { session, req } => {
+                if matches!(req, TermRequest::Raw(_) | TermRequest::Key(_)) {
+                    tracing::trace!(client = %self.client, %session, "term input received");
+                }
+                self.term(session, req).await;
+            }
             ClientMsg::Canvas(op) => match self.daemon.canvas.apply(op, self.client) {
                 Ok(delta) => {
                     let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
@@ -783,9 +788,18 @@ impl Peer<'_> {
         let task = tokio::spawn(async move {
             let mut stream = stream;
             while let Some(ev) = events.recv().await {
+                let send_from = std::time::Instant::now();
                 if let Err(e) = stream.send(&ev).await {
                     tracing::debug!(%client, %session, error = %e, "session stream ended");
                     break;
+                }
+                if matches!(ev, TermEvent::Frame(_)) {
+                    tracing::trace!(
+                        %client,
+                        %session,
+                        send_us = send_from.elapsed().as_micros(),
+                        "frame sent"
+                    );
                 }
             }
             let _finished = stream.finish();

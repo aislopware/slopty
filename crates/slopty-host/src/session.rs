@@ -39,7 +39,7 @@ enum Cmd {
     Attach { client: ClientId, size: TermSize, sink: ClientSink },
     Detach { client: ClientId, sink: Option<ClientSink> },
     Reserve { client: ClientId },
-    Request { client: ClientId, req: TermRequest },
+    Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     Probe { reply: oneshot::Sender<Probe> },
     Close,
@@ -139,7 +139,7 @@ impl SessionHandle {
 
     /// Forward a terminal request from a client.
     pub fn request(&self, client: ClientId, req: TermRequest) -> Result<(), HostError> {
-        self.send(Cmd::Request { client, req })
+        self.send(Cmd::Request { client, req, at: tokio::time::Instant::now() })
     }
 
     /// Current state.
@@ -240,11 +240,23 @@ struct Viewer {
     size: TermSize,
 }
 
+/// Where one keystroke is on its way through the actor, for the trace that takes the echo
+/// round trip apart (MEASUREMENTS.md, "the keystroke path, stage by stage"). Three stamps at
+/// trace level and nothing else: the cost when tracing is off is two `Option` writes.
+#[derive(Debug, Default)]
+struct EchoTrace {
+    /// Input bytes were written to the master, and no output has been read since.
+    input_at: Option<tokio::time::Instant>,
+    /// The first read after that input returned, and no frame has gone out since.
+    read_at: Option<tokio::time::Instant>,
+}
+
 struct Actor {
     id: SessionId,
     engine: GhosttyEngine,
     master: Arc<PtyMaster>,
     rx: mpsc::UnboundedReceiver<Cmd>,
+    echo: EchoTrace,
     viewers: Vec<Viewer>,
     driver: Option<ClientId>,
     title: Option<String>,
@@ -323,6 +335,7 @@ impl Actor {
             ack_seq: 0,
             frame_due: None,
             last_frame: None,
+            echo: EchoTrace::default(),
             tap: start.tap,
             // Whatever we replayed is in ptyd's ring or checkpoint already; the first checkpoint
             // of this host folds it and anything the replay answered into one state.
@@ -372,12 +385,34 @@ impl Actor {
                     }
                     Ok(n) => {
                         self.ack_seq = self.written_seq;
+                        if let Some(input_at) = self.echo.input_at
+                            && self.echo.read_at.is_none()
+                        {
+                            let now = tokio::time::Instant::now();
+                            self.echo.read_at = Some(now);
+                            tracing::trace!(
+                                session = %self.id,
+                                echo_us = now.saturating_duration_since(input_at).as_micros(),
+                                bytes = n,
+                                "echo read"
+                            );
+                        }
                         let bytes = buf.get(..n).unwrap_or_default();
                         self.engine.write(bytes);
                         self.tap_output(bytes);
                         self.after_output().await;
-                        if self.frame_due.is_none() {
-                            self.frame_due = Some(frame_due_after(tokio::time::Instant::now(), self.last_frame));
+                        // Frame right here when nothing paces it. A timer set to "now" is not
+                        // now: tokio rounds a deadline up to its next millisecond tick and the
+                        // driver parks until then, which put 1.4 ms between a keystroke's echo
+                        // and its frame (MEASUREMENTS.md, "the keystroke path, stage by stage").
+                        // The timer is for the flood, where the next frame is owed later.
+                        let now = tokio::time::Instant::now();
+                        let due = frame_due_after(now, self.last_frame);
+                        if due <= now {
+                            self.frame_due = None;
+                            self.flush_frame();
+                        } else if self.frame_due.is_none() {
+                            self.frame_due = Some(due);
                         }
                     }
                     Err(e) => {
@@ -513,8 +548,19 @@ impl Actor {
         }
         match self.engine.take_frame(self.ack_seq) {
             Ok(Some(frame)) => {
-                self.last_frame = Some(tokio::time::Instant::now());
+                let now = tokio::time::Instant::now();
+                self.last_frame = Some(now);
                 self.broadcast(&TermEvent::Frame(frame));
+                if let (Some(input_at), Some(read_at)) =
+                    (self.echo.input_at.take(), self.echo.read_at.take())
+                {
+                    tracing::trace!(
+                        session = %self.id,
+                        read_to_frame_us = now.saturating_duration_since(read_at).as_micros(),
+                        input_to_frame_us = now.saturating_duration_since(input_at).as_micros(),
+                        "frame flushed"
+                    );
+                }
             }
             Ok(None) => {}
             Err(e) => {
@@ -631,7 +677,7 @@ impl Actor {
                     self.send_to(old, TermEvent::Driver { you: false });
                 }
             }
-            Cmd::Request { client, req } => self.request(client, req).await,
+            Cmd::Request { client, req, at } => self.request(client, req, at).await,
             Cmd::Snapshot { reply } => {
                 let _ignored = reply.send(Snapshot {
                     title: self.title.clone(),
@@ -661,7 +707,8 @@ impl Actor {
         true
     }
 
-    async fn request(&mut self, client: ClientId, req: TermRequest) {
+    async fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
+        let queued_us = at.elapsed().as_micros();
         let mut bytes = Vec::new();
         let result = match req {
             TermRequest::Attach { .. } | TermRequest::Detach | TermRequest::Close => Ok(()),
@@ -733,12 +780,27 @@ impl Actor {
             self.send_to(client, TermEvent::Error(e.to_string()));
             return;
         }
-        if !bytes.is_empty()
-            && let Err(e) = self.master.write_all(&bytes).await
-        {
+        if bytes.is_empty() {
+            return;
+        }
+        let write_from = tokio::time::Instant::now();
+        if let Err(e) = self.master.write_all(&bytes).await {
             tracing::warn!(session = %self.id, error = %e, "pty write failed");
             self.send_to(client, TermEvent::Error(e.to_string()));
+            return;
         }
+        let now = tokio::time::Instant::now();
+        // The stamp the echo trace measures from; a keystroke that lands while the previous
+        // one is still in flight restarts the trace, which is what a bench that waits for each
+        // frame never does.
+        self.echo = EchoTrace { input_at: Some(now), read_at: None };
+        tracing::trace!(
+            session = %self.id,
+            queued_us,
+            write_us = now.saturating_duration_since(write_from).as_micros(),
+            bytes = bytes.len(),
+            "pty input written"
+        );
     }
 }
 

@@ -2342,3 +2342,64 @@ of a millisecond for it and the worst waited 11 ms, against the 4 stalls (355 ms
 counted in the same run and QUIC holds of 96–100 ms measured before ("stalls are not made by
 load"). What the stamp adds over the turn accounting is the certainty: the earlier `late_ms`
 of 0 was consistent with a lone descheduled datagram it could not see, and now it is not.
+
+## 2026-09-06 — the keystroke path, stage by stage
+
+```sh
+# release daemons on the manual sockets, both with the keystroke trace on
+SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
+SLOPTY_DIRECT_ONLY=1 RUST_LOG="info,slopty_host::session=trace,slopty_hostd::conn=trace" \
+  target/release/slopty-hostd --ptyd-socket /tmp/slopty-manual/ptyd.sock \
+  --ctl-socket /tmp/slopty-manual/hostd.sock --data-dir /tmp/slopty-manual/data > hostd.log 2>&1 &
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 \
+  RUST_LOG="warn,slopty=trace,slopty_cli=trace,slopty_client::link=trace" \
+  target/release/slopty bench echo --count 30 > bench.log 2>&1
+# both logs carry microsecond timestamps from one clock; match each "bench send" to the first
+# line of each later stage after it: term input received → pty input written → echo read →
+# frame flushed → frame sent (hostd) → frame received → bench frame (client)
+cargo nextest run -p slopty-engine --release --run-ignored only frame_cost --no-capture
+```
+
+The echo round trip had settled at p50 2.9–4.4 ms with a QUIC rtt estimate of 2–3 ms, and the
+working theory was "one rtt plus about 3 ms of engine and channel hops". Trace stamps at every
+stage (permanent, `trace` level, two `Option` writes when off) say where it actually went.
+Three runs of 30 bytes into `/bin/cat`, release, mac-studio, before any change:
+
+| stage                                  | p50 (3 runs)      | p90         |
+| -------------------------------------- | ----------------- | ----------- |
+| client → hostd, control stream         | 0.94–1.22 ms      | 1.7–2.1     |
+| conn → actor channel + master write    | 0.12–0.17 ms      | 0.2–0.4     |
+| kernel echo → actor read               | 0.05–0.06 ms      | 0.1         |
+| **actor read → frame flushed**         | **1.38–1.41 ms**  | **1.6–2.0** |
+| sink → forwarder + `stream.send`       | 0.04–0.05 ms      | 0.1–1.9     |
+| hostd → client, session stream         | 0.39–0.59 ms      | 1.0         |
+| link events channel → bench task       | 0.06–0.07 ms      | 0.1–0.4     |
+| total (the bench's own number)         | 3.12–3.92 ms      | 4.9–8.5     |
+
+The engine is not the 1.4 ms: `frame_cost` (one byte in, `take_frame` for the bench's 60×12
+screen, 1 000 times, release) is **write 0 µs, take_frame p50 2 µs, max 27 µs**. The stage is
+`sleep_until(now)`: the read arm set `frame_due = now` and let the select's timer arm flush,
+and a tokio timer with a deadline of "now" is rounded up to the wheel's next millisecond tick
+and waited for by the driver's park — 1.4 ms with a spread of 0.3 ms, the signature of a
+timer, not of work. The read arm now flushes the frame inline when nothing paces it and sets
+the timer only when the previous frame is younger than `MIN_FRAME_INTERVAL`.
+
+After, same command. The first run had the machine to itself; the others did not (load
+average 70, another user's `golangci-lint` at 5.7 cores) and every stage on both sides shows
+scheduling tails of 1–15 ms — noise this trace can now attribute rather than guess at:
+
+| run               | read → frame p50 / max | total p50 | total p90 | total max |
+| ----------------- | ---------------------- | --------- | --------- | --------- |
+| after 1 (quiet)   | **0.02 / 0.08 ms**     | **0.65 ms** | 1.14 ms | 1.68 ms   |
+| after 2 (loaded)  | 0.03 / 0.16 ms         | 0.87 ms   | 9.5 ms    | 27.8 ms   |
+| after 3 (loaded)  | 0.03 / 0.06 ms         | 3.23 ms   | 12.9 ms   | 14.1 ms   |
+| after 4 (loaded)  | 0.05 / 1.54 ms         | 4.67 ms   | 11.9 ms   | 19.7 ms   |
+| after 5 (loaded)  | 0.05 / 0.08 ms         | 4.09 ms   | 7.0 ms    | 9.8 ms    |
+| after 6 (loaded)  | 0.03 / 0.73 ms         | 0.69 ms   | 8.3 ms    | 15.0 ms   |
+
+The stage that was changed is 0.02–0.05 ms in every run, loaded or not; the quiet run's round
+trip is **0.65 ms p50, 0.56 ms min** against 3.1–3.9 ms before. What is left on a quiet
+machine is the two QUIC legs (0.35 + 0.18 ms: quinn's endpoint and connection drivers, the
+UDP send and receive, and a task wake at each end) and 0.1 ms of everything else. Re-measure
+the totals on a quiet machine; the loaded rows are kept because they are what a shared host
+looks like, and the trace is how to tell that from a regression.

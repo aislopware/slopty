@@ -69,6 +69,7 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
     for i in 0..count {
         let byte = if i % 2 == 0 { b"x".to_vec() } else { b"y".to_vec() };
         let sent = Instant::now();
+        tracing::trace!(i, "bench send");
         link.send(ClientMsg::Term { session: id, req: TermRequest::Raw(byte) }).await?;
         let echoed = tokio::time::timeout(ECHO_TIMEOUT, async {
             loop {
@@ -88,6 +89,7 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
         match echoed {
             Ok(Ok(())) => {
                 let us = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX);
+                tracing::trace!(i, us, "bench frame");
                 samples.push(us);
             }
             Ok(Err(e)) => bail!("echo bench: {e}"),

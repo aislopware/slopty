@@ -424,6 +424,29 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   is now framed at once; bytes already readable when the timer fires still land in the same
   frame because the actor's select reads the master first. Before/after in MEASUREMENTS
   2026-09-06 "leading-edge frame".
+  Amended again 2026-09-06, later: "framed at once" was framed on the next timer tick. The read
+  arm set `frame_due = now` and left the flush to the select's timer arm, and a tokio deadline
+  of "now" is rounded up to the timer wheel's next millisecond and waited for by the driver's
+  park: 1.4 ms per keystroke, measured stage by stage (MEASUREMENTS.md "the keystroke path,
+  stage by stage"; the engine itself is 2 µs). The read arm now calls `flush_frame` inline when
+  `frame_due_after` says the frame is due, and arms the timer only when the previous frame is
+  younger than `MIN_FRAME_INTERVAL`. Quiet-machine echo: p50 3.1–3.9 → **0.65 ms**. Rule for
+  the whole codebase that falls out of it: **never express "now" as a tokio timer** — a
+  `sleep_until(now)` or `interval` tick is a millisecond, and on this path a millisecond is
+  the budget.
+- ✅ **The keystroke path carries permanent trace stamps** (2026-09-06). `trace!` lines at
+  every stage of one echo — `term input received` and `frame sent` in hostd's connection,
+  `pty input written` (with `queued_us`, `write_us`), `echo read` (`echo_us`) and `frame
+  flushed` (`read_to_frame_us`, `input_to_frame_us`) in the session actor, `frame received`
+  in the client link and `bench send` / `bench frame` in the bench — with microsecond
+  timestamps from one clock when host and client share a machine, so a log pair splits the
+  round trip without a profiler. Cost when off: an `Instant` in `Cmd::Request` and two
+  `Option` writes per keystroke. This is how the 1.4 ms above was found after two rounds of
+  guessing (parser, coalescing) and it is the first thing to reach for when the echo number
+  moves; the loaded-machine rows in the same MEASUREMENTS entry show it telling scheduling
+  noise from a regression. Not a wire change: `ClientSink` still carries bare `TermEvent`s,
+  so the sink → forwarder hop is measured from the flush stamp to `frame sent` rather than
+  stamped itself.
 - ✅ **Only items in the viewport are drawn** (2026-09-05). `CanvasView::draws` culls an item whose
   screen rectangle is outside the viewport, except the active item and one being dragged or
   resized (their views must stay in the frame for focus and the gesture). The minimap still

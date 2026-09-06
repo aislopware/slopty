@@ -1598,6 +1598,41 @@ mod checkpoint_tests {
     /// --no-capture`: how long a checkpoint takes and how big it is at 80x24 with 10 000 lines
     /// of history, the number behind the checkpoint policy in `slopty_host::session` (recorded
     /// in MEASUREMENTS).
+    /// What one echoed keystroke costs inside the engine: `write` of one byte, then
+    /// `take_frame` for a 60×12 screen (the bench's size) — the "engine+frame" stage of the
+    /// keystroke trace (MEASUREMENTS.md, "the keystroke path, stage by stage"). Run with
+    /// `cargo nextest run -p slopty-engine --release --run-ignored only frame_cost --no-capture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn frame_cost() {
+        let mut e = engine(60, 12, 1_000);
+        e.write(b"$ ");
+        let _first = e.take_frame(0).unwrap();
+        let mut write_us = Vec::new();
+        let mut frame_us = Vec::new();
+        for i in 0..1_000_u32 {
+            let byte = if i % 2 == 0 { b"x" } else { b"y" };
+            let t = std::time::Instant::now();
+            e.write(byte);
+            write_us.push(t.elapsed().as_micros());
+            let t = std::time::Instant::now();
+            let frame = e.take_frame(u64::from(i)).unwrap();
+            frame_us.push(t.elapsed().as_micros());
+            assert!(frame.is_some(), "a typed byte dirties the row");
+            if i % 50 == 49 {
+                e.write(b"\r\n");
+            }
+        }
+        write_us.sort_unstable();
+        frame_us.sort_unstable();
+        let q = |v: &[u128]| (v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1]);
+        eprintln!(
+            "frame_cost: write p50/p90/max {:?} us, take_frame p50/p90/max {:?} us",
+            q(&write_us),
+            q(&frame_us)
+        );
+    }
+
     #[test]
     #[ignore = "measurement, run by hand"]
     fn checkpoint_cost() {
