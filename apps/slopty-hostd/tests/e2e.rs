@@ -7,7 +7,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_client::LinkEvent;
-    use slopty_core::ClientId;
+    use slopty_core::{ClientId, WindowId};
     use slopty_net::client::{HostConn, bind_client, connect_with_ticket};
     use slopty_net::pairing::PairTicket;
     use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
@@ -64,11 +64,38 @@ mod tests {
         (guard, host)
     }
 
+    /// Wait for ptyd to accept connections on `socket`, checking for early exit.
+    async fn wait_for_ptyd(child: &mut Child, socket: &std::path::Path) {
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(60)).expect("deadline");
+        let mut ready = false;
+        loop {
+            if let Some(status) = child.try_wait().expect("poll ptyd") {
+                panic!(
+                    "ptyd exited early with status {status} while waiting for ptyd.sock (deadline 60 s)"
+                );
+            }
+            if tokio::net::UnixStream::connect(socket).await.is_ok() {
+                ready = true;
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            // Poll interval: attempts UnixStream connect to ptyd socket every 25 ms.
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !ready {
+            let _kill = child.start_kill();
+            panic!("ptyd socket not ready after waiting 60 s");
+        }
+    }
+
     /// Start ptyd and hostd in `dir` and read the pairing ticket hostd prints.
     async fn daemons(dir: &std::path::Path, reach: Reach) -> (Guard, PairTicket) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("hostd.sock");
-        let ptyd = Command::new(bin("slopty-ptyd"))
+        let mut ptyd = Command::new(bin("slopty-ptyd"))
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -76,7 +103,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
         let mut hostd = Command::new(bin("slopty-hostd"));
         if reach.is_direct_only() {
             hostd.arg("--direct-only");
@@ -98,13 +125,33 @@ mod tests {
             .spawn()
             .unwrap();
         let stdout = hostd.stdout.take().unwrap();
-        let guard = Guard(vec![ptyd, hostd], None);
         let mut line = String::new();
-        tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line))
-            .await
-            .expect("hostd prints a ticket")
-            .unwrap();
-        let ticket: PairTicket = line.trim().parse().unwrap();
+        let read = tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line)).await;
+        match read {
+            Ok(Ok(_n)) => {}
+            Ok(Err(err)) => {
+                let status = hostd.try_wait().ok().flatten();
+                panic!(
+                    "failed to read hostd ticket line after waiting {STEP:?}: hostd exit status: {status:?}, io error: {err}"
+                );
+            }
+            Err(_elapsed) => {
+                let status = hostd.try_wait().ok().flatten();
+                panic!(
+                    "hostd did not print a ticket after waiting {STEP:?}: hostd exit status: {status:?}"
+                );
+            }
+        }
+        let ticket: PairTicket = match line.trim().parse() {
+            Ok(ticket) => ticket,
+            Err(err) => {
+                let status = hostd.try_wait().ok().flatten();
+                panic!(
+                    "failed to parse hostd ticket line after waiting {STEP:?}: {line:?}, hostd exit status: {status:?}, parse error: {err}"
+                );
+            }
+        };
+        let guard = Guard(vec![ptyd, hostd], None);
         (guard, ticket)
     }
 
@@ -415,6 +462,7 @@ mod tests {
                     last = Some(now);
                     sample.decoded = sample.decoded.saturating_add(1);
                 }
+                // Measurement window: samples presentation and frames over the requested duration; no event to wait for.
                 () = tokio::time::sleep_until(deadline) => break,
                 ev = events.recv() => match ev {
                     Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Rate { target_bps, verdict, capped, .. }))) => {
@@ -551,6 +599,7 @@ mod tests {
                     }
                     last = Some(now);
                 }
+                // Measurement window: streams under injected packet loss for the requested duration; no event to wait for.
                 () = tokio::time::sleep_until(deadline) => break,
                 ev = events.recv() => match ev {
                     Some(LinkEvent::Disconnected(why)) => panic!("disconnected: {why}"),
@@ -602,6 +651,8 @@ mod tests {
             .try_init();
         slopty_client::warm_up_decoder();
         let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
+        // observable state for it.
         tokio::time::sleep(Duration::from_secs(1)).await;
         let ctl_sock = dir.path().join("hostd.sock");
         let mut rows = Vec::new();
@@ -711,6 +762,8 @@ mod tests {
         let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
         // The daemon warms ScreenCaptureKit up right after it is online; by the time a user
         // opens a window that has long finished, so let it finish here too.
+        // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
+        // observable state for it.
         tokio::time::sleep(Duration::from_secs(1)).await;
         let ctl_sock = dir.path().join("hostd.sock");
         let mut rows = Vec::new();
@@ -1177,8 +1230,16 @@ mod tests {
             }
         };
         let screen = link.screen(stream, codec);
-        // Hole punching and the relay handshake both need a moment before the picture is fair.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Wait for relay path to establish before load starts (hole punching + relay handshake).
+        let relay_deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(15)).expect("deadline");
+        while tokio::time::Instant::now() < relay_deadline {
+            if link.paths().contains("relay") {
+                break;
+            }
+            // Poll interval: checks if connection paths include relay every 50 ms.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         if !link.paths().contains("relay") {
             drop(screen);
             link.close();
@@ -1315,13 +1376,7 @@ mod tests {
             .spawn()
             .expect("spawn the idle window");
         let ready = markers.join("ready");
-        let deadline = tokio::time::Instant::now()
-            .checked_add(Duration::from_secs(20))
-            .expect("a deadline inside the clock");
-        while !ready.exists() {
-            assert!(tokio::time::Instant::now() < deadline, "the idle window never opened");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_marker(&ready, "the idle window").await;
 
         let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
         let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
@@ -1340,7 +1395,7 @@ mod tests {
         // Off screen before the stream opens: listed (the host enumerates with
         // `onScreenWindowsOnly: false`), captured, and never drawing.
         std::fs::write(markers.join("hide"), b"").unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_for_window_off_screen(&markers, target, Duration::from_secs(5)).await;
 
         link.send(ClientMsg::Screen(ScreenRequest::Open {
             target: CaptureTarget::Window(target),
@@ -1385,6 +1440,8 @@ mod tests {
 
         // Told that, the receiver gives up asking: whatever it sent before the hint, it sends no
         // more of them over the next stretch, and the count is inside the cap either way.
+        // Quiescence observation window: verifies no frames and bounded refreshes over 3 s; no
+        // event can be observed for silence.
         tokio::time::sleep(Duration::from_secs(3)).await;
         let quiet = screen.stats();
         let cap = u64::from(slopty_media::Config::default().refresh_max_repeats);
@@ -1433,6 +1490,8 @@ mod tests {
         let mut listed = None;
         let mut idle_again = false;
         while tokio::time::Instant::now() < deadline {
+            // Poll interval: queries the host window list every 500 ms until the cached enumeration
+            // expires and reports on_screen=false.
             tokio::time::sleep(Duration::from_millis(500)).await;
             link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
             let windows = loop {
@@ -1456,9 +1515,14 @@ mod tests {
                 break;
             }
         }
-        let listed = listed.expect("the idle window still in the list");
+        let listed = listed.unwrap_or_else(|| {
+            panic!("the idle window listing never showed on_screen=false after waiting 10 s")
+        });
         let state = std::fs::read_to_string(markers.join("state")).unwrap_or_default();
-        assert!(!listed.on_screen, "the second hide did not stick: {listed:?}; helper: {state}");
+        assert!(
+            !listed.on_screen,
+            "the second hide did not stick after waiting 10 s: {listed:?}; helper: {state}"
+        );
 
         // And the host says so again. The old rule latched on "has ever encoded a frame", so a
         // window that drew and then went away stayed `Live` for the rest of the stream and the
@@ -1836,30 +1900,48 @@ mod tests {
         // Visible and unobstructed, so the host serves it as a crop of its display.
         let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop)
             .await
-            .expect("the host never took the display-crop path");
+            .expect("the host never took the display-crop path after waiting 15 s");
 
-        // What a crop with a window drawing in it costs, measured on this run rather than
-        // assumed: the scale everything after the hide is read against.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let drawing = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
-            .await
-            .expect("the stream is still live");
+        // Wait until the crop path has produced cropped frames while the window is drawing.
+        let drawing =
+            wait_for_stats(&ctl, Duration::from_secs(10), |s| s.cropped > cropping.cropped)
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "cropped frames did not increment above {} after waiting 10 s",
+                        cropping.cropped
+                    )
+                });
         let bits_visible = per_hundred(
             drawing.datagrams.saturating_sub(cropping.datagrams),
             drawing.cropped.saturating_sub(cropping.cropped),
         );
         let (luma, stop_luma) = watch_luma(&screen);
         let watching_from = std::time::Instant::now();
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Wait for at least one decoded frame to arrive while the window is drawing.
+        let mut frames = screen.frames();
+        let frame_deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(10)).expect("deadline");
+        loop {
+            tokio::time::timeout_at(frame_deadline, frames.changed())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("received no frame while window was drawing after waiting 10 s")
+                })
+                .expect("screen frames channel open");
+            if frames.borrow_and_update().is_some() {
+                break;
+            }
+        }
 
         // The counter as it stands before anything is asked. Everything the crop serves from
         // here on is measured against this, because a reading taken *after* the order is one
         // round trip to the control socket late, and the frames served in that gap would go
         // uncounted — a slow reply would let any number of them through while the guard read
         // zero.
-        let before_hide = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+        let before_hide = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
-            .expect("the stream is still live");
+            .expect("the stream is still live after waiting 5 s");
         std::fs::write(markers.join("hide"), b"").unwrap();
         let hidden_at = std::time::Instant::now();
         // When the window was really ordered out, as AppKit saw it: the marker is only a
@@ -1870,15 +1952,20 @@ mod tests {
             {
                 break std::time::Instant::now();
             }
-            assert!(hidden_at.elapsed() < Duration::from_secs(5), "the helper never hid");
+            assert!(
+                hidden_at.elapsed() < Duration::from_secs(5),
+                "the helper never hid after waiting 5 s"
+            );
+            // Poll interval: checks helper state file every 5 ms until AppKit orders out the
+            // window.
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        let at_order = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+        let at_order = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
-            .expect("the stream is still live");
+            .expect("the stream is still live after waiting 5 s");
         let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop)
             .await
-            .expect("a hidden window stayed on the crop path: it streams what is behind it");
+            .expect("a hidden window stayed on the crop path: it streams what is behind it after waiting 10 s");
         let left_crop_at = std::time::Instant::now();
         let swap_ms = left_crop_at.saturating_duration_since(ordered_out).as_millis();
         let order_ms = ordered_out.saturating_duration_since(hidden_at).as_millis();
@@ -1887,6 +1974,8 @@ mod tests {
         // pictures. The window that matters runs from the order to the swap; frames decoded
         // after that are the same ones, arriving late, so the cut is by arrival with a margin
         // and the three cases are compared against each other rather than a threshold.
+        // Drains in-flight frames: gives client decoder time to process frames sent before swap;
+        // stream carries no path-swap marker.
         tokio::time::sleep(Duration::from_millis(800)).await;
         let _stopped = stop_luma.send(());
         let seen = luma.await.expect("the luma watcher");
@@ -1911,10 +2000,12 @@ mod tests {
         // holds the backdrop, which is still repainting) and not from the window filter (there
         // is no window). The count is the host's, so it does not race the client decoding the
         // frames that were legitimately sent while the window was still up.
+        // Quiescence observation window: proves nothing is captured while window is away; no event
+        // can be observed for silence.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let after = wait_for_stats(&ctl, Duration::from_millis(500), |_s| true)
+        let after = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
-            .expect("the stream is still live");
+            .expect("the stream is still live after waiting 5 s");
         assert!(!after.on_crop, "a hidden window went back onto the crop path: {after:?}");
 
         // Showing it again brings the picture back, with no help from the client.
@@ -2028,8 +2119,7 @@ mod tests {
         // state: a stream carrying beats and nothing else, with no path swap in it. This is the
         // case the beat exists for, and the one claude/stalls found the host going quiet in.
         std::fs::write(markers.join("hide"), b"").unwrap();
-        wait_for_marker(&markers.join("state"), "the window to go").await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_for_window_off_screen(&markers, target, Duration::from_secs(5)).await;
 
         link.send(ClientMsg::Screen(ScreenRequest::Open {
             target: CaptureTarget::Window(target),
@@ -2050,10 +2140,12 @@ mod tests {
         };
         let screen = link.screen(stream, codec);
 
+        // Measurement window: observes the heartbeat cadence over the full quiet duration; no event
+        // to wait for.
         tokio::time::sleep(QUIET_FOR).await;
-        let stats = wait_for_stats(&ctl, Duration::from_secs(2), |_s| true)
+        let stats = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
-            .expect("the stream is still live");
+            .expect("the stream is still live after waiting 5 s");
         let client = screen.stats();
         eprintln!(
             "beat: gap p50 {} / p95 {} / max {} µs, worst ever {} µs over {} beats; bounds \
@@ -2144,7 +2236,12 @@ mod tests {
             {
                 break std::time::Instant::now();
             }
-            assert!(asked.elapsed() < Duration::from_secs(5), "the helper never hid");
+            assert!(
+                asked.elapsed() < Duration::from_secs(5),
+                "the helper never hid after waiting 5 s"
+            );
+            // Poll interval: checks helper state file every 2 ms until AppKit orders out the
+            // window.
             tokio::time::sleep(Duration::from_millis(2)).await;
         };
 
@@ -2163,6 +2260,8 @@ mod tests {
             if ordered_out.elapsed() > Duration::from_secs(3) {
                 break;
             }
+            // Poll interval: samples AX and CoreGraphics every 2 ms to measure detection latency
+            // without timer rounding.
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         eprintln!(
@@ -2239,6 +2338,7 @@ mod tests {
                     return Some(summary.stats);
                 }
             }
+            // Poll interval: queries hostd control socket for screens stats every 50 ms.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         None
@@ -2269,8 +2369,36 @@ mod tests {
             .checked_add(Duration::from_secs(20))
             .expect("a deadline inside the clock");
         while !path.exists() {
-            assert!(tokio::time::Instant::now() < deadline, "{what} never came up");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what} marker ({}) never came up after waiting 20 s",
+                path.display()
+            );
+            // Poll interval: checks marker file existence every 50 ms.
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Wait for a window to be hidden by the helper and confirmed off-screen by CoreGraphics.
+    async fn wait_for_window_off_screen(
+        markers: &std::path::Path,
+        target: WindowId,
+        within: Duration,
+    ) {
+        let deadline =
+            tokio::time::Instant::now().checked_add(within).expect("a deadline inside the clock");
+        loop {
+            let helper_hidden = std::fs::read_to_string(markers.join("state"))
+                .is_ok_and(|s| s.starts_with("hide visible=false"));
+            if helper_hidden && !slopty_capture::window_on_screen(target) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "window {target:?} did not hide and leave screen after waiting {within:?}"
+            );
+            // Poll interval: checks helper state and CoreGraphics on-screen status every 10 ms.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
