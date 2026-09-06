@@ -2575,20 +2575,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   hide was asked** (13–28 before), and 0–1 pictures of the gap reach the client
   (MEASUREMENTS.md, "the accessibility hide watch"). Two things were worth writing down rather
   than rediscovering:
-  * **It cannot name the window.** The public accessibility API exposes no window number for an
-    `AXUIElement`; the call that does, `_AXUIElementGetWindow`, is private and out under the
-    no-private-API rule. So accessibility can say "a window of that application went" but not
-    "*the* window went", and the watch treats any such change as *suspicion*: hold frames at
-    once, let core graphics confirm or deny inside the hold. That makes the privacy answer exact
-    and turns a false suspicion — another window of the same application closing or minimising
-    — into a freeze of 400 ms rather than a leak. Focus and main-window changes are *not*
-    suspicions: they fire on every switch between an application's windows and would freeze a
-    multi-window target constantly. The hold is 400 ms because the confirmation is the 256–266 ms
-    lag plus one geometry tick (≈100 ms). A false suspicion is priced at 520 ms of outage and
-    16 frames held, with the stream back on the crop by itself
-    (`a_sibling_window_closing_keeps_the_stream_flowing`; the ruling below on what that test
-    found first). The false-suspicion rate on a real multi-window application is still
-    unmeasured; `ScreenStats::suspicions` against `withheld` on a long session is how to read it.
+  * **It cannot name the window, but it can match it once.** The public accessibility API
+    exposes no window number for an `AXUIElement`; the call that does, `_AXUIElementGetWindow`,
+    is private and out under the no-private-API rule. So accessibility can say "a window of that
+    application went" but not "*the* window went" — except that at registration the watch reads
+    every window's `AXPosition`, `AXSize` and `AXTitle` and keeps the element whose frame (within
+    1 pt) and title are the target's from the window list (`kCGWindowBounds`, `kCGWindowName`),
+    and from then on tells that element from every other by identity (`CFEqual`), since an
+    element's identity is stable however the window moves. Its going, its minimising and the
+    application being hidden are the *suspicion*: hold frames at once, let core graphics confirm
+    or deny inside the hold. Any other window of the application going is `Went::Other`
+    (`ScreenStats::siblings`): no hold, only the wake the next ruling describes. Amended
+    2026-09-06 after `a_popup_of_the_application_closing_raises_no_suspicion` showed the
+    unmatched watch treating a borderless pop-up panel's going — an autocomplete list, a
+    tooltip — as the target's, a 400 ms freeze on every one; measured after the change, a
+    pop-up or sibling closing is no suspicion and the stream flows straight through
+    (MEASUREMENTS.md, "pop-ups and siblings against the targeted watch"). When nothing matches —
+    the application does not list the window, or it moved between the two reads — every window
+    of the application counts as the target, as before (`HideWatch::targeted` says which; the
+    watch logs it). Focus and main-window changes are *not* suspicions: they fire on every
+    switch between an application's windows and would freeze a multi-window target constantly.
+    The hold is 400 ms because the confirmation is the 256–266 ms lag plus one geometry tick
+    (≈100 ms).
   * **The constants are string literals.** Ruled in "Constants the SDK defines as `CFSTR`
     macros" below; the spelling lives once, in `crates/slopty-capture/src/ax.rs`.
   * **Without accessibility trust there is no watch** (`AxError::NotTrusted`, logged once per
@@ -2612,11 +2620,18 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   Frames stay held for the whole hold on either path: the variant that let the window filter's
   frames through encoded 1–2 pictures of the backdrop after the swap had settled, because the
   framework still delivers a frame or two of the old filter after the completion handler.
-  Measured cost of a false suspicion: 520 ms without frames and 16 held, nothing withheld, the
-  crop back by itself. Side effect on true hides: off the crop path 158–206 ms after the order
-  (373–473 before), since the swap is asked on the suspicion rather than the confirmation. The
-  `capture frame status` debug line (one per change of `SCFrameStatus`) stays in
-  `slopty_capture::stream`: it is how a silent stall is told from an idle source.
+  Measured cost of a false suspicion, while every window of the application still counted as
+  the target: 520 ms without frames and 16 held, nothing withheld, the crop back by itself.
+  Side effect on true hides: off the crop path 158–206 ms after the order (373–473 before),
+  since the swap is asked on the suspicion rather than the confirmation. The `capture frame
+  status` debug line (one per change of `SCFrameStatus`) stays in `slopty_capture::stream`: it
+  is how a silent stall is told from an idle source. Amended the same day, once the watch
+  matched the target (the ruling above): another window going is no longer a suspicion but
+  still the event the framework stalls on, so it sets `filter_stalled` and the next geometry
+  tick takes a stream on the crop through the window filter and back with no hold — frames flow
+  throughout, ten more of them 207–367 ms after the order-out, none held or withheld
+  (MEASUREMENTS.md, "pop-ups and siblings against the targeted watch"). The 520 ms freeze is now
+  only the unmatched watch's price.
 - ✅ **Constants the SDK defines as `CFSTR` macros are spelled once, next to their use**
   (2026-09-06). "Apple framework keys and constants come from the objc2 statics, never string
   literals" is written for constants that have a symbol: the static is the guarantee that the

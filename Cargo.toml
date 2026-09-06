@@ -155,6 +155,7 @@ objc2-application-services = { version = "=0.3.2", default-features = false, fea
     "AXError",
     "AXNotificationConstants",
     "AXUIElement",
+    "AXValue",
     "HIServices",
     "libc",
 ] }
@@ -197,6 +198,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGGeometry",
     "CGDirectDisplay",
     "CGWindow",
+    "CGWindowLevel",
     "CGEvent",
     "CGEventTypes",
     "CGEventSource",
@@ -209,6 +211,7 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSColor",
     "NSGraphics",
     "NSWindow",
+    "NSPanel",
     "NSRunningApplication",
     "NSPasteboard",
     "NSApplication",

@@ -12,12 +12,12 @@ mod content;
 mod geometry;
 mod stream;
 
-pub use ax::{AxError, HideWatch};
+pub use ax::{AxError, HideWatch, TargetWindow, Went};
 pub use content::{Shareable, enumerate};
 pub use geometry::{
     Above, Crop, Rect, can_capture, counts_as_occluder, crop_for, display_bounds,
     display_enclosing, occluded, occluders, pointer_location, target_bounds, window_bounds,
-    window_on_screen, window_owner_pid,
+    window_on_screen, window_owner_pid, window_title,
 };
 pub use stream::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, Capture, CaptureConfig, CapturedAudio, CapturedFrame,

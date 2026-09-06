@@ -2502,3 +2502,39 @@ tail pictures were the backdrop (luma level 0.5 behind a same-application window
 behind nothing, against 136 for the target): the framework delivers a frame or two of the old
 filter after the swap's completion handler, and with the swap landing before the window list
 knows, those are the desktop. The hold covers every frame for its duration, whichever path.
+
+## 2026-09-06 — pop-ups and siblings against the targeted watch
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e --test-threads 1 --no-capture -E 'test(a_popup_of_the_application) | \
+  test(a_sibling_window_closing) | test(a_hidden_window_stops) | \
+  test(what_a_crop_shows_of_an_empty_rectangle) | test(what_a_crop_shows_of_another_application)'
+```
+
+The idle-window helper gained `popup`/`unpopup`: a borderless, non-activating `NSPanel` at the
+pop-up menu level below the target, the shape of an autocomplete list or a tooltip. With the
+watch counting every window of the application as the target, the panel's order-out was a
+suspicion like any other: **suspicions 1, 10 frames held**, a 400 ms freeze per pop-up, which an
+editor would pay on every completion list. The watch now matches the target's element once at
+registration (`AXPosition`/`AXSize` within 1 pt and `AXTitle` against `kCGWindowBounds` and
+`kCGWindowName`; `targeted=true` in the log for every stream of this run) and another window's
+going is `siblings`, a wake through the window filter with no hold. Debug build, mac-studio,
+load average 5, one run each:
+
+| what went                    | suspicions | siblings | held | withheld | ten more frames after the order-out | on the crop after |
+| ---------------------------- | ---------- | -------- | ---- | -------- | ----------------------------------- | ----------------- |
+| a pop-up panel               | 0          | 1        | 0    | 0        | 367 ms                              | yes               |
+| a titled sibling window      | 0          | 1        | 0    | 0        | 207 ms                              | yes               |
+| the target (nothing behind)  | 1          | 0        | 7    | 0        | —                                   | no (correct)      |
+| the target (same app behind) | 1          | 0        | 7    | 0        | —                                   | no                |
+| the target (other app behind)| 1          | 0        | 9    | 0        | —                                   | no                |
+
+The three hides are unchanged from "a sibling window closing stalls the crop" (0 crop frames
+after the order, off the crop path 154–209 ms after it), so matching the target lost nothing
+on the true case. One of the five runs decoded 30 pictures *of the target* after the order —
+the host's counters showed nothing sent after it and 7 held, so those were frames already sent,
+let out of the client's decoder late on the loaded machine (0–2 in the eight other runs of the
+day). The client-side assertion now counts pictures *unlike* the target (`foreign_after_order`,
+more than 8 luma levels from every picture decoded while it was visible), which is the leak it
+was there to catch; pictures of the target after the order are never one.

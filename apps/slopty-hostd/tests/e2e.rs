@@ -1929,6 +1929,11 @@ mod tests {
         luma_tail_level: f64,
         /// How many of those pictures there were, so a spread of zero can be told from no data.
         samples_after_order: usize,
+        /// How many of them were unlike anything decoded while the target was visible (more than
+        /// 8 luma levels from every one of those): a picture of the gap. Pictures *of the
+        /// target* decoded after the order are frames sent before it and are not a leak, however
+        /// many the client's decoder lets out at once.
+        foreign_after_order: usize,
         /// Whether the picture came back when the window did.
         recovered: bool,
     }
@@ -2161,6 +2166,12 @@ mod tests {
                 during.get(during.len().saturating_sub(4)..).unwrap_or(&[]),
             ),
             samples_after_order: during.len(),
+            foreign_after_order: during
+                .iter()
+                .filter(|&&(_at, luma)| {
+                    visible.iter().all(|&(_at, seen)| (luma - seen).abs() > FOREIGN_LUMA)
+                })
+                .count(),
             withheld: swapped.withheld.saturating_sub(cropping.withheld),
             suspected: swapped.suspected.saturating_sub(cropping.suspected),
             suspicions: swapped.suspicions.saturating_sub(cropping.suspicions),
@@ -2195,6 +2206,10 @@ mod tests {
         assert!(run.recovered, "no picture after the window came back: {run:?}");
         assert_the_gap_reached_no_one(&run);
     }
+
+    /// How far, in luma levels, a decoded picture must sit from every picture of the visible
+    /// target to count as a picture of something else.
+    const FOREIGN_LUMA: f64 = 8.0;
 
     /// How long the beat measurement watches a quiet stream.
     const QUIET_FOR: Duration = Duration::from_secs(60);
@@ -2398,28 +2413,49 @@ mod tests {
         endpoint.close().await;
     }
 
-    /// What a false suspicion costs. The accessibility watch cannot name the window, so another
-    /// window of the target's application going away raises the same suspicion as the target
-    /// going away: frames are held for `SUSPICION_HOLD`, the stream is moved to the window
-    /// filter meanwhile and, since the window list never agrees, comes back to the crop when
-    /// the hold lapses. This produces exactly that — a sibling window in the helper's own
-    /// process, opened and ordered out while the target streams on the crop path — and reads
-    /// what happened from the host's counters: one suspicion, frames held for about the hold
-    /// and not longer, nothing withheld (the target never left), the stream flowing again by
-    /// itself and back on the crop. Opening the sibling must raise nothing. It is also the
-    /// regression test for the ScreenCaptureKit stall this scenario uncovered (MEASUREMENTS.md,
-    /// "a sibling window closing stalls the crop"): without the swap the framework delivers
-    /// nothing more, ever. Gated on `SLOPTY_SCREEN_E2E`.
+    /// Whether a pop-up of the application counts. Autocomplete lists, tooltips and menus are
+    /// windows of the process too — borderless, non-activating panels at the pop-up menu
+    /// level — and an editor opens and closes them constantly. If the accessibility watch
+    /// counted their going as a suspicion, every one would freeze the stream for the hold, so
+    /// this opens and orders out exactly such a panel below the target (never over it, so the
+    /// occlusion rule stays out of the picture) and reads the host's counters: no suspicion,
+    /// one sibling, the stream flowing throughout and on the crop afterwards. Gated on
+    /// `SLOPTY_SCREEN_E2E`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_popup_of_the_application_closing_raises_no_suspicion() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        another_window_of_the_application_goes("popup", "unpopup").await;
+    }
+
+    /// What a sibling window costs. The accessibility watch cannot name a window, but it can
+    /// match the target to its element once, so another titled window of the same process
+    /// going away is not a suspicion. It is still the event ScreenCaptureKit stalls on
+    /// (MEASUREMENTS.md, "a sibling window closing stalls the crop"): without the round trip
+    /// through the window filter the framework delivers nothing more, ever. This opens a second
+    /// window of the helper's own process beside the target, orders it out while the target
+    /// streams on the crop path, and reads the host's counters: no suspicion, one sibling,
+    /// nothing held or withheld, the stream flowing throughout and back on the crop. Opening
+    /// the sibling must raise nothing either. Gated on `SLOPTY_SCREEN_E2E`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sibling_window_closing_keeps_the_stream_flowing() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
             eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
             return;
         }
+        another_window_of_the_application_goes("sibling", "unsibling").await;
+    }
+
+    /// The driver of the two tests above: a crop-path stream on the idle window, the helper's
+    /// `open` marker, then its `close` marker, and the assertions that neither was taken for
+    /// the target and the stream never stopped.
+    async fn another_window_of_the_application_goes(open: &str, close: &str) {
         let dir = tempfile::tempdir().unwrap();
         let markers = dir.path().join("markers");
         std::fs::create_dir_all(&markers).unwrap();
-        let title = format!("slopty sibling {}", std::process::id());
+        let title = format!("slopty {open} {}", std::process::id());
         let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
             .arg(&markers)
             .arg(&title)
@@ -2453,81 +2489,78 @@ mod tests {
         let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop)
             .await
             .expect("the host never took the display-crop path after waiting 15 s");
-        let flowing =
-            wait_for_stats(&ctl, Duration::from_secs(10), |s| s.encoded > cropping.encoded + 10)
-                .await
-                .expect("no frames flowed on the crop after waiting 10 s");
-        assert!(
-            flowing.suspicions == 0 && cropping.suspicions == 0,
-            "a suspicion before anything happened: {flowing:?}"
+        let flowing = wait_for_stats(&ctl, Duration::from_secs(10), |s| {
+            s.encoded > cropping.encoded.saturating_add(10)
+        })
+        .await
+        .expect("no frames flowed on the crop after waiting 10 s");
+        assert_eq!(
+            (flowing.suspicions, flowing.siblings),
+            (0, 0),
+            "a notification before anything happened: {flowing:?}"
         );
 
-        // A sibling appears: a window created is not a window gone.
-        std::fs::write(markers.join("sibling"), b"").unwrap();
-        wait_for_marker_state(&markers, "sibling visible=true").await;
-        // Observation window: a suspicion raised by the sibling's creation would land inside
-        // the hold; one second is comfortably past it.
+        // The other window appears: a window created is not a window gone.
+        std::fs::write(markers.join(open), b"").unwrap();
+        wait_for_marker_state(&markers, &format!("{open} visible=true")).await;
+        // Observation window: a suspicion raised by the arrival would land inside the hold;
+        // one second is comfortably past it.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let with_sibling = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
+        let opened = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
             .expect("the stream is still live after waiting 5 s");
         assert_eq!(
-            with_sibling.suspicions, 0,
-            "opening another window of the application raised a suspicion: {with_sibling:?}"
+            (opened.suspicions, opened.siblings),
+            (0, 0),
+            "opening another window of the application was taken for one going: {opened:?}"
         );
         assert!(
-            with_sibling.encoded > flowing.encoded,
-            "the stream stopped when a sibling opened: {with_sibling:?}"
+            opened.encoded > flowing.encoded,
+            "the stream stopped when {open} opened: {opened:?}"
         );
 
-        // The sibling goes: the suspicion, the hold on the window filter, and the crop again.
-        std::fs::write(markers.join("unsibling"), b"").unwrap();
-        wait_for_marker_state(&markers, "unsibling visible=false").await;
+        // The other window goes: one sibling, no suspicion, a round trip through the window
+        // filter that the stream flows straight through.
+        std::fs::write(markers.join(close), b"").unwrap();
+        wait_for_marker_state(&markers, &format!("{close} visible=false")).await;
         let gone_at = std::time::Instant::now();
-        let suspected = wait_for_stats(&ctl, Duration::from_secs(3), |s| s.suspicions > 0)
+        let heard = wait_for_stats(&ctl, Duration::from_secs(3), |s| s.siblings > 0)
             .await
-            .expect("the sibling's order-out raised no suspicion within 3 s");
-        // Resumption: the first reading after the suspicion in which frames flowed again.
-        let resumed = wait_for_stats(&ctl, Duration::from_secs(3), |s| {
-            s.suspicions > 0 && s.encoded > suspected.encoded
+            .expect("the order-out was not heard within 3 s");
+        let flowing_again = wait_for_stats(&ctl, Duration::from_secs(3), |s| {
+            s.encoded > heard.encoded.saturating_add(10)
         })
         .await
-        .expect("the stream never flowed again after the false suspicion within 3 s");
-        let resumed_ms = gone_at.elapsed().as_millis();
-        // Settling window: a second suspicion or a late withhold would show inside it.
+        .expect("the stream did not keep flowing after another window went (within 3 s)");
+        let flowing_ms = gone_at.elapsed().as_millis();
+        // Settling window: a late suspicion, hold or withhold would show inside it.
         tokio::time::sleep(Duration::from_secs(1)).await;
         let after = wait_for_stats(&ctl, Duration::from_secs(5), |_s| true)
             .await
             .expect("the stream is still live after waiting 5 s");
-        eprintln!(
-            "false suspicion: flowing again after {resumed_ms} ms, suspicions {}, frames held {}, \
-             withheld {}, back on the crop {} ({after:?})",
-            after.suspicions,
-            after.suspected,
-            after.withheld.saturating_sub(with_sibling.withheld),
-            after.on_crop,
-        );
-        assert_eq!(after.suspicions, 1, "one order-out, one suspicion: {after:?}");
-        assert_eq!(
-            after.withheld, with_sibling.withheld,
-            "the window list agreed with a false suspicion: {after:?}"
-        );
-        assert!(
-            (1..=40).contains(&after.suspected),
-            "frames held for a false suspicion should be about the hold at 60 Hz, not {}: {after:?}",
-            after.suspected
-        );
-        assert!(
-            resumed_ms <= 1_000,
-            "the stream took {resumed_ms} ms to flow again after a false suspicion: {after:?}"
-        );
-        assert!(after.encoded > resumed.encoded, "the stream did not keep flowing: {after:?}");
-        assert!(after.on_crop, "the crop did not come back after a false suspicion: {after:?}");
 
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
         link.close();
         endpoint.close().await;
+
+        eprintln!(
+            "{close}: ten more frames {flowing_ms} ms after the order-out, siblings {}, \
+             suspicions {}, held {}, withheld {}, on the crop {} ({after:?})",
+            after.siblings, after.suspicions, after.suspected, after.withheld, after.on_crop,
+        );
+        assert_eq!(after.siblings, 1, "one order-out, one sibling: {after:?}");
+        assert_eq!(after.suspicions, 0, "another window going was taken for the target: {after:?}");
+        assert_eq!((after.suspected, after.withheld), (0, 0), "frames kept back: {after:?}");
+        assert!(
+            after.encoded > flowing_again.encoded,
+            "the stream did not keep flowing: {after:?}"
+        );
+        assert!(after.on_crop, "the stream is not on the crop after {close}: {after:?}");
+        assert!(
+            flowing_ms <= 1_000,
+            "the stream took {flowing_ms} ms for ten more frames after {close}: {after:?}"
+        );
     }
 
     /// Poll the helper's `state` file until it starts with `want`.
@@ -2580,7 +2613,7 @@ mod tests {
         assert!(run.suspected >= 1, "the watch fired but held nothing: {run:?}");
         assert!(run.after_order <= 2, "crop frames sent after the window was ordered out: {run:?}");
         assert!(
-            run.samples_after_order <= 2,
+            run.foreign_after_order <= 2,
             "pictures of the gap after the order reached the client: {run:?}"
         );
     }

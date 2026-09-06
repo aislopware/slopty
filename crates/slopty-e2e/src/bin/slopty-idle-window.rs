@@ -20,6 +20,10 @@
 //!   order that one out again. A window of the *same application* going away is what the host's
 //!   accessibility hide watch cannot tell from the target going away, so this is how a false
 //!   suspicion is produced on purpose.
+//! * `popup` — open a borderless, non-activating panel at the pop-up menu level below the window,
+//!   the shape of an autocomplete list or a tooltip, and `unpopup` — order it out. Whether the
+//!   accessibility watch counts such a window's going as a suspicion is what decides how often a
+//!   real editor would freeze the stream.
 //! * `quit` — leave.
 //!
 //! It writes `ready` into `<dir>` once the window is up.
@@ -45,9 +49,10 @@ mod macos {
 
     use objc2::{MainThreadMarker, MainThreadOnly as _};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSWindow,
-        NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSPanel,
+        NSWindow, NSWindowLevel, NSWindowStyleMask,
     };
+    use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
     use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize, NSString};
 
     /// How long the run loop is pumped between two looks at the marker directory.
@@ -107,6 +112,7 @@ mod macos {
         let mut shown = true;
         let mut ticks: u32 = 0;
         let mut sibling: Option<objc2::rc::Retained<NSWindow>> = None;
+        let mut popup: Option<objc2::rc::Retained<NSPanel>> = None;
         loop {
             pump();
             if dir.join("quit").exists() {
@@ -144,6 +150,40 @@ mod macos {
                     note(&dir, "unsibling", second.isVisible());
                 } else {
                     note(&dir, "unsibling", false);
+                }
+            }
+            if consume(&dir, "popup") {
+                let below = NSRect {
+                    origin: NSPoint { x: origin.x, y: origin.y - 100.0 },
+                    size: NSSize { width: 200.0, height: 60.0 },
+                };
+                let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+                    NSPanel::alloc(mtm),
+                    below,
+                    NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                    NSBackingStoreType::Buffered,
+                    false,
+                );
+                // SAFETY: as above (AppKit, `NSWindow.isReleasedWhenClosed`).
+                unsafe {
+                    panel.setReleasedWhenClosed(false);
+                }
+                let level = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey);
+                panel.setLevel(NSWindowLevel::try_from(level).map_err(|e| e.to_string())?);
+                panel.setFloatingPanel(true);
+                panel.setBecomesKeyOnlyIfNeeded(true);
+                panel.setHidesOnDeactivate(false);
+                panel.setBackgroundColor(Some(&NSColor::yellowColor()));
+                panel.orderFrontRegardless();
+                note(&dir, "popup", panel.isVisible());
+                popup = Some(panel);
+            }
+            if consume(&dir, "unpopup") {
+                if let Some(panel) = popup.take() {
+                    panel.orderOut(None);
+                    note(&dir, "unpopup", panel.isVisible());
+                } else {
+                    note(&dir, "unpopup", false);
                 }
             }
             if consume(&dir, "hide") {

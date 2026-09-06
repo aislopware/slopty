@@ -11,7 +11,7 @@ use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGGetDisplaysWithRect, CGPreflightScreenCaptureAccess,
     CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo,
     CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGWindowAlpha, kCGWindowBounds,
-    kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
+    kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
@@ -167,6 +167,17 @@ pub fn window_bounds(id: WindowId) -> Option<Rect> {
     let ok =
         unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), ptr::from_mut(&mut rect)) };
     ok.then(|| Rect::from_cg(rect))
+}
+
+/// Title of one window from the window list, if it has a non-empty one.
+#[must_use]
+pub fn window_title(id: WindowId) -> Option<String> {
+    let description = window_description(id)?;
+    // SAFETY: framework-provided constant string.
+    let key: &CFString = unsafe { kCGWindowName };
+    let title: CFRetained<CFString> = description.get(key)?.downcast().ok()?;
+    let title = title.to_string();
+    (!title.is_empty()).then_some(title)
 }
 
 /// Window levels of another process that count as occluders: normal windows (0) up to

@@ -77,10 +77,11 @@ const BOUNDS_EVERY: u64 = 12;
 ///
 /// The accessibility signal cannot name the window, so it is a suspicion; the window list is
 /// the confirmation and it lags the order-out by 256–266 ms (MEASUREMENTS.md, "which signal
-/// knows first"), read on a geometry tick every `BOUNDS_EVERY × CURSOR_PERIOD` ≈ 100 ms. A
-/// false suspicion — another window of the same application closing — costs a freeze this long
-/// and a round trip through the window filter; a true one is confirmed inside it and never
-/// leaks a frame of the desktop.
+/// knows first"), read on a geometry tick every `BOUNDS_EVERY × CURSOR_PERIOD` ≈ 100 ms. The
+/// watch matches the target to its element once, so another window of the application going
+/// is not a suspicion (`ScreenStats::siblings`); only when it could not match — the
+/// application does not list the window — does any window's going cost a freeze this long. A
+/// true suspicion is confirmed inside the hold and never leaks a frame of the desktop.
 pub const SUSPICION_HOLD: Duration = Duration::from_millis(400);
 
 /// Screen pipeline errors.
@@ -273,9 +274,15 @@ pub struct ScreenStats {
     /// [`SUSPICION_HOLD`]). Counted apart from [`Self::withheld`] so a hide shows where it was
     /// caught: here in the first ~260 ms, there once core graphics agrees.
     pub suspected: u64,
-    /// Accessibility notifications that raised a suspicion: a window of the target's
-    /// application hidden, minimised or destroyed, whether or not it was the target.
+    /// Accessibility notifications that raised a suspicion: the target hidden, minimised or
+    /// destroyed — or, when the watch could not match the target to its accessibility element,
+    /// any window of its application.
     pub suspicions: u64,
+    /// Accessibility notifications for a window of the target's application that was not the
+    /// target (a sibling window, a pop-up, a tooltip) going away. Never a hold: each one is a
+    /// round trip through the window filter, because the capture framework stalls on it
+    /// (`Shared::filter_stalled`).
+    pub siblings: u64,
     /// Encoded frames packetized.
     pub encoded: u64,
     /// Datagrams queued for the transport (data, parity, retransmits, cursor).
@@ -556,6 +563,7 @@ struct Counters {
     withheld: AtomicU64,
     suspected: AtomicU64,
     suspicions: AtomicU64,
+    siblings: AtomicU64,
     encoded: AtomicU64,
     datagrams: AtomicU64,
     queue_full: AtomicU64,
@@ -590,6 +598,7 @@ impl Counters {
             withheld: AtomicU64::new(0),
             suspected: AtomicU64::new(0),
             suspicions: AtomicU64::new(0),
+            siblings: AtomicU64::new(0),
             encoded: AtomicU64::new(0),
             datagrams: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
@@ -638,6 +647,7 @@ impl Counters {
             withheld: self.withheld.load(Ordering::Relaxed),
             suspected: self.suspected.load(Ordering::Relaxed),
             suspicions: self.suspicions.load(Ordering::Relaxed),
+            siblings: self.siblings.load(Ordering::Relaxed),
             encoded: self.encoded.load(Ordering::Relaxed),
             datagrams: self.datagrams.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
@@ -723,6 +733,12 @@ struct Shared {
     /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
     suspect_until_us: AtomicU64,
+    /// A window of the target's application other than the target went since the filter was
+    /// last changed. ScreenCaptureKit stops delivering for an application-scoped display filter
+    /// when any window of that application is ordered out, and only a change of filter kind
+    /// wakes it (MEASUREMENTS.md, "a sibling window closing stalls the crop"); the geometry
+    /// tick takes a stream on the crop through the window filter and back.
+    filter_stalled: std::sync::atomic::AtomicBool,
     out: mpsc::Sender<Queued>,
     budget: DatagramBudget,
     counters: Counters,
@@ -773,6 +789,15 @@ impl Shared {
         self.suspect_until_us.store(now.saturating_add(hold_us), Ordering::Relaxed);
         let suspicions = self.counters.suspicions.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(stream = %self.id, suspicions = suspicions.saturating_add(1), "hide suspected");
+    }
+
+    /// The accessibility API says a window of the target's application that is not the target
+    /// went: no hold, but the capture may have stalled on it, so the next geometry tick takes
+    /// the stream through the window filter.
+    fn sibling_went(&self) {
+        self.filter_stalled.store(true, Ordering::Relaxed);
+        let siblings = self.counters.siblings.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(stream = %self.id, siblings = siblings.saturating_add(1), "another window of the application went");
     }
 
     /// Whether a suspicion raised by [`Self::suspect`] is still holding frames at `now`.
@@ -1201,6 +1226,7 @@ impl ScreenStream {
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
+            filter_stalled: std::sync::atomic::AtomicBool::new(false),
             out,
             budget,
             counters: Counters::new(),
@@ -1450,8 +1476,18 @@ impl ScreenStream {
         // kind (MEASUREMENTS.md, "a sibling window closing stalls the crop"). A false suspicion
         // comes back to the crop on the first tick after the hold.
         let suspected = self.shared.suspected_at(host_now_us());
-        let wanted =
+        let mut wanted =
             if suspected { None } else { wanted_crop(id, rect, self.point_scale, on_screen) };
+        // Another window of the application went (`Shared::sibling_went`): no suspicion, but
+        // a crop that keeps its filter is a crop that never gets another frame. One tick on
+        // the window filter is the change of kind that wakes the framework; the crop is
+        // wanted again on the next. Any other path change is a change of kind as well and
+        // clears the flag by itself.
+        let stalled = self.shared.filter_stalled.load(Ordering::Relaxed);
+        let waking = stalled && wanted.is_some() && self.path == WindowPath::DisplayCrop;
+        if waking {
+            wanted = None;
+        }
         let wanted_path =
             if wanted.is_some() { WindowPath::DisplayCrop } else { WindowPath::Filter };
         if wanted_path == self.path && wanted == self.capture_config.crop {
@@ -1475,7 +1511,12 @@ impl ScreenStream {
                     }
                 };
                 if self.transitions.begin(WindowPath::Filter, None, 2) {
-                    tracing::info!(stream = %self.id, on_screen, suspected, "window covered, hidden, off its display or suspected: window filter");
+                    self.shared.filter_stalled.store(false, Ordering::Relaxed);
+                    if waking {
+                        tracing::info!(stream = %self.id, "another window of the application went: waking the capture through the window filter");
+                    } else {
+                        tracing::info!(stream = %self.id, on_screen, suspected, "window covered, hidden, off its display or suspected: window filter");
+                    }
                     self.update_capture(None);
                     self.retarget(&target);
                 }
@@ -1490,6 +1531,7 @@ impl ScreenStream {
                     }
                 };
                 if self.transitions.begin(WindowPath::DisplayCrop, Some(crop), 2) {
+                    self.shared.filter_stalled.store(false, Ordering::Relaxed);
                     tracing::info!(stream = %self.id, ?crop, "window clear: display crop");
                     self.retarget(&target);
                     self.update_capture(Some(crop));
@@ -1667,16 +1709,22 @@ async fn hide_watch_for(
     let weak = Arc::downgrade(shared);
     let started = tokio::task::spawn_blocking(move || {
         let pid = slopty_capture::window_owner_pid(window)?;
-        Some(HideWatch::start(pid, move || {
+        let bounds = slopty_capture::window_bounds(window)?;
+        let title = slopty_capture::window_title(window);
+        let target = slopty_capture::TargetWindow { bounds, title };
+        Some(HideWatch::start(pid, target, move |went| {
             if let Some(shared) = weak.upgrade() {
-                shared.suspect(host_now_us());
+                match went {
+                    slopty_capture::Went::Target => shared.suspect(host_now_us()),
+                    slopty_capture::Went::Other => shared.sibling_went(),
+                }
             }
         }))
     })
     .await;
     match started {
         Ok(Some(Ok(watch))) => {
-            tracing::debug!(stream = %id, "accessibility hide watch on");
+            tracing::debug!(stream = %id, targeted = watch.targeted(), "accessibility hide watch on");
             Some(watch)
         }
         Ok(Some(Err(e))) => {
@@ -1807,6 +1855,7 @@ mod tests {
             cropped: std::sync::atomic::AtomicBool::new(true),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
+            filter_stalled: std::sync::atomic::AtomicBool::new(false),
             out,
             budget: DatagramBudget::new(),
             counters: Counters::new(),
