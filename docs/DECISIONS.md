@@ -1756,6 +1756,23 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   and reveals it. Killing host B mid-stream turns its row amber while host A keeps streaming;
   restarting B goes green and the shell reattaches (the session survives in ptyd — the vt grid
   does not outlive a hostd restart, so reattach is confirmed by live I/O, not grid replay).
+- ✅ **Two-host harness hardening** (2026-09-06, from the Codex review of `claude/twohosts`,
+  fixed after landing). Four holes in `crates/slopty-e2e/src/harness.rs` and `tests/hosts.rs`,
+  none in product code: the `Drop` guard passed unset daemon PIDs (0) to `kill -9`, which signals
+  the cleanup shell's own process group and ends the script before the `pkill`/`rm -rf` that
+  follow — `teardown_script` now leaves unstarted daemons out (unit-tested); the remote root was
+  created and binaries copied before the `RemoteHost` guard existed, so a setup failure leaked
+  them on the second Mac — the guard is built first and every remote write happens through it;
+  the ssh helpers' timeouts dropped the child future without `kill_on_drop`, leaving an
+  ownerless ssh process — every ssh and gzip child is `kill_on_drop(true)`; and the suite passed
+  silently when `SLOPTY_HOST2_E2E` was set but `SLOPTY_HOST2` empty — `host2_gate` errors,
+  naming both variables, and the test panics on it (unit-tested).
+- ✅ **`slopty-hostd --direct-only` reads the same env spellings as the client** (2026-09-06).
+  The flag was a plain clap bool with `env = SLOPTY_DIRECT_ONLY`, which rejects `1` (clap only
+  accepts the flag's presence, and an env value must parse as the value type), so
+  `SLOPTY_DIRECT_ONLY=1 slopty-hostd` failed to start while the same variable is how the client
+  and every bench select direct-only. It now takes clap's boolish parser (`1`/`true`/`yes`/`on`)
+  from the env or `--direct-only[=value]`, defaulting to false, matching `Reach::from_env`.
 
 ## Multi-client
 

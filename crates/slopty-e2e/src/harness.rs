@@ -828,6 +828,8 @@ pub struct RemoteHost {
 
 /// Run `script` on `ssh` (through the login shell) and return its trimmed stdout.
 async fn ssh_out(ssh: &str, script: &str) -> Result<String> {
+    // `kill_on_drop`: when the timeout wins, the child inside the dropped `output()` future is
+    // killed rather than left running under nobody.
     let output = tokio::time::timeout(
         STARTUP,
         Command::new("ssh")
@@ -835,6 +837,7 @@ async fn ssh_out(ssh: &str, script: &str) -> Result<String> {
             .arg(ssh)
             .arg(script)
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -858,6 +861,7 @@ async fn ssh_pipe(ssh: &str, script: &str, input: &[u8]) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("spawn ssh {ssh}"))?;
     let mut stdin = child.stdin.take().context("ssh stdin")?;
@@ -884,6 +888,7 @@ async fn copy_bin(ssh: &str, local: &Path, remote: &str) -> Result<()> {
         .arg(local)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .kill_on_drop(true)
         .spawn()
         .context("spawn gzip")?;
     let mut gz_out = gz.stdout.take().context("gzip stdout")?;
@@ -896,6 +901,7 @@ async fn copy_bin(ssh: &str, local: &Path, remote: &str) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .context("spawn ssh (copy)")?;
     let mut ssh_in = ssh.stdin.take().context("ssh stdin")?;
@@ -913,6 +919,47 @@ async fn copy_bin(ssh: &str, local: &Path, remote: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
+}
+
+/// The remote teardown: kill the daemons we started, then anything else under `root`, then the
+/// root itself. `gentle` sends TERM first and gives the daemons 300 ms before KILL.
+///
+/// A pid of 0 is "never started" (the launch failed before that daemon came up) and is left out:
+/// `kill -9 0` would signal the cleanup shell's own process group and end the script before the
+/// `pkill`/`rm -rf` that follow.
+fn teardown_script(pids: &[u32], root: &str, gentle: bool) -> String {
+    let pids: Vec<String> = pids.iter().filter(|&&p| p != 0).map(u32::to_string).collect();
+    let kill = if pids.is_empty() {
+        String::new()
+    } else {
+        let pids = pids.join(" ");
+        let term =
+            if gentle { format!("kill {pids} 2>/dev/null; sleep 0.3; ") } else { String::new() };
+        format!("{term}kill -9 {pids} 2>/dev/null; ")
+    };
+    format!("{kill}pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true")
+}
+
+/// The two-host suite's gate, from the two environment variables.
+///
+/// `Ok(None)` when `SLOPTY_HOST2_E2E` is unset (the suite skips), `Ok(Some(ssh))` when it is set
+/// and `SLOPTY_HOST2` names the second machine, and an error when the gate is on but the machine
+/// is missing, so an enabled suite can never pass by doing nothing.
+///
+/// # Errors
+///
+/// When `gate` is set and `host2` is unset or empty.
+pub fn host2_gate(gate: Option<&str>, host2: Option<&str>) -> Result<Option<String>> {
+    if gate.is_none() {
+        return Ok(None);
+    }
+    match host2 {
+        Some(name) if !name.trim().is_empty() => Ok(Some(name.trim().to_owned())),
+        _ => bail!(
+            "SLOPTY_HOST2_E2E is set but SLOPTY_HOST2 is empty: name the second machine \
+             (its ssh destination) or unset SLOPTY_HOST2_E2E"
+        ),
+    }
 }
 
 impl RemoteHost {
@@ -937,6 +984,22 @@ impl RemoteHost {
         let port = 45_560;
         let name = "macbook".to_owned();
 
+        // The guard exists before the first byte lands on the remote: a missing binary or a
+        // failed copy below drops it, and `Drop` removes whatever was already created there.
+        let mut host = Self {
+            ssh: ssh.to_owned(),
+            root,
+            bin,
+            ctl_sock,
+            home,
+            transcript,
+            port,
+            ptyd_pid: 0,
+            hostd_pid: 0,
+            name,
+        };
+        let (root, bin) = (host.root.clone(), host.bin.clone());
+        let home = host.home.clone();
         ssh_out(
             ssh,
             &format!("rm -rf {root} && mkdir -p {bin} {home} {root}/data {root}/terminfo"),
@@ -951,18 +1014,6 @@ impl RemoteHost {
             copy_bin(ssh, &local, &format!("{bin}/{name}")).await?;
         }
 
-        let mut host = Self {
-            ssh: ssh.to_owned(),
-            root,
-            bin,
-            ctl_sock,
-            home,
-            transcript,
-            port,
-            ptyd_pid: 0,
-            hostd_pid: 0,
-            name,
-        };
         host.ptyd_pid = host.start_ptyd().await?;
         host.hostd_pid = host.start_hostd().await?;
         let ticket = host.mint_ticket().await?;
@@ -1107,16 +1158,8 @@ impl RemoteHost {
     ///
     /// When ssh cannot be reached or a process survives.
     pub async fn shutdown(self) -> Result<()> {
-        let pids = format!("{} {}", self.ptyd_pid, self.hostd_pid);
-        ssh_out(
-            &self.ssh,
-            &format!(
-                "kill {pids} 2>/dev/null; sleep 0.3; kill -9 {pids} 2>/dev/null; \
-                 pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true",
-                root = self.root
-            ),
-        )
-        .await?;
+        let script = teardown_script(&[self.ptyd_pid, self.hostd_pid], &self.root, true);
+        ssh_out(&self.ssh, &script).await?;
         let stray = ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self.root)).await?;
         ensure!(stray.trim() == "0", "remote processes survived teardown: {stray}");
         Ok(())
@@ -1126,12 +1169,7 @@ impl RemoteHost {
 impl Drop for RemoteHost {
     fn drop(&mut self) {
         // Best-effort synchronous cleanup if `shutdown` was not called (a panicking test).
-        let script = format!(
-            "kill -9 {} {} 2>/dev/null; pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true",
-            self.ptyd_pid,
-            self.hostd_pid,
-            root = self.root
-        );
+        let script = teardown_script(&[self.ptyd_pid, self.hostd_pid], &self.root, false);
         let _best_effort = std::process::Command::new("ssh")
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
             .arg(&self.ssh)
@@ -1167,4 +1205,40 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
     ensure!((em(position) + 0.155).abs() < 0.005, "post underlinePosition -155: {face:?}");
     ensure!((em(thickness) - 0.050).abs() < 0.005, "post underlineThickness 50: {face:?}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host2_gate, teardown_script};
+
+    #[test]
+    fn an_unstarted_daemon_is_not_in_the_kill_list() {
+        let s = teardown_script(&[0, 4242], "/tmp/slopty-e2e/host2-1", false);
+        assert_eq!(
+            s,
+            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/host2-1 2>/dev/null; rm -rf /tmp/slopty-e2e/host2-1; true"
+        );
+        let s = teardown_script(&[0, 0], "/tmp/r", true);
+        assert!(s.starts_with("pkill "), "no kill of pids when nothing started: {s}");
+        assert!(!s.contains(" 0 "), "pid 0 must never be signalled: {s}");
+        assert!(s.ends_with("rm -rf /tmp/r; true"));
+    }
+
+    #[test]
+    fn a_gentle_teardown_terms_before_it_kills() {
+        let s = teardown_script(&[7, 8], "/tmp/r", true);
+        assert!(s.starts_with("kill 7 8 2>/dev/null; sleep 0.3; kill -9 7 8 2>/dev/null; "));
+    }
+
+    #[test]
+    fn the_gate_refuses_to_run_without_a_second_machine() {
+        assert!(host2_gate(None, None).unwrap().is_none());
+        assert!(host2_gate(None, Some("mac")).unwrap().is_none());
+        assert_eq!(
+            host2_gate(Some("1"), Some(" macbook-pro ")).unwrap().as_deref(),
+            Some("macbook-pro")
+        );
+        assert!(host2_gate(Some("1"), None).is_err());
+        assert!(host2_gate(Some("1"), Some("")).is_err());
+    }
 }

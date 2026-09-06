@@ -29,19 +29,19 @@ mod tests {
     /// mesh.
     const STEP: Duration = Duration::from_secs(30);
 
-    /// The ssh name of the second machine, or `None` when the gate is off (the test skips).
+    /// The ssh name of the second machine, or `None` when the gate is off (the test skips). An
+    /// enabled gate without a machine is a configuration error, not a skip: it panics.
     fn gated() -> Option<String> {
-        if std::env::var_os("SLOPTY_HOST2_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_HOST2_E2E=1 (or run `cargo xtask e2e hosts`)");
-            return None;
+        let gate = std::env::var("SLOPTY_HOST2_E2E").ok();
+        let host2 = std::env::var("SLOPTY_HOST2").ok();
+        let ssh = slopty_e2e::harness::host2_gate(gate.as_deref(), host2.as_deref())
+            .expect("the two-host suite is enabled but misconfigured");
+        if ssh.is_none() {
+            eprintln!(
+                "skipped: set SLOPTY_HOST2_E2E=1 and SLOPTY_HOST2=<ssh name> (or run `cargo xtask e2e hosts`)"
+            );
         }
-        match std::env::var("SLOPTY_HOST2") {
-            Ok(name) if !name.is_empty() => Some(name),
-            _ => {
-                eprintln!("skipped: set SLOPTY_HOST2=<ssh name of the second machine>");
-                None
-            }
-        }
+        ssh
     }
 
     /// The name of the host whose canvas is on show.
