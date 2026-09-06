@@ -72,7 +72,11 @@ hypothesis until DECISIONS.md marks it verified.
    leaves the other streaming and reattaches on relaunch, closing and notes propagate. The
    display scenario also needs `SLOPTY_SCREEN_E2E`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
    (gate `SLOPTY_PAIR_IOS_E2E`) puts the second client in the simulator: the Mac and the phone
-   on one host.
+   on one host. `cargo xtask e2e hosts` (gate `SLOPTY_HOST2_E2E`, `SLOPTY_HOST2=<ssh name>`,
+   serial) is one client and two hosts on two machines: ptyd + hostd on a second Mac over ssh
+   (temp root, private HOME, torn down after), to prove cross-host attention — the pill sums
+   both hosts, a banner routes to the host holding its session, and a hook is played only
+   through `slopty hook` over ssh, never a real agent.
 4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.

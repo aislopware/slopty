@@ -462,6 +462,15 @@ fn apply(
             canvas.update(cx, slopty_ui::canvas::CanvasView::add_first_display);
             Reply::Ok
         }
+        Command::NotificationResponse { tag, action } => {
+            let Ok(session) = tag.parse::<SessionId>() else {
+                return Reply::Error { message: format!("not a session id: {tag}") };
+            };
+            workspace.update(cx, |ws, cx| {
+                ws.notification_response(session, action.as_deref(), window, cx);
+            });
+            Reply::Ok
+        }
         Command::Resize { width, height } => {
             window.resize(size(px(width), px(height)));
             Reply::Ok
@@ -650,6 +659,9 @@ impl Workspace {
                 name: h.name.clone(),
                 status: h.status.text(),
                 active: self.active == Some(h.id),
+                needs_you: h.needs_you,
+                rtt_us: h.rtt.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
+                relayed: h.relayed,
             })
             .collect();
         let mut dump = Dump {

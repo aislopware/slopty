@@ -135,6 +135,18 @@ pub enum Command {
     /// Add the host's first display to the active canvas, as picking it would (the host
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
+    /// Drive the app's system-notification response path with `tag` (a session UUID) and an
+    /// optional `action`, exactly as `cx.on_system_notification_response` would when the user
+    /// activates an agent banner: find the host whose canvas holds the session, switch to it,
+    /// then reveal the session (no action) or answer its prompt (`allow` / `deny`). System
+    /// notifications are disabled outside a bundle, so this is the only way to test the path.
+    NotificationResponse {
+        /// The banner's tag, which is the session UUID.
+        tag: String,
+        /// The button pressed: `allow`, `deny`, or none to reveal (the banner body).
+        #[serde(default)]
+        action: Option<String>,
+    },
     /// Resize the window's content area.
     Resize {
         /// Width in points.
@@ -482,6 +494,18 @@ pub struct HostInfo {
     pub status: String,
     /// Its canvas is the one shown.
     pub active: bool,
+    /// Agents on this host waiting on the human; the pill and the Dock badge sum this over
+    /// every host.
+    #[serde(default)]
+    pub needs_you: usize,
+    /// Link round trip in microseconds, sampled once a second while connected (the bar's
+    /// readout); `None` before the first sample.
+    #[serde(default)]
+    pub rtt_us: Option<u64>,
+    /// Whether this link's path goes through a relay rather than direct; `None` before the
+    /// first sample.
+    #[serde(default)]
+    pub relayed: Option<bool>,
 }
 
 /// One canvas item.

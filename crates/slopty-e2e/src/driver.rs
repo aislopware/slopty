@@ -256,6 +256,20 @@ impl Driver {
         self.ok(&Command::Reveal { session: session.to_owned() }).await
     }
 
+    /// Activate an agent banner: reveal `tag`'s session (no action) or answer its prompt
+    /// (`allow` / `deny`), switching hosts as the response handler does.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or the session is on no host.
+    pub async fn notification_response(&mut self, tag: &str, action: Option<&str>) -> Result<()> {
+        self.ok(&Command::NotificationResponse {
+            tag: tag.to_owned(),
+            action: action.map(str::to_owned),
+        })
+        .await
+    }
+
     /// The app's state.
     ///
     /// # Errors

@@ -271,6 +271,25 @@ impl Workspace {
             .map(|h| h.id)
     }
 
+    /// A banner for `session` was activated: switch to whichever host holds it and reveal it
+    /// (no `action`) or answer its prompt (`allow` / `deny`). The banner's tag is only the
+    /// session UUID, so the host is found by asking each canvas `has_session`.
+    fn notification_response(
+        &mut self,
+        session: SessionId,
+        action: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.host_of_session(session, cx) else { return };
+        if self.active != Some(host) {
+            self.activate(host, window, cx);
+        }
+        if let Some(canvas) = self.active_canvas() {
+            canvas.update(cx, |c, cx| c.notification_response(session, action, cx));
+        }
+    }
+
     /// Start (or refresh) a host: a slot in the switcher and a connect loop of its own.
     fn add_host(&mut self, id: EndpointId, name: String, cx: &mut Context<Self>) {
         if let Some(slot) = self.slot_mut(id) {
@@ -1466,15 +1485,7 @@ pub fn open_workspace(
         let action = response.action_id;
         let _handled = window.update(cx, |_root, window, cx| {
             for_notifications.update(cx, |ws, cx| {
-                let Some(host) = ws.host_of_session(session, cx) else { return };
-                if ws.active != Some(host) {
-                    ws.activate(host, window, cx);
-                }
-                if let Some(canvas) = ws.active_canvas() {
-                    canvas.update(cx, |c, cx| {
-                        c.notification_response(session, action.as_deref(), cx);
-                    });
-                }
+                ws.notification_response(session, action.as_deref(), window, cx);
             });
         });
     });

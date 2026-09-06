@@ -2152,3 +2152,36 @@ controller is cutting to its floor regardless.
 What would settle the remaining question is the same sweep with ≥ 3 runs per cell on a link in
 one state — which this session could not provide, because the link drifted monotonically worse
 across the two hours it took to measure everything above.
+
+## 2026-09-06 — cross-host attention against a real second host
+
+One client, two hosts on two machines: ptyd + hostd + the app on mac-studio, and a second
+ptyd + hostd on macbook-pro started over ssh under `/tmp/slopty-e2e/host2-<pid>` with a private
+`HOME` (torn down after, `pgrep -f <root>` empty). The app pairs with both, opens a shell on the
+MacBook host that round-trips over the mesh, then the cross-host attention path is driven: a
+permission hook is played to a MacBook session **through the real `slopty hook` relay over ssh**
+(never a Claude Code session, never a keystroke into a shell), the pill badges the cross-host
+sum, a tap switches host and focuses the session, and a `notification_response` carrying only the
+session UUID routes back to the MacBook host. Finally the MacBook hostd is killed mid-stream (row
+goes amber, mac-studio host keeps streaming) and restarted (green, shell reattaches via live
+I/O). This is the evidence behind the DECISIONS "Cross-host attention" ruling.
+
+```
+# built here for arm64 (same triple as macbook-pro) and copied by the harness:
+#   gzip -1 -c target/debug/<bin> | ssh macbook-pro 'gunzip -c > /tmp/slopty-e2e/host2-*/bin/<bin>'
+SLOPTY_HOST2=macbook-pro cargo xtask e2e hosts   # ×3
+```
+
+| run | host B up | mesh RTT (path) | hook → pill | full run |
+| --- | --- | --- | --- | --- |
+| 1   | 31.1 s | 8.2 ms (direct) |  4 ms | 54.8 s |
+| 2   | 37.7 s | 8.3 ms (direct) | 11 ms | 61.5 s |
+| 3   | 50.6 s | 8.3 ms (direct) | 14 ms | 75.7 s |
+
+The mesh link came up **direct over WireGuard every run** (~8.3 ms RTT, `relayed = false` in the
+app's dump), matching the earlier bench page's macbook-pro → mac-studio path. Cross-host
+attention lands the pill within **4–14 ms** of the relayed hook — the badge is a canvas event
+already flowing on the control stream, so it costs a frame, not a round trip. "Host B up" is the
+one-time ssh setup (copy three binaries, start two daemons, mint a ticket); it dominates the run
+and is not on any latency-critical path. The remote left exactly the two daemons it started
+(`strays before teardown: 2`), both reaped, `rm -rf` clean.

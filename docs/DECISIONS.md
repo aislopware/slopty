@@ -1746,8 +1746,16 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   a tap prefers the host on show, else the first with a waiting agent, switching first. A
   banner's tag stays the session UUID (unique across hosts); `on_system_notification_response`
   asks each canvas `has_session` to find the host, activates it, then calls
-  `notification_response` as before. Code-verified only: no Claude Code session was driven on
-  the second host in the manual run.
+  `notification_response` as before. Verified 2026-09-06 against a **real second host** on
+  another Mac (`crates/slopty-e2e/tests/hosts.rs`, `cargo xtask e2e hosts`, macbook-pro over
+  the WireGuard mesh — direct path, ~8 ms RTT): the app pairs with both hosts at once; with host
+  A on show, a permission hook played to a session on host B *through the real `slopty hook`
+  relay over ssh* (never a Claude Code session, never a keystroke into a shell) badges the pill
+  with the cross-host sum within a few ms; a tap on the pill switches to B and focuses the
+  waiting session; a `notification_response` carrying only that session's UUID routes back to B
+  and reveals it. Killing host B mid-stream turns its row amber while host A keeps streaming;
+  restarting B goes green and the shell reattaches (the session survives in ptyd — the vt grid
+  does not outlive a hostd restart, so reattach is confirmed by live I/O, not grid replay).
 
 ## Multi-client
 

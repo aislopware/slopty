@@ -46,7 +46,15 @@ pub enum Case {
     /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
     /// the phone on one host.
     PairIos,
-    /// All of the above (not `ios`, which needs a simulator).
+    /// One client, two hosts on two machines: ptyd + hostd + the app here, ptyd + hostd on a
+    /// second machine over ssh (`SLOPTY_HOST2=<ssh name>`), under a temp root there with a
+    /// private HOME. Proves cross-host attention against a real remote daemon: two hosts pair,
+    /// a shell on the second round-trips over the mesh, a permission hook played to it through
+    /// `slopty hook` badges the cross-host pill and routes a banner back to it, and killing it
+    /// mid-stream turns its row amber then green on restart. No permissions needed.
+    Hosts,
+    /// All of the above (not `ios`, which needs a simulator, nor `hosts`, which needs a second
+    /// machine).
     All,
     /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
     /// through its test socket: pair, open a shell, type, read the rows back, render frames
@@ -188,6 +196,14 @@ const PAIR_IOS: &[Suite] = &[Suite {
     serial: true,
 }];
 
+const HOSTS: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_HOST2_E2E"),
+    package: "slopty-e2e",
+    test: "hosts",
+    filter: "",
+    serial: true,
+}];
+
 const SMOOTH_IOS: &[Suite] = &[Suite {
     gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
     package: "slopty-e2e",
@@ -206,6 +222,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::SmoothIos => SMOOTH_IOS.iter().collect(),
         Case::Pair => PAIR.iter().collect(),
         Case::PairIos => PAIR_IOS.iter().collect(),
+        Case::Hosts => HOSTS.iter().collect(),
         Case::All => {
             APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).chain(SMOOTH).chain(PAIR).collect()
         }
@@ -247,7 +264,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         "build daemons and app",
         &cmd!(
             sh,
-            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty -p slopty-e2e --bins --features slopty/e2e"
+            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
         ),
     )?;
 

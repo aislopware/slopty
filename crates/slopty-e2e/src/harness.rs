@@ -793,6 +793,356 @@ impl Drop for Stack {
     }
 }
 
+/// A second host on another machine, reached over ssh.
+///
+/// `slopty-ptyd` and `slopty-hostd` run under one temporary root there, so the app can pair with
+/// two hosts at once and the cross-host attention path can be driven against a real remote daemon.
+///
+/// Everything it creates on the remote lives under [`Self::root`] and is torn down on
+/// [`Self::shutdown`] (and best-effort on drop). The remote's own `~/.claude` is never touched:
+/// the daemons and the hook relay run with a private `HOME` under the root, and
+/// `slopty hook install` is never run — so no user settings file is written.
+#[derive(Debug)]
+pub struct RemoteHost {
+    /// ssh destination (`$SLOPTY_HOST2`).
+    ssh: String,
+    /// The remote temp root; everything the host creates lives under it.
+    root: String,
+    /// The remote binary directory (`root/bin`).
+    bin: String,
+    /// The remote hostd control socket.
+    ctl_sock: String,
+    /// The remote private `HOME` (under [`Self::root`]).
+    home: String,
+    /// The remote transcript path, rewritten before each played hook.
+    transcript: String,
+    /// The fixed UDP port hostd binds, so a restart is reachable at the same address.
+    port: u16,
+    /// ptyd's and hostd's pids on the remote, killed on teardown; hostd's is replaced by
+    /// [`Self::restart_hostd`].
+    ptyd_pid: u32,
+    hostd_pid: u32,
+    /// The display name hostd was given (what the app's switcher shows for this host).
+    name: String,
+}
+
+/// Run `script` on `ssh` (through the login shell) and return its trimmed stdout.
+async fn ssh_out(ssh: &str, script: &str) -> Result<String> {
+    let output = tokio::time::timeout(
+        STARTUP,
+        Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+            .arg(ssh)
+            .arg(script)
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .with_context(|| format!("ssh {ssh} timed out running: {script}"))?
+    .with_context(|| format!("spawn ssh {ssh}"))?;
+    ensure!(
+        output.status.success(),
+        "ssh {ssh} failed ({}): {script}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Feed `input` to `script`'s stdin on `ssh`; return once it exits.
+async fn ssh_pipe(ssh: &str, script: &str, input: &[u8]) -> Result<()> {
+    let mut child = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .arg(ssh)
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn ssh {ssh}"))?;
+    let mut stdin = child.stdin.take().context("ssh stdin")?;
+    stdin.write_all(input).await?;
+    stdin.shutdown().await?;
+    drop(stdin);
+    let output = tokio::time::timeout(STARTUP, child.wait_with_output())
+        .await
+        .with_context(|| format!("ssh {ssh} timed out: {script}"))??;
+    ensure!(
+        output.status.success(),
+        "ssh {ssh} failed ({}): {script}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// gzip a local binary and gunzip it into place on the remote, `chmod +x`.
+async fn copy_bin(ssh: &str, local: &Path, remote: &str) -> Result<()> {
+    let mut gz = Command::new("gzip")
+        .arg("-1")
+        .arg("-c")
+        .arg(local)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawn gzip")?;
+    let mut gz_out = gz.stdout.take().context("gzip stdout")?;
+    let script =
+        format!("gunzip -c > {remote}.tmp && mv {remote}.tmp {remote} && chmod +x {remote}");
+    let mut ssh = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .arg(ssh)
+        .arg(&script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn ssh (copy)")?;
+    let mut ssh_in = ssh.stdin.take().context("ssh stdin")?;
+    tokio::io::copy(&mut gz_out, &mut ssh_in).await.context("stream binary over ssh")?;
+    ssh_in.shutdown().await?;
+    drop(ssh_in);
+    let gz_status = gz.wait().await?;
+    ensure!(gz_status.success(), "gzip {}", local.display());
+    let output = ssh.wait_with_output().await?;
+    ensure!(
+        output.status.success(),
+        "copy {} to {remote} ({}): {}",
+        local.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+impl RemoteHost {
+    /// Copy the daemons and the `slopty` CLI to `ssh`, start ptyd and hostd there under a fresh
+    /// temp root with a private `HOME`, and return the host with its pairing ticket ready.
+    ///
+    /// # Errors
+    ///
+    /// When ssh is unreachable, a binary is missing, a daemon does not come up, or the ticket
+    /// cannot be minted.
+    pub async fn launch(ssh: &str) -> Result<(Self, String)> {
+        let root = format!("/tmp/slopty-e2e/host2-{}", std::process::id());
+        let bin = format!("{root}/bin");
+        let home = format!("{root}/home");
+        let ctl_sock = format!("{root}/hostd.sock");
+        let transcript = format!("{root}/agent.jsonl");
+        // The daemons must never read the remote user's real HOME; assert the private one is
+        // under our own temp root before anything runs there.
+        ensure!(home.starts_with(&root), "private HOME {home} is not under the temp root {root}");
+        // A fixed port so a restart (the mid-stream-kill scenario) is reachable at the same
+        // address the app stored at pairing.
+        let port = 45_560;
+        let name = "macbook".to_owned();
+
+        ssh_out(
+            ssh,
+            &format!("rm -rf {root} && mkdir -p {bin} {home} {root}/data {root}/terminfo"),
+        )
+        .await
+        .context("prepare the remote temp root")?;
+
+        let dir = bin_dir()?;
+        for name in ["slopty-ptyd", "slopty-hostd", "slopty"] {
+            let local = dir.join(name);
+            ensure!(local.exists(), "{} is not built (add `-p slopty-cli`?)", local.display());
+            copy_bin(ssh, &local, &format!("{bin}/{name}")).await?;
+        }
+
+        let mut host = Self {
+            ssh: ssh.to_owned(),
+            root,
+            bin,
+            ctl_sock,
+            home,
+            transcript,
+            port,
+            ptyd_pid: 0,
+            hostd_pid: 0,
+            name,
+        };
+        host.ptyd_pid = host.start_ptyd().await?;
+        host.hostd_pid = host.start_hostd().await?;
+        let ticket = host.mint_ticket().await?;
+        Ok((host, ticket))
+    }
+
+    /// The common environment for a remote daemon: a private HOME and a terminfo dir of its own.
+    fn daemon_env(&self) -> String {
+        let terminfo = format!("{}/terminfo", self.root);
+        format!(
+            "HOME={} {}={terminfo} TERMINFO_DIRS={terminfo}: RUST_LOG=info",
+            self.home,
+            slopty_pty::terminfo::DIR_ENV,
+        )
+    }
+
+    /// Start ptyd on the remote (backgrounded), returning its pid.
+    async fn start_ptyd(&self) -> Result<u32> {
+        let env = self.daemon_env();
+        let (root, bin) = (&self.root, &self.bin);
+        let pid = ssh_out(
+            &self.ssh,
+            &format!(
+                "{env} nohup {bin}/slopty-ptyd --socket {root}/ptyd.sock \
+                 >{root}/ptyd.log 2>&1 & echo $!"
+            ),
+        )
+        .await?;
+        self.wait_remote_socket(&format!("{root}/ptyd.sock"), "remote ptyd").await?;
+        pid.trim().parse().with_context(|| format!("ptyd pid: {pid:?}"))
+    }
+
+    /// Start hostd on the remote (backgrounded, on a fixed port so a restart keeps the same
+    /// address), returning its pid. The link uses iroh's default reach (direct over the mesh
+    /// when it can, relay otherwise); the app's dump reports which path won.
+    async fn start_hostd(&self) -> Result<u32> {
+        let env = self.daemon_env();
+        let (root, bin, port, name) = (&self.root, &self.bin, self.port, &self.name);
+        let pid = ssh_out(
+            &self.ssh,
+            &format!(
+                "{env} SLOPTY_HOST_NAME={name} \
+                 nohup {bin}/slopty-hostd --ptyd-socket {root}/ptyd.sock \
+                 --ctl-socket {root}/hostd.sock --data-dir {root}/data --port {port} \
+                 >{root}/hostd.log 2>&1 & echo $!"
+            ),
+        )
+        .await?;
+        self.wait_remote_socket(&self.ctl_sock, "remote hostd").await?;
+        pid.trim().parse().with_context(|| format!("hostd pid: {pid:?}"))
+    }
+
+    /// Kill the remote hostd (ptyd and the sessions stay), as a host crash would.
+    ///
+    /// # Errors
+    ///
+    /// When the kill cannot be sent.
+    pub async fn kill_hostd(&self) -> Result<()> {
+        ssh_out(&self.ssh, &format!("kill {} 2>/dev/null; true", self.hostd_pid)).await?;
+        Ok(())
+    }
+
+    /// Start hostd again on the same data dir and port (same identity, reachable at the same
+    /// address): the app reconnects on its own.
+    ///
+    /// # Errors
+    ///
+    /// When hostd does not come back up.
+    pub async fn restart_hostd(&mut self) -> Result<()> {
+        // The dead daemon left its control socket on disk; drop it so the readiness poll waits
+        // for the new process to bind rather than seeing the stale file.
+        ssh_out(&self.ssh, &format!("rm -f {}", self.ctl_sock)).await?;
+        self.hostd_pid = self.start_hostd().await?;
+        Ok(())
+    }
+
+    /// Poll for a socket file on the remote.
+    async fn wait_remote_socket(&self, path: &str, what: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now().checked_add(STARTUP);
+        loop {
+            if ssh_out(&self.ssh, &format!("test -S {path} && echo ok || true")).await? == "ok" {
+                return Ok(());
+            }
+            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                bail!("{what} did not bind {path} within {STARTUP:?}");
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Mint a fresh pairing ticket over the remote hostd's control socket.
+    async fn mint_ticket(&self) -> Result<String> {
+        let ticket = ssh_out(
+            &self.ssh,
+            &format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host ticket", self.ctl_sock, self.bin),
+        )
+        .await?;
+        ensure!(ticket.starts_with("sloptypair"), "remote hostd did not mint a ticket: {ticket:?}");
+        Ok(ticket)
+    }
+
+    /// Play a Claude Code hook for `session` (the id from the dump) against the remote hostd,
+    /// through the real `slopty hook` relay over ssh: write [`TRANSCRIPT`] on the remote, then
+    /// run the relay with `SLOPTY_SESSION` set and the payload on its stdin, exactly what Claude
+    /// Code does. Nothing is typed into a shell and no real agent is started.
+    ///
+    /// # Errors
+    ///
+    /// When the transcript cannot be written or the relay cannot be run.
+    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
+        ssh_pipe(&self.ssh, &format!("cat > {}", self.transcript), TRANSCRIPT.as_bytes()).await?;
+        let payload = format!(
+            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
+            self.transcript
+        );
+        // The relay always exits 0 (it must never block the agent); the effect is asserted
+        // through the app's dump, not this call's status.
+        ssh_pipe(
+            &self.ssh,
+            &format!(
+                "SLOPTY_SESSION={session} SLOPTY_HOSTD_SOCKET={} {}/slopty hook",
+                self.ctl_sock, self.bin
+            ),
+            payload.as_bytes(),
+        )
+        .await
+    }
+
+    /// The remote's `slopty` processes still running under our root (should be empty after
+    /// [`Self::shutdown`]); the `pgrep -lf` lines, for the report.
+    ///
+    /// # Errors
+    ///
+    /// When ssh cannot be reached.
+    pub async fn stray_processes(&self) -> Result<String> {
+        ssh_out(&self.ssh, &format!("pgrep -lf {} || true", self.root)).await
+    }
+
+    /// Kill the remote daemons, remove the temp root, and confirm nothing of ours is left.
+    ///
+    /// # Errors
+    ///
+    /// When ssh cannot be reached or a process survives.
+    pub async fn shutdown(self) -> Result<()> {
+        let pids = format!("{} {}", self.ptyd_pid, self.hostd_pid);
+        ssh_out(
+            &self.ssh,
+            &format!(
+                "kill {pids} 2>/dev/null; sleep 0.3; kill -9 {pids} 2>/dev/null; \
+                 pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true",
+                root = self.root
+            ),
+        )
+        .await?;
+        let stray = ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self.root)).await?;
+        ensure!(stray.trim() == "0", "remote processes survived teardown: {stray}");
+        Ok(())
+    }
+}
+
+impl Drop for RemoteHost {
+    fn drop(&mut self) {
+        // Best-effort synchronous cleanup if `shutdown` was not called (a panicking test).
+        let script = format!(
+            "kill -9 {} {} 2>/dev/null; pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true",
+            self.ptyd_pid,
+            self.hostd_pid,
+            root = self.root
+        );
+        let _best_effort = std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+            .arg(&self.ssh)
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 /// Check that the terminal face is the bundled `JetBrains Mono` as its tables say.
 ///
 /// Measured through the platform text system: no line gap, the underline 0.155 em below the
