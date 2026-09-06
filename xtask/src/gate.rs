@@ -118,8 +118,14 @@ fn taplo(sh: &Shell, apply: bool) -> Result<()> {
 }
 
 /// Every commit since the last tag (or the root) follows Conventional Commits.
+///
+/// The tag is peeled to its commit: `cargo xtask release` writes **annotated** tags, and
+/// `committed` panics (`Option::unwrap()` on `None`, `committed/src/git.rs:10`) on a range whose
+/// start is a tag object rather than a commit. `v0.1.0..HEAD` crashed the step for every branch
+/// from the first release on; `v0.1.0^{commit}..HEAD` is the same range and does not.
 fn commits(sh: &Shell) -> Result<()> {
     let last_tag = cmd!(sh, "git describe --tags --abbrev=0").quiet().ignore_stderr().read().ok();
-    let range = last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}..HEAD", t.trim()));
+    let range =
+        last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}^{{commit}}..HEAD", t.trim()));
     quiet_step("committed", cmd!(sh, "committed {range} --no-merge-commit"))
 }
