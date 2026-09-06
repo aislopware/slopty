@@ -42,6 +42,13 @@ impl Ring {
         self.buf.drain(..).collect()
     }
 
+    /// Forget everything, including the count of what was dropped: the bytes are accounted
+    /// for elsewhere (a checkpoint holds their effect).
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.dropped = 0;
+    }
+
     /// Bytes currently held.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -74,6 +81,18 @@ mod tests {
         assert_eq!(r.drain(), b"bcde");
         assert_eq!(r.dropped(), 1);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn clear_forgets_the_bytes_and_the_drop_count() {
+        let mut r = Ring::new(2);
+        r.push(b"abc");
+        assert_eq!(r.dropped(), 1);
+        r.clear();
+        assert!(r.is_empty());
+        assert_eq!(r.dropped(), 0);
+        r.push(b"z");
+        assert_eq!(r.drain(), b"z");
     }
 
     #[test]

@@ -20,7 +20,8 @@ struct Args {
     /// Socket path (default: `$TMPDIR/slopty/ptyd.sock`, or `$SLOPTY_PTYD_SOCKET`).
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// Bytes of output retained per detached session.
+    /// Bytes of output retained per session: what came in while no host held it, or what the
+    /// host tapped since its last checkpoint.
     #[arg(long, default_value_t = slopty_pty::protocol::DEFAULT_BACKLOG_BYTES)]
     backlog_bytes: usize,
     /// Where the shell integration scripts are written (default: `$SLOPTY_DATA_DIR/shell`, else

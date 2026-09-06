@@ -6,7 +6,7 @@ mod actor {
 
     use slopty_core::{ClientId, SessionId};
     use slopty_grid::LineIndex;
-    use slopty_host::session::{self, SessionStart};
+    use slopty_host::session::{self, SessionStart, Tap};
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::terminal::{Frame, TermEvent, TermRequest, TermSize};
     use slopty_pty::{Pty, SpawnSpec};
@@ -17,6 +17,15 @@ mod actor {
     }
 
     fn start(command: &[&str]) -> (session::SessionHandle, tokio::process::Child) {
+        let (handle, child, _tap) = start_tapped(command, Vec::new());
+        (handle, child)
+    }
+
+    fn start_tapped(
+        command: &[&str],
+        checkpoint: Vec<u8>,
+    ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
+        let (tap, tap_rx) = mpsc::channel(64);
         let pty = Pty::open(size(40, 6)).unwrap();
         let child = pty
             .spawn(&SpawnSpec {
@@ -29,12 +38,14 @@ mod actor {
         let handle = session::spawn(SessionStart {
             id: SessionId::new(),
             master: pty.into_master(),
+            checkpoint,
             backlog: Vec::new(),
+            tap,
             size: size(40, 6),
             scrollback_lines: 1000,
         })
         .unwrap();
-        (handle, child)
+        (handle, child, tap_rx)
     }
 
     /// Apply frames onto a local screen model and return its text once `pred` holds.
@@ -118,6 +129,63 @@ mod actor {
                 .await;
         child.wait().await.unwrap();
         session.close();
+    }
+
+    /// Every read goes to the tap as it is, and once the shell is quiet a checkpoint follows
+    /// that a fresh actor can start from: the second actor shows the first one's screen.
+    #[tokio::test]
+    async fn output_is_tapped_and_a_quiet_session_checkpoints() {
+        let (session, mut child, mut taps) = start_tapped(&["/bin/sh", "-c", "cat"], Vec::new());
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        session.request(me, TermRequest::Raw(b"tapped-line\r".to_vec())).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("tapped-line\ntapped-line")).await;
+
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        let mut output = Vec::new();
+        let checkpoint = loop {
+            match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
+                Tap::Output { bytes, .. } => output.extend_from_slice(&bytes),
+                Tap::Checkpoint { state, .. }
+                    if output.windows(11).any(|w| w == b"tapped-line") =>
+                {
+                    break state;
+                }
+                Tap::Checkpoint { .. } => {}
+            }
+        };
+        let text_out = String::from_utf8_lossy(&output);
+        assert!(text_out.contains("tapped-line\r\ntapped-line"), "tapped: {text_out:?}");
+
+        let (next, mut cat2, mut taps2) = start_tapped(&["/bin/sh", "-c", "cat"], checkpoint);
+        let (tx2, mut rx2) = mpsc::channel(64);
+        next.attach(ClientId::new(), size(40, 6), tx2).unwrap();
+        let (_, screen) = wait_for(&mut rx2, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        assert!(
+            text(&screen).starts_with("tapped-line\ntapped-line"),
+            "replayed: {:?}",
+            text(&screen)
+        );
+        // The replayed state is checkpointed again by the new actor without any output.
+        let again = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Tap::Checkpoint { state, .. } = taps2.recv().await.unwrap() {
+                    break state;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!again.is_empty());
+
+        session.close();
+        next.close();
+        let _first = child.kill().await;
+        let _second = cat2.kill().await;
     }
 
     #[tokio::test]

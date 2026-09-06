@@ -9,6 +9,7 @@ mod tests {
     use slopty_client::LinkEvent;
     use slopty_core::{ClientId, WindowId};
     use slopty_net::client::{HostConn, bind_client, connect_with_ticket};
+    use slopty_net::framed::FramedRecv;
     use slopty_net::pairing::PairTicket;
     use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
     use slopty_proto::PROTOCOL_VERSION;
@@ -94,7 +95,6 @@ mod tests {
     /// Start ptyd and hostd in `dir` and read the pairing ticket hostd prints.
     async fn daemons(dir: &std::path::Path, reach: Reach) -> (Guard, PairTicket) {
         let ptyd_sock = dir.join("ptyd.sock");
-        let ctl_sock = dir.join("hostd.sock");
         let mut ptyd = Command::new(bin("slopty-ptyd"))
             .arg("--socket")
             .arg(&ptyd_sock)
@@ -104,6 +104,15 @@ mod tests {
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
         wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
+        let (hostd, ticket) = spawn_hostd(dir, reach).await;
+        let guard = Guard(vec![ptyd, hostd], None);
+        (guard, ticket)
+    }
+
+    /// Start hostd on `dir`'s ptyd socket and data dir and read its ticket.
+    async fn spawn_hostd(dir: &std::path::Path, reach: Reach) -> (Child, PairTicket) {
+        let ptyd_sock = dir.join("ptyd.sock");
+        let ctl_sock = dir.join("hostd.sock");
         let mut hostd = Command::new(bin("slopty-hostd"));
         if reach.is_direct_only() {
             hostd.arg("--direct-only");
@@ -151,8 +160,7 @@ mod tests {
                 );
             }
         };
-        let guard = Guard(vec![ptyd, hostd], None);
-        (guard, ticket)
+        (hostd, ticket)
     }
 
     /// A fresh endpoint (new key, new client id) dialing `ticket`: a cold QUIC connection.
@@ -265,6 +273,113 @@ mod tests {
                 other => panic!("unexpected control message before Pong: {other:?}"),
             }
         }
+    }
+
+    /// Open a shell, have it print `marker`, and wait for the marker on the screen.
+    async fn open_shell_and_see(
+        host: &mut HostConn,
+        marker: &str,
+    ) -> (slopty_core::SessionId, FramedRecv<TermEvent>) {
+        let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
+        host.tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size,
+                cwd: None,
+                command: vec!["/bin/sh".to_owned()],
+                env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                title: None,
+                attach: true,
+            }))
+            .await
+            .unwrap();
+        let session = loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::SessionOpened(summary) => break summary.id,
+                HostMsg::Canvas(_sync) => {}
+                other => panic!("unexpected control message before SessionOpened: {other:?}"),
+            }
+        };
+        let (header, mut events) =
+            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
+        assert_eq!(header.session, session);
+        // Quoted so the echoed command line never matches, only the output.
+        let (head, tail) = marker.split_at(marker.len() / 2);
+        host.tx
+            .send(&ClientMsg::Term {
+                session,
+                req: TermRequest::Raw(format!("echo {head}'{tail}'\n").into_bytes()),
+            })
+            .await
+            .unwrap();
+        wait_for_text(&mut events, marker).await;
+        (session, events)
+    }
+
+    /// Wait until a frame carries a row containing `text`.
+    async fn wait_for_text(events: &mut FramedRecv<TermEvent>, text: &str) {
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        loop {
+            let ev = tokio::time::timeout_at(deadline, events.recv()).await.unwrap().unwrap();
+            if let TermEvent::Frame(f) = ev
+                && f.updates.iter().any(|u| u.line.text().contains(text))
+            {
+                break;
+            }
+        }
+    }
+
+    /// The terminal lives in ptyd; the screen lives in hostd's engine. When hostd dies and comes
+    /// back on the same ptyd, the screen it shows is the one the shell drew before, rebuilt
+    /// from the checkpoint and the tapped output ptyd kept, not a blank grid.
+    #[tokio::test]
+    async fn a_host_restart_keeps_the_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, mut host) = connect(dir.path()).await;
+        let (session, events) = open_shell_and_see(&mut host, "restart-marker-one").await;
+        // Past the checkpoint delay (500 ms after the last output): the state, not the ring,
+        // is what the next host replays.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let mut old = guard.0.pop().unwrap();
+        old.start_kill().unwrap();
+        old.wait().await.unwrap();
+        drop(events);
+        drop(host);
+
+        let (hostd, ticket) = spawn_hostd(dir.path(), Reach::Anywhere).await;
+        guard.0.push(hostd);
+        let (endpoint, mut host) = dial(&ticket, Reach::Anywhere).await;
+        guard.1 = Some(endpoint);
+        assert_eq!(host.ack.sessions.iter().map(|s| s.id).collect::<Vec<_>>(), [session]);
+        let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
+        host.tx
+            .send(&ClientMsg::Term { session, req: TermRequest::Attach { size } })
+            .await
+            .unwrap();
+        let (header, mut events) =
+            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
+        assert_eq!(header.session, session);
+        let full = loop {
+            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+                TermEvent::Frame(f) if f.full => break f,
+                _other => {}
+            }
+        };
+        let rows: Vec<String> =
+            full.updates.iter().map(|u| u.line.text().trim_end().to_owned()).collect();
+        assert!(
+            rows.iter().any(|r| r == "restart-marker-one"),
+            "the screen after the restart lost the marker: {rows:?}"
+        );
+        // The shell behind it is the same one, still taking input.
+        host.tx
+            .send(&ClientMsg::Term {
+                session,
+                req: TermRequest::Raw(b"echo restart-mark'er-two'\n".to_vec()),
+            })
+            .await
+            .unwrap();
+        wait_for_text(&mut events, "restart-marker-two").await;
+        host.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 
     /// Streams the first display through hostd into the real client stack (`HostLink` +

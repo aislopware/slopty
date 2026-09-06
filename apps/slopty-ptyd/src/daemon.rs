@@ -268,7 +268,8 @@ impl Connection {
                 let (backlog, dropped) = session.pause_reader().await;
                 self.attached.insert(id);
                 let size = *session.size.lock();
-                let ev = PtydEvent::Attached { id, backlog, dropped, size };
+                let checkpoint = session.checkpoint.lock().clone();
+                let ev = PtydEvent::Attached { id, checkpoint, backlog, dropped, size };
                 self.reply(&ev, Some(session.master_fd())).await
             }
             PtydRequest::Detach { id } => {
@@ -280,6 +281,26 @@ impl Connection {
                     session.resume_reader();
                 }
                 self.reply(&PtydEvent::Ok, None).await
+            }
+            PtydRequest::Output { id, bytes } => {
+                // No reply by contract. Only the connection holding the master may tap: its
+                // frames and its EOF arrive in one order, so everything a dying host tapped is
+                // in the ring before our reader resumes, and nothing it sends can land after
+                // the next host attaches.
+                if let Some(session) = self.session(id)
+                    && *session.attached_by.lock() == Some(self.id)
+                {
+                    session.tap(&bytes);
+                }
+                Ok(())
+            }
+            PtydRequest::Checkpoint { id, state } => {
+                if let Some(session) = self.session(id)
+                    && *session.attached_by.lock() == Some(self.id)
+                {
+                    session.set_checkpoint(state);
+                }
+                Ok(())
             }
             PtydRequest::Resize { id, size } => {
                 let Some(session) = self.session(id) else {

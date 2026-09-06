@@ -1,4 +1,4 @@
-//! One PTY-backed child and its detached-output ring.
+//! One PTY-backed child, its output ring and the last host's checkpoint.
 
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
@@ -36,8 +36,10 @@ pub struct Session {
     pub master: Arc<PtyMaster>,
     /// Size of record.
     pub size: Mutex<TermSize>,
-    /// Output read while detached.
+    /// Output since the last checkpoint: tapped by the attached host, read by us while detached.
     pub ring: Mutex<Ring>,
+    /// The last host's terminal state (empty until a host sends one).
+    pub checkpoint: Mutex<Vec<u8>>,
     /// Connection id holding the master, if any.
     pub attached_by: Mutex<Option<u64>>,
     /// Exit status once known.
@@ -80,6 +82,7 @@ impl Session {
             master,
             size: Mutex::new(spec.size),
             ring: Mutex::new(Ring::new(backlog_bytes)),
+            checkpoint: Mutex::new(Vec::new()),
             attached_by: Mutex::new(None),
             exited: Mutex::new(None),
             pause,
@@ -155,6 +158,20 @@ impl Session {
         (ring.drain(), dropped)
     }
 
+    /// Output the attached host read, in order: goes after whatever the ring already holds.
+    pub fn tap(&self, bytes: &[u8]) {
+        self.ring.lock().push(bytes);
+    }
+
+    /// Replace the checkpoint; the ring's bytes are inside it now, so they go.
+    pub fn set_checkpoint(&self, state: Vec<u8>) {
+        // Both locks, ring first, so an `Attach` racing this sees either the old pair or the new
+        // pair: it takes `checkpoint` under its own lock only after `pause_reader` released ours.
+        let mut ring = self.ring.lock();
+        *self.checkpoint.lock() = state;
+        ring.clear();
+    }
+
     /// Let the reader drain again.
     pub fn resume_reader(&self) {
         self.pause.send_replace(false);
@@ -177,6 +194,7 @@ impl Session {
             attached: self.attached_by.lock().is_some(),
             exited: *self.exited.lock(),
             backlog: self.ring.lock().len(),
+            checkpoint: self.checkpoint.lock().len(),
         }
     }
 

@@ -10,9 +10,10 @@ use slopty_proto::terminal::TermSize;
 use crate::pty::SpawnSpec;
 
 /// Bumped on incompatible change. Both sides must match exactly.
-pub const PTYD_PROTOCOL: u16 = 1;
+pub const PTYD_PROTOCOL: u16 = 2;
 
-/// Bytes ptyd retains per session while detached.
+/// Bytes ptyd retains per session: output read while detached, or tapped by the host since
+/// its last checkpoint.
 pub const DEFAULT_BACKLOG_BYTES: usize = 4 << 20;
 
 /// Where the daemon listens: `$TMPDIR/slopty/ptyd.sock` (per-user, mode 0700 on macOS).
@@ -47,6 +48,24 @@ pub enum PtydRequest {
     Detach {
         /// Session.
         id: SessionId,
+    },
+    /// A copy of output the attached host just read from the master. No reply. ptyd appends it
+    /// to the session's ring so that a host which dies without detaching can be replaced by one
+    /// that replays everything since the last `Checkpoint`.
+    Output {
+        /// Session.
+        id: SessionId,
+        /// The bytes, in read order.
+        bytes: Vec<u8>,
+    },
+    /// The session's whole terminal state as a VT byte stream (what the attached host's engine
+    /// would emit to rebuild itself: modes, palette, scrollback, screen, cursor). No reply. ptyd
+    /// keeps the newest one and empties the ring, since the ring's bytes are now inside it.
+    Checkpoint {
+        /// Session.
+        id: SessionId,
+        /// The state.
+        state: Vec<u8>,
     },
     /// Resize (ptyd owns the size of record so a reattaching host sees the truth).
     Resize {
@@ -90,11 +109,14 @@ pub enum PtydEvent {
         /// Child pid.
         pid: u32,
     },
-    /// The master fd is attached to this frame. `backlog` is output ptyd read while detached;
-    /// `dropped` is how many bytes fell off the ring before that.
+    /// The master fd is attached to this frame. `checkpoint` is the newest state a previous
+    /// host left (empty if none); `backlog` is every byte since it — tapped by that host, then
+    /// read by ptyd while detached; `dropped` is how many bytes fell off the ring before that.
     Attached {
         /// Session.
         id: SessionId,
+        /// The last host's terminal state, replayed before `backlog`.
+        checkpoint: Vec<u8>,
         /// Buffered output.
         backlog: Vec<u8>,
         /// Bytes lost before `backlog`.
@@ -139,4 +161,6 @@ pub struct SessionInfo {
     pub exited: Option<i32>,
     /// Backlog bytes held.
     pub backlog: usize,
+    /// Checkpoint bytes held.
+    pub checkpoint: usize,
 }

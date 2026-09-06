@@ -133,7 +133,14 @@ the PTY's `ws_xpixel`/`ws_ypixel`, and pixel mouse reports are measured in it to
 the master, and drains it into a bounded ring while no host holds it. `Attach` pauses the reader
 (handshake through a `watch` pair so the fd is never read by two parties), ships the ring
 contents plus the master over `SCM_RIGHTS`, and hostd reads the fd directly from then on —
-no relay hop. Losing the hostd connection resumes draining; the child never blocks. A bare
+no relay hop. Losing the hostd connection resumes draining; the child never blocks. While a
+host holds the master it feeds the ring itself (`Output`, a copy of every read, on the same
+connection, which is the only one ptyd accepts taps from) and replaces the ring with a
+`Checkpoint`, the engine's whole state as VT bytes from libghostty-vt's formatter (palette,
+modes, every retained row, margins, cursor): right after adopting, then 500 ms after the last
+output (deferred while the output stands inside an escape sequence) or once 1 MiB has been
+tapped. `Attach` returns the checkpoint and the ring, and the new host's engine replays them in
+that order, so the screen, the scrollback and the title survive a hostd restart or crash. A bare
 program name the daemon cannot find on its own `PATH` runs through the user's login shell,
 interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
 

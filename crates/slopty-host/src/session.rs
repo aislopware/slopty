@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use slopty_core::{ClientId, SessionId};
+use slopty_engine::boundary::Boundary;
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine};
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
 use slopty_proto::terminal::{TermEvent, TermRequest, TermSize};
@@ -165,6 +166,26 @@ impl SessionHandle {
     }
 }
 
+/// What the actor hands ptyd so the session outlives this host: a copy of every byte read from
+/// the master, and now and then the engine's whole state (see [`Actor::checkpoint`]).
+#[derive(Debug)]
+pub enum Tap {
+    /// Output just read from the master.
+    Output {
+        /// Session.
+        id: SessionId,
+        /// The bytes.
+        bytes: Vec<u8>,
+    },
+    /// The terminal state, replacing everything tapped before it.
+    Checkpoint {
+        /// Session.
+        id: SessionId,
+        /// VT bytes from [`GhosttyEngine::checkpoint`].
+        state: Vec<u8>,
+    },
+}
+
 /// What the actor needs to start.
 #[derive(Debug)]
 pub struct SessionStart {
@@ -172,8 +193,12 @@ pub struct SessionStart {
     pub id: SessionId,
     /// The PTY master from ptyd.
     pub master: OwnedFd,
-    /// Output produced before we attached (replayed through the engine, never sent raw).
+    /// The last host's terminal state (empty if none), replayed before `backlog`.
+    pub checkpoint: Vec<u8>,
+    /// Output produced since then (replayed through the engine, never sent raw).
     pub backlog: Vec<u8>,
+    /// Where copies of output and checkpoints go (a task feeding ptyd).
+    pub tap: mpsc::Sender<Tap>,
     /// Size of record.
     pub size: TermSize,
     /// Scrollback lines to retain.
@@ -234,7 +259,29 @@ struct Actor {
     frame_due: Option<tokio::time::Instant>,
     /// When the last frame left, for [`MIN_FRAME_INTERVAL`].
     last_frame: Option<tokio::time::Instant>,
+    /// Copies of output and checkpoints, for ptyd.
+    tap: mpsc::Sender<Tap>,
+    /// Output has arrived since the last checkpoint.
+    dirty_since_checkpoint: bool,
+    /// Bytes tapped since the last checkpoint (a checkpoint empties ptyd's ring).
+    tapped_since_checkpoint: usize,
+    /// A tap did not fit the channel: ptyd's ring has a hole until the next checkpoint.
+    tap_lost: bool,
+    /// When the next checkpoint is due (`CHECKPOINT_AFTER` past the last output).
+    checkpoint_due: Option<tokio::time::Instant>,
+    /// Where the output stands in VT syntax, so a quiet-spell checkpoint never cuts a sequence.
+    boundary: Boundary,
 }
+
+/// A checkpoint follows this much quiet after output. Shorter means a crashed host loses less
+/// of what a fresh one cannot replay from the ring; longer means fewer formatter runs.
+const CHECKPOINT_AFTER: Duration = Duration::from_millis(500);
+/// A checkpoint is also taken once this many bytes were tapped since the last one, so ptyd's
+/// ring (4 MiB by default) never overflows under a flood and the replay stays bounded.
+const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
+/// Larger states are not sent: the ptyd frame codec caps a frame, and a state this size means
+/// a history far past any configured scrollback.
+const CHECKPOINT_MAX_BYTES: usize = 12 << 20;
 
 /// When the frame for output that arrived at `now` should go out: `COALESCE` later, or at the
 /// end of the previous frame's `MIN_FRAME_INTERVAL` if that is later.
@@ -255,6 +302,9 @@ impl Actor {
             size: start.size,
             scrollback_lines: start.scrollback_lines,
         })?;
+        if !start.checkpoint.is_empty() {
+            engine.write(&start.checkpoint);
+        }
         if !start.backlog.is_empty() {
             engine.write(&start.backlog);
         }
@@ -274,15 +324,34 @@ impl Actor {
             ack_seq: 0,
             frame_due: None,
             last_frame: None,
+            tap: start.tap,
+            // Whatever we replayed is in ptyd's ring or checkpoint already; the first checkpoint
+            // of this host folds it and anything the replay answered into one state.
+            dirty_since_checkpoint: true,
+            tapped_since_checkpoint: 0,
+            tap_lost: false,
+            checkpoint_due: None,
+            boundary: Boundary::default(),
         })
     }
 
     async fn run(mut self) {
         let mut buf = vec![0_u8; READ_BUF];
         let reader = Arc::clone(&self.master);
+        // The replay answered nothing yet: take its title and cwd, then checkpoint at once.
+        // ptyd handed us its ring with the master, so until this lands another restart would
+        // have nothing but the previous checkpoint.
+        self.after_output().await;
+        self.checkpoint(true);
         loop {
             let frame_timer = async {
                 match self.frame_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let checkpoint_timer = async {
+                match self.checkpoint_due {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending::<()>().await,
                 }
@@ -304,7 +373,9 @@ impl Actor {
                     }
                     Ok(n) => {
                         self.ack_seq = self.written_seq;
-                        self.engine.write(buf.get(..n).unwrap_or_default());
+                        let bytes = buf.get(..n).unwrap_or_default();
+                        self.engine.write(bytes);
+                        self.tap_output(bytes);
                         self.after_output().await;
                         if self.frame_due.is_none() {
                             self.frame_due = Some(frame_due_after(tokio::time::Instant::now(), self.last_frame));
@@ -320,9 +391,85 @@ impl Actor {
                     self.frame_due = None;
                     self.flush_frame();
                 }
+                () = checkpoint_timer => {
+                    self.checkpoint_due = None;
+                    self.checkpoint(false);
+                }
             }
         }
         tracing::debug!(session = %self.id, "actor stopped");
+    }
+
+    /// Copy output to ptyd's ring and schedule the checkpoint that will fold it away.
+    fn tap_output(&mut self, bytes: &[u8]) {
+        self.dirty_since_checkpoint = true;
+        self.boundary.feed(bytes);
+        self.tapped_since_checkpoint = self.tapped_since_checkpoint.saturating_add(bytes.len());
+        if let Err(e) = self.tap.try_send(Tap::Output { id: self.id, bytes: bytes.to_vec() }) {
+            // Full or gone: the ring has a hole. The next checkpoint replaces the ring, so
+            // pull it forward rather than leaving a replay that would misparse mid-sequence.
+            if !self.tap_lost {
+                tracing::warn!(session = %self.id, error = %e, "output tap dropped; checkpointing early");
+            }
+            self.tap_lost = true;
+        }
+        if self.tap_lost || self.tapped_since_checkpoint >= CHECKPOINT_EVERY_BYTES {
+            // Right here rather than through the timer: the select prefers the master, and a
+            // flood that keeps it readable would starve a timer indefinitely.
+            self.checkpoint(true);
+        } else {
+            let now = tokio::time::Instant::now();
+            self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+        }
+    }
+
+    /// Hand ptyd the engine's whole state, so a host that replaces this one starts from it.
+    /// Unless `force`d, a checkpoint waits while the output stands inside an escape sequence
+    /// or a character: it replaces the bytes before it, and the rest of that sequence would
+    /// print as text after a restart.
+    fn checkpoint(&mut self, force: bool) {
+        if !self.dirty_since_checkpoint {
+            return;
+        }
+        if !force && !self.boundary.is_ground() {
+            let now = tokio::time::Instant::now();
+            self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+            return;
+        }
+        let mut state = Vec::new();
+        if let Some(t) = &self.title {
+            // Not part of what the formatter emits; the next host learns it the way this one did.
+            state.extend_from_slice(b"\x1b]0;");
+            state.extend_from_slice(t.as_bytes());
+            state.extend_from_slice(b"\x1b\\");
+        }
+        match self.engine.checkpoint() {
+            Ok(bytes) => state.extend_from_slice(&bytes),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                return;
+            }
+        }
+        if state.len() > CHECKPOINT_MAX_BYTES {
+            // ptyd would refuse the frame; keep the ring instead (it holds the output since
+            // the last checkpoint that did fit) and try again at the next quiet spell.
+            tracing::warn!(session = %self.id, bytes = state.len(), "checkpoint too large; skipped");
+            self.tapped_since_checkpoint = 0;
+            return;
+        }
+        match self.tap.try_send(Tap::Checkpoint { id: self.id, state }) {
+            Ok(()) => {
+                self.dirty_since_checkpoint = false;
+                self.tapped_since_checkpoint = 0;
+                self.tap_lost = false;
+            }
+            Err(e) => {
+                // Try again after the next quiet spell; the ring keeps growing meanwhile.
+                tracing::warn!(session = %self.id, error = %e, "checkpoint not sent");
+                let now = tokio::time::Instant::now();
+                self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+            }
+        }
     }
 
     /// Side effects of the bytes just consumed.

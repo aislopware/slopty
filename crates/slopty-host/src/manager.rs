@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 use slopty_core::SessionId;
@@ -12,7 +12,7 @@ use slopty_pty::{PtydClient, SpawnSpec};
 use tokio::sync::mpsc;
 
 use crate::HostError;
-use crate::session::{self, Probe, SessionHandle, SessionStart};
+use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
 pub const SCROLLBACK_LINES: u32 = 50_000;
@@ -34,6 +34,8 @@ pub struct Host {
 
 struct Inner {
     ptyd: tokio::sync::Mutex<PtydClient>,
+    /// Output copies and checkpoints for ptyd, drained onto `ptyd` by [`tap_loop`].
+    tap: mpsc::Sender<Tap>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
     exits: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, i32)>>>,
     /// Environment every session gets on top of the request's (`SLOPTY_HOSTD_SOCKET`).
@@ -53,14 +55,17 @@ impl Host {
         let path = socket.unwrap_or_else(socket_path);
         let (mut client, exits) = PtydClient::connect(&path).await?;
         let existing = client.list().await?;
+        let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
         let host = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
+                tap,
                 sessions: Mutex::new(HashMap::new()),
                 exits: Mutex::new(Some(exits)),
                 session_env: Mutex::new(Vec::new()),
             }),
         };
+        tokio::spawn(tap_loop(Arc::downgrade(&host.inner), tap_rx));
         for info in existing {
             tracing::info!(session = %info.id, pid = info.pid, "adopting session from ptyd");
             if let Err(e) = host.adopt(info.id, info.size, Vec::new()).await {
@@ -114,10 +119,15 @@ impl Host {
         command: Vec<String>,
     ) -> Result<SessionHandle, HostError> {
         let attached = self.inner.ptyd.lock().await.attach(id).await?;
+        if attached.dropped > 0 {
+            tracing::warn!(session = %id, dropped = attached.dropped, "output lost before the backlog; the replay starts mid-stream");
+        }
         let handle = session::spawn(SessionStart {
             id,
             master: attached.master,
+            checkpoint: attached.checkpoint,
             backlog: attached.backlog,
+            tap: self.inner.tap.clone(),
             size: if attached.size == TermSize::default() { size } else { attached.size },
             scrollback_lines: SCROLLBACK_LINES,
         })?;
@@ -209,5 +219,31 @@ impl Host {
     pub async fn record_size(&self, id: SessionId, size: TermSize) -> Result<(), HostError> {
         self.inner.ptyd.lock().await.resize(id, size).await?;
         Ok(())
+    }
+}
+
+/// Taps waiting for ptyd: 64 KiB reads at most, so this bounds the memory a stalled ptyd can
+/// cost the host at about 64 MiB; a full queue makes the actor checkpoint early instead.
+const TAP_QUEUE: usize = 1024;
+
+/// Forward output copies and checkpoints to ptyd on the host's connection until the host goes
+/// away. The taps ride the same connection as the requests, and only that connection may tap
+/// (ptyd checks it holds the master), so a dying host's last taps and its EOF reach ptyd in
+/// order. A failed send is logged and the loop goes on: the next request will notice a dead
+/// ptyd, and a rejected frame (too large) must not stop the other sessions' taps.
+async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
+    while let Some(tap) = rx.recv().await {
+        let Some(inner) = inner.upgrade() else { return };
+        let sent = send_tap(&mut *inner.ptyd.lock().await, tap).await;
+        if let Err(e) = sent {
+            tracing::warn!(error = %e, "ptyd tap not sent");
+        }
+    }
+}
+
+async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::PtyError> {
+    match tap {
+        Tap::Output { id, bytes } => ptyd.output(id, bytes).await,
+        Tap::Checkpoint { id, state } => ptyd.checkpoint(id, state).await,
     }
 }

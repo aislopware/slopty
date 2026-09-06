@@ -2185,3 +2185,37 @@ already flowing on the control stream, so it costs a frame, not a round trip. "H
 one-time ssh setup (copy three binaries, start two daemons, mint a ticket); it dominates the run
 and is not on any latency-critical path. The remote left exactly the two daemons it started
 (`strays before teardown: 2`), both reaped, `rm -rf` clean.
+
+## 2026-09-06 — checkpoint cost (the number behind the 500 ms / 1 MiB policy)
+
+`GhosttyEngine::checkpoint` is libghostty-vt's VT formatter over the whole terminal, run by the
+session actor 500 ms after the last output or once 1 MiB has been tapped since the last one
+(`slopty_host::session::{CHECKPOINT_AFTER, CHECKPOINT_EVERY_BYTES}`). Release, mac-studio, an
+80×24 engine with `scrollback_lines = 10_000`, filled with 10 024 coloured 70-column lines
+(651 560 bytes) in 64 KiB chunks like PTY reads:
+
+```
+cargo nextest run -p slopty-engine --release --run-ignored only checkpoint_cost --no-capture
+```
+
+| step | result |
+| --- | --- |
+| history retained | 10 001 lines |
+| checkpoint size | 694 142 bytes (palette ≈ 7 KB, the rest rows + SGR) |
+| format | 21.9 ms, 22.6 ms (two runs) |
+| replay into a fresh engine, one chunk | 12.1 s |
+| replay in 64 KiB chunks | 11.8 s |
+| **filling the original engine with the same lines** | **12.6 s** |
+| raw `libghostty_vt::Terminal::vt_write` of the same bytes | 13.2 s |
+
+Formatting is cheap enough to run after every quiet spell: 22 ms for a full 10k-line history, once
+per 500 ms at most, off the read loop's hot path (the actor formats, the tap task sends). The
+replay is not the checkpoint's cost: filling the engine with the same output takes as long, so a
+host that restarts with a 10k-line session pays what the session paid to draw it the first time.
+That write-path throughput (≈ 50 KB/s, ≈ 1.2 ms per line) is not the engine's either: the raw
+binding is as slow, and the cause is the build. Every profile in `Cargo.toml` keeps
+`debug = "line-tables-only"`, cargo therefore sets `DEBUG=true` for build scripts, and
+`libghostty-vt-sys` takes that as "compile the zig library with `-Doptimize=Debug`", release
+included. `.cargo/config.toml` now pins `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast`; the same test
+after the change is the next entry.
+

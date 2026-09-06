@@ -20,7 +20,10 @@ use crate::{PtyError, fdpass};
 pub struct Attached {
     /// The PTY master.
     pub master: OwnedFd,
-    /// Output ptyd read while nobody was attached.
+    /// The last host's terminal state (empty if none); replay it before `backlog`.
+    pub checkpoint: Vec<u8>,
+    /// Output since the checkpoint: tapped by the last host, then read by ptyd while nobody
+    /// was attached.
     pub backlog: Vec<u8>,
     /// Bytes lost before `backlog`.
     pub dropped: u64,
@@ -68,9 +71,9 @@ impl PtydClient {
     /// Take the master.
     pub async fn attach(&mut self, id: SessionId) -> Result<Attached, PtyError> {
         match self.call(&PtydRequest::Attach { id }).await? {
-            PtydEvent::Attached { backlog, dropped, size, .. } => {
+            PtydEvent::Attached { checkpoint, backlog, dropped, size, .. } => {
                 let master = self.fds.pop_front().ok_or(PtyError::UnexpectedReply)?;
-                Ok(Attached { master, backlog, dropped, size })
+                Ok(Attached { master, checkpoint, backlog, dropped, size })
             }
             other => Self::unexpected(other),
         }
@@ -79,6 +82,43 @@ impl PtydClient {
     /// Return the master to ptyd's care (drop your copy after this).
     pub async fn detach(&mut self, id: SessionId) -> Result<(), PtyError> {
         self.expect_ok(&PtydRequest::Detach { id }).await
+    }
+
+    /// Hand ptyd a copy of output just read from an attached master. Fire-and-forget: ptyd
+    /// never replies, so this only waits for the socket to take the bytes. Use a connection of
+    /// its own for these, so they never sit between a request and its reply.
+    pub async fn output(&mut self, id: SessionId, bytes: Vec<u8>) -> Result<(), PtyError> {
+        self.send_nowait(&PtydRequest::Output { id, bytes }).await
+    }
+
+    /// Hand ptyd the session's current terminal state; it replaces the previous checkpoint and
+    /// empties the ring. Fire-and-forget, like [`Self::output`].
+    pub async fn checkpoint(&mut self, id: SessionId, state: Vec<u8>) -> Result<(), PtyError> {
+        self.send_nowait(&PtydRequest::Checkpoint { id, state }).await
+    }
+
+    async fn send_nowait(&mut self, req: &PtydRequest) -> Result<(), PtyError> {
+        self.drain_unsolicited()?;
+        let frame = codec::encode(req)?;
+        fdpass::send(&self.stream, &frame, None).await
+    }
+
+    /// Route whatever ptyd has already sent (child exits). Requests that carry no reply never
+    /// read, so without this a run of exits with no other traffic would fill ptyd's send buffer
+    /// and stall it on us while we stall on it.
+    fn drain_unsolicited(&mut self) -> Result<(), PtyError> {
+        loop {
+            match self.stream.try_read_buf(&mut self.buf) {
+                Ok(0) => return Err(PtyError::Closed),
+                Ok(_read) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(PtyError::os("read ptyd", e)),
+            }
+        }
+        while let Some(ev) = codec::try_decode::<PtydEvent>(&mut self.buf)? {
+            self.route_unsolicited(&ev);
+        }
+        Ok(())
     }
 
     /// Record a resize.

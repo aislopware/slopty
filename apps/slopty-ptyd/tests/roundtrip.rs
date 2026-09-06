@@ -175,4 +175,68 @@ mod roundtrip {
         assert_eq!(slopty_pty::pty::get_size(master.as_fd()).unwrap(), (90, 40));
         client.shutdown().await.unwrap();
     }
+
+    /// The attached host copies output into ptyd's ring on the connection that holds the
+    /// master and now and then replaces the ring with the terminal state; the next host to
+    /// attach gets that state and the output after it. Taps from any other connection are
+    /// ignored.
+    #[tokio::test]
+    async fn a_checkpoint_and_the_tap_after_it_come_back_on_reattach() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let id = SessionId::new();
+        client
+            .spawn(
+                id,
+                SpawnSpec {
+                    command: vec!["/bin/sh".into(), "-c".into(), "read x; echo bye:$x".into()],
+                    cwd: None,
+                    env: Vec::new(),
+                    size: size(),
+                },
+            )
+            .await
+            .unwrap();
+        let attached = client.attach(id).await.unwrap();
+        assert!(attached.checkpoint.is_empty(), "a fresh session has no checkpoint");
+        let master = PtyMaster::new(attached.master).unwrap();
+
+        client.output(id, b"before-the-checkpoint".to_vec()).await.unwrap();
+        client.checkpoint(id, b"STATE".to_vec()).await.unwrap();
+        client.output(id, b"after-the-checkpoint".to_vec()).await.unwrap();
+        // Taps carry no reply; a request that does orders them before its reply.
+        let info = client.list().await.unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].checkpoint, b"STATE".len());
+
+        // Another connection cannot tap a session it does not hold.
+        let (mut stranger, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        stranger.output(id, b"ignored".to_vec()).await.unwrap();
+        stranger.checkpoint(id, b"IGNORED".to_vec()).await.unwrap();
+        assert_eq!(stranger.list().await.unwrap()[0].checkpoint, b"STATE".len());
+
+        // The host dies: the connection drops and ptyd resumes reading the master itself.
+        drop(client);
+        drop(master);
+        let (mut next, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let reattached = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(a) = next.attach(id).await {
+                    break a;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(reattached.checkpoint, b"STATE");
+        assert_eq!(reattached.dropped, 0);
+        let backlog = String::from_utf8_lossy(&reattached.backlog).into_owned();
+        assert!(backlog.starts_with("after-the-checkpoint"), "backlog: {backlog:?}");
+        assert!(
+            !backlog.contains("before") && !backlog.contains("ignored"),
+            "backlog: {backlog:?}"
+        );
+        next.shutdown().await.unwrap();
+    }
 }

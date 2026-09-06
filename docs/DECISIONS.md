@@ -1773,7 +1773,58 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   `SLOPTY_DIRECT_ONLY=1 slopty-hostd` failed to start while the same variable is how the client
   and every bench select direct-only. It now takes clap's boolish parser (`1`/`true`/`yes`/`on`)
   from the env or `--direct-only[=value]`, defaulting to false, matching `Reach::from_env`.
-
+- ✅ **A terminal survives a hostd restart: ptyd keeps a checkpoint plus the output after it**
+  (2026-09-06). Before, ptyd's ring only held output produced while no host was attached, so a
+  hostd restart (an upgrade, a crash, `launchctl kickstart`) came back with live shells and a
+  blank grid until the program redrew. Options weighed: (a) hostd relaying every byte through
+  ptyd instead of reading the master itself (a relay hop on the hot path, ruled out when custody
+  was designed); (b) ptyd holding the whole output history and hostd replaying it (unbounded,
+  and a replay of a day of output takes seconds); (c) hostd handing ptyd a copy of each read
+  (`PtydRequest::Output`) and, when the session has been quiet for 500 ms or 1 MiB has been
+  tapped, the engine's whole state (`Checkpoint`), which empties the ring; `Attach` returns
+  both and the engine replays checkpoint then ring. (c) is the ruling: the replay is bounded by
+  one checkpoint plus at most 1 MiB, the hot path gains one `try_send` of a `Vec` copy per read
+  on a channel a task drains onto the host's ptyd connection, and a full channel only makes the
+  next checkpoint come early (taken inline, not through the timer, which the read-biased select
+  could starve under a flood). The taps ride the *same* connection as the requests, and ptyd
+  accepts them only from the connection holding the master: a first cut used a second
+  connection, and the Codex review of it found the two races that buys — a dying host's
+  buffered taps and checkpoint landing after its master connection's EOF (dropped, or worse,
+  installed over the replacement's state) — plus a connection that never read ptyd's `Exited`
+  broadcasts. One connection orders taps and EOF, the no-reply sends drain pending events
+  first, and a failed tap send is logged without stopping the loop. The first checkpoint is
+  taken right after the replay (the ring came to us with the master, so until then a second
+  restart would have only the previous checkpoint), and a quiet-spell checkpoint is deferred
+  while the output stands inside an escape sequence or a UTF-8 character
+  (`slopty_engine::boundary::Boundary`), because it replaces the bytes before it and the rest
+  of that sequence would print as text; the byte threshold forces one regardless. The
+  checkpoint is libghostty-vt's own VT formatter (`Format::Vt`,
+  palette, modes, scrolling region, pwd, keyboard, style, hyperlink, protection, kitty keyboard,
+  charsets) with corrections, each with a test in `ghostty::checkpoint_tests`: the formatter
+  only sees the active screen, so on the alternate screen the primary is snapshotted as the
+  `?1049h`/`?1047h`/`?47h` goes by (`GhosttyEngine::write` splits the chunk there, and keeps
+  the tail of a chunk that ends inside `ESC [ ? 10` so a switch split across two reads is
+  still seen before it completes) and emitted first, then every mode the primary blob set is
+  put back to its default (each blob only writes deviations, so a mode turned off on the
+  alternate screen would otherwise stay on), then `?1049h` + home, then the alternate screen;
+  it drops trailing blank rows, so the missing rows are fed as `CR LF` before the first margin
+  sequence (`DECSTBM` or `DECSLRM`, found independently) so a scrolled primary keeps its
+  history and cursor row; and its cursor comes before `DECSTBM`, which homes the cursor, so the
+  cursor is emitted last, relative to the margins when origin mode is on. Tab stops are not
+  emitted (their emission leaves the cursor at the last stop and shifts the content after it;
+  programs do not set them). Known approximations: a pending wrap at the last column is lost
+  (shared with the formatter), and soft wraps come back as hard rows (`with_unwrap(false)`
+  keeps the row count exact for the padding; widening the terminal after a restart will not
+  reflow lines drawn before it — ruled acceptable over a replay whose row count depends on the
+  formatter's blank-row logic). The title is prefixed as OSC 0 because the formatter does not
+  carry it.
+  `PTYD_PROTOCOL` is 2; both daemons ship together so no compatibility path exists.
+  Proved by `apps/slopty-ptyd/tests/roundtrip.rs` (tap, checkpoint, a stranger's taps ignored,
+  reattach on a new connection), `crates/slopty-host/tests/session_actor.rs` (output tapped,
+  quiet checkpoint, replay into a second actor) and `apps/slopty-hostd/tests/e2e.rs`
+  `a_host_restart_keeps_the_screen` (marker printed, hostd killed after the checkpoint delay,
+  a fresh hostd on the same ptyd shows the marker in its full frame and the shell still
+  answers). Cost: MEASUREMENTS 2026-09-06 "checkpoint cost".
 ## Multi-client
 
 Proven end to end by the pair suite (`crates/slopty-e2e/tests/pair.rs`, `cargo xtask e2e pair`):

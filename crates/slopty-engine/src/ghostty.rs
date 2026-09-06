@@ -49,6 +49,12 @@ pub struct GhosttyEngine {
     /// Absolute index of screen row 0 of the active screen.
     base: u64,
     on_alt: bool,
+    /// The primary screen as VT bytes, taken just before the program switched to the alternate
+    /// screen, so a checkpoint made on the alternate screen can carry both.
+    primary_snapshot: Option<Vec<u8>>,
+    /// The tail of the last chunk when it ended inside a possible alternate-screen switch
+    /// (`ESC [ ? 10`), so a switch split across two reads is still seen before it completes.
+    alt_prefix: Vec<u8>,
     sync_since: Option<MonoTime>,
     buttons_down: u8,
     scratch: String,
@@ -117,6 +123,8 @@ impl GhosttyEngine {
             epoch: 0,
             base: 0,
             on_alt: false,
+            primary_snapshot: None,
+            alt_prefix: Vec::new(),
             sync_since: None,
             buttons_down: 0,
             scratch: String::with_capacity(16),
@@ -147,6 +155,104 @@ impl GhosttyEngine {
         let mut formatter = Formatter::new(&self.term, options)?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The whole terminal as the VT byte stream that rebuilds it in a fresh engine of the same
+    /// size: palette, modes, scrolling region, working directory (OSC 7), keyboard
+    /// state, every retained row (history then screen, soft wraps kept), and the cursor with its
+    /// pending style and hyperlink. libghostty-vt's own formatter writes it, so what a program
+    /// drew comes back exactly as its cells, not as an approximation from the grid.
+    ///
+    /// When the alternate screen is active the formatter can only see that screen, so the bytes
+    /// are the primary screen as of the moment the program switched (kept by [`Self::write`])
+    /// followed by the alternate screen; a program that leaves the alternate screen after the
+    /// replay finds its primary where it was.
+    ///
+    /// # Errors
+    ///
+    /// When the formatter fails.
+    pub fn checkpoint(&mut self) -> Result<Vec<u8>, EngineError> {
+        let active = self.format_active_screen()?;
+        if !self.on_alt {
+            // Also the fallback for a switch [`Self::write`] fails to see: at worst the primary
+            // comes back as of this checkpoint.
+            self.primary_snapshot = Some(active.clone());
+            return Ok(active);
+        }
+        let primary = self.primary_snapshot.clone().unwrap_or_default();
+        let mut out = primary.clone();
+        // Each blob only sets the modes that differ from the defaults, so a mode the primary
+        // had on and the program turned off on the alternate screen would stay on: put every
+        // mode the primary set back to its default before the alternate screen sets its own.
+        out.extend_from_slice(&mode_resets(&primary));
+        // Enter the alternate screen here, saving the primary cursor the snapshot just placed,
+        // and home: the formatter writes content from wherever the cursor is, and it is where
+        // the primary left it. Its own `?1049h` (in the modes it emits) is then a no-op.
+        out.extend_from_slice(b"\x1b[?1049h\x1b[H");
+        out.extend_from_slice(&active);
+        Ok(out)
+    }
+
+    /// The active screen and the terminal state around it, as VT bytes.
+    ///
+    /// The formatter leaves two things to us. It drops trailing blank rows, so a primary screen
+    /// that has scrolled would come back with too little history and its rows shifted up; the
+    /// missing rows are replayed as line feeds, placed before any scrolling region so they
+    /// scroll into history and not inside the region. And its cursor position comes before
+    /// the scrolling region, which homes the cursor when set; the cursor is written last here
+    /// instead, with origin mode lifted around it so the row is absolute.
+    fn format_active_screen(&self) -> Result<Vec<u8>, EngineError> {
+        let options = FormatterOptions::new()
+            .with_format(Format::Vt)
+            .with_unwrap(false)
+            .with_trim(false)
+            .with_palette(true)
+            .with_modes(true)
+            .with_scrolling_region(true)
+            // Not tab stops: emitting them (`CSI 3 g`, then `CSI n G` + `ESC H` per stop) leaves
+            // the cursor at the last stop and the content that follows starts there, shifted.
+            // Programs do not set tab stops; the defaults every 8 columns are what a fresh
+            // engine has anyway.
+            .with_tabstops(false)
+            .with_pwd(true)
+            .with_keyboard(true)
+            .with_cursor(false)
+            .with_style(true)
+            .with_hyperlink(true)
+            .with_protection(true)
+            .with_kitty_keyboard(true)
+            .with_charsets(true);
+        let mut formatter = Formatter::new(&self.term, options)?;
+        let bytes = formatter.format_alloc(None)?;
+        let mut out = Vec::with_capacity(bytes.len().saturating_add(64));
+        if self.on_alt {
+            // No history behind the alternate screen: nothing to scroll back into place.
+            out.extend_from_slice(&bytes);
+        } else {
+            let (before, after) = bytes.split_at(margins_at(&bytes).map_or(bytes.len(), |m| m.at));
+            out.extend_from_slice(before);
+            // Rows are separated by CR LF and nothing else in the output contains one, so the
+            // cursor stands on row `separators` of `total`; feed lines until it is on the last.
+            let total = self.term.scrollback_rows()?.saturating_add(usize::from(self.term.rows()?));
+            let separators = memchr::memmem::find_iter(&bytes, b"\r\n").count();
+            for _ in 0..total.saturating_sub(1).saturating_sub(separators) {
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(after);
+        }
+        let (mut row, mut col) =
+            (u32::from(self.term.cursor_y()?), u32::from(self.term.cursor_x()?));
+        if self.term.mode(Mode::ORIGIN)? {
+            // Setting or clearing origin mode homes the cursor, so it cannot be lifted around
+            // the move: address the cursor the way the program does, relative to the margins.
+            let margins = margins_at(&bytes).unwrap_or_default();
+            row = row.saturating_sub(margins.top);
+            col = col.saturating_sub(margins.left);
+        }
+        out.extend_from_slice(
+            format!("\x1b[{};{}H", row.saturating_add(1), col.saturating_add(1)).as_bytes(),
+        );
+        Ok(out)
     }
 
     /// Current epoch of line numbering.
@@ -187,6 +293,39 @@ impl GhosttyEngine {
         self.exit_marks.clear();
         self.prompt_starts.clear();
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
+    }
+
+    /// Feed one chunk. If the chunk switches to the alternate screen, the primary screen is
+    /// snapshotted first (for [`Self::checkpoint`]): the bytes before the switch are fed, the
+    /// snapshot taken, then the rest.
+    fn feed(&mut self, chunk: &[u8]) {
+        if !self.on_alt && !self.alt_prefix.is_empty() {
+            // The last chunk ended inside `ESC [ ? 10…`: if this one completes a switch, the
+            // terminal is still on the primary (the sequence is not finished), so snapshot now.
+            let mut probe = std::mem::take(&mut self.alt_prefix);
+            probe.extend(chunk.iter().take(8));
+            if alt_enter_at(&probe) == Some(0) {
+                self.primary_snapshot = self.format_active_screen().ok();
+            }
+        }
+        let switch_at = if self.on_alt { None } else { alt_enter_at(chunk) };
+        let rest = match switch_at {
+            Some(at) => {
+                let (before, from_switch) = chunk.split_at(at);
+                self.term.vt_write(before);
+                self.settle_or_bump();
+                if !self.on_alt {
+                    self.primary_snapshot = self.format_active_screen().ok();
+                }
+                from_switch
+            }
+            None => chunk,
+        };
+        self.term.vt_write(rest);
+        self.settle_or_bump();
+        if !self.on_alt {
+            self.alt_prefix = alt_prefix_of(chunk).to_vec();
+        }
     }
 
     fn settle_or_bump(&mut self) {
@@ -457,6 +596,107 @@ impl GhosttyEngine {
     }
 }
 
+/// The margins the formatter wrote, if any, and where its first margin sequence starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Margins {
+    /// Byte offset of the first of `DECSTBM` / `DECSLRM`.
+    at: usize,
+    /// Top margin, 0-based.
+    top: u32,
+    /// Left margin, 0-based.
+    left: u32,
+}
+
+/// The formatter writes `DECSTBM` (`CSI top ; bottom r`) and `DECSLRM` (`CSI left ; right s`)
+/// independently, each only when set. Cells never hold an escape and nothing else it writes
+/// ends in `r` or in `s` with parameters, so the first match of each is it.
+fn margins_at(bytes: &[u8]) -> Option<Margins> {
+    let stbm = csi_with_final(bytes, b'r');
+    let slrm = csi_with_final(bytes, b's');
+    let at = match (stbm, slrm) {
+        (Some((a, _)), Some((b, _))) => a.min(b),
+        (Some((a, _)), None) | (None, Some((a, _))) => a,
+        (None, None) => return None,
+    };
+    Some(Margins {
+        at,
+        top: stbm.map_or(0, |(_, first)| first.saturating_sub(1)),
+        left: slrm.map_or(0, |(_, first)| first.saturating_sub(1)),
+    })
+}
+
+/// The first `CSI params final` in `bytes` whose parameters are digits and `;` only (at least
+/// one digit) and whose final byte is `last`: its offset and its first parameter.
+fn csi_with_final(bytes: &[u8], last: u8) -> Option<(usize, u32)> {
+    memchr::memmem::find_iter(bytes, b"\x1b[").find_map(|at| {
+        let rest = bytes.get(at.saturating_add(2)..).unwrap_or_default();
+        let params = rest.iter().take_while(|b| b.is_ascii_digit() || **b == b';').count();
+        if params == 0 || rest.get(params) != Some(&last) {
+            return None;
+        }
+        let first = rest.get(..params)?.split(|b| *b == b';').next()?;
+        let first: u32 = std::str::from_utf8(first).ok()?.parse().ok()?;
+        Some((at, first))
+    })
+}
+
+/// The sequences that put every mode `blob` sets back to its default, in order. The alternate
+/// screen switches themselves are left alone; the caller enters the alternate screen itself.
+fn mode_resets(blob: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for at in memchr::memmem::find_iter(blob, b"\x1b[") {
+        let rest = blob.get(at.saturating_add(2)..).unwrap_or_default();
+        let (private, rest) = match rest.split_first() {
+            Some((b'?', rest)) => (true, rest),
+            _ => (false, rest),
+        };
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        let Some(&last) = rest.get(digits) else { continue };
+        if digits == 0 || !matches!(last, b'h' | b'l') {
+            continue;
+        }
+        let number = rest.get(..digits).unwrap_or_default();
+        if private && matches!(number, b"47" | b"1047" | b"1049" | b"1048") {
+            continue;
+        }
+        out.extend_from_slice(b"\x1b[");
+        if private {
+            out.push(b'?');
+        }
+        out.extend_from_slice(number);
+        out.push(if last == b'h' { b'l' } else { b'h' });
+    }
+    out
+}
+
+/// The tail of `chunk` from its last escape when that tail is an unfinished start of an
+/// alternate-screen switch (a proper prefix of `ESC [ ? 1049 h` and friends), else empty.
+fn alt_prefix_of(chunk: &[u8]) -> &[u8] {
+    let Some(esc) = memchr::memrchr(0x1b, chunk) else { return &[] };
+    let tail = chunk.get(esc..).unwrap_or_default();
+    let unfinished = [&b"\x1b[?1049h"[..], b"\x1b[?1047h", b"\x1b[?47h"]
+        .iter()
+        .any(|seq| seq.len() > tail.len() && seq.starts_with(tail));
+    if unfinished { tail } else { &[] }
+}
+
+/// Byte offset of the first sequence that enters the alternate screen (`CSI ? 1049 h`,
+/// `CSI ? 1047 h`, `CSI ? 47 h`), if the chunk holds one. A split sequence (the `ESC [ ?` at the
+/// end of one read and the digits in the next) is not found; the primary snapshot is then the
+/// one from the last checkpoint, which is only staler by the output between them.
+fn alt_enter_at(chunk: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = memchr::memmem::find(chunk.get(from..)?, b"\x1b[?") {
+        let at = from.saturating_add(rel);
+        let params = chunk.get(at.saturating_add(3)..).unwrap_or_default();
+        if [&b"1049h"[..], b"1047h", b"47h"].iter().any(|p| params.starts_with(p)) {
+            return Some(at);
+        }
+        from = at.saturating_add(3);
+    }
+    None
+}
+
 /// OSC 7 payload (`file://host/percent%20encoded/path`) → local path. Non-file URLs and paths on
 /// other hosts are ignored.
 #[must_use]
@@ -633,13 +873,11 @@ impl VtEngine for GhosttyEngine {
         let mut rest = bytes;
         while let Some(found) = self.osc.scan(rest) {
             let (head, tail) = rest.split_at(found.end.min(rest.len()));
-            self.term.vt_write(head);
-            self.settle_or_bump();
+            self.feed(head);
             self.record_mark(found.mark);
             rest = tail;
         }
-        self.term.vt_write(rest);
-        self.settle_or_bump();
+        self.feed(rest);
     }
 
     fn resize(&mut self, size: TermSize) -> Result<(), EngineError> {
@@ -1248,5 +1486,230 @@ mod scrollback_tests {
         // Pruning is page-granular (a page is several hundred rows), so the count lands
         // within a page of the limit on either side; what matters is that it is bounded.
         assert!(total < 2_000, "kept {total} rows with a 1k limit");
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use pretty_assertions::assert_eq;
+    use slopty_grid::{StyleFlags, TermModes};
+    use slopty_proto::input::CellMetrics;
+
+    use super::*;
+
+    fn engine(cols: u16, rows: u16, scrollback: u32) -> GhosttyEngine {
+        GhosttyEngine::new(EngineConfig {
+            size: TermSize { cols, rows, metrics: CellMetrics { cell_width: 8, cell_height: 16 } },
+            scrollback_lines: scrollback,
+        })
+        .unwrap()
+    }
+
+    /// Text of every retained line, history then screen.
+    fn all_text(e: &GhosttyEngine) -> Vec<String> {
+        let total = u32::try_from(e.total_lines().unwrap()).unwrap();
+        let (_start, lines) = e.lines(e.oldest_line(), total).unwrap();
+        lines.iter().map(|l| l.text().trim_end().to_owned()).collect()
+    }
+
+    #[test]
+    fn a_checkpoint_rebuilds_history_screen_cursor_and_modes() {
+        let mut a = engine(12, 3, 100);
+        for i in 0..5 {
+            a.write(format!("line {i}\r\n").as_bytes());
+        }
+        a.write(b"\x1b[1;31mred\x1b[0m plain\x1b[?2004h\x1b[?1h\x1b[2;4H");
+        let checkpoint = a.checkpoint().unwrap();
+
+        let mut b = engine(12, 3, 100);
+        b.write(&checkpoint);
+
+        assert_eq!(all_text(&b), all_text(&a));
+        let fa = a.full_frame(0).unwrap();
+        let fb = b.full_frame(0).unwrap();
+        assert_eq!((fb.cursor.row, fb.cursor.col), (fa.cursor.row, fa.cursor.col));
+        assert_eq!(fb.total_lines, fa.total_lines);
+        let red = |f: &Frame| {
+            f.updates
+                .iter()
+                .find(|u| u.line.text().starts_with("red"))
+                .map(|u| u.line.cells[0].style)
+        };
+        assert_eq!(red(&fb), red(&fa));
+        assert!(red(&fb).unwrap().flags.contains(StyleFlags::BOLD));
+        let modes = b.modes().unwrap();
+        assert!(modes.contains(TermModes::BRACKETED_PASTE), "{modes:?}");
+        assert!(modes.contains(TermModes::APP_CURSOR_KEYS), "{modes:?}");
+    }
+
+    #[test]
+    fn a_checkpoint_on_the_alternate_screen_carries_the_primary_too() {
+        let mut a = engine(10, 2, 100);
+        a.write(b"prompt$ vim\r\n");
+        // The switch and the alt-screen drawing arrive in one read, as they do from a program.
+        a.write(b"\x1b[?1049h\x1b[H~ editor");
+        assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        let checkpoint = a.checkpoint().unwrap();
+
+        let mut b = engine(10, 2, 100);
+        b.write(&checkpoint);
+        assert!(b.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        assert_eq!(all_text(&b), all_text(&a));
+
+        // Leaving the alternate screen lands on the same primary on both.
+        a.write(b"\x1b[?1049l");
+        b.write(b"\x1b[?1049l");
+        assert_eq!(all_text(&b), all_text(&a));
+        // "prompt$ vim" wrapped at ten columns and scrolled: the history line came back too.
+        assert_eq!(all_text(&b), ["prompt$ vi", "m", ""]);
+    }
+
+    #[test]
+    fn a_scrolled_screen_with_blank_rows_keeps_its_history_and_cursor() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"one\r\ntwo\r\nthree\r\nfour\r\n\r\n\x1b[A");
+        let checkpoint = a.checkpoint().unwrap();
+        let mut b = engine(20, 3, 100);
+        b.write(&checkpoint);
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&b), ["one", "two", "three", "four", "", ""]);
+        assert_eq!((b.term.cursor_y().unwrap(), b.term.cursor_x().unwrap()), (1, 0));
+    }
+
+    #[test]
+    fn a_scrolling_region_comes_back_with_the_cursor_below_it() {
+        let mut a = engine(20, 4, 100);
+        a.write(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\x1b[1;2r\x1b[?6h\x1b[2;1Hx");
+        let checkpoint = a.checkpoint().unwrap();
+        assert!(margins_at(&checkpoint).is_some());
+        let mut b = engine(20, 4, 100);
+        b.write(&checkpoint);
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!((a.term.cursor_y().unwrap(), a.term.cursor_x().unwrap()), (1, 1));
+        assert_eq!((b.term.cursor_y().unwrap(), b.term.cursor_x().unwrap()), (1, 1));
+        assert!(b.term.mode(Mode::ORIGIN).unwrap());
+        // A line feed at the region's bottom scrolls the region, not the screen.
+        a.write(b"\n");
+        b.write(b"\n");
+        assert_eq!(all_text(&b), all_text(&a));
+    }
+
+    /// `cargo nextest run -p slopty-engine --release --run-ignored only checkpoint_cost
+    /// --no-capture`: how long a checkpoint takes and how big it is at 80x24 with 10 000 lines
+    /// of history, the number behind the checkpoint policy in `slopty_host::session` (recorded
+    /// in MEASUREMENTS).
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn checkpoint_cost() {
+        let mut e = engine(80, 24, 10_000);
+        let mut out = Vec::new();
+        for i in 0..10_024 {
+            out.extend_from_slice(
+                format!(
+                    "\x1b[3{}mline {i:05}\x1b[0m the quick brown fox jumps over the lazy dog\r\n",
+                    i % 8
+                )
+                .as_bytes(),
+            );
+        }
+        let start = std::time::Instant::now();
+        for chunk in out.chunks(65_536) {
+            e.write(chunk);
+        }
+        let fill = start.elapsed();
+        let mut raw = Terminal::new(80, 24).unwrap();
+        raw.set_scrollback_max_lines(Some(10_000)).unwrap();
+        let start = std::time::Instant::now();
+        for chunk in out.chunks(65_536) {
+            raw.vt_write(chunk);
+        }
+        let raw_fill = start.elapsed();
+        eprintln!("checkpoint_cost: raw libghostty-vt fill {raw_fill:?} vs engine fill {fill:?}");
+        let start = std::time::Instant::now();
+        let bytes = e.checkpoint().unwrap();
+        let took = start.elapsed();
+        let start = std::time::Instant::now();
+        let mut b = engine(80, 24, 10_000);
+        b.write(&bytes);
+        let replay = start.elapsed();
+        let start = std::time::Instant::now();
+        let mut c = engine(80, 24, 10_000);
+        for chunk in bytes.chunks(65_536) {
+            c.write(chunk);
+        }
+        let replay_chunked = start.elapsed();
+        assert_eq!(all_text(&b), all_text(&e));
+        assert_eq!(all_text(&c), all_text(&e));
+        eprintln!(
+            "checkpoint_cost: {} history lines; fill {} bytes in 64 KiB chunks {fill:?}; checkpoint {} bytes, format {took:?}, replay one chunk {replay:?}, replay 64 KiB chunks {replay_chunked:?}",
+            e.total_lines().unwrap() - 24,
+            out.len(),
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn margins_are_read_from_the_formatter_sequences() {
+        let bytes = b"abc\x1b[3;10r\x1b[2;7s\x1b]7;file:///\x1b\\";
+        assert_eq!(margins_at(bytes), Some(Margins { at: 3, top: 2, left: 1 }));
+        assert_eq!(margins_at(b"\x1b[3;10r"), Some(Margins { at: 0, top: 2, left: 0 }));
+        // DECSLRM alone (full-height margins, a left margin): still found, padding before it.
+        assert_eq!(margins_at(b"x\x1b[0m\x1b[5;20s"), Some(Margins { at: 5, top: 0, left: 4 }));
+        assert!(margins_at(b"\x1b]4;0;rgb:00/00/00\x1b\\\x1b[?1049h\x1b[s").is_none());
+    }
+
+    #[test]
+    fn mode_resets_invert_every_mode_but_the_screen_switch() {
+        let blob =
+            b"\x1b]4;0;rgb:00/00/00\x1b\\\x1b[?1h\x1b[4h\x1b[?7l\x1b[?1049h\x1b[?25l\x1b[2;1H";
+        assert_eq!(mode_resets(blob), b"\x1b[?1l\x1b[4l\x1b[?7h\x1b[?25h");
+        assert!(mode_resets(b"plain\x1b[31m\x1b[3;4r").is_empty());
+    }
+
+    #[test]
+    fn an_alternate_screen_switch_split_across_reads_still_snapshots_the_primary() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"before\r\n");
+        a.write(b"\x1b[?10");
+        assert!(!a.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        a.write(b"49h\x1b[Halt");
+        assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        let checkpoint = a.checkpoint().unwrap();
+        let mut b = engine(20, 3, 100);
+        b.write(&checkpoint);
+        assert_eq!(all_text(&b), all_text(&a));
+        a.write(b"\x1b[?1049l");
+        b.write(b"\x1b[?1049l");
+        assert_eq!(all_text(&b), ["before", "", ""]);
+        assert_eq!(all_text(&b), all_text(&a));
+    }
+
+    #[test]
+    fn a_mode_turned_off_on_the_alternate_screen_stays_off_after_replay() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"\x1b[?1h\x1b[?1049h\x1b[?1l");
+        assert!(!a.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
+        let checkpoint = a.checkpoint().unwrap();
+        let mut b = engine(20, 3, 100);
+        b.write(&checkpoint);
+        assert!(!b.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
+        b.write(b"\x1b[?1049l");
+        assert!(!b.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
+    }
+
+    #[test]
+    fn a_primary_checkpoint_stays_as_the_fallback_snapshot() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"kept\r\n");
+        let _first = a.checkpoint().unwrap();
+        assert!(a.primary_snapshot.is_some());
+    }
+
+    #[test]
+    fn the_alternate_screen_switch_is_found_mid_chunk() {
+        assert_eq!(alt_enter_at(b"abc\x1b[?1049hxyz"), Some(3));
+        assert_eq!(alt_enter_at(b"\x1b[?25l\x1b[?47h"), Some(6));
+        assert_eq!(alt_enter_at(b"\x1b[?1049l\x1b[?2004h"), None);
+        assert_eq!(alt_enter_at(b"plain"), None);
     }
 }

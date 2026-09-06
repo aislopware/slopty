@@ -8095,6 +8095,7 @@ name = "slopty-engine"
 version = "0.1.0"
 dependencies = [
  "libghostty-vt",
+ "memchr",
  "pretty_assertions",
  "regex",
  "slopty-core",

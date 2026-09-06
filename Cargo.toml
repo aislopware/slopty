@@ -48,6 +48,7 @@ bytes = { version = "1.12.1", features = [ "serde" ] }
 futures-core = "0.3.34"
 core-foundation = "0.10.1"
 core-video = "0.5.2"
+memchr = "2.8.3"
 parking_lot = "0.12.5"
 uuid = { version = "1.26.0", features = [ "v4", "v7", "serde", "fast-rng" ] }
 camino = { version = "1.2.5", features = [ "serde1" ] }
