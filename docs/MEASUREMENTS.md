@@ -2239,3 +2239,46 @@ overhead over the raw write (3.6 ms vs 1.6 ms for 10k lines: the OSC 133 scan, t
 follow, the alternate-screen scan) is now the larger half and is where the next write-path
 measurement goes.
 
+## 2026-09-06 — `slopty bench echo` after the ReleaseFast pin: the keystroke path was never parser-bound
+
+Release daemons (13b95f0) on the paired `/tmp/slopty-manual` dirs, direct-only, mac-studio to its
+own hostd (the client dialled the LAN address, not loopback), three runs of 30 bytes into
+`/bin/cat`:
+
+```sh
+SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
+SLOPTY_DIRECT_ONLY=1 target/release/slopty-hostd --ptyd-socket /tmp/slopty-manual/ptyd.sock \
+  --ctl-socket /tmp/slopty-manual/hostd.sock --data-dir /tmp/slopty-manual/data &
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/release/slopty bench echo --count 30
+```
+
+| run | min | p50 | p90 | max | QUIC rtt |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 4.3 | 5.9 | 7.3 | 11.9 | 2.7 ms |
+| 2 | 4.4 | 5.6 | 7.3 | 12.8 | 2.6 ms |
+| 3 | 4.4 | 6.1 | 10.2 | 31.0 | 3.3 ms |
+
+Same as the 2026-09-05 release row (p50 4.4–5.1, p90 4.8–8.1): one byte through the parser was
+never where the time went, so the 3 500× on bulk parsing leaves the echo where it was. The
+round trip is still the QUIC rtt plus about 3 ms of engine, coalescing and channel hops; that
+3 ms is the next thing to take apart on the keystroke path, not the parser.
+
+## 2026-09-06 — leading-edge frame: the 2 ms coalescing window off the keystroke path
+
+Same setup and command as the entry above, hostd rebuilt with `frame_due_after` framing output
+after a quiet spell at once (`MIN_FRAME_INTERVAL` still paces floods; the read arm of the
+actor's select still folds already-readable bytes into the frame):
+
+| run | min | p50 | p90 | max | QUIC rtt (smoothed) |
+| --- | --- | --- | --- | --- | --- |
+| before 1–3 | 4.3–4.4 | 5.6–6.1 | 7.3–10.2 | 11.9–31.0 | 2.6–3.3 ms |
+| after 1 | 2.1 | 4.4 | 6.0 | 6.4 | 5.2 ms |
+| after 2 | 1.9 | 3.9 | 5.3 | 14.8 | 5.8 ms |
+| after 3 | 2.0 | 2.9 | 5.2 | 5.4 | 2.3 ms |
+
+The floor moved by the size of the window (4.3 → 1.9 ms) and the median by 1.5–3 ms; the QUIC
+rtt estimate wandered between runs (2.3–5.8 ms, it is iroh's smoothed value, not a per-run
+ping), so the medians are the honest comparison. What is left under the floor is one rtt plus
+the engine and the channel hops; the flood cap is unchanged (a `yes` still sends one frame per
+8 ms).
+

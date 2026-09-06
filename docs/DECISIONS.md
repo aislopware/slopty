@@ -415,9 +415,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   for 2 ms and then sent a frame, so a flooding shell produced 500 frames/s per session; twenty
   of them overran every client's 256-frame sink and hostd detached the client ("cannot keep
   up") within seconds. `slopty_host::session::MIN_FRAME_INTERVAL` (8 ms) paces a session's
-  frames after the first: a burst after a quiet spell still leaves after `COALESCE`, a flood
-  leaves every 8 ms. No display shows more than 120 Hz; the prediction path is unaffected
-  (the client's local echo does not wait for a frame).
+  frames after the first: a flood leaves every 8 ms. No display shows more than 120 Hz; the
+  prediction path is unaffected (the client's local echo does not wait for a frame).
+  Amended 2026-09-06: the 2 ms `COALESCE` window that a burst after a quiet spell used to wait
+  is gone. With the pacer in place it bought nothing (a flood is bounded by the 8 ms interval
+  either way) and it was the largest fixed cost on a keystroke's echo: `bench echo` on
+  loopback sat at QUIC rtt + ~3 ms, 2 ms of which was this window. Output after a quiet spell
+  is now framed at once; bytes already readable when the timer fires still land in the same
+  frame because the actor's select reads the master first. Before/after in MEASUREMENTS
+  2026-09-06 "leading-edge frame".
 - ✅ **Only items in the viewport are drawn** (2026-09-05). `CanvasView::draws` culls an item whose
   screen rectangle is outside the viewport, except the active item and one being dragged or
   resized (their views must stay in the frame for focus and the gesture). The minimap still

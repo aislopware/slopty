@@ -15,15 +15,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::HostError;
 
-/// Output is coalesced into at most one frame per this interval while it keeps arriving; an
-/// idle burst is flushed immediately on the next tick.
-const COALESCE: Duration = Duration::from_millis(2);
 /// While output keeps flowing, frames go out no closer together than this: 125 frames per
 /// second per session is more than any display shows (120 Hz `ProMotion`), and without the
-/// cap a `yes`-like flood sent one frame per `COALESCE`, five hundred a second per session,
-/// which twenty sessions turned into a client that could not keep up (MEASUREMENTS,
-/// 2026-09-05 "frame budget"). A burst after a quiet spell still leaves after `COALESCE`, so
-/// a keystroke's echo is not delayed.
+/// cap a `yes`-like flood sent five hundred frames a second per session, which twenty
+/// sessions turned into a client that could not keep up (MEASUREMENTS, 2026-09-05 "frame
+/// budget"). Output after a quiet spell is framed at once: there is nothing to coalesce it
+/// with yet, and a fixed window (2 ms until 2026-09-06) was the largest fixed cost on a
+/// keystroke's echo (MEASUREMENTS, 2026-09-06 "leading-edge frame"). Bytes that are already
+/// readable when the timer fires still join the same frame, because the read arm of the
+/// actor's select comes first.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
@@ -283,16 +283,15 @@ const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
 /// a history far past any configured scrollback.
 const CHECKPOINT_MAX_BYTES: usize = 12 << 20;
 
-/// When the frame for output that arrived at `now` should go out: `COALESCE` later, or at the
-/// end of the previous frame's `MIN_FRAME_INTERVAL` if that is later.
+/// When the frame for output that arrived at `now` should go out: now, or at the end of the
+/// previous frame's `MIN_FRAME_INTERVAL` if that is later.
 fn frame_due_after(
     now: tokio::time::Instant,
     last_frame: Option<tokio::time::Instant>,
 ) -> tokio::time::Instant {
-    let soon = now.checked_add(COALESCE).unwrap_or(now);
     match last_frame.and_then(|at| at.checked_add(MIN_FRAME_INTERVAL)) {
-        Some(paced) if paced > soon => paced,
-        _ => soon,
+        Some(paced) if paced > now => paced,
+        _ => now,
     }
 }
 
@@ -748,11 +747,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_burst_after_a_quiet_spell_leaves_after_coalesce() {
+    fn output_after_a_quiet_spell_is_framed_at_once() {
         let now = tokio::time::Instant::now();
-        assert_eq!(frame_due_after(now, None), now + COALESCE);
+        assert_eq!(frame_due_after(now, None), now);
         let long_ago = now.checked_sub(Duration::from_secs(1)).unwrap();
-        assert_eq!(frame_due_after(now, Some(long_ago)), now + COALESCE);
+        assert_eq!(frame_due_after(now, Some(long_ago)), now);
+        let at_boundary = now.checked_sub(MIN_FRAME_INTERVAL).unwrap();
+        assert_eq!(frame_due_after(now, Some(at_boundary)), now);
     }
 
     #[test]
@@ -760,8 +761,7 @@ mod tests {
         let now = tokio::time::Instant::now();
         let just_sent = now.checked_sub(Duration::from_millis(1)).unwrap();
         assert_eq!(frame_due_after(now, Some(just_sent)), just_sent + MIN_FRAME_INTERVAL);
-        // Exactly at the boundary, `COALESCE` wins (it is later).
-        let at_boundary = now.checked_sub(MIN_FRAME_INTERVAL).unwrap();
-        assert_eq!(frame_due_after(now, Some(at_boundary)), now + COALESCE);
+        let almost = now.checked_sub(Duration::from_millis(7)).unwrap();
+        assert_eq!(frame_due_after(now, Some(almost)), now + Duration::from_millis(1));
     }
 }
