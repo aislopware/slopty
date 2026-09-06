@@ -41,8 +41,17 @@ struct Args {
     #[arg(long)]
     print_ticket: bool,
     /// No relay, no wide-area lookup: clients must reach this host directly (LAN or a private
-    /// mesh such as `NetBird`). Also `SLOPTY_DIRECT_ONLY=1`.
-    #[arg(long, env = Reach::ENV)]
+    /// mesh such as `NetBird`). Also `SLOPTY_DIRECT_ONLY=1` (`1`/`true`/`yes`/`on`, as the
+    /// client reads it).
+    #[arg(
+        long,
+        env = Reach::ENV,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value = "false",
+        action = clap::ArgAction::Set
+    )]
     direct_only: bool,
     /// UDP port to listen on; 0 picks a random free port (clients that cannot hear mDNS
     /// then lose the host after a restart). Also `SLOPTY_PORT`.
@@ -204,4 +213,28 @@ async fn main() -> Result<()> {
         .send(slopty_proto::HostMsg::Rejected(slopty_proto::handshake::Rejection::Busy));
     daemon.listener.endpoint().close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::Args;
+
+    /// The flag, `--direct-only=<boolish>` and the env value all go through one boolish parser,
+    /// so `SLOPTY_DIRECT_ONLY=1` (the client's spelling) is accepted rather than rejected.
+    #[test]
+    fn direct_only_takes_the_clients_spellings() {
+        assert!(!Args::try_parse_from(["hostd"]).unwrap().direct_only);
+        assert!(Args::try_parse_from(["hostd", "--direct-only"]).unwrap().direct_only);
+        for yes in ["1", "true", "yes", "on"] {
+            let arg = format!("--direct-only={yes}");
+            assert!(Args::try_parse_from(["hostd", &arg]).unwrap().direct_only, "{yes}");
+        }
+        for no in ["0", "false", "no", "off"] {
+            let arg = format!("--direct-only={no}");
+            assert!(!Args::try_parse_from(["hostd", &arg]).unwrap().direct_only, "{no}");
+        }
+        assert!(Args::try_parse_from(["hostd", "--direct-only=maybe"]).is_err());
+    }
 }
