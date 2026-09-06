@@ -333,6 +333,9 @@ struct Ivars {
     sink: FrameSink,
     audio: Option<AudioSink>,
     on_stop: StopSink,
+    /// The last frame status seen, so a change is logged once (`SCFrameStatus` raw value; -1
+    /// before the first frame).
+    last_status: std::sync::atomic::AtomicIsize,
 }
 
 define_class!(
@@ -374,13 +377,26 @@ define_class!(
 
 impl Output {
     fn new(sink: FrameSink, audio: Option<AudioSink>, on_stop: StopSink) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(Ivars { sink, audio, on_stop });
+        let this = Self::alloc().set_ivars(Ivars {
+            sink,
+            audio,
+            on_stop,
+            last_status: std::sync::atomic::AtomicIsize::new(-1),
+        });
         // SAFETY: `NSObject`'s `init` on a freshly allocated instance with ivars set.
         unsafe { msg_send![super(this), init] }
     }
 
     fn screen_sample(&self, sample: &CMSampleBuffer) {
-        if frame_status(sample) != Some(SCFrameStatus::Complete) {
+        let status = frame_status(sample);
+        let raw = status.map_or(-2, |s| s.0);
+        let before = self.ivars().last_status.swap(raw, std::sync::atomic::Ordering::Relaxed);
+        if before != raw {
+            // Complete 0, Idle 1, Blank 2, Suspended 3, Started 4, Stopped 5 (SCStream.h): the
+            // framework's own word on why frames stop, logged once per change.
+            tracing::debug!(from = before, to = raw, "capture frame status");
+        }
+        if status != Some(SCFrameStatus::Complete) {
             return;
         }
         // SAFETY: valid sample buffer.

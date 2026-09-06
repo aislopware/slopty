@@ -72,14 +72,15 @@ const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 /// Cursor ticks between re-reads of the target's bounds (10 Hz).
 const BOUNDS_EVERY: u64 = 12;
 
-/// How long frames are held after the accessibility API says a window of the target's
-/// application went away, if the window list has not confirmed it by then.
+/// How long a window may not be served as a crop after the accessibility API says a window of
+/// its application went away, if the window list has not confirmed it by then.
 ///
 /// The accessibility signal cannot name the window, so it is a suspicion; the window list is
 /// the confirmation and it lags the order-out by 256–266 ms (MEASUREMENTS.md, "which signal
 /// knows first"), read on a geometry tick every `BOUNDS_EVERY × CURSOR_PERIOD` ≈ 100 ms. A
 /// false suspicion — another window of the same application closing — costs a freeze this long
-/// and nothing else; a true one is confirmed inside it and never leaks a frame of the desktop.
+/// and a round trip through the window filter; a true one is confirmed inside it and never
+/// leaks a frame of the desktop.
 pub const SUSPICION_HOLD: Duration = Duration::from_millis(400);
 
 /// Screen pipeline errors.
@@ -765,7 +766,8 @@ impl Shared {
     }
 
     /// The accessibility API says a window of the target's application went at `now`: hold
-    /// frames for [`SUSPICION_HOLD`] while the window list catches up.
+    /// frames for [`SUSPICION_HOLD`] while the window list catches up; the geometry tick moves
+    /// the stream to the window filter meanwhile.
     fn suspect(&self, now: u64) {
         let hold_us = u64::try_from(SUSPICION_HOLD.as_micros()).unwrap_or(u64::MAX);
         self.suspect_until_us.store(now.saturating_add(hold_us), Ordering::Relaxed);
@@ -790,7 +792,12 @@ impl Shared {
             return;
         }
         // And for the ~260 ms before the window list knows, the accessibility API's word: a
-        // window of that application just went, so this may be the desktop already.
+        // window of that application just went, so a crop may be the desktop already. The
+        // geometry tick moves a suspected stream to the window filter meanwhile, but its first
+        // frames are held too: ScreenCaptureKit still delivers a frame or two of the old filter
+        // after the swap has settled, and with the swap landing before the window list knows,
+        // those showed the backdrop (MEASUREMENTS.md, "a sibling window closing stalls the
+        // crop"). Nothing is sent for the hold, whichever path it arrives on.
         if self.suspected_at(host_now_us()) {
             self.counters.suspected.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1434,7 +1441,17 @@ impl ScreenStream {
         // Keyed on the target, not on the path this side believes it is on: a `retarget` the
         // framework rejects leaves the crop running while the bookkeeping says window filter,
         // and every frame it delivers is then a picture of the desktop.
-        let wanted = wanted_crop(id, rect, self.point_scale, on_screen);
+        // A suspicion is the other reason the crop is not allowed: the accessibility API has
+        // said a window of this application went, and for the hold the window list cannot be
+        // trusted to say which. Frames are held for the hold either way (`Shared::on_frame`);
+        // the swap is what wakes ScreenCaptureKit, which stops delivering for an
+        // application-scoped display filter once a window of that application is ordered out
+        // and is woken by no re-application of the same kind of filter, only by a change of
+        // kind (MEASUREMENTS.md, "a sibling window closing stalls the crop"). A false suspicion
+        // comes back to the crop on the first tick after the hold.
+        let suspected = self.shared.suspected_at(host_now_us());
+        let wanted =
+            if suspected { None } else { wanted_crop(id, rect, self.point_scale, on_screen) };
         let wanted_path =
             if wanted.is_some() { WindowPath::DisplayCrop } else { WindowPath::Filter };
         if wanted_path == self.path && wanted == self.capture_config.crop {
@@ -1458,7 +1475,7 @@ impl ScreenStream {
                     }
                 };
                 if self.transitions.begin(WindowPath::Filter, None, 2) {
-                    tracing::info!(stream = %self.id, on_screen, "window covered, hidden or off its display: window filter");
+                    tracing::info!(stream = %self.id, on_screen, suspected, "window covered, hidden, off its display or suspected: window filter");
                     self.update_capture(None);
                     self.retarget(&target);
                 }
@@ -1890,18 +1907,26 @@ mod tests {
         let held = shared.stats();
         assert_eq!((held.captured, held.suspected, held.withheld, held.cropped), (1, 1, 0, 0));
 
+        // The window filter's frames are held just the same: the framework still delivers a
+        // frame or two of the old filter after a swap has settled.
+        shared.cropped.store(false, Ordering::Relaxed);
+        shared.on_frame(&frame);
+        let filtered = shared.stats();
+        assert_eq!((filtered.captured, filtered.suspected, filtered.cropped), (2, 2, 0));
+        shared.cropped.store(true, Ordering::Relaxed);
+
         // Confirmed by the window list: the frame is withheld, the older reason wins.
         shared.target_hidden.store(true, Ordering::Relaxed);
         shared.on_frame(&frame);
         let confirmed = shared.stats();
-        assert_eq!((confirmed.suspected, confirmed.withheld), (1, 1));
+        assert_eq!((confirmed.suspected, confirmed.withheld), (2, 1));
 
         // The hold has lapsed and the window list says on screen: frames flow again.
         shared.target_hidden.store(false, Ordering::Relaxed);
         shared.suspect_until_us.store(0, Ordering::Relaxed);
         shared.on_frame(&frame);
         let flowing = shared.stats();
-        assert_eq!((flowing.captured, flowing.suspected, flowing.cropped), (3, 1, 1));
+        assert_eq!((flowing.captured, flowing.suspected, flowing.cropped), (4, 2, 1));
     }
 
     /// What the crop must never hand on. The path is decided on the geometry tick, but the

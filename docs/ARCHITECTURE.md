@@ -261,8 +261,12 @@ on the window's application, on its own `CFRunLoop` thread) hears AppKit order a
 moment it happens, and its callback opens a `SUSPICION_HOLD` (400 ms) during which `on_frame`
 holds every frame (`ScreenStats::suspected`). Accessibility cannot name the window, so the hold is
 a suspicion — any window of that application going raises it — and the geometry tick's
-`target_hidden` is the confirmation that outlives it; a false suspicion costs a 400 ms freeze,
-never a frame of the desktop. Without accessibility trust the watch is simply absent and the
+`target_hidden` is the confirmation that outlives it; a false suspicion costs a ~500 ms freeze,
+never a frame of the desktop. During the hold `follow_window` moves the stream to the window
+filter and brings the crop back on the first tick after it: ScreenCaptureKit stops delivering
+for an application-scoped display filter once a window of that application is ordered out, and
+only a change of filter kind wakes it (DECISIONS.md "A suspicion moves the stream to the window
+filter"). Without accessibility trust the watch is simply absent and the
 crop carries black rather than what is behind the window for those ~260 ms, in every case that
 has been measured including another application's window: DECISIONS.md "The accessibility API
 knows about a hide 260 ms before core graphics does" and "A crop cannot be made to show another

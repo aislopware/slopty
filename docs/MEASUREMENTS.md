@@ -2445,3 +2445,60 @@ itself (their socket task, endpoint and connection drivers, and one wake at each
 the same on one worker. What the worker count buys is the tail — p90 0.8 against 1.5–2.8 ms,
 max 0.9 against 6.8 — which is worth knowing and not worth a runtime change on the strength
 of two runs (DECISIONS "The QUIC legs are quinn's and iroh's own").
+
+## 2026-09-06 — a sibling window closing stalls the crop
+
+```sh
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+  --test e2e --test-threads 1 --no-capture -E 'test(a_sibling_window_closing) | \
+  test(a_hidden_window_stops) | test(what_a_crop_shows_of_an_empty_rectangle) | \
+  test(what_a_crop_shows_of_another_application)'
+```
+
+The test written to price a false suspicion — the idle-window helper opens a second window of
+its own process next to the target and orders it out while the target streams on the crop path
+— found something else first. With the hold as it was (frames held for 400 ms, the filter left
+alone) the suspicion came and went and **no frame was ever captured again**: `encoded` stood
+still for the rest of the run, and the `capture frame status` log added for this (a debug line
+on every change of `SCFrameStatus`) showed the framework's last word was a `Complete` frame
+before the order-out and nothing after it. An application-scoped display filter
+(`initWithDisplay:includingApplications:exceptingWindows:`) stops delivering sample buffers once
+a window of that application is ordered out, with no error and no status change. What wakes it,
+tried in that order on the same run:
+
+| after the sibling went                                                           | frames again |
+| -------------------------------------------------------------------------------- | ------------ |
+| nothing (the hold lapses, the filter stays)                                      | never        |
+| `updateContentFilter` with the same filter rebuilt from the cached content        | never        |
+| `updateContentFilter` with the same kind of filter from a fresh `SCShareableContent` | never     |
+| swap to the window filter, then back to the display crop                         | yes          |
+
+Only a change of filter *kind* wakes it. The swap back to the crop is rejected once with
+`-3812` when it is asked in the same tick as the retarget (the crop update reaches the framework
+while the filter is still the window filter); the retry on the next tick lands, as for any
+other path change.
+
+So a suspicion now moves the stream to the window filter for the hold (`follow_window` treats
+"suspected" like "covered"), frames held throughout, and the crop returns on the first tick
+after the hold. Read from the same tests, debug build, mac-studio, one run each:
+
+| scenario                    | suspicions | frames held | withheld | crop frames after the order | flowing again after | back on the crop |
+| --------------------------- | ---------- | ----------- | -------- | --------------------------- | ------------------- | ---------------- |
+| sibling closes (false)      | 1          | 16          | 0        | —                           | **520 ms**          | yes              |
+| target hides, nothing behind| 1          | 7           | 0        | 0                           | —                   | no (correct)     |
+| target hides, same app      | 1          | 5           | 0        | 0                           | —                   | no               |
+| target hides, another app   | 1          | 6           | 0        | 0                           | —                   | no               |
+
+The false suspicion costs a 520 ms outage (the 400 ms hold plus a tick and the swap back) and
+the stream is whole afterwards; before this it was dead. The true hides gain from it as well:
+`swap_ms` (order → off the crop path) is **158–206 ms** against 373–473 before, because the
+swap is now asked on the suspicion instead of on the confirmation, and `withheld` is 0 because
+the crop is already gone by the time the window list agrees.
+
+One variant was tried and rejected on this evidence: holding only the *crop's* frames during a
+suspicion and letting the window filter's through, so a false suspicion would not freeze at
+all. Two of the hide runs then encoded 1–2 frames after the swap had settled, and the client's
+tail pictures were the backdrop (luma level 0.5 behind a same-application window and 28.5
+behind nothing, against 136 for the target): the framework delivers a frame or two of the old
+filter after the swap's completion handler, and with the swap landing before the window list
+knows, those are the desktop. The hold covers every frame for its duration, whichever path.

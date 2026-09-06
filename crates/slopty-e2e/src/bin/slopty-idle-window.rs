@@ -16,6 +16,10 @@
 //!   never sees a frame.
 //! * `show` — order it back in and repaint it forever, which is the host's cue that the source is
 //!   live again.
+//! * `sibling` — open a second window of this same process beside the first, and `unsibling` —
+//!   order that one out again. A window of the *same application* going away is what the host's
+//!   accessibility hide watch cannot tell from the target going away, so this is how a false
+//!   suspicion is produced on purpose.
 //! * `quit` — leave.
 //!
 //! It writes `ready` into `<dir>` once the window is up.
@@ -102,10 +106,45 @@ mod macos {
 
         let mut shown = true;
         let mut ticks: u32 = 0;
+        let mut sibling: Option<objc2::rc::Retained<NSWindow>> = None;
         loop {
             pump();
             if dir.join("quit").exists() {
                 break;
+            }
+            if consume(&dir, "sibling") {
+                let beside = NSRect {
+                    origin: NSPoint { x: origin.x + SIZE.width + 40.0, y: origin.y },
+                    size: SIZE,
+                };
+                // SAFETY: as for the first window: the designated initialiser with plain
+                // values, on the main thread (AppKit, `NSWindow`).
+                let second = unsafe {
+                    NSWindow::initWithContentRect_styleMask_backing_defer(
+                        NSWindow::alloc(mtm),
+                        beside,
+                        NSWindowStyleMask::Titled,
+                        NSBackingStoreType::Buffered,
+                        false,
+                    )
+                };
+                second.setTitle(&NSString::from_str(&format!("{title} sibling")));
+                // SAFETY: as above (AppKit, `NSWindow.isReleasedWhenClosed`).
+                unsafe {
+                    second.setReleasedWhenClosed(false);
+                }
+                second.setBackgroundColor(Some(&NSColor::redColor()));
+                second.orderFrontRegardless();
+                note(&dir, "sibling", second.isVisible());
+                sibling = Some(second);
+            }
+            if consume(&dir, "unsibling") {
+                if let Some(second) = sibling.take() {
+                    second.orderOut(None);
+                    note(&dir, "unsibling", second.isVisible());
+                } else {
+                    note(&dir, "unsibling", false);
+                }
             }
             if consume(&dir, "hide") {
                 shown = false;

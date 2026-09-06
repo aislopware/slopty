@@ -2584,9 +2584,11 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
     — into a freeze of 400 ms rather than a leak. Focus and main-window changes are *not*
     suspicions: they fire on every switch between an application's windows and would freeze a
     multi-window target constantly. The hold is 400 ms because the confirmation is the 256–266 ms
-    lag plus one geometry tick (≈100 ms). The false-suspicion rate on a real multi-window
-    application is still unmeasured; `ScreenStats::suspicions` against `withheld` on a long
-    session is how to read it.
+    lag plus one geometry tick (≈100 ms). A false suspicion is priced at 520 ms of outage and
+    16 frames held, with the stream back on the crop by itself
+    (`a_sibling_window_closing_keeps_the_stream_flowing`; the ruling below on what that test
+    found first). The false-suspicion rate on a real multi-window application is still
+    unmeasured; `ScreenStats::suspicions` against `withheld` on a long session is how to read it.
   * **The constants are string literals.** Ruled in "Constants the SDK defines as `CFSTR`
     macros" below; the spelling lives once, in `crates/slopty-capture/src/ax.rs`.
   * **Without accessibility trust there is no watch** (`AxError::NotTrusted`, logged once per
@@ -2597,6 +2599,24 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   window-server data core graphics reads, so they cannot be earlier than it; window-server
   notifications are private API and out for that reason; and deciding a hide from the frames
   themselves (the crop going black) is a guess about content that a dark window would trip.
+- ✅ **A suspicion moves the stream to the window filter, because ScreenCaptureKit stalls an
+  application-scoped display filter when a window of that application is ordered out**
+  (2026-09-06, found by the false-suspicion test). With the hold alone, a sibling window of the
+  target's process closing left the stream dead: no sample buffer ever again, no error, no
+  status change (MEASUREMENTS.md, "a sibling window closing stalls the crop"). Re-applying the
+  same filter, from the cached content or a fresh `SCShareableContent`, does not wake it; a
+  change of filter kind does. So `follow_window` treats a live suspicion like a covered window
+  — the crop is not allowed, the stream goes to the window filter on the next tick — and comes
+  back to the crop on the first tick after the hold; a crop update asked in the same tick as
+  the retarget is rejected once with `-3812` and lands on the retry, like any other path change.
+  Frames stay held for the whole hold on either path: the variant that let the window filter's
+  frames through encoded 1–2 pictures of the backdrop after the swap had settled, because the
+  framework still delivers a frame or two of the old filter after the completion handler.
+  Measured cost of a false suspicion: 520 ms without frames and 16 held, nothing withheld, the
+  crop back by itself. Side effect on true hides: off the crop path 158–206 ms after the order
+  (373–473 before), since the swap is asked on the suspicion rather than the confirmation. The
+  `capture frame status` debug line (one per change of `SCFrameStatus`) stays in
+  `slopty_capture::stream`: it is how a silent stall is told from an idle source.
 - ✅ **Constants the SDK defines as `CFSTR` macros are spelled once, next to their use**
   (2026-09-06). "Apple framework keys and constants come from the objc2 statics, never string
   literals" is written for constants that have a symbol: the static is the guarantee that the
