@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use slopty_agent::transcript::Tail;
 use slopty_core::{ClientId, SessionId, StreamId};
 use slopty_host::HostError;
-use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, listing};
+use slopty_host::screen::{
+    DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, listing,
+};
 use slopty_host::session::ClientSink;
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
@@ -75,7 +76,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     }
 
     let mut events = daemon.events.subscribe();
-    let (datagrams, datagram_rx) = mpsc::channel::<Bytes>(DATAGRAM_QUEUE);
+    let (datagrams, datagram_rx) = mpsc::channel::<Queued>(DATAGRAM_QUEUE);
     let budget = DatagramBudget::new();
     let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
     let paths = tokio::spawn(slopty_net::endpoint::log_path_events(conn.clone(), "host"));
@@ -253,6 +254,48 @@ impl Backlog {
     }
 }
 
+/// Samples the queue-wait quantiles are computed over: 10 s of frames at 60 fps and ~10
+/// datagrams a frame would be more; this is enough to say what the last stretch looked like.
+const WAIT_WINDOW: usize = 1024;
+
+/// A datagram that waited longer than this in the pump's channel is logged on its own, even
+/// with no backlog around it: a queue that was empty when the pump last looked and then held
+/// one datagram for the length of a deschedule is invisible to the turn accounting above.
+const LATE_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How long each datagram waited in the pump's channel, read from the stamp `Queued` carries,
+/// over the last [`WAIT_WINDOW`] of them. This is the measurement the backlog accounting
+/// approximates: not how the pump's turns went, but what each datagram actually paid.
+#[derive(Debug, Default)]
+struct Waits {
+    ring: std::collections::VecDeque<u64>,
+    /// The worst single wait since the last time it was reported.
+    worst_us: u64,
+}
+
+impl Waits {
+    fn push(&mut self, waited_us: u64) {
+        if self.ring.len() >= WAIT_WINDOW {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(waited_us);
+        self.worst_us = self.worst_us.max(waited_us);
+    }
+
+    fn quantiles(&self) -> Quantiles {
+        let (a, b) = self.ring.as_slices();
+        let mut all = Vec::with_capacity(a.len().saturating_add(b.len()));
+        all.extend_from_slice(a);
+        all.extend_from_slice(b);
+        Quantiles::of(&all)
+    }
+
+    /// The worst wait since the last call, and forget it.
+    fn take_worst_us(&mut self) -> u64 {
+        std::mem::take(&mut self.worst_us)
+    }
+}
+
 /// Drain the media queue into QUIC datagrams, tracking what the path can carry.
 ///
 /// Logs every stretch during which QUIC held datagrams back (the send buffer was not empty):
@@ -264,10 +307,13 @@ impl Backlog {
 /// because the window or the pacer holds it. A receiver cannot tell them apart — both are
 /// silence on the link — so a stall charged to the network needs the backlog line ruled out
 /// first.
-async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget: DatagramBudget) {
+async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Queued>, budget: DatagramBudget) {
     let mut last_budget = 0;
     let mut hold: Option<Hold> = None;
     let mut backlog: Option<Backlog> = None;
+    let mut waits = Waits::default();
+    // When a lone late datagram was last logged, so a stretch of them is one line a second.
+    let mut late_logged: Option<std::time::Instant> = None;
     // What the previous turn of the loop saw, so this one can tell how long the pump owed a
     // turn to datagrams that were already waiting.
     let mut last_turn = std::time::Instant::now();
@@ -302,6 +348,8 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget:
                 behind_ms = b.behind.as_millis(),
                 late_ms = b.late.as_millis(),
                 max_queued = b.max_queued,
+                waited = %waits.quantiles().describe(),
+                worst_wait_ms = waits.take_worst_us() / 1000,
                 "the datagram pump caught up"
             );
         }
@@ -333,7 +381,21 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Bytes>, budget:
                 }
             }
         }
-        let Some(datagram) = datagram else { continue };
+        let Some(queued_datagram) = datagram else { continue };
+        let waited_us = queued_datagram.waited_us();
+        let datagram = queued_datagram.datagram;
+        waits.push(waited_us);
+        if waited_us > u64::try_from(LATE_WAIT.as_micros()).unwrap_or(u64::MAX)
+            && backlog.is_none()
+            && late_logged.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+        {
+            late_logged = Some(std::time::Instant::now());
+            tracing::debug!(
+                waited_ms = waited_us / 1000,
+                queued,
+                "a datagram waited in the pump's channel with no backlog to charge it to"
+            );
+        }
         if let Some(max) = conn.max_datagram_size() {
             if max != last_budget {
                 tracing::debug!(max, "datagram budget");
@@ -362,7 +424,7 @@ struct Peer<'d> {
     attached: HashMap<SessionId, (JoinHandle<()>, ClientSink)>,
     screens: HashMap<StreamId, ScreenStream>,
     next_stream: u32,
-    datagrams: mpsc::Sender<Bytes>,
+    datagrams: mpsc::Sender<Queued>,
     budget: DatagramBudget,
     pump: JoinHandle<()>,
     paths: JoinHandle<()>,
@@ -736,7 +798,7 @@ impl Peer<'_> {
 mod tests {
     use std::time::Duration;
 
-    use super::{Backlog, HOLD_POLL};
+    use super::{Backlog, HOLD_POLL, WAIT_WINDOW, Waits};
 
     /// 200 ms of sleep, less the millisecond the loop was entitled to take.
     const LATE: Duration = match Duration::from_millis(200).checked_sub(HOLD_POLL) {
@@ -761,6 +823,26 @@ mod tests {
         assert_eq!(b.behind, Duration::from_millis(201));
         assert_eq!(b.late, LATE, "the worst turn stands");
         assert_eq!(b.max_queued, 40);
+    }
+
+    /// The wait ring keeps the last window of stamps, reports their quantiles, and hands out
+    /// the worst wait once: a 200 ms deschedule shows up as the max even after a thousand
+    /// quick datagrams have pushed it out of the window's median.
+    #[test]
+    fn the_wait_ring_reports_the_last_window_and_the_worst_once() {
+        let mut w = Waits::default();
+        w.push(200_000);
+        for _ in 0..WAIT_WINDOW {
+            w.push(50);
+        }
+        let q = w.quantiles();
+        assert_eq!(
+            (q.n as usize, q.p50_us, q.max_us),
+            (WAIT_WINDOW, 50, 50),
+            "the window moved on"
+        );
+        assert_eq!(w.take_worst_us(), 200_000, "the worst wait does not");
+        assert_eq!(w.take_worst_us(), 0, "and is reported once");
     }
 
     /// A pump that keeps its promise every turn is never late, however long the backlog lasts.

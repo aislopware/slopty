@@ -45,6 +45,28 @@ use tokio::task::JoinHandle;
 pub const DATAGRAM_QUEUE: usize = 4096;
 /// Free queue slots below which a captured frame is dropped instead of encoded.
 const LOW_WATER: usize = 256;
+
+/// A datagram in the queue between the pipeline and the transport, stamped with when it was
+/// put there.
+///
+/// The pump reads the stamp on the way out: the difference is the time the datagram spent
+/// waiting for the pump to run, which no turn timing can see for a queue that was empty when
+/// the pump last looked.
+#[derive(Clone, Debug)]
+pub struct Queued {
+    /// The datagram to send.
+    pub datagram: Bytes,
+    /// `host_now_us()` when it was queued.
+    pub queued_at_us: u64,
+}
+
+impl Queued {
+    /// How long this datagram has been in the queue, microseconds.
+    #[must_use]
+    pub fn waited_us(&self) -> u64 {
+        host_now_us().saturating_sub(self.queued_at_us)
+    }
+}
 /// Cursor sample period (120 Hz); a datagram goes out only when the position changed.
 const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 /// Cursor ticks between re-reads of the target's bounds (10 Hz).
@@ -700,7 +722,7 @@ struct Shared {
     /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
     suspect_until_us: AtomicU64,
-    out: mpsc::Sender<Bytes>,
+    out: mpsc::Sender<Queued>,
     budget: DatagramBudget,
     counters: Counters,
 }
@@ -728,10 +750,11 @@ impl Shared {
 
     /// Queue a datagram; a full queue drops it (video is unreliable by design).
     fn push(&self, datagram: Bytes) -> bool {
-        match self.out.try_send(datagram) {
+        let queued_at_us = host_now_us();
+        match self.out.try_send(Queued { datagram, queued_at_us }) {
             Ok(()) => {
                 self.counters.datagrams.fetch_add(1, Ordering::Relaxed);
-                self.last_push_us.store(host_now_us(), Ordering::Relaxed);
+                self.last_push_us.store(queued_at_us, Ordering::Relaxed);
                 true
             }
             Err(_full_or_closed) => {
@@ -1145,7 +1168,7 @@ impl ScreenStream {
         id: StreamId,
         target: CaptureTarget,
         quality: Quality,
-        out: mpsc::Sender<Bytes>,
+        out: mpsc::Sender<Queued>,
         budget: DatagramBudget,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
@@ -1751,7 +1774,7 @@ mod tests {
 
     /// A stream's shared state with no encoder and nowhere to send: enough to drive
     /// [`Shared::on_frame`] and read what it counted.
-    fn shared_for_frames() -> (Arc<Shared>, mpsc::Receiver<Bytes>) {
+    fn shared_for_frames() -> (Arc<Shared>, mpsc::Receiver<Queued>) {
         let (out, rx) = mpsc::channel(8);
         let shared = Arc::new(Shared {
             id: StreamId(1),

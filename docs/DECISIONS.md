@@ -2728,7 +2728,16 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   descheduled for 200 ms could have reported 1 ms. It now sums the turns owed to datagrams
   already queued and keeps the worst turn against the 1 ms deadline the loop asks for while work
   is outstanding; re-measured, no turn past 25 ms in 3 × 90 s against QUIC holds of 96–100 ms in
-  the same logs. Unit test: `a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain`. The bench's `quic path (client side)` line — the feedback connection, permanently at
+  the same logs. Unit test: `a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain`.
+  Amended 2026-09-06: the turn accounting still could not see a datagram that arrived in an
+  empty queue and then waited out a deschedule alone — `queued_before` was zero, so no turn was
+  owed. Every datagram now carries its enqueue time (`slopty_host::screen::Queued`, stamped in
+  `Shared::push` with `host_now_us()`) and the pump reads the wait on the way out: the caught-up
+  line reports `waited` p50/p95/max over the last 1024 datagrams and the worst since the last
+  line, and a lone wait past 20 ms with no backlog to charge it to is logged on its own, at most
+  once a second. Host-internal; the stamp never goes on the wire. Unit test:
+  `the_wait_ring_reports_the_last_window_and_the_worst_once`; numbers in MEASUREMENTS.md
+  "what a datagram waits in the pump's channel". The bench's `quic path (client side)` line — the feedback connection, permanently at
   `min_pipe_cwnd` because nothing measurable flows on it — is relabelled
   `quic path (client→host, feedback only)`; reading it as the media window is the mistake this
   entry exists to stop.

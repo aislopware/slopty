@@ -2311,3 +2311,34 @@ off the crop path) is unchanged at 373–473 ms: the watch changes what is *sent
 lag, not the lag. One notification per hide, every time, so nothing else in the helper's
 window set was mistaken for it; the false-suspicion rate of a real multi-window application is
 still to be read from `suspicions` against `withheld` on a long session.
+
+## 2026-09-06 — what a datagram waits in the pump's channel
+
+```sh
+RUST_LOG="info,iroh::_events::path=debug,slopty_hostd::conn=debug" SLOPTY_FLAP_E2E=1 \
+  SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd --test e2e \
+  path_flap_with_no_load --no-capture
+# then read the "the datagram pump caught up" lines: waited = p50 / p95 / max over the last
+# 1024 datagrams, worst_wait_ms = the worst single wait since the previous line
+```
+
+The no-load flap shape (90 s, loopback, mac-studio, debug build), now with every datagram
+stamped when it is queued and the wait read by the pump on the way out — the number the
+backlog accounting could only approximate, and could not see at all for a datagram that
+arrived in an empty queue and waited alone.
+
+| over 1654 caught-up lines, 1656 frames         | value        |
+| ---------------------------------------------- | ------------ |
+| queue wait p50 (worst line)                    | 0.11 ms      |
+| queue wait p95 (worst line)                    | 0.66 ms      |
+| queue wait max in any window                   | **10.8 ms**  |
+| lines whose worst single wait was ≥ 5 ms       | 8 of 1654    |
+| lone waits past 20 ms with no backlog          | 0            |
+| turn accounting on the same run (`late_ms`)    | 0 everywhere |
+| max queued when the pump looked                | 31           |
+
+The pump is not where the stalls of this shape come from: the typical datagram waits a tenth
+of a millisecond for it and the worst waited 11 ms, against the 4 stalls (355 ms) the receiver
+counted in the same run and QUIC holds of 96–100 ms measured before ("stalls are not made by
+load"). What the stamp adds over the turn accounting is the certainty: the earlier `late_ms`
+of 0 was consistent with a lone descheduled datagram it could not see, and now it is not.

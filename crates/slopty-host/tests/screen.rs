@@ -40,7 +40,7 @@ mod tests {
         let (mut data, mut parity, mut cursor, mut keyframes) = (0_u32, 0_u32, 0_u32, 0_u32);
         let mut frames = std::collections::BTreeSet::new();
         while let Ok(Some(datagram)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            let (header, _payload) = MediaHeader::parse(&datagram).expect("well-formed");
+            let (header, _payload) = MediaHeader::parse(&datagram.datagram).expect("well-formed");
             match Kind::from_u8(header.kind) {
                 Some(Kind::VideoData) => {
                     data += 1;
