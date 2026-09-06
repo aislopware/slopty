@@ -2585,7 +2585,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   worse than that, and no measurement of Cubic over the mesh exists to weigh against it. Two
   controllers, two paths, one knob: the numbers for both are on the MEASUREMENTS page and
   `SLOPTY_CC` selects either. Revisit when the mesh comparison exists, or when noq exposes the
-  `ProbeRTT` knobs.
+  `ProbeRTT` knobs. **Settled 2026-09-06 by the mesh comparison below: the default stays BBR3,
+  and the loopback numbers in this entry are true but were taken in a regime where no window
+  binds.**
 - ❌ **The client's `pacing.rs` is not the ACK path** (2026-09-06, checked while looking for a
   receiver-side limiter). It is the display pacer — present-on-arrival, replace rather than queue,
   and the percentiles that go with it. What governs ACK cadence is `slopty_net::endpoint`'s
@@ -2654,3 +2656,75 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `a_sleep_is_forgiven_once_and_a_stall_that_stays_on_keeps_reporting`,
   `sleep_inside_the_hosts_own_silence_is_not_forgiven_twice`; both were checked against a mutation
   of the fix they cover.
+
+- ✅ **BBR3 stays the default congestion controller; the choice is decided by the busy case, and
+  a still desktop cannot decide it at all** (2026-09-06, sixteen 90 s runs over the Wi-Fi/mesh
+  path, MEASUREMENTS.md "BBR3 vs Cubic over the mesh"). This is the comparison the entry above
+  said it was waiting for, and it splits by regime rather than by controller.
+
+  On a **still desktop** the two are indistinguishable on everything the receiver sees — stalls
+  165.5 against 166, stalled 18.7 s against 19.0 s, the same arrival-gap-max distribution (each
+  has two of six runs past 1.4 s) — even though Cubic's window runs 3× larger at p50 and BBR3
+  sits on its four-packet floor for 35.8 % of samples against Cubic's 0.1 %, and even though
+  Cubic absorbed roughly twice the packet loss. Nothing binds: a still desktop offers ~1 Mbit/s
+  against a 30 Mbit/s ask, so the window the controller picks is a window nothing needs. **The
+  loopback ruling above was measured entirely in this regime.** Its numbers stand and its
+  mechanism (`ProbeRTT`) is real; what it could not see is that the quantity it optimised does
+  not reach the user.
+
+  Put a scrolling terminal on the captured display and they separate at once, in the direction
+  the 2026-09-05 ruling claimed and on the path it claimed it for: **Cubic's window collapses to
+  13–15 kB under real loss and its target falls to 1.6–7.9 Mbit/s, while BBR3 holds 40–43 kB and
+  one run reached the full 30 Mbit/s**, moving more datagrams in both interleaved pairs. That is
+  picture quality, not smoothness — delivered fps is 54–56 either way because ScreenCaptureKit
+  caps at 60 — and it is the whole reason a 30 Mbit/s target exists. `SLOPTY_CC=cubic` remains
+  the escape hatch for a short path with no loss, where the `ProbeRTT` hitch is the only thing
+  happening.
+
+  **The strength of this evidence, stated plainly, because a later sweep partly cuts against it.**
+  Counting every busy-source pair, BBR3 delivers more datagrams and a higher end target in three
+  of four interleaved pairs. The exception is the 20 Mbit/s sweep run, taken after the link had
+  degraded to ~600 lost packets per 90 s: there **BBR3** cut to the 1 Mbit/s floor with a 9.5 s
+  backlog at cwnd 4 920 and a 5.8 s arrival gap, while Cubic held 5.1 Mbit/s and moved 36 % more
+  datagrams. So the claim this ruling supports is narrow: BBR3 is better where the window is the
+  binding constraint on a merely-lossy link. Once the link is bad enough that the rate controller
+  is cutting to its floor anyway, **both controllers collapse and which one does so in a given
+  run is not predictable from the controller** — neither is defensible there on this evidence.
+  Settling that needs ≥ 3 runs per cell on a link in one state, which this session could not
+  provide: it drifted monotonically worse across the two hours of measurement.
+
+  Method notes worth keeping: runs were **interleaved** because the link drifted hard (23 → 240
+  lost packets per run across the twelve still runs, with Cubic drawing the worse half); and the
+  **mesh MTU is 1230**, so BBR3's `MinPipeCwnd` floor is 4 920 B here against loopback's 5 808 —
+  the same four packets, so the two pages' floor figures must not be compared as bytes.
+
+- 🔬 **The two controllers fail in opposite ways, and `held_ms` is one instrument reading both**
+  (2026-09-06). `held_ms` in hostd's pump is how long QUIC's datagram send buffer went without
+  emptying — not one datagram's delay — so a long hold means two different things. **BBR3
+  starves**: 43.8 s and 33.8 s holds peaking at 37 kB with cwnd at 4 920, which is ~2 Mbit/s
+  through four packets at a 20 ms rtt, delivered to the user as 269 stalls whose worst gap is
+  186 ms — a drizzle, not a freeze. The 37 kB peak is `frame_fits`' 32 kB `HELD_FLOOR` plus a
+  frame in flight, so the capture guard was dropping frames throughout. **Cubic overshoots**:
+  1.7 s and 1.9 s holds peaking at 267 kB and 347 kB, each one refresh keyframe admitted while
+  the buffer was under the 32 kB floor and then draining through a 10–17 kB window. `frame_fits`
+  gates a frame *before* it is encoded, so it bounds what is queued ahead of a keyframe and never
+  the keyframe itself. Read a hold's `max_bytes` beside its `held_ms` or the number means
+  nothing.
+
+- ✅ **`send_ms_lo` stays one byte; no protocol widening** (2026-09-06, the mesh case the stalls
+  ruling left open). Across ~24 minutes of mesh streaming and ~2 800 released stalls: `stamp
+  wrapped 0` and `stamp backwards 0` everywhere, and exactly one gap past the 256 ms range —
+  2.016 s, `host_gap=0ns`, `stamp=Absent`, charged whole to the link, which is the right party
+  (the host had a 1 979 ms send backlog in that run). The reason is structural rather than luck:
+  a wrap needs a datagram to *arrive* carrying a stamp more than 256 ms old, and when the link
+  holds everything for two seconds nothing arrives to carry one, so the case lands on the
+  already-pessimistic `Absent` path. Wrapping would need a link that delays past 256 ms without
+  reordering and keeps delivering; this path does not do that. PROTOCOL_VERSION 15 stays free.
+
+- ✅ **Initial congestion window 32 packets stands, and buys nothing visible on Wi-Fi**
+  (2026-09-06, five interleaved starts per window over the mesh). Median first-decoded 587 ms at
+  IW 32 against 581 ms at IW 10, inside a 526–1 144 ms spread within each condition. The
+  arithmetic is unrefuted — a 58.7 kB keyframe is 49 packets, 5 windows at IW 10 and 2 at IW 32,
+  ~33 ms at this path's 11 ms rtt — but start-up here is dominated by the 217–304 ms to the first
+  datagram and 40 ms of encode, not by the window. Keep it for LAN and loopback, where it is
+  cheap and the arithmetic is the same; do not claim a Wi-Fi start-up win for it.

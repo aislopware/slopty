@@ -1978,3 +1978,177 @@ on its own task every 100 ms (that file belongs to another branch; the beats did
 page is a still desktop, where ScreenCaptureKit delivers 8–29 fps of near-empty frames and the
 stream carries about 1 Mbit/s against its 30 Mbit/s target, so nothing here says what the send
 side does when there is actually 30 Mbit/s to send.
+
+## 2026-09-06 — BBR3 vs Cubic over the mesh, still desktop and busy source (debug build)
+
+The comparison the cadence ruling left open, now that macbook-pro is on. Path: MacBook Pro over
+Wi-Fi → WireGuard mesh (`100.107.14.250`) → mac-studio, `--direct-only` both ends, idle
+`slopty ping` before the first run app rtt 8.3 / 10.3 / 38.3 ms and QUIC rtt 12.4 ms. Debug build
+both ends, the same profile as every mesh row above. Target display 6 (1920×1080), default
+30 Mbit/s target, 90 s per run, **interleaved** BBR3/Cubic so the link's drift is shared. The
+link did drift: QUIC lost packets per run climbed 23 → 240 across the twelve still-desktop runs,
+and Cubic drew the worse half of it. Also on the machine and its network throughout: Cloudflare
+WARP, Slack, Parsec and an iOS Simulator.
+
+**The mesh MTU is 1230, not loopback's 1452**, so BBR3's `MinPipeCwnd` floor here is
+**4 920 B**, not 5 808. Same four packets; the two tables cannot be compared on the raw byte.
+
+### A still desktop (application-limited, ~1 Mbit/s of content)
+
+| run | cc | fps | cwnd min / p50 / max | at floor | holds >25 ms | worst hold | stalls (stalled) | gap max | lost / cong | FEC / lost / NACK / refresh |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| b1 | BBR3  | 17.6 | 4 920 / 10 529 / 121 774 | 6.7 %  | 7.3/min   | 113 ms    | 145 (16 302 ms) | 224 ms  | 23 / 17  | 7 / 0 / 8 / 0        |
+| c1 | Cubic | 18.8 | 4 246 / 25 468 / 74 255  | 0.1 %  | 8.7/min   | 82 ms     | 171 (20 022 ms) | 291 ms  | 64 / 31  | 15 / 0 / 21 / 0      |
+| b2 | BBR3  | 16.2 | 4 920 / 4 920 / 244 948  | 65.7 % | 43.3/min  | 43 757 ms | 268 (29 891 ms) | 1 426 ms| 53 / 41  | 13 / 11 / 1 063 / 21 |
+| c2 | Cubic | 18.4 | 5 994 / 15 277 / 71 367  | 0.1 %  | 4.7/min   | 1 979 ms  | 177 (22 063 ms) | 2 223 ms| 124 / 27 | 5 / 4 / 28 / 8       |
+| b3 | BBR3  | 18.6 | 4 920 / 7 821 / 115 719  | 37.2 % | 18.0/min  | 135 ms    | 175 (19 948 ms) | 315 ms  | 160 / 88 | 28 / 1 / 42 / 1      |
+| c3 | Cubic | 17.2 | 3 273 / 12 306 / 123 721 | 0.1 %  | 18.7/min  | 1 681 ms  | 170 (19 357 ms) | 1 953 ms| 240 / 94 | 18 / 53 / 120 / 60   |
+| b4 | BBR3  | 15.9 | 4 920 / 4 920 / 404 972  | 69.2 % | 161.3/min | 1 897 ms  | 184 (22 457 ms) | 1 670 ms| 77 / 53  | 25 / 15 / 1 164 / 22 |
+| c4 | Cubic | 18.6 | 2 460 / 9 548 / 238 470  | 0.1 %  | 6.0/min   | 174 ms    | 162 (18 623 ms) | 373 ms  | 136 / 77 | 26 / 2 / 27 / 3      |
+| b5 | BBR3  | 18.6 | 4 920 / 7 971 / 169 132  | 34.4 % | 10.7/min  | 139 ms    | 156 (17 469 ms) | 203 ms  | 93 / 62  | 17 / 0 / 22 / 1      |
+| c5 | Cubic | 18.6 | 3 808 / 13 034 / 43 543  | 1.9 %  | 10.0/min  | 1 904 ms  | 154 (17 822 ms) | 189 ms  | 114 / 96 | 8 / 95 / 205 / 96    |
+| b6 | BBR3  | 18.6 | 4 920 / 10 697 / 120 525 | 4.5 %  | 9.3/min   | 104 ms    | 145 (16 407 ms) | 181 ms  | 9 / 6    | 2 / 0 / 3 / 0        |
+| c6 | Cubic | 18.6 | 3 091 / 20 312 / 120 864 | 0.3 %  | 3.3/min   | 39 ms     | 149 (16 807 ms) | 184 ms  | 30 / 24  | 7 / 0 / 10 / 1       |
+
+Medians: fps **18.1 / 18.6**, cwnd p50 **7 971 / 13 034 B**, samples at the floor **35.8 % /
+0.1 %**, holds past 25 ms **14.4 / 7.4 per minute**, worst hold **137 / 928 ms**, stalls
+**165.5 / 166**, stalled **18 708 / 18 990 ms**, lost packets absorbed **65 / 119** (BBR3 /
+Cubic).
+
+**On everything the receiver sees the two are indistinguishable** — same stall count, same
+stalled milliseconds, the same gap-max distribution (each has two runs past 1.4 s) — although
+Cubic's window runs 3× larger and BBR3 spends a third of its samples on four packets, and
+although Cubic absorbed roughly twice the loss. Neither window binds here: a still desktop offers
+~1 Mbit/s against a 30 Mbit/s ask, so the controller is choosing a window nothing needs.
+
+### A busy source (a Ghostty window scrolling `seq` on the captured display)
+
+| run | cc | fps | cwnd min / p50 / max | at floor | holds >25 ms | worst hold | stalls (stalled) | gap max | host target, end | datagrams | lost / cong | FEC / lost / NACK / refresh |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| bs1 | BBR3  | 56.2 | 4 920 / 40 524 / 156 295 | 1.2 % | 54.7/min | 377 ms   | 180 (20 015 ms) | 189 ms | **30.0 Mbit/s** | 33 122 | 334 / 262 | 166 / 3 / 259 / 3   |
+| cs1 | Cubic | 55.5 | 4 885 / 15 410 / 94 013  | 0.1 % | 44.0/min | 1 861 ms | 182 (20 713 ms) | 281 ms | 7.9 Mbit/s      | 28 052 | 310 / 244 | 153 / 12 / 219 / 14 |
+| bs2 | BBR3  | 56.0 | 4 920 / 43 322 / 263 914 | 1.3 % | 36.0/min | 1 413 ms | 176 (19 701 ms) | 447 ms | 13.9 Mbit/s     | 27 780 | 373 / 283 | 189 / 11 / 204 / 11 |
+| cs2 | Cubic | 54.5 | 3 218 / 13 077 / 203 716 | 0.1 % | 54.7/min | 2 070 ms | 179 (19 889 ms) | 488 ms | 1.6 Mbit/s      | 24 397 | 533 / 415 | 250 / 28 / 312 / 28 |
+
+Here the controllers separate, and in the direction the 2026-09-05 ruling claimed. **Cubic's
+window collapses to 13–15 kB under real loss and its target falls to 1.6–7.9 Mbit/s; BBR3 holds
+40–43 kB and one run reached the full 30 Mbit/s.** BBR3 also moved more datagrams in both pairs.
+Delivered fps is the same (54–56) because ScreenCaptureKit caps at 60 and both controllers keep
+up at this frame size — the difference is the bitrate the encoder was allowed to ask for, which
+is picture quality, not smoothness.
+
+The two failure modes are different things and the "worst hold" column mixes them. `held_ms` is
+how long QUIC's datagram send buffer went without emptying, not one datagram's delay:
+
+* **BBR3 starves.** b2's 43 757 ms and 33 795 ms holds peaked at **37 kB** with cwnd at 4 920 —
+  ~2 Mbit/s through a four-packet window at a 20 ms rtt, so the buffer never drained for 78 s of
+  the 90. Not one freeze: 269 released stalls whose worst gap is 186 ms, a drizzle. The 37 kB
+  peak is `frame_fits`' `HELD_FLOOR` (32 kB) plus a frame in flight — the guard was dropping
+  captures the whole time.
+* **Cubic overshoots.** c3's 1 681 ms hold peaked at **267 kB**, c5's 1 904 ms at **347 kB**:
+  one refresh keyframe, admitted while the buffer was under the 32 kB floor and then draining
+  through a 10–17 kB window. `frame_fits` gates a frame *before* it is encoded, so it bounds
+  what is queued ahead of a keyframe, never the keyframe itself. c5's 96 refreshes and 95 lost
+  frames are the same event.
+
+### The loss path over the mesh (the item that needed a second machine and a busy screen)
+
+The busy rows above are that measurement. Against the loopback injected-loss rows: parity
+recovers far more than is lost at every sample (166 / 3, 153 / 12, 189 / 11, 250 / 28 —
+FEC-recovered against frames lost outright), which the loopback rows never showed because
+loopback loses nothing without injection. Frames are tens of fragments here, so the packetizer's
+one-parity-fragment minimum no longer dominates and the redundancy controller's ratio is what
+binds — the regime the loopback note said this test could not reach. The NACK-answer guard is
+live and load-bearing: it refused 85 / 76 / 54 retransmits in b2 / b4 / c3, the collapsed-link
+case it was added for.
+
+### Stall attribution over the mesh, and whether `send_ms_lo` wraps
+
+Across all sixteen 90 s runs (~24 minutes of streaming, ~2 800 released stalls): **`stamp
+wrapped 0` and `stamp backwards 0` everywhere**, and exactly **one** stall gap past
+`send_ms_lo`'s 256 ms range — 2.016 s in c2, `host_gap=0ns`, `stamp=Absent`, the whole 2.016 s
+charged to the link. That is the right party: the host had a 1 979 ms send backlog in the same
+run. Every other gap is under 245 ms and reads as `Host(n)` with the link taking the remainder.
+
+No widening is proposed, and the reason is structural rather than luck. A wrap needs a datagram
+to *arrive* carrying a stamp more than 256 ms old; when the link holds everything for two seconds
+nothing arrives to carry a stamp, so the case lands on the `Absent` path, which is already
+pessimistic. Wrapping would need a link that delays past 256 ms without reordering *and* keeps
+delivering — not what this path does.
+
+Commands (mac-studio side; the client side is the recipe in "start-up over the mesh" with
+`/tmp/slopty-bench/mesh`):
+
+```sh
+# mac-studio, private daemons under this worktree
+D=$PWD/target/e2e-data/mesh; mkdir -p $D/data
+target/debug/slopty-ptyd --socket $D/ptyd.sock &
+RUST_LOG=info,slopty_net=debug,slopty_hostd=debug,slopty_host=debug \
+  SLOPTY_PORT=45550 SLOPTY_PATH_TRACE_MS=100 SLOPTY_CC=bbr3|cubic \
+  target/debug/slopty-hostd --direct-only --ptyd-socket $D/ptyd.sock \
+  --ctl-socket $D/hostd.sock --data-dir $D/data --port 45550 > $D/hostd-<tag>.log 2>&1 &
+gzip -1 -c target/debug/slopty | ssh macbook-pro 'mkdir -p /tmp/slopty-bench/mesh && gunzip -c > /tmp/slopty-bench/mesh/slopty && chmod +x /tmp/slopty-bench/mesh/slopty'
+open -na Ghostty --args -e sh -c 'seq 1 400000000'          # busy rows only
+# macbook-pro, once per run (hostd restarted between runs so SLOPTY_CC takes)
+ssh macbook-pro 'export SLOPTY_DATA_DIR=/tmp/slopty-bench/mesh/data SLOPTY_DIRECT_ONLY=1 \
+  RUST_LOG=warn,slopty_media=debug,slopty_client=debug; \
+  /tmp/slopty-bench/mesh/slopty bench screen --display 6 --seconds 90 --max-stalls 0'
+# host-side series, per run
+grep 'path health' $D/hostd-<tag>.log   | grep -o 'cwnd=[0-9]*'     # the window as a series
+grep 'quic released' $D/hostd-<tag>.log | grep -o 'held_ms=[0-9]* max_bytes=[0-9]* cwnd=[0-9]*'
+grep -c 'nack not answered' $D/hostd-<tag>.log
+```
+
+### QUIC initial window 32 vs 10 over the mesh (the measurement the IW ruling was owed)
+
+`slopty bench screen --display 6 --seconds 20`, five starts per window, interleaved, BBR3, the
+same scrolling window on the display. The keyframe was 58.6–58.8 kB in all ten runs (49 packets
+of 1200 B) and encode took 37–44 ms.
+
+| window | first decoded, 5 starts | median | keyframe spread |
+| --- | --- | --- | --- |
+| 32 (default) | 587 / 567 / 1 024 / 597 / 526 ms | 587 ms | 12–43 ms |
+| 10 (`SLOPTY_QUIC_IW=10`) | 555 / 581 / 1 144 / 576 / 782 ms | 581 ms | 20–54 ms |
+
+**No measurable difference: 6 ms between the medians against a 526–1 144 ms spread within each
+condition.** The arithmetic behind the 32-packet ruling is not refuted — 49 packets is 5 windows
+at IW 10 and 2 at IW 32, which at this path's 11 ms rtt predicts ~33 ms — but that is an order of
+magnitude below what start-up on this path actually costs. First datagram alone is 217–304 ms
+after `Open` and the encode is 40 ms; the congestion window is not what makes a stream slow to
+start here. Run 3 of each pair (1 024 / 1 144 ms) is the same bad minute on the link, which is
+what interleaving is for.
+
+The mesh row this ruling was owed since 2026-09-05 therefore exists and says: keep 32 for the
+arithmetic, expect nothing visible from it on a Wi-Fi path.
+
+### Bitrate sweep with a busy source, and where the comparison stops being clean
+
+Same busy source, 90 s, interleaved per rate, **on a link that had degraded further** — 502–633
+lost packets per run against 310–373 in the 30 Mbit/s rows above, and an idle-ish `ping` during a
+run of 7.9 / 65.3 / 138.9 ms (stddev 45 ms) against 8.3 / 10.3 / 38.3 ms at the session's start.
+Absolute numbers here are therefore **not** comparable with the 30 Mbit/s rows taken 40 minutes
+earlier; only the two runs within each rate are.
+
+| target | cc | fps | cwnd p50 | datagrams | host target, end | worst hold | gap max | lost / cong |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 Mbit/s | BBR3  | 52.9 | 18 446 B | 30 154 | 3.6 Mbit/s | 2 564 ms | 479 ms   | 628 / 464 |
+| 10 Mbit/s | Cubic | 53.5 | 10 012 B | 21 764 | 1.0 Mbit/s | 1 383 ms | 547 ms   | 633 / 472 |
+| 20 Mbit/s | BBR3  | 49.9 | 11 462 B | 21 533 | 1.0 Mbit/s | 9 508 ms | 5 775 ms | 502 / 397 |
+| 20 Mbit/s | Cubic | 51.6 | 13 869 B | 29 299 | 5.1 Mbit/s | 2 764 ms | 692 ms   | 611 / 494 |
+
+**This does not reproduce the clean BBR3 win of the 30 Mbit/s pairs.** At 10 Mbit/s BBR3 keeps
+the larger window and 39 % more datagrams; at 20 Mbit/s it is BBR3 that cuts to the 1 Mbit/s
+floor, with a 9.5 s backlog at cwnd 4 920 and a **5.8 s** arrival gap, while Cubic holds 5.1
+Mbit/s and moves 36 % more datagrams. On a link losing ~600 packets per 90 s **both controllers
+collapse, and which one collapses in a given run is not predictable from the controller.**
+
+Counting every busy-source pair on this page: BBR3 delivers more datagrams and a higher end
+target in **three of four** interleaved pairs, Cubic in one, and the one Cubic win is large. The
+two cleanest pairs — 30 Mbit/s, the better link, two runs each — favour BBR3 unambiguously. That
+is the strength of the evidence: a real advantage where the window is the binding constraint on a
+merely-lossy link, and no demonstrated advantage once the link is bad enough that the rate
+controller is cutting to its floor regardless.
+
+What would settle the remaining question is the same sweep with ≥ 3 runs per cell on a link in
+one state — which this session could not provide, because the link drifted monotonically worse
+across the two hours it took to measure everything above.
