@@ -23,3 +23,13 @@ checkout = ".research/gpui-kit"
 local_branch = "slopty"
 base = "84f57fdfcb4910623fb0bb7f795b077e249f9271"
 base_date = "2026-09-12"
+
+[libghostty-rs]
+upstream = "https://github.com/Uzaaft/libghostty-rs.git"
+upstream_branch = "master"
+fork = "https://github.com/aislopware/libghostty-rs.git"
+fork_branch = "slopty"
+checkout = ".research/libghostty-rs"
+local_branch = "slopty"
+base = "5988a0b78b4aa804d1c12e66bbfe662bd97d81c0"
+base_date = "2026-09-01"

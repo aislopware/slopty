@@ -26,7 +26,10 @@ const CONFIG: &str = "xtask/upstream.toml";
 /// A fork base older than this many days earns a gate warning.
 const STALE_AFTER_DAYS: i64 = 7;
 /// Sync order: gpui-kit's lock resolves against the zed fork, so zed goes first.
-const ORDER: [&str; 2] = ["zed", "gpui-kit"];
+/// Where the vendored terminal source comes from.
+const GHOSTTY_UPSTREAM: &str = "https://github.com/ghostty-org/ghostty.git";
+
+const ORDER: [&str; 3] = ["zed", "gpui-kit", "libghostty-rs"];
 /// How many tags newer than the base `check` lists per fork.
 const TAGS_SHOWN: usize = 6;
 
@@ -75,6 +78,8 @@ struct Config {
     zed: Fork,
     #[serde(rename = "gpui-kit")]
     gpui_kit: Fork,
+    #[serde(rename = "libghostty-rs")]
+    libghostty_rs: Fork,
 }
 
 impl Config {
@@ -84,8 +89,8 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("parsing {path}"))
     }
 
-    const fn forks(&self) -> [(&'static str, &Fork); 2] {
-        [(ORDER[0], &self.zed), (ORDER[1], &self.gpui_kit)]
+    const fn forks(&self) -> [(&'static str, &Fork); 3] {
+        [(ORDER[0], &self.zed), (ORDER[1], &self.gpui_kit), (ORDER[2], &self.libghostty_rs)]
     }
 }
 
@@ -114,7 +119,7 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
                 return Ok(());
             }
             let _dir = sh.push_dir(&root);
-            step("cargo update", &cmd!(sh, "cargo update -p gpui -p gpui-kit"))?;
+            step("cargo update", &cmd!(sh, "cargo update -p gpui -p gpui-kit -p libghostty-vt"))?;
             for (name, base) in &synced {
                 write_base(&root, name, base)?;
             }
@@ -168,7 +173,7 @@ fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) 
     let range = format!("{}..{}", fork.base, upstream.sha);
     let behind = cmd!(sh, "git rev-list --count {range}").read()?;
     let tags = tags_since(sh, &fork.base, &upstream.sha)?;
-    let age = today_days()?.saturating_sub(days_from_civil(&fork.base_date)?);
+    let age = today_days()?.saturating_sub(days_from_civil(&fork.base_date)?).max(0);
     println!(
         "{name}: base {} ({}, {age} days old); upstream {} at {} ({}): {behind} commits ahead",
         short(&fork.base),
@@ -197,6 +202,38 @@ fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) 
     if local != fork_head.sha {
         println!("  note: local branch {} is at {}", fork.local_branch, short(&local));
     }
+    if name == "libghostty-rs" {
+        ghostty_pin_report(sh, root, &fork_head.sha)?;
+    }
+    Ok(())
+}
+
+/// The binding pins one ghostty commit (`GHOSTTY_COMMIT` in its sys build script) and the
+/// workspace vendors the source it builds from (`vendor/ghostty`); the two must agree. Also says
+/// how far the vendored source is behind ghostty's `main`, since that is the bump that moves
+/// the terminal, not the binding.
+fn ghostty_pin_report(sh: &Shell, root: &Utf8Path, fork_head: &str) -> Result<()> {
+    let build_rs = format!("{fork_head}:crates/libghostty-vt-sys/build.rs");
+    let script = cmd!(sh, "git show {build_rs}").read()?;
+    let pinned = script
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const GHOSTTY_COMMIT: &str = \""))
+        .and_then(|rest| rest.split('"').next())
+        .context("build.rs has no GHOSTTY_COMMIT")?
+        .to_owned();
+    let vendored = root.join("vendor/ghostty");
+    let _dir = sh.push_dir(&vendored);
+    let head = cmd!(sh, "git rev-parse HEAD").read()?;
+    let state = if head == pinned { "=" } else { "≠" };
+    println!("  binding pins ghostty {} {state} vendor/ghostty {}", short(&pinned), short(&head));
+    let main = fetch(sh, GHOSTTY_UPSTREAM, "main")?;
+    let range = format!("{head}..{}", main.sha);
+    let behind = cmd!(sh, "git rev-list --count {range}").read()?;
+    println!(
+        "  vendor/ghostty is {behind} commits behind ghostty main {} ({})",
+        short(&main.sha),
+        main.date
+    );
     Ok(())
 }
 
@@ -227,10 +264,20 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
         }
         Some(local) if local == fork_head.sha => {}
         Some(local) => {
+            // The fork head is usually an ancestor. It is not when the previous `sync` rebased
+            // this branch and then stopped (a build-check failed and the fix landed here), so
+            // fall back to patches: a branch that carries every fork patch is ahead, not
+            // diverged. `git cherry` marks a patch missing from the branch with `+`.
             let fork_is_ancestor =
                 cmd!(sh, "git merge-base --is-ancestor {fork_sha} {local}").run().is_ok();
+            let carries_every_patch = || {
+                cmd!(sh, "git cherry {local} {fork_sha}")
+                    .quiet()
+                    .read()
+                    .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
+            };
             ensure!(
-                fork_is_ancestor,
+                fork_is_ancestor || carries_every_patch(),
                 "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
                 dir,
                 fork.local_branch,
@@ -275,6 +322,9 @@ fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
             ("check gpui + gpui_platform (host)", "check -p gpui -p gpui_platform"),
         ],
         "gpui-kit" => &[("check gpui-kit", "check -p gpui-kit --features component,assets")],
+        // `GHOSTTY_SOURCE_DIR` comes from this workspace's `.cargo/config.toml` (the checkout
+        // sits under the main clone), so the check builds against `vendor/ghostty`.
+        "libghostty-rs" => &[("check libghostty-vt", "check -p libghostty-vt --all-targets")],
         _ => &[],
     }
 }

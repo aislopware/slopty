@@ -641,6 +641,26 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   "not yet stable" — we pin one ghostty commit and vendor the source (`GHOSTTY_SOURCE_DIR`, no
   network at build time). Only the host builds it. Zig 0.16.0 required (installed).
   Alternative kept as a differential-test oracle: `rio-vt` 0.5.26 (pure Rust, extracted 2026-07).
+  2026-09-12: **ghostty bumped 752 commits to main `44f2a44df` (2026-09-10) through a binding
+  fork** `aislopware/libghostty-rs` branch `slopty` (upstream `Uzaaft/libghostty-rs` never moved
+  past our pin, and its bindings are checked in, not generated at build time). The fork commit
+  re-pins `GHOSTTY_COMMIT`, regenerates `bindings.rs` with the repo's own `gen-bindings` tool
+  (`GHOSTTY_SOURCE_DIR=<ghostty> cargo run -p libghostty-vt-sys --features bindgen-tool --bin
+  gen-bindings`) and adapts the wrapper: every C enum is typed `: int` now, so the wrapper enums
+  are `repr(i32)`; `ghostty_render_state_colors_get` is gone, colors come through
+  `ghostty_render_state_get(COLORS)`. The wrapper's 34 tests pass; slopty-engine and slopty-pty
+  compile and test unchanged (the terminfo source did not move, only gained a content hash).
+  `xtask/upstream.toml` tracks the binding as a third fork: `check` also prints whether the
+  binding's `GHOSTTY_COMMIT` equals `vendor/ghostty` and how far the vendored source is behind
+  ghostty main; `sync` build-checks it with `cargo check -p libghostty-vt --all-targets`
+  (`GHOSTTY_SOURCE_DIR` comes from our `.cargo/config.toml`, so the checkout under `.research/`
+  builds against `vendor/ghostty`). A ghostty bump is therefore: move the submodule, re-pin +
+  regenerate in the binding fork, push, `cargo update -p libghostty-vt`, gate.
+  New C API worth adopting, 🔬 until measured: native search (`ghostty_search_new/set/tick/get`,
+  whole-terminal, incremental) against our text-formatting search; `row_iterator_next_dirty`
+  for the apply path; `ghostty_terminal_paste` with its Kitty clipboard/paste safety checks
+  (`GHOSTTY_REJECTED`); semantic prompt state read straight from the C API; Kitty clipboard
+  protocol reads (`clipboard_read` effect) behind a permission prompt.
 - ✅ **Rendering is our GPUI element**, not sugarloaf or ghostty's renderer. Glyph shaping via
   GPUI's text system with our own cell layout, sprite glyphs for box drawing, per-row dirty
   tracking (zed's terminal element reshapes every frame; we won't).
