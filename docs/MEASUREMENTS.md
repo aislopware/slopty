@@ -2561,3 +2561,18 @@ newest `max` get their columns, ASCII rows skip the layout altogether. What rema
 lines is the formatter (10 ms, libghostty writing the history as plain text) plus ~6 ms of
 per-row regex scanning; ghostty's native `ghostty_search_*` API would skip the formatter but
 knows no regex (see DECISIONS "Terminal").
+
+## 2026-09-12 — the smooth probe after the fork sync and ghostty bump (main `becd27e`)
+
+`SLOPTY_SMOOTH_E2E=1 cargo xtask e2e smooth` on an idle Mac Studio, the display-stream
+scenario skipped (no screen-recording grant in this shell). Same shape as the 2026-09-06 runs:
+nothing in zed `d12e456`, gpui-kit `84f57fd` or ghostty `44f2a44` moved the frame times.
+
+```
+MEASURE (a) mac: 20 streaming shells, pan at zoom 1: draw 0.8 / 1.5 / 3.8 / 12.3 ms · every 3.4 / 16.2 ms · 845 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (b) mac: 20 streaming shells, zoom fit → 200 % → fit: draw 0.8 / 2.5 / 6.0 / 25.3 ms · every 3.4 / 16.0 ms · 838 frames, 1 over 16.7 ms, 1 dropped
+MEASURE frames while typing: draw 1.2 / 2.8 / 8.7 / 9.1 ms · every 9.6 / 63.5 ms · 189 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (d) mac, SLOPTY_PREDICT=never: echo 13.8 / 21.6 / 27.8 ms (60 keys) · predicted 0.0 / 0.0 / 0.0 ms (0 keys)
+MEASURE frames while typing: draw 1.4 / 5.8 / 10.9 / 11.0 ms · every 11.3 / 59.7 ms · 189 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (d) mac, SLOPTY_PREDICT=always: echo 16.2 / 24.8 / 58.2 ms (60 keys) · predicted 2.6 / 6.6 / 11.2 ms (60 keys)
+```
