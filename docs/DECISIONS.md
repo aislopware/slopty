@@ -783,8 +783,9 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 
 ## Transport
 
-- ✅ **iroh 1.1.0** (verified from source in the cargo registry 2026-09-04). QUIC via n0's own
-  `noq` 1.2.0 underneath (a quinn fork; **not** the `quinn` crate, so quinn docs/types do not
+- ✅ **iroh 1.2.0** (1.1.0 verified from source in the cargo registry 2026-09-04; 1.2.0 adopted
+  2026-09-12 the day after its release: `n0-dns-resolver` replaces hickory, nothing in our API
+  surface moved, gate + app/iOS e2e green). QUIC via n0's own `noq` 1.3.0 underneath (a quinn fork; **not** the `quinn` crate, so quinn docs/types do not
   apply): streams for control/terminal, unreliable datagrams for media, connection migration for
   Wi-Fi↔cellular, hole punching + relay fallback, E2E encryption keyed by endpoint identity.
   Rejected: slop-desk's raw UDP + "the WireGuard mesh is the security boundary" (phone-anywhere
@@ -1648,7 +1649,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 - ✅ Rust 1.98.1 pinned; edition 2024; resolver 3; `[workspace.lints]` with clippy
   all/pedantic/nursery/cargo + curated restriction lints; `panic = "unwind"` everywhere
   (`panic = "abort"` turns any ObjC exception crossing objc2 into a process abort).
-- ✅ nextest 0.9.143 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
+- ✅ **Dependency refresh is a routine, not an event** (2026-09-12): `cargo upgrade --dry-run
+  --incompatible` (cargo-edit) lists what the reqs hold back, `cargo update` moves the rest;
+  bump the reqs in `Cargo.toml` and the tool floors in `xtask::setup`, then gate and e2e.
+  The one crate that must not follow crates.io is `core-video`: `gpui::SurfaceSource:
+  From<CVPixelBuffer>` is typed against the fork's version (0.5.2 while zed stays there), so a
+  bump to 0.6 fails `slopty-ui` — it moves when the fork's does (comment beside the req).
+- ✅ nextest 0.9.144 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
   cargo-deny 0.20.2 · cargo-shear 1.13.4 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
   typos 1.50.1 · taplo 0.10 · prek 0.5.2 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
 - ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message (commit-msg
