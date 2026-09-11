@@ -43,14 +43,15 @@ slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 anyhow = "1.0.104"
 thiserror = "2.0.20"
 regex = "1.13.1"
-bitflags = { version = "2.13.1", features = [ "serde" ] }
+bitflags = { version = "2.13.2", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
 futures-core = "0.3.34"
 core-foundation = "0.10.1"
+# core-video follows the GPUI fork: `SurfaceSource: From<CVPixelBuffer>` needs the same crate version.
 core-video = "0.5.2"
 memchr = "2.8.3"
 parking_lot = "0.12.5"
-uuid = { version = "1.26.0", features = [ "v4", "v7", "serde", "fast-rng" ] }
+uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
 camino = { version = "1.2.5", features = [ "serde1" ] }
 
 # serialization
@@ -59,8 +60,8 @@ serde_json = "1.0.151"
 # Transcript timestamps (RFC 3339 in the JSONL) and their local-time display.
 chrono = { version = "0.4.45", default-features = false, features = [ "std", "clock" ] }
 postcard = { version = "1.1.3", default-features = false, features = [ "alloc", "use-std" ] }
-zerocopy = { version = "0.8.56", features = [ "derive" ] }
-toml = "1.1.5"
+zerocopy = { version = "0.8.57", features = [ "derive" ] }
+toml = "1.1.6"
 
 # async / io
 tokio = { version = "1.53.1", features = [
@@ -78,7 +79,7 @@ tokio = { version = "1.53.1", features = [
 # observability
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = [ "env-filter", "json", "fmt" ] }
-plist = "1.10.0"
+plist = "1.10.1"
 rustix = { version = "1.1.4", features = [
     "fs",
     "process",
@@ -103,10 +104,10 @@ nix = { version = "0.31.3", features = [
 # networking. iroh 1.x runs on n0's own QUIC stack (noq), not quinn. Default features are OFF:
 # the default `fast-apple-datapath` (private `sendmsg_x`/`recvmsg_x`) costs ~50 ms of round-trip
 # latency on macOS (measured 2026-09-04, docs/MEASUREMENTS.md) and must never be enabled.
-iroh = { version = "1.1.0", default-features = false, features = [ "tls-ring" ] }
+iroh = { version = "1.2.0", default-features = false, features = [ "tls-ring" ] }
 iroh-mdns-address-lookup = "0.5.0"
 iroh-tickets = "1.0.0"
-noq-proto = { version = "1.2.0", default-features = false }
+noq-proto = { version = "1.3.0", default-features = false }
 data-encoding = "2.11.1"
 
 # media: systematic Reed–Solomon over GF(2^16) with NEON; parity per video frame
