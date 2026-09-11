@@ -1412,10 +1412,20 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   daemons and CLI beside the app (`Contents/MacOS/slopty host install` works unchanged since
   the installer copies from its own directory), ad-hoc signed unless `--sign` names an
   identity.
-- ⏸ A real jitter estimator and PLC (Apple's decoder takes no
-  empty packet for concealment as far as the test showed; not tried). No `Quality` field for
-  audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes
-  "on" free.
+- ✅ **Short audio gaps are concealed by replaying the last packet with a fade** (2026-09-12,
+  `slopty_codec::audio::Conceal`). Apple's Opus decoder takes no empty packet for its own
+  concealment, so the client keeps the last decoded packet and, on a sequence gap of up to
+  `MAX_CONCEALED` = 3 packets (60 ms), pushes it again faded linearly to silence across the
+  gap before the packet that arrived: a lost packet is a dip, not a click, and the ring keeps
+  the gap's 20 ms per packet so the next real packet is not played early. Longer gaps stay
+  silence (replaying 60 ms of anything sounds worse than a pause, and the ring underruns to
+  silence by itself). Counted as `audio_concealed` in the client's `ScreenStats` and on the
+  overlay's second line. Unit-tested on the fade shape and the cap; the loss-injection app
+  self-test (`SLOPTY_E2E_DROP_PERMILLE`) exercises the path. Still ⏸: a jitter estimator
+  with an adaptive prefill (the ring starts playing at once and holds at most 200 ms; no
+  measurement has shown late packets as a problem on the links tried). No `Quality` field for
+  audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes "on"
+  free.
 
 ## Input
 

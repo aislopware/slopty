@@ -41,6 +41,49 @@ const PACKET_SAMPLES: usize = FRAME_SAMPLES as usize * CHANNELS as usize;
 /// Bytes per f32 sample.
 const SAMPLE_BYTES: usize = size_of::<f32>();
 
+/// Longest gap concealed, in packets (60 ms). A longer one is a pause: replaying anything for
+/// longer sounds worse than silence, and the ring underruns to silence on its own.
+pub const MAX_CONCEALED: u32 = 3;
+
+/// Packet-loss concealment without the decoder's help.
+///
+/// Apple's Opus decoder takes no empty packet for it, so the last decoded packet stands in for
+/// a short gap, replayed with a linear fade to silence across the gap: a lost packet is a dip
+/// instead of a click. The stand-in keeps the ring's timing too: the gap took 20 ms per packet
+/// on the host, and playing that long keeps the next real packet from arriving early.
+#[derive(Debug, Default)]
+pub struct Conceal {
+    last: Vec<f32>,
+}
+
+impl Conceal {
+    /// Remember the packet just decoded.
+    pub fn remember(&mut self, pcm: &[f32]) {
+        self.last.clear();
+        self.last.extend_from_slice(pcm);
+    }
+
+    /// Append samples standing in for `missing` packets, oldest first: the remembered packet
+    /// fading from full level to silence over `min(missing, MAX_CONCEALED)` packets. Nothing
+    /// when nothing was remembered or the gap is longer than that.
+    pub fn fill(&self, missing: u32, out: &mut Vec<f32>) {
+        if missing == 0 || missing > MAX_CONCEALED || self.last.is_empty() {
+            return;
+        }
+        let len = self.last.len();
+        let total = usize::try_from(missing).unwrap_or(1).saturating_mul(len).max(1);
+        out.reserve(total);
+        #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+        let total_f = total as f32;
+        for i in 0..total {
+            let sample = self.last.get(i.checked_rem(len).unwrap_or(0)).copied().unwrap_or(0.0);
+            #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+            let gain = 1.0 - (i as f32 + 1.0) / total_f;
+            out.push(sample * gain);
+        }
+    }
+}
+
 /// A byte or sample count as the `u32` the C structs carry; saturates on nonsense sizes.
 fn u32_of(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -523,5 +566,40 @@ mod tests {
         assert!(player.queued() <= PACKET_SAMPLES * 2);
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(player.queued(), 0);
+    }
+}
+
+#[cfg(test)]
+mod conceal_tests {
+    use super::*;
+
+    /// One lost packet is the last one replayed, fading to silence by its end.
+    #[test]
+    fn a_short_gap_is_the_last_packet_fading_out() {
+        let mut c = Conceal::default();
+        c.remember(&[1.0, 1.0, 1.0, 1.0]);
+        let mut out = Vec::new();
+        c.fill(1, &mut out);
+        assert_eq!(out, vec![0.75, 0.5, 0.25, 0.0]);
+        out.clear();
+        c.fill(2, &mut out);
+        assert_eq!(out.len(), 8);
+        assert!((out[0] - 0.875).abs() < 1e-6 && out[7] == 0.0, "{out:?}");
+        assert!(out.windows(2).all(|w| w[0] >= w[1]), "monotone fade: {out:?}");
+    }
+
+    /// Nothing to replay, no gap, or a gap too long to paper over: silence from the ring.
+    #[test]
+    fn nothing_is_concealed_without_a_packet_or_past_the_cap() {
+        let mut out = Vec::new();
+        Conceal::default().fill(1, &mut out);
+        assert!(out.is_empty());
+        let mut c = Conceal::default();
+        c.remember(&[0.5, 0.5]);
+        c.fill(0, &mut out);
+        c.fill(MAX_CONCEALED + 1, &mut out);
+        assert!(out.is_empty());
+        c.fill(MAX_CONCEALED, &mut out);
+        assert_eq!(out.len(), 2 * MAX_CONCEALED as usize);
     }
 }

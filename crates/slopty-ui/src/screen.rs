@@ -194,7 +194,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
     let ui = crate::frames::hud_line(input.ui);
     format!(
         "{}×{} @{:.2}  ·  {:.0} fps  ·  {:.2} Mb/s  ·  {rtt}  ·  {age}\n\
-         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {}\n\
+         jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}  ·  audio {} lost {} concealed {}\n\
          present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
          {ui}",
         input.size.0,
@@ -214,6 +214,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         stats.stalled_ms,
         stats.audio_packets,
         stats.audio_lost,
+        stats.audio_concealed,
         ms(pacing.latency_p50),
         ms(pacing.latency_p95),
         ms(pacing.latency_max),
@@ -1110,6 +1111,7 @@ mod tests {
             stalled: false,
             audio_packets: 50,
             audio_lost: 0,
+            audio_concealed: 0,
             ..ScreenStats::default()
         };
         let pacing = PacingStats {
@@ -1142,7 +1144,7 @@ mod tests {
             lines,
             vec![
                 "1920×1080 @1.00  ·  60 fps  ·  18.25 Mb/s  ·  rtt 9.4 ms  ·  age 12 ms",
-                "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0",
+                "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)  ·  audio 50 lost 0 concealed 0",
                 "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
                 "ui –",
             ]
