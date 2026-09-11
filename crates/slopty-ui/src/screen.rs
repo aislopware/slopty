@@ -108,6 +108,9 @@ pub struct ScreenView {
     pacer: Pacer,
     /// Link RTT from the canvas, for the overlay.
     rtt: Option<Duration>,
+    /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
+    /// this window streams; dropping the view lets go.
+    _awake: Task<()>,
     /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
     rate: Option<(u32, RateVerdict, bool)>,
     /// What the host says its capture target is doing (`ScreenEvent::Source`). A target that
@@ -327,6 +330,15 @@ impl ScreenView {
                 }
             }
         });
+        // Somebody is watching a remote window: the platform must not dim or sleep under it.
+        let acquisition = cx.prevent_idle_sleep("Slopty remote window");
+        let awake = cx.spawn(async move |_this, _cx| match acquisition.await {
+            Ok(guard) => {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            }
+            Err(e) => tracing::warn!(error = %e, "idle sleep prevention"),
+        });
         let scale = quality.scale.clamp(MIN_SCALE, 1.0);
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
         let native = (size.0 as f32 / scale, size.1 as f32 / scale);
@@ -351,6 +363,7 @@ impl ScreenView {
             marked: None,
             hud: None,
             rtt: None,
+            _awake: awake,
             pacer: Pacer::default(),
             rate: None,
             source: SourceState::Live,

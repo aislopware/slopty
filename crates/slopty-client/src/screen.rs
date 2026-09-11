@@ -340,7 +340,8 @@ pub struct ScreenHandle {
     /// The host's capture target is producing pictures (shared with the worker).
     source_live: Arc<AtomicBool>,
     router: ScreenRouter,
-    task: JoinHandle<()>,
+    /// The worker; a detached test handle has none.
+    task: Option<JoinHandle<()>>,
 }
 
 impl ScreenHandle {
@@ -397,8 +398,32 @@ impl ScreenHandle {
 
 impl Drop for ScreenHandle {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
         self.router.detach(self.stream);
+    }
+}
+
+#[cfg(feature = "headless")]
+impl ScreenHandle {
+    /// A handle with no worker behind it: nothing ever arrives, nothing is decoded. For the
+    /// headless UI tests, which need a stream to exist, not to show pictures.
+    #[must_use]
+    pub fn detached(stream: StreamId) -> Self {
+        let (_frames_tx, frames) = watch::channel(None);
+        let (_cursor_tx, cursor) = watch::channel(CursorState::default());
+        let (_stats_tx, stats) = watch::channel(ScreenStats::default());
+        Self {
+            stream,
+            frames,
+            cursor,
+            stats,
+            muted: Arc::new(AtomicBool::new(false)),
+            source_live: Arc::new(AtomicBool::new(true)),
+            router: ScreenRouter::default(),
+            task: None,
+        }
     }
 }
 
@@ -483,6 +508,7 @@ pub fn spawn_screen(
         capture_clock: CaptureClock::new(),
     };
     let task = runtime.spawn(worker.run());
+    let task = Some(task);
     ScreenHandle { stream, frames, cursor, stats, muted, source_live, router: router.clone(), task }
 }
 

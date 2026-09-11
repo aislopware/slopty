@@ -1915,6 +1915,25 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   lines. Consequence: every latency number recorded before this date that passed through the
   parser is an upper bound; the ones that matter (keystroke echo, attach replay) get re-measured
   as they come up rather than all at once.
+- ✅ **Sleep policy (2026-09-12): the host stays awake while a client is attached, its display
+  stays on while a window streams, and the client keeps the device awake while it shows a
+  stream.** Parsec's behaviour, for the same reasons: a host that idles to sleep drops every
+  session, a sleeping display captures black, and a phone that dims mid-stream is a phone you
+  keep poking. Host side: `slopty_host::wake::Wake` is a pure counter (clients, live streams)
+  behind the `Holds` trait; hostd's `Assertions` maps it to `NSProcessInfo` activities
+  (`Activity::system_awake` = `UserInitiated`, `Activity::display_awake` adds
+  `IdleDisplaySleepDisabled`; `Activity` is now `Send`, NSProcessInfo being thread-safe). The
+  first client joining holds, the last leaving releases; the display follows the stream
+  `Registry`'s live count through its new observer, so every open/close path (client close,
+  connection drop, `close_screens`) is covered by construction. Nothing is held with nobody
+  attached: an unattended host sleeps as its owner set it. Client side: `ScreenView` holds
+  GPUI's `prevent_idle_sleep` guard (macOS `NSActivity`, iOS `idleTimerDisabled` in our fork)
+  for its lifetime; a sleeping or removed window drops it. Headless test
+  `a_streaming_window_keeps_the_device_awake` reads the test platform's hold count; the host
+  policy has unit tests on edges and underflow. Not done, ⏸ until asked: a host setting to opt
+  out (`pmset` still wins over an activity for a forced sleep), and holding the client awake
+  while an agent works in a terminal with no stream showing (zed does this for its agent
+  panel; ours would key on the hooks pill).
 
 ## Multi-client
 

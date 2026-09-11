@@ -29,11 +29,42 @@ impl Activity {
     pub fn latency_critical(reason: &str) -> Self {
         let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
             | NSActivityOptions::LatencyCritical;
+        Self::begin(options, reason)
+    }
+
+    /// Keep the machine from idle sleep while the reason holds (the display may still sleep):
+    /// a client is attached and the host has to keep answering it.
+    #[must_use]
+    pub fn system_awake(reason: &str) -> Self {
+        Self::begin(NSActivityOptions::UserInitiated, reason)
+    }
+
+    /// Keep the display awake as well: a window or display is being captured, and a sleeping
+    /// display captures nothing.
+    #[must_use]
+    pub fn display_awake(reason: &str) -> Self {
+        let options =
+            NSActivityOptions::UserInitiated | NSActivityOptions::IdleDisplaySleepDisabled;
+        Self::begin(options, reason)
+    }
+
+    fn begin(options: NSActivityOptions, reason: &str) -> Self {
         let token = NSProcessInfo::processInfo()
             .beginActivityWithOptions_reason(options, &NSString::from_str(reason));
         Self { token }
     }
 }
+
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the token is only ever handed back to NSProcessInfo, which is thread-safe"
+)]
+// SAFETY: `NSProcessInfo` is thread-safe (Foundation's NSProcessInfo documentation: thread-safe
+// since macOS 10.7) and `endActivity:` takes its token back from any thread; the token is an
+// opaque object Foundation owns and this type only ever hands it back.
+unsafe impl Send for Activity {}
+// SAFETY: as above; the only shared access is `Drop`, which needs `&mut self`.
+unsafe impl Sync for Activity {}
 
 impl Drop for Activity {
     fn drop(&mut self) {

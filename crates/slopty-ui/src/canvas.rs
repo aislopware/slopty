@@ -2626,6 +2626,72 @@ mod tests {
         (view, rx, me, cx)
     }
 
+    /// A window on the canvas streams, and a streaming window keeps the device awake: the Mac
+    /// out of idle sleep, the phone's screen on. Putting the window to sleep lets go.
+    #[gpui::test]
+    fn a_streaming_window_keeps_the_device_awake(cx: &mut TestAppContext) {
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            view.set_animation(false);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+        cx.run_until_parked();
+        let window = slopty_core::WindowId(7);
+        let item = |sleeping: bool| CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Window { window },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping,
+        };
+        let mut placed = item(false);
+        let id = placed.id;
+        view.update_in(cx, |c, _window, cx| {
+            let op = CanvasOp::Upsert(placed.clone());
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op }, cx);
+        });
+        cx.run_until_parked();
+        let target = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|msg| match msg {
+                ClientMsg::Screen(ScreenRequest::Open { target, .. }) => Some(target),
+                _ => None,
+            })
+            .expect("the canvas asks the host for the window's stream");
+        assert_eq!(target, CaptureTarget::Window(window));
+        assert_eq!(cx.active_idle_sleep_preventions(), 0, "nothing streams yet");
+
+        view.update_in(cx, |c, _window, cx| {
+            let opened = ScreenEvent::Opened {
+                stream: StreamId(1),
+                target,
+                codec: slopty_proto::screen::VideoCodec::Hevc,
+                width: 1280,
+                height: 800,
+                scale: 2.0,
+                hdr: false,
+            };
+            c.screen_event(opened, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 1, "a streaming window holds the device");
+
+        placed = item(true);
+        placed.id = id;
+        view.update_in(cx, |c, _window, cx| {
+            let op = CanvasOp::Upsert(placed);
+            c.apply_sync(CanvasSync::Delta { version: 2, by: me, op }, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 0, "a sleeping window lets go");
+    }
+
     /// `debug_bounds` wants a static selector; tests may leak a handful.
     fn selector(part: &str, id: ItemId) -> &'static str {
         Box::leak(format!("{part}-{}", id.as_uuid()).into_boxed_str())

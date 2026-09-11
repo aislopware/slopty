@@ -411,6 +411,7 @@ const CLOSED_KEEP: usize = 8;
 #[derive(Clone, Default, Debug)]
 pub struct Registry {
     inner: Arc<Mutex<RegistryInner>>,
+    observer: Arc<Mutex<Observer>>,
 }
 
 #[derive(Default, Debug)]
@@ -419,7 +420,28 @@ struct RegistryInner {
     closed: VecDeque<ScreenSummary>,
 }
 
+/// Told the live-stream count after every change (the daemon's sleep policy listens).
+#[derive(Default)]
+struct Observer(Option<Box<dyn Fn(usize) + Send>>);
+
+impl std::fmt::Debug for Observer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Observer(set)" } else { "Observer(none)" })
+    }
+}
+
 impl Registry {
+    /// Call `f` with the number of live streams after every open and close.
+    pub fn observe(&self, f: impl Fn(usize) + Send + 'static) {
+        self.observer.lock().0 = Some(Box::new(f));
+    }
+
+    fn changed(&self, live: usize) {
+        if let Some(f) = &self.observer.lock().0 {
+            f(live);
+        }
+    }
+
     /// Track a stream `client` opened.
     pub fn insert(
         &self,
@@ -427,26 +449,36 @@ impl Registry {
         target: CaptureTarget,
         handle: StatsHandle,
     ) {
-        self.inner.lock().live.push((client.to_string(), target, handle));
+        let live = {
+            let mut inner = self.inner.lock();
+            inner.live.push((client.to_string(), target, handle));
+            inner.live.len()
+        };
+        self.changed(live);
     }
 
     /// The stream closed: keep its final counters.
     pub fn remove(&self, client: &impl std::fmt::Display, id: StreamId) {
         let client = client.to_string();
-        let mut inner = self.inner.lock();
-        let Some(at) = inner.live.iter().position(|(c, _, h)| *c == client && h.id() == id) else {
-            return;
+        let live = {
+            let mut inner = self.inner.lock();
+            let Some(at) = inner.live.iter().position(|(c, _, h)| *c == client && h.id() == id)
+            else {
+                return;
+            };
+            let (client, target, handle) = inner.live.remove(at);
+            if inner.closed.len() >= CLOSED_KEEP {
+                inner.closed.pop_front();
+            }
+            inner.closed.push_back(ScreenSummary {
+                client,
+                stream: id.0,
+                target,
+                stats: handle.stats(),
+            });
+            inner.live.len()
         };
-        let (client, target, handle) = inner.live.remove(at);
-        if inner.closed.len() >= CLOSED_KEEP {
-            inner.closed.pop_front();
-        }
-        inner.closed.push_back(ScreenSummary {
-            client,
-            stream: id.0,
-            target,
-            stats: handle.stats(),
-        });
+        self.changed(live);
     }
 
     /// Live streams with their counters right now, then the closed ones (oldest first).

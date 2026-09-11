@@ -99,6 +99,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         feedback,
         transcripts: HashMap::new(),
     };
+    daemon.wake.lock().client_joined();
 
     // Window resizes on the host are polled: ScreenCaptureKit keeps scaling the old output
     // size until the capture is reconfigured.
@@ -449,6 +450,7 @@ impl Drop for Peer<'_> {
         self.paths.abort();
         self.health.abort();
         self.feedback.abort();
+        self.daemon.wake.lock().client_left();
     }
 }
 

@@ -22,5 +22,9 @@ slopty-proto.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# `ScreenHandle::detached` for the headless UI tests.
+headless = [  ]
+
 [dev-dependencies]
 pretty_assertions.workspace = true

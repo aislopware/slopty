@@ -13,6 +13,7 @@ pub mod manager;
 pub mod repo;
 pub mod screen;
 pub mod session;
+pub mod wake;
 
 pub use canvas::CanvasStore;
 pub use manager::Host;

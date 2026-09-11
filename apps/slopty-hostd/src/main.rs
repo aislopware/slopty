@@ -85,6 +85,29 @@ pub struct Daemon {
     pub port: u16,
     /// Screen streams across every connection, for the control socket.
     pub screens: slopty_host::screen::Registry,
+    /// Sleep policy: awake while a client is attached, display on while a stream is live.
+    pub wake: Arc<parking_lot::Mutex<slopty_host::wake::Wake<Box<dyn slopty_host::wake::Holds>>>>,
+}
+
+/// The daemon's sleep assertions, as `NSProcessInfo` activities.
+#[derive(Default)]
+struct Assertions {
+    system: Option<slopty_platform::Activity>,
+    display: Option<slopty_platform::Activity>,
+}
+
+impl slopty_host::wake::Holds for Assertions {
+    fn system(&mut self, hold: bool) {
+        self.system =
+            hold.then(|| slopty_platform::Activity::system_awake("Slopty client attached"));
+        tracing::info!(hold, "system sleep hold");
+    }
+
+    fn display(&mut self, hold: bool) {
+        self.display =
+            hold.then(|| slopty_platform::Activity::display_awake("Slopty window streaming"));
+        tracing::info!(hold, "display sleep hold");
+    }
 }
 
 /// How often the pasteboard's change count is read (one Mach call to the pasteboard server).
@@ -133,6 +156,13 @@ async fn main() -> Result<()> {
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
+    let holds: Box<dyn slopty_host::wake::Holds> = Box::new(Assertions::default());
+    let wake = Arc::new(parking_lot::Mutex::new(slopty_host::wake::Wake::new(holds)));
+    let screens = slopty_host::screen::Registry::default();
+    screens.observe({
+        let wake = Arc::clone(&wake);
+        move |live| wake.lock().streams(live)
+    });
     let daemon = Daemon {
         host,
         listener,
@@ -144,7 +174,8 @@ async fn main() -> Result<()> {
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
         started_at: std::time::Instant::now(),
         port: args.port,
-        screens: slopty_host::screen::Registry::default(),
+        screens,
+        wake,
     };
     tokio::spawn(watch_pasteboard(daemon.clone()));
     // Agents the hooks never report: the foreground process, the title, the transcript.
