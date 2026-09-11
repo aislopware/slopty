@@ -1478,6 +1478,48 @@ mod scrollback_tests {
         assert_eq!(e.search("", false, 10).unwrap(), search::Found::default());
     }
 
+    /// What one search costs over a full history, as the text search does it today: format the
+    /// whole terminal to plain text, then scan. `cargo nextest run -p slopty-engine search_cost
+    /// --run-ignored all --no-capture` prints it (MEASUREMENTS.md "search").
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn search_cost() {
+        for lines in [1_000_u32, 10_000, 50_000] {
+            let mut e = engine(lines);
+            write_lines(&mut e, lines);
+            let total = e.total_lines().unwrap();
+            let mut format_us = Vec::new();
+            let mut plain_us = Vec::new();
+            let mut regex_us = Vec::new();
+            for _ in 0..10 {
+                let t = std::time::Instant::now();
+                let text = e.plain_text().unwrap();
+                format_us.push(t.elapsed().as_micros());
+                assert!(!text.is_empty());
+                let t = std::time::Instant::now();
+                let found = e.search("lazy dog", false, 100).unwrap();
+                plain_us.push(t.elapsed().as_micros());
+                assert!(found.total > 0);
+                let t = std::time::Instant::now();
+                let found = e.search("line [0-9]+7 ", true, 100).unwrap();
+                regex_us.push(t.elapsed().as_micros());
+                assert!(found.total > 0);
+            }
+            format_us.sort_unstable();
+            plain_us.sort_unstable();
+            regex_us.sort_unstable();
+            eprintln!(
+                "search_cost: {total} lines: format p50 {} us, plain p50 {} us max {} us, regex \
+                 p50 {} us max {} us",
+                format_us[format_us.len() / 2],
+                plain_us[plain_us.len() / 2],
+                plain_us[plain_us.len() - 1],
+                regex_us[regex_us.len() / 2],
+                regex_us[regex_us.len() - 1],
+            );
+        }
+    }
+
     #[test]
     fn history_is_pruned_near_the_line_limit() {
         let mut e = engine(1_000);

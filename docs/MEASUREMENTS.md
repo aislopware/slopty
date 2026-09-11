@@ -2538,3 +2538,26 @@ let out of the client's decoder late on the loaded machine (0–2 in the eight o
 day). The client-side assertion now counts pictures *unlike* the target (`foreign_after_order`,
 more than 8 luma levels from every picture decoded while it was visible), which is the leak it
 was there to catch; pictures of the target after the order are never one.
+
+## 2026-09-12 — search over a full history: the columns were the cost, not the text
+
+`cargo nextest run -p slopty-engine search_cost --run-ignored all --no-capture --cargo-profile
+release` (release build of the host engine; ten searches each over a history of N lines of
+"line i the quick brown fox jumps over the lazy dog"; "plain" is the needle `lazy dog`, which
+hits every row; "regex" is `line [0-9]+7 `, which hits one row in ten; `max` = 100).
+
+| lines  | format (plain text) p50 | plain before | plain after | regex before | regex after |
+|--------|-------------------------|--------------|-------------|--------------|-------------|
+| 1 001  | 0.2 ms                  | 2.4 ms       | 0.4 ms      | 0.6 ms       | 0.4 ms      |
+| 10 001 | 2.0 ms                  | 21.3 ms      | 3.4 ms      | 5.0 ms       | 3.3 ms      |
+| 50 001 | 9.9 ms                  | 104 ms       | 16 ms       | 23 ms        | 16 ms       |
+
+"Before" is main at `b2d5ca3`: the plain path lower-cased every row into a fresh `String`
+(an allocation per row), and both paths laid out the cell columns of every hit — a call into
+libghostty's `grapheme_width` per character of every row that hit, so a needle that hits every
+row paid it 50 000 times for the 100 hits it reports. "After": plain text is an escaped regex
+(memchr literal search, Unicode case folding), hits are counted as they are found and only the
+newest `max` get their columns, ASCII rows skip the layout altogether. What remains at 50 k
+lines is the formatter (10 ms, libghostty writing the history as plain text) plus ~6 ms of
+per-row regex scanning; ghostty's native `ghostty_search_*` API would skip the formatter but
+knows no regex (see DECISIONS "Terminal").

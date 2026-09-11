@@ -18,70 +18,38 @@ pub struct Found {
     pub matches: Vec<SearchMatch>,
 }
 
-/// What to look for: plain text with smart case, or a regular expression.
+/// What to look for: plain text or a regular expression, both with smart case.
+///
+/// Plain text is an escaped regex: the crate's literal search is memchr-fast and its case
+/// folding is Unicode's, where folding the haystack line by line was an allocation per row.
 #[derive(Clone, Debug)]
-pub enum Pattern {
-    /// Substring; `folded` is the needle lower-cased when the search is case-insensitive.
-    Plain {
-        /// The needle, lower-cased when `insensitive`.
-        needle: String,
-        /// Match case-insensitively (the needle had no upper-case letter).
-        insensitive: bool,
-    },
-    /// A compiled regex (smart case folded into the pattern).
-    Regex(regex::Regex),
-}
+pub struct Pattern(regex::Regex);
 
 impl Pattern {
     /// Build a pattern; a regex that does not compile is the error message.
     pub fn new(needle: &str, regex: bool) -> Result<Self, String> {
         let insensitive = !needle.chars().any(char::is_uppercase);
-        if regex {
-            let source = if insensitive { format!("(?i){needle}") } else { needle.to_owned() };
-            return regex::RegexBuilder::new(&source)
-                .size_limit(1 << 20)
-                .build()
-                .map(Self::Regex)
-                .map_err(|e| e.to_string());
-        }
-        let needle = if insensitive { fold(needle) } else { needle.to_owned() };
-        Ok(Self::Plain { needle, insensitive })
+        let source = if regex { needle.to_owned() } else { regex::escape(needle) };
+        regex::RegexBuilder::new(&source)
+            .case_insensitive(insensitive)
+            .size_limit(1 << 20)
+            .build()
+            .map(Self)
+            .map_err(|e| e.to_string())
     }
 
     /// Whether the pattern can match anything at all.
     fn is_empty(&self) -> bool {
-        match self {
-            Self::Plain { needle, .. } => needle.is_empty(),
-            Self::Regex(re) => re.as_str().is_empty(),
-        }
+        self.0.as_str().is_empty()
     }
 
     /// Hits in one line as `(first char, char count)`; empty matches are skipped.
     fn hits(&self, line: &str) -> Vec<(usize, usize)> {
-        match self {
-            Self::Plain { needle, insensitive } => {
-                let folded: String;
-                let haystack = if *insensitive {
-                    folded = fold(line);
-                    &folded
-                } else {
-                    line
-                };
-                if !haystack.contains(&**needle) {
-                    return Vec::new();
-                }
-                let count = needle.chars().count();
-                haystack
-                    .match_indices(&**needle)
-                    .map(|(byte, _)| (char_index(haystack, byte), count))
-                    .collect()
-            }
-            Self::Regex(re) => re
-                .find_iter(line)
-                .filter(|m| !m.as_str().is_empty())
-                .map(|m| (char_index(line, m.start()), m.as_str().chars().count()))
-                .collect(),
-        }
+        self.0
+            .find_iter(line)
+            .filter(|m| !m.as_str().is_empty())
+            .map(|m| (char_index(line, m.start()), m.as_str().chars().count()))
+            .collect()
     }
 }
 
@@ -93,38 +61,54 @@ fn char_index(s: &str, byte: usize) -> usize {
 /// Find `pattern` in `text`, whose first line is absolute line `base`.
 ///
 /// Smart case: a needle without an upper-case letter matches case-insensitively. Hits never
-/// span rows (soft-wrapped lines are searched row by row).
+/// span rows (soft-wrapped lines are searched row by row). Every hit is counted, but columns
+/// are laid out only for the `max` newest ones that are reported: the column of a hit needs
+/// the cell width of every cluster before it on its row, which is a call into libghostty per
+/// character, and a needle that hits every row of a long history would pay it fifty thousand
+/// times for a hundred answers.
 #[must_use]
 pub fn find(text: &str, pattern: &Pattern, base: LineIndex, max: u32) -> Found {
     if pattern.is_empty() {
         return Found::default();
     }
-    let mut hits: Vec<SearchMatch> = Vec::new();
-    let mut total: u32 = 0;
     let keep = usize::try_from(max).unwrap_or(usize::MAX);
+    // `(row, line, first char, char count)` of the hits still in the running.
+    let mut pending: Vec<(usize, &str, usize, usize)> = Vec::new();
+    let mut total: u32 = 0;
     for (row, line) in text.split('\n').enumerate() {
         let found = pattern.hits(line);
         if found.is_empty() {
             continue;
         }
-        let index = LineIndex(base.0.saturating_add(u64::try_from(row).unwrap_or(u64::MAX)));
-        let widths = Widths::new(line);
-        for (first, count) in found {
-            let (col, len) = widths.span(first, count);
-            total = total.saturating_add(1);
-            hits.push(SearchMatch { line: index, col, len });
+        total = total.saturating_add(u32::try_from(found.len()).unwrap_or(u32::MAX));
+        pending.extend(found.into_iter().map(|(first, count)| (row, line, first, count)));
+        // Older hits than the newest `keep` are never reported: forget them in batches.
+        if pending.len() > keep.saturating_mul(2) {
+            let excess = pending.len().saturating_sub(keep);
+            pending.drain(..excess);
         }
     }
-    let excess = hits.len().saturating_sub(keep);
-    if excess > 0 {
-        hits.drain(..excess);
-    }
-    Found { total, matches: hits }
-}
-
-/// Lower-case a line character by character so char indices line up with the original.
-fn fold(s: &str) -> String {
-    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+    let excess = pending.len().saturating_sub(keep);
+    let mut widths: Option<(usize, Widths)> = None;
+    let matches = pending
+        .iter()
+        .skip(excess)
+        .map(|&(row, line, first, count)| {
+            let index = LineIndex(base.0.saturating_add(u64::try_from(row).unwrap_or(u64::MAX)));
+            let (col, len) = if line.is_ascii() {
+                // One byte, one char, one cell.
+                (u16::try_from(first).unwrap_or(u16::MAX), u16::try_from(count).unwrap_or(1).max(1))
+            } else {
+                let w = match &widths {
+                    Some((at, w)) if *at == row => w,
+                    _ => &widths.insert((row, Widths::new(line))).1,
+                };
+                w.span(first, count)
+            };
+            SearchMatch { line: index, col, len }
+        })
+        .collect();
+    Found { total, matches }
 }
 
 /// Cell column at each char boundary of a line.
@@ -213,6 +197,18 @@ mod tests {
         let found = find(text, "a", LineIndex(0), 2);
         assert_eq!(found.total, 4);
         assert_eq!(found.matches, vec![m(2, 0, 1), m(3, 0, 1)]);
+    }
+
+    /// The running set is trimmed in batches while scanning; the answer is still the newest
+    /// `max` hits with the full count, and columns on a non-ASCII row are laid out per row.
+    #[test]
+    fn a_needle_that_hits_every_row_keeps_the_newest_and_counts_them_all() {
+        let text = (0..1_000).map(|i| format!("日本 a{i} a")).collect::<Vec<_>>().join("\n");
+        let found = find(&text, "a", LineIndex(0), 3);
+        assert_eq!(found.total, 2_000);
+        // Row 999 is "日本 a999 a": its "a"s are at columns 5 and 10; the third newest hit is
+        // row 998's last one.
+        assert_eq!(found.matches, vec![m(998, 10, 1), m(999, 5, 1), m(999, 10, 1)]);
     }
 
     #[test]

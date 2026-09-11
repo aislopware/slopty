@@ -657,7 +657,10 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   builds against `vendor/ghostty`). A ghostty bump is therefore: move the submodule, re-pin +
   regenerate in the binding fork, push, `cargo update -p libghostty-vt`, gate.
   New C API worth adopting, 🔬 until measured: native search (`ghostty_search_new/set/tick/get`,
-  whole-terminal, incremental) against our text-formatting search; `row_iterator_next_dirty`
+  whole-terminal, incremental, plain text with smart case only — no regex) against our
+  text-formatting search, which after 2026-09-12's fix costs 16 ms for 50 000 lines of which
+  the formatter is 10 ms (MEASUREMENTS "search over a full history"); adopt it for plain
+  needles only if a scrollback that large is common; `row_iterator_next_dirty`
   for the apply path; `ghostty_terminal_paste` with its Kitty clipboard/paste safety checks
   (`GHOSTTY_REJECTED`); semantic prompt state read straight from the C API; Kitty clipboard
   protocol reads (`clipboard_read` effect) behind a permission prompt.
