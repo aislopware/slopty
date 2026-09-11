@@ -576,6 +576,9 @@ fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
         bytes: s.bytes,
         stalls: s.stalls,
         stalled_ms: s.stalled_ms,
+        audio_packets: s.audio_packets,
+        audio_lost: s.audio_lost,
+        audio_concealed: s.audio_concealed,
     };
     ScreenInfo {
         recovery,

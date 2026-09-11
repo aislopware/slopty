@@ -707,6 +707,12 @@ pub struct RecoveryInfo {
     pub stalls: u64,
     /// Time spent stalled, milliseconds.
     pub stalled_ms: u64,
+    /// Opus packets played.
+    pub audio_packets: u64,
+    /// Opus packets missing from the sequence.
+    pub audio_lost: u64,
+    /// Lost packets papered over with the previous one fading out.
+    pub audio_concealed: u64,
 }
 
 /// A terminal's conversation view.

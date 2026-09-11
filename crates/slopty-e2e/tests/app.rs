@@ -745,13 +745,13 @@ mod tests {
             "\nMEASURE (loss) app self-test: a scrolling window under injected loss (loopback, debug)"
         );
         println!(
-            "| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 ms |"
+            "| drop | frames | by parity | by NACK | lost | datagrams (lost) | kB | parity ‰ | NACK / refresh | stalls | gap p50 ms | audio played / lost / concealed |"
         );
-        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
         for (permille, s) in &rows {
             let r = &s.recovery;
             println!(
-                "| {permille} ‰ | {} | {} | {} | {} | {} ({}) | {} | {} | {} / {} | {} | {:.1} |",
+                "| {permille} ‰ | {} | {} | {} | {} | {} ({}) | {} | {} | {} / {} | {} | {:.1} | {} / {} / {} |",
                 r.frames,
                 r.frames_fec,
                 r.frames_retransmit,
@@ -764,6 +764,9 @@ mod tests {
                 r.refreshes,
                 r.stalls,
                 slopty_e2e::FrameInfo::ms(s.interval_p50_us),
+                r.audio_packets,
+                r.audio_lost,
+                r.audio_concealed,
             );
         }
 
