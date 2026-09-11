@@ -18,7 +18,7 @@ use gpui::{
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, Size, StatefulInteractiveElement as _, Styled as _, SystemNotification,
-    SystemNotificationAction, Window, canvas, div, fill, outline, point, px, size,
+    SystemNotificationAction, Task, Window, canvas, div, fill, outline, point, px, size,
 };
 use slopty_client::arrange::{self, Arrangeable, Heading};
 use slopty_client::canvas::{
@@ -262,6 +262,10 @@ pub struct CanvasView {
     sessions: HashMap<SessionId, SessionSummary>,
     /// Coding agents the host has observed, by session.
     agents: HashMap<SessionId, AgentEvent>,
+    /// Holds the device out of idle sleep while an agent works in any session (thinking or
+    /// running a tool): the human is waiting on it, not the other way round. Released when
+    /// every agent is idle or waiting on the human.
+    awake: Option<Task<()>>,
     /// Badge answers sent but not yet reflected by the host.
     answered: HashMap<SessionId, Answer>,
     /// `slopty hook install` has been offered to this human once; the offer stops showing
@@ -365,6 +369,7 @@ impl CanvasView {
             terminals: HashMap::new(),
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             agents: HashMap::new(),
+            awake: None,
             answered: HashMap::new(),
             hooks_offered: false,
             screens: HashMap::new(),
@@ -554,11 +559,32 @@ impl CanvasView {
         }
     }
 
+    /// Hold the device awake while any agent works; let go when none does.
+    fn update_awake(&mut self, cx: &Context<Self>) {
+        let working = self
+            .agents
+            .values()
+            .any(|a| matches!(a.status, AgentStatus::Working | AgentStatus::Tool { .. }));
+        if !working {
+            self.awake = None;
+        } else if self.awake.is_none() {
+            let acquisition = cx.prevent_idle_sleep("Slopty agent working");
+            self.awake = Some(cx.spawn(async move |_this, _cx| match acquisition.await {
+                Ok(guard) => {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                }
+                Err(e) => tracing::warn!(error = %e, "idle sleep prevention"),
+            }));
+        }
+    }
+
     /// A session is gone.
     pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.sessions.remove(&session);
         self.agents.remove(&session);
         self.answered.remove(&session);
+        self.update_awake(cx);
         self.reconcile(cx);
         self.count_needs_you(cx);
         cx.notify();
@@ -642,6 +668,7 @@ impl CanvasView {
                 cx.emit(CanvasEvent::Attention(session));
             }
         }
+        self.update_awake(cx);
         self.count_needs_you(cx);
         cx.notify();
     }
@@ -2690,6 +2717,47 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(cx.active_idle_sleep_preventions(), 0, "a sleeping window lets go");
+    }
+
+    /// An agent at work keeps the device awake (the human is waiting on it); an agent that
+    /// idles, waits on the human, or whose session closes lets go.
+    #[gpui::test]
+    fn a_working_agent_keeps_the_device_awake(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let other = SessionId::new();
+        host_opens(&view, cx, session, me, SHELL, 1);
+        host_opens(&view, cx, other, me, Rect { x: 800.0, ..SHELL }, 2);
+        let event = |session: SessionId, status: AgentStatus| AgentEvent {
+            session,
+            kind: AgentKind::ClaudeCode,
+            status,
+            agent_session: None,
+            detail: None,
+            attention: false,
+            source: AgentSource::Hook,
+        };
+        let holds = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.active_idle_sleep_preventions()
+        };
+        view.update_in(cx, |c, _window, cx| c.agent_event(event(session, AgentStatus::Idle), cx));
+        assert_eq!(holds(cx), 0, "an idle agent holds nothing");
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(event(session, AgentStatus::Working), cx);
+        });
+        assert_eq!(holds(cx), 1, "a working agent holds the device");
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(event(other, AgentStatus::Tool { tool: "Bash".to_owned() }), cx);
+        });
+        assert_eq!(holds(cx), 1, "one hold covers every agent");
+        view.update_in(cx, |c, _window, cx| {
+            let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+            c.agent_event(event(session, blocked), cx);
+        });
+        assert_eq!(holds(cx), 1, "the other agent still works");
+        view.update_in(cx, |c, _window, cx| c.session_closed(other, cx));
+        assert_eq!(holds(cx), 0, "waiting on the human is not work");
     }
 
     /// `debug_bounds` wants a static selector; tests may leak a handful.

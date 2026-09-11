@@ -1933,10 +1933,11 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   GPUI's `prevent_idle_sleep` guard (macOS `NSActivity`, iOS `idleTimerDisabled` in our fork)
   for its lifetime; a sleeping or removed window drops it. Headless test
   `a_streaming_window_keeps_the_device_awake` reads the test platform's hold count; the host
-  policy has unit tests on edges and underflow. Not done, ⏸ until asked: a host setting to opt
-  out (`pmset` still wins over an activity for a forced sleep), and holding the client awake
-  while an agent works in a terminal with no stream showing (zed does this for its agent
-  panel; ours would key on the hooks pill).
+  policy has unit tests on edges and underflow. The canvas also holds the device awake while
+  any agent is `Working` or in a `Tool` (the human is waiting on it, as zed does for its agent
+  panel) and lets go when every agent is idle, blocked on the human, or gone
+  (`a_working_agent_keeps_the_device_awake`). Not done, ⏸ until asked: a host setting to opt
+  out (`pmset` still wins over an activity for a forced sleep).
 
 ## Multi-client
 
