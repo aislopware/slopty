@@ -35,6 +35,21 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   the fork commit rewrites every `gpui-pre-*` entry — and the resolution is mechanical: take
   upstream's lock, `cargo update -w` re-adds the git sources against the freshly pushed zed
   fork. `cargo xtask upstream sync` does exactly that and stops on any other conflicted file.
+  2026-09-11: rebased onto zed main `d12e456be7` (2026-09-11, 64 commits) and gpui-kit main
+  `84f57fdfcb` (2026-09-12, 57 commits, tag v0.6.1). One API break: upstream added
+  `Platform::prevent_idle_sleep(&self, reason) -> Task<Result<ActivityGuard>>` (the macOS
+  backend wraps `NSProcessInfo` activities); `gpui_ios` now implements it with UIKit's one
+  process-wide `UIApplication.idleTimerDisabled` behind a hold count, released on the main
+  queue since a guard may drop on any thread (fork commit `c4a311d623`). Sync gotcha fixed in
+  `xtask`: when a build-check fails after the rebase, the fix lands on the already-rebased local
+  branch, and the next `sync` used to refuse it as "diverged" (the fork head is no longer an
+  ancestor). The check is now patch-based (`git cherry`): a local branch that carries every
+  fork patch is "ahead", not diverged, and the sync continues from it.
+  After the sync: gate green, app self-test 6/7 with `conversation.png` at 1.046 % vs the
+  1 % tolerance — gpui-kit's markdown moved (inline code now rounded in the mono font, #2949;
+  heading/list layout, #3038; descender clipping, #3023), so the golden was re-accepted;
+  every structural assertion in that scenario passed. Also in this gpui-kit range: headless UI
+  testing (#3005) and a mobile-application layer (#3045), both worth reading for the iOS app.
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
   per fork, the upstream and fork URLs, branches, the checkout under the main clone's

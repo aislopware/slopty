@@ -681,7 +681,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1195,7 +1195,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1725,7 +1725,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2062,7 +2062,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2689,7 +2689,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2715,7 +2715,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2785,8 +2785,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.6.0"
-source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#bc785c9f40cb6094c3cf2c7f6839f3fab8d0ec63"
+version = "0.6.1"
+source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#2604f6992291456b598af8ba1a8185d56a382887"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2819,8 +2819,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.6.0"
-source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#bc785c9f40cb6094c3cf2c7f6839f3fab8d0ec63"
+version = "0.6.1"
+source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#2604f6992291456b598af8ba1a8185d56a382887"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2844,6 +2844,7 @@ dependencies = [
  "once_cell",
  "paste",
  "raw-window-handle",
+ "regex",
  "resvg 0.45.1",
  "ropey",
  "rust-i18n",
@@ -2861,8 +2862,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.6.0"
-source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#bc785c9f40cb6094c3cf2c7f6839f3fab8d0ec63"
+version = "0.6.1"
+source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#2604f6992291456b598af8ba1a8185d56a382887"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2872,8 +2873,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit"
-version = "0.6.0"
-source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#bc785c9f40cb6094c3cf2c7f6839f3fab8d0ec63"
+version = "0.6.1"
+source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#2604f6992291456b598af8ba1a8185d56a382887"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -2885,8 +2886,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.6.0"
-source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#bc785c9f40cb6094c3cf2c7f6839f3fab8d0ec63"
+version = "0.6.1"
+source = "git+https://github.com/aislopware/gpui-kit.git?branch=slopty#2604f6992291456b598af8ba1a8185d56a382887"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2900,7 +2901,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "block",
@@ -2923,7 +2924,7 @@ dependencies = [
 [[package]]
 name = "gpui_ios"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2953,7 +2954,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2999,7 +3000,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3031,6 +3032,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
  "objc2-user-notifications",
  "parking_lot",
  "pathfinder_geometry",
@@ -3045,7 +3047,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3056,7 +3058,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3070,7 +3072,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "schemars",
  "serde",
@@ -3080,7 +3082,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "log",
@@ -3090,7 +3092,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3114,7 +3116,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3140,7 +3142,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3472,7 +3474,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3583,7 +3585,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4694,7 +4696,7 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -6110,7 +6112,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "collections",
  "serde",
@@ -6732,7 +6734,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7048,7 +7050,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "derive_refineable",
 ]
@@ -7349,7 +7351,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7416,7 +7418,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7499,7 +7501,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8557,7 +8559,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "heapless 0.9.3",
  "log",
@@ -8845,7 +8847,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9627,7 +9629,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "perf",
  "quote",
@@ -10226,7 +10228,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11428,7 +11430,7 @@ checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11445,7 +11447,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -11456,7 +11458,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/zed.git?branch=slopty#2360f99d39eaa9f14f6e53714f0b97da644dc4ad"
+source = "git+https://github.com/aislopware/zed.git?branch=slopty#c4a311d6236d1c59ce1faafdfc6dbf9b1d3544c8"
 
 [[package]]
 name = "zune-core"
