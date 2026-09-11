@@ -1927,11 +1927,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (`Activity::system_awake` = `UserInitiated`, `Activity::display_awake` adds
   `IdleDisplaySleepDisabled`; `Activity` is now `Send`, NSProcessInfo being thread-safe). The
   first client joining holds, the last leaving releases; the display follows the stream
-  `Registry`'s live count through its new observer, so every open/close path (client close,
-  connection drop, `close_screens`) is covered by construction. Nothing is held with nobody
+  `Registry`'s live count through its new observer (called under the registry lock, so counts
+  arrive in mutation order — Codex found the race where two closes and an open could report
+  `0` after `1`), so every open/close path (client close, connection drop, `close_screens`) is
+  covered by construction. Nothing is held with nobody
   attached: an unattended host sleeps as its owner set it. Client side: `ScreenView` holds
   GPUI's `prevent_idle_sleep` guard (macOS `NSActivity`, iOS `idleTimerDisabled` in our fork)
-  for its lifetime; a sleeping or removed window drops it. Headless test
+  for its lifetime; a sleeping or removed window drops it. On the Mac that guard is
+  `UserInitiated` (system sleep only), so `ScreenView` also holds `Activity::display_awake`:
+  a viewer watching a remote window is not touching the keyboard (Codex, same review). Headless test
   `a_streaming_window_keeps_the_device_awake` reads the test platform's hold count; the host
   policy has unit tests on edges and underflow. The canvas also holds the device awake while
   any agent is `Working` or in a `Tool` (the human is waiting on it, as zed does for its agent

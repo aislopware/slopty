@@ -420,7 +420,10 @@ struct RegistryInner {
     closed: VecDeque<ScreenSummary>,
 }
 
-/// Told the live-stream count after every change (the daemon's sleep policy listens).
+/// Told the live-stream count after every change (the daemon's sleep policy listens). Called
+/// with the registry's own lock held, so counts arrive in mutation order: two closes racing
+/// an open could otherwise report `0` after `1` and release a hold with a stream still live.
+/// The listener must therefore never call back into the registry.
 #[derive(Default)]
 struct Observer(Option<Box<dyn Fn(usize) + Send>>);
 
@@ -436,9 +439,9 @@ impl Registry {
         self.observer.lock().0 = Some(Box::new(f));
     }
 
-    fn changed(&self, live: usize) {
+    fn changed(&self, inner: &RegistryInner) {
         if let Some(f) = &self.observer.lock().0 {
-            f(live);
+            f(inner.live.len());
         }
     }
 
@@ -449,36 +452,31 @@ impl Registry {
         target: CaptureTarget,
         handle: StatsHandle,
     ) {
-        let live = {
-            let mut inner = self.inner.lock();
-            inner.live.push((client.to_string(), target, handle));
-            inner.live.len()
-        };
-        self.changed(live);
+        let mut inner = self.inner.lock();
+        inner.live.push((client.to_string(), target, handle));
+        self.changed(&inner);
+        drop(inner);
     }
 
     /// The stream closed: keep its final counters.
     pub fn remove(&self, client: &impl std::fmt::Display, id: StreamId) {
         let client = client.to_string();
-        let live = {
-            let mut inner = self.inner.lock();
-            let Some(at) = inner.live.iter().position(|(c, _, h)| *c == client && h.id() == id)
-            else {
-                return;
-            };
-            let (client, target, handle) = inner.live.remove(at);
-            if inner.closed.len() >= CLOSED_KEEP {
-                inner.closed.pop_front();
-            }
-            inner.closed.push_back(ScreenSummary {
-                client,
-                stream: id.0,
-                target,
-                stats: handle.stats(),
-            });
-            inner.live.len()
+        let mut inner = self.inner.lock();
+        let Some(at) = inner.live.iter().position(|(c, _, h)| *c == client && h.id() == id) else {
+            return;
         };
-        self.changed(live);
+        let (client, target, handle) = inner.live.remove(at);
+        if inner.closed.len() >= CLOSED_KEEP {
+            inner.closed.pop_front();
+        }
+        inner.closed.push_back(ScreenSummary {
+            client,
+            stream: id.0,
+            target,
+            stats: handle.stats(),
+        });
+        self.changed(&inner);
+        drop(inner);
     }
 
     /// Live streams with their counters right now, then the closed ones (oldest first).

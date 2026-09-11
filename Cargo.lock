@@ -8352,6 +8352,7 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-grid",
+ "slopty-platform",
  "slopty-predict",
  "slopty-proto",
  "slopty-theme",

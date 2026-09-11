@@ -18,6 +18,7 @@ core-video.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 slopty-client.workspace = true
+slopty-platform.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-predict.workspace = true

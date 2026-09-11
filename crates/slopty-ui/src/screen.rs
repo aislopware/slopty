@@ -111,6 +111,10 @@ pub struct ScreenView {
     /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
     /// this window streams; dropping the view lets go.
     _awake: Task<()>,
+    /// On the Mac, GPUI's hold is the system's only: this one keeps the display on too, since
+    /// a viewer watching a remote window is not touching the keyboard.
+    #[cfg(target_os = "macos")]
+    _display: slopty_platform::Activity,
     /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
     rate: Option<(u32, RateVerdict, bool)>,
     /// What the host says its capture target is doing (`ScreenEvent::Source`). A target that
@@ -364,6 +368,8 @@ impl ScreenView {
             hud: None,
             rtt: None,
             _awake: awake,
+            #[cfg(target_os = "macos")]
+            _display: slopty_platform::Activity::display_awake("Slopty remote window"),
             pacer: Pacer::default(),
             rate: None,
             source: SourceState::Live,
