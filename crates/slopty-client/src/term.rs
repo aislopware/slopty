@@ -918,6 +918,26 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_asks_for_a_resync_once_and_a_full_frame_never_does() {
+        let mut s = TermState::new(size());
+        assert!(s.apply(TermEvent::Frame(frame(1, true, 0, 0, 1, &[(0, "a")]))).is_empty());
+        // A delta after a missed frame asks to attach again, at this size.
+        let effects = s.apply(TermEvent::Frame(frame(3, false, 0, 0, 1, &[(0, "b")])));
+        assert_eq!(effects, vec![Effect::Request(TermRequest::Attach { size: s.size() })]);
+        // Another gap while that is pending asks nothing more.
+        assert!(s.apply(TermEvent::Frame(frame(6, false, 0, 0, 1, &[(0, "c")]))).is_empty());
+        // The full frame that answers it clears the flag, and a full frame after a gap never
+        // asks: it is the resync.
+        assert!(s.apply(TermEvent::Frame(frame(9, true, 0, 0, 1, &[(0, "d")]))).is_empty());
+        assert!(s.apply(TermEvent::Frame(frame(20, true, 0, 0, 1, &[(0, "e")]))).is_empty());
+        // A frame at another size resizes the screen; one at the same size leaves it alone.
+        let wide = Frame { cols: 20, rows: 4, ..frame(21, false, 0, 0, 1, &[(0, "f")]) };
+        s.apply(TermEvent::Frame(wide));
+        assert_eq!((s.screen().cols(), s.screen().rows()), (20, 4));
+        assert_eq!((s.size().cols, s.size().rows), (20, 4));
+    }
+
+    #[test]
     fn resize_event_and_request() {
         let mut s = TermState::new(size());
         let bigger = TermSize { cols: 20, rows: 5, ..TermSize::default() };
