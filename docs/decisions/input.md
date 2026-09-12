@@ -1,0 +1,71 @@
+# Decisions — Input
+
+See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
+
+- ✅ **`slopty-input` = `CGEvent` injection, one `Injector` per screen stream** (verified end to
+  end 2026-09-04: keys typed into the Slopty app landed in a streamed Ghostty window). Stream
+  pixels map back to global points through the target's current bounds (cached 100 ms) and the
+  stream's pixels-per-point scale, which `ScreenStream` updates on every quality change.
+  Window streams post with `CGEventPostToPid` to the owner; display streams post to the HID tap.
+  Keys carry the client's text via `CGEventKeyboardSetUnicodeString`, so host and client
+  layouts need not agree; bare modifier keys post as `FlagsChanged`. Needs post-event
+  (Accessibility) access: `slopty-hostd` preflights at start-up, warns, and asks once.
+
+- ✅ **The injector decides, a `Backend` posts** (2026-09-05). `Injector<B: Backend>` maps
+  pixels to points, tracks held buttons and flags, picks the route (`Pid` vs `Hid`; right
+  clicks always `Hid`) and activation, and hands a `Post { route, flags, event }` to the
+  backend. `System` builds the `CGEvent`; `Recorder` keeps the `Post`s. The whole decision
+  path is unit-tested against `Recorder` under `cargo gate` with no Accessibility grant and
+  no real event. The one live test (`SLOPTY_INPUT_E2E`) checks only that a display-stream
+  move lands, and runs via `cargo xtask e2e input`. Hand-driven checks (keys into a pid +
+  window screenshots + reading them back) are banned: see `CLAUDE.md` ▸ Live tests.
+
+- ⚠️ **macOS delivers keyboard events only to the active app.** Events posted to an inactive
+  pid queue up and all land the moment the app activates (observed macOS 26.5: four probe keys
+  arrived as `echoecho` after activation). So the injector activates the owner
+  (`NSRunningApplication::activateWithOptions`) before a button-down or key press when it is
+  not active, and the client sends `Focus` when a screen view gains focus. The host's own
+  desktop sees that app come to the front; there is no public API around this.
+
+- ⚠️ **`CGWindowListCreateDescriptionFromArray` takes raw `CGWindowID`s as array values**, in a
+  `CFArray` built with NULL callbacks, not boxed `CFNumber`s: with numbers it returns an empty
+  array (observed macOS 26.5; the docs say "array of window IDs"). `window_bounds` returned
+  `None` for every window until this was fixed; the gated `slopty-capture` geometry test pins it.
+
+- ⚠️ **Initialise CoreGraphics before ScreenCaptureKit in a daemon.** `SCContentFilter
+  initWithDesktopIndependentWindow:` calls SkyLight, which aborts with
+  `Assertion failed: (did_initialize), function CGS_REQUIRE_INIT` when nothing has connected the
+  process to the WindowServer yet (a hostd whose first SCK call is a window filter, e.g. a
+  client reconnecting with a persisted window item). `slopty-capture` calls `CGMainDisplayID`
+  once before any enumerate/resolve.
+
+- ✅ **⌘ chords go to the remote window unless the canvas binds them** (2026-09-04). GPUI runs
+  key bindings before key listeners, so ⌘T/⌘N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- never reach `ScreenView`;
+  every other chord (⌘C/⌘V/⌘Z/⌘S/⌘K…) is forwarded with `Mods::SUPER` and no text (GPUI gives
+  no `key_char` for ⌘ chords; the injector's virtual keycode carries it). Verified: ⌘K from the
+  app reached hostd as `Key { K, Press, SUPER }` and cleared the streamed Ghostty. The view
+  tracks pressed keys so a release whose press was eaten by a canvas binding is not forwarded.
+  ⌘Q/⌘H/⌘M stay with the app (menu bar). Modifier-only presses are not forwarded (GPUI has no
+  key-down for them); the injector sets flags per event instead.
+
+- ⚠️ **An absolute GPUI element without insets sits at its static position.** `ScreenView`
+  recorded its bounds from a `canvas().absolute().size_full()` placed *after* the picture, so
+  Taffy put it one body-height below the real top: every pointer event mapped ~834 px too high
+  and the injector clamped it to the window's top edge (clicks "worked" only by landing on the
+  title bar). Fixed with `inset_0()`; the canvas viewport recorder got the same for safety.
+
+- ✅ **Host window resizes are polled, not observed** (2026-09-04). ScreenCaptureKit keeps
+  scaling a window into the old output size (a 600×830 window in a 1264×834 stream looked
+  2× wide), so `ScreenStream::check_geometry` (one `CGWindowListCreateDescriptionFromArray`
+  per stream, every 250 ms from the hostd connection loop) compares the target's bounds with
+  the stream's native size, rebuilds encoder + capture at the new size with a keyframe, and
+  emits `ScreenEvent::Geometry`. The client's `ScreenView` updates its native size and the
+  canvas gives the item the new aspect (width kept, `Place`). Verified: 600×830 → 900×500 changed
+  the item to 1264×736 and the picture painted unstretched. No public resize notification
+  exists for another app's window short of AX observers, which need the same polling fallback.
+
+- ✅ **Magnify is ignored** for now: there is no public constructor for gesture `CGEvent`s.
+
+- 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
+  `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
+  unverified; verify with a ⌘ chord once the daemon is signed).

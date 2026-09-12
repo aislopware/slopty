@@ -1,0 +1,66 @@
+# Decisions — Multi-client
+
+See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
+
+Proven end to end by the pair suite (`crates/slopty-e2e/tests/pair.rs`, `cargo xtask e2e pair`):
+
+two app processes on one host, each driven through its own test socket. Before this, one line in
+
+ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients at once.
+
+- ✅ **Item geometry, z, sleep and note text are host state; camera and zoom are client state**
+  (2026-09-06, confirming what the code already did). `slopty_host::canvas::CanvasStore` is the one
+  authoritative document (persisted `canvas.json`): every client proposes `CanvasOp`s and mirrors
+  the host's `CanvasSync` deltas (`slopty_client::canvas`), so a terminal opened on A appears on B
+  in the same place, an item A drags lands on B where A left it, and a note A edits reads the same
+  on B once its editor commits (400 ms idle, `slopty_ui::note`). The camera `{x, y, zoom}` lives in
+  each `CanvasView` and is never sent, so A's ⌘= and ⌘1 do not move B. This is the kolu-style shared
+  canvas: one plane, one layout, many viewpoints. Pair-suite evidence: a shell opened on A is on B
+  within a round trip (loopback, measured below) with the same title, size and rows; A zooming in
+  leaves B at zoom 1; a title-bar drag on A moves the item to the same rect on B; ⌘W on A takes the
+  item off B.
+
+- ✅ **Input is serialised by the session actor; no client "holds" the keyboard** (2026-09-06). Both
+  clients type into the same session at once and every key of each side lands in its own order,
+  none lost or reordered: the actor (`slopty_host::session`) writes each `TermRequest::Key` to the
+  PTY in arrival order on its own thread, with no per-client gating. A numbered sequence typed a
+  key at a time from each side came out interleaved and complete (`a0b1c2…i8j9`). What one client
+  owns is not the input but the **PTY size**: the driver (the opener, else the first to attach)
+  sizes the grid, the others see its size and wear the "take" pill. Rejected again here, as under
+  Terminal: tmux-style "latest input drives" (a phone would keep resizing the desktop's terminal).
+  The take pill renders on the active item only, so a client takes over by focusing the terminal
+  and clicking "take"; the PTY then follows the taker and the former driver gets the pill.
+
+- ✅ **A permission answer is client-local; the host's next word clears the others** (2026-09-06). An
+  agent's attention (a hook played to hostd) badges every client and each shows "1 needs you", read
+  off the same `HostMsg::Agent` broadcast. "Allow" on A drops A's own count at once (the answer is
+  A typing Enter into the prompt, `CanvasView::answered`), but B keeps counting it until the host
+  reports the agent moved on (a `PreToolUse`), because only the host knows the prompt was answered
+  and by whom. This is deliberate: the alternative (broadcasting one client's answer as authority)
+  would clear B on an answer that the agent might still be blocked on.
+
+- ✅ **A dying connection detaches only its own sinks; the survivor never stalls, and a relaunch
+  catches up** (2026-09-06, exercising the "detach only its own sinks" ruling under two clients).
+  A killed outright (SIGKILL, no QUIC goodbye) while B watches a flooding shell: B's output paused
+  no longer than the dump-poll floor (about one frame; see MEASUREMENTS) and B kept typing and
+  echoing. A relaunched on the same identity reconnects with no ticket, reattaches every session
+  and shows the current rows; both clients then hold the same canvas. When A's abandoned QUIC
+  connection finally idles out at the host (`IDLE_TIMEOUT`, 45 s), hostd's `Peer::drop` calls
+  `SessionHandle::detach_sink(client, &sink)`, which removes a viewer only if `Sender::same_channel`
+  matches — so the relaunched A's live viewer survives its dead connection's cleanup, and the host
+  still reports both clients connected.
+
+- ✅ **A display streams to two clients; the host encodes once per viewer, not once per stream**
+  (2026-09-06). `slopty-hostd`'s `Peer` opens a `ScreenStream` per connection
+  (`conn.rs::screen`), so two clients watching the same display run two captures and two HEVC
+  encoders. Measured (loopback, native 1920×1080, debug): both viewers present the frames with
+  no drops (arrival → present p50 4.3 ms, p95 21-57 ms; MEASUREMENTS below), and hostd draws
+  0.15 cores with two viewers against 0.09 with one — the second viewer costs about 0.06 of a
+  core. Kept per-viewer rather than fanning one encode out to both: each client already adapts
+  its own bitrate to its own path (`ScreenRequest::Report` → per-stream rate control, the mesh
+  measurements) and can ask for its own quality (`SetQuality`), which a shared encode would take
+  away, and two clients of one display is the common case (a laptop and a phone), not twenty.
+  `slopty host screens` lists both live streams with their client ids, which is how the test
+  confirms the fan-out. Revisit if many viewers of one high-resolution display becomes real: a
+  shared base layer with per-client rate would cap the cost, at the price of the per-client
+  adaptation.

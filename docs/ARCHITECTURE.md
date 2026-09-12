@@ -4,7 +4,7 @@ Slopty is a remote-coding workstation: a macOS **host** exposes shells and windo
 **clients** show them on one infinite canvas, mixed freely, with Claude Code agents surfaced as
 first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
-This file is the map. Rulings and their evidence live in [DECISIONS.md](DECISIONS.md).
+This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 How the work itself is organised across agent sessions is in `docs/ORCHESTRATION.md`.
 
 ## 1. Shape
