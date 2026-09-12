@@ -442,8 +442,53 @@ next waiting terminal in reading order, cycling from the active item; the top ba
 On macOS the count is also the Dock badge, an attention event bounces the Dock icon when the
 app is not active, and (bundled app only) a notification-centre banner with Allow/Deny buttons
 is posted; clicking it activates the app and reveals the session
-(`CanvasView::notification_response`). Later: ACP (`agent-client-protocol`) for structured
-control.
+(`CanvasView::notification_response`).
+
+**Driven agents (structured control).** "New Agent (Structured)" / ⌘⌥T (`NewDrivenAgent`)
+sends `ClientMsg::OpenAgent { cwd, resume, model, title }` and the host runs Claude Code
+itself, with no PTY, over its own stream-json host protocol (DECISIONS, "Structured driving
+is Claude Code's own stream-json protocol"): `apps/slopty-hostd/src/driven.rs` spawns `claude
+-p --verbose --input-format stream-json --output-format stream-json --permission-prompts host
+--permission-prompt-tool stdio --include-partial-messages --replay-user-messages [--resume id]
+[--model m]` through the login shell (or the program named by `SLOPTY_CLAUDE_BIN`, which is
+how the self-test substitutes a fake), in the requested directory, with stdio piped and
+`CLAUDECODE` unset. The session is a `SessionKind::Agent` `SessionSummary` (protocol 15) in
+the same `HelloAck` list and the same canvas item kind as a terminal, so placement, many
+clients, sleeping, closing and reattaching are the machinery terminals already have; only the
+per-session stream differs: `TermRequest::Attach` answers with the conversation snapshot
+instead of a grid, `Close` ends the process. `slopty_agent::stream` is the pure protocol
+layer — `parse` turns each NDJSON line into an `Event` (`Init`, transcript-shaped `Record`s,
+`TextDelta`, `MessageStop`, `Permission`, `ControlAck`, `Result`, `Denied`), `Fold::apply`
+turns events into `TranscriptEntry`s (through the same `transcript::record_entries` the JSONL
+tail uses), the streamed `Partial` text, `AgentStatus` (`Working` while a turn runs,
+`Blocked(Permission)` on a `can_use_tool`, `Done` on the `result`) and `PermissionRequest`s
+(the request id, the tool, its one-line summary and its whole input, clipped), and
+`user_message` / `Fold::answer` / `interrupt` build the lines the host writes back. The
+daemon's pump task per agent folds stdout, keeps the last 400 entries, the partial and the
+pending requests per session (`driven::Snapshot`, what a joining client gets), and
+broadcasts `HostMsg::Transcript` (increments), `HostMsg::AgentPartial` (coalesced to one
+every 40 ms), `HostMsg::AgentPermission` and `HostMsg::Agent` with `source: Driven`, the
+strongest source. Clients speak `ClientMsg::AgentSay { session, text }` (shown at once as
+the user entry; the agent's replay of it is deduplicated), `AgentAnswer { session, request,
+allowed, message }` and `AgentInterrupt { session }`. When the process ends, the session
+closes like any other (`SessionClosed { Exited }`, the item removed).
+The **agent card** is the same `TerminalView` in *driven* mode (`set_driven`, from
+`SessionSummary.kind`): the conversation opens on its first frame with the caret in the
+composer and cannot be hidden, there is no grid behind it, ↩ in the composer sends
+`AgentSay`, Esc and ⌃C send `AgentInterrupt`, the streamed text shows under the list
+(`conversation-partial`) until it becomes an entry, and the attention row names the tool
+*and what it would do* (`Attention::Permission.detail` from the `PermissionRequest`), with
+Allow / Deny raising `TerminalViewEvent::AgentAnswered { request, allowed }` so the canvas
+sends `AgentAnswer` by request id (`answer_driven`) — the title-bar badge and the
+notification-centre buttons go the same way for a driven session. Both kinds coexist: ⌘⇧T
+still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
+(`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
+(`driven_agent`), headless `a_driven_view_speaks_to_the_agent`, and the app self-test
+`a_driven_agent_talks_over_stream_json`, which runs the host against `slopty-fake-claude`
+(`crates/slopty-e2e/src/bin`, a scripted stream-json agent: it streams, lingers for an
+interrupt, and asks a `Write` permission that the test allows and then denies through the
+Allow / Deny buttons in the accessibility tree) and reads the card through the dump
+(`TerminalInfo.kind`, `ConversationInfo.partial`, `ConversationInfo.permission`).
 
 **Conversation view.** A terminal that runs a Claude Code session can show the conversation
 instead of the grid: the "chat" pill in its title bar or ⌘⇧L (`ToggleConversation`) sends

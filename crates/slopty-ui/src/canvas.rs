@@ -26,12 +26,17 @@ use slopty_client::canvas::{
 };
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason, TranscriptUpdate};
+use slopty_proto::agent::{
+    AgentEvent, AgentSource, AgentStatus, BlockReason, OpenAgent, PermissionRequest,
+    TranscriptUpdate,
+};
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
 };
-use slopty_proto::terminal::{OpenSession, SessionSummary, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{
+    OpenSession, SessionKind, SessionSummary, TermEvent, TermRequest, TermSize,
+};
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
@@ -58,6 +63,8 @@ pub mod actions {
             NewTerminal,
             /// Open a new Claude Code agent on the host.
             NewAgent,
+            /// Open a Claude Code agent the host drives over its structured protocol.
+            NewDrivenAgent,
             /// Put an empty note on the canvas.
             NewNote,
             /// Put a host window or display on the canvas.
@@ -91,8 +98,9 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewNote,
-    NewTerminal, NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewDrivenAgent,
+    NewNote, NewTerminal, NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
+    ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -112,6 +120,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-t", NewTerminal, CTX),
         KeyBinding::new("cmd-n", NewTerminal, CTX),
         KeyBinding::new("cmd-shift-t", NewAgent, CTX),
+        KeyBinding::new("cmd-alt-t", NewDrivenAgent, CTX),
         KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
@@ -827,6 +836,12 @@ impl CanvasView {
         if self.answered.contains_key(&session) {
             return;
         }
+        if self.is_driven(session) {
+            // A driven agent is answered by request id, not by a key: the view knows the
+            // request and reports back through `TerminalViewEvent::AgentAnswered`.
+            view.update(cx, |view, cx| view.answer(answer == Answer::Allowed, cx));
+            return;
+        }
         view.update(cx, |view, cx| {
             // A Control armed on the phone's key bar is for the next typed key, not for this.
             if view.sticky_control() {
@@ -836,6 +851,28 @@ impl CanvasView {
                 Keystroke { modifiers: Modifiers::default(), key: key.to_owned(), key_char: None };
             view.press(keystroke, cx);
         });
+        self.answered.insert(session, answer);
+        cx.dismiss_system_notification(&session.to_string());
+        self.count_needs_you(cx);
+        cx.notify();
+    }
+
+    /// Whether the host drives the session's agent (a `SessionKind::Agent` session).
+    fn is_driven(&self, session: SessionId) -> bool {
+        self.sessions.get(&session).is_some_and(|s| s.kind == SessionKind::Agent)
+    }
+
+    /// The driven view's Allow / Deny, by request id: the host answers Claude Code, and the
+    /// badge clears as for a typed answer.
+    fn answer_driven(
+        &mut self,
+        session: SessionId,
+        request: String,
+        allowed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.send(ClientMsg::AgentAnswer { session, request, allowed, message: None });
+        let answer = if allowed { Answer::Allowed } else { Answer::Denied };
         self.answered.insert(session, answer);
         cx.dismiss_system_notification(&session.to_string());
         self.count_needs_you(cx);
@@ -1120,6 +1157,25 @@ impl CanvasView {
         self.active = Some(id);
     }
 
+    /// What a driven agent is writing now, for the view showing it.
+    pub fn agent_partial(&self, session: SessionId, text: String, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.agent_partial(text, cx));
+        }
+    }
+
+    /// A driven agent's tool call waiting on the human, for the view showing it.
+    pub fn agent_permission(
+        &self,
+        session: SessionId,
+        request: PermissionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.agent_permission(request, cx));
+        }
+    }
+
     /// A slice of an agent session's conversation, for the terminal showing it.
     pub fn transcript_update(&self, update: TranscriptUpdate, cx: &mut Context<Self>) {
         if let Some(view) = self.terminals.get(&update.session) {
@@ -1174,8 +1230,14 @@ impl CanvasView {
                     }
                     TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
                     TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
+                    TerminalViewEvent::AgentAnswered { request, allowed } => {
+                        this.answer_driven(sid, request.clone(), *allowed, cx);
+                    }
                 },
             ));
+            if self.is_driven(*session) {
+                view.update(cx, TerminalView::set_driven);
+            }
             self.send(ClientMsg::Term { session: *session, req: TermRequest::Attach { size } });
             // A view born after the host reported the agent (a woken item) starts with its state.
             if let Some(agent) = self.agents.get(session) {
@@ -1306,6 +1368,30 @@ impl CanvasView {
     /// user's login shell, so `claude` is found wherever their rc files put it (or alias it).
     pub fn new_agent(&mut self, _: &NewAgent, _window: &mut Window, cx: &mut Context<Self>) {
         self.open_session(vec![AGENT_COMMAND.to_owned()], Some(AGENT_COMMAND.to_owned()), cx);
+    }
+
+    /// ⌘⌥T: a Claude Code agent the host drives over its stream-json protocol, shown as a
+    /// conversation card; it starts in the active terminal's directory when there is one.
+    pub fn new_driven_agent(
+        &mut self,
+        _: &NewDrivenAgent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.active.and_then(|id| self.doc.get(id)).and_then(|item| self.cwd_of(item));
+        self.open_agent(cwd, cx);
+    }
+
+    /// Open a driven agent in `cwd` (the host's default when `None`); the host places it.
+    pub fn open_agent(&self, cwd: Option<String>, cx: &mut Context<Self>) {
+        tracing::debug!(?cwd, "open driven agent");
+        self.send(ClientMsg::OpenAgent(OpenAgent {
+            cwd,
+            resume: None,
+            model: None,
+            title: Some(AGENT_COMMAND.to_owned()),
+        }));
+        cx.notify();
     }
 
     /// Open a session running `command` (the login shell when empty), titled after its
@@ -2303,6 +2389,7 @@ impl Render for CanvasView {
             .bg(hsla(self.theme.surfaces.canvas))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent))
+            .on_action(cx.listener(Self::new_driven_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))
@@ -2819,6 +2906,7 @@ mod tests {
         };
         let id = item.id;
         let summary = SessionSummary {
+            kind: SessionKind::Terminal,
             id: session,
             title: "shell".into(),
             cwd: at.cwd.map(str::to_owned),

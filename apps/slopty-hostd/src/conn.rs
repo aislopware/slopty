@@ -66,11 +66,16 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         name: daemon.name.clone(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         caps: Caps::empty(),
-        sessions: daemon.host.summaries().await,
+        sessions: {
+            let mut sessions = daemon.host.summaries().await;
+            sessions.extend(daemon.driven.summaries());
+            sessions
+        },
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
     out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
-    let agents = daemon.agents.lock().snapshot();
+    let mut agents = daemon.agents.lock().snapshot();
+    agents.extend(daemon.driven.events());
     for event in agents {
         out.send(HostMsg::Agent(event)).await.map_err(|_gone| NetError::Closed)?;
     }
@@ -495,11 +500,46 @@ impl Peer<'_> {
             },
             ClientMsg::Screen(req) => self.screen(req).await,
             ClientMsg::Transcript(TranscriptFollow { session, follow }) => {
-                if follow {
+                if self.daemon.driven.contains(session) {
+                    if follow {
+                        let _alive = self.send_driven_snapshot(session).await;
+                    }
+                } else if follow {
                     self.transcripts.insert(session, Tail::default());
                     let _alive = self.poll_transcripts().await;
                 } else {
                     self.transcripts.remove(&session);
+                }
+            }
+            ClientMsg::OpenAgent(req) => match self.daemon.driven.open(self.daemon, &req) {
+                Ok(summary) => {
+                    let session = summary.id;
+                    tracing::info!(client = %self.client, %session, cwd = ?summary.cwd, "agent opened");
+                    let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));
+                    if let Some(delta) = self.daemon.canvas.ensure_terminal(session, self.client) {
+                        let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(client = %self.client, error = %e, "open agent");
+                    let event = TermEvent::Error(e.to_string());
+                    let _sent =
+                        self.out.send(HostMsg::Term { session: SessionId::nil(), event }).await;
+                }
+            },
+            ClientMsg::AgentSay { session, text } => {
+                if let Err(e) = self.daemon.driven.say(session, text) {
+                    tracing::debug!(client = %self.client, %session, error = %e, "agent say");
+                }
+            }
+            ClientMsg::AgentAnswer { session, request, allowed, message } => {
+                if let Err(e) = self.daemon.driven.answer(session, request, allowed, message) {
+                    tracing::debug!(client = %self.client, %session, error = %e, "agent answer");
+                }
+            }
+            ClientMsg::AgentInterrupt { session } => {
+                if let Err(e) = self.daemon.driven.interrupt(session) {
+                    tracing::debug!(client = %self.client, %session, error = %e, "agent interrupt");
                 }
             }
             ClientMsg::InstallHooks => {
@@ -721,7 +761,44 @@ impl Peer<'_> {
         }
     }
 
+    /// What a client attaching to or following a driven agent is shown: the conversation so
+    /// far, the text being streamed, the tools waiting on it, and the status. Returns `false`
+    /// when the client's writer is gone.
+    async fn send_driven_snapshot(&self, session: SessionId) -> bool {
+        let Some(snapshot) = self.daemon.driven.snapshot(session) else { return true };
+        let update = TranscriptUpdate { session, reset: true, entries: snapshot.entries };
+        if self.out.send(HostMsg::Transcript(update)).await.is_err() {
+            return false;
+        }
+        if !snapshot.partial.is_empty() {
+            let partial = HostMsg::AgentPartial { session, text: snapshot.partial };
+            if self.out.send(partial).await.is_err() {
+                return false;
+            }
+        }
+        for request in snapshot.pending {
+            if self.out.send(HostMsg::AgentPermission { session, request }).await.is_err() {
+                return false;
+            }
+        }
+        self.out.send(HostMsg::Agent(snapshot.event)).await.is_ok()
+    }
+
     async fn term(&mut self, session: SessionId, req: TermRequest) {
+        if self.daemon.driven.contains(session) {
+            match req {
+                TermRequest::Attach { .. } => {
+                    let _alive = self.send_driven_snapshot(session).await;
+                }
+                TermRequest::Close => {
+                    if let Err(e) = self.daemon.driven.close(session) {
+                        tracing::debug!(client = %self.client, %session, error = %e, "agent close");
+                    }
+                }
+                _other => {}
+            }
+            return;
+        }
         match req {
             TermRequest::Attach { size } => self.attach(session, size).await,
             TermRequest::Detach => {

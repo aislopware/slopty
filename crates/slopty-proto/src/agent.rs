@@ -61,8 +61,24 @@ pub enum AgentSource {
     Title,
     /// The agent's JSONL transcript said what the turn is doing.
     Transcript,
-    /// A Claude Code hook said, the only signal that reports blocking.
+    /// A Claude Code hook said, the only observed signal that reports blocking.
     Hook,
+    /// The host drives the agent over its structured protocol and hears everything.
+    Driven,
+}
+
+/// Client → host: start an agent the host drives (a `SessionKind::Agent` session); answered
+/// with `HostMsg::SessionOpened`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct OpenAgent {
+    /// Working directory; the host's default when `None`.
+    pub cwd: Option<String>,
+    /// A Claude Code session id to resume, else a new conversation.
+    pub resume: Option<String>,
+    /// Model override (`--model`), else Claude Code's default.
+    pub model: Option<String>,
+    /// Display name.
+    pub title: Option<String>,
 }
 
 /// Host → client.

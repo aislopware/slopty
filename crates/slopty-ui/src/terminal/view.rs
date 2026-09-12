@@ -17,7 +17,9 @@ use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentStatus, BlockReason, TranscriptFollow, TranscriptUpdate};
+use slopty_proto::agent::{
+    AgentStatus, BlockReason, PermissionRequest, TranscriptFollow, TranscriptUpdate,
+};
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::{Theme, alpha};
@@ -166,6 +168,14 @@ pub enum TerminalViewEvent {
         /// Allow (Enter) or deny (Esc).
         allowed: bool,
     },
+    /// A driven session's Allow / Deny row was pressed: the canvas answers the host's
+    /// permission request by id.
+    AgentAnswered {
+        /// The request id (`PermissionRequest::id`).
+        request: String,
+        /// Allow or deny.
+        allowed: bool,
+    },
 }
 
 /// One session's view.
@@ -216,6 +226,16 @@ pub struct TerminalView {
     focus_composer: bool,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
+    /// The host drives this session's agent over its structured protocol: the conversation
+    /// is the whole view (there is no grid), the composer speaks to the agent, and the answers
+    /// go back by request id.
+    driven: bool,
+    /// Open the conversation on the next frame (a driven view is born without a window).
+    open_conversation: bool,
+    /// The permission the driven agent waits on, with the input it would run with.
+    permission: Option<PermissionRequest>,
+    /// The text the driven agent is writing now, ahead of its next entry.
+    partial: String,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -280,13 +300,74 @@ impl TerminalView {
             answered: None,
             focus_composer: false,
             search_regex: false,
+            driven: false,
+            open_conversation: false,
+            permission: None,
+            partial: String::new(),
         }
+    }
+
+    /// Make this the view of a session the host drives (`SessionKind::Agent`): the
+    /// conversation opens on the first frame and stays; there is nothing else to show.
+    pub fn set_driven(&mut self, cx: &mut Context<Self>) {
+        self.driven = true;
+        self.open_conversation = true;
+        cx.notify();
+    }
+
+    /// Whether the host drives this session's agent (the conversation is the whole view).
+    #[must_use]
+    pub const fn is_driven(&self) -> bool {
+        self.driven
+    }
+
+    /// The text the driven agent is writing now.
+    #[must_use]
+    pub fn partial(&self) -> &str {
+        &self.partial
+    }
+
+    /// The permission the driven agent waits on.
+    #[must_use]
+    pub const fn permission(&self) -> Option<&PermissionRequest> {
+        self.permission.as_ref()
+    }
+
+    /// A slice of what the driven agent is writing, replacing the last one; empty once the
+    /// text became an entry.
+    pub fn agent_partial(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.partial != text {
+            self.partial = text;
+            cx.notify();
+        }
+    }
+
+    /// The driven agent asks to run a tool; shown above the composer with Allow / Deny.
+    pub fn agent_permission(&mut self, request: PermissionRequest, cx: &mut Context<Self>) {
+        self.permission = Some(request);
+        self.answered = None;
+        cx.notify();
+    }
+
+    fn say(&self, msg: ClientMsg) {
+        if let Err(e) = self.out.try_send(msg) {
+            tracing::warn!(session = %self.session, error = %e, "outbound queue");
+        }
+    }
+
+    /// Esc or ⌃C in a driven conversation: stop the agent's turn.
+    pub fn interrupt_agent(&self) {
+        self.say(ClientMsg::AgentInterrupt { session: self.session });
     }
 
     /// ⌘⇧L or the title-bar pill: show the agent's conversation instead of the grid, or the
     /// grid again. The host is told to start or stop tailing the transcript. The composer
     /// takes the keyboard with the conversation; the grid takes it back.
     pub fn toggle_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.driven {
+            // The conversation is the whole view.
+            return;
+        }
         let follow = self.conversation.is_none();
         if follow {
             let conversation = Conversation::new(window, cx);
@@ -309,6 +390,12 @@ impl TerminalView {
     pub fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = &self.conversation else { return };
         let text = conversation.take_composer_text(window, cx);
+        if self.driven {
+            if !text.trim().is_empty() {
+                self.say(ClientMsg::AgentSay { session: self.session, text });
+            }
+            return;
+        }
         if !text.trim().is_empty() {
             self.send(TermRequest::Paste(text));
         }
@@ -326,6 +413,13 @@ impl TerminalView {
         if self.answered.is_some() {
             return;
         }
+        if self.driven {
+            let Some(request) = self.permission.as_ref().map(|p| p.id.clone()) else { return };
+            self.answered = Some(allowed);
+            cx.emit(TerminalViewEvent::AgentAnswered { request, allowed });
+            cx.notify();
+            return;
+        }
         self.answered = Some(allowed);
         cx.emit(TerminalViewEvent::Answered { allowed });
         cx.notify();
@@ -335,6 +429,9 @@ impl TerminalView {
     /// elicitation puts the caret in the composer when the conversation is on.
     pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
         self.answered = None;
+        if !matches!(status, Some(AgentStatus::Blocked(BlockReason::Permission { .. }))) {
+            self.permission = None;
+        }
         if self.conversation.is_some()
             && matches!(
                 status,
@@ -358,9 +455,11 @@ impl TerminalView {
     #[must_use]
     pub fn attention(&self) -> Option<Attention> {
         match self.agent.as_ref()? {
-            AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-                Some(Attention::Permission { tool: tool.clone(), answered: self.answered })
-            }
+            AgentStatus::Blocked(BlockReason::Permission { tool }) => Some(Attention::Permission {
+                tool: tool.clone(),
+                answered: self.answered,
+                detail: self.permission.as_ref().map(|p| p.summary.clone()),
+            }),
             AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation) => {
                 Some(Attention::Prompt)
             }
@@ -1125,6 +1224,17 @@ impl TerminalView {
         // terminal meaning, so the agent can be interrupted without leaving the chat.
         if self.composer_focused(window, cx) {
             let k = &event.keystroke;
+            if self.driven {
+                // No grid behind the chat: Esc and ⌃C interrupt the agent, nothing else leaves
+                // the composer.
+                if k.key == "escape" || (k.modifiers.control && k.key == "c") {
+                    self.interrupt_agent();
+                    cx.stop_propagation();
+                } else if k.key == "enter" && !k.modifiers.shift {
+                    cx.stop_propagation();
+                }
+                return;
+            }
             if !(k.key == "escape" || k.modifiers.control) {
                 if k.key == "enter" && !k.modifiers.shift {
                     // The composer's Enter action submitted and let the action through; the
@@ -1506,6 +1616,20 @@ impl Render for TerminalView {
         if zooming {
             self.motion_frames = self.motion_frames.saturating_add(1);
         }
+        if std::mem::take(&mut self.open_conversation) && self.conversation.is_none() {
+            // A driven view opens its chat on its first frame (it needs the window) and asks
+            // for the conversation so far, which may have arrived before there was a chat.
+            self.conversation = Some(Conversation::new(window, cx));
+            self.focus_composer = true;
+            self.say(ClientMsg::Transcript(TranscriptFollow {
+                session: self.session,
+                follow: true,
+            }));
+        }
+        if self.driven && focused && self.conversation.is_some() {
+            // The canvas gives the view the keyboard; in a driven view that is the composer.
+            self.focus_composer = true;
+        }
         if std::mem::take(&mut self.focus_composer) && self.conversation.is_some() {
             // Focus moves after this update, not from inside the render.
             cx.defer_in(window, |this, window, cx| {
@@ -1516,10 +1640,9 @@ impl Render for TerminalView {
         }
         let attention = self.attention();
         let composer_focused = self.composer_focused(window, cx);
-        let conversation = self
-            .conversation
-            .as_ref()
-            .map(|c| c.render(attention.as_ref(), composer_focused, &self.theme, cx));
+        let conversation = self.conversation.as_ref().map(|c| {
+            c.render(attention.as_ref(), &self.partial, composer_focused, &self.theme, cx)
+        });
         let search_focused = self
             .search
             .as_ref()
@@ -2067,7 +2190,11 @@ mod tests {
         assert!(cx.debug_bounds("conversation-attention").is_some(), "the row says allowed");
         assert_eq!(
             view.read_with(cx, |v, _| v.attention()),
-            Some(Attention::Permission { tool: "Bash".to_owned(), answered: Some(true) })
+            Some(Attention::Permission {
+                tool: "Bash".to_owned(),
+                answered: Some(true),
+                detail: None
+            })
         );
 
         view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
@@ -2531,5 +2658,112 @@ mod tests {
             let tall = item.size.height - pad * 2.0 * zoom;
             assert!(rows <= tall, "at zoom {zoom}: {rows:?} > {tall:?}");
         }
+    }
+
+    /// Every message the host received that speaks to or about the agent, oldest first, as
+    /// one word each.
+    fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(match msg {
+                ClientMsg::Transcript(TranscriptFollow { follow, .. }) => {
+                    format!("follow:{follow}")
+                }
+                ClientMsg::AgentSay { text, .. } => format!("say:{text}"),
+                ClientMsg::AgentAnswer { request, allowed, .. } => {
+                    format!("answer:{request}:{allowed}")
+                }
+                ClientMsg::AgentInterrupt { .. } => "interrupt".to_owned(),
+                ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
+                ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
+                // Resizes and the like: not what these tests are about.
+                _ => continue,
+            });
+        }
+        out
+    }
+
+    /// A driven view (the host speaks Claude Code's stream-json protocol) opens its
+    /// conversation on its first frame with the keyboard in the composer and asks the host for
+    /// the conversation so far; ↩ speaks to the agent rather than pasting into a grid; the
+    /// agent's streamed text shows under the list until it becomes an entry; a permission
+    /// request shows what the tool would do and is answered by request id, never by a key;
+    /// Esc interrupts; ⌘⇧L cannot hide the conversation.
+    #[gpui::test]
+    fn a_driven_view_speaks_to_the_agent(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&answers);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::AgentAnswered { request, allowed } = event {
+                    seen.borrow_mut().push(format!("{request}:{allowed}"));
+                }
+            })
+            .detach();
+        });
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation").is_some(), "the conversation is the view");
+        assert!(composer_focused(&view, cx), "with the caret in the composer");
+        assert_eq!(drain_words(&mut rx), ["follow:true"]);
+
+        cx.simulate_keystrokes("h i enter");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["say:hi"], "↩ speaks to the agent");
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some(""));
+        cx.simulate_keystrokes("enter");
+        assert!(drain_words(&mut rx).is_empty(), "an empty ↩ says nothing");
+
+        view.update(cx, |v, cx| v.agent_partial("Hello, so far".to_owned(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-partial").is_some(), "the partial shows");
+        view.update(cx, |v, cx| v.agent_partial(String::new(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-partial").is_none());
+
+        let request = PermissionRequest {
+            id: "req_1".to_owned(),
+            tool_use: "toolu_1".to_owned(),
+            tool: "Write".to_owned(),
+            summary: "note.txt".to_owned(),
+            input: Clipped::whole("{}".to_owned()),
+        };
+        view.update(cx, |v, cx| {
+            v.agent_permission(request, cx);
+            let blocked =
+                AgentStatus::Blocked(BlockReason::Permission { tool: "Write".to_owned() });
+            v.set_agent_status(Some(blocked), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.attention()),
+            Some(Attention::Permission {
+                tool: "Write".to_owned(),
+                answered: None,
+                detail: Some("note.txt".to_owned())
+            })
+        );
+        let allow = cx.debug_bounds("conversation-allow").expect("Allow is drawn");
+        cx.simulate_click(allow.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*answers.borrow(), ["req_1:true"], "answered by request id");
+        assert!(drain_words(&mut rx).is_empty(), "no key was typed");
+        assert!(cx.debug_bounds("conversation-allow").is_none(), "one tap, one answer");
+
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.permission().is_none()), "the request is spent");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(drain_words(&mut rx), ["interrupt"], "Esc interrupts the turn");
+        cx.simulate_keystrokes("ctrl-c");
+        assert_eq!(drain_words(&mut rx), ["interrupt"], "so does ⌃C");
+        assert!(composer_focused(&view, cx), "and the caret stays");
+
+        cx.simulate_keystrokes("cmd-shift-l");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
+        assert!(drain_words(&mut rx).is_empty());
     }
 }

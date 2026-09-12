@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -66,6 +66,32 @@ pub enum ClientMsg {
     /// Register the `slopty hook` relay in the host's Claude Code settings, so agents there
     /// report precisely instead of being guessed at; answered with `HostMsg::HooksInstalled`.
     InstallHooks,
+    /// Start an agent the host drives; the host answers with `HostMsg::SessionOpened` of
+    /// `SessionKind::Agent`.
+    OpenAgent(agent::OpenAgent),
+    /// Send the human's words to a driven agent as its next prompt.
+    AgentSay {
+        /// The agent session.
+        session: SessionId,
+        /// The prompt.
+        text: String,
+    },
+    /// Answer a driven agent's permission request.
+    AgentAnswer {
+        /// The agent session.
+        session: SessionId,
+        /// `PermissionRequest::id`.
+        request: String,
+        /// Allow or deny.
+        allowed: bool,
+        /// What a denial tells the agent; the host's default wording when `None`.
+        message: Option<String>,
+    },
+    /// Stop a driven agent's running turn (Esc).
+    AgentInterrupt {
+        /// The agent session.
+        session: SessionId,
+    },
 }
 
 impl ClientMsg {
@@ -81,6 +107,10 @@ impl ClientMsg {
             Self::Transcript(_) => "Transcript",
             Self::Ping { .. } => "Ping",
             Self::InstallHooks => "InstallHooks",
+            Self::OpenAgent(_) => "OpenAgent",
+            Self::AgentSay { .. } => "AgentSay",
+            Self::AgentAnswer { .. } => "AgentAnswer",
+            Self::AgentInterrupt { .. } => "AgentInterrupt",
         }
     }
 }
@@ -128,6 +158,21 @@ pub enum HostMsg {
         /// What happened, for the client's notice.
         message: String,
     },
+    /// The text a driven agent is streaming right now, so far; empty once it has landed as a
+    /// transcript entry.
+    AgentPartial {
+        /// The agent session.
+        session: SessionId,
+        /// The message so far.
+        text: String,
+    },
+    /// A driven agent waits on the human for a tool call; answer with `ClientMsg::AgentAnswer`.
+    AgentPermission {
+        /// The agent session.
+        session: SessionId,
+        /// The request.
+        request: agent::PermissionRequest,
+    },
 }
 
 impl HostMsg {
@@ -146,6 +191,8 @@ impl HostMsg {
             Self::Transcript(_) => "Transcript",
             Self::Pong { .. } => "Pong",
             Self::HooksInstalled { .. } => "HooksInstalled",
+            Self::AgentPartial { .. } => "AgentPartial",
+            Self::AgentPermission { .. } => "AgentPermission",
         }
     }
 }

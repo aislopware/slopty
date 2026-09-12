@@ -297,6 +297,161 @@ mod tests {
         stack.shutdown().await;
     }
 
+    /// A structured agent: the host runs Claude Code (here the fake, `SLOPTY_CLAUDE_BIN`)
+    /// over its stream-json protocol and the card is the conversation with no grid. The
+    /// composer speaks to the agent and the prompt comes back as the user entry; the answer
+    /// streams in under the list ahead of its entry; Esc interrupts a turn; a tool call puts
+    /// Allow / Deny above the composer with what the tool would do, and the answer goes back
+    /// by request id; ⌘W ends the agent and takes the card away.
+    #[tokio::test]
+    async fn a_driven_agent_talks_over_stream_json() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch_with_driven_claude("e2e-host").await.unwrap();
+        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        stack
+            .driver
+            .wait_for("the first shell", STEP, |d| {
+                d.status == "connected" && d.item("terminal").is_some()
+            })
+            .await
+            .unwrap();
+        let drv = &mut stack.driver;
+        drv.open_agent(None).await.unwrap();
+        let dump = drv
+            .wait_for("the agent card with the caret in its composer", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.kind == "agent" && t.conversation.as_ref().is_some_and(|c| c.composer_focused)
+                })
+            })
+            .await
+            .unwrap();
+        let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
+        let session = card.session.clone();
+        assert_eq!(card.agent_source.as_deref(), Some("driven"), "{card:?}");
+        assert_eq!(dump.items.len(), 2, "{:?}", dump.items);
+        let chat = move |d: &slopty_e2e::Dump| {
+            d.terminals
+                .iter()
+                .find(|t| t.session == session)
+                .and_then(|t| t.conversation.clone().map(|c| (t.agent.clone(), c)))
+        };
+
+        // A prompt: sent on ↩, shown at once as the user entry (the agent's replay of it is
+        // not shown twice), answered by a streamed text that becomes the assistant entry.
+        drv.type_text("hello").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the turn to end", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries == ["user: hello", "assistant: Hello from the fake"]
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(
+            conv.partial.is_empty() && conv.composer.is_empty() && conv.attention.is_none(),
+            "{conv:?}"
+        );
+
+        // A turn that streams and stops: the partial shows under the list while the agent is
+        // working; Esc interrupts it, and the turn ends with the interrupted record.
+        drv.type_text("linger").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the streamed text", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("working") && conv.partial == "Hello from the fake"
+            })
+        })
+        .await
+        .unwrap();
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the interrupted turn", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| {
+                conv.partial.is_empty()
+                    && conv.entries.last().map(String::as_str)
+                        == Some("user: [Request interrupted by user]")
+            })
+        })
+        .await
+        .unwrap();
+
+        // A tool call: Allow / Deny above the composer name the tool and what it would do;
+        // Allow answers the request and the agent goes on to its result and its closing line.
+        drv.type_text("write the note").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the permission row", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("blocked:permission:Write")
+                        && conv.attention.as_deref() == Some("permission:Write")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert_eq!(conv.permission.as_deref(), Some("Write:note.txt"), "{conv:?}");
+        assert_eq!(
+            conv.entries.last().map(String::as_str),
+            Some("tool Write: note.txt"),
+            "{conv:?}"
+        );
+        let allow = dump.a11y_node("Button", Some("Allow")).unwrap();
+        let [bx, by, bw, bh] = allow.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        let dump = drv
+            .wait_for("the allowed call's result and the closing line", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries.last().map(String::as_str)
+                            == Some("assistant: Done: the note is written.")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(conv.entries.contains(&"result Write: wrote note.txt".to_owned()), "{conv:?}");
+        assert!(conv.attention.is_none() && conv.permission.is_none(), "{conv:?}");
+
+        // Deny: the call fails with the host's message and the agent says so.
+        drv.type_text("write it again").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the second permission row", STEP, |d| {
+                chat(d)
+                    .is_some_and(|(_, conv)| conv.attention.as_deref() == Some("permission:Write"))
+            })
+            .await
+            .unwrap();
+        let deny = dump.a11y_node("Button", Some("Deny")).unwrap();
+        let [bx, by, bw, bh] = deny.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        let dump = drv
+            .wait_for("the denied call", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries.last().map(String::as_str)
+                            == Some("assistant: Understood, I did not write it.")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(conv.entries.iter().any(|e| e.starts_with("result Write failed: ")), "{conv:?}");
+
+        // ⌘W: the agent ends, its session closes, the card goes.
+        drv.keys("cmd-w").await.unwrap();
+        drv.wait_for("the card gone", STEP, |d| {
+            d.items.len() == 1 && d.terminals.iter().all(|t| t.kind != "agent")
+        })
+        .await
+        .unwrap();
+        stack.shutdown().await;
+    }
+
     /// A `claude` nobody registered hooks for: "+ agent" starts the fake one the harness put
     /// on ptyd's `PATH`, and the host attributes it from its foreground process, then its
     /// title, then the transcript it writes — each signal taking over from the weaker one.

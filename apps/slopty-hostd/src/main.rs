@@ -8,6 +8,7 @@
 mod agents;
 mod conn;
 mod ctl;
+pub mod driven;
 mod paths;
 
 use std::path::PathBuf;
@@ -77,6 +78,8 @@ pub struct Daemon {
     /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
     /// by [`agents::watch`] for the sessions no hook speaks for.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
+    /// Agents the daemon starts and drives itself over Claude Code's stream-json protocol.
+    pub driven: driven::Driven,
     /// The host's pasteboard, synced with remote-window clients.
     pub pasteboard: Arc<slopty_input::Pasteboard>,
     /// When the daemon came up (for `doctor`).
@@ -171,6 +174,7 @@ async fn main() -> Result<()> {
         events,
         canvas,
         agents: Arc::default(),
+        driven: driven::Driven::default(),
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
         started_at: std::time::Instant::now(),
         port: args.port,

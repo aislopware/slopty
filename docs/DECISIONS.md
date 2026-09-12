@@ -2499,6 +2499,17 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   process per agent session and the wire carries `AgentRequest`/`AgentUpdate` (protocol bump), a
   fake `claude` in `slopty-e2e` replays the fixtures for the self-test; (3) an agent card on the
   canvas hosting the conversation view without a grid, on the Mac and the phone.
+  Landed (2026-09-12, protocol 15): (1) as `slopty_agent::stream`; (2) as `hostd::driven` with
+  `ClientMsg::{OpenAgent, AgentSay, AgentAnswer, AgentInterrupt}` and
+  `HostMsg::{AgentPartial, AgentPermission}`, the session a `SessionKind::Agent` in the
+  ordinary session list so the canvas, many-clients and reattach machinery is reused unchanged;
+  (3) as `TerminalView`'s driven mode (ARCHITECTURE, "Driven agents"). Two rulings made on the
+  way: the fake `claude` for the self-test is a Rust binary (`slopty-fake-claude`) handed to the
+  host as `SLOPTY_CLAUDE_BIN`, not a shell script on `PATH`, because the host launches the real
+  one through the login shell and a test must not depend on the tester's rc files; and the
+  driven session keeps ⌘⇧T's PTY `claude` beside it (⌘⌥T / "New Agent (Structured)" opens the
+  driven one) until the structured card has proven itself day to day — the TUI's own rendering
+  of diffs, todo lists and slash-command output has no equal in the card yet.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

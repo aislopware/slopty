@@ -123,6 +123,13 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
+    /// Open a Claude Code agent the host drives over its structured protocol (a conversation
+    /// card, `kind: agent`), as ⌘⌥T does, in `cwd` or the host's default.
+    OpenAgent {
+        /// Working directory.
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
     /// Bring a session's terminal into view, make it active and give it the keyboard, as
@@ -535,6 +542,9 @@ pub struct ItemInfo {
 pub struct TerminalInfo {
     /// Session id.
     pub session: String,
+    /// `terminal` (a grid), or `agent` (a session the host drives: the conversation is the
+    /// whole card).
+    pub kind: String,
     /// Title from the program, if any.
     pub title: Option<String>,
     /// Columns × rows.
@@ -730,6 +740,10 @@ pub struct ConversationInfo {
     pub pinned: bool,
     /// The row above the composer: `permission:<tool>`, `allowed`, `denied`, `prompt`.
     pub attention: Option<String>,
+    /// What a driven agent is writing now (empty otherwise).
+    pub partial: String,
+    /// The permission a driven agent waits on, `<tool>:<summary>`.
+    pub permission: Option<String>,
 }
 
 impl Dump {

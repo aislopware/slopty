@@ -1378,6 +1378,12 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::Transcript(update)) => {
             canvas.update(cx, |c, cx| c.transcript_update(update, cx));
         }
+        LinkEvent::Control(HostMsg::AgentPartial { session, text }) => {
+            canvas.update(cx, |c, cx| c.agent_partial(session, text, cx));
+        }
+        LinkEvent::Control(HostMsg::AgentPermission { session, request }) => {
+            canvas.update(cx, |c, cx| c.agent_permission(session, request, cx));
+        }
         LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
             let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
             if !ok {

@@ -71,6 +71,8 @@ pub enum SessionState {
 pub struct SessionSummary {
     /// Identity.
     pub id: SessionId,
+    /// What runs in it: a shell in a PTY, or an agent the host drives (protocol 15).
+    pub kind: SessionKind,
     /// Title (OSC 0/2, else the command).
     pub title: String,
     /// Current working directory if known (OSC 7).
@@ -88,6 +90,18 @@ pub struct SessionSummary {
     pub viewers: u16,
     /// Command line the session was started with.
     pub command: Vec<String>,
+}
+
+/// What a session is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum SessionKind {
+    /// A program in a PTY: the grid, keys, the whole terminal.
+    #[default]
+    Terminal,
+    /// A coding agent the host drives over its structured protocol: a conversation, no grid.
+    /// Prompts go through `ClientMsg::AgentSay`, permissions through `AgentAnswer`, Esc
+    /// through `AgentInterrupt`; `TermRequest::Close` still closes it.
+    Agent,
 }
 
 /// Why a session closed.

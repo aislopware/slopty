@@ -172,6 +172,7 @@ impl Host {
             };
             out.push(SessionSummary {
                 id,
+                kind: slopty_proto::terminal::SessionKind::Terminal,
                 title: snap.title.clone().unwrap_or_else(|| {
                     command.first().cloned().unwrap_or_else(|| "shell".to_owned())
                 }),

@@ -43,6 +43,9 @@ pub enum Attention {
         tool: String,
         /// The human already answered; waiting for the host to report the next state.
         answered: Option<bool>,
+        /// One line about the call (the command, the file), when the host knows it: a driven
+        /// agent says what the tool would do; a watched one only names the tool.
+        detail: Option<String>,
     },
     /// The agent asked something: the composer has the focus.
     Prompt,
@@ -175,6 +178,7 @@ impl Conversation {
     pub fn render(
         &self,
         attention: Option<&Attention>,
+        partial: &str,
         composer_focused: bool,
         theme: &Theme,
         cx: &Context<TerminalView>,
@@ -254,6 +258,7 @@ impl Conversation {
                         )))
                     }),
             )
+            .when(!partial.is_empty(), |el| el.child(partial_row(partial, &theme)))
             .when_some(attention, |el, attention| el.child(attention_row(attention, &theme, cx)))
             .child(self.composer_row(composer_focused, &theme, cx))
             .into_any_element()
@@ -323,15 +328,48 @@ impl Conversation {
     }
 }
 
+/// What the agent is writing right now, under the list and ahead of its next entry: the
+/// Markdown so far, capped so a long answer scrolls in the entry it becomes.
+fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
+    let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    let prose = gpui::relative(theme.typography.markdown_line_height);
+    let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
+    div()
+        .id("conversation-partial")
+        .debug_selector(|| "conversation-partial".to_owned())
+        .role(Role::Status)
+        .aria_label("Claude is writing")
+        .w_full()
+        .flex_none()
+        .max_h(px(theme.typography.ui_size * 12.0))
+        .overflow_hidden()
+        .px(px(spacing.md))
+        .py(px(spacing.xs))
+        .border_t_1()
+        .border_color(hsla(s.border))
+        .line_height(prose)
+        .child(
+            TextView::markdown("conversation-partial-md", SharedString::from(partial.to_owned()))
+                .style(markdown_style(theme, &mono)),
+        )
+        .into_any_element()
+}
+
 /// What the agent waits for, with the one-tap answers, above the composer: the warn tone,
 /// faint, since the agent is blocked on the human.
 fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
     let s = &theme.surfaces;
     let spacing = theme.spacing;
     let status = match attention {
-        Attention::Permission { tool, answered: None } => format!("Claude wants to use {tool}"),
-        Attention::Permission { tool, answered: Some(true) } => format!("{tool}: allowed"),
-        Attention::Permission { tool, answered: Some(false) } => format!("{tool}: denied"),
+        Attention::Permission { tool, answered: None, detail: None } => {
+            format!("Claude wants to use {tool}")
+        }
+        Attention::Permission { tool, answered: None, detail: Some(detail) } => {
+            format!("Claude wants to use {tool}: {detail}")
+        }
+        Attention::Permission { tool, answered: Some(true), .. } => format!("{tool}: allowed"),
+        Attention::Permission { tool, answered: Some(false), .. } => format!("{tool}: denied"),
         Attention::Prompt => "Claude is waiting for your answer".to_owned(),
     };
     let row = div()
@@ -368,8 +406,33 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
         tab_stop(pill, s.accent)
     };
     match attention {
-        Attention::Permission { tool, answered: None } => row
-            .child(div().flex_1().child(SharedString::from(format!("Claude wants to use {tool}"))))
+        Attention::Permission { tool, answered: None, detail } => row
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .child(SharedString::from(format!("Claude wants to use {tool}")))
+                    .when_some(detail.as_ref(), |el, detail| {
+                        el.child(
+                            div()
+                                .text_color(hsla(s.text_muted))
+                                .font_family(
+                                    theme
+                                        .typography
+                                        .mono_families
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                )
+                                .text_size(px(theme.typography.caption()))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(SharedString::from(detail.clone())),
+                        )
+                    }),
+            )
             .child(
                 button("conversation-allow", "Allow", true)
                     .on_click(cx.listener(|this, _ev, _window, cx| this.answer(true, cx))),
@@ -379,7 +442,7 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
                     .on_click(cx.listener(|this, _ev, _window, cx| this.answer(false, cx))),
             )
             .into_any_element(),
-        Attention::Permission { tool, answered: Some(allowed) } => row
+        Attention::Permission { tool, answered: Some(allowed), .. } => row
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(format!(
                 "{tool}: {}",

@@ -467,6 +467,19 @@ impl Stack {
         Self::launch_in(dir, host_name, &env).await
     }
 
+    /// [`Self::launch`] with `slopty-fake-claude` (see `src/bin/slopty-fake-claude.rs`) as the
+    /// `claude` the host drives over stream-json (`SLOPTY_CLAUDE_BIN`): a scripted agent that
+    /// streams text, asks for a permission and takes an interrupt, with no model behind it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], or when the fake is not built.
+    pub async fn launch_with_driven_claude(host_name: &str) -> Result<Self> {
+        let fake = bin("slopty-fake-claude")?;
+        let fake = fake.to_string_lossy().into_owned();
+        Self::launch_with(host_name, &[("SLOPTY_CLAUDE_BIN", &*fake)]).await
+    }
+
     /// Let the fake `claude` move past the stage it is waiting on (`working`, `transcript`,
     /// `done`, `quit`).
     ///

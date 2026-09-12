@@ -441,6 +441,13 @@ fn apply(
             });
             Reply::Ok
         }
+        Command::OpenAgent { cwd } => {
+            let Some(canvas) = workspace.read(cx).active_canvas() else {
+                return Reply::Error { message: "no active canvas".into() };
+            };
+            canvas.update(cx, |canvas, cx| canvas.open_agent(cwd, cx));
+            Reply::Ok
+        }
         Command::FramesReset => {
             slopty_ui::frames::reset(cx);
             Reply::Ok
@@ -748,8 +755,10 @@ impl Workspace {
                     composer: c.composer_text(cx),
                     composer_focused: c.composer_focus(cx).is_focused(window),
                     pinned: c.pinned(),
+                    partial: view.partial().to_owned(),
+                    permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
                     attention: view.attention().map(|a| match a {
-                        Attention::Permission { tool, answered: None } => {
+                        Attention::Permission { tool, answered: None, .. } => {
                             format!("permission:{tool}")
                         }
                         Attention::Permission { answered: Some(true), .. } => "allowed".to_owned(),
@@ -759,6 +768,7 @@ impl Workspace {
                 });
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
+                    kind: if view.is_driven() { "agent" } else { "terminal" }.to_owned(),
                     title: view.title().map(str::to_owned),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
@@ -771,6 +781,7 @@ impl Workspace {
                             AgentSource::Title => "title",
                             AgentSource::Transcript => "transcript",
                             AgentSource::Hook => "hook",
+                            AgentSource::Driven => "driven",
                         })
                         .map(str::to_owned),
                     conversation,

@@ -228,6 +228,15 @@ impl Driver {
         self.ok(&Command::Open { command, count }).await
     }
 
+    /// Open a driven Claude Code agent (a conversation card) in `cwd`.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or there is no canvas.
+    pub async fn open_agent(&mut self, cwd: Option<&str>) -> Result<()> {
+        self.ok(&Command::OpenAgent { cwd: cwd.map(str::to_owned) }).await
+    }
+
     /// Add the host's first display to the canvas.
     ///
     /// # Errors

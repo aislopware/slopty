@@ -161,6 +161,7 @@ mod golden {
             "host_session_opened",
             &HostMsg::SessionOpened(SessionSummary {
                 id: session(),
+                kind: slopty_proto::terminal::SessionKind::Terminal,
                 title: "zsh".to_owned(),
                 cwd: Some("/w/slopty/crates/ui".to_owned()),
                 repo: Some("/w/slopty".to_owned()),
@@ -188,6 +189,86 @@ mod golden {
                 session: session(),
                 event: TermEvent::Cwd { path: "/tmp".to_owned(), repo: None },
             },
+        );
+    }
+
+    /// A driven agent (protocol 15): opened by the client, prompted, answered and stopped
+    /// in-protocol; the host streams the partial text and the permission it waits on.
+    #[test]
+    fn driven_agent() {
+        use slopty_proto::agent::{
+            AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Clipped, OpenAgent,
+            PermissionRequest,
+        };
+        use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
+        snap(
+            "client_open_agent",
+            &ClientMsg::OpenAgent(OpenAgent {
+                cwd: Some("/w/slopty".to_owned()),
+                resume: None,
+                model: Some("opus".to_owned()),
+                title: Some("claude".to_owned()),
+            }),
+        );
+        snap(
+            "client_agent_say",
+            &ClientMsg::AgentSay { session: session(), text: "fix the build".to_owned() },
+        );
+        snap(
+            "client_agent_answer",
+            &ClientMsg::AgentAnswer {
+                session: session(),
+                request: "e2f45975-aa92-4c0c-ad9b-05cd456d9b00".to_owned(),
+                allowed: false,
+                message: Some("not that file".to_owned()),
+            },
+        );
+        snap("client_agent_interrupt", &ClientMsg::AgentInterrupt { session: session() });
+        snap(
+            "host_session_opened_agent",
+            &HostMsg::SessionOpened(SessionSummary {
+                id: session(),
+                kind: SessionKind::Agent,
+                title: "claude".to_owned(),
+                cwd: Some("/w/slopty".to_owned()),
+                repo: Some("/w/slopty".to_owned()),
+                cols: 0,
+                rows: 0,
+                state: SessionState::Running,
+                viewers: 0,
+                command: vec!["claude".to_owned()],
+            }),
+        );
+        snap(
+            "host_agent_partial",
+            &HostMsg::AgentPartial { session: session(), text: "Looking at the".to_owned() },
+        );
+        snap(
+            "host_agent_permission",
+            &HostMsg::AgentPermission {
+                session: session(),
+                request: PermissionRequest {
+                    id: "e2f45975-aa92-4c0c-ad9b-05cd456d9b00".to_owned(),
+                    tool_use: "toolu_01F6WsndtGMAv3yQPYeTTxMc".to_owned(),
+                    tool: "Write".to_owned(),
+                    summary: "src/main.rs".to_owned(),
+                    input: Clipped::whole(
+                        "{\n  \"file_path\": \"src/main.rs\",\n  \"content\": \"hi\"\n}".to_owned(),
+                    ),
+                },
+            },
+        );
+        snap(
+            "host_agent_driven",
+            &HostMsg::Agent(AgentEvent {
+                session: session(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Write".to_owned() }),
+                agent_session: Some("19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned()),
+                detail: Some("src/main.rs".to_owned()),
+                attention: true,
+                source: AgentSource::Driven,
+            }),
         );
     }
 

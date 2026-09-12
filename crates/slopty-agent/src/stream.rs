@@ -209,6 +209,57 @@ fn control_request(record: &Value) -> Option<Event> {
     })
 }
 
+/// The arguments that put Claude Code into the protocol this module speaks. `resume` reopens
+/// a conversation by session id; `model` overrides the default model.
+#[must_use]
+pub fn arguments(resume: Option<&str>, model: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-p",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompts",
+        "host",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--replay-user-messages",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if let Some(id) = resume {
+        args.push("--resume".to_owned());
+        args.push(id.to_owned());
+    }
+    if let Some(model) = model {
+        args.push("--model".to_owned());
+        args.push(model.to_owned());
+    }
+    args
+}
+
+/// `words` as one line for `$SHELL -lic`.
+///
+/// Each word is single-quoted where a POSIX or fish shell would otherwise read it. The
+/// interactive login shell is what finds a `claude` that is an alias or lives in
+/// `~/.claude/local`, as it does for the "+ agent" terminal.
+#[must_use]
+pub fn shell_line<'a>(words: impl IntoIterator<Item = &'a str>) -> String {
+    words.into_iter().map(shell_quote).collect::<Vec<_>>().join(" ")
+}
+
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty()
+        && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&b))
+    {
+        return word.to_owned();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
 /// The line that sends the human's words as the next prompt.
 #[must_use]
 pub fn user_message(text: &str) -> String {
@@ -596,6 +647,16 @@ mod tests {
         assert!(
             matches!(updates.get(1), Some(Update::Turn(t)) if !t.ok && t.kind == "error_during_execution")
         );
+    }
+
+    #[test]
+    fn the_launch_line_quotes_only_what_a_shell_would_read() {
+        let args = arguments(Some("19146b4d"), Some("opus"));
+        assert_eq!(&args[..2], ["-p", "--verbose"]);
+        assert_eq!(&args[args.len() - 4..], ["--resume", "19146b4d", "--model", "opus"]);
+        assert_eq!(arguments(None, None).len(), 12);
+        let words = ["exec", "claude", "-p", "it's", "a b", ""];
+        assert_eq!(shell_line(words), "exec claude -p 'it'\\''s' 'a b' ''");
     }
 
     #[test]
