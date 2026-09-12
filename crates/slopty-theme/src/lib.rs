@@ -269,6 +269,8 @@ pub mod alpha {
     pub const MINIMAP_ITEM: f32 = 0.7;
     /// Another client's viewport outline on the minimap.
     pub const MINIMAP_LOOKER: f32 = 0.8;
+    /// The name tag on another client's outline; opaque while that client is followed.
+    pub const LOOKER_TAG: f32 = 0.9;
 }
 
 /// Surface colours for chrome (not the terminal grid): a four-step ladder, three text

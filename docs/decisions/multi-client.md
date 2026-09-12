@@ -77,7 +77,10 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   (never itself: its own echo is `CanvasChange::Echo`) and the canvas draws each as an outline
   in a colour picked from the client id with its name in the corner, over the items; the
   outline has no listeners so it is never in the way, and the name is a button that flies the
-  camera to what that client sees ("go where they look" without asking where that is). The
+  camera to what that client sees ("go where they look" without asking where that is), and
+  keeps following: every move they report is flown to until this client moves the camera
+  itself (wheel, pinch, drag, minimap, ⌘0/1/2, arrange) or they leave — a follow is a mode
+  you leave by doing anything, never one you have to remember to switch off. The
   minimap fits the lookers' viewports too and outlines each in its colour, so a client off
   this screen is still in the overview. Tested at every layer: the table, the document, the
   headless canvas (the outline's a11y node and bounds; one `Look` per rest; the minimap's

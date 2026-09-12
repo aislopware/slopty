@@ -440,7 +440,8 @@ own actions (find, the prompts) reach the terminal that had the focus.
 table beside the document and fans it out as `CanvasSync::Presence`, newcomers hearing the
 table after the snapshot and a dropped connection announced with no view. The canvas draws
 every other client as an outline in its colour with its name at the corner, so two people on
-one canvas can see what the other sees (`docs/decisions/multi-client.md`, 2026-09-13).
+one canvas can see what the other sees; the name is a button that follows that client's
+viewport until the camera is moved by hand (`docs/decisions/multi-client.md`, 2026-09-13).
 
 ## 5. Agents
 

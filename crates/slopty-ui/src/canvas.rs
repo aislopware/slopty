@@ -24,7 +24,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::arrange::{self, Arrangeable, Heading};
 use slopty_client::canvas::{
-    CARD_ZOOM, Camera, CanvasDoc, FLIGHT, Flight, GAP, TERMINAL_SIZE, snap,
+    CARD_ZOOM, Camera, CanvasChange, CanvasDoc, FLIGHT, Flight, GAP, TERMINAL_SIZE, snap,
 };
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
@@ -520,6 +520,9 @@ pub struct CanvasView {
     /// A `Look` is scheduled for `LOOK_EVERY` from the first change; it reads the viewport
     /// as it is then, so a pan of many frames is one message.
     look_pending: bool,
+    /// The client whose viewport the camera keeps up with: every move they report is flown
+    /// to, until this client moves the camera itself or they leave.
+    following: Option<ClientId>,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
     /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
@@ -634,6 +637,7 @@ impl CanvasView {
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
             looked: None,
+            following: None,
             look_pending: false,
             flight: None,
             zoom_drawn: None,
@@ -731,6 +735,11 @@ impl CanvasView {
         };
         let change = self.doc.apply_sync(sync, self.me);
         tracing::debug!(?change, version = self.doc.version(), "canvas sync");
+        if let CanvasChange::Presence(client) = change
+            && self.following == Some(client)
+        {
+            self.follow(client, cx);
+        }
         self.reconcile(cx);
         if let Some((id, session)) = ours {
             self.fit_to_viewport(id);
@@ -2534,7 +2543,9 @@ impl CanvasView {
                 let s = self.camera.to_screen(l.view);
                 let colour = self.looker_colour(l.client);
                 let label = SharedString::from(l.name.clone());
-                let view = l.view;
+                let client = l.client;
+                let following = self.following == Some(client);
+                let verb = if following { "following" } else { "follow" };
                 let tag = div()
                     .id(ElementId::from(SharedString::from(format!("follow-{}", l.client))))
                     .debug_selector({
@@ -2542,12 +2553,12 @@ impl CanvasView {
                         move || format!("follow-{name}")
                     })
                     .role(Role::Button)
-                    .aria_label(format!("follow {}", l.name))
+                    .aria_label(format!("{verb} {}", l.name))
                     .absolute()
                     .left(px(0.0))
                     .top(px(0.0))
                     .px(px(theme.spacing.xs))
-                    .bg(hsla_alpha(colour, 0.9))
+                    .bg(hsla_alpha(colour, if following { 1.0 } else { alpha::LOOKER_TAG }))
                     .text_size(px(theme.typography.small()))
                     .text_color(hsla(theme.surfaces.accent_fg))
                     .font_family(theme.typography.ui_family.clone())
@@ -2555,8 +2566,12 @@ impl CanvasView {
                     .child(label.clone());
                 let tag = tab_stop(tag, theme.surfaces.accent).on_click(cx.listener(
                     move |this, _ev, _w, cx| {
-                        let target = Camera::fitted([view], this.viewport_size());
-                        this.fly_to(target, cx);
+                        if this.following == Some(client) {
+                            this.following = None;
+                            cx.notify();
+                        } else {
+                            this.follow(client, cx);
+                        }
                     },
                 ));
                 div()
@@ -2604,10 +2619,30 @@ impl CanvasView {
     const fn take_camera(&mut self) {
         self.flight = None;
         self.frame_at = None;
+        self.following = None;
+    }
+
+    /// Keep up with `client`: fly to where they look now and again on every move they report.
+    /// A client no longer looking anywhere is nobody to follow.
+    fn follow(&mut self, client: ClientId, cx: &mut Context<Self>) {
+        let Some(view) = self.doc.lookers().find(|l| l.client == client).map(|l| l.view) else {
+            self.following = None;
+            cx.notify();
+            return;
+        };
+        let target = Camera::fitted([view], self.viewport_size());
+        self.fly(target, cx);
+        self.following = Some(client);
+    }
+
+    /// Move the camera to `target` on this client's own account: it stops following anyone.
+    fn fly_to(&mut self, target: Camera, cx: &mut Context<Self>) {
+        self.following = None;
+        self.fly(target, cx);
     }
 
     /// Move the camera to `target`, over [`FLIGHT`] seconds unless animation is off.
-    fn fly_to(&mut self, target: Camera, cx: &mut Context<Self>) {
+    fn fly(&mut self, target: Camera, cx: &mut Context<Self>) {
         let viewport = self.viewport_size();
         if !self.animate || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
             self.flight = None;
@@ -4540,6 +4575,79 @@ mod tests {
             (camera.x - expected.x).abs() < 0.5 && (camera.y - expected.y).abs() < 0.5,
             "{camera:?} vs {expected:?}"
         );
+    }
+
+    /// The name tag toggles following: the camera keeps up with every move that client reports
+    /// until this client moves the camera itself, and a client that leaves is nobody to follow.
+    #[gpui::test]
+    fn following_keeps_up_with_them_until_you_move(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let pad = ClientId::new();
+        let far = Rect { x: 5_000.0, y: 3_000.0, w: 400.0, h: 700.0 };
+        let presence = |view: Option<Rect>| CanvasSync::Presence {
+            client: pad,
+            kind: ClientKind::IPad,
+            name: "pad".to_owned(),
+            view,
+        };
+        view.update(cx, |c, cx| {
+            c.camera = Camera::fitted([far], c.viewport_size());
+            c.camera.pan(200.0, 100.0);
+            c.apply_sync(presence(Some(far)), cx);
+        });
+        cx.run_until_parked();
+        let tag = cx.debug_bounds("follow-pad").expect("the tag is drawn");
+        cx.simulate_click(tag.center(), Modifiers::default());
+        cx.run_until_parked();
+        let labels = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.iter()
+                .filter(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("pad"))
+                })
+                .filter_map(|n| n.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(cx), vec!["following pad".to_owned()]);
+        // They move: the camera goes with them.
+        let moved = Rect { x: 9_000.0, y: 1_000.0, w: 300.0, h: 500.0 };
+        view.update(cx, |c, cx| c.apply_sync(presence(Some(moved)), cx));
+        cx.run_until_parked();
+        let (camera, viewport) = view.read_with(cx, |c, _| (c.camera, c.viewport_size()));
+        let expected = Camera::fitted([moved], viewport);
+        assert!(
+            (camera.x - expected.x).abs() < 0.5 && (camera.y - expected.y).abs() < 0.5,
+            "{camera:?} vs {expected:?}"
+        );
+        // This client pans: following ends, and their next move is theirs alone.
+        view.update(cx, |c, cx| {
+            c.take_camera();
+            c.camera.pan(50.0, 0.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.following), None);
+        let before = view.read_with(cx, |c, _| c.camera);
+        view.update(cx, |c, cx| c.apply_sync(presence(Some(far)), cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.camera), before, "not followed");
+        // Back where their outline is on screen; follow again, then they leave: nobody to
+        // follow.
+        view.update(cx, |c, cx| {
+            c.camera = Camera::fitted([far], c.viewport_size());
+            c.camera.pan(200.0, 100.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let tag = cx.debug_bounds("follow-pad").expect("the tag is drawn again");
+        cx.simulate_click(tag.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.following), Some(pad));
+        view.update(cx, |c, cx| c.apply_sync(presence(None), cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.following), None);
+        assert!(labels(cx).is_empty(), "no tag without a viewport");
     }
 
     /// The host hears where this client looks once the viewport rests, and again only when it
