@@ -161,6 +161,16 @@ mod tests {
     }
 
     #[test]
+    fn only_a_shell_hands_over_to_its_command_word() {
+        // `-c` means "command" to a shell; to a runtime it is a flag like any other, and the
+        // package entry point that follows is still the script that decides.
+        let cli = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+        assert!(is_claude("node", &argv(&["node", "--check", cli])));
+        assert!(!is_claude("node", &argv(&["node", "-c", "claude-code/other.js", cli])));
+        assert!(is_claude("sh", &argv(&["sh", "-c", "claude --resume"])));
+    }
+
+    #[test]
     fn other_programs_are_not_agents() {
         assert!(!is_claude("node", &argv(&["node", "server.js"])));
         assert!(!is_claude("node", &[]), "a runtime with no argv says nothing");

@@ -1407,6 +1407,97 @@ mod tests {
     }
 
     #[test]
+    fn a_result_is_ok_only_when_it_succeeded_without_an_error() {
+        let result = |subtype: &str, is_error: bool| {
+            let line = format!(
+                r#"{{"type":"result","subtype":"{subtype}","is_error":{is_error},"num_turns":1,"result":"","session_id":"s"}}"#
+            );
+            match parse(&line) {
+                Some(Event::Result(turn)) => turn.ok,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(result("success", false));
+        assert!(!result("success", true));
+        assert!(!result("error_max_turns", false));
+    }
+
+    #[test]
+    fn a_usage_of_nothing_is_no_context_and_a_rule_for_you_says_so() {
+        assert_eq!(
+            context_tokens(&json!({"usage":{"input_tokens":0,"cache_read_input_tokens":0}})),
+            None
+        );
+        assert_eq!(
+            context_tokens(&json!({"usage":{"input_tokens":0,"cache_read_input_tokens":1}})),
+            Some(1)
+        );
+        let rules = json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls"}],"behavior":"allow","destination":"userSettings"}]);
+        assert_eq!(always_label(&rules).as_deref(), Some("always allow Bash(ls) for you"));
+    }
+
+    #[test]
+    fn a_relative_edit_is_located_against_the_directory_init_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").expect("write");
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let mut fold = Fold::default();
+        let init = format!(
+            r#"{{"type":"system","subtype":"init","cwd":"{cwd}","session_id":"s","tools":[],"model":"m","permissionMode":"default","slash_commands":[]}}"#
+        );
+        let Some(event) = parse(&init) else { panic!("parses") };
+        fold.apply(event, 0);
+        let edit = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_e","name":"Edit","input":{"file_path":"a.txt","old_string":"two","new_string":"deux"}}]},"parent_tool_use_id":null}"#;
+        let Some(event) = parse(edit) else { panic!("parses") };
+        let updates = fold.apply(event, 0);
+        let line = updates.iter().find_map(|u| match u {
+            Update::Entries(entries) => entries.iter().find_map(|e| match &e.body {
+                TranscriptBody::ToolUse { detail: ToolDetail::Diff { line, .. }, .. } => {
+                    Some(*line)
+                }
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(line, Some(Some(2)), "{updates:?}");
+        // An assistant record with nothing streamed before it clears no partial.
+        assert!(!updates.iter().any(|u| matches!(u, Update::Partial(_))), "{updates:?}");
+    }
+
+    #[test]
+    fn compacting_is_a_working_status_and_a_finished_task_stays_finished() {
+        let mut fold = Fold::default();
+        let Some(event) = parse(r#"{"type":"system","subtype":"status","status":"compacting"}"#)
+        else {
+            panic!("parses")
+        };
+        let updates = fold.apply(event, 0);
+        let Some(Update::Status { status, detail }) = updates.first() else {
+            panic!("{updates:?}")
+        };
+        assert_eq!(
+            (status, detail.as_deref()),
+            (&AgentStatus::Working, Some("compacting the conversation…"))
+        );
+
+        let lines = [
+            r#"{"type":"system","subtype":"task_started","task_id":"t","tool_use_id":"toolu_p","description":"List files","subagent_type":"Explore","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"ls"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","tool_use_id":"toolu_p","status":"completed","output_file":"/tmp/t.txt","summary":"","usage":{"total_tokens":12000,"tool_uses":3,"duration_ms":4000}}"#,
+            r#"{"type":"system","subtype":"task_progress","task_id":"t","tool_use_id":"toolu_p","description":"List files","subagent_type":"Explore","usage":{"total_tokens":11283,"tool_uses":1,"duration_ms":2525},"last_tool_name":"Bash"}"#,
+        ];
+        let mut done = Vec::new();
+        for line in lines {
+            let Some(event) = parse(line) else { panic!("parses: {line}") };
+            for update in fold.apply(event, 0) {
+                if let Update::Task(task) = update {
+                    done.push(task.done);
+                }
+            }
+        }
+        assert_eq!(done, [false, true, true], "a late progress record does not reopen it");
+    }
+
+    #[test]
     fn the_launch_line_quotes_only_what_a_shell_would_read() {
         let args = arguments(Some("19146b4d"), Some("opus"), false);
         assert_eq!(&args[..2], ["-p", "--verbose"]);

@@ -267,6 +267,12 @@ mod tests {
         touch(&dir.join("notes.txt"), at(1_000_010));
         assert_eq!(transcript_for(home.path(), cwd, started), None, "nothing written since");
 
+        // Written the very instant the session started: still this session's.
+        touch(&dir.join("exact.jsonl"), started);
+        assert_eq!(
+            transcript_for(home.path(), cwd, started).as_deref(),
+            Some(dir.join("exact.jsonl").as_path())
+        );
         touch(&dir.join("live.jsonl"), at(1_000_001));
         assert_eq!(
             transcript_for(home.path(), cwd, started).as_deref(),
@@ -338,6 +344,25 @@ mod tests {
         assert!(
             matches!(&last[2].body, TranscriptBody::Assistant { markdown } if markdown == "answer 3")
         );
+    }
+
+    /// The first prompt sits in the first records, but a long preamble (a meta record, a big
+    /// slash-command record) may push it kilobytes in; the scan reads far enough.
+    #[test]
+    fn a_prompt_past_a_long_preamble_still_names_the_conversation() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/tmp/project");
+        let dir = project_dir(home.path(), cwd);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let preamble = "x".repeat(8 * 1024);
+        let body = format!(
+            "{{\"type\":\"user\",\"isMeta\":true,\"message\":{{\"role\":\"user\",\"content\":\"{preamble}\"}}}}\n\
+             {{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"late prompt\"}}}}\n"
+        );
+        std::fs::write(dir.join("late.jsonl"), body).expect("write");
+        let listed = sessions(home.path(), cwd, 10);
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].title, "late prompt");
     }
 
     #[test]

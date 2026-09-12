@@ -1128,6 +1128,98 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_is_described_by_the_argument_that_names_its_work() {
+        let detail = |tool: &str, input: &str| {
+            hook(&format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{input}}}"#
+            ))
+            .tool_detail()
+        };
+        assert_eq!(detail("Bash", r#"{"command":"ls\n-la"}"#).as_deref(), Some("$ ls"));
+        assert_eq!(
+            detail("Edit", r#"{"file_path":"/Users/x/proj/src/lib.rs"}"#).as_deref(),
+            Some("Edit src/lib.rs")
+        );
+        assert_eq!(detail("Glob", r#"{"pattern":"**/*.rs"}"#).as_deref(), Some("Glob **/*.rs"));
+        assert_eq!(detail("Grep", r#"{"pattern":"todo"}"#).as_deref(), Some("Grep todo"));
+        assert_eq!(detail("Agent", r#"{"description":"scan"}"#).as_deref(), Some("Agent: scan"));
+        assert_eq!(detail("Task", r#"{"description":"scan"}"#).as_deref(), Some("Agent: scan"));
+        assert_eq!(
+            detail("WebFetch", r#"{"url":"https://x.test"}"#).as_deref(),
+            Some("Fetch https://x.test")
+        );
+        assert_eq!(detail("WebSearch", r#"{"query":"gpui"}"#).as_deref(), Some("Search gpui"));
+        assert_eq!(detail("Skill", r#"{"skill":"commit"}"#).as_deref(), Some("/commit"));
+        // A tool we do not know, or a known one without its argument, is named bare.
+        assert_eq!(detail("Foo", r#"{"x":1}"#).as_deref(), Some("Foo"));
+        assert_eq!(detail("Glob", "{}").as_deref(), Some("Glob"));
+        // The tool in a permission message stops at a space or a full stop.
+        assert_eq!(
+            tool_from_message(Some("Claude needs your permission to use Bash.")).as_deref(),
+            Some("Bash")
+        );
+        assert_eq!(
+            tool_from_message(Some("Claude needs your permission to use Read tool")).as_deref(),
+            Some("Read")
+        );
+        assert_eq!(tool_from_message(Some("Claude needs your permission to use ")), None);
+    }
+
+    #[test]
+    fn the_other_notifications_block_on_the_human_and_elicitations_end() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let note = |kind: &str| {
+            hook(&format!(r#"{{"hook_event_name":"Notification","notification_type":"{kind}"}}"#))
+        };
+        let status = |t: &mut Tracker, kind: &str| t.apply(sid, &note(kind)).map(|e| e.status);
+        assert_eq!(
+            status(&mut t, "agent_needs_input"),
+            Some(AgentStatus::Blocked(BlockReason::Question))
+        );
+        assert_eq!(
+            status(&mut t, "elicitation_dialog"),
+            Some(AgentStatus::Blocked(BlockReason::Elicitation))
+        );
+        assert_eq!(status(&mut t, "elicitation_complete"), Some(AgentStatus::Working));
+        assert_eq!(
+            status(&mut t, "elicitation_url_dialog"),
+            Some(AgentStatus::Blocked(BlockReason::Elicitation))
+        );
+        assert_eq!(status(&mut t, "elicitation_response"), Some(AgentStatus::Working));
+    }
+
+    #[test]
+    fn the_table_lists_its_agents_and_takes_a_detail_once() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let mut table = AgentTable::default();
+        assert!(table.sessions_with_agents().is_empty());
+        table.observe(a, &seen("claude", None));
+        table.observe(b, &seen("zsh", None));
+        assert_eq!(table.sessions_with_agents(), vec![a]);
+        assert!(table.set_detail(a, "fix it"), "a new detail");
+        assert!(!table.set_detail(a, "fix it"), "the same detail");
+        assert!(!table.set_detail(b, "fix it"), "no agent, nothing to put it on");
+        assert_eq!(table.snapshot()[0].detail.as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn an_event_from_another_source_is_not_current_even_with_the_same_status() {
+        // The poll said idle from the process; a hook then said idle too. The poll's event
+        // would put the weaker source back, so it is stale.
+        let sid = SessionId::new();
+        let mut table = AgentTable::default();
+        let stale = table.observe(sid, &seen("claude", None)).expect("the process");
+        assert_eq!((&stale.status, stale.source), (&AgentStatus::Idle, AgentSource::Process));
+        let hooked =
+            table.apply(sid, &hook(r#"{"hook_event_name":"SessionStart"}"#)).expect("the hook");
+        assert_eq!((&hooked.status, hooked.source), (&AgentStatus::Idle, AgentSource::Hook));
+        assert!(!table.is_current(&stale));
+        assert!(table.is_current(&hooked));
+    }
+
+    #[test]
     fn details_are_short() {
         let long = "x".repeat(200);
         let h = hook(&format!(

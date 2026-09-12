@@ -270,6 +270,50 @@ mod tests {
             &json!({"type":"command","command":"/a/b/slopty","args":["host","status"]})
         ));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/other hook"})));
+        // Both conditions of each form must hold: one argument that is `hook`, or no
+        // arguments and a command line that ends in ` hook`.
+        assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty","args":["hook","x"]})));
+        assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty hook","args":["host"]})));
+        assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty"})));
+    }
+
+    #[test]
+    fn uninstall_reports_a_change_whether_a_group_shrank_or_went() {
+        // Our relay shares a group with a user hook: the entry goes, the group stays.
+        let mut doc = json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "Bash", "hooks": [
+                        { "type": "command", "command": "echo hi" },
+                        { "type": "command", "command": "/opt/slopty hook" }
+                    ] }
+                ]
+            }
+        });
+        assert!(uninstall(&mut doc));
+        assert_eq!(
+            doc,
+            json!({ "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [ { "type": "command", "command": "echo hi" } ] }
+            ] } })
+        );
+        // A group that was only ours goes with its event and the `hooks` key.
+        let mut doc = json!({ "hooks": { "Stop": [ { "hooks": [
+            { "type": "command", "command": "/opt/slopty", "args": ["hook"] }
+        ] } ] }, "other": 1 });
+        assert!(uninstall(&mut doc));
+        assert_eq!(doc, json!({ "other": 1 }));
+    }
+
+    #[test]
+    fn the_home_is_the_environments_and_a_directory_is_not_a_settings_file() {
+        let expected =
+            std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        assert_eq!(home_dir(), expected);
+        // Only a missing file reads as empty settings; any other error is reported.
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(read(&dir.path().join("none.json")).expect("missing"), json!({}));
+        assert!(read(dir.path()).is_err(), "a directory is not settings");
     }
 
     #[test]

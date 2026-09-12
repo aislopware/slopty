@@ -1304,5 +1304,34 @@ mod tests {
         std::fs::write(&path, &big).expect("write");
         assert_eq!(last_assistant_line(&path).as_deref(), Some("Running the tests now."));
         assert_eq!(last_assistant_line(&dir.path().join("missing.jsonl")), None);
+        // A long tool result after the last words: the scan reaches back past it.
+        let result = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","content":"{}"}}]}}}}"#,
+            "x".repeat(64 * 1024)
+        );
+        let later = format!("{big}{result}\n");
+        std::fs::write(&path, &later).expect("write");
+        assert_eq!(last_assistant_line(&path).as_deref(), Some("Running the tests now."));
+    }
+
+    #[test]
+    fn the_line_the_tail_starts_in_is_never_trusted_and_a_whole_file_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        // A file read whole: its first line counts, even when it is the only one.
+        let first =
+            r#"{"type":"assistant","message":{"role":"assistant","content":"plain words"}}"#;
+        std::fs::write(&path, format!("{first}\n")).expect("write");
+        assert_eq!(last_assistant_line(&path).as_deref(), Some("plain words"));
+        // A file read from the tail: the line the read starts in may be a fragment, so it is
+        // skipped even when, as here, the cut lands exactly on its first byte.
+        let user = r#"{"type":"user","message":{"role":"user","content":"pad"}}"#;
+        let tail: usize = TAIL_BYTES.try_into().expect("fits");
+        let frame = r#"{"type":"user","x":""}"#;
+        let filler = "y".repeat(tail - (first.len() + 1) - (frame.len() + 1));
+        let body = format!("{user}\n{first}\n{{\"type\":\"user\",\"x\":\"{filler}\"}}\n");
+        assert_eq!(body.len() - tail, user.len() + 1, "the cut lands on the assistant line");
+        std::fs::write(&path, &body).expect("write");
+        assert_eq!(last_assistant_line(&path), None);
     }
 }
