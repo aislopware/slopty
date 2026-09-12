@@ -77,8 +77,10 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   (never itself: its own echo is `CanvasChange::Echo`) and the canvas draws each as an outline
   in a colour picked from the client id with its name in the corner, over the items; the
   outline has no listeners so it is never in the way, and the name is a button that flies the
-  camera to what that client sees ("go where they look" without asking where that is). Tested at every layer: the table, the document, the
-  headless canvas (the outline's a11y node and bounds; one `Look` per rest), and two clients on
-  a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
+  camera to what that client sees ("go where they look" without asking where that is). The
+  minimap fits the lookers' viewports too and outlines each in its colour, so a client off
+  this screen is still in the overview. Tested at every layer: the table, the document, the
+  headless canvas (the outline's a11y node and bounds; one `Look` per rest; the minimap's
+  fit), and two clients on a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
   (a viewport is what the other person can see, which is what matters for "look at this";
   a pointer at 20 Hz is a stream), and presence across hosts (a canvas is per host).

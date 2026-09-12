@@ -2512,7 +2512,8 @@ impl CanvasView {
     /// The other clients' viewports: an outline in each one's colour with its name at the
     /// corner, drawn over the items and never in their way (the outline has no listeners); the
     /// name is a button that flies the camera to what that client sees.
-    fn render_lookers(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+    /// A colour for another client, stable across frames and clients: from its id.
+    fn looker_colour(&self, client: ClientId) -> slopty_theme::Rgb {
         let theme = &self.theme;
         let palette = [
             theme.surfaces.accent,
@@ -2520,13 +2521,18 @@ impl CanvasView {
             theme.surfaces.warn,
             theme.surfaces.error,
         ];
+        let hue = usize::try_from(client.as_uuid().as_u128() % 4).unwrap_or(0);
+        palette.get(hue).copied().unwrap_or(theme.surfaces.accent)
+    }
+
+    fn render_lookers(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = &self.theme;
         self.doc
             .lookers()
             .filter(|l| self.on_screen(l.view))
             .map(|l| {
                 let s = self.camera.to_screen(l.view);
-                let hue = (l.client.as_uuid().as_u128() % 4) as usize;
-                let colour = palette.get(hue).copied().unwrap_or(theme.surfaces.accent);
+                let colour = self.looker_colour(l.client);
                 let label = SharedString::from(l.name.clone());
                 let view = l.view;
                 let tag = div()
@@ -3302,8 +3308,13 @@ impl CanvasView {
         };
         let items: Vec<(Rect, bool)> =
             self.doc.items().map(|i| (i.rect, self.active == Some(i.id))).collect();
+        // The other clients' viewports are part of the overview: where they look is in the
+        // box even when it is off this screen.
+        let lookers: Vec<(Rect, slopty_theme::Rgb)> =
+            self.doc.lookers().map(|l| (l.view, self.looker_colour(l.client))).collect();
         let entity = cx.entity();
-        let rects: Vec<Rect> = items.iter().map(|(r, _)| *r).collect();
+        let rects: Vec<Rect> =
+            items.iter().map(|(r, _)| *r).chain(lookers.iter().map(|(r, _)| *r)).collect();
         let map = canvas(
             move |bounds, _window, cx| {
                 let rects = rects.into_iter().chain(std::iter::once(viewport));
@@ -3326,6 +3337,13 @@ impl CanvasView {
                     window.paint_quad(fill(
                         map.to_box(*rect),
                         hsla_alpha(color, alpha::MINIMAP_ITEM),
+                    ));
+                }
+                for (rect, colour) in &lookers {
+                    window.paint_quad(outline(
+                        map.to_box(*rect),
+                        hsla_alpha(*colour, alpha::MINIMAP_LOOKER),
+                        BorderStyle::Solid,
                     ));
                 }
                 window.paint_quad(outline(
@@ -4437,6 +4455,56 @@ mod tests {
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(!tree.iter().any(|n| n.label.as_deref() == Some("phone")), "gone with the client");
+    }
+
+    /// The overview fits where the others look, so a client off this screen is still in the box.
+    #[gpui::test]
+    fn the_minimap_fits_where_the_others_look(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let id = ItemId::new();
+        let item = CanvasItem {
+            id,
+            kind: ItemKind::Note { text: "here".to_owned() },
+            rect: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        let far = Rect { x: 9_000.0, y: 9_000.0, w: 400.0, h: 300.0 };
+        let inside = |map: MinimapMap, r: Rect| {
+            let b = map.to_box(r);
+            let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
+            let (ox, oy) = (f32::from(map.origin.x), f32::from(map.origin.y));
+            x >= ox
+                && y >= oy
+                && x + f32::from(b.size.width) <= ox + MINIMAP.0 + 1.0
+                && y + f32::from(b.size.height) <= oy + MINIMAP.1 + 1.0
+        };
+        let map = view.read_with(cx, |c, _| c.minimap.expect("drawn"));
+        assert!(!inside(map, far), "far is outside the overview before anyone looks there");
+        view.update(cx, |c, cx| {
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: ClientId::new(),
+                    kind: ClientKind::Mac,
+                    name: "other".to_owned(),
+                    view: Some(far),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let map = view.read_with(cx, |c, _| c.minimap.expect("drawn"));
+        assert!(inside(map, far), "the overview grew to include where they look");
+        assert!(
+            inside(map, Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }),
+            "and still shows the item"
+        );
     }
 
     /// The name on another client's outline is a button: it flies the camera to what that
