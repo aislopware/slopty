@@ -857,6 +857,17 @@ mod tests {
         assert_eq!(head.body, LineIndex(2));
     }
 
+    /// Output that begins on the very first line (a shell attached mid-command) is all of the
+    /// last command's output: the walk back stops at the top, not one short of it.
+    #[test]
+    fn output_from_the_first_line_is_the_last_commands_whole_output() {
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "$ ")]);
+        f.updates[2].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+        state.apply(TermEvent::Frame(f));
+        assert_eq!(state.last_command_output(), Some("a\nb".to_owned()));
+    }
+
     fn texts(state: &TermState) -> Vec<Option<String>> {
         state.view().into_iter().map(|r| r.line.map(Line::text)).collect()
     }
