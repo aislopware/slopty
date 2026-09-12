@@ -370,6 +370,11 @@ mod tests {
         assert_eq!(stats.interval_jitter, Duration::ZERO);
         // Arrival → present is the decode plus the wait for the paint; no extra frame of it.
         assert!(stats.latency_p95 < FRAME.saturating_add(2 * MS), "{stats:?}");
+        assert!(stats.latency_p95 > Duration::ZERO && stats.latency_p95 <= stats.latency_max);
+        // The picture's age runs from the paint that put it up.
+        assert_eq!(pacer.age(), Some(Duration::ZERO));
+        clock.advance(MS);
+        assert_eq!(pacer.age(), Some(MS));
     }
 
     /// Two frames between paints: the newer one is shown, the older is counted skipped and never
@@ -555,6 +560,11 @@ mod tests {
         let mut clock = CaptureClock::new();
         clock.widen(HALF_WRAP);
         assert_eq!(clock.widen(0), 0);
+        // And exactly half a turn forward, in a later turn, is not a straggler either.
+        let mut clock = CaptureClock::new();
+        clock.widen(u32::MAX - 10);
+        clock.widen(5);
+        assert_eq!(clock.widen(HALF_WRAP + 5), WRAP + u64::from(HALF_WRAP) + 5);
     }
 
     #[test]

@@ -1180,6 +1180,12 @@ mod tests {
         );
         let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"in blocks"}]}}"#;
         assert_eq!(progress(blocks).and_then(|p| p.detail).as_deref(), Some("in blocks"));
+        // An assistant record whose content is one string: its last line, still working.
+        let words = r#"{"type":"assistant","message":{"role":"assistant","content":"Just words.\nLast line."}}"#;
+        assert_eq!(
+            progress(words),
+            Some(Progress { status: AgentStatus::Working, detail: Some("Last line.".to_owned()) })
+        );
         // A tool result is the turn continuing, with nothing to say for itself.
         let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
         assert_eq!(progress(result), Some(Progress { status: AgentStatus::Working, detail: None }));
@@ -1211,6 +1217,21 @@ mod tests {
             progress(injected),
             Some(Progress { status: AgentStatus::Working, detail: None })
         );
+    }
+
+    #[test]
+    fn an_informational_line_is_a_notice_at_its_own_level() {
+        let info = |level: &str| {
+            system_body(&serde_json::json!({
+                "type": "system", "subtype": "informational", "content": " Tip ", "level": level
+            }))
+        };
+        let notice =
+            |level: NoticeLevel| Some(TranscriptBody::Notice { level, text: "Tip".to_owned() });
+        assert_eq!(info("notice"), notice(NoticeLevel::Notice));
+        assert_eq!(info("suggestion"), notice(NoticeLevel::Suggestion));
+        assert_eq!(info("warning"), notice(NoticeLevel::Warning));
+        assert_eq!(info("debug"), None);
     }
 
     #[test]
