@@ -969,6 +969,29 @@ mod tests {
         assert_eq!((h.rx.stats().frames_lost, h.rx.stats().nacks), (1, 2));
     }
 
+    /// A whole frame asked for before a silence is not asked for again the moment the link
+    /// moves: the answer gets its round trip first, then the retry.
+    #[test]
+    fn a_whole_frame_asked_for_before_a_silence_waits_a_round_trip_when_the_link_moves() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let _never_arrives = h.send(&frame_bytes(2, 2_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        h.advance(nack_delay());
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }]);
+        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
+        h.awake(Duration::from_millis(120));
+        h.deliver(&s3.datagrams);
+        assert!(h.tick().is_empty(), "the ask was just before the silence: wait for its answer");
+        h.advance(RTT + nack_delay());
+        let s4 = h.send(&frame_bytes(5, 2_000), false, false);
+        h.deliver(&s4.datagrams);
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }], "the retry");
+    }
+
     /// Deadlines restart when the link moves for frames never asked for too: one still inside
     /// its NACK delay when everything went quiet is asked for as soon as something arrives,
     /// not a retry gap later as if it had been asked already.
@@ -1050,14 +1073,31 @@ mod tests {
     /// malformed, whichever count it is.
     #[test]
     fn a_fragment_that_contradicts_its_frame_on_one_count_is_malformed() {
+        // A header of no data fragments, or an index past the last fragment, is not a frame:
+        // nothing is tracked for it.
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        // The header: `index` is the little-endian u16 at byte 8, `data_count` at byte 10,
+        // `parity_count` the byte at 12.
+        let mut no_data = s0.datagrams[2].to_vec();
+        no_data[8] = 0;
+        no_data[10] = 0;
+        assert_eq!(h.rx.ingest(&Bytes::from(no_data), h.now), Ingest::Ignored(Ignored::Malformed));
+        let mut past_the_end = s0.datagrams[2].to_vec();
+        past_the_end[8] = 3;
+        assert_eq!(
+            h.rx.ingest(&Bytes::from(past_the_end), h.now),
+            Ingest::Ignored(Ignored::Malformed)
+        );
+        assert_eq!(h.rx.queue_depth(), 0, "nothing tracked");
+
         h.deliver(&s0.datagrams[..1]);
+        // Two data and no parity: three fragments as before, one count wrong.
         let mut wrong_count = s0.datagrams[1].to_vec();
-        // `data_count` is the little-endian u16 at byte 10 of the header: 2 → 3.
-        wrong_count[10] = wrong_count[10].wrapping_add(1);
+        wrong_count[10] = 3;
+        wrong_count[12] = 0;
         let (header, _) = MediaHeader::parse(&wrong_count).unwrap();
-        assert_eq!(header.data_count.get(), 3);
+        assert_eq!((header.data_count.get(), header.parity_count), (3, 0));
         assert_eq!(
             h.rx.ingest(&Bytes::from(wrong_count), h.now),
             Ingest::Ignored(Ignored::Malformed)
@@ -1151,6 +1191,47 @@ mod tests {
         let silences = h.rx.stats().silences;
         assert_eq!((silences.in_flight, silences.host_quiet, silences.receiver_dozed), (1, 0, 0));
         assert_eq!(h.rx.take_report(h.now, 0).stalled_ms, 50);
+    }
+
+    /// Out of order, only a frame the stream can restart from is worth asking for: a keyframe
+    /// while one is awaited, and a refresh frame too once a refresh was requested. Fragments
+    /// of any other frame are left to arrive or not.
+    #[test]
+    fn only_a_frame_the_stream_can_restart_from_is_asked_for_out_of_order() {
+        // Awaiting the first keyframe.
+        let mut h = Harness::new();
+        let plain = h.send(&frame_bytes(1, 2_000), false, false);
+        h.deliver_except(&plain, &[0, 1]);
+        h.advance(nack_delay());
+        assert!(h.tick().is_empty(), "a plain frame cannot start the stream");
+        let refresh = h.send(&frame_bytes(2, 2_000), false, true);
+        h.deliver_except(&refresh, &[0, 1]);
+        h.advance(nack_delay());
+        assert!(h.tick().is_empty(), "nor a refresh: nothing to refresh from");
+        let key = h.send(&frame_bytes(3, 2_000), true, false);
+        h.deliver_except(&key, &[0, 1]);
+        h.advance(nack_delay());
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 2, fragments: vec![0, 1] }]);
+
+        // Awaiting a refresh after a loss.
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let _never_arrives = h.send(&frame_bytes(2, 2_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        h.advance(cfg().max_hold);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert!(h.rx.awaiting_refresh());
+        let plain = h.send(&frame_bytes(4, 2_000), false, false);
+        h.deliver_except(&plain, &[0, 1]);
+        h.advance(nack_delay());
+        assert!(h.tick().is_empty(), "a plain frame cannot restart the stream");
+        let refresh = h.send(&frame_bytes(5, 2_000), false, true);
+        h.deliver_except(&refresh, &[0, 1]);
+        h.advance(nack_delay());
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 4, fragments: vec![0, 1] }]);
     }
 
     /// The queue depth is the frames waiting to be taken plus the ones still assembling, and
