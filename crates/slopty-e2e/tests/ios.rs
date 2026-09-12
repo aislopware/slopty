@@ -206,6 +206,7 @@ mod tests {
         let mut stack =
             Stack::launch_on_simulator_with_driven_claude("e2e-ios-host", simulator).await.unwrap();
         let render_path = stack.path("agent.png");
+        let question_path = stack.path("question.png");
         stack
             .driver
             .wait_for("the first shell", STEP, |d| {
@@ -274,6 +275,41 @@ mod tests {
         assert!(foreground_fraction(&frame) > BLANK, "frame is blank");
         let name = format!("ios-{}-agent", device(dump.window.width));
         assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // A question: the options are buttons over the composer, and a finger on "Blue"
+        // is the whole answer — no Allow / Deny, nothing typed.
+        drv.type_text("ask me").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the question", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.kind == "agent"
+                        && t.conversation.as_ref().is_some_and(|c| {
+                            c.attention.as_deref() == Some("question")
+                                && c.question_options == ["Red", "Blue"]
+                        })
+                }) && d.a11y_node("Button", Some("Blue")).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(dump.a11y_node("Button", Some("Allow")).is_none(), "{:#?}", dump.a11y);
+        let frame = drv.render(&question_path).await.unwrap();
+        let name = format!("ios-{}-question", device(dump.window.width));
+        assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        let (bx, by) = centre(&dump, "Button", "Blue");
+        drv.ui_tap(bx, by).await.unwrap();
+        drv.wait_for("the answer taken", STEP, |d| {
+            d.terminals.iter().any(|t| {
+                t.kind == "agent"
+                    && t.agent.as_deref() == Some("done")
+                    && t.conversation.as_ref().is_some_and(|c| {
+                        c.entries.last().map(String::as_str) == Some("assistant: Blue")
+                            && c.attention.is_none()
+                    })
+            })
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 }
