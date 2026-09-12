@@ -13,5 +13,5 @@ pub use element::{CellMetrics, Prepared, TerminalElement};
 pub(crate) use element::{family_picks, rows_prepared};
 pub use view::{
     CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt,
-    Selection, TerminalView, TerminalViewEvent, ToggleConversation, key_bindings,
+    RerunLast, Selection, TerminalView, TerminalViewEvent, ToggleConversation, key_bindings,
 };

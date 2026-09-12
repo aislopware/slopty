@@ -152,7 +152,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// The palette's lines for the canvas's and the terminal's actions, with their keys.
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
-    use crate::terminal::{CopyLastOutput, Find, NextPrompt, PrevPrompt, ToggleConversation};
+    use crate::terminal::{
+        CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast, ToggleConversation,
+    };
     let canvas = key_bindings();
     let terminal = crate::terminal::key_bindings();
     let c = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &canvas);
@@ -178,6 +180,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
         t("Copy last output", Box::new(CopyLastOutput)),
+        t("Rerun last command", Box::new(RerunLast)),
         t("Show or hide the conversation", Box::new(ToggleConversation)),
     ]
 }
@@ -2292,11 +2295,11 @@ impl CanvasView {
             ItemKind::Display { .. } => "display",
             ItemKind::Note { .. } => "note",
         };
-        let (title, focused) = match item.kind {
+        let (title, focused) = match &item.kind {
             ItemKind::Terminal { session } => {
-                let view = self.terminals.get(&session);
+                let view = self.terminals.get(session);
                 let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
-                (self.terminal_title(session, cx), focused)
+                (self.terminal_title(*session, cx), focused)
             }
             ItemKind::Window { window: host_window } => {
                 let view = self.screens.get(&item.id);

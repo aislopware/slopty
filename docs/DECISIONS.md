@@ -2927,6 +2927,14 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+- ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
+  click on the block; the command a human reruns most is the one that just finished, and
+  Warp puts that on a key. Ruling: `TermState::last_command` is the command of the block
+  before the newest prompt (marks only, `None` without shell integration or before the
+  first command), and `TerminalView::rerun_last` types it through `run_text` (one paste,
+  one ↩) exactly as the menu and the answer's "run" button do. ⌘⇧R was taken (arrange by
+  repository), so ⌘⇧↩; the palette lists "Rerun last command". Test: an assertion in
+  `prompt_navigation_and_last_output_follow_the_marks`.
 - ✅ **A new shell or agent starts where the active shell is** (2026-09-12). ⌘N and ⌘⇧T sent
   `cwd: None` (the host's default, the home directory) while ⌘⌥T's driven card already took
   the active terminal's directory; every terminal opens a new tab in the current directory

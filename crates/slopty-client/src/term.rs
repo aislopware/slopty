@@ -411,6 +411,15 @@ impl TermState {
             .collect()
     }
 
+    /// The last finished command: what was typed at the block before the newest prompt
+    /// (shell integration marks it); `None` when no command has run.
+    #[must_use]
+    pub fn last_command(&self) -> Option<String> {
+        let newest_prompt = self.prompt_before(LineIndex(self.newest().0.saturating_add(1)))?;
+        let previous = self.prompt_before(newest_prompt)?;
+        self.block_head(previous)?.command
+    }
+
     /// Newest line (the bottom of the screen).
     fn newest(&self) -> LineIndex {
         LineIndex(
@@ -746,6 +755,7 @@ mod tests {
         assert_eq!(state.prompt_after(LineIndex(4)), Some(LineIndex(8)));
         assert_eq!(state.prompt_after(LineIndex(8)), None);
         assert_eq!(state.last_command_output(), Some("1\n2".to_owned()), "blank tail trimmed");
+        assert_eq!(state.last_command().as_deref(), Some("seq 2"));
         // A block from any of its rows: the prompt, the typed command, the trimmed output.
         let block = state.command_block(LineIndex(6)).expect("the seq block");
         assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(1)));

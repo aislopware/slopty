@@ -66,6 +66,8 @@ mod actions {
             NextPrompt,
             /// Copy the output of the last command.
             CopyLastOutput,
+            /// Run the last command again: a paste of what was typed, then ↩.
+            RerunLast,
             /// Show the agent's conversation instead of the grid, or the grid again.
             ToggleConversation,
             /// Tab in a driven composer with the slash list up: take the selected
@@ -78,7 +80,7 @@ mod actions {
 }
 pub use actions::{
     CloseFind, CompleteSlash, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste,
-    PrevPrompt, ToggleConversation,
+    PrevPrompt, RerunLast, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -94,6 +96,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-up", PrevPrompt, CTX),
         KeyBinding::new("cmd-down", NextPrompt, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
+        KeyBinding::new("cmd-shift-enter", RerunLast, CTX),
         KeyBinding::new("cmd-shift-l", ToggleConversation, CTX),
         KeyBinding::new("tab", CompleteSlash, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
@@ -1441,6 +1444,13 @@ impl TerminalView {
         }
     }
 
+    /// ⌘⇧↩: the last finished command again, typed as the block menu's rerun types it.
+    pub fn rerun_last(&mut self, _: &RerunLast, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(command) = self.state.last_command() {
+            self.run_text(command, cx);
+        }
+    }
+
     /// ⌘↑: the prompt above the viewport's top row, scrolled to the top.
     pub fn prev_prompt(&mut self, _: &PrevPrompt, _window: &mut Window, cx: &mut Context<Self>) {
         let top = self.state.index_at_row(0);
@@ -2386,6 +2396,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::prev_prompt))
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
+            .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::toggle_conversation_action))
             .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
                 if !this.completion_nav("tab", window, cx) {
