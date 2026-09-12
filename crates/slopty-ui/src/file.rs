@@ -631,12 +631,21 @@ impl Render for FileView {
                         range
                             .filter_map(|ix| {
                                 let line = lines.get(ix)?.clone();
-                                let runs = highlight::runs(
-                                    line.len(),
-                                    spans.as_ref().and_then(|s| s.get(ix)).map(Vec::as_slice),
-                                    &font,
-                                    &run_theme,
-                                );
+                                // A line with no spans (a plain file, or the parse still
+                                // running) is plain text, sparing the run vector; the
+                                // coloured card's cost was the shaper's, not this (MEASUREMENTS
+                                // 2026-09-13, "a coloured file card's zoom").
+                                let text = match spans.as_ref().and_then(|s| s.get(ix)) {
+                                    Some(line_spans) => StyledText::new(line.clone())
+                                        .with_runs(highlight::runs(
+                                            line.len(),
+                                            Some(line_spans.as_slice()),
+                                            &font,
+                                            &run_theme,
+                                        ))
+                                        .into_any_element(),
+                                    None => line.into_any_element(),
+                                };
                                 let number = ix.saturating_add(1);
                                 let this = this.clone();
                                 Some(
@@ -668,11 +677,7 @@ impl Render for FileView {
                                                     "{number:>digits$}"
                                                 ))),
                                         )
-                                        .child(
-                                            div()
-                                                .text_color(fg)
-                                                .child(StyledText::new(line).with_runs(runs)),
-                                        ),
+                                        .child(div().text_color(fg).child(text)),
                                 )
                             })
                             .collect()

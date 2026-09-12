@@ -685,3 +685,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `highlight::tests` (tokens by extension, name, first line and fence; a block comment across
   lines; runs cover the line; byte ranges of a block), `file::tests::a_file_is_coloured_by_its_grammar_after_the_read`
   (background parse, generation guard, summary), `kit::tests` (the hook is installed after a sync).
+
+- ✅ **A font run spans colours; the painter reads them by glyph (2026-09-13).** GPUI shaped a
+  line in one CoreText run per *decoration* change (colour, underline, strikethrough), so a
+  coloured line of code cost one shape per token and the shaped-line cache keyed on all of it.
+  A 2 000-line file card zooming on the canvas went from 0 dropped frames to 116 of 565 after
+  the colouring landed (p95 9.4 → 22.5 ms), bisected to that commit, and an experiment that
+  drew the same card without its spans brought the frame back (MEASUREMENTS 2026-09-13). The
+  fork commit `06c345cf` (`gpui: shape a line's font runs by font, not by colour`) merges font
+  runs by font id only, at all four sites (`shape_line`, `shape_text`, `layout_line`,
+  `layout_line_by_hash`); the decoration runs are untouched, and `paint_line` already applied
+  them by glyph byte index, independent of the font runs, so nothing else changes. With it the
+  zoom cycle is back to 0 dropped of 787 frames (p95 9.6 ms). The trade-off, accepted: a
+  ligature can now form across two colours and takes the first one — with a coding font that
+  means `->` in one hue where the punctuation and the operator were coloured apart, which the
+  nine-token theme does not do. Not the alternatives: colouring a file card only when the zoom
+  rests (a flicker, and the terminal grid's coloured rows have the same cost); a per-line
+  plain-text fallback in `FileView` (kept only for a row with no spans, where it saves the
+  run vector, but it did not move the coloured card's numbers). To carry on an upstream sync:
+  the patch is one hunk per site, `cargo xtask upstream sync` replays it.

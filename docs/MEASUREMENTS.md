@@ -2712,3 +2712,57 @@ What follows: neither belongs in the gate (its budget is 5–10 minutes for ever
 are the weekly `Deep` workflow's, one runner each, and run by hand before a release. The
 first Miri run failed on `tests/golden.rs` — insta shells out to `cargo metadata` and Miri
 cannot `fork` — so `deep miri` sets `INSTA_WORKSPACE_ROOT`; the rerun is the number kept.
+
+## 2026-09-13 — a coloured file card's zoom: the shaper split runs on colour
+
+The smooth probe's (f) after the colouring landed (main `e931d97`, 2026-09-12) against the
+run above at `72e7754`: the card at 200 % dropped 116 of 565 frames where it had dropped none.
+Command, on an idle Mac Studio, dev profile (optimised), the file scenario alone:
+
+```
+cargo build -p slopty-ptyd -p slopty-hostd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+SLOPTY_SMOOTH_E2E=1 cargo nextest run -p slopty-e2e --test smooth --no-capture --no-fail-fast -E 'test(a_full_file_card)'
+```
+
+```
+main e931d97   (f) draw 4.0 / 22.5 / 24.4 / 25.5 ms · every 6.1 / 22.8 ms · 563 frames, 116 dropped
+```
+
+`git bisect run` over `2b8e9cb..e931d97` (`/tmp/bisect-f.sh`: build the bins, run (f), good
+under 40 dropped), each step a fresh build and one run:
+
+```
+1a7fc04  (f) 3.8 / 9.4 / 11.6 / 12.4 ms · 791 frames · 0 dropped   good
+2b8e9cb  (f) 3.9 / 9.4 / 11.3 / 13.1 ms · 795 frames · 0 dropped   good
+ab6be77  (f) 3.8 / 9.3 / 11.3 / 11.7 ms · 796 frames · 0 dropped   good
+e931d97  (f) 4.0 / 22.5 / 24.4 / 25.5 ms · 563 frames · 116 dropped bad   ← first bad
+```
+
+The experiment that named the cost: the same build with the card's spans dropped at draw
+(`SLOPTY_NO_COLOUR`, a temporary switch in `FileView`'s row closure, not kept):
+
+```
+e931d97, no colour   (f) 3.8 / 9.2 / 11.3 / 12.3 ms · 796 frames · 0 dropped
+```
+
+So the coloured rows cost 13 ms a frame at 200 %, and the parse was not it (it runs once, on
+a background thread). The reason is in GPUI's `text_system.rs`: `shape_line` and the three
+`layout_line` variants started a new `FontRun` on every decoration change, so a row of code
+with a span per token shaped as ten or twenty CoreText runs instead of one, at every zoom
+step (the zoom changes the font size, so the shaped-line cache misses on every frame of the
+cycle). The painter (`paint_line`) applies the decoration runs by glyph byte index and never
+looks at the font runs, so the split bought nothing but the ligature boundary.
+
+The fix, in the fork (`aislopware/zed` `06c345cf`, "gpui: shape a line's font runs by font, not
+by colour"): merge font runs by font id only, at all four sites. The same command after
+`cargo update -p gpui`, the two scenarios of the file test:
+
+```
+main + fix   (e) draw 2.4 / 3.9 / 4.1 / 5.6 ms · every 4.3 / 11.9 ms · 877 frames, 0 dropped
+main + fix   (f) draw 3.7 / 9.6 / 11.7 / 12.7 ms · every 6.5 / 13.5 ms · 787 frames, 0 dropped
+```
+
+(f) is back on the `72e7754` line (9.4 / 11.4 / 12.0 ms). A per-row plain-text fallback in
+`FileView` (a `SharedString` child instead of a one-run `StyledText` for a row with no spans)
+was tried first and did not move the coloured card; it stays only because a plain file's row
+saves a run vector for nothing lost.
