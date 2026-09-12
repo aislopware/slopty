@@ -266,6 +266,37 @@ mod tests {
     }
 
     /// Nothing overlaps, every item keeps its size, and the same input gives the same canvas.
+    /// The geometry, exactly: rows of a square-ish grid one gap apart, a heading as wide as
+    /// its block, and three gaps between blocks.
+    #[test]
+    fn a_block_is_a_grid_under_its_heading_and_blocks_stand_three_gaps_apart() {
+        assert!((BLOCK_GAP / GAP - 3.0).abs() < f32::EPSILON);
+        let items = vec![
+            item(Some("/w/a"), 4, (100.0, 50.0)),
+            item(Some("/w/a"), 3, (100.0, 50.0)),
+            item(Some("/w/a"), 2, (100.0, 50.0)),
+            item(Some("/w/a"), 1, (100.0, 50.0)),
+            item(Some("/w/b"), 0, (200.0, 100.0)),
+        ];
+        let out = arrange_by_repo(&items, (0.0, 0.0));
+        let at = |i: usize| out.place(items[i].id).expect("placed");
+        let top = HEADING_HEIGHT;
+        // Four items make two columns, not three: the third starts the second row.
+        assert_eq!(at(0), Rect { x: 0.0, y: top, w: 100.0, h: 50.0 });
+        assert_eq!(at(1), Rect { x: 128.0, y: top, w: 100.0, h: 50.0 });
+        assert_eq!(at(2), Rect { x: 0.0, y: 96.0, w: 100.0, h: 50.0 });
+        assert_eq!(at(3), Rect { x: 128.0, y: 96.0, w: 100.0, h: 50.0 });
+        // The heading spans the row: two items and the snapped gap between them.
+        assert_eq!(out.headings[0].rect, Rect { x: 0.0, y: 0.0, w: 232.0, h: HEADING_HEIGHT });
+        // The next block starts three gaps past the first, snapped, under its own heading.
+        assert_eq!(at(4), Rect { x: 304.0, y: top, w: 200.0, h: 100.0 });
+        assert_eq!(out.headings[1].rect, Rect { x: 304.0, y: 0.0, w: 200.0, h: HEADING_HEIGHT });
+        // What the camera fits is every item and every heading.
+        let rects: Vec<Rect> = out.rects().collect();
+        assert_eq!(rects.len(), 7);
+        assert!(rects.contains(&out.headings[1].rect));
+    }
+
     #[test]
     fn the_layout_is_deterministic_and_never_overlaps() {
         let repos = ["/w/a", "/w/b", "/w/b/deep", "/w/c"];

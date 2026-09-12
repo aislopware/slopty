@@ -551,6 +551,81 @@ mod tests {
     }
 
     #[test]
+    fn free_slot_follows_the_item_that_reaches_furthest_right() {
+        let mut doc = CanvasDoc::default();
+        // `wide` starts at the left but ends furthest right; `near` starts further right.
+        let session = SessionId::new();
+        let wide = CanvasItem {
+            kind: ItemKind::Terminal { session },
+            rect: Rect { x: 0.0, y: 64.0, w: 500.0, h: 50.0 },
+            ..term(0.0, 0)
+        };
+        let near = term(100.0, 1);
+        doc.apply_op(&CanvasOp::Upsert(wide.clone()));
+        doc.apply_op(&CanvasOp::Upsert(near));
+        assert_eq!(doc.items().count(), 2);
+        assert_eq!(doc.item_for_session(session).map(|i| i.id), Some(wide.id));
+        // The slot goes past `wide`'s right edge, on `wide`'s row.
+        let slot = doc.free_slot((640.0, 400.0));
+        assert_eq!((slot.x, slot.y), (snap(500.0 + GAP), 64.0));
+        // Snapping rounds to the nearest grid line, in both directions.
+        assert!((snap(100.0) - 96.0).abs() < f32::EPSILON);
+        assert!((snap(-40.0) - -48.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_camera_pans_in_canvas_units_and_zooms_about_a_point_off_the_origin() {
+        // A screen-space drag moves the camera against the drag, scaled by the zoom.
+        let mut cam = Camera { x: 10.0, y: 20.0, zoom: 2.0 };
+        cam.pan(4.0, -8.0);
+        assert_eq!(cam, Camera { x: 8.0, y: 24.0, zoom: 2.0 });
+        // Zooming in about screen (40, 40) keeps the canvas point under it where it is: the
+        // camera's origin ends up 40 screen points, at the new zoom, before that point.
+        let under = cam.to_canvas(40.0, 40.0);
+        cam.zoom_at(2.0, 40.0, 40.0);
+        assert_eq!(cam, Camera { x: under.0 - 10.0, y: under.1 - 10.0, zoom: 4.0 });
+        assert_eq!(cam.to_canvas(40.0, 40.0), under);
+        // Cards start below the card zoom, not at it.
+        assert!(!Camera { x: 0.0, y: 0.0, zoom: CARD_ZOOM }.cards());
+        assert!(Camera { x: 0.0, y: 0.0, zoom: CARD_ZOOM - 0.01 }.cards());
+    }
+
+    #[test]
+    fn reveal_nudges_the_least_on_each_side_and_fits_by_the_tighter_axis() {
+        let vp = (600.0, 400.0);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let origin = Camera { x: 0.0, y: 0.0, zoom: 1.0 };
+        let inset = GAP * 2.0;
+        // Off the left and above: the item lands one gap inside both edges.
+        let mut cam = origin;
+        let corner = Rect { x: -100.0, y: -50.0, w: 200.0, h: 100.0 };
+        cam.reveal(corner, vp);
+        let s = cam.to_screen(corner);
+        assert!(close(s.x, GAP) && close(s.y, GAP), "{s:?}");
+        // Off the right and below: its far edges land one gap inside.
+        let mut cam = origin;
+        let far = Rect { x: 700.0, y: 500.0, w: 200.0, h: 100.0 };
+        cam.reveal(far, vp);
+        let s = cam.to_screen(far);
+        assert!(close(s.x + s.w, vp.0 - GAP) && close(s.y + s.h, vp.1 - GAP), "{s:?}");
+        // Exactly one gap inside every edge is in view: nothing moves.
+        let mut cam = origin;
+        let edge = Rect { x: GAP, y: GAP, w: vp.0 - inset, h: vp.1 - inset };
+        cam.reveal(edge, vp);
+        assert_eq!(cam, origin);
+        // An item that fits exactly at the current zoom is panned to, not re-zoomed: the
+        // vertical axis, already in view, stays where it was.
+        let mut cam = Camera { x: 500.0, y: 0.0, zoom: 1.0 };
+        let exact = Rect { x: 0.0, y: 100.0, w: vp.0 - inset, h: 200.0 };
+        cam.reveal(exact, vp);
+        assert!(close(cam.zoom, 1.0) && close(cam.x, -GAP) && close(cam.y, 0.0), "{cam:?}");
+        // Too wide for the viewport: the width decides the zoom, less a gap on each side.
+        let mut cam = origin;
+        cam.reveal(Rect { x: 0.0, y: 0.0, w: 800.0, h: 100.0 }, vp);
+        assert!(close(cam.zoom, (vp.0 - inset) / 800.0), "{cam:?}");
+    }
+
+    #[test]
     fn camera_round_trips_and_zooms_about_point() {
         let mut cam = Camera { x: 10.0, y: 20.0, zoom: 2.0 };
         let r = Rect { x: 30.0, y: 40.0, w: 10.0, h: 5.0 };
@@ -599,6 +674,10 @@ mod tests {
         assert!(mid.x > quarter.x, "still moving: {mid:?} after {quarter:?}");
         assert!(mid.zoom < from.zoom && mid.zoom > to.zoom, "zoom follows: {mid:?}");
 
+        // Time only runs forward: a negative or unreal step leaves the flight where it is.
+        assert_eq!(flight.advance(-1.0), mid);
+        assert_eq!(flight.advance(f32::NAN), mid);
+
         let landed = flight.advance(FLIGHT);
         assert!(flight.done());
         assert_eq!(landed, to, "the last frame is the target exactly");
@@ -643,6 +722,47 @@ mod tests {
     }
 
     /// `fitted` is `fit` without moving the camera it was called on.
+    #[test]
+    fn fit_puts_the_union_in_the_middle_and_fills_the_tighter_side() {
+        let vp = (800.0, 600.0);
+        let inset = GAP * 2.0;
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let mut cam = Camera::default();
+        // The union runs from the first rect's corner to the second's far corner.
+        cam.fit(
+            [
+                Rect { x: 100.0, y: 50.0, w: 1000.0, h: 500.0 },
+                Rect { x: 2000.0, y: 800.0, w: 100.0, h: 100.0 },
+            ],
+            vp,
+        );
+        let union = cam.to_screen(Rect { x: 100.0, y: 50.0, w: 2000.0, h: 850.0 });
+        // Wider than tall for this viewport: the width fills it less a gap on each side, and
+        // the union is centred both ways.
+        assert!(close(union.x, GAP) && close(union.w, vp.0 - inset), "{union:?}");
+        assert!(close(union.y + union.h / 2.0, vp.1 / 2.0), "{union:?}");
+        // Zoom is a fit, never a blow-up: a small union sits at 1:1 in the middle.
+        let mut cam = Camera::default();
+        cam.fit([Rect { x: 10.0, y: 20.0, w: 200.0, h: 100.0 }], vp);
+        let small = cam.to_screen(Rect { x: 10.0, y: 20.0, w: 200.0, h: 100.0 });
+        assert!(close(cam.zoom, 1.0), "{cam:?}");
+        assert!(close(small.x + small.w / 2.0, vp.0 / 2.0), "{small:?}");
+        assert!(close(small.y + small.h / 2.0, vp.1 / 2.0), "{small:?}");
+        // The centre lands at any zoom, on both axes.
+        let item = Rect { x: 100.0, y: 50.0, w: 400.0, h: 300.0 };
+        let screen = Camera::centred_on(item, vp, 0.5).to_screen(item);
+        assert!(close(screen.y + screen.h / 2.0, vp.1 / 2.0), "{screen:?}");
+        // Cubic ease-out: half the time is seven eighths of the way.
+        assert!(
+            close(ease_out(0.5), 0.875) && close(ease_out(0.0), 0.0) && close(ease_out(1.0), 1.0)
+        );
+        // A zoom of zero on either side cannot be interpolated through: the target's is taken.
+        let flat = Camera { x: 0.0, y: 0.0, zoom: 0.0 };
+        let one = Camera { x: 0.0, y: 0.0, zoom: 1.0 };
+        assert!(close(flat.lerp(one, 0.5, vp).zoom, 1.0));
+        assert!(close(one.lerp(flat, 0.0, vp).zoom, 0.0));
+    }
+
     #[test]
     fn fitted_is_fit_without_the_side_effect() {
         let vp = (800.0, 600.0);
