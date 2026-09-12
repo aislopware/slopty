@@ -254,6 +254,90 @@ mod actor {
         session.close();
     }
 
+    /// A viewer that claims the wheel gets it, the old driver is told, the PTY takes the new
+    /// driver's size and every later resize of theirs; a search finds a line and rejects a
+    /// bad pattern; a probe names the foreground process; releasing the wheel is told too.
+    #[tokio::test]
+    async fn a_claimed_wheel_resizes_and_a_search_and_probe_answer() {
+        let (session, mut child) =
+            start(&["/bin/sh", "-c", "printf 'alpha\\nbeta\\ngamma\\n'; read x; exit 0"]);
+        let a = ClientId::new();
+        let b = ClientId::new();
+        let (tx_a, mut rx_a) = mpsc::channel(64);
+        let (tx_b, mut rx_b) = mpsc::channel(64);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        wait_for(&mut rx_a, |_, s| text(s).contains("gamma")).await;
+        session.attach(b, size(60, 10), tx_b).unwrap();
+        wait_for(&mut rx_b, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
+            .await;
+
+        // b claims the wheel: a is told, b is told, and the PTY becomes b's size.
+        session.request(b, TermRequest::Drive { drive: true }).unwrap();
+        wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: false }))
+        })
+        .await;
+        let (events, _) = wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Resized { cols: 60, rows: 10 }))
+        })
+        .await;
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
+
+        // The driver's resize moves the PTY; a viewer's does not.
+        session.request(a, TermRequest::Resize(size(20, 4))).unwrap();
+        session.request(b, TermRequest::Resize(size(50, 8))).unwrap();
+        let (events, _) = wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Resized { cols: 50, rows: 8 }))
+        })
+        .await;
+        assert!(
+            !events.iter().any(|e| matches!(e, TermEvent::Resized { cols: 20, rows: 4 })),
+            "a viewer's size is recorded, never applied: {events:?}"
+        );
+
+        // A search over the screen and history; a bad pattern is refused, not fatal.
+        session
+            .request(a, TermRequest::Search { needle: "beta".to_owned(), max: 10, regex: false })
+            .unwrap();
+        let (events, _) =
+            wait_for(&mut rx_a, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Matches { .. })))
+                .await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TermEvent::Matches { needle, total: 1, matches } if needle == "beta" && matches.len() == 1
+        )));
+        session
+            .request(a, TermRequest::Search { needle: "(".to_owned(), max: 10, regex: true })
+            .unwrap();
+        wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::SearchInvalid { needle, .. } if needle == "("))
+        })
+        .await;
+
+        // The probe names the shell waiting on `read` (macOS's `/bin/sh` is a bash), with
+        // no title or cwd announced.
+        let probe = session.probe().await.unwrap();
+        assert_eq!(
+            probe.foreground.as_ref().and_then(|f| f.argv.first()).map(String::as_str),
+            Some("/bin/sh"),
+            "{probe:?}"
+        );
+        assert_eq!((probe.title, probe.cwd), (None, None));
+
+        // Focus reaches the engine (nothing is encoded while the program has not asked).
+        session.request(b, TermRequest::Focus { focused: true }).unwrap();
+        // Releasing the wheel is told to the one who held it.
+        session.request(b, TermRequest::Drive { drive: false }).unwrap();
+        wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: false }))
+        })
+        .await;
+
+        session.request(b, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
+
     /// The opener drives even when another client attaches first.
     #[tokio::test]
     async fn reserved_driver_beats_the_first_attach() {
