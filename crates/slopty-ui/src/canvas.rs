@@ -1044,7 +1044,7 @@ impl CanvasView {
                 }
                 PickerEvent::Jump(session) => this.reveal_session(*session, cx),
                 PickerEvent::Resume(agent) => this.resume_agent_session(agent, cx),
-                PickerEvent::Dismiss => {}
+                PickerEvent::Dismiss | PickerEvent::Everywhere => {}
             }
             this.picker = None;
             // The jump focuses its terminal; every other outcome hands focus back to the canvas.
@@ -1183,15 +1183,26 @@ impl CanvasView {
 
     /// The host's answer to ⌘⌥R: the conversations on disk for the directory asked about,
     /// shown as the resume picker.
-    pub fn agent_sessions(&mut self, sessions: Vec<AgentSessionInfo>, cx: &mut Context<Self>) {
+    pub fn agent_sessions(
+        &mut self,
+        cwd: Option<String>,
+        sessions: Vec<AgentSessionInfo>,
+        cx: &mut Context<Self>,
+    ) {
         if !std::mem::take(&mut self.resume_wanted) {
             return;
         }
         let theme = self.theme.clone();
-        let picker = cx.new(|cx| WindowPicker::resume(sessions, theme, cx));
+        let picker = cx.new(|cx| WindowPicker::resume(sessions, cwd, theme, cx));
         self.subscriptions.push(cx.subscribe(&picker, |this, _picker, event, cx| {
-            if let PickerEvent::Resume(agent) = event {
-                this.resume_agent_session(agent, cx);
+            match event {
+                PickerEvent::Resume(agent) => this.resume_agent_session(agent, cx),
+                PickerEvent::Everywhere => {
+                    // The whole host's list replaces this directory's when it arrives.
+                    this.resume_wanted = true;
+                    this.send(ClientMsg::ListAgentSessions { cwd: None });
+                }
+                _ => {}
             }
             this.picker = None;
             this.pending_focus_self = true;
@@ -1468,7 +1479,8 @@ impl CanvasView {
     }
 
     /// ⌘⌥R: ask the host for the Claude Code conversations in the active terminal's
-    /// directory (its default without one); the picker opens when the list arrives.
+    /// directory (every directory on the host without one, as on the phone); the picker
+    /// opens when the list arrives.
     pub fn resume_agent(&mut self, _: &ResumeAgent, _window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.active.and_then(|id| self.doc.get(id)).and_then(|item| self.cwd_of(item));
         self.resume_wanted = true;
@@ -4049,7 +4061,8 @@ mod tests {
 
     /// ⌘⌥R asks the host for the conversations on disk; the answer opens the picker as a
     /// resume list, and a row opens that conversation as a driven agent in its directory,
-    /// titled by its first prompt.
+    /// titled by its first prompt. A list for one directory offers every directory on the
+    /// host; the whole-host list does not.
     #[gpui::test]
     fn a_past_conversation_is_resumed_from_the_picker(cx: &mut TestAppContext) {
         let (view, mut rx, _me, cx) = canvas(cx);
@@ -4074,11 +4087,37 @@ mod tests {
                 modified_ms: 0,
             },
         ];
-        view.update_in(cx, |c, _window, cx| c.agent_sessions(found, cx));
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_sessions(Some("/w/slopty".to_owned()), found.clone(), cx);
+        });
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Dialog", Some("Resume a conversation"))), "{tree:#?}");
+        assert!(
+            tree.iter().any(|n| n.role == "Button"
+                && n.label.as_deref().is_some_and(|l| l.starts_with("Every directory, "))),
+            "one directory's list offers the host: {tree:#?}"
+        );
+        let row = cx.debug_bounds("picker-everywhere-0").expect("the everywhere row");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let asked = drain(&mut rx);
+        assert!(
+            matches!(asked.as_slice(), [ClientMsg::ListAgentSessions { cwd: None }]),
+            "{asked:?}"
+        );
+        assert!(view.read_with(cx, |c, _| c.picker.is_none()), "closed until the host answers");
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(None, found, cx));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Dialog", Some("Resume a conversation"))), "{tree:#?}");
+        assert!(
+            !tree
+                .iter()
+                .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Every directory"))),
+            "the whole host's list offers nothing wider: {tree:#?}"
+        );
         assert!(
             tree.iter().any(|n| n.role == "Button"
                 && n.label.as_deref().is_some_and(
@@ -4107,7 +4146,7 @@ mod tests {
         assert!(view.read_with(cx, |c, _| c.picker.is_none()), "the picker closed");
 
         // An answer nobody asked for (another client's, or a late one) opens nothing.
-        view.update_in(cx, |c, _window, cx| c.agent_sessions(Vec::new(), cx));
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(None, Vec::new(), cx));
         cx.run_until_parked();
         assert!(view.read_with(cx, |c, _| c.picker.is_none()));
     }

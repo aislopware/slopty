@@ -38,6 +38,8 @@ pub enum PickerEvent {
     Jump(SessionId),
     /// Resume a past Claude Code conversation as a driven agent.
     Resume(AgentSessionInfo),
+    /// List the conversations of every directory on the host, not just this one's.
+    Everywhere,
     /// Closed without choosing.
     Dismiss,
 }
@@ -79,6 +81,8 @@ pub struct WindowPicker {
     agents: Vec<AgentSessionInfo>,
     /// The picker is the resume form: only `agents` are listed, under that title.
     resume: bool,
+    /// The resume form lists one directory (`Some`) or every directory on the host.
+    scope: Option<String>,
     theme: Theme,
     focus: FocusHandle,
 }
@@ -118,19 +122,27 @@ impl WindowPicker {
             displays,
             agents: Vec::new(),
             resume: false,
+            scope: None,
             theme,
             focus: cx.focus_handle(),
         }
     }
 
-    /// The resume form: the conversations the host has on disk for a directory.
-    pub fn resume(agents: Vec<AgentSessionInfo>, theme: Theme, cx: &Context<Self>) -> Self {
+    /// The resume form: the conversations the host has on disk for a directory (`scope`),
+    /// or for every directory on the host when `None`.
+    pub fn resume(
+        agents: Vec<AgentSessionInfo>,
+        scope: Option<String>,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Self {
         Self {
             sessions: Vec::new(),
             windows: Vec::new(),
             displays: Vec::new(),
             agents,
             resume: true,
+            scope,
             theme,
             focus: cx.focus_handle(),
         }
@@ -252,8 +264,18 @@ impl Render for WindowPicker {
             );
         }
         let empty = rows.is_empty();
+        if self.resume && self.scope.is_some() {
+            // A list for one directory offers the whole host; the answer replaces the picker.
+            let line = Line::new(
+                "Every directory".to_owned(),
+                "the conversations of every project on the host".to_owned(),
+            );
+            rows.push(
+                self.row(("everywhere", 0), line, PickerEvent::Everywhere, cx).into_any_element(),
+            );
+        }
         let (title, nothing): (&'static str, &'static str) = if self.resume {
-            ("Resume a conversation", "no conversation on the host for this directory")
+            ("Resume a conversation", "no conversation on the host")
         } else {
             (
                 "Jump to a session, or add a window from the host",

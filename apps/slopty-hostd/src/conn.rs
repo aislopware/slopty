@@ -551,7 +551,7 @@ impl Peer<'_> {
             }
             ClientMsg::ListAgentSessions { cwd } => {
                 let (cwd, sessions) = crate::driven::Driven::sessions(cwd.as_deref());
-                tracing::debug!(client = %self.client, %cwd, found = sessions.len(), "agent sessions");
+                tracing::debug!(client = %self.client, ?cwd, found = sessions.len(), "agent sessions");
                 let _sent = self.out.send(HostMsg::AgentSessions { cwd, sessions }).await;
             }
             ClientMsg::InstallHooks => {

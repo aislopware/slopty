@@ -97,8 +97,43 @@ pub fn conversation(home: &Path, cwd: &Path, id: &str, limit: usize) -> Vec<Tran
 #[must_use]
 pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> Vec<AgentSessionInfo> {
     let dir = project_dir(home, cwd);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut found: Vec<AgentSessionInfo> = entries
+    named(candidates(&dir, &cwd.to_string_lossy()), limit)
+}
+
+/// The conversations Claude Code has on disk for every directory on this host, newest first.
+///
+/// [`sessions`] over each project directory, at most `limit`. Only the newest candidates are
+/// opened to be named, so a home with hundreds of transcripts costs `limit` reads, not all of
+/// them. A transcript whose records do not name their directory is listed under the project
+/// directory's name, as Claude Code escaped it.
+#[must_use]
+pub fn all_sessions(home: &Path, limit: usize) -> Vec<AgentSessionInfo> {
+    let Ok(projects) = std::fs::read_dir(projects_dir(home)) else { return Vec::new() };
+    let found = projects
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .flat_map(|entry| {
+            let dir = entry.path();
+            let fallback = entry.file_name().to_string_lossy().into_owned();
+            candidates(&dir, &fallback)
+        })
+        .collect();
+    named(found, limit)
+}
+
+/// One transcript that may be a conversation, before it is opened.
+struct Candidate {
+    id: String,
+    path: PathBuf,
+    /// The directory to list it under when its records do not name one.
+    fallback_cwd: String,
+    modified_ms: u64,
+}
+
+/// Every `.jsonl` in `dir` that is not a subagent's, unopened; nothing when `dir` is missing.
+fn candidates(dir: &Path, fallback_cwd: &str) -> Vec<Candidate> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -110,11 +145,10 @@ pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> Vec<AgentSessionInfo> 
                 return None;
             }
             let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
-            let (title, seen_cwd) = first_prompt(&path)?;
-            Some(AgentSessionInfo {
+            Some(Candidate {
                 id: id.to_owned(),
-                cwd: seen_cwd.unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
-                title,
+                path,
+                fallback_cwd: fallback_cwd.to_owned(),
                 modified_ms: modified
                     .duration_since(UNIX_EPOCH)
                     .ok()
@@ -122,10 +156,26 @@ pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> Vec<AgentSessionInfo> 
                     .unwrap_or(0),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// The newest `limit` candidates that hold a prompt, named by it, newest first. Candidates are
+/// opened in that order and only until `limit` are named.
+fn named(mut found: Vec<Candidate>, limit: usize) -> Vec<AgentSessionInfo> {
     found.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.id.cmp(&b.id)));
-    found.truncate(limit);
     found
+        .into_iter()
+        .filter_map(|c| {
+            let (title, seen_cwd) = first_prompt(&c.path)?;
+            Some(AgentSessionInfo {
+                id: c.id,
+                cwd: seen_cwd.unwrap_or(c.fallback_cwd),
+                title,
+                modified_ms: c.modified_ms,
+            })
+        })
+        .take(limit)
+        .collect()
 }
 
 /// The first line the human typed into a transcript (and the working directory the record
@@ -346,5 +396,30 @@ mod tests {
         );
         assert_eq!(listed[0].modified_ms, 2_000_000);
         assert_eq!(sessions(home.path(), cwd, 1).len(), 1, "the limit keeps the newest");
+
+        // Every directory: a second project's conversation joins the list in mtime order; one
+        // whose records never name a directory is listed under the escaped directory name.
+        let other = projects_dir(home.path()).join("-tmp-other");
+        std::fs::create_dir_all(&other).expect("mkdir");
+        let path = other.join("d4.jsonl");
+        std::fs::write(
+            &path,
+            concat!(r#"{"type":"user","message":{"role":"user","content":"ship it"}}"#, "\n"),
+        )
+        .expect("write");
+        std::fs::File::open(&path).expect("open").set_modified(at(1_500)).expect("mtime");
+        let everywhere = all_sessions(home.path(), 10);
+        let lines: Vec<(&str, &str, &str)> =
+            everywhere.iter().map(|s| (s.id.as_str(), s.title.as_str(), s.cwd.as_str())).collect();
+        assert_eq!(
+            lines,
+            [
+                ("b2", "fix the build", "/tmp/project"),
+                ("d4", "ship it", "-tmp-other"),
+                ("a1", "add tests", "-tmp-project")
+            ]
+        );
+        assert_eq!(all_sessions(home.path(), 2).len(), 2, "the limit spans directories");
+        assert!(all_sessions(Path::new("/nonexistent"), 10).is_empty(), "no home: nothing");
     }
 }

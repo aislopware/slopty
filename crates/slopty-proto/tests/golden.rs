@@ -385,7 +385,7 @@ mod golden {
         snap(
             "host_agent_sessions",
             &HostMsg::AgentSessions {
-                cwd: "/w/slopty".to_owned(),
+                cwd: Some("/w/slopty".to_owned()),
                 sessions: vec![AgentSessionInfo {
                     id: "19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned(),
                     cwd: "/w/slopty".to_owned(),

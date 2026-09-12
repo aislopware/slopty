@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 21;
+pub const PROTOCOL_VERSION: u16 = 22;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -85,10 +85,11 @@ pub enum ClientMsg {
     },
     /// Retune a driven agent in place: model, permission mode.
     AgentSet(agent::AgentSet),
-    /// List the Claude Code conversations the host has on disk for a working directory (the
-    /// host's default when `None`), newest first; answered with `HostMsg::AgentSessions`.
+    /// List the Claude Code conversations the host has on disk, newest first: those of one
+    /// working directory, or of every directory when `None`; answered with
+    /// `HostMsg::AgentSessions`.
     ListAgentSessions {
-        /// Working directory.
+        /// Working directory, or every directory on the host.
         cwd: Option<String>,
     },
 }
@@ -190,8 +191,8 @@ pub enum HostMsg {
     },
     /// The answer to `ClientMsg::ListAgentSessions`.
     AgentSessions {
-        /// The working directory listed.
-        cwd: String,
+        /// The working directory listed, or every directory on the host.
+        cwd: Option<String>,
         /// Newest first.
         sessions: Vec<agent::AgentSessionInfo>,
     },

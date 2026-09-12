@@ -572,9 +572,14 @@ active terminal's directory; the host lists `~/.claude/projects/<escaped cwd>/*.
 Code names it by `process.cwd()`: newest first, at most 30, each named by the first prompt
 the human typed — meta records, sidechains, subagent `agent-*.jsonl` files and
 `<command-…>` records are not prompts, and a file with none is not listed) as
-`HostMsg::AgentSessions`, which opens the `WindowPicker` in its resume form (`Dialog`
-"Resume a conversation", rows `picker-agent-<i>` labelled "title, N min ago · cwd"); a row
-sends `OpenAgent { cwd, resume: id, title }`, so the new card is titled by that first prompt
+`HostMsg::AgentSessions { cwd, sessions }`, which opens the `WindowPicker` in its resume
+form (`Dialog` "Resume a conversation", rows `picker-agent-<i>` labelled "title, N min ago ·
+cwd"). Without an active terminal (the phone), or from the "Every directory" row
+(`picker-everywhere-0`) a directory's list ends with, `cwd` is `None` and the host lists
+every project under `~/.claude/projects` (`discover::all_sessions`, protocol 22: all
+candidates sorted by mtime first, only the newest opened to be named, so the cost is 30
+reads whatever the home holds); that answer carries `cwd: None` and offers nothing wider.
+A row sends `OpenAgent { cwd, resume: id, title }`, so the new card is titled by that first prompt
 and Claude Code continues the same session (`--resume`); before the agent says anything the
 pump reads the transcript's last entries (`discover::conversation`, off the runtime) and
 appends them, so the card opens with its past instead of empty. Tests: the fold and the discovery

@@ -2693,6 +2693,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   permission), headless `a_driven_view_shows_the_agent_and_retunes_it` (the usage chip in the
   tree), the app self-test (the fake sends the probe's event after init; the dump's `usage`
   reads "5h 23% · 7d 74%").
+- ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
+  ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
+  phone, where there is no terminal to stand in, that meant one directory forever, and on the
+  Mac a conversation in another project could not be reached without opening a shell there
+  first. Rulings: (1) `ListAgentSessions { cwd: None }` now means every directory on the host,
+  not the daemon's default — the phone's natural case, and the answer names its scope
+  (`AgentSessions.cwd: Option<String>`) so the picker knows whether to offer more; (2) a
+  directory's list keeps its focus and ends with one "Every directory" row that re-asks with
+  `None`, rather than always listing the host, because the thirty newest across every project
+  bury the one you were just working in; (3) the whole-host list is bounded by the same cap
+  and opens only the newest candidates (mtime sort first, prompt read second), so a home with
+  a thousand transcripts costs thirty reads; a transcript whose records never name a
+  directory is listed under the escaped project directory name, which is what Claude Code
+  itself knows. Wire: `HostMsg::AgentSessions.cwd` optional; goldens `host_agent_sessions` /
+  `client_hello` re-accepted, PROTOCOL_VERSION 21 → 22. Tests:
+  `the_conversations_on_disk_are_listed_newest_first_by_their_first_prompt` (`discover`: a
+  second project joins in mtime order, the fallback name, the cap spans directories),
+  headless `a_past_conversation_is_resumed_from_the_picker` (the row offered for one
+  directory, the re-ask with `None`, none offered for the host), the app self-test (a shell
+  that has reported its directory lists it and offers the host, one that has not lists the
+  host outright; either way the host's list holds the fake's conversation and offers nothing
+  wider).
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

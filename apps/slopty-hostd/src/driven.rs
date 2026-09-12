@@ -138,15 +138,18 @@ impl Driven {
         Some(snapshot)
     }
 
-    /// The conversations Claude Code has on disk for `cwd` (the daemon's default when
-    /// `None`), newest first, for a client that wants to resume one.
+    /// The conversations Claude Code has on disk for `cwd`, or for every directory on this
+    /// host when `None`, newest first, for a client that wants to resume one.
     #[must_use]
-    pub fn sessions(cwd: Option<&str>) -> (String, Vec<AgentSessionInfo>) {
-        let cwd = cwd.map_or_else(default_cwd, str::to_owned);
+    pub fn sessions(cwd: Option<&str>) -> (Option<String>, Vec<AgentSessionInfo>) {
         let home = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
-        let sessions =
-            slopty_agent::discover::sessions(&home, std::path::Path::new(&cwd), SESSIONS_LISTED);
-        (cwd, sessions)
+        let sessions = match cwd {
+            Some(cwd) => {
+                slopty_agent::discover::sessions(&home, std::path::Path::new(cwd), SESSIONS_LISTED)
+            }
+            None => slopty_agent::discover::all_sessions(&home, SESSIONS_LISTED),
+        };
+        (cwd.map(str::to_owned), sessions)
     }
 
     /// Start an agent. The summary is returned for the `SessionOpened` the caller broadcasts.

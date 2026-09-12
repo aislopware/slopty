@@ -707,18 +707,37 @@ mod tests {
         .await
         .unwrap();
 
-        // ⌘⌥R: the host lists the conversations in the active shell's directory (the private
-        // HOME, where the fake wrote its transcript); the row named by the first prompt opens
-        // the same Claude Code session again, as a new card titled by that prompt.
+        // ⌘⌥R: the host lists the conversations in the active shell's directory when the
+        // shell has reported one (OSC 7), offering every directory too; without one it lists
+        // every directory on the host outright — the private HOME holds one project either
+        // way, the fake's. The whole host's list holds the same conversation and offers
+        // nothing wider. The row named by the first prompt opens the same Claude Code session
+        // again, as a new card titled by that prompt.
         drv.keys("cmd-alt-r").await.unwrap();
-        let dump = drv
-            .wait_for("the resume picker", STEP, |d| {
-                d.a11y_node("Dialog", Some("Resume a conversation")).is_some()
-                    && d.a11y.iter().any(|n| {
-                        n.role == "Button"
-                            && n.label.as_deref().is_some_and(|l| l.starts_with("hello, "))
-                    })
+        let hello_row = |d: &slopty_e2e::Dump| {
+            d.a11y_node("Dialog", Some("Resume a conversation")).is_some()
+                && d.a11y.iter().any(|n| {
+                    n.role == "Button"
+                        && n.label.as_deref().is_some_and(|l| l.starts_with("hello, "))
+                })
+        };
+        let everywhere = |d: &slopty_e2e::Dump| {
+            d.a11y.iter().any(|n| {
+                n.role == "Button"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("Every directory, "))
             })
+        };
+        let dump = drv.wait_for("the resume picker", STEP, hello_row).await.unwrap();
+        if let Some(wider) = dump
+            .a11y
+            .iter()
+            .find(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Every directory, ")))
+        {
+            let [bx, by, bw, bh] = wider.bounds;
+            drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        }
+        let dump = drv
+            .wait_for("the whole host's list", STEP, |d| hello_row(d) && !everywhere(d))
             .await
             .unwrap();
         let row = dump
