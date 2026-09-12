@@ -27,6 +27,7 @@
 
 pub mod detect;
 pub mod discover;
+pub mod files;
 pub mod hooks;
 pub mod stream;
 pub mod title;

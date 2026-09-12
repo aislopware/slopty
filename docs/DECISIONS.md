@@ -2945,6 +2945,32 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `ListBoxOption`s in `a_driven_view_shows_the_agent_and_retunes_it` (headless), and the
   app self-test's driven scenario, where the fake describes its three commands after its
   init and the dump's a11y carries the described line.
+- ✅ **The composer completes `@file` from the host's working directory, protocol 30**
+  (2026-09-12). Claude Code expands `@path` in a prompt into the file's contents, which is
+  how a human points the agent at a file; the composer took the text as typed, so the path
+  had to be known and spelled out — on a phone, from memory. Rulings: (1) the word the text
+  ends in, when it starts with `@`, is asked of the host as it is typed (`ListFiles {
+  session, query }`, once per distinct query; a `mail@x` mid-word is not an `@` word and an
+  empty query asks nothing); (2) the host answers from the driven session's working
+  directory (`Driven::cwd`), off the runtime, with `slopty_agent::files::matching`: the
+  `ignore` walker (hidden entries and `.gitignore` rules skipped, `require_git(false)` so a
+  plain directory's ignore file counts too), depth 8 and 20 000 entries at most so a home
+  directory ends, case-insensitive substring on the relative path, a path whose last
+  component starts with the query first and shorter paths first among equals, at most 8
+  (`FILES_LISTED`), a directory ending in `/` so the next keystrokes can descend; (3) the
+  answer carries its query back and the view keeps it only while that is still the word
+  the composer ends in, so a slow answer to an old query never lists under a new one; (4)
+  the paths list in the same box as the slash commands (`Completion { insert, hint,
+  description }` is the list's row; slash commands fill all three, paths the insert) and
+  Tab replaces the `@` word alone, leaving the sentence around it, with a space after so
+  the next word can follow; (5) slash commands win when both would match — a `/…` text is
+  never an `@` word. Wire: `ListFiles` / `Files`; goldens `client_list_files`,
+  `host_files`, `client_hello` (re-accepted), PROTOCOL_VERSION 29 → 30. Tests:
+  `a_name_that_starts_with_the_query_ranks_first_and_ignored_paths_are_skipped` (`agent`,
+  a temp tree), the `@` half of `a_driven_view_shows_the_agent_and_retunes_it` (headless:
+  the queries sent as the word grows, the stale answer dropped, the word replaced) and the
+  app self-test's driven scenario (a file in the private home, `see @no` → `@notes.txt`,
+  Tab → `see @notes.txt `).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

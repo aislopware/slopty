@@ -224,6 +224,10 @@ pub struct TerminalView {
     selecting: bool,
     /// The command-block menu a right click opened, and where.
     block_menu: Option<BlockMenu>,
+    /// The host's answer to the composer's `@` word: the query asked and the paths found.
+    files: Option<(String, Vec<String>)>,
+    /// The `@` query last asked of the host, so a keystroke that leaves it alone asks nothing.
+    files_asked: Option<String>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
     /// ⌘ is down: links under the pointer show as links.
@@ -314,6 +318,8 @@ impl TerminalView {
             sticky_control: false,
             sticky_command: false,
             block_menu: None,
+            files: None,
+            files_asked: None,
             selection: None,
             selecting: false,
             hover: None,
@@ -488,7 +494,8 @@ impl TerminalView {
         &self.info
     }
 
-    /// The names of the slash commands completing the composer's text right now.
+    /// What completes the composer's text right now, as Tab would insert it: slash
+    /// commands by name, paths as `@path`.
     #[must_use]
     pub fn completions(&self, cx: &gpui::App) -> Vec<String> {
         if !self.driven {
@@ -496,11 +503,24 @@ impl TerminalView {
         }
         self.conversation
             .as_ref()
-            .map(|c| c.completions(&self.info.slash_commands, cx))
+            .map(|c| c.completions(&self.info.slash_commands, self.files.as_ref(), cx))
             .unwrap_or_default()
             .into_iter()
-            .map(|c| c.name)
+            .map(|c| c.insert)
             .collect()
+    }
+
+    /// The host's answer to a `ListFiles`: kept when its query is still the `@` word the
+    /// composer ends in, dropped as stale otherwise.
+    pub fn files(&mut self, query: String, paths: Vec<String>, cx: &mut Context<Self>) {
+        let current = self
+            .conversation
+            .as_ref()
+            .and_then(|c| conversation::file_query(&c.composer_text(cx)).map(str::to_owned));
+        if current.as_deref() == Some(query.as_str()) {
+            self.files = Some((query, paths));
+            cx.notify();
+        }
     }
 
     /// The model chip: open or close the menu of models.
@@ -537,10 +557,24 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The composer's text changed: the completion list starts over from its first match.
+    /// The composer's text changed: the completion list starts over from its first match,
+    /// and an `@` word the text now ends in is asked of the host (once per query).
     pub fn composer_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .conversation
+            .as_ref()
+            .and_then(|c| conversation::file_query(&c.composer_text(cx)).map(str::to_owned))
+            .filter(|q| !q.is_empty());
         if let Some(c) = self.conversation.as_mut() {
             c.composer_changed();
+        }
+        if query != self.files_asked {
+            self.files_asked.clone_from(&query);
+            if let Some(query) = query {
+                self.say(ClientMsg::ListFiles { session: self.session, query });
+            } else {
+                self.files = None;
+            }
         }
         cx.notify();
     }
@@ -588,10 +622,10 @@ impl TerminalView {
         let handled = match key {
             "tab" => {
                 let at = self.conversation.as_ref().map_or(0, Conversation::selected_completion);
-                if let Some(command) =
+                if let Some(insert) =
                     completions.get(at.min(completions.len().saturating_sub(1))).cloned()
                 {
-                    self.complete_slash(&command, window, cx);
+                    self.complete_with(&insert, window, cx);
                 }
                 true
             }
@@ -616,10 +650,11 @@ impl TerminalView {
         handled
     }
 
-    /// Put a slash command in the composer (Tab, or a click on a completion).
-    pub fn complete_slash(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Put a completion in the composer (Tab, or a click on one): a slash command, or an
+    /// `@path` in place of the `@` word.
+    pub fn complete_with(&mut self, insert: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(c) = self.conversation.as_mut() {
-            c.complete(command, window, cx);
+            c.complete(insert, window, cx);
             c.focus_composer(window, cx);
             cx.notify();
         }
@@ -2265,6 +2300,7 @@ impl Render for TerminalView {
                 self.preparing,
                 composer_focused,
                 working,
+                self.files.as_ref(),
                 &self.theme,
                 cx,
             )
@@ -3654,6 +3690,7 @@ mod tests {
                 ),
                 ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
                 ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
+                ClientMsg::ListFiles { query, .. } => format!("files:{query}"),
                 // Resizes and the like: not what these tests are about.
                 _ => continue,
             });
@@ -4167,6 +4204,32 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(drain_words(&mut rx), ["say:/cost"], "↩ sends the command as a prompt");
+
+        // `@` completion: the word is asked of the host once per query, the answer lists
+        // the paths while the word is still that query, Tab replaces the word alone.
+        view.update_in(cx, |v, window, cx| {
+            if let Some(c) = v.conversation() {
+                let _taken = c.take_composer_text(window, cx);
+            }
+        });
+        cx.simulate_keystrokes("s e e space @ m a");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["files:m", "files:ma"], "asked as the word grows");
+        view.update(cx, |v, cx| {
+            v.files("m".to_owned(), vec!["Makefile".to_owned()], cx);
+            v.files("ma".to_owned(), vec!["src/main.rs".to_owned(), "docs/manual/".to_owned()], cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(completions(cx), ["@src/main.rs", "@docs/manual/"], "the current answer only");
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("see @src/main.rs "), "the word alone is replaced");
+        assert!(completions(cx).is_empty(), "the space ends the word");
+        assert!(drain_words(&mut rx).is_empty(), "no word: nothing asked");
+        assert_eq!(conversation::file_query("look at @src/ma"), Some("src/ma"));
+        assert_eq!(conversation::file_query("@"), Some(""));
+        assert_eq!(conversation::file_query("mail@x y"), None);
         let named =
             |names: &[&str]| names.iter().map(|n| SlashCommand::named(n)).collect::<Vec<_>>();
         let names =

@@ -1176,6 +1176,19 @@ impl CanvasView {
         }
     }
 
+    /// The host's answer to a view's `@file` query.
+    pub fn agent_files(
+        &self,
+        session: SessionId,
+        query: String,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.files(query, paths, cx));
+        }
+    }
+
     /// A subagent a driven agent spawned, for the view showing it.
     pub fn agent_task(&self, session: SessionId, task: AgentTask, cx: &mut Context<Self>) {
         if let Some(view) = self.terminals.get(&session) {

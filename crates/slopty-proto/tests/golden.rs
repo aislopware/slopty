@@ -409,6 +409,18 @@ mod golden {
             &ClientMsg::ListAgentSessions { cwd: Some("/w/slopty".to_owned()) },
         );
         snap(
+            "client_list_files",
+            &ClientMsg::ListFiles { session: session(), query: "ma".to_owned() },
+        );
+        snap(
+            "host_files",
+            &HostMsg::Files {
+                session: session(),
+                query: "ma".to_owned(),
+                paths: vec!["src/main.rs".to_owned(), "docs/manual/".to_owned()],
+            },
+        );
+        snap(
             "host_agent_sessions",
             &HostMsg::AgentSessions {
                 cwd: Some("/w/slopty".to_owned()),

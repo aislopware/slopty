@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 29;
+pub const PROTOCOL_VERSION: u16 = 30;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -96,6 +96,14 @@ pub enum ClientMsg {
         /// Working directory, or every directory on the host.
         cwd: Option<String>,
     },
+    /// Paths under a driven agent's working directory that `query` matches, for the
+    /// composer's `@file` completion; answered with `HostMsg::Files`.
+    ListFiles {
+        /// The agent session.
+        session: SessionId,
+        /// What was typed after the `@`.
+        query: String,
+    },
 }
 
 impl ClientMsg {
@@ -117,6 +125,7 @@ impl ClientMsg {
             Self::AgentInterrupt { .. } => "AgentInterrupt",
             Self::AgentSet(_) => "AgentSet",
             Self::ListAgentSessions { .. } => "ListAgentSessions",
+            Self::ListFiles { .. } => "ListFiles",
         }
     }
 }
@@ -200,6 +209,15 @@ pub enum HostMsg {
         /// Newest first.
         sessions: Vec<agent::AgentSessionInfo>,
     },
+    /// The answer to `ClientMsg::ListFiles`.
+    Files {
+        /// The agent session.
+        session: SessionId,
+        /// The query answered, so a stale answer can be told from the current one.
+        query: String,
+        /// Paths relative to the working directory, best first; a directory ends in `/`.
+        paths: Vec<String>,
+    },
 }
 
 impl HostMsg {
@@ -223,6 +241,7 @@ impl HostMsg {
             Self::AgentInfo { .. } => "AgentInfo",
             Self::AgentTask { .. } => "AgentTask",
             Self::AgentSessions { .. } => "AgentSessions",
+            Self::Files { .. } => "Files",
         }
     }
 }

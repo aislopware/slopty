@@ -554,6 +554,24 @@ impl Peer<'_> {
                 tracing::debug!(client = %self.client, ?cwd, found = sessions.len(), "agent sessions");
                 let _sent = self.out.send(HostMsg::AgentSessions { cwd, sessions }).await;
             }
+            ClientMsg::ListFiles { session, query } => {
+                let paths = match self.daemon.driven.cwd(session) {
+                    Some(cwd) if !query.is_empty() => {
+                        let needle = query.clone();
+                        tokio::task::spawn_blocking(move || {
+                            slopty_agent::files::matching(
+                                std::path::Path::new(&cwd),
+                                &needle,
+                                crate::driven::FILES_LISTED,
+                            )
+                        })
+                        .await
+                        .unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                };
+                let _sent = self.out.send(HostMsg::Files { session, query, paths }).await;
+            }
             ClientMsg::InstallHooks => {
                 let (ok, message) = install_hooks().await;
                 tracing::info!(client = %self.client, ok, %message, "install hooks");

@@ -78,18 +78,54 @@ pub fn slash_matches(text: &str, commands: &[SlashCommand]) -> Vec<SlashCommand>
 /// would push the transcript off the top.
 pub const SLASH_MAX: usize = 8;
 
-/// A completion as one line reads it (its a11y label): the name, the argument hint after
-/// it, the description after a dash — each only where the agent gave one.
-#[must_use]
-pub fn slash_label(command: &SlashCommand) -> String {
-    let mut label = command.name.clone();
-    if !command.hint.is_empty() {
-        label.push(' ');
-        label.push_str(&command.hint);
+/// One line of the completion list: what Tab puts in the composer and what the line says.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Completion {
+    /// What replaces the word being completed (`/compact`, `@src/main.rs`).
+    pub insert: String,
+    /// The argument hint after it, if any.
+    pub hint: String,
+    /// The description after it, if any.
+    pub description: String,
+}
+
+impl From<&SlashCommand> for Completion {
+    fn from(command: &SlashCommand) -> Self {
+        Self {
+            insert: command.name.clone(),
+            hint: command.hint.clone(),
+            description: command.description.clone(),
+        }
     }
-    if !command.description.is_empty() {
+}
+
+/// The `@file` word the composer's text ends in — what is typed after the `@` — when it
+/// does: a word that starts with `@` and is not the whole `/…` command. The host is asked
+/// for the paths it matches.
+#[must_use]
+pub fn file_query(text: &str) -> Option<&str> {
+    let word = text.rsplit(char::is_whitespace).next().unwrap_or(text);
+    word.strip_prefix('@')
+}
+
+/// The paths the host found for the `@` word, as the list shows them.
+#[must_use]
+pub fn file_completions(paths: &[String]) -> Vec<Completion> {
+    paths.iter().map(|p| Completion { insert: format!("@{p}"), ..Completion::default() }).collect()
+}
+
+/// A completion as one line reads it (its a11y label): what it inserts, the argument hint
+/// after it, the description after a dash — each only where there is one.
+#[must_use]
+pub fn completion_label(completion: &Completion) -> String {
+    let mut label = completion.insert.clone();
+    if !completion.hint.is_empty() {
+        label.push(' ');
+        label.push_str(&completion.hint);
+    }
+    if !completion.description.is_empty() {
         label.push_str(" — ");
-        label.push_str(&command.description);
+        label.push_str(&completion.description);
     }
     label
 }
@@ -311,13 +347,31 @@ impl Conversation {
         }
     }
 
-    /// The slash commands completing the composer's text, unless Esc hid them.
+    /// What completes the composer's text, unless Esc hid the list: the slash commands a
+    /// `/…` text is a prefix of, else the paths the host found for the `@` word the text
+    /// ends in (`files` is the host's answer, kept only while its query is that word).
     #[must_use]
-    pub fn completions(&self, commands: &[SlashCommand], cx: &App) -> Vec<SlashCommand> {
+    pub fn completions(
+        &self,
+        commands: &[SlashCommand],
+        files: Option<&(String, Vec<String>)>,
+        cx: &App,
+    ) -> Vec<Completion> {
         if self.completions_hidden {
             return Vec::new();
         }
-        slash_matches(&self.composer_text(cx), commands)
+        let text = self.composer_text(cx);
+        let slash: Vec<Completion> =
+            slash_matches(&text, commands).iter().map(Completion::from).collect();
+        if !slash.is_empty() {
+            return slash;
+        }
+        match (file_query(&text), files) {
+            (Some(query), Some((asked, paths))) if !query.is_empty() && asked == query => {
+                file_completions(paths)
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Which completion ↑/↓ have selected.
@@ -349,9 +403,18 @@ impl Conversation {
         self.completions_hidden = true;
     }
 
-    /// Put `command` and a space in the composer, the caret after them.
-    pub fn complete(&mut self, command: &str, window: &mut Window, cx: &mut App) {
-        let text = format!("{command} ");
+    /// Put `insert` and a space in the composer, the caret after them: a `/command`
+    /// replaces the text, an `@path` replaces the `@` word the text ends in.
+    pub fn complete(&mut self, insert: &str, window: &mut Window, cx: &mut App) {
+        let mut text = if insert.starts_with('@') {
+            let current = self.composer_text(cx);
+            let word = file_query(&current).map_or(0, |q| q.len().saturating_add(1));
+            current.get(..current.len().saturating_sub(word)).unwrap_or_default().to_owned()
+        } else {
+            String::new()
+        };
+        text.push_str(insert);
+        text.push(' ');
         self.composer.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.insert(text, window, cx);
@@ -485,10 +548,12 @@ impl Conversation {
         preparing: usize,
         composer_focused: bool,
         working: bool,
+        files: Option<&(String, Vec<String>)>,
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
-        let completions = info.map(|i| self.completions(&i.slash_commands, cx)).unwrap_or_default();
+        let completions =
+            info.map(|i| self.completions(&i.slash_commands, files, cx)).unwrap_or_default();
         let entries = Rc::clone(&self.entries);
         let open = Rc::clone(&self.open);
         let tasks = Rc::clone(&self.tasks);
@@ -751,7 +816,7 @@ impl Conversation {
     /// highlighted and a click takes any of them.
     fn completions_row(
         &self,
-        completions: &[SlashCommand],
+        completions: &[Completion],
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
@@ -775,13 +840,13 @@ impl Conversation {
             .border_color(hsla(s.border))
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
-            .children(completions.iter().enumerate().map(|(ix, command)| {
+            .children(completions.iter().enumerate().map(|(ix, completion)| {
                 let chosen = ix == selected;
-                let name = command.name.clone();
-                let label = slash_label(command);
-                let hint = (!command.hint.is_empty()).then(|| command.hint.clone());
+                let insert = completion.insert.clone();
+                let label = completion_label(completion);
+                let hint = (!completion.hint.is_empty()).then(|| completion.hint.clone());
                 let description =
-                    (!command.description.is_empty()).then(|| command.description.clone());
+                    (!completion.description.is_empty()).then(|| completion.description.clone());
                 div()
                     .id(ElementId::NamedInteger(
                         "conversation-completion".into(),
@@ -806,13 +871,13 @@ impl Conversation {
                         cx.stop_propagation();
                     })
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.complete_slash(&name, window, cx);
+                        this.complete_with(&insert, window, cx);
                     }))
                     .child(
                         div()
                             .flex_none()
                             .font_family(mono.clone())
-                            .child(SharedString::from(command.name.clone())),
+                            .child(SharedString::from(completion.insert.clone())),
                     )
                     .children(hint.map(|hint| {
                         div()

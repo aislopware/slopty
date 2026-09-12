@@ -474,6 +474,30 @@ mod tests {
         .await
         .unwrap();
 
+        // `@file` completion: the agent runs in the private home, where a file was put; the
+        // `@` word is asked of the host and Tab replaces the word alone.
+        std::fs::write(std::path::Path::new(&home).join("notes.txt"), "e2e").unwrap();
+        drv.type_text("see @no").await.unwrap();
+        drv.wait_for("the path", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| conv.completions == ["@notes.txt"])
+        })
+        .await
+        .unwrap();
+        drv.keys("tab").await.unwrap();
+        drv.wait_for("the completed path", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| {
+                conv.composer == "see @notes.txt " && conv.completions.is_empty()
+            })
+        })
+        .await
+        .unwrap();
+        drv.keys("cmd-a backspace").await.unwrap();
+        drv.wait_for("an empty composer", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| conv.composer.is_empty())
+        })
+        .await
+        .unwrap();
+
         // A hook's word is a notice line in the card, before the answer it precedes.
         drv.type_text("hooked").await.unwrap();
         drv.keys("enter").await.unwrap();

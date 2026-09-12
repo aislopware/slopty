@@ -604,10 +604,17 @@ the agent has confirmed. The composer completes the announced slash commands
 (`conversation::slash_matches`): a one-word `/…` text lists its prefix matches above the
 field (`conversation-completions`, `ListBox` of `ListBoxOption`s, at most `SLASH_MAX` = 8,
 one per line: the name in the mono face, the argument hint and the description muted after
-it, the a11y label `slash_label`: `/compact [instructions] — …`), Tab takes the selected
+it, the a11y label `completion_label`: `/compact [instructions] — …`), Tab takes the selected
 one (`CompleteSlash`, bound to Tab in the "Terminal" context ahead of gpui-kit `Root`'s
 focus-ring Tab, and propagated when there is nothing to complete), ↑/↓ choose, Esc hides the
-list until the text changes — those keys are caught in the capture phase (`completion_key`,
+list until the text changes. An `@` word the text ends in (`conversation::file_query`) is
+asked of the host once per query (`ClientMsg::ListFiles { session, query }` →
+`HostMsg::Files { session, query, paths }`, protocol 30: `slopty_agent::files::matching`
+walks the agent's working directory with the `ignore` crate — hidden and `.gitignore`d
+entries skipped, depth 8, 20 000 entries at most — and answers at most 8 paths, a name
+starting with the query first, a directory ending in `/`); the answer whose query is still
+the word lists as `@path` completions in the same box and Tab replaces the word alone.
+Those keys are caught in the capture phase (`completion_key`,
 and `capture_action` for the input's own `MoveUp` / `MoveDown` / `Escape` / `IndentInline`,
 which GPUI dispatches before any key event) so the composer never moves its caret or
 interrupts the agent while the list is up. **Resuming** a conversation:

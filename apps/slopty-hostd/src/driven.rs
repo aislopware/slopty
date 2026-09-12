@@ -41,6 +41,9 @@ const PARTIAL_EVERY: Duration = Duration::from_millis(40);
 const KEEP_ENTRIES: usize = 400;
 /// How long a closed agent gets to exit on its own before it is killed.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
+/// How many paths a `ListFiles` answers with.
+pub const FILES_LISTED: usize = 8;
+
 /// How many past conversations a `ListAgentSessions` answers with.
 const SESSIONS_LISTED: usize = 30;
 
@@ -116,6 +119,12 @@ impl Driven {
     #[must_use]
     pub fn summaries(&self) -> Vec<SessionSummary> {
         self.inner.lock().values().map(|e| e.summary.clone()).collect()
+    }
+
+    /// The working directory `session` runs in, when it is a driven agent.
+    #[must_use]
+    pub fn cwd(&self, session: SessionId) -> Option<String> {
+        self.inner.lock().get(&session).and_then(|e| e.summary.cwd.clone())
     }
 
     /// Every driven agent's status, for a client that just connected.
