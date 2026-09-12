@@ -1638,6 +1638,12 @@ impl CanvasView {
         self.open_session(Vec::new(), None, cx);
     }
 
+    /// Where a session opened from the keyboard starts: the active terminal's directory when
+    /// there is one (a shell beside a shell belongs to the same work), else the host's default.
+    fn active_cwd(&self) -> Option<String> {
+        self.active.and_then(|id| self.doc.get(id)).and_then(|item| self.cwd_of(item))
+    }
+
     /// ⌘⇧T: a terminal running Claude Code. The bare name resolves on the host through the
     /// user's login shell, so `claude` is found wherever their rc files put it (or alias it).
     pub fn new_agent(&mut self, _: &NewAgent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1652,8 +1658,7 @@ impl CanvasView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cwd = self.active.and_then(|id| self.doc.get(id)).and_then(|item| self.cwd_of(item));
-        self.open_agent(cwd, cx);
+        self.open_agent(self.active_cwd(), cx);
     }
 
     /// Open a driven agent in `cwd` (the host's default when `None`); the host places it.
@@ -1693,7 +1698,7 @@ impl CanvasView {
         tracing::debug!(?command, "open session");
         self.send(ClientMsg::OpenSession(OpenSession {
             size: TermSize::default(),
-            cwd: None,
+            cwd: self.active_cwd(),
             command,
             env: Vec::new(),
             title,
@@ -3518,10 +3523,13 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-n");
         let sent = drain(&mut rx);
-        assert!(matches!(sent.as_slice(), [ClientMsg::OpenSession(_)]), "{sent:?}");
+        assert!(
+            matches!(sent.as_slice(), [ClientMsg::OpenSession(OpenSession { cwd: None, .. })]),
+            "no shell to inherit from: {sent:?}"
+        );
 
         let session = SessionId::new();
-        let id = host_opens(&view, cx, session, me, SHELL, 1);
+        let id = host_opens_in(&view, cx, session, me, SHELL, 1, Where::loose("/tmp/work"));
         // Our own upsert: the item is drawn at its rect, active, the terminal takes the
         // keyboard, it attached itself to the host and the minimap appears.
         let bounds = cx.debug_bounds(selector("item", id)).expect("item drawn");
@@ -3535,6 +3543,28 @@ mod tests {
                 m,
                 ClientMsg::Term { session: s, req: TermRequest::Attach { .. } } if *s == session
             )),
+            "{sent:?}"
+        );
+
+        // A shell beside a shell starts where that shell is (⌘⇧T's agent too).
+        cx.simulate_keystrokes("cmd-n");
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
+                    if cwd == "/tmp/work" && command.is_empty()
+            ),
+            "{sent:?}"
+        );
+        cx.simulate_keystrokes("cmd-shift-t");
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
+                    if cwd == "/tmp/work" && command == &[AGENT_COMMAND.to_owned()]
+            ),
             "{sent:?}"
         );
     }

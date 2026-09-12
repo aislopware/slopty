@@ -2927,6 +2927,15 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+- ✅ **A new shell or agent starts where the active shell is** (2026-09-12). ⌘N and ⌘⇧T sent
+  `cwd: None` (the host's default, the home directory) while ⌘⌥T's driven card already took
+  the active terminal's directory; every terminal opens a new tab in the current directory
+  and a shell opened beside a shell belongs to the same work. Ruling: `OpenSession.cwd` is
+  `CanvasView::active_cwd` — the active item's session cwd as the host last reported it
+  (`session_moved` follows OSC 7), `None` with no active terminal (the empty canvas, a note,
+  a window). No wire change. Test: `cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it`
+  reads the `OpenSession` for the empty canvas (`cwd: None`), then ⌘N and ⌘⇧T beside a shell
+  the host placed in `/tmp/work`.
 - ✅ **A long shell command that ends unwatched badges its item** (2026-09-12). Agents
   already badge their title bar when they need the human; a `cargo build` or a test run left
   in a shell the human has panned away from ended silently, and Warp/iTerm both notify on
