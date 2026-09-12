@@ -251,4 +251,28 @@ mod tests {
         );
         assert_eq!(mode & 0o777, 0o600);
     }
+
+    #[test]
+    fn a_token_past_its_ttl_is_gone_and_equality_is_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = TrustStore::open(&dir.path().join("trust.json")).unwrap();
+        let stale = [9; 32];
+        let old = SystemTime::now() - TOKEN_TTL - Duration::from_secs(1);
+        store.tokens.push((stale, old));
+        let fresh = store.mint_token();
+        let client = SecretKey::generate().public();
+        assert!(!store.redeem(&stale, client, ClientId::new(), "late").unwrap(), "expired");
+        assert!(store.redeem(&fresh, client, ClientId::new(), "in time").unwrap());
+
+        let a = [0; 32];
+        let mut one = a;
+        one[5] = 1;
+        let mut two = a;
+        two[0] = 1;
+        two[1] = 1;
+        assert!(constant_time_eq(&a, &a));
+        assert!(!constant_time_eq(&a, &one), "one byte apart");
+        assert!(!constant_time_eq(&a, &two), "two bytes apart the same way");
+        assert!(!constant_time_eq(&a, &[0xff; 32]));
+    }
 }

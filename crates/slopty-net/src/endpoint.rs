@@ -40,8 +40,14 @@ impl Reach {
     /// [`Reach::DirectOnly`] when [`Self::ENV`] is `1` or `true`, else [`Reach::Anywhere`].
     #[must_use]
     pub fn from_env() -> Self {
-        match std::env::var(Self::ENV).as_deref() {
-            Ok("1" | "true" | "yes") => Self::DirectOnly,
+        Self::from_flag(std::env::var(Self::ENV).ok().as_deref())
+    }
+
+    /// [`Self::from_env`] without the environment: the variable's value, if set.
+    #[must_use]
+    pub fn from_flag(flag: Option<&str>) -> Self {
+        match flag {
+            Some("1" | "true" | "yes") => Self::DirectOnly,
             _ => Self::Anywhere,
         }
     }
@@ -108,8 +114,12 @@ const INITIAL_WINDOW_PACKETS: u64 = 32;
 /// The initial congestion window in bytes: [`INITIAL_WINDOW_ENV`] packets if set, else
 /// [`INITIAL_WINDOW_PACKETS`].
 fn initial_window() -> u64 {
-    let packets = std::env::var(INITIAL_WINDOW_ENV)
-        .ok()
+    initial_window_of(std::env::var(INITIAL_WINDOW_ENV).ok().as_deref())
+}
+
+/// [`initial_window`] without the environment: `packets` if it reads as a positive number.
+fn initial_window_of(packets: Option<&str>) -> u64 {
+    let packets = packets
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|p| *p > 0)
         .unwrap_or(INITIAL_WINDOW_PACKETS);
@@ -386,6 +396,23 @@ pub async fn log_path_events(conn: iroh::endpoint::Connection, side: &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reach_and_the_initial_window_read_their_flags() {
+        for on in ["1", "true", "yes"] {
+            assert!(Reach::from_flag(Some(on)).is_direct_only(), "{on}");
+        }
+        for off in ["0", "no", "TRUE", ""] {
+            assert!(!Reach::from_flag(Some(off)).is_direct_only(), "{off:?}");
+        }
+        assert!(!Reach::from_flag(None).is_direct_only());
+        assert_eq!(initial_window_of(None), 32 * 1200);
+        assert_eq!(initial_window_of(Some("8")), 8 * 1200);
+        for bad in ["0", "-3", "many", ""] {
+            assert_eq!(initial_window_of(Some(bad)), 32 * 1200, "{bad:?}");
+        }
+        assert_eq!(DATAGRAM_BUFFER, 4 * 1024 * 1024);
+    }
 
     #[test]
     fn the_path_trace_is_off_unless_a_period_asks_for_it() {

@@ -164,4 +164,28 @@ mod tests {
         );
         assert!(me.find("zzz").is_none());
     }
+
+    #[test]
+    fn a_forgotten_host_is_gone_from_the_file_and_a_stranger_is_not_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deep").join("client.json");
+        let host_key = SecretKey::generate();
+        let mut me = Identity::open(&path).unwrap();
+        assert!(me.hosts().is_empty());
+        me.remember(KnownHost {
+            host: HostId::new(),
+            name: "Studio".to_owned(),
+            addr: EndpointAddr::new(host_key.public()),
+            paired_at: 1,
+        })
+        .unwrap();
+        assert_eq!(me.hosts().len(), 1);
+        assert_eq!(me.hosts()[0].0, host_key.public());
+        assert!(!me.forget(&SecretKey::generate().public()).unwrap(), "never known");
+        assert!(me.forget(&host_key.public()).unwrap());
+        assert!(!me.forget(&host_key.public()).unwrap(), "already gone");
+        assert!(Identity::open(&path).unwrap().hosts().is_empty(), "saved");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(Identity::open(&path).is_err(), "a corrupt file is an error, not a fresh key");
+    }
 }

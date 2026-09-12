@@ -70,6 +70,16 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(slopty_net::endpoint::relayed(&conn.conn), Some(false));
+        // The selected path is measured and described.
+        let rtt = conn.rtt().expect("a selected path has an rtt");
+        assert!(rtt > Duration::ZERO, "{rtt:?}");
+        assert!(slopty_net::endpoint::received_datagrams(&conn.conn) > 1, "a handshake is several");
+        let paths = slopty_net::endpoint::describe_paths(&conn.conn);
+        assert!(paths.contains("*direct") && paths.contains("rtt"), "{paths}");
+        let health = slopty_net::endpoint::describe_health(&conn.conn);
+        assert!(health.contains("cwnd") && health.contains("space"), "{health}");
+        let (srtt, cwnd) = slopty_net::endpoint::selected_path(&conn.conn).expect("selected");
+        assert!(srtt > Duration::ZERO && cwnd > 1, "{srtt:?} {cwnd}");
         conn.conn.close(0_u32.into(), b"done");
         tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
     }
@@ -92,6 +102,9 @@ mod tests {
                 first.tx.send(&HostMsg::HelloAck(ack())).await.unwrap();
                 let mut stream = open_session_stream(&first.conn, session).await.unwrap();
                 stream.send(&TermEvent::Bell).await.unwrap();
+                // A pre-encoded frame (the fan-out path), then a graceful end.
+                let raw = slopty_proto::codec::encode(&TermEvent::Bell).unwrap();
+                stream.send_raw(&raw).await.unwrap();
                 stream.finish().unwrap();
                 first.conn.closed().await;
 
@@ -110,6 +123,9 @@ mod tests {
         let (header, mut events) = conn.accept_session_stream().await.unwrap();
         assert_eq!(header.session, session);
         assert_eq!(events.recv().await.unwrap(), TermEvent::Bell);
+        assert_eq!(events.recv().await.unwrap(), TermEvent::Bell, "the raw frame");
+        let end = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap();
+        assert!(matches!(end, Err(slopty_net::NetError::Closed)), "finished: {end:?}");
         conn.conn.close(0_u32.into(), b"done");
 
         // Reconnect without a token.
