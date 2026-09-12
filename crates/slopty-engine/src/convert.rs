@@ -127,20 +127,26 @@ pub const fn cell_width(w: CellWide) -> CellWidth {
 /// Semantic mark for a row, from its prompt state and its first cell's content class.
 ///
 /// `start` says a `133;A` was written on this row (libghostty's flag cannot tell two prompts
-/// on adjacent rows apart); `exit` is the status the shell reported for the command before it.
+/// on adjacent rows apart); `exit` is the status the shell reported for the command before
+/// it; `input` the column of the row's first input cell (what was typed after `133;B`).
 #[must_use]
 pub const fn semantic_mark(
     prompt: RowSemanticPrompt,
     first: CellSemanticContent,
     start: bool,
     exit: Option<u8>,
+    input: Option<u16>,
 ) -> SemanticMark {
     let prompt_row = match prompt {
         RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation => true,
         RowSemanticPrompt::None => matches!(first, CellSemanticContent::Prompt),
     };
     if prompt_row {
-        if start { SemanticMark::Prompt { exit } } else { SemanticMark::PromptContinuation }
+        if start {
+            SemanticMark::Prompt { exit, input }
+        } else {
+            SemanticMark::PromptContinuation { input }
+        }
     } else {
         match first {
             CellSemanticContent::Input => SemanticMark::Input,

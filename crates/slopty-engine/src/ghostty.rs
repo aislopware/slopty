@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
-use libghostty_vt::screen::{GridRef, Screen as VtScreen, TrackedGridRef};
+use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
 use libghostty_vt::selection::Selection;
 use libghostty_vt::terminal::{ClipboardLocation, Mode, Point, PointCoordinate, PointSpace};
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
@@ -446,6 +446,7 @@ impl GhosttyEngine {
                 let raw = row.raw_row()?;
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
+                let mut first_input = None;
                 // The row flag may be a false positive, but a row without it has no links.
                 let row_has_links = raw.has_hyperlink()?;
                 let mut links = LinkRuns::default();
@@ -454,8 +455,12 @@ impl GhosttyEngine {
                 while let Some(cell) = cell_iter.next() {
                     let Some(slot) = line.cells.get_mut(usize::from(x)) else { break };
                     let rc = cell.raw_cell()?;
+                    let content = rc.semantic_content()?;
                     if first_semantic.is_none() {
-                        first_semantic = Some(rc.semantic_content()?);
+                        first_semantic = Some(content);
+                    }
+                    if first_input.is_none() && matches!(content, CellSemanticContent::Input) {
+                        first_input = Some(x);
                     }
                     let style = if cell.has_styling()? {
                         convert::style(&cell.style()?)
@@ -495,6 +500,7 @@ impl GhosttyEngine {
                         first,
                         self.prompt_starts.contains(&abs),
                         exit_for(&self.exit_marks, &self.prompt_starts, abs),
+                        first_input,
                     )
                 });
                 updates.push(RowUpdate { row: y, line });
@@ -526,6 +532,7 @@ impl GhosttyEngine {
         let mut line = Line::blank(cols);
         let mut chars = [char::MIN; 16];
         let mut first_semantic = None;
+        let mut first_input = None;
         let mut row_info = None;
         let mut row_has_links = false;
         let mut links = LinkRuns::default();
@@ -538,8 +545,12 @@ impl GhosttyEngine {
                 row_info = Some(row);
             }
             let rc = gr.cell()?;
+            let content = rc.semantic_content()?;
             if first_semantic.is_none() {
-                first_semantic = Some(rc.semantic_content()?);
+                first_semantic = Some(content);
+            }
+            if first_input.is_none() && matches!(content, CellSemanticContent::Input) {
+                first_input = Some(x);
             }
             let width = convert::cell_width(rc.wide()?);
             let style =
@@ -582,6 +593,7 @@ impl GhosttyEngine {
                     first,
                     self.prompt_starts.contains(&abs),
                     exit_for(&self.exit_marks, &self.prompt_starts, abs),
+                    first_input,
                 )
             });
         }
@@ -1333,11 +1345,13 @@ mod tests {
         e.write(prompt);
         let f = e.full_frame(0).unwrap();
         let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
-        assert_eq!(marks[0], SemanticMark::Prompt { exit: None }, "nothing ran before it");
-        assert_eq!(marks[1], SemanticMark::Prompt { exit: Some(1) }, "adjacent prompts stay apart");
+        // The typed command starts at column 2 (after "$ "); nothing typed at the newest one.
+        let prompt = |exit, input| SemanticMark::Prompt { exit, input };
+        assert_eq!(marks[0], prompt(None, Some(2)), "nothing ran before it");
+        assert_eq!(marks[1], prompt(Some(1), Some(2)), "adjacent prompts stay apart");
         assert_eq!(marks[2], SemanticMark::Output);
         assert_eq!(marks[3], SemanticMark::Output, "blank line the shell printed");
-        assert_eq!(marks[4], SemanticMark::Prompt { exit: Some(0) }, "status survives the gap");
+        assert_eq!(marks[4], prompt(Some(0), None), "status survives the gap");
         assert_eq!(marks[5], SemanticMark::Output, "never written to");
         assert!(f.updates[1].line.text().starts_with("$ "));
         // A two-row prompt right under the last one (no command ran, so no status), scrolling
@@ -1345,17 +1359,17 @@ mod tests {
         e.write(b"\r\n\x1b]133;A\x07~\r\n> \x1b]133;B\x07");
         let f = e.full_frame(0).unwrap();
         let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
-        assert_eq!(marks[3], SemanticMark::Prompt { exit: Some(0) });
-        assert_eq!(marks[4], SemanticMark::Prompt { exit: None }, "the status above is taken");
-        assert_eq!(marks[5], SemanticMark::PromptContinuation);
+        assert_eq!(marks[3], prompt(Some(0), None));
+        assert_eq!(marks[4], prompt(None, None), "the status above is taken");
+        assert_eq!(marks[5], SemanticMark::PromptContinuation { input: None });
         // The same blocks on the history path.
         e.write(b"\r\n\r\n\r\n");
         let (_, lines) = e.lines(LineIndex(0), 7).unwrap();
         let marks: Vec<SemanticMark> = lines.iter().map(|l| l.mark).collect();
-        assert_eq!(marks[1], SemanticMark::Prompt { exit: Some(1) });
-        assert_eq!(marks[4], SemanticMark::Prompt { exit: Some(0) });
-        assert_eq!(marks[5], SemanticMark::Prompt { exit: None });
-        assert_eq!(marks[6], SemanticMark::PromptContinuation);
+        assert_eq!(marks[1], prompt(Some(1), Some(2)));
+        assert_eq!(marks[4], prompt(Some(0), None));
+        assert_eq!(marks[5], prompt(None, None));
+        assert_eq!(marks[6], SemanticMark::PromptContinuation { input: None });
     }
 
     /// Bytes captured from a real zsh with the integration loaded (synchronized output,
@@ -1373,15 +1387,27 @@ mod tests {
         let f = e.full_frame(0).unwrap();
         let rows: Vec<(String, SemanticMark)> =
             f.updates.iter().map(|u| (u.line.text(), u.line.mark)).collect();
-        let prompt = |exit| SemanticMark::Prompt { exit };
+        // A three-row prompt: the command is typed on the third row, at column 2.
+        let prompt = |exit| SemanticMark::Prompt { exit, input: None };
         assert_eq!(rows[0], (String::new(), prompt(None)));
-        assert_eq!(rows[1], ("/tmp ".to_owned(), SemanticMark::PromptContinuation));
-        assert_eq!(rows[2].0, "> seq 1 3");
+        assert_eq!(rows[1], ("/tmp ".to_owned(), SemanticMark::PromptContinuation { input: None }));
+        assert_eq!(
+            rows[2],
+            ("> seq 1 3".to_owned(), SemanticMark::PromptContinuation { input: Some(2) })
+        );
         assert_eq!(rows[3], ("1".to_owned(), SemanticMark::Output));
         assert_eq!(rows[6], (String::new(), prompt(Some(0))), "status of seq, D then A");
         assert_eq!(rows[8].0, "> false");
         assert_eq!(rows[9], (String::new(), prompt(Some(1))), "status of false");
-        assert_eq!(rows[10], ("/tmp exit 1 ".to_owned(), SemanticMark::PromptContinuation));
+        assert_eq!(
+            rows[10],
+            ("/tmp exit 1 ".to_owned(), SemanticMark::PromptContinuation { input: None })
+        );
+        assert_eq!(
+            rows[11].1,
+            SemanticMark::PromptContinuation { input: None },
+            "nothing typed yet"
+        );
     }
 
     #[test]

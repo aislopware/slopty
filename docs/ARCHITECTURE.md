@@ -108,9 +108,10 @@ session's environment opts out (`apply` then changes nothing); other programs ru
 the library exposes neither which row an `A` landed on nor the status a `D` carries, scans the
 PTY bytes for those two marks itself (`slopty_engine::osc133::Scanner`, state kept across
 reads so a mark split over two PTY reads is still found) and notes the cursor's absolute line
-at each. Every `Line` then carries a `SemanticMark`: `Prompt { exit }` on the row a prompt
-started (with the previous command's status), `PromptContinuation` for the rest of a
-multi-line prompt, `Input`, `Output`. The client side is in §6.
+at each. Every `Line` then carries a `SemanticMark`: `Prompt { exit, input }` on the row a
+prompt started (with the previous command's status), `PromptContinuation { input }` for the
+rest of a multi-line prompt, `Input`, `Output`; `input` is the column of the row's first
+`Input` cell (libghostty's per-cell `CellSemanticContent`), where the typed command begins. The client side is in §6.
 
 **Render metrics.** The cell grid is derived exactly as ghostty derives it
 (`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
@@ -808,8 +809,11 @@ the top of the viewport (`TermState::prompt_before/after` over the cached lines,
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output),
 ⌘⇧C copies the last finished command's output (`TermState::last_command_output`: the
 `Output` rows right above the newest prompt start, blank tail trimmed; nothing without shell
-integration). Headless `#[gpui::test]`s in `terminal/view.rs` read the separators back from
-`painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
+integration). A right click on a block row opens the block menu (`block-menu`, protocol 28:
+the marks carry the input column, `TermState::command_block` reads the command and the
+output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
+↩ as a key) and "Select block". Headless `#[gpui::test]`s in `terminal/view.rs` read the
+separators back from `painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
 for the conversation view (§5), whose composer takes the typing.
 
 **Render path and frame time.** One GPUI frame draws the workspace: the top bar, then the

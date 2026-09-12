@@ -76,6 +76,21 @@ pub struct TermState {
     frames: u64,
 }
 
+/// One shell command block, as [`TermState::command_block`] reads it from the marks.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CommandBlock {
+    /// The row the prompt starts on.
+    pub prompt: LineIndex,
+    /// The first row after the block (the next prompt's start, or one past the newest line).
+    pub end: LineIndex,
+    /// The status of the command that ran before this prompt, when the shell said.
+    pub exit: Option<u8>,
+    /// What was typed at the prompt, rows joined with newlines; `None` when nothing was.
+    pub command: Option<String>,
+    /// The output rows, trailing blank rows trimmed, joined with newlines.
+    pub output: String,
+}
+
 impl TermState {
     /// Fresh state for a session of `size`.
     #[must_use]
@@ -359,6 +374,54 @@ impl TermState {
         None
     }
 
+    /// The command block a line belongs to: its prompt row, the typed command (from the
+    /// prompt row's input column through any further `Input` rows) and its output, among the
+    /// lines held here. `None` off a block (before the first prompt, or no shell integration).
+    #[must_use]
+    pub fn command_block(&self, index: LineIndex) -> Option<CommandBlock> {
+        let prompt = if self.line(index).is_some_and(|l| l.mark.starts_prompt()) {
+            index
+        } else {
+            self.prompt_before(index)?
+        };
+        let end = self
+            .prompt_after(prompt)
+            .unwrap_or_else(|| LineIndex(self.newest().0.saturating_add(1)));
+        let first = self.line(prompt)?;
+        // The prompt's rows (a start, then continuations) up to the one the command was typed
+        // on, from its input column; further `Input` rows continue a multi-line command.
+        let mut command: Vec<String> = Vec::new();
+        let mut output: Vec<String> = Vec::new();
+        let mut i = prompt.0;
+        while i < end.0 {
+            match self.line(LineIndex(i)) {
+                Some(line) if line.mark.is_prompt() && output.is_empty() => {
+                    if let Some(col) = line.mark.input_col() {
+                        let typed: String = line.text().chars().skip(usize::from(col)).collect();
+                        command.push(typed.trim_end().to_owned());
+                    }
+                }
+                Some(line) if line.mark == SemanticMark::Input && output.is_empty() => {
+                    command.push(line.text().trim_end().to_owned());
+                }
+                Some(line) => output.push(line.text()),
+                None => break,
+            }
+            i = i.saturating_add(1);
+        }
+        while output.last().is_some_and(String::is_empty) {
+            output.pop();
+        }
+        let command = command.join("\n");
+        Some(CommandBlock {
+            prompt,
+            end,
+            exit: first.mark.exit(),
+            command: (!command.trim().is_empty()).then_some(command),
+            output: output.join("\n"),
+        })
+    }
+
     /// Scroll so that `index` is the top row of the viewport.
     pub fn scroll_to_line(&mut self, index: LineIndex) -> Vec<Effect> {
         self.scroll_to(self.first_visible.0.saturating_sub(index.0))
@@ -512,7 +575,7 @@ mod tests {
 
     #[test]
     fn prompt_navigation_and_last_output_follow_the_marks() {
-        let prompt = |exit| SemanticMark::Prompt { exit };
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let mut state = TermState::new(size());
         // Screen 6..=8, then history 0..=5 into the cache.
         let mut f = frame(1, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
@@ -539,6 +602,18 @@ mod tests {
         assert_eq!(state.prompt_after(LineIndex(4)), Some(LineIndex(8)));
         assert_eq!(state.prompt_after(LineIndex(8)), None);
         assert_eq!(state.last_command_output(), Some("1\n2".to_owned()), "blank tail trimmed");
+        // A block from any of its rows: the prompt, the typed command, the trimmed output.
+        let block = state.command_block(LineIndex(6)).expect("the seq block");
+        assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(1)));
+        assert_eq!(block.command.as_deref(), Some("seq 2"));
+        assert_eq!(block.output, "1\n2");
+        let block = state.command_block(LineIndex(3)).expect("the false block");
+        assert_eq!((block.prompt, block.end), (LineIndex(3), LineIndex(4)));
+        assert_eq!((block.command.as_deref(), block.output.as_str()), (Some("false"), ""));
+        assert_eq!(state.command_block(LineIndex(0)).map(|b| b.output), Some("a\nb".to_owned()));
+        let newest = state.command_block(LineIndex(8)).expect("the open prompt");
+        assert_eq!((newest.prompt, newest.end), (LineIndex(8), LineIndex(9)));
+        assert_eq!(newest.command, None, "nothing typed after the prompt");
         let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
         assert_eq!(state.index_at_row(0), LineIndex(3));
         assert_eq!(state.view_offset(), 3);

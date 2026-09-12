@@ -9,9 +9,10 @@ use gpui::{
     Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, TextInputAction, TextInputConfiguration,
-    TouchPhase, UTF16Selection, Window, div, point, px, size,
+    TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px, size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use slopty_client::term::CommandBlock;
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
@@ -221,6 +222,8 @@ pub struct TerminalView {
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
     selecting: bool,
+    /// The command-block menu a right click opened, and where.
+    block_menu: Option<BlockMenu>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
     /// ⌘ is down: links under the pointer show as links.
@@ -310,6 +313,7 @@ impl TerminalView {
             marked: None,
             sticky_control: false,
             sticky_command: false,
+            block_menu: None,
             selection: None,
             selecting: false,
             hover: None,
@@ -1172,6 +1176,111 @@ impl TerminalView {
         }
     }
 
+    /// The block menu's items, in order: what applies to this block.
+    fn block_menu_items(block: &CommandBlock) -> Vec<BlockMenuItem> {
+        let mut items = Vec::new();
+        if block.command.is_some() {
+            items.push(BlockMenuItem::CopyCommand);
+        }
+        if !block.output.is_empty() {
+            items.push(BlockMenuItem::CopyOutput);
+        }
+        if block.command.is_some() {
+            items.push(BlockMenuItem::Rerun);
+        }
+        items.push(BlockMenuItem::SelectBlock);
+        items
+    }
+
+    /// A block menu item was chosen: do it and close the menu.
+    fn block_menu_pick(&mut self, item: BlockMenuItem, cx: &mut Context<Self>) {
+        let Some(menu) = self.block_menu.take() else { return };
+        let block = menu.block;
+        match item {
+            BlockMenuItem::CopyCommand => {
+                if let Some(command) = block.command {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(command));
+                }
+            }
+            BlockMenuItem::CopyOutput => {
+                if !block.output.is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(block.output));
+                }
+            }
+            BlockMenuItem::Rerun => {
+                // The command as a paste (bracketed when the shell asks, as any paste), then
+                // ↩ as a key so the shell runs it the way the human would have.
+                if let Some(command) = block.command {
+                    self.send(TermRequest::Paste(command));
+                    if let Ok(enter) = Keystroke::parse("enter") {
+                        self.press(enter, cx);
+                    }
+                }
+            }
+            BlockMenuItem::SelectBlock => {
+                let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
+                let cols = self.state.size().cols;
+                self.selection = Some(Selection {
+                    anchor: (block.prompt, 0),
+                    head: (last, cols.saturating_sub(1)),
+                });
+                self.selecting = false;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The block menu, drawn late and anchored where the right click landed.
+    fn render_block_menu(&self, menu: &BlockMenu, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = &theme.spacing;
+        let items = Self::block_menu_items(&menu.block);
+        let list = div()
+            .id("block-menu")
+            .debug_selector(|| "block-menu".to_owned())
+            .role(gpui::accesskit::Role::Menu)
+            .aria_label("Command block")
+            .occlude()
+            .flex()
+            .flex_col()
+            .min_w(px(160.0))
+            .p(px(spacing.xs))
+            .rounded(px(theme.radii.sm))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.panel))
+            .shadow_md()
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(s.text))
+            .on_mouse_down_out(cx.listener(|this, _ev, _window, cx| {
+                this.block_menu = None;
+                cx.notify();
+            }))
+            .children(items.into_iter().map(|item| {
+                let key = item.key();
+                let row = div()
+                    .id(gpui::ElementId::Name(format!("block-menu-{key}").into()))
+                    .debug_selector(move || format!("block-menu-{key}"))
+                    .role(gpui::accesskit::Role::MenuItem)
+                    .aria_label(item.label())
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xxs))
+                    .rounded(px(theme.radii.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::TINT_PRESSED)))
+                    .child(SharedString::from(item.label()));
+                crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
+                    move |this, _ev, _window, cx| {
+                        this.block_menu_pick(item, cx);
+                    },
+                ))
+            }));
+        deferred(anchored().position(menu.at).snap_to_window_with_margin(px(8.0)).child(list))
+            .with_priority(1)
+            .into_any_element()
+    }
+
     /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
     pub fn copy_last_output(
         &mut self,
@@ -1626,6 +1735,13 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Esc closes the block menu and goes no further.
+        if self.block_menu.is_some() && event.keystroke.key == "escape" {
+            self.block_menu = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         // Cmd shortcuts belong to the app.
         if event.keystroke.modifiers.platform {
             tracing::debug!(session = %self.session, key = %event.keystroke.key, "cmd key passed up");
@@ -1714,6 +1830,9 @@ impl TerminalView {
             return;
         }
         self.focus.focus(window, cx);
+        if self.block_menu.take().is_some() {
+            cx.notify();
+        }
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
         };
@@ -1735,6 +1854,15 @@ impl TerminalView {
         // Left button selects unless the program asked for the mouse (⇧ overrides, as in
         // every terminal); everything else is reported to the program.
         let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);
+        // Right button on a command block (shell integration marks them) opens its menu.
+        if event.button == MouseButton::Right
+            && (!program_wants_mouse || event.modifiers.shift)
+            && let Some(block) = self.state.command_block(self.state.index_at_row(row))
+        {
+            self.block_menu = Some(BlockMenu { block, at: event.position });
+            cx.notify();
+            return;
+        }
         if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
             let index = self.state.index_at_row(row);
             if event.click_count >= 2 {
@@ -2146,6 +2274,48 @@ impl Render for TerminalView {
                 el.child(grid)
             })
             .children(search)
+            .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
+    }
+}
+
+/// The command-block menu a right click opened.
+struct BlockMenu {
+    /// The block under the click.
+    block: CommandBlock,
+    /// Where the click landed (window coordinates), the menu's anchor.
+    at: gpui::Point<Pixels>,
+}
+
+/// What the block menu offers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockMenuItem {
+    /// The typed command to the clipboard.
+    CopyCommand,
+    /// The command's output to the clipboard.
+    CopyOutput,
+    /// Type the command again and press ↩.
+    Rerun,
+    /// Select the whole block, prompt to last output row.
+    SelectBlock,
+}
+
+impl BlockMenuItem {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::CopyCommand => "copy-command",
+            Self::CopyOutput => "copy-output",
+            Self::Rerun => "rerun",
+            Self::SelectBlock => "select-block",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CopyCommand => "Copy command",
+            Self::CopyOutput => "Copy output",
+            Self::Rerun => "Rerun",
+            Self::SelectBlock => "Select block",
+        }
     }
 }
 
@@ -2228,7 +2398,7 @@ mod tests {
     /// Three command blocks: `ls` (a, b), `false` (nothing), `seq 2` (1, 2, blank), then the
     /// newest prompt. Lines 0..=5 are history the host already sent, 6..=8 the screen.
     fn with_command_blocks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) {
-        let prompt = |exit| SemanticMark::Prompt { exit };
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let screen =
             [("2", SemanticMark::Output), ("", SemanticMark::Output), ("$ ", prompt(Some(0)))];
         view.update_in(cx, |view, _window, cx| {
@@ -2407,6 +2577,74 @@ mod tests {
         with_command_blocks(&view, cx);
         cx.simulate_keystrokes("cmd-shift-c");
         assert_eq!(text(cx).as_deref(), Some("1\n2"), "blank tail trimmed, prompt rows excluded");
+    }
+
+    /// A right click on a block's row opens its menu: the typed command and the output to
+    /// the clipboard, the command run again (a paste, then ↩), the block selected; Esc and
+    /// any click close it; a row before the first prompt offers nothing.
+    #[gpui::test]
+    fn a_right_click_on_a_block_offers_its_command_and_output(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        // Row 0 of the viewport is line 6 ("2"), output of `seq 2` (prompt line 4).
+        let at = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * 1.5, m.line_height * 0.5)
+        });
+        let right_click = |cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(at, MouseButton::Right, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let pick = |cx: &mut VisualTestContext, key: &'static str| {
+            let selector: &'static str = Box::leak(format!("block-menu-{key}").into_boxed_str());
+            let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{key} in the menu"));
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("block-menu").is_none(), "the menu closes after {key}");
+        };
+        let clipboard = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        };
+
+        right_click(cx);
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Menu", Some("Command block"))), "{tree:#?}");
+        for label in ["Copy command", "Copy output", "Rerun", "Select block"] {
+            assert!(tree.iter().any(|n| n.is("MenuItem", Some(label))), "{label}: {tree:#?}");
+        }
+        assert!(drain_input(&mut rx).is_empty(), "a right click on a block is not reported");
+        pick(cx, "copy-output");
+        assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
+
+        right_click(cx);
+        pick(cx, "copy-command");
+        assert_eq!(clipboard(cx).as_deref(), Some("seq 2"));
+
+        right_click(cx);
+        pick(cx, "rerun");
+        assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
+
+        right_click(cx);
+        pick(cx, "select-block");
+        let selected = view.read_with(cx, |v, _| v.selected_text());
+        assert_eq!(selected.as_deref(), Some("$ seq 2\n1\n2\n"), "prompt row to the blank row");
+
+        right_click(cx);
+        cx.simulate_keystrokes("escape");
+        assert!(cx.debug_bounds("block-menu").is_none(), "Esc closes it");
+        assert!(drain_input(&mut rx).is_empty(), "the Esc went to the menu, not the shell");
+        right_click(cx);
+        // Left of the menu (it hangs right and down from the click), on another row.
+        let elsewhere = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * 0.5, m.line_height * 2.5)
+        });
+        cx.simulate_click(elsewhere, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-menu").is_none(), "a click elsewhere closes it");
     }
 
     #[test]

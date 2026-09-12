@@ -2877,6 +2877,35 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   re-accepted, PROTOCOL_VERSION 26 → 27. Tests: the app self-test's `die` turn (the fake
   writes "fake: not logged in" to stderr and exits 3; the card is gone and the dump's
   `notice` reads the status and the line).
+- ✅ **A command block has a menu: copy the command, copy the output, run it again, select
+  it — and the rows know where the command starts, protocol 28** (2026-09-12). Warp's
+  blocks are the point of shell integration, and Slopty had only ⌘⇧C for the newest block's
+  output; the typed command could not be told from the prompt at all, since the marks said
+  which *row* a prompt started on but not which *column* the input began at (`133;B`). Read
+  from libghostty: every cell carries a `CellSemanticContent` (`Prompt`, `Input`, `Output`),
+  so the engine now notes the first `Input` cell's column on each prompt row. Rulings: (1)
+  `SemanticMark::Prompt { exit, input }` and `PromptContinuation { input }` carry that
+  column (`None` until something is typed) — on the continuation too, because a real zsh
+  prompt is three rows and the command lands on the third; (2)
+  `TermState::command_block(line)` reads a block from any of its rows: the prompt's rows up
+  to the one with the input column (the command from there; later `Input` rows continue a
+  multi-line command) and the output rows to the next prompt, blank tail trimmed; (3) a right
+  click on a block row — when the program has not asked for the mouse, ⇧ overriding as for
+  selection — opens a small menu at the pointer (`block-menu`, role Menu; items only for what
+  applies: "Copy command", "Copy output", "Rerun", always "Select block"); Esc, any click
+  or a pick closes it, and the click is not reported to the program; (4) "Rerun" is a paste of
+  the command followed by ↩ as a key — the shell sees exactly what the human would have typed
+  (bracketed when it asked), so aliases, history and hooks all apply; (5) it is our own small
+  menu (the tokens, the a11y roles, the tab ring) rather than gpui-kit's `ContextMenu`, whose
+  element-state machinery adds nothing here. Wire: the two marks; goldens `host_lines_marks`
+  / `client_hello` re-accepted, PROTOCOL_VERSION 27 → 28. Tests:
+  `prompt_rows_carry_the_previous_commands_exit_status` and
+  `captured_zsh_bytes_keep_output_rows_and_statuses` (`engine`: the column on the row the
+  command was typed on, `None` before typing, on both the screen and history paths),
+  `prompt_navigation_and_last_output_follow_the_marks` (`client`: blocks from any row, the
+  open prompt with no command), headless `a_right_click_on_a_block_offers_its_command_and_output`
+  (the menu in the tree, each pick's effect on the clipboard, the paste + ↩, the selection,
+  Esc and a click elsewhere).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

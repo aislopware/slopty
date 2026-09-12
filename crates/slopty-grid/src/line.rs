@@ -17,6 +17,9 @@ pub enum SemanticMark {
         /// `None` when no command ran or the shell gave no status. The `D` lands on (or just
         /// above) the row the next prompt starts on, so this is where the status lives.
         exit: Option<u8>,
+        /// The column the typed command starts at on this row (the first cell written after
+        /// `OSC 133;B`); `None` while nothing has been typed at this prompt.
+        input: Option<u16>,
     },
     /// User input (`OSC 133;B`).
     Input,
@@ -24,14 +27,18 @@ pub enum SemanticMark {
     Output,
     /// A further row of the prompt that started above: a multi-line prompt, or a secondary
     /// prompt (`OSC 133;A;k=s`).
-    PromptContinuation,
+    PromptContinuation {
+        /// The column the typed command starts at on this row, when the input line is this
+        /// one (a two-row prompt takes its command on the second row).
+        input: Option<u16>,
+    },
 }
 
 impl SemanticMark {
     /// A prompt row of any kind.
     #[must_use]
     pub const fn is_prompt(self) -> bool {
-        matches!(self, Self::Prompt { .. } | Self::PromptContinuation)
+        matches!(self, Self::Prompt { .. } | Self::PromptContinuation { .. })
     }
 
     /// The first row of a command block.
@@ -44,7 +51,16 @@ impl SemanticMark {
     #[must_use]
     pub const fn exit(self) -> Option<u8> {
         match self {
-            Self::Prompt { exit } => exit,
+            Self::Prompt { exit, .. } => exit,
+            _ => None,
+        }
+    }
+
+    /// The column the typed command starts at on a prompt row (a start or a continuation).
+    #[must_use]
+    pub const fn input_col(self) -> Option<u16> {
+        match self {
+            Self::Prompt { input, .. } | Self::PromptContinuation { input } => input,
             _ => None,
         }
     }

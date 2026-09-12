@@ -649,9 +649,9 @@ mod golden {
     #[test]
     fn lines_with_prompt_marks() {
         let mut prompt = Line::from_text("$ false", 8, Style::DEFAULT);
-        prompt.mark = SemanticMark::Prompt { exit: Some(1) };
+        prompt.mark = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
         let mut cont = Line::from_text("> ", 8, Style::DEFAULT);
-        cont.mark = SemanticMark::PromptContinuation;
+        cont.mark = SemanticMark::PromptContinuation { input: Some(2) };
         let mut output = Line::from_text("x", 8, Style::DEFAULT);
         output.mark = SemanticMark::Output;
         snap(
@@ -726,7 +726,7 @@ mod size_report {
             let prompts: Vec<RowUpdate> = (0..rows)
                 .map(|row| {
                     let mut line = Line::blank(cols);
-                    line.mark = slopty_grid::SemanticMark::Prompt { exit: Some(1) };
+                    line.mark = slopty_grid::SemanticMark::Prompt { exit: Some(1), input: Some(2) };
                     RowUpdate { row, line }
                 })
                 .collect();
