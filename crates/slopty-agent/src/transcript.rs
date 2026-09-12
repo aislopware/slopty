@@ -1168,7 +1168,7 @@ mod tests {
                 detail: Some("cargo test".to_owned()),
             })
         );
-        // A prompt starts a turn and names it.
+        // A prompt starts a turn and names it, whether its content is a string or blocks.
         let prompt =
             r#"{"type":"user","message":{"role":"user","content":"fix the build\nplease"}}"#;
         assert_eq!(
@@ -1178,6 +1178,8 @@ mod tests {
                 detail: Some("fix the build".to_owned()),
             })
         );
+        let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"in blocks"}]}}"#;
+        assert_eq!(progress(blocks).and_then(|p| p.detail).as_deref(), Some("in blocks"));
         // A tool result is the turn continuing, with nothing to say for itself.
         let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
         assert_eq!(progress(result), Some(Progress { status: AgentStatus::Working, detail: None }));
@@ -1289,6 +1291,13 @@ mod tests {
         let read = tail.read(&path).expect("read");
         assert!(read.restarted);
         assert_eq!(read.entries, vec![user(Some(1_788_602_400_000), "fix it")]);
+        // So is one cut back to a line still being written, or to nothing at all.
+        std::fs::write(&path, "{\"type\":\"user\"").expect("rewrite");
+        assert_eq!(tail.read(&path).expect("read"), Read { restarted: true, ..Read::default() });
+        std::fs::write(&path, "").expect("truncate");
+        assert_eq!(tail.read(&path).expect("read"), Read { restarted: true, ..Read::default() });
+        // Only a missing file reads as nothing; a directory is an error.
+        let _error = tail.read(dir.path()).expect_err("a directory is not a transcript");
     }
 
     #[test]

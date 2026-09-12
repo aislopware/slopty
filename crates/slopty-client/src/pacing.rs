@@ -543,6 +543,21 @@ mod tests {
 
     /// The ring forgets: only the last `RING` frames are in the percentiles.
     #[test]
+    fn a_step_back_within_a_turn_stays_in_it_and_half_a_turn_is_not_a_wrap() {
+        let mut clock = CaptureClock::new();
+        // Across the boundary once, so there is a turn to fall out of.
+        clock.widen(u32::MAX - 10);
+        assert_eq!(clock.widen(5), WRAP + 5);
+        // A small step back (a reordered frame) is not a straggler from the previous turn.
+        assert_eq!(clock.widen(1_000), WRAP + 1_000);
+        assert_eq!(clock.widen(900), WRAP + 900);
+        // Exactly half a turn back is the largest step that is still a step, not a wrap.
+        let mut clock = CaptureClock::new();
+        clock.widen(HALF_WRAP);
+        assert_eq!(clock.widen(0), 0);
+    }
+
+    #[test]
     fn the_ring_keeps_the_last_frames_only() {
         let clock = FakeClock::new();
         let mut pacer = Pacer::new(&clock);
