@@ -488,6 +488,7 @@ fn apply(
                     slopty_proto::agent::OpenAgent {
                         cwd,
                         resume: Some(id),
+                        worktree: false,
                         model: None,
                         title: Some("resumed".to_owned()),
                     },

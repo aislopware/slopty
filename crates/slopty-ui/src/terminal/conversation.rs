@@ -139,6 +139,16 @@ pub fn model_label(model: &str) -> String {
     )
 }
 
+/// The worktree an agent runs in, from the directory it reports: the name under the
+/// repository's `.claude/worktrees`, where Claude Code makes them; `None` for any other
+/// directory.
+#[must_use]
+pub fn worktree_name(cwd: &str) -> Option<&str> {
+    let (_, rest) = cwd.split_once("/.claude/worktrees/")?;
+    let name = rest.split('/').next().unwrap_or(rest);
+    (!name.is_empty()).then_some(name)
+}
+
 /// A permission mode as the chip shows it.
 #[must_use]
 pub fn mode_label(mode: &str) -> &str {
@@ -701,6 +711,7 @@ impl Conversation {
         };
         let model = info.model.as_deref().map_or_else(|| "Claude".to_owned(), model_label);
         let mode = info.permission_mode.as_deref().unwrap_or("default");
+        let worktree = info.cwd.as_deref().and_then(worktree_name).map(str::to_owned);
         let mut meta = format!("{} {}", info.turns, if info.turns == 1 { "turn" } else { "turns" });
         if info.cost_micro_usd > 0 {
             meta.push_str(" · ");
@@ -748,6 +759,13 @@ impl Conversation {
                             this.cycle_permission_mode(cx);
                         })),
                     )
+                    .when_some(worktree, |el, name| {
+                        el.child(chip(
+                            "conversation-worktree",
+                            format!("⎇ {name}"),
+                            format!("Worktree: {name}"),
+                        ))
+                    })
                     .child(
                         div()
                             .flex_1()

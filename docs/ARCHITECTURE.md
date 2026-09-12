@@ -463,7 +463,9 @@ is posted; clicking it activates the app and reveals the session
 (`CanvasView::notification_response`).
 
 **Driven agents (structured control).** "New Agent (Structured)" / ⌘⌥T (`NewDrivenAgent`)
-sends `ClientMsg::OpenAgent { cwd, resume, model, title }` and the host runs Claude Code
+sends `ClientMsg::OpenAgent { cwd, resume, worktree, model, title }` (⌘⌥⇧T sets `worktree`:
+Claude Code makes a git worktree under `.claude/worktrees` and runs there; the card's header
+shows its name) and the host runs Claude Code
 itself, with no PTY, over its own stream-json host protocol (DECISIONS, "Structured driving
 is Claude Code's own stream-json protocol"): `apps/slopty-hostd/src/driven.rs` spawns `claude
 -p --verbose --input-format stream-json --output-format stream-json --permission-prompts host

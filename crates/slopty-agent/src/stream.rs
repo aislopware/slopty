@@ -29,6 +29,8 @@ use crate::transcript::{self, ToolNames};
 pub struct Init {
     /// Claude Code's session id, the one `--resume` takes.
     pub session_id: String,
+    /// The directory the agent runs in (`cwd`): the worktree's when `--worktree` made one.
+    pub cwd: String,
     /// The model in use.
     pub model: String,
     /// The permission mode in force (`default`, `acceptEdits`, `auto`, …).
@@ -148,6 +150,7 @@ pub fn parse(line: &str) -> Option<Event> {
     let event = match (kind, subtype) {
         ("system", Some("init")) => Event::Init(Init {
             session_id: string(&record, "session_id"),
+            cwd: string(&record, "cwd"),
             model: string(&record, "model"),
             permission_mode: string(&record, "permissionMode"),
             tools: strings(&record, "tools"),
@@ -459,10 +462,13 @@ pub fn always_label(suggestions: &Value) -> Option<String> {
     if parts.is_empty() { Some("remember this".to_owned()) } else { Some(parts.join("; ")) }
 }
 
-/// The arguments that put Claude Code into the protocol this module speaks. `resume` reopens
-/// a conversation by session id; `model` overrides the default model.
+/// The arguments that put Claude Code into the protocol this module speaks.
+///
+/// `resume` reopens a conversation by session id; `model` overrides the default model;
+/// `worktree` asks for a fresh git worktree of the working directory's repository, named by
+/// Claude Code.
 #[must_use]
-pub fn arguments(resume: Option<&str>, model: Option<&str>) -> Vec<String> {
+pub fn arguments(resume: Option<&str>, model: Option<&str>, worktree: bool) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--verbose",
@@ -487,6 +493,9 @@ pub fn arguments(resume: Option<&str>, model: Option<&str>) -> Vec<String> {
     if let Some(model) = model {
         args.push("--model".to_owned());
         args.push(model.to_owned());
+    }
+    if worktree {
+        args.push("--worktree".to_owned());
     }
     args
 }
@@ -1390,10 +1399,11 @@ mod tests {
 
     #[test]
     fn the_launch_line_quotes_only_what_a_shell_would_read() {
-        let args = arguments(Some("19146b4d"), Some("opus"));
+        let args = arguments(Some("19146b4d"), Some("opus"), false);
         assert_eq!(&args[..2], ["-p", "--verbose"]);
         assert_eq!(&args[args.len() - 4..], ["--resume", "19146b4d", "--model", "opus"]);
-        assert_eq!(arguments(None, None).len(), 12);
+        assert_eq!(arguments(None, None, false).len(), 12);
+        assert_eq!(arguments(None, None, true).last().map(String::as_str), Some("--worktree"));
         let words = ["exec", "claude", "-p", "it's", "a b", ""];
         assert_eq!(shell_line(words), "exec claude -p 'it'\\''s' 'a b' ''");
     }

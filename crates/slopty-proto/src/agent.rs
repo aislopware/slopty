@@ -75,6 +75,9 @@ pub struct OpenAgent {
     pub cwd: Option<String>,
     /// A Claude Code session id to resume, else a new conversation.
     pub resume: Option<String>,
+    /// Run in a fresh git worktree of `cwd`'s repository (`--worktree`, named by Claude Code),
+    /// so the agent's edits stay off the branch the human is on.
+    pub worktree: bool,
     /// Model override (`--model`), else Claude Code's default.
     pub model: Option<String>,
     /// Display name.
@@ -89,6 +92,9 @@ pub struct OpenAgent {
 pub struct AgentInfo {
     /// Claude Code's session id, the one `OpenAgent::resume` takes; known after `init`.
     pub agent_session: Option<String>,
+    /// The directory the agent runs in, as `init` reports it: the fresh worktree's when
+    /// `OpenAgent::worktree` asked for one.
+    pub cwd: Option<String>,
     /// The model in use (`claude-fable-5-1`, …), as the agent last named it.
     pub model: Option<String>,
     /// The permission mode in force (`default`, `acceptEdits`, `plan`, …).

@@ -2594,6 +2594,8 @@ New gate:
 cold (four empty target dirs, sccache warm)        725 s   clippy host 584 · ios 670 · nextest 673 · rustdoc 724
 incremental, slopty-proto changed (every crate
   downstream rebuilds in all four lanes)            54 s   clippy host 17 · ios 18 · nextest 50 (build 16, run 13) · rustdoc 22 · tools 4
+incremental, slopty-ui + slopty-e2e + docs          40 s   clippy host 12 · ios 12 · nextest 36 · rustdoc 17
+warm, nothing changed                               19 s   clippy host 3 · ios 3 · nextest 15 (run 13) · rustdoc 3 · tools 4
 ```
 
 (from `/tmp/gate-new*.log`, the `✓ <lane> (<time>)` lines; a lane's time includes waiting

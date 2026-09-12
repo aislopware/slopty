@@ -67,6 +67,9 @@ pub mod actions {
             NewAgent,
             /// Open a Claude Code agent the host drives over its structured protocol.
             NewDrivenAgent,
+            /// Open a driven Claude Code agent in a fresh git worktree of the active shell's
+            /// repository, so its edits stay off the human's branch.
+            NewWorktreeAgent,
             /// Pick a past Claude Code conversation on the host to resume as a driven agent.
             ResumeAgent,
             /// Put an empty note on the canvas.
@@ -105,8 +108,8 @@ pub mod actions {
 }
 pub use actions::{
     AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewDrivenAgent,
-    NewNote, NewTerminal, NextAttention, OpenPalette, ResumeAgent, ToggleMute, ToggleStats, ZoomIn,
-    ZoomOut, ZoomReset, ZoomToItem,
+    NewNote, NewTerminal, NewWorktreeAgent, NextAttention, OpenPalette, ResumeAgent, ToggleMute,
+    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -127,6 +130,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-n", NewTerminal, CTX),
         KeyBinding::new("cmd-shift-t", NewAgent, CTX),
         KeyBinding::new("cmd-alt-t", NewDrivenAgent, CTX),
+        KeyBinding::new("cmd-alt-shift-t", NewWorktreeAgent, CTX),
         KeyBinding::new("cmd-alt-r", ResumeAgent, CTX),
         KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
@@ -163,6 +167,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("New terminal", Box::new(NewTerminal)),
         c("New agent", Box::new(NewAgent)),
         c("New conversation (driven agent)", Box::new(NewDrivenAgent)),
+        c("New conversation in a fresh worktree", Box::new(NewWorktreeAgent)),
         c("Resume a conversation", Box::new(ResumeAgent)),
         c("New note", Box::new(NewNote)),
         c("Add a window or display", Box::new(AddWindow)),
@@ -1540,6 +1545,7 @@ impl CanvasView {
             OpenAgent {
                 cwd: Some(agent.cwd.clone()),
                 resume: Some(agent.id.clone()),
+                worktree: false,
                 model: None,
                 title: Some(title),
             },
@@ -1797,10 +1803,35 @@ impl CanvasView {
         self.open_agent(self.active_cwd(), cx);
     }
 
+    /// ⌘⌥⇧T: a driven agent in a fresh git worktree of the active shell's repository.
+    pub fn new_worktree_agent(
+        &mut self,
+        _: &NewWorktreeAgent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_agent_with(
+            OpenAgent {
+                cwd: self.active_cwd(),
+                resume: None,
+                worktree: true,
+                model: None,
+                title: Some(AGENT_COMMAND.to_owned()),
+            },
+            cx,
+        );
+    }
+
     /// Open a driven agent in `cwd` (the host's default when `None`); the host places it.
     pub fn open_agent(&self, cwd: Option<String>, cx: &mut Context<Self>) {
         self.open_agent_with(
-            OpenAgent { cwd, resume: None, model: None, title: Some(AGENT_COMMAND.to_owned()) },
+            OpenAgent {
+                cwd,
+                resume: None,
+                worktree: false,
+                model: None,
+                title: Some(AGENT_COMMAND.to_owned()),
+            },
             cx,
         );
     }
@@ -2853,6 +2884,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_driven_agent))
+            .on_action(cx.listener(Self::new_worktree_agent))
             .on_action(cx.listener(Self::resume_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
@@ -3756,6 +3788,17 @@ mod tests {
                 sent.as_slice(),
                 [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
                     if cwd == "/tmp/work" && command == &[AGENT_COMMAND.to_owned()]
+            ),
+            "{sent:?}"
+        );
+        // ⌘⌥⇧T: a driven agent in a fresh worktree of that shell's repository.
+        cx.simulate_keystrokes("cmd-alt-shift-t");
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), worktree: true, resume: None, .. })]
+                    if cwd == "/tmp/work"
             ),
             "{sent:?}"
         );
@@ -4791,7 +4834,7 @@ mod tests {
         assert!(
             matches!(
                 opened.as_slice(),
-                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), resume: Some(id), model: None, title: Some(title) })]
+                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), resume: Some(id), worktree: false, model: None, title: Some(title) })]
                     if cwd == "/w/slopty" && id == "19146b4d" && title == "fix the build"
             ),
             "{opened:?}"

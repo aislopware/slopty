@@ -655,6 +655,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   host outright; either way the host's list holds the fake's conversation and offers nothing
   wider).
 
+- ✅ **A conversation can start in a fresh worktree, protocol 32** (2026-09-12). Two agents
+  editing one checkout tread on each other; Claude Code's `--worktree` makes a git worktree
+  under the repository's `.claude/worktrees/<name>` and runs there. Rulings: (1)
+  `OpenAgent::worktree` (a flag: Claude Code names the worktree; a name prompt would cost a
+  dialog for little) adds `--worktree` to the launch line; ⌘⌥⇧T (`NewWorktreeAgent`) and
+  "New conversation in a fresh worktree" in the palette send it with the active shell's
+  directory, like ⌘⌥T; (2) `init` reports the directory the agent really runs in, so
+  `AgentInfo::cwd` carries it and the host's `Driven::cwd` (what `@file` completion and the
+  resume list use) prefers it over the directory the agent was started in; (3) the card's
+  header shows a `⎇ <name>` chip (`conversation-worktree`, a11y "Worktree: <name>") when
+  that directory is under `.claude/worktrees`, from `conversation::worktree_name`, and nothing
+  otherwise. The fake agent answers `--worktree` by reporting such a directory. Tests:
+  `the_launch_line_quotes_only_what_a_shell_would_read`, the ⌘⌥⇧T step of
+  `cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it`, the chip in the header test,
+  goldens `client_open_agent` and `host_agent_info`.
 - ✅ **Parity tracks loss asymmetrically, with a deadband** (2026-09-05). The ratio is
   `2 × smoothed loss + 5 %`, clamped to 5…50 %, and a report with `frames_lost > 0` raises it to
   1.5× the current ratio at once (parity was demonstrably not enough for a frame that then cost

@@ -69,6 +69,13 @@ impl Fake {
                 .join(escaped)
                 .join(format!("{session}.jsonl"))
         });
+        // `--worktree`: the CLI would make one under the repository's `.claude/worktrees` and
+        // run there; the fake only reports such a directory.
+        let cwd = if args.iter().any(|a| a == "--worktree") {
+            format!("{cwd}/.claude/worktrees/fake")
+        } else {
+            cwd
+        };
         Self {
             session,
             model: after("--model").unwrap_or_else(|| DEFAULT_MODEL.to_owned()),

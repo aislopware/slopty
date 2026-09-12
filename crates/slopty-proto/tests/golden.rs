@@ -212,6 +212,7 @@ mod golden {
             &ClientMsg::OpenAgent(OpenAgent {
                 cwd: Some("/w/slopty".to_owned()),
                 resume: None,
+                worktree: true,
                 model: Some("opus".to_owned()),
                 title: Some("claude".to_owned()),
             }),
@@ -380,6 +381,7 @@ mod golden {
                 session: session(),
                 info: AgentInfo {
                     agent_session: Some("19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned()),
+                    cwd: Some("/w/slopty/.claude/worktrees/fix-x".to_owned()),
                     model: Some("claude-fable-5-1".to_owned()),
                     permission_mode: Some("acceptEdits".to_owned()),
                     slash_commands: vec![

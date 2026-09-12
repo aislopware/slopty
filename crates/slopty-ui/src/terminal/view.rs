@@ -4250,6 +4250,7 @@ mod tests {
             v.agent_info(
                 AgentInfo {
                     agent_session: Some("s1".to_owned()),
+                    cwd: Some("/w/slopty/.claude/worktrees/fix-x".to_owned()),
                     model: Some("claude-sonnet-5".to_owned()),
                     permission_mode: Some("default".to_owned()),
                     slash_commands: vec![
@@ -4301,6 +4302,9 @@ mod tests {
         assert_eq!(context(1, Some(200_000)), "ctx 1%");
         assert!(tree.iter().any(|n| n.is("Button", Some("Model: sonnet-5"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Button", Some("Permission mode: Ask"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Button", Some("Worktree: fix-x"))), "{tree:#?}");
+        assert_eq!(conversation::worktree_name("/w/slopty"), None);
+        assert_eq!(conversation::worktree_name("/w/.claude/worktrees/a/src"), Some("a"));
         assert_eq!(conversation::cost_label(12_500), "1¢");
         assert_eq!(conversation::cost_label(1_234_567), "$1.23");
 

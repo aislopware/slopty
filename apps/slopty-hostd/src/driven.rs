@@ -121,10 +121,14 @@ impl Driven {
         self.inner.lock().values().map(|e| e.summary.clone()).collect()
     }
 
-    /// The working directory `session` runs in, when it is a driven agent.
+    /// The working directory `session` runs in, when it is a driven agent: the one the agent
+    /// reported (its worktree, when it made one), else the one it was started in.
     #[must_use]
     pub fn cwd(&self, session: SessionId) -> Option<String> {
-        self.inner.lock().get(&session).and_then(|e| e.summary.cwd.clone())
+        self.inner
+            .lock()
+            .get(&session)
+            .and_then(|e| e.info.cwd.clone().or_else(|| e.summary.cwd.clone()))
     }
 
     /// Every driven agent's status, for a client that just connected.
@@ -333,7 +337,7 @@ fn default_cwd() -> String {
 /// user's interactive login shell, which is what resolves an alias or `~/.claude/local` as the
 /// "+ agent" terminal does.
 fn launch(req: &OpenAgent, cwd: &str) -> Command {
-    let args = stream::arguments(req.resume.as_deref(), req.model.as_deref());
+    let args = stream::arguments(req.resume.as_deref(), req.model.as_deref(), req.worktree);
     let mut command = if let Some(bin) = std::env::var_os(CLAUDE_BIN_ENV) {
         let mut c = Command::new(bin);
         c.args(&args);
@@ -558,6 +562,7 @@ impl Pump {
             }
             Update::Init(init) => self.info(|info| {
                 info.agent_session = Some(init.session_id.clone()).filter(|s| !s.is_empty());
+                info.cwd = Some(init.cwd.clone()).filter(|c| !c.is_empty());
                 info.model = Some(init.model.clone()).filter(|m| !m.is_empty());
                 info.permission_mode = Some(init.permission_mode.clone()).filter(|m| !m.is_empty());
                 info.slash_commands.clone_from(&init.slash_commands);
