@@ -269,9 +269,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   reads a 2 000-line card without a wheel and "edit" opens where the reading stopped. The
   bindings sit in the Canvas context (`LineUp`… in `canvas::actions`), which a focused
   terminal or remote window never lets them reach, and do nothing under the palette or the
-  picker. The palette line reads "Find in terminal or file". Tests:
+  picker. A click or a tap on a row (`file-line-<item>-<row>`) makes it the reading line
+  too, and "ask" names it — `@path line N ` — when there is one, since the tinted line is
+  what the question is about. The palette line reads "Find in terminal or file". Tests:
   `arrow_keys_move_a_file_cards_reading_line` (headless: first key → top, steps, a page,
-  clamps at both ends, `reading_line` follows),
+  clamps at both ends, `reading_line` follows, a click on the sixth row),
   `a_file_cards_edit_pill_opens_the_editor_at_the_line_read` (headless: no pill without a
   shell, `+2` from the opening line, `+3` from the second hit),
   `hits_are_the_lines_holding_the_needle_in_any_case` (unit),

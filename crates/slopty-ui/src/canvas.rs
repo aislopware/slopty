@@ -798,7 +798,10 @@ impl CanvasView {
     fn ask_about_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(item) = self.doc.get(id) else { return };
         if let ItemKind::File { path } = &item.kind {
-            let mention = format!("@{path} ");
+            // The reading line, when there is one, is what the question is about.
+            let line = self.files.get(&id).and_then(|v| v.read(cx).reading_line());
+            let mention =
+                line.map_or_else(|| format!("@{path} "), |l| format!("@{path} line {l} "));
             self.ask_agent(mention, cx);
             return;
         }
@@ -5622,7 +5625,11 @@ mod tests {
         let text = view.read_with(cx, |c, cx| {
             c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
         });
-        assert_eq!(text.as_deref(), Some("@/tmp/work/note.txt "), "the mention in the composer");
+        assert_eq!(
+            text.as_deref(),
+            Some("@/tmp/work/note.txt line 2 "),
+            "the mention in the composer, with the line the card landed on"
+        );
         view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
         cx.run_until_parked();
 
@@ -5956,6 +5963,14 @@ mod tests {
         // The reading line is what "edit" opens on.
         let line = view.read_with(cx, |c, cx| c.file(id).unwrap().read(cx).reading_line());
         assert_eq!(line, Some(1));
+
+        // A click on a row makes it the reading line.
+        let fifth: &'static str =
+            Box::leak(format!("file-line-{}-5", id.as_uuid()).into_boxed_str());
+        let row = cx.debug_bounds(fifth).expect("the sixth row is drawn");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(5));
     }
 
     #[gpui::test]

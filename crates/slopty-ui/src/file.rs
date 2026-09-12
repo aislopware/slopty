@@ -11,7 +11,7 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    AnyElement, AppContext as _, Context, ElementId, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Render, ScrollStrategy, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
     div, px, uniform_list,
@@ -543,7 +543,7 @@ pub fn size_label(bytes: u64) -> String {
 
 impl Render for FileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = self.id.as_uuid();
+        let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let theme = self.theme.clone();
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
@@ -570,6 +570,7 @@ impl Render for FileView {
                 let mark = hsla_alpha(theme.surfaces.accent, alpha::TINT);
                 let hit = hsla_alpha(theme.surfaces.warn, alpha::TINT);
                 let here = hsla_alpha(theme.surfaces.warn, alpha::TINT_STRONG);
+                let this = cx.entity().downgrade();
                 let list = uniform_list(
                     SharedString::from(format!("file-lines-{id}")),
                     count,
@@ -578,8 +579,20 @@ impl Render for FileView {
                             .filter_map(|ix| {
                                 let line = lines.get(ix)?.clone();
                                 let number = ix.saturating_add(1);
+                                let this = this.clone();
                                 Some(
                                     div()
+                                        .id(ElementId::NamedInteger(
+                                            "file-line".into(),
+                                            u64::try_from(ix).unwrap_or(u64::MAX),
+                                        ))
+                                        .debug_selector(move || format!("file-line-{id}-{ix}"))
+                                        // A click (a tap) makes the line the reading line.
+                                        .on_click(move |_ev, _window, cx| {
+                                            let _set = this.update(cx, |v, cx| {
+                                                v.focus_line(u32::try_from(number).ok(), cx);
+                                            });
+                                        })
                                         .flex()
                                         .gap(px(pad))
                                         .whitespace_nowrap()
