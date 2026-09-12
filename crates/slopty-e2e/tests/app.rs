@@ -905,6 +905,18 @@ mod tests {
             "the bubble says a picture went with it: {:?}",
             card.conversation
         );
+
+        // The agent dies on its own: the card goes, and the top bar says why (its status and
+        // its last word on stderr) rather than leaving a vanished conversation unexplained.
+        drv.type_text("die").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the failure notice", STEP, |d| {
+            d.terminals.iter().all(|t| t.kind != "agent")
+                && d.notice.as_deref()
+                    == Some("Claude Code exited with status 3: fake: not logged in")
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 

@@ -534,7 +534,9 @@ is a `TranscriptBody::Compacted` entry drawn as a ruled divider ("compacted (aut
 (`system/informational` past the `info` level, `model_fallback`, `permission_retry`;
 protocol 26) are `TranscriptBody::Notice { level, text }` entries drawn as one plain line in
 the muted, accent or warn tone; `system/commands_changed` replaces the slash list and
-`system/task_notification` ends a backgrounded task. A
+`system/task_notification` ends a backgrounded task. An agent that exits unasked with a
+non-zero status closes its session with `CloseReason::Failed { status, detail }` (its last
+stderr line; protocol 27), which the app shows as a top-bar notice. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
 nothing yet to draw; it never displaces a permission or a question. So does a streamed

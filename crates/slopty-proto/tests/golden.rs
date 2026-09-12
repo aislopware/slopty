@@ -361,6 +361,14 @@ mod golden {
         use slopty_proto::agent::{
             AgentInfo, AgentSessionInfo, AgentSet, Context, Usage, UsageWindow,
         };
+        use slopty_proto::terminal::CloseReason;
+        snap(
+            "host_session_closed_failed",
+            &HostMsg::SessionClosed {
+                session: session(),
+                reason: CloseReason::Failed { status: 1, detail: "Not logged in".to_owned() },
+            },
+        );
         snap(
             "host_agent_info",
             &HostMsg::AgentInfo {

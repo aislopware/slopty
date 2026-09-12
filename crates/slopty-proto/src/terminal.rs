@@ -105,7 +105,7 @@ pub enum SessionKind {
 }
 
 /// Why a session closed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CloseReason {
     /// A client asked.
     Requested,
@@ -113,6 +113,14 @@ pub enum CloseReason {
     Exited,
     /// The host is shutting down.
     HostShutdown,
+    /// A driven agent died on its own: nobody asked it to close and it left a non-zero
+    /// status. The client shows the reason so a lost conversation is not a mystery.
+    Failed {
+        /// The process's exit status (`-1` when killed by a signal).
+        status: i32,
+        /// Its last line of stderr ("Not logged in"), empty when it said nothing.
+        detail: String,
+    },
 }
 
 /// Client → host, scoped to one session.

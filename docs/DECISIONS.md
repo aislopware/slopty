@@ -2862,6 +2862,21 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `supportedDialogKinds` in `initialize`, which Slopty does not, so it cannot leave the
   agent hanging on an unanswered dialog; `get_context_usage`, `rewind_files` and
   `rewind_conversation` need an SDK-host callback and are not answered over stdio.
+- ✅ **A driven agent that dies on its own says why, protocol 27** (2026-09-12). When
+  Claude Code exited without being asked — a lost login, an unknown `--resume` id, a crash —
+  the pump broadcast the same `SessionClosed { reason: Exited }` as a ⌘W and the card simply
+  vanished: a conversation gone with no word. Rulings: (1) `CloseReason::Failed { status,
+  detail }` is a fourth reason, sent only by the driven pump and only when no `Close` was
+  asked and the status is non-zero (a shell's own `exit 1` stays `Exited`; the reason is a
+  *driven* failure); (2) `detail` is the agent's last non-empty stderr line, truncated the
+  way every detail is, because that is where Claude Code says "Not logged in"; (3) the
+  client shows it as the top-bar notice ("Claude Code exited with status 3: …") and closes
+  the card as before — the transcript is on disk and ⌘⌥R resumes it — rather than keeping a
+  dead card open. The `slopty` CLI's attach prints "failed". Wire: `CloseReason::Failed`
+  (the enum loses `Copy`); golden `host_session_closed_failed` added, `client_hello`
+  re-accepted, PROTOCOL_VERSION 26 → 27. Tests: the app self-test's `die` turn (the fake
+  writes "fake: not logged in" to stderr and exits 3; the card is gone and the dump's
+  `notice` reads the status and the line).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

@@ -216,21 +216,28 @@ impl Driven {
             if let Some(id) = resumed {
                 pump.seed_past(&id).await;
             }
+            // The last thing the agent said on stderr names why it died ("Not logged in").
+            let last_stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
             if let Some(stderr) = stderr {
+                let last = Arc::clone(&last_stderr);
                 tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         tracing::debug!(%session, "claude stderr: {line}");
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            line.clone_into(&mut last.lock());
+                        }
                     }
                 });
             }
             let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
                 tracing::error!(%session, "claude spawned without pipes");
-                pump.ended(&daemon, &mut child).await;
+                pump.ended(&daemon, &mut child, false, &last_stderr).await;
                 return;
             };
-            pump.run(stdin, stdout, cmd_rx).await;
-            pump.ended(&daemon, &mut child).await;
+            let requested = pump.run(stdin, stdout, cmd_rx).await;
+            pump.ended(&daemon, &mut child, requested, &last_stderr).await;
         });
         Ok(summary)
     }
@@ -347,12 +354,13 @@ struct Pump {
 }
 
 impl Pump {
+    /// Pump until the agent's stdout ends or a close is asked; `true` when it was asked.
     async fn run(
         &self,
         mut stdin: tokio::process::ChildStdin,
         stdout: tokio::process::ChildStdout,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
-    ) {
+    ) -> bool {
         let mut lines = BufReader::new(stdout).lines();
         let mut fold = Fold::default();
         // Retune requests in flight, by request id: what to record when the agent acks.
@@ -437,7 +445,7 @@ impl Pump {
                         Cmd::Close => {
                             let _closed = stdin.shutdown().await;
                             tokio::time::sleep(EXIT_GRACE).await;
-                            break;
+                            return true;
                         }
                     };
                     if let Some(mut line) = line {
@@ -454,6 +462,7 @@ impl Pump {
                 }
             }
         }
+        false
     }
 
     /// Broadcast the streamed text as the table holds it now.
@@ -671,8 +680,14 @@ impl Pump {
     }
 
     /// The process is gone (or being closed): kill what is left, drop the table entry and
-    /// tell every client the session ended.
-    async fn ended(&self, daemon: &Daemon, child: &mut Child) {
+    /// tell every client the session ended — and why, when nobody asked and it failed.
+    async fn ended(
+        &self,
+        daemon: &Daemon,
+        child: &mut Child,
+        requested: bool,
+        last_stderr: &Mutex<String>,
+    ) {
         let status = match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
             Ok(Ok(status)) => status.code().unwrap_or(-1),
             _timeout_or_error => {
@@ -680,16 +695,19 @@ impl Pump {
                 -1
             }
         };
-        tracing::info!(session = %self.session, status, "claude exited");
+        tracing::info!(session = %self.session, status, requested, "claude exited");
+        let reason = if requested || status == 0 {
+            CloseReason::Exited
+        } else {
+            CloseReason::Failed { status, detail: slopty_agent::truncate(&last_stderr.lock()) }
+        };
         let removed = self.table.inner.lock().remove(&self.session);
         if let Some(mut entry) = removed {
             entry.event.status = AgentStatus::None;
             entry.event.attention = false;
             let _sent = self.events.send(HostMsg::Agent(entry.event));
         }
-        let _sent = self
-            .events
-            .send(HostMsg::SessionClosed { session: self.session, reason: CloseReason::Exited });
+        let _sent = self.events.send(HostMsg::SessionClosed { session: self.session, reason });
         for delta in daemon.canvas.remove_session(self.session, ClientId::nil()) {
             let _sent = self.events.send(HostMsg::Canvas(delta));
         }

@@ -17,7 +17,8 @@
 //! * `/compact` — a `compact_boundary` system record (40 000 → 5 000 tokens) and the summary user
 //!   record flagged `isCompactSummary`, both also written to the transcript file;
 //! * a prompt starting with `hooked` — a `system/informational` warning (a hook's word, "… says:
-//!   mind the tests") before the usual deltas and reply.
+//!   mind the tests") before the usual deltas and reply;
+//! * a prompt starting with `die` — "fake: not logged in" on stderr and exit status 3.
 //!
 //! It also does what a retune asks: `set_model` is acknowledged and the assistant records
 //! that follow name the new model; `set_permission_mode` is acknowledged and followed by the
@@ -30,6 +31,7 @@
 //! Stdin closing ends it, as it ends Claude Code.
 
 use std::io::{BufRead as _, Write};
+use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
@@ -236,15 +238,16 @@ fn finish_text(fake: &Fake, out: &mut impl Write) -> std::io::Result<()> {
     emit(out, &fake.result("success", &text))
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> ExitCode {
     match run() {
+        Ok(code) => code,
         // A broken pipe means the host is gone; nothing to report to.
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        other => other,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
-fn run() -> std::io::Result<()> {
+fn run() -> std::io::Result<ExitCode> {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     let mut fake = Fake::from_args();
@@ -532,6 +535,12 @@ fn run() -> std::io::Result<()> {
                         "session_id": fake.session}),
             )?;
             waiting = Some(Wait::Interrupt);
+        } else if text.starts_with("die") {
+            // The agent falls over: a last word on stderr and a non-zero status, the way a
+            // lost login or a crash ends a real one.
+            std::io::stderr().write_all(b"fake: not logged in\n")?;
+            out.flush()?;
+            return Ok(ExitCode::from(3));
         } else if text.starts_with("hooked") {
             // A hook's word arrives as an informational line before the answer.
             emit(
@@ -572,7 +581,7 @@ fn run() -> std::io::Result<()> {
             finish_text(&fake, &mut out)?;
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What a turn in progress waits for from the host.

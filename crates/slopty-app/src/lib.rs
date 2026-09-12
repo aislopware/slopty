@@ -27,6 +27,7 @@ use slopty_client::LinkEvent;
 use slopty_core::SessionId;
 use slopty_net::EndpointId;
 use slopty_proto::HostMsg;
+use slopty_proto::terminal::CloseReason;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Theme, alpha};
 use slopty_ui::a11y::{key_name, tab_stop};
@@ -1469,7 +1470,13 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
             canvas.update(cx, |c, cx| c.session_opened(summary, cx));
         }
-        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+        LinkEvent::Control(HostMsg::SessionClosed { session, reason }) => {
+            if let CloseReason::Failed { status, detail } = reason {
+                let why = if detail.is_empty() { String::new() } else { format!(": {detail}") };
+                let _shown = this.update(cx, |ws, cx| {
+                    ws.show_notice(format!("Claude Code exited with status {status}{why}"), cx);
+                });
+            }
             canvas.update(cx, |c, cx| c.session_closed(session, cx));
         }
         LinkEvent::Control(HostMsg::Term { session, event }) => {
