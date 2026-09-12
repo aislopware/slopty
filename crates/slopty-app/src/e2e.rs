@@ -662,7 +662,7 @@ fn entry_line(entry: &TranscriptEntry) -> String {
         TranscriptBody::User { text } => format!("user: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("assistant: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "thinking".to_owned(),
-        TranscriptBody::ToolUse { name, summary, detail } => match detail {
+        TranscriptBody::ToolUse { name, summary, detail, .. } => match detail {
             ToolDetail::Diff { lines, .. } => {
                 let added = lines.iter().filter(|l| l.kind == DiffKind::Added).count();
                 let removed = lines.iter().filter(|l| l.kind == DiffKind::Removed).count();
@@ -783,6 +783,19 @@ impl Workspace {
                     partial: view.partial().to_owned(),
                     permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
                     always: view.permission().and_then(|p| p.always.clone()),
+                    tasks: c
+                        .tasks()
+                        .iter()
+                        .map(|t| {
+                            format!(
+                                "{}:{}:{}:{}",
+                                t.call,
+                                t.description,
+                                t.tool_uses,
+                                if t.done { "done" } else { "running" }
+                            )
+                        })
+                        .collect(),
                     model: view.info().model.clone(),
                     permission_mode: view.info().permission_mode.clone(),
                     agent_session: view.info().agent_session.clone(),

@@ -23,7 +23,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_proto::HostMsg;
 use slopty_proto::agent::{
     AgentAnswer, AgentEvent, AgentInfo, AgentKind, AgentSessionInfo, AgentSource, AgentStatus,
-    BlockReason, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
+    AgentTask, BlockReason, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_proto::terminal::{CloseReason, SessionKind, SessionState, SessionSummary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -64,6 +64,8 @@ struct Entry {
     pending: Vec<PermissionRequest>,
     event: AgentEvent,
     info: AgentInfo,
+    /// The subagents seen, newest state per call.
+    tasks: Vec<AgentTask>,
 }
 
 /// A snapshot of one driven agent for a client that attaches or follows it.
@@ -79,6 +81,8 @@ pub struct Snapshot {
     pub event: AgentEvent,
     /// What the agent said about itself.
     pub info: AgentInfo,
+    /// The subagents it spawned, newest state per call.
+    pub tasks: Vec<AgentTask>,
 }
 
 /// The driven agents of this daemon.
@@ -128,6 +132,7 @@ impl Driven {
             pending: entry.pending.clone(),
             event: entry.event.clone(),
             info: entry.info.clone(),
+            tasks: entry.tasks.clone(),
         };
         drop(table);
         Some(snapshot)
@@ -190,6 +195,7 @@ impl Driven {
                     model: req.model.clone(),
                     ..AgentInfo::default()
                 },
+                tasks: Vec::new(),
             },
         );
         let _sent = daemon.events.send(HostMsg::Agent(event));
@@ -518,6 +524,17 @@ impl Pump {
                 info.permission_mode = Some(init.permission_mode.clone()).filter(|m| !m.is_empty());
                 info.slash_commands.clone_from(&init.slash_commands);
             }),
+            Update::Task(task) => {
+                let mut table = self.table.inner.lock();
+                if let Some(entry) = table.get_mut(&self.session) {
+                    match entry.tasks.iter_mut().find(|t| t.call == task.call) {
+                        Some(seen) => *seen = task.clone(),
+                        None => entry.tasks.push(task.clone()),
+                    }
+                }
+                drop(table);
+                let _sent = self.events.send(HostMsg::AgentTask { session: self.session, task });
+            }
             Update::Model(model) => self.info(|info| info.model = Some(model.clone())),
             Update::PermissionMode(mode) => {
                 self.info(|info| info.permission_mode = Some(mode.clone()));

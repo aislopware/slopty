@@ -197,8 +197,8 @@ mod golden {
     #[test]
     fn driven_agent() {
         use slopty_proto::agent::{
-            AgentAnswer, AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Choice,
-            Clipped, OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
+            AgentAnswer, AgentEvent, AgentKind, AgentSource, AgentStatus, AgentTask, BlockReason,
+            Choice, Clipped, OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
         };
         use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
         snap(
@@ -281,6 +281,21 @@ mod golden {
             },
         );
         snap("client_agent_interrupt", &ClientMsg::AgentInterrupt { session: session() });
+        snap(
+            "host_agent_task",
+            &HostMsg::AgentTask {
+                session: session(),
+                task: AgentTask {
+                    call: "toolu_01SK3eaNEMYyHLEyk9JQtNpK".to_owned(),
+                    description: "Running List files in the working directory".to_owned(),
+                    kind: Some("Explore".to_owned()),
+                    tool_uses: 1,
+                    duration_ms: 2525,
+                    last_tool: Some("Bash".to_owned()),
+                    done: false,
+                },
+            },
+        );
         snap(
             "host_session_opened_agent",
             &HostMsg::SessionOpened(SessionSummary {
@@ -406,6 +421,7 @@ mod golden {
                     TranscriptEntry {
                         at: at(1000),
                         body: TranscriptBody::ToolUse {
+                            call: "toolu_01F6WsndtGMAv3yQPYeTTxMc".to_owned(),
                             name: "Bash".to_owned(),
                             summary: "cargo test".to_owned(),
                             detail: ToolDetail::Command {
@@ -440,6 +456,7 @@ mod golden {
         let tool = |name: &str, summary: &str, detail| TranscriptEntry {
             at: None,
             body: TranscriptBody::ToolUse {
+                call: format!("toolu_{}", name.to_lowercase()),
                 name: name.to_owned(),
                 summary: summary.to_owned(),
                 detail,

@@ -507,7 +507,17 @@ session", "always allow Bash(cargo test:*) in this project") and drawn as Always
 `AgentAnswer { allowed: true, always: true }` and the host answers with the suggestions
 echoed as `updatedPermissions`, after which Claude Code stops asking for that case and, for
 a mode change, sends the `system/status` record that moves the mode chip. `AgentAnswer` is
-one struct (`session, request, allowed, message, answers, always`) for both rows. Both kinds coexist: ⌘⇧T
+one struct (`session, request, allowed, message, answers, always`) for both rows.
+A subagent (`Agent` / `Task`) is followed, not shown (protocol 20): over stream-json its
+own records carry `parent_tool_use_id`, and `transcript::is_subagent` skips them the way
+it skips a sidechain in the file (no entries, no status, no model), while Claude Code's
+`system/task_started` and `task_progress` records (`tool_use_id`, `description`,
+`subagent_type`, `usage.tool_uses`, `usage.duration_ms`, `last_tool_name`) fold into one
+`AgentTask` per spawning call, marked `done` when that call's `tool_result` arrives, and
+travel as `HostMsg::AgentTask` (kept per session for a joining client). Every `ToolUse`
+entry now carries its `call` id, and the card draws the task under the call that spawned it
+(`conversation::task_line`: "Explore running · 1 tool use · 3 s · Bash", muted once done);
+the label reads the same. Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
 (`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test
@@ -515,8 +525,9 @@ still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the pr
 (`crates/slopty-e2e/src/bin`, a scripted stream-json agent: it streams, lingers for an
 interrupt, asks a `Write` permission that the test allows and then denies through the
 Allow / Deny buttons in the accessibility tree, edits with a todo list, asks a question
-the test answers by tapping "Blue", and suggests accept-edits with its `Write` permission,
-which the test takes with Always and then writes again unasked; goldens
+the test answers by tapping "Blue", suggests accept-edits with its `Write` permission,
+which the test takes with Always and then writes again unasked, and spawns a subagent whose
+own Bash stays off the card while its progress shows under the call; goldens
 `conversation-tools`, `conversation-question`) and reads the card through the dump
 (`TerminalInfo.kind`, `ConversationInfo.partial`, `ConversationInfo.permission`).
 

@@ -623,6 +623,34 @@ mod tests {
         let (_, conv) = chat(&dump).unwrap();
         assert!(conv.entries.iter().any(|e| e.starts_with("result Write failed: ")), "{conv:?}");
 
+        // A subagent: its own records stay off the card, and its progress shows under the
+        // call that spawned it, running then done.
+        drv.type_text("delegate the listing").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the subagent's turn", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries.last().map(String::as_str)
+                            == Some("assistant: The subagent found note.txt.")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(conv.entries.contains(&"tool Agent: List files".to_owned()), "{conv:?}");
+        assert!(!conv.entries.iter().any(|e| e == "tool Bash: ls"), "{conv:?}");
+        assert!(conv.tasks.iter().any(|t| t.ends_with(":Running List files:1:done")), "{conv:?}");
+        assert!(
+            dump.a11y_node(
+                "ListItem",
+                Some("Tool Agent: List files, Explore done, 1 tool use, 3 s, Bash")
+            )
+            .is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+
         // Always: the row names what the agent suggested; taking it allows this call, the
         // mode chip follows the agent's status record, and the next write does not ask.
         drv.type_text("write once more").await.unwrap();
@@ -727,7 +755,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 13))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 15))
             })
             .await
             .unwrap();
@@ -746,6 +774,8 @@ mod tests {
                 "assistant: Edited: hi is now hello.".to_owned(),
                 "user: ask me".to_owned(),
                 "user: write it again".to_owned(),
+                "user: delegate the listing".to_owned(),
+                "assistant: The subagent found note.txt.".to_owned(),
                 "user: write once more".to_owned(),
                 "user: write yet again".to_owned(),
                 "assistant: Done: the note is written.".to_owned(),

@@ -18,8 +18,8 @@ use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentInfo, AgentSet, AgentStatus, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail,
-    TranscriptFollow, TranscriptUpdate,
+    AgentInfo, AgentSet, AgentStatus, AgentTask, BlockReason, PermissionRequest, QuestionAnswer,
+    ToolDetail, TranscriptFollow, TranscriptUpdate,
 };
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
@@ -458,6 +458,14 @@ impl TerminalView {
     pub fn agent_info(&mut self, info: AgentInfo, cx: &mut Context<Self>) {
         if self.info != info {
             self.info = info;
+            cx.notify();
+        }
+    }
+
+    /// A subagent the driven agent spawned: shown under the call that spawned it.
+    pub fn agent_task(&mut self, task: AgentTask, cx: &mut Context<Self>) {
+        if let Some(conversation) = &mut self.conversation {
+            conversation.set_task(task);
             cx.notify();
         }
     }
@@ -2068,6 +2076,7 @@ mod tests {
         TranscriptEntry {
             at: None,
             body: TranscriptBody::ToolUse {
+                call: format!("toolu_{command}"),
                 name: "Bash".to_owned(),
                 summary: command.to_owned(),
                 detail: ToolDetail::Command {
@@ -2701,6 +2710,7 @@ mod tests {
         let edit = TranscriptEntry {
             at: None,
             body: TranscriptBody::ToolUse {
+                call: "toolu_e".to_owned(),
                 name: "Edit".to_owned(),
                 summary: "src/a.rs".to_owned(),
                 detail: ToolDetail::Diff {
@@ -2714,6 +2724,7 @@ mod tests {
         let todos = TranscriptEntry {
             at: None,
             body: TranscriptBody::ToolUse {
+                call: "toolu_t".to_owned(),
                 name: "TodoWrite".to_owned(),
                 summary: String::new(),
                 detail: ToolDetail::Todos {
@@ -2757,6 +2768,63 @@ mod tests {
             ["Tool Edit: src/a.rs, 10 added, 10 removed", "Tool TodoWrite: 1 of 3 done"],
             "{tree:#?}"
         );
+    }
+
+    /// A subagent's progress shows under the call that spawned it — the kind, the tool
+    /// count, the time, the last tool, then "done" — and a screen reader hears the same;
+    /// the subagent's own records never become entries (that is the host's rule, tested
+    /// in `slopty_agent`), so the card stays the agent's conversation.
+    #[gpui::test]
+    fn a_subagent_progresses_under_its_call(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        let spawn = TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                call: "toolu_p".to_owned(),
+                name: "Agent".to_owned(),
+                summary: "List files".to_owned(),
+                detail: ToolDetail::Agent {
+                    description: "List files".to_owned(),
+                    kind: Some("Explore".to_owned()),
+                    prompt: Clipped::whole("ls".to_owned()),
+                },
+            },
+        };
+        let update = TranscriptUpdate { session, reset: true, entries: vec![spawn] };
+        view.update(cx, |v, cx| v.transcript_update(update, cx));
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let label = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.iter()
+                .find(|n| n.role == "ListItem")
+                .and_then(|n| n.label.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(label(cx), "Tool Agent: List files");
+        let task = |tool_uses, duration_ms, done| AgentTask {
+            call: "toolu_p".to_owned(),
+            description: "Running List files".to_owned(),
+            kind: Some("Explore".to_owned()),
+            tool_uses,
+            duration_ms,
+            last_tool: Some("Bash".to_owned()),
+            done,
+        };
+        view.update(cx, |v, cx| v.agent_task(task(1, 2_525, false), cx));
+        cx.run_until_parked();
+        assert_eq!(label(cx), "Tool Agent: List files, Explore running, 1 tool use, 3 s, Bash");
+        assert!(cx.debug_bounds("tool-task").is_some(), "the progress line is drawn");
+        view.update(cx, |v, cx| v.agent_task(task(3, 12_000, true), cx));
+        cx.run_until_parked();
+        assert_eq!(label(cx), "Tool Agent: List files, Explore done, 3 tool uses, 12 s, Bash");
+        // A reset (a new conversation) forgets the tasks.
+        let again = TranscriptUpdate { session, reset: true, entries: vec![user("ok")] };
+        view.update(cx, |v, cx| v.transcript_update(again, cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.tasks().is_empty())));
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the host

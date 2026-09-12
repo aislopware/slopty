@@ -1492,6 +1492,9 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::AgentInfo { session, info }) => {
             canvas.update(cx, |c, cx| c.agent_info(session, info, cx));
         }
+        LinkEvent::Control(HostMsg::AgentTask { session, task }) => {
+            canvas.update(cx, |c, cx| c.agent_task(session, task, cx));
+        }
         LinkEvent::Control(HostMsg::AgentSessions { sessions, .. }) => {
             canvas.update(cx, |c, cx| c.agent_sessions(sessions, cx));
         }

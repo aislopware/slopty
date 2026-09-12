@@ -115,6 +115,28 @@ pub struct AgentSet {
     pub permission_mode: Option<String>,
 }
 
+/// A subagent a driven agent spawned (`Agent` / `Task`), as the host follows it.
+///
+/// Built from Claude Code's `system/task_started` and `task_progress` records; the
+/// subagent's own records never reach the card, this does, under the call that spawned it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct AgentTask {
+    /// The spawning call's id (`TranscriptBody::ToolUse::call`).
+    pub call: String,
+    /// The one-line brief, then what it is doing now ("Running List files…").
+    pub description: String,
+    /// The subagent kind (`Explore`, …), when the agent chose one.
+    pub kind: Option<String>,
+    /// Tool calls it has made.
+    pub tool_uses: u32,
+    /// How long it has run.
+    pub duration_ms: u64,
+    /// The last tool it called.
+    pub last_tool: Option<String>,
+    /// Its result reached the agent.
+    pub done: bool,
+}
+
 /// Client → host: the human's answer to a driven agent's `PermissionRequest`, by id.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentAnswer {
@@ -200,6 +222,8 @@ pub enum TranscriptBody {
     },
     /// A tool the agent called.
     ToolUse {
+        /// The call's own id (`tool_use_id`), what a result or a subagent's progress names.
+        call: String,
         /// Tool name (`Bash`, `Edit`, …).
         name: String,
         /// One line about the call: the command, the file, the pattern.

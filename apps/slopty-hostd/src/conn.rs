@@ -796,6 +796,11 @@ impl Peer<'_> {
         if self.out.send(HostMsg::AgentInfo { session, info: snapshot.info }).await.is_err() {
             return false;
         }
+        for task in snapshot.tasks {
+            if self.out.send(HostMsg::AgentTask { session, task }).await.is_err() {
+                return false;
+            }
+        }
         self.out.send(HostMsg::Agent(snapshot.event)).await.is_ok()
     }
 

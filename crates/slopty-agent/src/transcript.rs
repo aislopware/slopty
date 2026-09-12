@@ -196,7 +196,7 @@ fn line_progress(line: &str) -> Option<Progress> {
 /// turns. The records Claude Code streams over stdio have the same shape as the file's.
 #[must_use]
 pub fn record_progress(record: &Value) -> Option<Progress> {
-    if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+    if is_subagent(record) {
         return None;
     }
     let message = record.get("message")?;
@@ -289,6 +289,15 @@ fn entries_named(tools: &mut ToolNames, jsonl: &str) -> Vec<TranscriptEntry> {
     jsonl.lines().flat_map(|line| line_entries(tools, line)).collect()
 }
 
+/// A subagent's own record: a sidechain in the transcript file (`isSidechain`), or a record
+/// under the call that spawned it over stream-json (`parent_tool_use_id`). Neither is the
+/// agent's conversation.
+#[must_use]
+pub fn is_subagent(record: &Value) -> bool {
+    record.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        || record.get("parent_tool_use_id").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+}
+
 /// The entries one record contributes (none for bookkeeping and sidechains).
 fn line_entries(tools: &mut ToolNames, line: &str) -> Vec<TranscriptEntry> {
     let Ok(record) = serde_json::from_str::<Value>(line) else { return Vec::new() };
@@ -299,7 +308,7 @@ fn line_entries(tools: &mut ToolNames, line: &str) -> Vec<TranscriptEntry> {
 /// remembers the calls so their results can be named; keep one per conversation.
 #[must_use]
 pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEntry> {
-    if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+    if is_subagent(record) {
         return Vec::new();
     }
     let kind = record.get("type").and_then(Value::as_str);
@@ -388,13 +397,14 @@ fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBod
                 .map(|text| TranscriptBody::Thinking { text: clip(&text) }),
             Some("tool_use" | "server_tool_use") => {
                 let name = block.get("name")?.as_str()?.to_owned();
-                if let Some(id) = block.get("id").and_then(Value::as_str) {
-                    tools.remember(id, &name);
+                let call = block.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                if !call.is_empty() {
+                    tools.remember(&call, &name);
                 }
                 let input = block.get("input");
                 let summary = tool_summary(&name, input);
                 let detail = tool_detail(&name, input);
-                Some(TranscriptBody::ToolUse { name, summary, detail })
+                Some(TranscriptBody::ToolUse { call, name, summary, detail })
             }
             _ => None,
         })
@@ -676,6 +686,7 @@ mod tests {
                 TranscriptEntry {
                     at,
                     body: TranscriptBody::ToolUse {
+                        call: "t1".to_owned(),
                         name: "Bash".to_owned(),
                         summary: "cargo test".to_owned(),
                         detail: ToolDetail::Command {
@@ -708,6 +719,7 @@ mod tests {
             got.iter().map(|e| e.body.clone()).collect::<Vec<_>>(),
             vec![
                 TranscriptBody::ToolUse {
+                    call: "t2".to_owned(),
                     name: "Edit".to_owned(),
                     summary: "src/a.rs".to_owned(),
                     // An edit missing its replacement keeps the JSON, not an empty diff.
@@ -719,6 +731,7 @@ mod tests {
                     },
                 },
                 TranscriptBody::ToolUse {
+                    call: "t3".to_owned(),
                     name: "Mystery".to_owned(),
                     summary: "because".to_owned(),
                     detail: ToolDetail::Json {
@@ -858,6 +871,31 @@ mod tests {
             ToolDetail::Json { input: Clipped::whole("{\n  \"cmd\": \"ls\"\n}".to_owned()) }
         );
         assert_eq!(tool_detail("WebFetch", None), ToolDetail::Json { input: Clipped::default() });
+    }
+
+    /// Over stream-json a subagent's records carry the spawning call as
+    /// `parent_tool_use_id` (probed on CLI 2.1.269); like a sidechain in the file, they are
+    /// not the agent's conversation and move no status.
+    #[test]
+    fn a_subagents_own_records_are_not_entries() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"ls"}}]},"parent_tool_use_id":"toolu_parent"}"#,
+            "
+",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"a.txt"}]},"parent_tool_use_id":"toolu_parent"}"#,
+            "
+",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"parent_tool_use_id":null}"#,
+            "
+",
+        );
+        let got = entries(jsonl);
+        assert_eq!(
+            got.iter().map(|e| e.body.clone()).collect::<Vec<_>>(),
+            [TranscriptBody::Assistant { markdown: "done".to_owned() }]
+        );
+        let sub: Value = serde_json::from_str(jsonl.lines().next().unwrap_or_default()).unwrap();
+        assert_eq!(record_progress(&sub), None);
     }
 
     #[test]

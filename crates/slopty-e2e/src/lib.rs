@@ -775,6 +775,9 @@ pub struct ConversationInfo {
     /// What the pending permission's "Always" would do, when the agent suggested one.
     #[serde(default)]
     pub always: Option<String>,
+    /// The subagents the agent spawned, `<call>:<description>:<tool uses>:<running|done>`.
+    #[serde(default)]
+    pub tasks: Vec<String>,
 }
 
 impl Dump {

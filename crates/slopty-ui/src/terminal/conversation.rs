@@ -29,8 +29,8 @@ use gpui::{
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{
-    AgentInfo, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail, TranscriptBody,
-    TranscriptEntry, TranscriptUpdate,
+    AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail,
+    TranscriptBody, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_theme::{Theme, alpha};
 
@@ -145,6 +145,9 @@ pub struct Conversation {
     list: ListState,
     /// Entries whose folded part is open; shared with the list's render closure.
     open: Rc<HashSet<usize>>,
+    /// The subagents the agent spawned, newest state per call; shared with the render
+    /// closure, looked up by the spawning entry's call id.
+    tasks: Rc<[AgentTask]>,
     /// The text being written.
     composer: Entity<TextareaState>,
     _composer_events: Subscription,
@@ -185,6 +188,7 @@ impl Conversation {
             entries: Rc::from([]),
             list,
             open: Rc::new(HashSet::new()),
+            tasks: Rc::from([]),
             composer,
             _composer_events: events,
             model_menu: false,
@@ -312,6 +316,22 @@ impl Conversation {
         text
     }
 
+    /// A subagent's newest state, replacing what was known of that call.
+    pub fn set_task(&mut self, task: AgentTask) {
+        let mut tasks = self.tasks.to_vec();
+        match tasks.iter_mut().find(|t| t.call == task.call) {
+            Some(seen) => *seen = task,
+            None => tasks.push(task),
+        }
+        self.tasks = Rc::from(tasks);
+    }
+
+    /// The subagents known, in the order first seen.
+    #[must_use]
+    pub fn tasks(&self) -> &[AgentTask] {
+        &self.tasks
+    }
+
     /// Take a slice from the host: a reset replaces everything (and pins the view to the
     /// bottom again), otherwise the entries append.
     pub fn apply(&mut self, update: TranscriptUpdate) {
@@ -322,6 +342,7 @@ impl Conversation {
         self.entries = Rc::from(entries);
         if update.reset {
             self.open = Rc::new(HashSet::new());
+            self.tasks = Rc::from([]);
             self.list.reset(after);
             self.pin();
         } else {
@@ -349,6 +370,7 @@ impl Conversation {
         let completions = info.map(|i| self.completions(&i.slash_commands, cx)).unwrap_or_default();
         let entries = Rc::clone(&self.entries);
         let open = Rc::clone(&self.open);
+        let tasks = Rc::clone(&self.tasks);
         let theme = theme.clone();
         let empty = entries.is_empty();
         let view = cx.entity();
@@ -388,7 +410,15 @@ impl Conversation {
                                 move |ix, _window: &mut Window, _cx: &mut App| {
                                     entries.get(ix).map_or_else(
                                         || div().into_any_element(),
-                                        |e| entry(ix, e, open.contains(&ix), &view, &theme),
+                                        |e| {
+                                            let task = match &e.body {
+                                                TranscriptBody::ToolUse { call, .. } => {
+                                                    tasks.iter().find(|t| &t.call == call)
+                                                }
+                                                _ => None,
+                                            };
+                                            entry(ix, e, open.contains(&ix), task, &view, &theme)
+                                        },
                                     )
                                 },
                             )
@@ -991,6 +1021,7 @@ fn entry(
     ix: usize,
     entry: &TranscriptEntry,
     open: bool,
+    task: Option<&AgentTask>,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -1004,7 +1035,7 @@ fn entry(
         .id(ElementId::NamedInteger("conversation-entry".into(), u64::try_from(ix).unwrap_or(0)))
         .debug_selector(move || format!("conversation-entry-{ix}"))
         .role(Role::ListItem)
-        .aria_label(SharedString::from(entry_label(entry)))
+        .aria_label(SharedString::from(entry_label(entry, task)))
         .w_full()
         .px(px(spacing.md))
         .py(px(spacing.xs));
@@ -1072,7 +1103,7 @@ fn entry(
             )
             .when(open, |el| el.child(clipped_block(text, &mono, theme)))
             .into_any_element(),
-        TranscriptBody::ToolUse { name, summary, detail } => row
+        TranscriptBody::ToolUse { name, summary, detail, .. } => row
             .flex()
             .flex_col()
             .gap(px(spacing.xs))
@@ -1097,6 +1128,7 @@ fn entry(
                     .children(tool_badge(detail, theme))
                     .on_click(toggle),
             )
+            .children(task.map(|t| task_line(t, theme)))
             .children(tool_body(detail, open, &mono, theme))
             .into_any_element(),
         TranscriptBody::ToolResult { tool, output, is_error } => {
@@ -1125,16 +1157,60 @@ fn entry(
     }
 }
 
-/// One entry as a screen reader hears it: who, then the first line.
+/// A subagent's progress under the call that spawned it: "Explore running · 1 tool use ·
+/// 3 s · Bash", the state in the accent tone while it runs and muted once done.
+fn task_line(task: &AgentTask, theme: &Theme) -> impl IntoElement {
+    let s = &theme.surfaces;
+    let (state, tone) = if task.done { ("done", s.text_muted) } else { ("running", s.accent) };
+    div()
+        .id("tool-task")
+        .debug_selector(|| "tool-task".to_owned())
+        .flex()
+        .gap(px(theme.spacing.xs))
+        .pl(px(theme.spacing.lg))
+        .text_size(px(theme.typography.caption()))
+        .child(div().text_color(hsla(tone)).child(SharedString::from(format!(
+            "{} {state}",
+            task.kind.as_deref().unwrap_or("agent")
+        ))))
+        .child(
+            div()
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(format!("· {}", task_counts(task).join(" · ")))),
+        )
+}
+
+/// A subagent's counts as words: tool uses, seconds, the last tool.
+fn task_counts(task: &AgentTask) -> Vec<String> {
+    let mut parts =
+        vec![format!("{} tool use{}", task.tool_uses, if task.tool_uses == 1 { "" } else { "s" })];
+    let seconds = task.duration_ms.div_ceil(1000);
+    if seconds > 0 {
+        parts.push(format!("{seconds} s"));
+    }
+    if let Some(tool) = &task.last_tool {
+        parts.push(tool.clone());
+    }
+    parts
+}
+
+/// One entry as a screen reader hears it: who, then the first line; a call that spawned a
+/// subagent adds the subagent's state and counts.
 #[must_use]
-pub fn entry_label(entry: &TranscriptEntry) -> String {
+pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String {
     let first = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_owned();
     match &entry.body {
         TranscriptBody::User { text } => format!("You: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("Claude: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "Claude thinking".to_owned(),
-        TranscriptBody::ToolUse { name, summary, detail } => match detail {
-            ToolDetail::Diff { lines, more_lines, .. } => {
+        TranscriptBody::ToolUse { name, summary, detail, .. } => match (task, detail) {
+            (Some(task), _) => format!(
+                "Tool {name}: {summary}, {} {}, {}",
+                task.kind.as_deref().unwrap_or("agent"),
+                if task.done { "done" } else { "running" },
+                task_counts(task).join(", ")
+            ),
+            (None, ToolDetail::Diff { lines, more_lines, .. }) => {
                 let (added, removed) = diff_counts(lines);
                 format!("Tool {name}: {summary}, {added} added, {removed} removed{}", {
                     if *more_lines > 0 {
@@ -1144,11 +1220,11 @@ pub fn entry_label(entry: &TranscriptEntry) -> String {
                     }
                 })
             }
-            ToolDetail::Todos { items } => {
+            (None, ToolDetail::Todos { items }) => {
                 let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
                 format!("Tool {name}: {done} of {} done", items.len())
             }
-            _ => format!("Tool {name}: {summary}"),
+            (None, _) => format!("Tool {name}: {summary}"),
         },
         TranscriptBody::ToolResult { tool, output, is_error } => format!(
             "Result of {}{}: {}",

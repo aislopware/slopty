@@ -2644,6 +2644,33 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   (Always between Allow and Deny in the tree, one tap answers for good), the app self-test
   (`write once more` taken with Always: the chip reads Accept edits; `write yet again`
   asks nothing).
+- ✅ **A subagent is followed under its call, never shown as the agent, protocol 20**
+  (2026-09-12). Probed on CLI 2.1.269 with an `Agent` (Explore) call: the subagent's own
+  `assistant` and `user` records stream on the same stdout with `parent_tool_use_id` set to
+  the spawning call, and around them come `system/task_started` (`tool_use_id`,
+  `description`, `subagent_type`, `prompt`, `is_backgrounded`) and `system/task_progress`
+  (`usage.tool_uses`, `usage.duration_ms`, `last_tool_name`, a "Running …" description);
+  no `task_completed` was seen — the call's own `tool_result` ends it. Before this the card
+  showed the subagent's thinking, tool calls and results inline as the agent's, moved the
+  status chip to the subagent's tools, and the last assistant line could be the
+  subagent's. Rulings: (1) `is_subagent` (sidechain in the file, `parent_tool_use_id` on
+  the stream) gates entries, progress and the model in one place — the transcript reader —
+  so the JSONL tail and the stream can never disagree; (2) the progress is one
+  `AgentTask` per spawning call, upserted (a start after progress keeps the counts) and
+  marked done by the result, sent whole each time like `AgentInfo`, and kept per session so
+  a client joining mid-run sees the running subagents; (3) the card needs the call id to
+  hang the task on, so `ToolUse` carries `call` — the same `tool_use_id` the results are
+  named after — rather than the client guessing by order, which breaks with two subagents;
+  (4) the line under the call says kind, state, tool uses, seconds and last tool and the
+  label says the same, because on the phone the subagent's minutes are the only sign the
+  turn is alive. Wire: `TranscriptBody::ToolUse.call`, `AgentTask`, `HostMsg::AgentTask`,
+  goldens `host_transcript` / `host_transcript_tools` / `host_agent_sessions` /
+  `client_hello` re-accepted, `host_agent_task` added, PROTOCOL_VERSION 19 → 20. Tests:
+  `a_subagents_own_records_are_not_entries` (`transcript`),
+  `a_subagent_is_followed_by_its_task_records_and_its_own_are_hidden` (`stream`, the
+  probe's six lines), headless `a_subagent_progresses_under_its_call` (the label through
+  running and done, the reset), the app self-test's `delegate the listing` turn (the
+  subagent's Bash absent, the task done in the dump and in the tree).
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

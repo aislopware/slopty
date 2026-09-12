@@ -18,7 +18,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use slopty_proto::agent::{
-    AgentStatus, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail, TranscriptEntry,
+    AgentStatus, AgentTask, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail,
+    TranscriptEntry,
 };
 
 use crate::transcript::{self, ToolNames};
@@ -73,6 +74,8 @@ pub enum Event {
         /// What the allow reply echoes, boxed to keep the event small.
         pending: Box<Pending>,
     },
+    /// A subagent started or progressed (`system/task_started`, `task_progress`).
+    Task(AgentTask),
     /// Claude Code answered a control request the host sent (an interrupt).
     ControlAck {
         /// The host's request id.
@@ -120,6 +123,24 @@ pub fn parse(line: &str) -> Option<Event> {
                 .filter(|m| !m.is_empty())
                 .map(str::to_owned),
         },
+        ("system", Some("task_started" | "task_progress")) => Event::Task(AgentTask {
+            call: string(&record, "tool_use_id"),
+            description: string(&record, "description"),
+            kind: record.get("subagent_type").and_then(Value::as_str).map(str::to_owned),
+            tool_uses: record
+                .get("usage")
+                .and_then(|u| u.get("tool_uses"))
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+            duration_ms: record
+                .get("usage")
+                .and_then(|u| u.get("duration_ms"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            last_tool: record.get("last_tool_name").and_then(Value::as_str).map(str::to_owned),
+            done: false,
+        }),
         ("system", Some("permission_denied")) => Event::Denied {
             tool: string(&record, "tool_name"),
             reason: record
@@ -434,6 +455,8 @@ pub enum Update {
     },
     /// A tool waits on the human; answer with [`Fold::answer`].
     Permission(PermissionRequest),
+    /// A subagent started, progressed or finished; the client shows it under its call.
+    Task(AgentTask),
     /// A turn ended.
     Turn(TurnResult),
     /// The session is up and said what it is.
@@ -453,6 +476,8 @@ pub enum Update {
 pub struct Fold {
     tools: ToolNames,
     pending: HashMap<String, Pending>,
+    /// The subagents seen, by the call that spawned them, for marking them done.
+    tasks: HashMap<String, AgentTask>,
     partial: String,
     status: Option<(AgentStatus, Option<String>)>,
     init: Option<Init>,
@@ -490,6 +515,23 @@ impl Fold {
             Event::TextDelta(text) => {
                 self.partial.push_str(&text);
                 vec![Update::Partial(self.partial.clone())]
+            }
+            Event::Task(task) => {
+                let mut task = task;
+                if let Some(seen) = self.tasks.get(&task.call) {
+                    // A start after progress, or progress without counts, keeps what is known.
+                    task.tool_uses = task.tool_uses.max(seen.tool_uses);
+                    task.duration_ms = task.duration_ms.max(seen.duration_ms);
+                    if task.last_tool.is_none() {
+                        task.last_tool.clone_from(&seen.last_tool);
+                    }
+                    if task.kind.is_none() {
+                        task.kind.clone_from(&seen.kind);
+                    }
+                    task.done = seen.done;
+                }
+                self.tasks.insert(task.call.clone(), task.clone());
+                vec![Update::Task(task)]
             }
             Event::Permission { request, pending } => {
                 self.pending.insert(request.id.clone(), *pending);
@@ -561,6 +603,28 @@ impl Fold {
 
     fn record(&mut self, record: &Value, now: u64) -> Vec<Update> {
         let mut out = Vec::new();
+        if transcript::is_subagent(record) {
+            // A subagent talking to itself: not the conversation, not the model, not the
+            // status. Its progress arrives as task records.
+            return out;
+        }
+        // A result for a call that spawned a subagent ends that subagent.
+        if let Some(blocks) =
+            record.get("message").and_then(|m| m.get("content")).and_then(Value::as_array)
+        {
+            for id in blocks.iter().filter_map(|b| {
+                (b.get("type").and_then(Value::as_str) == Some("tool_result"))
+                    .then(|| b.get("tool_use_id").and_then(Value::as_str))
+                    .flatten()
+            }) {
+                if let Some(task) = self.tasks.get_mut(id)
+                    && !task.done
+                {
+                    task.done = true;
+                    out.push(Update::Task(task.clone()));
+                }
+            }
+        }
         let is_assistant = record.get("type").and_then(Value::as_str) == Some("assistant");
         if is_assistant && !self.partial.is_empty() {
             self.partial.clear();
@@ -659,6 +723,7 @@ mod tests {
                     }
                     Update::Partial(_)
                     | Update::Permission(_)
+                    | Update::Task(_)
                     | Update::Model(_)
                     | Update::PermissionMode(_) => {}
                 }
@@ -779,6 +844,64 @@ mod tests {
         );
         assert_eq!(always_label(&json!([])), None);
         assert_eq!(always_label(&json!([{"type":"mystery"}])).as_deref(), Some("remember this"));
+    }
+
+    /// Probed on CLI 2.1.269: a subagent's own records carry `parent_tool_use_id`, and
+    /// `system/task_started` / `task_progress` follow it; the call's result ends it.
+    #[test]
+    fn a_subagent_is_followed_by_its_task_records_and_its_own_are_hidden() {
+        let mut fold = Fold::default();
+        let lines = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_p","name":"Agent","input":{"description":"List files","prompt":"ls","subagent_type":"Explore"}}]},"parent_tool_use_id":null}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"t","tool_use_id":"toolu_p","description":"List files","subagent_type":"Explore","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"ls"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_c","name":"Bash","input":{"command":"ls"}}]},"parent_tool_use_id":"toolu_p"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_c","content":"a.txt"}]},"parent_tool_use_id":"toolu_p"}"#,
+            r#"{"type":"system","subtype":"task_progress","task_id":"t","tool_use_id":"toolu_p","description":"Running List files","subagent_type":"Explore","usage":{"total_tokens":11283,"tool_uses":1,"duration_ms":2525},"last_tool_name":"Bash"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_p","content":"a.txt is there"}]},"parent_tool_use_id":null}"#,
+        ];
+        let mut updates = Vec::new();
+        for line in lines {
+            let Some(event) = parse(line) else { panic!("parses: {line}") };
+            updates.extend(fold.apply(event, 0));
+        }
+        let tasks: Vec<&AgentTask> = updates
+            .iter()
+            .filter_map(|u| if let Update::Task(t) = u { Some(t) } else { None })
+            .collect();
+        assert_eq!(tasks.len(), 3, "{updates:?}");
+        assert_eq!(
+            (tasks[0].tool_uses, tasks[0].done, tasks[0].kind.as_deref()),
+            (0, false, Some("Explore"))
+        );
+        assert_eq!(
+            (
+                tasks[1].tool_uses,
+                tasks[1].duration_ms,
+                tasks[1].last_tool.as_deref(),
+                tasks[1].done
+            ),
+            (1, 2525, Some("Bash"), false)
+        );
+        assert_eq!(tasks[1].description, "Running List files");
+        assert!(tasks[2].done && tasks[2].tool_uses == 1, "{:?}", tasks[2]);
+        let entries: Vec<&TranscriptEntry> = updates
+            .iter()
+            .filter_map(|u| if let Update::Entries(e) = u { Some(e) } else { None })
+            .flatten()
+            .collect();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| match &e.body {
+                TranscriptBody::ToolUse { name, call, .. } => {
+                    format!("{name}:{call}")
+                }
+                TranscriptBody::ToolResult { tool, .. } => {
+                    format!("result:{}", tool.as_deref().unwrap_or("?"))
+                }
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(names, ["Agent:toolu_p", "result:Agent"], "the subagent's Bash is not shown");
     }
 
     #[test]

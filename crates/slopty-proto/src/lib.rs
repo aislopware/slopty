@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 19;
+pub const PROTOCOL_VERSION: u16 = 20;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -181,6 +181,13 @@ pub enum HostMsg {
         /// The info.
         info: agent::AgentInfo,
     },
+    /// A subagent a driven agent spawned: started, progressing, or done.
+    AgentTask {
+        /// The agent session.
+        session: SessionId,
+        /// The subagent, whole.
+        task: agent::AgentTask,
+    },
     /// The answer to `ClientMsg::ListAgentSessions`.
     AgentSessions {
         /// The working directory listed.
@@ -209,6 +216,7 @@ impl HostMsg {
             Self::AgentPartial { .. } => "AgentPartial",
             Self::AgentPermission { .. } => "AgentPermission",
             Self::AgentInfo { .. } => "AgentInfo",
+            Self::AgentTask { .. } => "AgentTask",
             Self::AgentSessions { .. } => "AgentSessions",
         }
     }

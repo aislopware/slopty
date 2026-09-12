@@ -27,8 +27,8 @@ use slopty_client::canvas::{
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentAnswer, AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, BlockReason,
-    OpenAgent, PermissionRequest, TranscriptUpdate,
+    AgentAnswer, AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, AgentTask,
+    BlockReason, OpenAgent, PermissionRequest, TranscriptUpdate,
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
@@ -1171,6 +1171,13 @@ impl CanvasView {
     pub fn agent_info(&self, session: SessionId, info: AgentInfo, cx: &mut Context<Self>) {
         if let Some(view) = self.terminals.get(&session) {
             view.update(cx, |v, cx| v.agent_info(info, cx));
+        }
+    }
+
+    /// A subagent a driven agent spawned, for the view showing it.
+    pub fn agent_task(&self, session: SessionId, task: AgentTask, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.agent_task(task, cx));
         }
     }
 

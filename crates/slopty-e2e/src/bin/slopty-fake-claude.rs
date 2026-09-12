@@ -406,6 +406,56 @@ fn run() -> std::io::Result<()> {
                                     "input": input, "tool_use_id": tool_use, "requires_user_interaction": true}}),
             )?;
             waiting = Some(Wait::Permission { tool_use });
+        } else if text.starts_with("delegate") {
+            // A subagent: the Agent call, the task records that follow it, the subagent's own
+            // records under the call (which the card must not show), the call's result.
+            requests = requests.wrapping_add(1);
+            let call = format!("toolu_{requests}");
+            let brief =
+                json!({"description": "List files", "prompt": "ls", "subagent_type": "Explore"});
+            emit(
+                &mut out,
+                &fake.assistant(
+                    &json!([{"type": "tool_use", "id": call, "name": "Agent", "input": brief}]),
+                ),
+            )?;
+            emit(
+                &mut out,
+                &json!({"type": "system", "subtype": "task_started", "task_id": "task_1", "tool_use_id": call,
+                        "description": "List files", "subagent_type": "Explore", "is_backgrounded": true,
+                        "spawn_depth": 1, "task_type": "local_agent", "prompt": "ls", "session_id": fake.session, "uuid": "ts"}),
+            )?;
+            let under = |mut record: Value| {
+                if let Some(map) = record.as_object_mut() {
+                    map.insert("parent_tool_use_id".to_owned(), json!(call));
+                }
+                record
+            };
+            let sub = fake.assistant(&json!([{"type": "tool_use", "id": format!("{call}_c"), "name": "Bash", "input": {"command": "ls"}}]));
+            emit(&mut out, &under(sub))?;
+            let sub = fake.record(
+                "user",
+                &json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("{call}_c"), "content": "note.txt"}]}),
+            );
+            emit(&mut out, &under(sub))?;
+            emit(
+                &mut out,
+                &json!({"type": "system", "subtype": "task_progress", "task_id": "task_1", "tool_use_id": call,
+                        "description": "Running List files", "subagent_type": "Explore",
+                        "usage": {"total_tokens": 1000, "tool_uses": 1, "duration_ms": 2500},
+                        "last_tool_name": "Bash", "session_id": fake.session, "uuid": "tp"}),
+            )?;
+            emit(
+                &mut out,
+                &fake.record(
+                    "user",
+                    &json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call, "content": "The directory holds note.txt."}]}),
+                ),
+            )?;
+            let closing = "The subagent found note.txt.";
+            fake.note_reply(closing);
+            emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": closing}])))?;
+            emit(&mut out, &fake.result("success", closing))?;
         } else if text.starts_with("linger") {
             stream_deltas(&fake, &mut out)?;
             waiting = Some(Wait::Interrupt);
