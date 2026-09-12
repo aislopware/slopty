@@ -702,8 +702,13 @@ starts folded, a result shows its first 4 lines, and a tool call draws its `Tool
 (`tool_badge`), folded past 12 lines until a click; a todo list shows whole with what is
 done struck through and the item in progress in the accent tone; a command, a written file,
 a subagent's brief and a stranger's JSON open on a click; a read or a search opens to its
-slice or filter. A screen reader hears the counts ("Tool Edit: src/a.rs, 2 added, 1
-removed", "Tool TodoWrite: 1 of 3 done"); headless `an_edit_shows_its_diff_and_a_todo_list_its_checklist`,
+slice or filter. A call that named a file (an edit, a write, a read; `conversation::tool_path`)
+carries an "open" button in its header (`conversation-open-<entry>`, a11y "Open <path> in the
+editor") under the same rule as the answer's "run" button: drawn only while the canvas has a
+plain shell, and a click types `url::editor_command` for the path into that shell the way
+⌘-click on a path in a terminal does, without folding the call. A screen reader hears the
+counts ("Tool Edit: src/a.rs, 2 added, 1 removed", "Tool TodoWrite: 1 of 3 done"); headless
+`an_edit_shows_its_diff_and_a_todo_list_its_checklist` and `a_tool_calls_path_opens_in_the_canvas_shell`,
 the app self-test's `edit` turn against the fake (golden `conversation-tools`). Under the list sits the
 **composer**, a gpui-kit `TextareaState` growing from one to six rows: ↩ sends the text into
 the session as `TermRequest::Paste` followed by an Enter key (an empty ↩ sends the bare

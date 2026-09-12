@@ -160,6 +160,14 @@ pub fn shell_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// The command that opens `path` in the shell's editor: `$EDITOR`, else `vi`, at `line`
+/// when one is known. Typed at a prompt, so the shell expands the variable itself.
+#[must_use]
+pub fn editor_command(path: &str, line: Option<u32>) -> String {
+    let at = line.map(|l| format!("+{l} ")).unwrap_or_default();
+    format!("${{EDITOR:-vi}} {at}{}", shell_word(path))
+}
+
 /// The URL in `text` that covers byte `offset`.
 #[must_use]
 pub fn url_at(text: &str, offset: usize) -> Option<&str> {
@@ -261,6 +269,8 @@ mod tests {
         );
         assert_eq!(path_at_col(&line, 1), None);
         assert_eq!(shell_word("it's a b"), "'it'\\''s a b'");
+        assert_eq!(editor_command("a b.rs", Some(3)), "${EDITOR:-vi} +3 'a b.rs'");
+        assert_eq!(editor_command("/x/y", None), "${EDITOR:-vi} '/x/y'");
     }
 
     #[test]

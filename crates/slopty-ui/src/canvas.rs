@@ -5020,6 +5020,87 @@ mod tests {
         );
     }
 
+    /// A tool call that named a file (an edit here) offers "open" while the canvas has a
+    /// plain shell, and a click types the editor command for that file into it — without
+    /// folding the call, whose header the button sits in.
+    #[gpui::test]
+    fn a_tool_calls_path_opens_in_the_canvas_shell(cx: &mut TestAppContext) {
+        use slopty_proto::agent::{DiffKind, DiffLine, ToolDetail};
+        let (view, mut rx, me, cx) = canvas(cx);
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, SHELL, 1);
+        view.update_in(cx, |c, _window, cx| {
+            c.transcript_update(
+                TranscriptUpdate {
+                    session: agent,
+                    reset: true,
+                    entries: vec![TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::ToolUse {
+                            call: "t1".to_owned(),
+                            name: "Edit".to_owned(),
+                            summary: "src/it's.rs".to_owned(),
+                            detail: ToolDetail::Diff {
+                                path: "/tmp/work/src/it's.rs".to_owned(),
+                                lines: vec![DiffLine { kind: DiffKind::Added, text: "x".into() }],
+                                more_lines: 0,
+                                replace_all: false,
+                            },
+                        },
+                    }],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-entry-0").is_some(), "the call is drawn");
+        assert!(cx.debug_bounds("conversation-open-0").is_none(), "no shell: nowhere to open it");
+
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, Rect { x: 760.0, ..SHELL }, 2);
+        view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
+        cx.run_until_parked();
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.is("Button", Some("Open /tmp/work/src/it's.rs in the editor"))),
+            "{tree:#?}"
+        );
+        let open = cx.debug_bounds("conversation-open-0").expect("the call's open button");
+        let folded_before = view.read_with(cx, |c, cx| {
+            c.terminals[&agent].read(cx).conversation().is_some_and(|conv| conv.is_open(0))
+        });
+        drain(&mut rx);
+
+        cx.simulate_click(open.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(terminal_focused(&view, cx, shell), "the shell was revealed and took the keyboard");
+        let sent: Vec<TermRequest> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { session, req }
+                    if session == shell
+                        && matches!(req, TermRequest::Paste(_) | TermRequest::Key(_)) =>
+                {
+                    Some(req)
+                }
+                _ => None,
+            })
+            .collect();
+        match sent.as_slice() {
+            [TermRequest::Paste(code), TermRequest::Key(key)] => {
+                assert_eq!(code, "${EDITOR:-vi} '/tmp/work/src/it'\\''s.rs'", "quoted as one word");
+                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+            }
+            other => panic!("a paste then one ↩ into the shell: {other:?}"),
+        }
+        let folded_after = view.read_with(cx, |c, cx| {
+            c.terminals[&agent].read(cx).conversation().is_some_and(|conv| conv.is_open(0))
+        });
+        assert_eq!(folded_before, folded_after, "the click did not fold the call");
+    }
+
     /// "Ask the agent" with no agent card on the canvas opens one in the active shell's
     /// directory, and the block lands in its composer once the card has one.
     #[gpui::test]

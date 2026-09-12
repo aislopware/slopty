@@ -1536,6 +1536,7 @@ fn entry(
                             .child(SharedString::from(summary.clone())),
                     )
                     .children(tool_badge(detail, theme))
+                    .children(run.and_then(|r| open_button(ix, detail, r, theme)))
                     .on_click(toggle),
             )
             .children(task.map(|t| task_line(t, theme)))
@@ -1814,6 +1815,54 @@ fn code_segment(
                 .child(SharedString::from(body.to_owned())),
         )
         .into_any_element()
+}
+
+/// The file a tool call touched, when it named one — an edit, a write or a read — and the
+/// line to open it at: a read's first line, when the agent asked for a slice.
+#[must_use]
+pub fn tool_path(detail: &ToolDetail) -> Option<(&str, Option<u32>)> {
+    match detail {
+        ToolDetail::Diff { path, .. } | ToolDetail::Write { path, .. } => Some((path, None)),
+        ToolDetail::Read { path, offset, .. } => Some((path, *offset)),
+        _ => None,
+    }
+}
+
+/// An "open" button on a tool call that named a file: it types the editor command for that
+/// file into the canvas's shell (`run` is the view to ask, as for a fenced block). The
+/// header row it sits in folds the call on a click, so the button keeps its own.
+fn open_button(
+    ix: usize,
+    detail: &ToolDetail,
+    run: &Entity<TerminalView>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let (path, line) = tool_path(detail)?;
+    let path = path.to_owned();
+    let s = &theme.surfaces;
+    let view = run.clone();
+    let id = format!("conversation-open-{ix}");
+    Some(
+        div()
+            .id(ElementId::Name(id.clone().into()))
+            .debug_selector(move || id)
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Open {path} in the editor")))
+            .flex_none()
+            .px(px(theme.spacing.xs))
+            .rounded(px(theme.radii.xs))
+            .cursor_pointer()
+            .text_color(hsla(s.text_muted))
+            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_click(move |_ev, _window, cx| {
+                cx.stop_propagation();
+                let command = crate::terminal::url::editor_command(&path, line);
+                view.update(cx, |_v, cx| cx.emit(TerminalViewEvent::RunInShell(command)));
+            })
+            .child("open")
+            .into_any_element(),
+    )
 }
 
 /// A clipped text as a mono block at `small()`, with the count of what the host or the fold

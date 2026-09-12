@@ -171,6 +171,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and revealing it with the keyboard in its terminal), and the app self-test's notes scenario,
   which now makes its note through the palette.
 
+- ✅ **A tool call's file opens in the canvas's shell** (2026-09-12). The card shows the
+  agent editing `src/a.rs`; the human's next move is to look at that file, and finding it
+  by hand meant a shell, a `cd` and a typed path. Ruling: an edit, a write and a read
+  (`conversation::tool_path`, the three `ToolDetail`s that name one file) get an "open"
+  button in the call's header, gated exactly as the answer's "run" button is (the canvas's
+  `set_can_run_in_shell` flag: a plain shell exists) and going through the same
+  `TerminalViewEvent::RunInShell` — the command is `url::editor_command`, the
+  `${EDITOR:-vi} 'path'` line ⌘-click on a path in a terminal types, so one rule says what
+  "open" means everywhere and the shell, not the client, expands `$EDITOR`. Claude Code's
+  file tools take absolute paths, so the shell's directory does not matter. The button lives
+  in the fold row and stops its click's propagation so opening does not toggle the call.
+  A read that asked for a slice opens at its first line (`offset`); a diff carries no line
+  on the wire, so an edit opens at the top. Ids `conversation-open-<entry>`,
+  a11y "Open <path> in the editor". Test: headless
+  `a_tool_calls_path_opens_in_the_canvas_shell` (no button with only the card; a shell joins
+  and it appears; the click reveals the shell and its channel gets one `Paste` of the quoted
+  editor command then `Key(Enter)`; the call's fold state is unchanged).
+
 - ✅ **A fenced block runs in the canvas's shell, and the canvas decides which one**
   (2026-09-12, the question "A fenced block in an answer is its own element" left open).
   "Copy" got the command out of the answer but the human still had to find a shell and paste

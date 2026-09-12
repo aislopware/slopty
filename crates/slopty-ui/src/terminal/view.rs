@@ -1160,8 +1160,7 @@ impl TerminalView {
             cx.emit(TerminalViewEvent::Notice(format!("Copied {}", span.path)));
             return;
         }
-        let at = span.line.map(|l| format!("+{l} ")).unwrap_or_default();
-        let command = format!("${{EDITOR:-vi}} {at}{}", url::shell_word(&span.path));
+        let command = url::editor_command(&span.path, span.line);
         tracing::info!(path = %span.path, line = ?span.line, "open path");
         self.run_text(command, cx);
     }
