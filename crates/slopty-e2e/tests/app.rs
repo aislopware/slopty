@@ -527,6 +527,31 @@ mod tests {
         assert!(conv.entries.contains(&"result Write: wrote note.txt".to_owned()), "{conv:?}");
         assert!(conv.attention.is_none() && conv.permission.is_none(), "{conv:?}");
 
+        // An edit the settings allow: no permission, and the card shows the call as a diff
+        // with its counts and the todo list as a checklist (the golden is that card).
+        drv.type_text("edit the note").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the edit's diff and the todo list", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries.last().map(String::as_str)
+                            == Some("assistant: Edited: hi is now hello.")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(conv.entries.contains(&"tool Edit: note.txt (+1 -1)".to_owned()), "{conv:?}");
+        assert!(conv.entries.contains(&"tool TodoWrite: 1/2 done".to_owned()), "{conv:?}");
+        assert!(
+            dump.a11y_node("ListItem", Some("Tool Edit: note.txt, 1 added, 1 removed")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+        let frame = drv.render(&stack.dir.path().join("tools.png")).await.unwrap();
+        assert_matches("conversation-tools", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
         // Deny: the call fails with the host's message and the agent says so.
         drv.type_text("write it again").await.unwrap();
         drv.keys("enter").await.unwrap();
@@ -610,7 +635,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 7))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 9))
             })
             .await
             .unwrap();
@@ -625,6 +650,8 @@ mod tests {
                 "assistant: Total cost: $0.02".to_owned(),
                 "user: linger".to_owned(),
                 "user: write the note".to_owned(),
+                "user: edit the note".to_owned(),
+                "assistant: Edited: hi is now hello.".to_owned(),
                 "user: write it again".to_owned(),
             ],
             "the whole past, oldest first (the fake logs text replies only)"

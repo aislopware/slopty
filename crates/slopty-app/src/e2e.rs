@@ -30,7 +30,10 @@ use slopty_e2e::{
     Button, Command, ConversationInfo, Dump, FaceInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
     Reply, ScreenInfo, TerminalInfo, WindowInfo,
 };
-use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason, TranscriptBody, TranscriptEntry};
+use slopty_proto::agent::{
+    AgentSource, AgentStatus, BlockReason, DiffKind, TodoStatus, ToolDetail, TranscriptBody,
+    TranscriptEntry,
+};
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
 use slopty_ui::screen::ScreenView;
@@ -659,7 +662,18 @@ fn entry_line(entry: &TranscriptEntry) -> String {
         TranscriptBody::User { text } => format!("user: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("assistant: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "thinking".to_owned(),
-        TranscriptBody::ToolUse { name, summary, .. } => format!("tool {name}: {summary}"),
+        TranscriptBody::ToolUse { name, summary, detail } => match detail {
+            ToolDetail::Diff { lines, .. } => {
+                let added = lines.iter().filter(|l| l.kind == DiffKind::Added).count();
+                let removed = lines.iter().filter(|l| l.kind == DiffKind::Removed).count();
+                format!("tool {name}: {summary} (+{added} -{removed})")
+            }
+            ToolDetail::Todos { items } => {
+                let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+                format!("tool {name}: {done}/{} done", items.len())
+            }
+            _ => format!("tool {name}: {summary}"),
+        },
         TranscriptBody::ToolResult { tool, output, is_error } => format!(
             "result {}{}: {}",
             tool.as_deref().unwrap_or("?"),

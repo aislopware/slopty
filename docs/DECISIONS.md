@@ -2554,6 +2554,36 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   bar's Esc, and the fake's `linger` turn is now ended by a click on it. The self-test's private
   `HOME` (also given to the driven launch now, the way the fake-claude launch already did)
   keeps the fake's transcripts out of the developer's `~/.claude`.
+- ✅ **A tool call rides the wire as what it would do, not as its JSON, protocol 17**
+  (2026-09-12). The card showed every tool call as a name, a one-line summary and its input
+  as pretty JSON behind a fold — a `Bash` read fine, an `Edit` did not: the change was two
+  JSON strings with escaped newlines, and the TUI's inline diff was the one thing the card
+  had no answer to (the ruling above kept ⌘⇧T's TUI beside the card for exactly that).
+  Rulings: (1) the host reads the input into a `ToolDetail` (`Command`, `Diff`, `Write`,
+  `Read`, `Search`, `Todos`, `Agent`, `Json`) and the client draws the shape — the host
+  already knows Claude Code's tools (it names their summaries), the diff is computed once for
+  every client instead of on each, and a phone with no `similar` and no JSON parse in its
+  paint path is the point; (2) the diff is `old_string` against `new_string` line by line
+  (`similar` 3.2, `TextDiff::from_lines`), so a one-line change inside a ten-line
+  `old_string` reads as context around one removed and one added, cut to the same 40 lines /
+  4 000 characters as any long text with the count of what was dropped; (3) a known tool
+  whose input lacks the field it is known by degrades to `Json`, never to an empty block, so
+  a shape change on the agent's side shows what the card showed before; (4) a `Todo` with
+  no text is dropped and the status is Claude Code's three (`pending`, `in_progress`,
+  `completed`); (5) the `PermissionRequest` carries the same `ToolDetail` in place of its
+  JSON, so the row and the entry never disagree; (6) on the card an edit's diff and a todo
+  list show *unasked* — the diff is the point of the entry — the diff folded past 12 lines
+  (`DIFF_PREVIEW_LINES`, three times a result's 4: a diff is read whole or not at all),
+  everything else opens on the click it always did; (7) a screen reader hears the counts,
+  not the lines. Wire: `TranscriptBody::ToolUse.input` → `detail`,
+  `PermissionRequest.input` → `detail`, goldens `host_transcript` /
+  `host_agent_permission` / `client_hello` re-accepted and `host_transcript_tools` (every
+  shape) added, PROTOCOL_VERSION 16 → 17. Tests:
+  `an_edit_is_a_diff_a_todo_list_a_checklist_and_a_stranger_its_json`,
+  `a_long_diff_is_cut_like_any_long_text` (`slopty_agent::transcript`), headless
+  `an_edit_shows_its_diff_and_a_todo_list_its_checklist` (tinted rows counted in the scene,
+  the fold, the labels), and the app self-test's `edit` turn against the fake (an `Edit` and
+  a `TodoWrite` the settings allow, golden `conversation-tools`).
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

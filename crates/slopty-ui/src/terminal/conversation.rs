@@ -28,7 +28,10 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
-use slopty_proto::agent::{AgentInfo, Clipped, TranscriptBody, TranscriptEntry, TranscriptUpdate};
+use slopty_proto::agent::{
+    AgentInfo, Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
+    TranscriptEntry, TranscriptUpdate,
+};
 use slopty_theme::{Theme, alpha};
 
 use crate::a11y::tab_stop;
@@ -37,6 +40,9 @@ use crate::terminal::view::TerminalView;
 
 /// Lines of a tool result shown before it is opened.
 pub const RESULT_PREVIEW_LINES: usize = 4;
+/// Lines of an edit's diff shown before it is opened: a diff is the point of the entry, so
+/// it shows unasked, but a long one folds past this.
+pub const DIFF_PREVIEW_LINES: usize = 12;
 /// The composer grows with its text up to this many rows, then scrolls.
 const COMPOSER_MAX_ROWS: usize = 6;
 /// The models the chip offers, as Claude Code's `--model` aliases with their names.
@@ -896,7 +902,7 @@ fn entry(
             )
             .when(open, |el| el.child(clipped_block(text, &mono, theme)))
             .into_any_element(),
-        TranscriptBody::ToolUse { name, summary, input } => row
+        TranscriptBody::ToolUse { name, summary, detail } => row
             .flex()
             .flex_col()
             .gap(px(spacing.xs))
@@ -918,9 +924,10 @@ fn entry(
                             .text_color(hsla(s.text_secondary))
                             .child(SharedString::from(summary.clone())),
                     )
+                    .children(tool_badge(detail, theme))
                     .on_click(toggle),
             )
-            .when(open, |el| el.child(clipped_block(input, &mono, theme)))
+            .children(tool_body(detail, open, &mono, theme))
             .into_any_element(),
         TranscriptBody::ToolResult { tool, output, is_error } => {
             let (shown, hidden) = preview(output, open);
@@ -956,7 +963,23 @@ pub fn entry_label(entry: &TranscriptEntry) -> String {
         TranscriptBody::User { text } => format!("You: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("Claude: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "Claude thinking".to_owned(),
-        TranscriptBody::ToolUse { name, summary, .. } => format!("Tool {name}: {summary}"),
+        TranscriptBody::ToolUse { name, summary, detail } => match detail {
+            ToolDetail::Diff { lines, more_lines, .. } => {
+                let (added, removed) = diff_counts(lines);
+                format!("Tool {name}: {summary}, {added} added, {removed} removed{}", {
+                    if *more_lines > 0 {
+                        format!(", {more_lines} more lines")
+                    } else {
+                        String::new()
+                    }
+                })
+            }
+            ToolDetail::Todos { items } => {
+                let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+                format!("Tool {name}: {done} of {} done", items.len())
+            }
+            _ => format!("Tool {name}: {summary}"),
+        },
         TranscriptBody::ToolResult { tool, output, is_error } => format!(
             "Result of {}{}: {}",
             tool.as_deref().unwrap_or("a tool"),
@@ -1014,6 +1037,193 @@ fn clipped_block(text: &Clipped, mono: &str, theme: &Theme) -> AnyElement {
             )
         })
         .into_any_element()
+}
+
+/// What a tool call would do, under its header: an edit's diff and a todo list show
+/// unasked (the diff folded past [`DIFF_PREVIEW_LINES`]); a command, a written file, a
+/// subagent's brief and an unknown tool's JSON open on a click; a read or a search has
+/// only its slice or filter to add and shows it when opened.
+fn tool_body(detail: &ToolDetail, open: bool, mono: &str, theme: &Theme) -> Option<AnyElement> {
+    let s = &theme.surfaces;
+    let small = theme.typography.small();
+    let block = |text: &Clipped| clipped_block(text, mono, theme);
+    let line = |text: String| {
+        div()
+            .pl(px(theme.spacing.lg))
+            .text_size(px(small))
+            .text_color(hsla(s.text_muted))
+            .child(SharedString::from(text))
+    };
+    match detail {
+        ToolDetail::Diff { lines, more_lines, replace_all, .. } => {
+            let shown = if open { lines.len() } else { lines.len().min(DIFF_PREVIEW_LINES) };
+            let hidden = lines.len().saturating_sub(shown);
+            let more = u32::try_from(hidden).unwrap_or(u32::MAX).saturating_add(*more_lines);
+            let mut rows: Vec<AnyElement> = lines
+                .iter()
+                .take(shown)
+                .map(|l| diff_row(l, mono, theme).into_any_element())
+                .collect();
+            if more > 0 {
+                rows.push(
+                    div()
+                        .italic()
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(format!("{more} more lines")))
+                        .into_any_element(),
+                );
+            }
+            if *replace_all {
+                rows.push(
+                    div()
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from("every occurrence"))
+                        .into_any_element(),
+                );
+            }
+            Some(
+                div()
+                    .id("tool-diff")
+                    .flex()
+                    .flex_col()
+                    .pl(px(theme.spacing.lg))
+                    .font_family(mono.to_owned())
+                    .text_size(px(small))
+                    .children(rows)
+                    .into_any_element(),
+            )
+        }
+        ToolDetail::Todos { items } => Some(
+            div()
+                .id("tool-todos")
+                .flex()
+                .flex_col()
+                .pl(px(theme.spacing.lg))
+                .text_size(px(small))
+                .children(items.iter().map(|t| todo_row(t, theme)))
+                .into_any_element(),
+        ),
+        ToolDetail::Command { command, description } if open => Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xs))
+                .child(block(command))
+                .children(description.as_ref().map(|d| line(d.clone())))
+                .into_any_element(),
+        ),
+        ToolDetail::Write { content, .. } if open => Some(block(content)),
+        ToolDetail::Agent { kind, prompt, .. } if open => Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xs))
+                .children(kind.as_ref().map(|k| line(format!("as {k}"))))
+                .child(block(prompt))
+                .into_any_element(),
+        ),
+        ToolDetail::Json { input } if open => Some(block(input)),
+        ToolDetail::Read { offset, limit, .. } if open => {
+            let slice = match (offset, limit) {
+                (Some(o), Some(n)) => format!("lines {o} to {}", o.saturating_add(*n)),
+                (Some(o), None) => format!("from line {o}"),
+                (None, Some(n)) => format!("first {n} lines"),
+                (None, None) => "whole file".to_owned(),
+            };
+            Some(line(slice).into_any_element())
+        }
+        ToolDetail::Search { path, glob, .. } if open => {
+            let mut parts = Vec::new();
+            if let Some(p) = path {
+                parts.push(format!("in {p}"));
+            }
+            if let Some(g) = glob {
+                parts.push(format!("files {g}"));
+            }
+            if parts.is_empty() {
+                parts.push("everywhere".to_owned());
+            }
+            Some(line(parts.join(", ")).into_any_element())
+        }
+        _ => None,
+    }
+}
+
+/// The "+a −r" of an edit in the tool header, added in the success tone and removed in the
+/// error tone; nothing for any other tool.
+fn tool_badge(detail: &ToolDetail, theme: &Theme) -> Option<AnyElement> {
+    let ToolDetail::Diff { lines, .. } = detail else { return None };
+    let (added, removed) = diff_counts(lines);
+    let s = &theme.surfaces;
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .gap(px(theme.spacing.xs))
+            .text_size(px(theme.typography.caption()))
+            .child(div().text_color(hsla(s.success)).child(SharedString::from(format!("+{added}"))))
+            .child(div().text_color(hsla(s.error)).child(SharedString::from(format!("−{removed}"))))
+            .into_any_element(),
+    )
+}
+
+/// Lines added and removed in a diff.
+fn diff_counts(lines: &[DiffLine]) -> (usize, usize) {
+    let added = lines.iter().filter(|l| l.kind == DiffKind::Added).count();
+    let removed = lines.iter().filter(|l| l.kind == DiffKind::Removed).count();
+    (added, removed)
+}
+
+/// One diff line: a sign column, then the text, the row tinted in the success tone for an
+/// addition, the error tone for a removal, nothing for context.
+fn diff_row(line: &DiffLine, mono: &str, theme: &Theme) -> impl IntoElement {
+    let s = &theme.surfaces;
+    let (sign, tone) = match line.kind {
+        DiffKind::Context => (" ", None),
+        DiffKind::Added => ("+", Some(s.success)),
+        DiffKind::Removed => ("−", Some(s.error)),
+    };
+    div()
+        .flex()
+        .w_full()
+        .px(px(theme.spacing.xs))
+        .font_family(mono.to_owned())
+        .text_color(hsla(if tone.is_some() { s.text } else { s.text_muted }))
+        .when_some(tone, |el, tone| el.bg(hsla_alpha(tone, alpha::TINT)))
+        .child(
+            div()
+                .flex_none()
+                .w(px(theme.spacing.md))
+                .text_color(hsla(tone.unwrap_or(s.text_muted)))
+                .child(sign),
+        )
+        .child(div().flex_1().min_w(px(0.0)).whitespace_normal().child(SharedString::from(
+            if line.text.is_empty() { " ".to_owned() } else { line.text.clone() },
+        )))
+}
+
+/// One todo: a mark for its state, then the text; done items are struck through and muted,
+/// the one in progress is in the accent tone.
+fn todo_row(todo: &Todo, theme: &Theme) -> impl IntoElement {
+    let s = &theme.surfaces;
+    let (mark, color) = match todo.status {
+        TodoStatus::Pending => ("○", s.text_secondary),
+        TodoStatus::InProgress => ("●", s.accent),
+        TodoStatus::Completed => ("✓", s.text_muted),
+    };
+    div()
+        .flex()
+        .gap(px(theme.spacing.sm))
+        .text_color(hsla(color))
+        .child(div().flex_none().w(px(theme.spacing.md)).child(mark))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .whitespace_normal()
+                .when(todo.status == TodoStatus::Completed, gpui::Styled::line_through)
+                .child(SharedString::from(todo.text.clone())),
+        )
 }
 
 /// A fold's header: "▸ thinking" / "▾ thinking", with the line count while folded.

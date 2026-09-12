@@ -1889,7 +1889,7 @@ impl Render for TerminalView {
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Line, RowUpdate, SemanticMark, Style, TermModes};
-    use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry};
+    use slopty_proto::agent::{Clipped, ToolDetail, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
@@ -1932,7 +1932,10 @@ mod tests {
             body: TranscriptBody::ToolUse {
                 name: "Bash".to_owned(),
                 summary: command.to_owned(),
-                input: Clipped::whole(format!("{{\n  \"command\": \"{command}\"\n}}")),
+                detail: ToolDetail::Command {
+                    command: Clipped::whole(command.to_owned()),
+                    description: None,
+                },
             },
         }
     }
@@ -2538,6 +2541,85 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(0))));
     }
 
+    /// An edit shows as its diff unasked — added lines tinted in the success tone, removed
+    /// in the error tone, the counts in the header — folded past its preview until a click;
+    /// a todo list shows whole, with what is done struck through; a screen reader hears the
+    /// counts.
+    #[gpui::test]
+    fn an_edit_shows_its_diff_and_a_todo_list_its_checklist(cx: &mut TestAppContext) {
+        use slopty_proto::agent::{DiffKind, DiffLine, Todo, TodoStatus};
+        let (view, _rx, cx) = terminal(cx);
+        // Tall enough for the whole open diff: the list is bottom-aligned and would scroll
+        // the top rows out of the scene otherwise.
+        cx.simulate_resize(size(px(400.0), px(900.0)));
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        let line = |kind, text: &str| DiffLine { kind, text: text.to_owned() };
+        let mut lines = vec![line(DiffKind::Context, "fn a() {")];
+        lines.extend((0..10).map(|i| line(DiffKind::Removed, &format!("    old {i}"))));
+        lines.extend((0..10).map(|i| line(DiffKind::Added, &format!("    new {i}"))));
+        lines.push(line(DiffKind::Context, "}"));
+        let edit = TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                name: "Edit".to_owned(),
+                summary: "src/a.rs".to_owned(),
+                detail: ToolDetail::Diff {
+                    path: "src/a.rs".to_owned(),
+                    lines,
+                    more_lines: 0,
+                    replace_all: false,
+                },
+            },
+        };
+        let todos = TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                name: "TodoWrite".to_owned(),
+                summary: String::new(),
+                detail: ToolDetail::Todos {
+                    items: vec![
+                        Todo { text: "read".to_owned(), status: TodoStatus::Completed },
+                        Todo { text: "write".to_owned(), status: TodoStatus::InProgress },
+                        Todo { text: "test".to_owned(), status: TodoStatus::Pending },
+                    ],
+                },
+            },
+        };
+        let update = TranscriptUpdate { session, reset: true, entries: vec![edit, todos] };
+        view.update(cx, |v, cx| v.transcript_update(update, cx));
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+
+        let theme = view.read_with(cx, |v, _| v.theme().clone());
+        let s = &theme.surfaces;
+        let tinted = |cx: &mut VisualTestContext, tone| {
+            let want = hsla_alpha(tone, alpha::TINT);
+            let quads = cx.update(|window, _| window.painted_quads());
+            quads.iter().filter(|q| q.background.as_solid().is_some_and(|c| c == want)).count()
+        };
+        // Folded: the preview's lines, ten removed and two added.
+        assert_eq!(tinted(cx, s.error), 10, "removed lines in the error tint");
+        assert_eq!(tinted(cx, s.success), 1, "added lines in the success tint, folded");
+        let folded = cx.debug_bounds("conversation-entry-0").expect("the edit");
+        let header = point(folded.center().x, folded.top() + px(6.0));
+        cx.simulate_click(header, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(tinted(cx, s.success), 10, "every added line once open");
+        let open = cx.debug_bounds("conversation-entry-0").expect("the edit");
+        assert!(open.size.height > folded.size.height);
+        assert!(cx.debug_bounds("conversation-entry-1").is_some(), "the todo list is drawn");
+
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let labels: Vec<String> =
+            tree.iter().filter(|n| n.role == "ListItem").filter_map(|n| n.label.clone()).collect();
+        assert_eq!(
+            labels,
+            ["Tool Edit: src/a.rs, 10 added, 10 removed", "Tool TodoWrite: 1 of 3 done"],
+            "{tree:#?}"
+        );
+    }
+
     /// An input method previews its composition at the cursor and nothing reaches the host
     /// until it commits; the commit goes out as raw bytes and clears the preview.
     #[gpui::test]
@@ -2929,7 +3011,7 @@ mod tests {
             tool_use: "toolu_1".to_owned(),
             tool: "Write".to_owned(),
             summary: "note.txt".to_owned(),
-            input: Clipped::whole("{}".to_owned()),
+            detail: ToolDetail::Json { input: Clipped::whole("{}".to_owned()) },
         };
         view.update(cx, |v, cx| {
             v.agent_permission(request, cx);

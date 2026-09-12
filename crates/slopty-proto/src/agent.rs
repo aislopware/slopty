@@ -185,8 +185,8 @@ pub enum TranscriptBody {
         name: String,
         /// One line about the call: the command, the file, the pattern.
         summary: String,
-        /// The whole input as pretty JSON, clipped; shown on expand.
-        input: Clipped,
+        /// What the call would do, in the shape the client draws it.
+        detail: ToolDetail,
     },
     /// What a tool returned.
     ToolResult {
@@ -228,8 +228,118 @@ pub struct PermissionRequest {
     pub tool: String,
     /// One line about the call, the same line the transcript shows for it.
     pub summary: String,
-    /// The whole input as pretty JSON, clipped.
-    pub input: Clipped,
+    /// What the call would do, the same shape the transcript entry carries.
+    pub detail: ToolDetail,
+}
+
+/// What a tool call would do, in the shape the client draws.
+///
+/// Read from the call's input on the host: an edit is a diff, a todo list is a checklist, a
+/// command is a command line, and a tool nobody taught the host is its input as pretty JSON.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ToolDetail {
+    /// A shell command (`Bash`).
+    Command {
+        /// The command line, clipped.
+        command: Clipped,
+        /// What the agent said it is for.
+        description: Option<String>,
+    },
+    /// A file edit (`Edit`): the replaced text against its replacement, line by line.
+    Diff {
+        /// The file.
+        path: String,
+        /// The change, clipped to the same size as any other long text.
+        lines: Vec<DiffLine>,
+        /// Diff lines dropped after `lines`; zero when nothing was cut.
+        more_lines: u32,
+        /// Every occurrence is replaced, not only the first.
+        replace_all: bool,
+    },
+    /// A file written whole (`Write`).
+    Write {
+        /// The file.
+        path: String,
+        /// The content, clipped.
+        content: Clipped,
+    },
+    /// A file read (`Read`).
+    Read {
+        /// The file.
+        path: String,
+        /// The first line read, when the agent asked for a slice.
+        offset: Option<u32>,
+        /// Lines read, when the agent asked for a slice.
+        limit: Option<u32>,
+    },
+    /// A search (`Grep`, `Glob`).
+    Search {
+        /// The pattern.
+        pattern: String,
+        /// Where, when the agent said.
+        path: Option<String>,
+        /// A file filter, when the agent gave one.
+        glob: Option<String>,
+    },
+    /// The agent's task list (`TodoWrite`), whole.
+    Todos {
+        /// The items in the agent's order.
+        items: Vec<Todo>,
+    },
+    /// A subagent (`Agent`, `Task`).
+    Agent {
+        /// The agent's one-line brief.
+        description: String,
+        /// The agent kind, when the agent chose one.
+        kind: Option<String>,
+        /// The whole brief, clipped.
+        prompt: Clipped,
+    },
+    /// Any other tool: the input as pretty JSON, clipped.
+    Json {
+        /// The input.
+        input: Clipped,
+    },
+}
+
+/// One line of a [`ToolDetail::Diff`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DiffLine {
+    /// Kept, removed or added.
+    pub kind: DiffKind,
+    /// The line without its newline.
+    pub text: String,
+}
+
+/// Which side of a diff a line is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum DiffKind {
+    /// The same on both sides.
+    Context,
+    /// Only in the replaced text.
+    Removed,
+    /// Only in the replacement.
+    Added,
+}
+
+/// One item of a [`ToolDetail::Todos`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Todo {
+    /// The item as the agent wrote it.
+    pub text: String,
+    /// Where it stands.
+    pub status: TodoStatus,
+}
+
+/// Where a [`Todo`] stands, in Claude Code's three states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TodoStatus {
+    /// Not started.
+    Pending,
+    /// The one being worked on.
+    InProgress,
+    /// Done.
+    Completed,
 }
 
 /// Client → host: start or stop following a session's conversation.

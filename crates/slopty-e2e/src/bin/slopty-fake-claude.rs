@@ -302,6 +302,36 @@ fn run() -> std::io::Result<()> {
                                     "input": input, "description": "Write note.txt", "tool_use_id": tool_use}}),
             )?;
             waiting = Some(Wait::Permission { tool_use });
+        } else if text.starts_with("edit") {
+            // An edit the settings already allow: the call, its result and a todo list, no
+            // permission asked. What the card makes of them is the point.
+            requests = requests.wrapping_add(1);
+            let edit = json!({"file_path": "note.txt", "old_string": "hi\nthere", "new_string": "hello\nthere"});
+            let todos = json!({"todos": [
+                {"content": "Edit the note", "status": "completed", "activeForm": "Editing the note"},
+                {"content": "Tell the user", "status": "in_progress", "activeForm": "Telling the user"}
+            ]});
+            emit(
+                &mut out,
+                &fake.assistant(&json!([
+                    {"type": "tool_use", "id": format!("toolu_{requests}"), "name": "Edit", "input": edit},
+                    {"type": "tool_use", "id": format!("toolu_{requests}_todo"), "name": "TodoWrite", "input": todos}
+                ])),
+            )?;
+            emit(
+                &mut out,
+                &fake.record(
+                    "user",
+                    &json!({"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": format!("toolu_{requests}"), "content": "The file note.txt has been updated."},
+                        {"type": "tool_result", "tool_use_id": format!("toolu_{requests}_todo"), "content": "Todos have been modified successfully."}
+                    ]}),
+                ),
+            )?;
+            let closing = "Edited: hi is now hello.";
+            fake.note_reply(closing);
+            emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": closing}])))?;
+            emit(&mut out, &fake.result("success", closing))?;
         } else if text.starts_with("linger") {
             stream_deltas(&fake, &mut out)?;
             waiting = Some(Wait::Interrupt);

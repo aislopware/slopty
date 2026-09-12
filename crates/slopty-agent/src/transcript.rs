@@ -16,7 +16,10 @@ use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
-use slopty_proto::agent::{AgentStatus, Clipped, TranscriptBody, TranscriptEntry};
+use slopty_proto::agent::{
+    AgentStatus, Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
+    TranscriptEntry,
+};
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
 /// run to tens of kilobytes.
@@ -390,8 +393,8 @@ fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBod
                 }
                 let input = block.get("input");
                 let summary = tool_summary(&name, input);
-                let input = clip(&input.map(pretty).unwrap_or_default());
-                Some(TranscriptBody::ToolUse { name, summary, input })
+                let detail = tool_detail(&name, input);
+                Some(TranscriptBody::ToolUse { name, summary, detail })
             }
             _ => None,
         })
@@ -401,6 +404,114 @@ fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBod
 /// A tool input as the agent wrote it, indented.
 fn pretty(input: &Value) -> String {
     serde_json::to_string_pretty(input).unwrap_or_default()
+}
+
+/// What a tool call would do, in the shape the client draws ([`ToolDetail`]).
+///
+/// The tools Claude Code ships are read by their input fields; anything else keeps its
+/// input as pretty JSON. A known tool whose input lacks the field it is known by (a `Bash`
+/// with no `command`) falls back to JSON too, so a shape change on the agent's side degrades
+/// to what the card showed before, never to an empty block.
+#[must_use]
+pub fn tool_detail(name: &str, input: Option<&Value>) -> ToolDetail {
+    let field = |key: &str| input?.get(key)?.as_str();
+    let number = |key: &str| input?.get(key)?.as_u64().and_then(|n| u32::try_from(n).ok());
+    let json = || ToolDetail::Json { input: clip(&input.map(pretty).unwrap_or_default()) };
+    match name {
+        "Bash" => field("command").map_or_else(json, |command| ToolDetail::Command {
+            command: clip(command),
+            description: field("description").map(str::to_owned),
+        }),
+        "Edit" => match (field("file_path"), field("old_string"), field("new_string")) {
+            (Some(path), Some(old), Some(new)) => {
+                let (lines, more_lines) = diff_lines(old, new);
+                ToolDetail::Diff {
+                    path: path.to_owned(),
+                    lines,
+                    more_lines,
+                    replace_all: input
+                        .and_then(|i| i.get("replace_all"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                }
+            }
+            _ => json(),
+        },
+        "Write" => match (field("file_path"), field("content")) {
+            (Some(path), Some(content)) => {
+                ToolDetail::Write { path: path.to_owned(), content: clip(content) }
+            }
+            _ => json(),
+        },
+        "Read" => field("file_path").map_or_else(json, |path| ToolDetail::Read {
+            path: path.to_owned(),
+            offset: number("offset"),
+            limit: number("limit"),
+        }),
+        "Grep" | "Glob" => field("pattern").map_or_else(json, |pattern| ToolDetail::Search {
+            pattern: pattern.to_owned(),
+            path: field("path").map(str::to_owned),
+            glob: field("glob").map(str::to_owned),
+        }),
+        "TodoWrite" => input
+            .and_then(|i| i.get("todos"))
+            .and_then(Value::as_array)
+            .map_or_else(json, |todos| ToolDetail::Todos {
+                items: todos.iter().filter_map(todo).collect(),
+            }),
+        "Agent" | "Task" => match (field("description"), field("prompt")) {
+            (Some(description), Some(prompt)) => ToolDetail::Agent {
+                description: description.to_owned(),
+                kind: field("subagent_type").map(str::to_owned),
+                prompt: clip(prompt),
+            },
+            _ => json(),
+        },
+        _ => json(),
+    }
+}
+
+/// One `TodoWrite` item; `None` when it has no text.
+fn todo(item: &Value) -> Option<Todo> {
+    let text = item.get("content")?.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let status = match item.get("status").and_then(Value::as_str) {
+        Some("completed") => TodoStatus::Completed,
+        Some("in_progress") => TodoStatus::InProgress,
+        _ => TodoStatus::Pending,
+    };
+    Some(Todo { text: text.to_owned(), status })
+}
+
+/// `old` against `new` line by line, cut the way [`clip`] cuts a text.
+///
+/// Kept to [`CLIP_LINES`] lines and [`CLIP_CHARS`] characters with the count of what was
+/// dropped. Lines the two share are context, so a one-line change inside a ten-line
+/// `old_string` reads as nine kept lines around one removed and one added.
+#[must_use]
+pub fn diff_lines(old: &str, new: &str) -> (Vec<DiffLine>, u32) {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut lines = Vec::new();
+    let mut chars = 0_usize;
+    let mut dropped = 0_u32;
+    for change in diff.iter_all_changes() {
+        let kind = match change.tag() {
+            similar::ChangeTag::Equal => DiffKind::Context,
+            similar::ChangeTag::Delete => DiffKind::Removed,
+            similar::ChangeTag::Insert => DiffKind::Added,
+        };
+        let text = change.value().trim_end_matches(['\n', '\r']);
+        let len = text.chars().count();
+        if lines.len() >= CLIP_LINES || chars.saturating_add(len) > CLIP_CHARS {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        chars = chars.saturating_add(len);
+        lines.push(DiffLine { kind, text: text.to_owned() });
+    }
+    (lines, dropped)
 }
 
 /// Cut `text` to at most [`CLIP_LINES`] whole lines and [`CLIP_CHARS`] characters, counting
@@ -529,7 +640,10 @@ mod tests {
                     body: TranscriptBody::ToolUse {
                         name: "Bash".to_owned(),
                         summary: "cargo test".to_owned(),
-                        input: Clipped::whole("{\n  \"command\": \"cargo test\"\n}".to_owned()),
+                        detail: ToolDetail::Command {
+                            command: Clipped::whole("cargo test".to_owned()),
+                            description: None,
+                        },
                     }
                 },
             ],
@@ -558,14 +672,22 @@ mod tests {
                 TranscriptBody::ToolUse {
                     name: "Edit".to_owned(),
                     summary: "src/a.rs".to_owned(),
-                    input: Clipped::whole(
-                        "{\n  \"file_path\": \"src/a.rs\",\n  \"old_string\": \"x\"\n}".to_owned()
-                    ),
+                    // An edit missing its replacement keeps the JSON, not an empty diff.
+                    detail: ToolDetail::Json {
+                        input: Clipped::whole(
+                            "{\n  \"file_path\": \"src/a.rs\",\n  \"old_string\": \"x\"\n}"
+                                .to_owned()
+                        )
+                    },
                 },
                 TranscriptBody::ToolUse {
                     name: "Mystery".to_owned(),
                     summary: "because".to_owned(),
-                    input: Clipped::whole("{\n  \"n\": 1,\n  \"why\": \"because\"\n}".to_owned()),
+                    detail: ToolDetail::Json {
+                        input: Clipped::whole(
+                            "{\n  \"n\": 1,\n  \"why\": \"because\"\n}".to_owned()
+                        )
+                    },
                 },
                 TranscriptBody::ToolResult {
                     tool: Some("Edit".to_owned()),
@@ -587,6 +709,109 @@ mod tests {
             "{got:#?}"
         );
         assert!(got.iter().all(|e| e.at.is_none()), "no timestamps in these records");
+    }
+
+    #[test]
+    fn an_edit_is_a_diff_a_todo_list_a_checklist_and_a_stranger_its_json() {
+        let edit = serde_json::json!({
+            "file_path": "src/a.rs",
+            "old_string": "fn a() {\n    1\n}",
+            "new_string": "fn a() {\n    2\n}",
+            "replace_all": true
+        });
+        let line = |kind, text: &str| DiffLine { kind, text: text.to_owned() };
+        assert_eq!(
+            tool_detail("Edit", Some(&edit)),
+            ToolDetail::Diff {
+                path: "src/a.rs".to_owned(),
+                lines: vec![
+                    line(DiffKind::Context, "fn a() {"),
+                    line(DiffKind::Removed, "    1"),
+                    line(DiffKind::Added, "    2"),
+                    line(DiffKind::Context, "}"),
+                ],
+                more_lines: 0,
+                replace_all: true,
+            }
+        );
+        let todos = serde_json::json!({"todos": [
+            {"content": "read", "status": "completed", "activeForm": "Reading"},
+            {"content": "write", "status": "in_progress"},
+            {"content": "  ", "status": "pending"},
+            {"content": "test"}
+        ]});
+        let todo = |text: &str, status| Todo { text: text.to_owned(), status };
+        assert_eq!(
+            tool_detail("TodoWrite", Some(&todos)),
+            ToolDetail::Todos {
+                items: vec![
+                    todo("read", TodoStatus::Completed),
+                    todo("write", TodoStatus::InProgress),
+                    todo("test", TodoStatus::Pending),
+                ]
+            }
+        );
+        let bash =
+            serde_json::json!({"command": "cargo test\n# twice", "description": "Run the tests"});
+        assert_eq!(
+            tool_detail("Bash", Some(&bash)),
+            ToolDetail::Command {
+                command: Clipped::whole("cargo test\n# twice".to_owned()),
+                description: Some("Run the tests".to_owned()),
+            }
+        );
+        let read = serde_json::json!({"file_path": "a.rs", "offset": 10, "limit": 20});
+        assert_eq!(
+            tool_detail("Read", Some(&read)),
+            ToolDetail::Read { path: "a.rs".to_owned(), offset: Some(10), limit: Some(20) }
+        );
+        let grep = serde_json::json!({"pattern": "fn main", "glob": "*.rs"});
+        assert_eq!(
+            tool_detail("Grep", Some(&grep)),
+            ToolDetail::Search {
+                pattern: "fn main".to_owned(),
+                path: None,
+                glob: Some("*.rs".to_owned())
+            }
+        );
+        let agent = serde_json::json!({
+            "description": "Find it", "prompt": "Look everywhere", "subagent_type": "Explore"
+        });
+        assert_eq!(
+            tool_detail("Agent", Some(&agent)),
+            ToolDetail::Agent {
+                description: "Find it".to_owned(),
+                kind: Some("Explore".to_owned()),
+                prompt: Clipped::whole("Look everywhere".to_owned()),
+            }
+        );
+        // A known tool with a strange input, and a tool the host does not know.
+        assert_eq!(
+            tool_detail("Bash", Some(&serde_json::json!({"cmd": "ls"}))),
+            ToolDetail::Json { input: Clipped::whole("{\n  \"cmd\": \"ls\"\n}".to_owned()) }
+        );
+        assert_eq!(tool_detail("WebFetch", None), ToolDetail::Json { input: Clipped::default() });
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_like_any_long_text() {
+        let old = "line\n".repeat(30);
+        let new = "row\n".repeat(30);
+        let (lines, more) = diff_lines(&old, &new);
+        assert_eq!(lines.len(), CLIP_LINES);
+        assert_eq!(usize::try_from(more).unwrap_or(0), 60 - CLIP_LINES);
+        assert!(lines.iter().all(|l| l.kind != DiffKind::Context), "{lines:?}");
+        // A text without a final newline diffs the same as one with it.
+        let (lines, more) = diff_lines("a\nb", "a\nc\n");
+        assert_eq!(
+            lines,
+            [
+                DiffLine { kind: DiffKind::Context, text: "a".to_owned() },
+                DiffLine { kind: DiffKind::Removed, text: "b".to_owned() },
+                DiffLine { kind: DiffKind::Added, text: "c".to_owned() },
+            ]
+        );
+        assert_eq!(more, 0);
     }
 
     #[test]

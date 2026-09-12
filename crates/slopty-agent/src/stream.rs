@@ -209,14 +209,14 @@ fn control_request(record: &Value) -> Option<Event> {
         let line = transcript::tool_summary(&tool, Some(&input));
         if line.is_empty() { string(request, "description") } else { line }
     };
-    let pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
+    let detail = transcript::tool_detail(&tool, Some(&input));
     Some(Event::Permission {
         request: PermissionRequest {
             id: string(record, "request_id"),
             tool_use: string(request, "tool_use_id"),
             tool,
             summary,
-            input: transcript::clip(&pretty),
+            detail,
         },
         input,
     })
@@ -619,7 +619,13 @@ mod tests {
         assert_eq!(request.id, "e2f45975-aa92-4c0c-ad9b-05cd456d9b00");
         assert_eq!(request.tool_use, "toolu_01F6WsndtGMAv3yQPYeTTxMc");
         assert_eq!(request.summary, "/private/tmp/sj-probe/probe4.txt");
-        assert!(request.input.text.contains("\"content\": \"hi\""), "{:?}", request.input);
+        assert_eq!(
+            request.detail,
+            slopty_proto::agent::ToolDetail::Write {
+                path: "/private/tmp/sj-probe/probe4.txt".to_owned(),
+                content: slopty_proto::agent::Clipped::whole("hi".to_owned()),
+            }
+        );
         assert_eq!(fold.pending(), [request.id.as_str()]);
 
         let line = fold.answer(&request.id, true, None).expect("open");

@@ -465,7 +465,7 @@ layer — `parse` turns each NDJSON line into an `Event` (`Init`, transcript-sha
 turns events into `TranscriptEntry`s (through the same `transcript::record_entries` the JSONL
 tail uses), the streamed `Partial` text, `AgentStatus` (`Working` while a turn runs,
 `Blocked(Permission)` on a `can_use_tool`, `Done` on the `result`) and `PermissionRequest`s
-(the request id, the tool, its one-line summary and its whole input, clipped), and
+(the request id, the tool, its one-line summary and its `ToolDetail`), and
 `user_message` / `Fold::answer` / `interrupt` build the lines the host writes back. The
 daemon's pump task per agent folds stdout, keeps the last 400 entries, the partial and the
 pending requests per session (`driven::Snapshot`, what a joining client gets), and
@@ -549,16 +549,28 @@ replaced file resets again). An entry is `TranscriptEntry { at, body }`: the rec
 `timestamp` in Unix milliseconds and a `TranscriptBody::{User, Assistant, Thinking, ToolUse,
 ToolResult}` built from the JSONL records — `user` text, `assistant` text blocks as markdown,
 `thinking` blocks, `tool_use` blocks with a one-line summary (the command / file / pattern /
-query the tool was given) and the whole input as pretty JSON, `tool_result` blocks with
-`is_error` and named after their `tool_use_id` (the `Tail` remembers the last 512 calls).
-Thinking, tool input and tool output are `Clipped` on the host: the first 40 whole lines or
-4 000 characters, whichever comes first, and the count of lines dropped, so the wire never
-carries a whole file. Sidechain rows and the app's injected texts are skipped. The client
+query the tool was given) and a `ToolDetail` (protocol 17: what the call would do, read on
+the host from the input by tool — `Edit` as a `Diff` of `old_string` against `new_string`
+line by line through `similar`, `Write` with its content, `Bash` as a `Command`, `Read` with
+its slice, `Grep`/`Glob` as a `Search`, `TodoWrite` as `Todos`, `Agent`/`Task` with the
+brief, and any other tool or a known one with a strange input as its `Json`), `tool_result`
+blocks with `is_error` and named after their `tool_use_id` (the `Tail` remembers the last
+512 calls). Thinking, tool input, a diff and tool output are `Clipped` on the host: the
+first 40 whole lines or 4 000 characters, whichever comes first, and the count of lines
+dropped, so the wire never carries a whole file. Sidechain rows and the app's injected texts are skipped. The client
 keeps them in `slopty_ui::terminal::conversation::Conversation`: a bottom-aligned gpui `list`
 in `FollowMode::Tail` (pinned to the newest entry until the reader scrolls up, then a
 "↓ latest" pill re-pins; a reset re-pins) with `TextView::markdown` for assistant turns,
 "HH:MM" local-time stamps on prompts and answers, and folds that open on a click — thinking
-and tool input start folded, a result shows its first 4 lines. Under the list sits the
+starts folded, a result shows its first 4 lines, and a tool call draws its `ToolDetail`
+(`conversation::tool_body`): an edit's diff shows unasked as rows tinted in the success tone
+(added) and the error tone (removed) with a sign column and "+a −r" in the header
+(`tool_badge`), folded past 12 lines until a click; a todo list shows whole with what is
+done struck through and the item in progress in the accent tone; a command, a written file,
+a subagent's brief and a stranger's JSON open on a click; a read or a search opens to its
+slice or filter. A screen reader hears the counts ("Tool Edit: src/a.rs, 2 added, 1
+removed", "Tool TodoWrite: 1 of 3 done"); headless `an_edit_shows_its_diff_and_a_todo_list_its_checklist`,
+the app self-test's `edit` turn against the fake (golden `conversation-tools`). Under the list sits the
 **composer**, a gpui-kit `TextareaState` growing from one to six rows: ↩ sends the text into
 the session as `TermRequest::Paste` followed by an Enter key (an empty ↩ sends the bare
 Enter, so a prompt can be accepted; slash commands and `@file` go through as typed), ⇧↩

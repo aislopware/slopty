@@ -198,7 +198,7 @@ mod golden {
     fn driven_agent() {
         use slopty_proto::agent::{
             AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Clipped, OpenAgent,
-            PermissionRequest,
+            PermissionRequest, ToolDetail,
         };
         use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
         snap(
@@ -252,9 +252,10 @@ mod golden {
                     tool_use: "toolu_01F6WsndtGMAv3yQPYeTTxMc".to_owned(),
                     tool: "Write".to_owned(),
                     summary: "src/main.rs".to_owned(),
-                    input: Clipped::whole(
-                        "{\n  \"file_path\": \"src/main.rs\",\n  \"content\": \"hi\"\n}".to_owned(),
-                    ),
+                    detail: ToolDetail::Write {
+                        path: "src/main.rs".to_owned(),
+                        content: Clipped::whole("hi".to_owned()),
+                    },
                 },
             },
         );
@@ -320,7 +321,8 @@ mod golden {
     #[test]
     fn transcript() {
         use slopty_proto::agent::{
-            Clipped, TranscriptBody, TranscriptEntry, TranscriptFollow, TranscriptUpdate,
+            Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
+            TranscriptEntry, TranscriptFollow, TranscriptUpdate,
         };
         snap(
             "client_transcript_follow",
@@ -348,7 +350,10 @@ mod golden {
                         body: TranscriptBody::ToolUse {
                             name: "Bash".to_owned(),
                             summary: "cargo test".to_owned(),
-                            input: Clipped::whole("{\n  \"command\": \"cargo test\"\n}".to_owned()),
+                            detail: ToolDetail::Command {
+                                command: Clipped::whole("cargo test".to_owned()),
+                                description: Some("Run the tests".to_owned()),
+                            },
                         },
                     },
                     TranscriptEntry {
@@ -368,6 +373,88 @@ mod golden {
                             markdown: "Done: **2** tests.".to_owned(),
                         },
                     },
+                ],
+            }),
+        );
+        // Every shape a tool call takes on the wire: the edit as a diff, the todo list, the
+        // read's slice, the search's filter, the subagent's brief, the stranger's JSON.
+        let line = |kind, text: &str| DiffLine { kind, text: text.to_owned() };
+        let tool = |name: &str, summary: &str, detail| TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                name: name.to_owned(),
+                summary: summary.to_owned(),
+                detail,
+            },
+        };
+        snap(
+            "host_transcript_tools",
+            &HostMsg::Transcript(TranscriptUpdate {
+                session: session(),
+                reset: false,
+                entries: vec![
+                    tool(
+                        "Edit",
+                        "src/a.rs",
+                        ToolDetail::Diff {
+                            path: "src/a.rs".to_owned(),
+                            lines: vec![
+                                line(DiffKind::Context, "fn a() {"),
+                                line(DiffKind::Removed, "    1"),
+                                line(DiffKind::Added, "    2"),
+                                line(DiffKind::Context, "}"),
+                            ],
+                            more_lines: 3,
+                            replace_all: true,
+                        },
+                    ),
+                    tool(
+                        "TodoWrite",
+                        "",
+                        ToolDetail::Todos {
+                            items: vec![
+                                Todo { text: "read".to_owned(), status: TodoStatus::Completed },
+                                Todo { text: "write".to_owned(), status: TodoStatus::InProgress },
+                                Todo { text: "test".to_owned(), status: TodoStatus::Pending },
+                            ],
+                        },
+                    ),
+                    tool(
+                        "Read",
+                        "src/a.rs",
+                        ToolDetail::Read {
+                            path: "src/a.rs".to_owned(),
+                            offset: Some(10),
+                            limit: Some(20),
+                        },
+                    ),
+                    tool(
+                        "Grep",
+                        "fn main",
+                        ToolDetail::Search {
+                            pattern: "fn main".to_owned(),
+                            path: Some("src".to_owned()),
+                            glob: Some("*.rs".to_owned()),
+                        },
+                    ),
+                    tool(
+                        "Agent",
+                        "Find it",
+                        ToolDetail::Agent {
+                            description: "Find it".to_owned(),
+                            kind: Some("Explore".to_owned()),
+                            prompt: Clipped::whole("Look everywhere".to_owned()),
+                        },
+                    ),
+                    tool(
+                        "WebFetch",
+                        "https://example.com",
+                        ToolDetail::Json {
+                            input: Clipped::whole(
+                                "{\n  \"url\": \"https://example.com\"\n}".to_owned(),
+                            ),
+                        },
+                    ),
                 ],
             }),
         );
