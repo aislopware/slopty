@@ -7,8 +7,10 @@
 //! the screen it is on (a phone shrinks it to the viewport, an iPad keeps the desktop size);
 //! and a played Claude Code session (its hook handed to hostd from the test) shows its
 //! conversation, inside the screen above the key bar, with a composer that types into the
-//! shell. Each scenario renders the app's own frame (the fork's iOS `render_to_image`) and
-//! compares it with a golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
+//! shell; and a driven agent (the host runs the fake `claude` over stream-json) shows as a
+//! card with its header, its answer and the composer above the key bar. Each scenario renders
+//! the app's own frame (the fork's iOS `render_to_image`) and compares it with a golden per
+//! device, `ios-phone-*.png` or `ios-pad-*.png`.
 
 #[cfg(test)]
 mod tests {
@@ -192,6 +194,69 @@ mod tests {
         drv.wait_for("the grid back", STEP, |d| d.terminals[0].conversation.is_none())
             .await
             .unwrap();
+        stack.shutdown().await;
+    }
+
+    /// The driven agent's card on the phone or the tablet: opened over the socket as ⌘⌥T
+    /// would, the composer takes the keyboard, a prompt typed there is answered, and the
+    /// header names the model and the mode. The frame is compared with the device's golden.
+    #[tokio::test]
+    async fn the_driven_agent_card_on_the_simulator() {
+        let Some(simulator) = simulator() else { return };
+        let mut stack =
+            Stack::launch_on_simulator_with_driven_claude("e2e-ios-host", simulator).await.unwrap();
+        let render_path = stack.path("agent.png");
+        stack
+            .driver
+            .wait_for("the first shell", STEP, |d| {
+                d.status == "connected" && d.item("terminal").is_some()
+            })
+            .await
+            .unwrap();
+        let drv = &mut stack.driver;
+        drv.open_agent(None).await.unwrap();
+        drv.wait_for("the card with the caret in its composer", STEP, |d| {
+            d.terminals.iter().any(|t| {
+                t.kind == "agent" && t.conversation.as_ref().is_some_and(|c| c.composer_focused)
+            })
+        })
+        .await
+        .unwrap();
+        drv.type_text("hello").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the answered turn", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.kind == "agent"
+                        && t.agent.as_deref() == Some("done")
+                        && t.conversation.as_ref().is_some_and(|c| {
+                            c.entries == ["user: hello", "assistant: Hello from the fake"]
+                                && c.model.as_deref() == Some("fake-model")
+                        })
+                })
+            })
+            .await
+            .unwrap();
+        assert!(dump.a11y_node("Button", Some("Model: fake-model")).is_some(), "{:#?}", dump.a11y);
+        assert!(
+            dump.a11y_node("Button", Some("Permission mode: Ask")).is_some(),
+            "{:#?}",
+            dump.a11y
+        );
+        assert!(dump.a11y_node("Button", Some("Send")).is_some(), "{:#?}", dump.a11y);
+        let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
+        let item = dump.items.iter().find(|i| i.session.as_deref() == Some(&card.session)).unwrap();
+        let [x, y, w, h] = item.bounds;
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + w <= dump.window.width + 1.0 && y + h < dump.window.height,
+            "{item:?} in {}x{}",
+            dump.window.width,
+            dump.window.height
+        );
+        let frame = drv.render(&render_path).await.unwrap();
+        assert!(foreground_fraction(&frame) > BLANK, "frame is blank");
+        let name = format!("ios-{}-agent", device(dump.window.width));
+        assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
         stack.shutdown().await;
     }
 }

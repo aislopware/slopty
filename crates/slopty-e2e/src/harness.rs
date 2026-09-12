@@ -222,6 +222,15 @@ async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
 
 /// The daemons of a stack: ptyd and hostd (named `host_name`) under `root`, and the ticket
 /// hostd printed. `env` goes to both, on top of this process's own.
+/// A private `HOME` under `root` for a driven-agent launch: the fake `claude` writes its
+/// transcripts under it, and the host lists them from there, so nothing of the developer's
+/// own `~/.claude` is read or written.
+fn driven_home(root: &Path) -> Result<String> {
+    let home = root.join("home");
+    std::fs::create_dir_all(&home)?;
+    Ok(home.to_string_lossy().into_owned())
+}
+
 async fn daemons(
     root: &Path,
     host_name: &str,
@@ -475,9 +484,51 @@ impl Stack {
     ///
     /// As [`Self::launch`], or when the fake is not built.
     pub async fn launch_with_driven_claude(host_name: &str) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-driven-").tempdir()?;
+        let home = driven_home(dir.path())?;
         let fake = bin("slopty-fake-claude")?;
         let fake = fake.to_string_lossy().into_owned();
-        Self::launch_with(host_name, &[("SLOPTY_CLAUDE_BIN", &*fake)]).await
+        Self::launch_in(dir, host_name, &[("SLOPTY_CLAUDE_BIN", &*fake), ("HOME", &*home)]).await
+    }
+
+    /// [`Self::launch_on_simulator`] with `slopty-fake-claude` driven by the daemons on the
+    /// Mac, as [`Self::launch_with_driven_claude`]: the card on the phone or the tablet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_on_simulator`], or when the fake is not built.
+    pub async fn launch_on_simulator_with_driven_claude(
+        host_name: &str,
+        simulator: Simulator,
+    ) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-driven-").tempdir()?;
+        let root = dir.path();
+        let home = driven_home(root)?;
+        let fake = bin("slopty-fake-claude")?;
+        let fake = fake.to_string_lossy().into_owned();
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let env = [("SLOPTY_CLAUDE_BIN", &*fake), ("HOME", &*home)];
+        let (children, ticket) = daemons(root, host_name, &log, &env).await?;
+        let driver = spawn_simulator_app(root, "app", &log, &simulator, &[]).await?;
+        Self::pair(Self {
+            dir,
+            ticket,
+            driver,
+            children,
+            app_ix: None,
+            simulator: Some(simulator),
+            log,
+            app_env: Vec::new(),
+        })
+        .await
+    }
+
+    /// The private `HOME` the daemons run with, when the launch gave them one (the driven
+    /// and the fake-claude launches do): where the fake `claude` writes its transcripts and
+    /// where a driven agent runs when no directory is named.
+    #[must_use]
+    pub fn home(&self) -> Option<String> {
+        self.app_env.iter().find(|(k, _v)| k == "HOME").map(|(_k, v)| v.clone())
     }
 
     /// Let the fake `claude` move past the stage it is waiting on (`working`, `transcript`,

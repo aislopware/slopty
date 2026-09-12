@@ -87,7 +87,13 @@ pub enum Event {
         /// Why.
         reason: String,
     },
-    /// Anything else: status, rate limits, hook bookkeeping, thinking token counts.
+    /// `system/status`: the permission mode changed (the answer to `set_permission_mode`
+    /// arrives this way too).
+    Status {
+        /// The mode now in force, when the record names one.
+        permission_mode: Option<String>,
+    },
+    /// Anything else: rate limits, hook bookkeeping, thinking token counts.
     Other,
 }
 
@@ -105,6 +111,13 @@ pub fn parse(line: &str) -> Option<Event> {
             tools: strings(&record, "tools"),
             slash_commands: strings(&record, "slash_commands"),
         }),
+        ("system", Some("status")) => Event::Status {
+            permission_mode: record
+                .get("permissionMode")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
+        },
         ("system", Some("permission_denied")) => Event::Denied {
             tool: string(&record, "tool_name"),
             reason: record
@@ -278,6 +291,30 @@ pub fn interrupt(request_id: &str) -> String {
     .to_string()
 }
 
+/// The line that switches the agent's model in place (`set_model`); `model` is an alias
+/// (`fable`, `opus`, `sonnet`, `haiku`) or a full name.
+#[must_use]
+pub fn set_model(request_id: &str, model: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_model", "model": model},
+    })
+    .to_string()
+}
+
+/// The line that switches the agent's permission mode in place (`set_permission_mode`);
+/// the agent confirms with a `system/status` record naming the mode.
+#[must_use]
+pub fn set_permission_mode(request_id: &str, mode: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_permission_mode", "mode": mode},
+    })
+    .to_string()
+}
+
 fn allow_line(request_id: &str, input: &Value) -> String {
     json!({
         "type": "control_response",
@@ -325,6 +362,12 @@ pub enum Update {
     Permission(PermissionRequest),
     /// A turn ended.
     Turn(TurnResult),
+    /// The session is up and said what it is.
+    Init(Init),
+    /// The model in use changed (an assistant record named another one).
+    Model(String),
+    /// The permission mode changed.
+    PermissionMode(String),
 }
 
 /// Folds the event stream of one conversation into [`Update`]s.
@@ -339,6 +382,7 @@ pub struct Fold {
     partial: String,
     status: Option<(AgentStatus, Option<String>)>,
     init: Option<Init>,
+    model: Option<String>,
 }
 
 impl Fold {
@@ -359,8 +403,14 @@ impl Fold {
     pub fn apply(&mut self, event: Event, now: u64) -> Vec<Update> {
         match event {
             Event::Init(init) => {
-                self.init = Some(init);
-                self.status(AgentStatus::Idle, None).into_iter().collect()
+                self.model = Some(init.model.clone()).filter(|m| !m.is_empty());
+                self.init = Some(init.clone());
+                let mut out = vec![Update::Init(init)];
+                out.extend(self.status(AgentStatus::Idle, None));
+                out
+            }
+            Event::Status { permission_mode } => {
+                permission_mode.map(Update::PermissionMode).into_iter().collect()
             }
             Event::Record(record) => self.record(&record, now),
             Event::TextDelta(text) => {
@@ -425,6 +475,15 @@ impl Fold {
         if is_assistant && !self.partial.is_empty() {
             self.partial.clear();
             out.push(Update::Partial(String::new()));
+        }
+        if is_assistant
+            && let Some(model) =
+                record.get("message").and_then(|m| m.get("model")).and_then(Value::as_str)
+            && !model.is_empty()
+            && self.model.as_deref() != Some(model)
+        {
+            self.model = Some(model.to_owned());
+            out.push(Update::Model(model.to_owned()));
         }
         let entries: Vec<TranscriptEntry> = transcript::record_entries(&mut self.tools, record)
             .into_iter()
@@ -496,16 +555,26 @@ mod tests {
         let mut entries = Vec::new();
         let mut statuses = Vec::new();
         let mut turns = Vec::new();
+        let mut inits = 0;
         for event in events(ONE_TURN) {
             for update in fold.apply(event, 1_000) {
                 match update {
                     Update::Entries(e) => entries.extend(e),
                     Update::Status { status, detail } => statuses.push((status, detail)),
                     Update::Turn(t) => turns.push(t),
-                    Update::Partial(_) | Update::Permission(_) => {}
+                    Update::Init(init) => {
+                        assert_eq!(init.model, "claude-haiku-4-5-20251001");
+                        assert!(init.slash_commands.iter().any(|c| c == "/compact"));
+                        inits += 1;
+                    }
+                    Update::Partial(_)
+                    | Update::Permission(_)
+                    | Update::Model(_)
+                    | Update::PermissionMode(_) => {}
                 }
             }
         }
+        assert_eq!(inits, 1, "init is reported once, before the first status");
         let bodies: Vec<&str> = entries
             .iter()
             .map(|e| match &e.body {
@@ -672,7 +741,13 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"type":"system","subtype":"status","status":"requesting"}"#),
-            Some(Event::Other)
+            Some(Event::Status { permission_mode: None })
+        );
+        assert_eq!(
+            parse(
+                r#"{"type":"system","subtype":"status","status":null,"permissionMode":"acceptEdits"}"#
+            ),
+            Some(Event::Status { permission_mode: Some("acceptEdits".into()) })
         );
         assert_eq!(parse(r#"{"type":"rate_limit_event"}"#), Some(Event::Other));
         assert_eq!(parse("not json"), None);
@@ -681,5 +756,54 @@ mod tests {
             serde_json::from_str::<Value>(&user_message("fix it\nplease")).ok(),
             Some(json!({"type":"user","message":{"role":"user","content":"fix it\nplease"}}))
         );
+    }
+
+    /// `set_model` / `set_permission_mode` are control requests the agent acknowledges; the
+    /// model actually in use is read off the next assistant record, the mode off the status
+    /// record the agent writes when it switches.
+    #[test]
+    fn a_retune_is_asked_in_protocol_and_confirmed_by_what_the_agent_says_next() {
+        assert_eq!(
+            serde_json::from_str::<Value>(&set_model("slopty-1", "opus")).ok(),
+            Some(json!({"type":"control_request","request_id":"slopty-1",
+                        "request":{"subtype":"set_model","model":"opus"}}))
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&set_permission_mode("slopty-2", "plan")).ok(),
+            Some(json!({"type":"control_request","request_id":"slopty-2",
+                        "request":{"subtype":"set_permission_mode","mode":"plan"}}))
+        );
+        let mut fold = Fold::default();
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-sonnet-5","permissionMode":"default","tools":[],"slash_commands":[]}"#;
+        let Some(init) = parse(init) else { panic!("parses") };
+        let updates = fold.apply(init, 0);
+        assert!(matches!(updates.first(), Some(Update::Init(i)) if i.model == "claude-sonnet-5"));
+        let Some(ack) = parse(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"slopty-1"}}"#,
+        ) else {
+            panic!("parses")
+        };
+        assert_eq!(ack, Event::ControlAck { request_id: "slopty-1".into(), error: None });
+        assert!(fold.apply(ack, 0).is_empty(), "the ack alone changes nothing shown");
+        let same = r#"{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"hi"}]},"session_id":"s"}"#;
+        let Some(same) = parse(same) else { panic!("parses") };
+        assert!(
+            !fold.apply(same, 0).iter().any(|u| matches!(u, Update::Model(_))),
+            "the same model is not news"
+        );
+        let switched = r#"{"type":"assistant","message":{"model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"hi"}]},"session_id":"s"}"#;
+        let Some(switched) = parse(switched) else { panic!("parses") };
+        let models: Vec<String> = fold
+            .apply(switched, 0)
+            .into_iter()
+            .filter_map(|u| if let Update::Model(m) = u { Some(m) } else { None })
+            .collect();
+        assert_eq!(models, ["claude-opus-5"]);
+        let Some(status) =
+            parse(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"plan"}"#)
+        else {
+            panic!("parses")
+        };
+        assert_eq!(fold.apply(status, 0), [Update::PermissionMode("plan".into())]);
     }
 }

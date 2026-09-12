@@ -18,7 +18,8 @@ use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentStatus, BlockReason, PermissionRequest, TranscriptFollow, TranscriptUpdate,
+    AgentInfo, AgentSet, AgentStatus, BlockReason, PermissionRequest, TranscriptFollow,
+    TranscriptUpdate,
 };
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
@@ -27,7 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
-use crate::terminal::conversation::{Attention, Conversation};
+use crate::terminal::conversation::{self, Attention, Conversation};
 use crate::terminal::element::{CellMetrics, TerminalElement};
 use crate::terminal::{latency, url};
 
@@ -65,12 +66,17 @@ mod actions {
             /// Copy the output of the last command.
             CopyLastOutput,
             ToggleConversation,
+            /// Tab in a driven composer with the slash list up: take the selected
+            /// completion. Bound in the Terminal context so it is tried before gpui-kit's
+            /// root `Tab` (which moves the focus ring); it propagates when there is
+            /// nothing to complete.
+            CompleteSlash,
         ]
     );
 }
 pub use actions::{
-    CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt,
-    ToggleConversation,
+    CloseFind, CompleteSlash, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste,
+    PrevPrompt, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -87,6 +93,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-down", NextPrompt, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
         KeyBinding::new("cmd-shift-l", ToggleConversation, CTX),
+        KeyBinding::new("tab", CompleteSlash, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
         KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
     ]
@@ -236,6 +243,8 @@ pub struct TerminalView {
     permission: Option<PermissionRequest>,
     /// The text the driven agent is writing now, ahead of its next entry.
     partial: String,
+    /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
+    info: AgentInfo,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -304,6 +313,7 @@ impl TerminalView {
             open_conversation: false,
             permission: None,
             partial: String::new(),
+            info: AgentInfo::default(),
         }
     }
 
@@ -347,6 +357,154 @@ impl TerminalView {
         self.permission = Some(request);
         self.answered = None;
         cx.notify();
+    }
+
+    /// What the driven agent says about itself, whole.
+    pub fn agent_info(&mut self, info: AgentInfo, cx: &mut Context<Self>) {
+        if self.info != info {
+            self.info = info;
+            cx.notify();
+        }
+    }
+
+    /// What the driven agent last said about itself.
+    #[must_use]
+    pub const fn info(&self) -> &AgentInfo {
+        &self.info
+    }
+
+    /// The slash commands completing the composer's text right now.
+    #[must_use]
+    pub fn completions(&self, cx: &gpui::App) -> Vec<String> {
+        if !self.driven {
+            return Vec::new();
+        }
+        self.conversation
+            .as_ref()
+            .map(|c| c.completions(&self.info.slash_commands, cx))
+            .unwrap_or_default()
+    }
+
+    /// The model chip: open or close the menu of models.
+    pub fn toggle_model_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.conversation.as_mut() {
+            c.set_model_menu(!c.model_menu_open());
+            cx.notify();
+        }
+    }
+
+    /// A model from the menu: ask the host to switch the agent to it; the header changes
+    /// when the agent confirms.
+    pub fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        if let Some(c) = self.conversation.as_mut() {
+            c.set_model_menu(false);
+        }
+        self.say(ClientMsg::AgentSet(AgentSet {
+            session: self.session,
+            model: Some(model.to_owned()),
+            permission_mode: None,
+        }));
+        cx.notify();
+    }
+
+    /// The mode chip: ask the host for the next permission mode.
+    pub fn cycle_permission_mode(&self, cx: &mut Context<Self>) {
+        let next =
+            conversation::next_mode(self.info.permission_mode.as_deref().unwrap_or("default"));
+        self.say(ClientMsg::AgentSet(AgentSet {
+            session: self.session,
+            model: None,
+            permission_mode: Some(next.to_owned()),
+        }));
+        cx.notify();
+    }
+
+    /// The composer's text changed: the completion list starts over from its first match.
+    pub fn composer_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.conversation.as_mut() {
+            c.composer_changed();
+        }
+        cx.notify();
+    }
+
+    /// Keys for the slash-completion list and the model menu, taken in the capture phase so
+    /// the composer's own bindings (↑/↓ move its caret, Esc clears it) never see them while
+    /// the list is up: Tab takes the selected completion, ↑/↓ choose, Esc hides the list or
+    /// closes the menu.
+    fn completion_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let k = &event.keystroke;
+        if !k.modifiers.modified() && self.completion_nav(&k.key, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// The composer's own ↑ / ↓ / Esc actions arrive before any key event; while the
+    /// completion list or the model menu is up they belong to it, so they are caught in the
+    /// capture phase and stopped there.
+    fn composer_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_nav(key, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// `key` as the completion list or the model menu takes it; `false` when neither is up
+    /// or the key is not theirs.
+    fn completion_nav(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.driven || !self.composer_focused(window, cx) {
+            return false;
+        }
+        if key == "escape" && self.conversation.as_ref().is_some_and(Conversation::model_menu_open)
+        {
+            self.toggle_model_menu(cx);
+            return true;
+        }
+        let completions = self.completions(cx);
+        if completions.is_empty() {
+            return false;
+        }
+        let handled = match key {
+            "tab" => {
+                let at = self.conversation.as_ref().map_or(0, Conversation::selected_completion);
+                if let Some(command) =
+                    completions.get(at.min(completions.len().saturating_sub(1))).cloned()
+                {
+                    self.complete_slash(&command, window, cx);
+                }
+                true
+            }
+            "down" | "up" => {
+                let delta = if key == "down" { 1 } else { -1 };
+                if let Some(c) = self.conversation.as_mut() {
+                    c.step_completion(delta, completions.len());
+                }
+                true
+            }
+            "escape" => {
+                if let Some(c) = self.conversation.as_mut() {
+                    c.hide_completions();
+                }
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            cx.notify();
+        }
+        handled
+    }
+
+    /// Put a slash command in the composer (Tab, or a click on a completion).
+    pub fn complete_slash(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.conversation.as_mut() {
+            c.complete(command, window, cx);
+            c.focus_composer(window, cx);
+            cx.notify();
+        }
     }
 
     fn say(&self, msg: ClientMsg) {
@@ -1226,7 +1384,8 @@ impl TerminalView {
             let k = &event.keystroke;
             if self.driven {
                 // No grid behind the chat: Esc and ⌃C interrupt the agent, nothing else leaves
-                // the composer.
+                // the composer. (The completion list's keys were taken in the capture phase,
+                // see `completion_key`.)
                 if k.key == "escape" || (k.modifiers.control && k.key == "c") {
                     self.interrupt_agent();
                     cx.stop_propagation();
@@ -1640,8 +1799,9 @@ impl Render for TerminalView {
         }
         let attention = self.attention();
         let composer_focused = self.composer_focused(window, cx);
+        let info = self.driven.then_some(&self.info);
         let conversation = self.conversation.as_ref().map(|c| {
-            c.render(attention.as_ref(), &self.partial, composer_focused, &self.theme, cx)
+            c.render(info, attention.as_ref(), &self.partial, composer_focused, &self.theme, cx)
         });
         let search_focused = self
             .search
@@ -1665,6 +1825,33 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::toggle_conversation_action))
+            .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
+                if !this.completion_nav("tab", window, cx) {
+                    // A grid, or nothing to complete: the key goes on to whoever is next.
+                    cx.propagate();
+                }
+            }))
+            .capture_key_down(cx.listener(Self::completion_key))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                    this.composer_action("down", window, cx);
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                    this.composer_action("up", window, cx);
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                    this.composer_action("escape", window, cx);
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
+                    this.composer_action("tab", window, cx);
+                },
+            ))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -2674,6 +2861,11 @@ mod tests {
                     format!("answer:{request}:{allowed}")
                 }
                 ClientMsg::AgentInterrupt { .. } => "interrupt".to_owned(),
+                ClientMsg::AgentSet(AgentSet { model, permission_mode, .. }) => format!(
+                    "set:{}{}",
+                    model.map(|m| format!("model={m}")).unwrap_or_default(),
+                    permission_mode.map(|m| format!("mode={m}")).unwrap_or_default()
+                ),
                 ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
                 ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
                 // Resizes and the like: not what these tests are about.
@@ -2765,5 +2957,111 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
         assert!(drain_words(&mut rx).is_empty());
+    }
+
+    /// A driven view shows what the agent said about itself over the list — the model as a
+    /// chip whose menu switches it, the permission mode as a chip that cycles, the turns and
+    /// the cost — and its composer completes the slash commands the agent announced: `/`
+    /// lists the matches, ↓ moves, Tab takes one, Esc hides the list without interrupting.
+    #[gpui::test]
+    fn a_driven_view_shows_the_agent_and_retunes_it(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        assert!(cx.debug_bounds("conversation-header").is_some(), "the header is there at once");
+        view.update(cx, |v, cx| {
+            v.agent_info(
+                AgentInfo {
+                    agent_session: Some("s1".to_owned()),
+                    model: Some("claude-sonnet-5".to_owned()),
+                    permission_mode: Some("default".to_owned()),
+                    slash_commands: ["/compact", "/clear", "/cost"].map(str::to_owned).to_vec(),
+                    turns: 2,
+                    cost_micro_usd: 12_500,
+                },
+                cx,
+            );
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Model: sonnet-5"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Button", Some("Permission mode: Ask"))), "{tree:#?}");
+        assert_eq!(conversation::cost_label(12_500), "1¢");
+        assert_eq!(conversation::cost_label(1_234_567), "$1.23");
+
+        // The model chip opens the menu; a model in it is asked of the host, and the chip
+        // only changes when the host confirms.
+        let chip = cx.debug_bounds("conversation-model").expect("the model chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let opus = cx.debug_bounds("conversation-model-opus").expect("the menu opened");
+        cx.simulate_click(opus.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["set:model=opus"]);
+        assert!(cx.debug_bounds("conversation-models").is_none(), "one pick closes the menu");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.info().model.clone()).as_deref(),
+            Some("claude-sonnet-5")
+        );
+        view.update(cx, |v, cx| {
+            let mut info = v.info().clone();
+            info.model = Some("opus".to_owned());
+            v.agent_info(info, cx);
+        });
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Model: Opus 5"))), "{tree:#?}");
+
+        // The mode chip asks for the next mode.
+        let chip = cx.debug_bounds("conversation-mode").expect("the mode chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["set:mode=acceptEdits"]);
+        assert_eq!(conversation::next_mode("plan"), "default", "the cycle wraps");
+
+        // Slash completion in the composer.
+        assert!(composer_focused(&view, cx));
+        cx.simulate_keystrokes("/ c");
+        cx.run_until_parked();
+        let completions =
+            |cx: &mut VisualTestContext| view.read_with(cx, TerminalView::completions);
+        assert_eq!(completions(cx), ["/compact", "/clear", "/cost"]);
+        assert!(cx.debug_bounds("conversation-completions").is_some(), "listed above the composer");
+        cx.simulate_keystrokes("down tab");
+        cx.run_until_parked();
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("/clear "), "Tab takes the selected one");
+        assert!(completions(cx).is_empty(), "a completed command lists nothing");
+        assert!(drain_words(&mut rx).is_empty(), "nothing was sent");
+
+        view.update_in(cx, |v, window, cx| {
+            if let Some(c) = v.conversation() {
+                let _taken = c.take_composer_text(window, cx);
+            }
+        });
+        cx.simulate_keystrokes("/ c o");
+        cx.run_until_parked();
+        assert_eq!(completions(cx), ["/compact", "/cost"]);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(completions(cx).is_empty(), "Esc hides the list");
+        assert!(drain_words(&mut rx).is_empty(), "and does not interrupt the agent");
+        cx.simulate_keystrokes("s t");
+        cx.run_until_parked();
+        assert!(completions(cx).is_empty(), "the one match is the text itself");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["say:/cost"], "↩ sends the command as a prompt");
+        assert_eq!(
+            conversation::slash_matches("/C", &["/compact".to_owned(), "/clear".to_owned()]),
+            ["/compact", "/clear"],
+            "matching ignores case"
+        );
+        assert!(conversation::slash_matches("/co x", &["/compact".to_owned()]).is_empty());
+        assert!(conversation::slash_matches("hello", &["/help".to_owned()]).is_empty());
+        assert_eq!(conversation::model_label("claude-fable-5-1"), "fable-5-1");
+        assert_eq!(conversation::model_label("fable"), "Fable 5.1");
     }
 }

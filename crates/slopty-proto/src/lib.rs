@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -92,6 +92,14 @@ pub enum ClientMsg {
         /// The agent session.
         session: SessionId,
     },
+    /// Retune a driven agent in place: model, permission mode.
+    AgentSet(agent::AgentSet),
+    /// List the Claude Code conversations the host has on disk for a working directory (the
+    /// host's default when `None`), newest first; answered with `HostMsg::AgentSessions`.
+    ListAgentSessions {
+        /// Working directory.
+        cwd: Option<String>,
+    },
 }
 
 impl ClientMsg {
@@ -111,6 +119,8 @@ impl ClientMsg {
             Self::AgentSay { .. } => "AgentSay",
             Self::AgentAnswer { .. } => "AgentAnswer",
             Self::AgentInterrupt { .. } => "AgentInterrupt",
+            Self::AgentSet(_) => "AgentSet",
+            Self::ListAgentSessions { .. } => "ListAgentSessions",
         }
     }
 }
@@ -173,6 +183,20 @@ pub enum HostMsg {
         /// The request.
         request: agent::PermissionRequest,
     },
+    /// What a driven agent says about itself, whole, whenever any of it changes.
+    AgentInfo {
+        /// The agent session.
+        session: SessionId,
+        /// The info.
+        info: agent::AgentInfo,
+    },
+    /// The answer to `ClientMsg::ListAgentSessions`.
+    AgentSessions {
+        /// The working directory listed.
+        cwd: String,
+        /// Newest first.
+        sessions: Vec<agent::AgentSessionInfo>,
+    },
 }
 
 impl HostMsg {
@@ -193,6 +217,8 @@ impl HostMsg {
             Self::HooksInstalled { .. } => "HooksInstalled",
             Self::AgentPartial { .. } => "AgentPartial",
             Self::AgentPermission { .. } => "AgentPermission",
+            Self::AgentInfo { .. } => "AgentInfo",
+            Self::AgentSessions { .. } => "AgentSessions",
         }
     }
 }

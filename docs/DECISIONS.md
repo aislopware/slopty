@@ -2510,6 +2510,39 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   driven session keeps ⌘⇧T's PTY `claude` beside it (⌘⌥T / "New Agent (Structured)" opens the
   driven one) until the structured card has proven itself day to day — the TUI's own rendering
   of diffs, todo lists and slash-command output has no equal in the card yet.
+- ✅ **A driven agent is retuned in place and resumed from its transcript directory,
+  protocol 16** (2026-09-12). Probed on CLI 2.1.269 over the same stdio protocol:
+  `control_request` `set_model` and `set_permission_mode` are acknowledged without a restart
+  (`{"subtype":"success"}`; the mode change is followed by a `system/status` record naming
+  the mode), while `supported_models` and `supported_commands` answer "Unsupported control
+  request subtype". Rulings: (1) the model list is a fixed table of Claude Code's own aliases
+  (`fable`, `opus`, `sonnet`, `haiku`; `--help` documents the alias form) rather than a
+  guessed set of full names, and the header chip shows the full name the agent's next
+  assistant record carries, so a wrong alias shows as the agent's word, not ours; (2) the
+  slash-command list is `init`'s `slash_commands`, sent once per session inside `AgentInfo`
+  rather than re-asked; (3) the host answers a retune with the whole `AgentInfo` again, not
+  a delta, since it is small and a client joining late needs the same message; (4) the cost
+  rides as `cost_micro_usd: u64` so the wire type stays `Eq`; (5) "Resume" lists the host's
+  `~/.claude/projects/<escaped cwd>` directory itself (the same escaping `discover` already
+  verified) named by the first human prompt, with the rule that a transcript holding no
+  prompt is not listed — Claude Code writes a file for a `/clear` or a hook run too, and
+  resuming one of those shows an empty conversation; (6) the completion keys are caught in
+  GPUI's capture phase as *actions* (`MoveUp`/`MoveDown`/`Escape` of gpui-kit's input) and
+  not as key events: GPUI dispatches a matched key binding's action before the raw key
+  event, so an `on_key_down` on the card never saw ↓ (the headless test caught it: Tab took
+  the first match, not the second); (7) Tab completes as a `CompleteSlash` action bound in
+  the "Terminal" context that propagates when there is nothing to complete, because
+  gpui-kit's `Root` binds "tab" to its own focus-ring action and would have taken the key
+  first (the app self-test caught it: Tab landed on "Send"); (8) the project directory is
+  named by the *canonical* working directory (`discover::project_dir` resolves it when it
+  exists): Claude Code names it by `process.cwd()`, which on macOS is `/private/var/…` for a
+  `/var/…` the host was given, and the self-test's temp HOME is exactly such a path — the
+  listing found nothing until then; (9) after ⌘W removes the active item, `reconcile` makes
+  the canvas take the keyboard back on its next frame instead of leaving focus on the dead
+  handle, which is why ⌘⌥R right after a close now lands (and why the arrange-by-repo golden
+  moved: the remaining note draws as the active item, as it should). The self-test's private
+  `HOME` (also given to the driven launch now, the way the fake-claude launch already did)
+  keeps the fake's transcripts out of the developer's `~/.claude`.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

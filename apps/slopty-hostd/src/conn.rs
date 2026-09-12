@@ -542,6 +542,17 @@ impl Peer<'_> {
                     tracing::debug!(client = %self.client, %session, error = %e, "agent interrupt");
                 }
             }
+            ClientMsg::AgentSet(set) => {
+                let session = set.session;
+                if let Err(e) = self.daemon.driven.set(session, set.model, set.permission_mode) {
+                    tracing::debug!(client = %self.client, %session, error = %e, "agent set");
+                }
+            }
+            ClientMsg::ListAgentSessions { cwd } => {
+                let (cwd, sessions) = crate::driven::Driven::sessions(cwd.as_deref());
+                tracing::debug!(client = %self.client, %cwd, found = sessions.len(), "agent sessions");
+                let _sent = self.out.send(HostMsg::AgentSessions { cwd, sessions }).await;
+            }
             ClientMsg::InstallHooks => {
                 let (ok, message) = install_hooks().await;
                 tracing::info!(client = %self.client, ok, %message, "install hooks");
@@ -780,6 +791,9 @@ impl Peer<'_> {
             if self.out.send(HostMsg::AgentPermission { session, request }).await.is_err() {
                 return false;
             }
+        }
+        if self.out.send(HostMsg::AgentInfo { session, info: snapshot.info }).await.is_err() {
+            return false;
         }
         self.out.send(HostMsg::Agent(snapshot.event)).await.is_ok()
     }

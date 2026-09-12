@@ -27,8 +27,8 @@ use slopty_client::canvas::{
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentEvent, AgentSource, AgentStatus, BlockReason, OpenAgent, PermissionRequest,
-    TranscriptUpdate,
+    AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, BlockReason, OpenAgent,
+    PermissionRequest, TranscriptUpdate,
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
@@ -65,6 +65,8 @@ pub mod actions {
             NewAgent,
             /// Open a Claude Code agent the host drives over its structured protocol.
             NewDrivenAgent,
+            /// Pick a past Claude Code conversation on the host to resume as a driven agent.
+            ResumeAgent,
             /// Put an empty note on the canvas.
             NewNote,
             /// Put a host window or display on the canvas.
@@ -99,8 +101,8 @@ pub mod actions {
 }
 pub use actions::{
     AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewDrivenAgent,
-    NewNote, NewTerminal, NextAttention, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
-    ZoomToItem,
+    NewNote, NewTerminal, NextAttention, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut,
+    ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -121,6 +123,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-n", NewTerminal, CTX),
         KeyBinding::new("cmd-shift-t", NewAgent, CTX),
         KeyBinding::new("cmd-alt-t", NewDrivenAgent, CTX),
+        KeyBinding::new("cmd-alt-r", ResumeAgent, CTX),
         KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
@@ -292,6 +295,8 @@ pub struct CanvasView {
     picker: Option<Entity<WindowPicker>>,
     /// A `List` is in flight for the picker.
     picker_wanted: bool,
+    /// A `ListAgentSessions` is in flight for the resume picker.
+    resume_wanted: bool,
     /// The next listing adds its first display straight away (the self-test socket's way
     /// to put a remote display on the canvas without the picker).
     display_wanted: bool,
@@ -389,6 +394,7 @@ impl CanvasView {
             open_screen,
             picker: None,
             picker_wanted: false,
+            resume_wanted: false,
             display_wanted: false,
             show_stats: false,
             rtt: None,
@@ -1042,6 +1048,7 @@ impl CanvasView {
                     this.add_screen_item(*target, *size, title.clone());
                 }
                 PickerEvent::Jump(session) => this.reveal_session(*session, cx),
+                PickerEvent::Resume(agent) => this.resume_agent_session(agent, cx),
                 PickerEvent::Dismiss => {}
             }
             this.picker = None;
@@ -1090,7 +1097,8 @@ impl CanvasView {
     }
 
     /// What a terminal's title bar says: the program's title, else the session's, else "shell".
-    fn terminal_title(&self, session: SessionId, cx: &Context<Self>) -> String {
+    #[must_use]
+    pub fn terminal_title(&self, session: SessionId, cx: &App) -> String {
         self.terminals
             .get(&session)
             .and_then(|v| v.read(cx).state().title().map(str::to_owned))
@@ -1162,6 +1170,50 @@ impl CanvasView {
         if let Some(view) = self.terminals.get(&session) {
             view.update(cx, |v, cx| v.agent_partial(text, cx));
         }
+    }
+
+    /// What a driven agent says about itself, for the view showing it.
+    pub fn agent_info(&self, session: SessionId, info: AgentInfo, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.agent_info(info, cx));
+        }
+    }
+
+    /// The host's answer to ⌘⌥R: the conversations on disk for the directory asked about,
+    /// shown as the resume picker.
+    pub fn agent_sessions(&mut self, sessions: Vec<AgentSessionInfo>, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.resume_wanted) {
+            return;
+        }
+        let theme = self.theme.clone();
+        let picker = cx.new(|cx| WindowPicker::resume(sessions, theme, cx));
+        self.subscriptions.push(cx.subscribe(&picker, |this, _picker, event, cx| {
+            if let PickerEvent::Resume(agent) = event {
+                this.resume_agent_session(agent, cx);
+            }
+            this.picker = None;
+            this.pending_focus_self = true;
+            cx.notify();
+        }));
+        self.pending_focus_picker = true;
+        self.picker = Some(picker);
+        cx.notify();
+    }
+
+    /// A row of the resume picker: open the conversation as a driven agent in its directory,
+    /// titled by its first prompt.
+    fn resume_agent_session(&self, agent: &AgentSessionInfo, cx: &mut Context<Self>) {
+        let title =
+            if agent.title.is_empty() { AGENT_COMMAND.to_owned() } else { agent.title.clone() };
+        self.open_agent_with(
+            OpenAgent {
+                cwd: Some(agent.cwd.clone()),
+                resume: Some(agent.id.clone()),
+                model: None,
+                title: Some(title),
+            },
+            cx,
+        );
     }
 
     /// A driven agent's tool call waiting on the human, for the view showing it.
@@ -1261,7 +1313,12 @@ impl CanvasView {
         if let Some(active) = self.active
             && self.doc.get(active).is_none()
         {
+            // The active item held the keyboard and is gone (its session closed, a peer
+            // removed it): the topmost item becomes active and the canvas takes the keyboard
+            // back on its next frame (and hands it to that item when it is a live terminal),
+            // so the next shortcut still lands instead of dying on a handle nobody draws.
             self.active = self.doc.by_z().last().map(|i| i.id);
+            self.pending_focus_self = true;
         }
         self.prune_headings();
     }
@@ -1384,13 +1441,26 @@ impl CanvasView {
 
     /// Open a driven agent in `cwd` (the host's default when `None`); the host places it.
     pub fn open_agent(&self, cwd: Option<String>, cx: &mut Context<Self>) {
-        tracing::debug!(?cwd, "open driven agent");
-        self.send(ClientMsg::OpenAgent(OpenAgent {
-            cwd,
-            resume: None,
-            model: None,
-            title: Some(AGENT_COMMAND.to_owned()),
-        }));
+        self.open_agent_with(
+            OpenAgent { cwd, resume: None, model: None, title: Some(AGENT_COMMAND.to_owned()) },
+            cx,
+        );
+    }
+
+    /// Open a driven agent as `req` says (a fresh conversation or a resumed one); the host
+    /// places it.
+    pub fn open_agent_with(&self, req: OpenAgent, cx: &mut Context<Self>) {
+        tracing::debug!(cwd = ?req.cwd, resume = ?req.resume, "open driven agent");
+        self.send(ClientMsg::OpenAgent(req));
+        cx.notify();
+    }
+
+    /// ⌘⌥R: ask the host for the Claude Code conversations in the active terminal's
+    /// directory (its default without one); the picker opens when the list arrives.
+    pub fn resume_agent(&mut self, _: &ResumeAgent, _window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active.and_then(|id| self.doc.get(id)).and_then(|item| self.cwd_of(item));
+        self.resume_wanted = true;
+        self.send(ClientMsg::ListAgentSessions { cwd });
         cx.notify();
     }
 
@@ -2390,6 +2460,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_driven_agent))
+            .on_action(cx.listener(Self::resume_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))
@@ -3962,5 +4033,70 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(labels(cx), 2, "a zoom step and its settled frame shape nothing");
         assert!(view.read_with(cx, |c, _| c.camera.zoom > 1.0));
+    }
+
+    /// ⌘⌥R asks the host for the conversations on disk; the answer opens the picker as a
+    /// resume list, and a row opens that conversation as a driven agent in its directory,
+    /// titled by its first prompt.
+    #[gpui::test]
+    fn a_past_conversation_is_resumed_from_the_picker(cx: &mut TestAppContext) {
+        let (view, mut rx, _me, cx) = canvas(cx);
+        cx.simulate_keystrokes("cmd-alt-r");
+        cx.run_until_parked();
+        let asked = drain(&mut rx);
+        assert!(
+            matches!(asked.as_slice(), [ClientMsg::ListAgentSessions { cwd: None }]),
+            "{asked:?}"
+        );
+        let found = vec![
+            AgentSessionInfo {
+                id: "19146b4d".to_owned(),
+                cwd: "/w/slopty".to_owned(),
+                title: "fix the build".to_owned(),
+                modified_ms: 0,
+            },
+            AgentSessionInfo {
+                id: "2".to_owned(),
+                cwd: "/w/slopty".to_owned(),
+                title: String::new(),
+                modified_ms: 0,
+            },
+        ];
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(found, cx));
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Dialog", Some("Resume a conversation"))), "{tree:#?}");
+        assert!(
+            tree.iter().any(|n| n.role == "Button"
+                && n.label.as_deref().is_some_and(
+                    |l| l.starts_with("fix the build, ") && l.ends_with(" d ago · /w/slopty")
+                )),
+            "{tree:#?}"
+        );
+        assert!(
+            tree.iter()
+                .any(|n| n.role == "Button"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("2, "))),
+            "an untitled conversation is named by its id: {tree:#?}"
+        );
+        let row = cx.debug_bounds("picker-agent-0").expect("the first row");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let opened = drain(&mut rx);
+        assert!(
+            matches!(
+                opened.as_slice(),
+                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), resume: Some(id), model: None, title: Some(title) })]
+                    if cwd == "/w/slopty" && id == "19146b4d" && title == "fix the build"
+            ),
+            "{opened:?}"
+        );
+        assert!(view.read_with(cx, |c, _| c.picker.is_none()), "the picker closed");
+
+        // An answer nobody asked for (another client's, or a late one) opens nothing.
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(Vec::new(), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |c, _| c.picker.is_none()));
     }
 }

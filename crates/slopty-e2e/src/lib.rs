@@ -129,6 +129,9 @@ pub enum Command {
         /// Working directory.
         #[serde(default)]
         cwd: Option<String>,
+        /// A Claude Code session id to resume, as the resume picker would.
+        #[serde(default)]
+        resume: Option<String>,
     },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
@@ -545,7 +548,7 @@ pub struct TerminalInfo {
     /// `terminal` (a grid), or `agent` (a session the host drives: the conversation is the
     /// whole card).
     pub kind: String,
-    /// Title from the program, if any.
+    /// What the title bar says: the program's title, else the session's, else "shell".
     pub title: Option<String>,
     /// Columns × rows.
     pub size: [u16; 2],
@@ -744,6 +747,27 @@ pub struct ConversationInfo {
     pub partial: String,
     /// The permission a driven agent waits on, `<tool>:<summary>`.
     pub permission: Option<String>,
+    /// The model the driven agent named (`AgentInfo::model`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The permission mode the driven agent named.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Claude Code's own session id, once the agent said it.
+    #[serde(default)]
+    pub agent_session: Option<String>,
+    /// The slash commands the driven agent announced.
+    #[serde(default)]
+    pub slash_commands: Vec<String>,
+    /// Turns so far.
+    #[serde(default)]
+    pub turns: u32,
+    /// The slash commands completing the composer's text right now, as listed above it.
+    #[serde(default)]
+    pub completions: Vec<String>,
+    /// The model menu is open under the header.
+    #[serde(default)]
+    pub model_menu: bool,
 }
 
 impl Dump {

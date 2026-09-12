@@ -22,8 +22,8 @@ use slopty_agent::stream::{self, Fold, Update};
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::HostMsg;
 use slopty_proto::agent::{
-    AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, OpenAgent, PermissionRequest,
-    TranscriptEntry, TranscriptUpdate,
+    AgentEvent, AgentInfo, AgentKind, AgentSessionInfo, AgentSource, AgentStatus, BlockReason,
+    OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_proto::terminal::{CloseReason, SessionKind, SessionState, SessionSummary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,6 +41,8 @@ const PARTIAL_EVERY: Duration = Duration::from_millis(40);
 const KEEP_ENTRIES: usize = 400;
 /// How long a closed agent gets to exit on its own before it is killed.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
+/// How many past conversations a `ListAgentSessions` answers with.
+const SESSIONS_LISTED: usize = 30;
 
 /// What a client can ask a driven agent.
 #[derive(Debug)]
@@ -48,6 +50,7 @@ enum Cmd {
     Say(String),
     Answer { request: String, allowed: bool, message: Option<String> },
     Interrupt,
+    Set { model: Option<String>, permission_mode: Option<String> },
     Close,
 }
 
@@ -60,6 +63,7 @@ struct Entry {
     partial: String,
     pending: Vec<PermissionRequest>,
     event: AgentEvent,
+    info: AgentInfo,
 }
 
 /// A snapshot of one driven agent for a client that attaches or follows it.
@@ -73,6 +77,8 @@ pub struct Snapshot {
     pub pending: Vec<PermissionRequest>,
     /// The agent's status.
     pub event: AgentEvent,
+    /// What the agent said about itself.
+    pub info: AgentInfo,
 }
 
 /// The driven agents of this daemon.
@@ -121,9 +127,21 @@ impl Driven {
             partial: entry.partial.clone(),
             pending: entry.pending.clone(),
             event: entry.event.clone(),
+            info: entry.info.clone(),
         };
         drop(table);
         Some(snapshot)
+    }
+
+    /// The conversations Claude Code has on disk for `cwd` (the daemon's default when
+    /// `None`), newest first, for a client that wants to resume one.
+    #[must_use]
+    pub fn sessions(cwd: Option<&str>) -> (String, Vec<AgentSessionInfo>) {
+        let cwd = cwd.map_or_else(default_cwd, str::to_owned);
+        let home = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
+        let sessions =
+            slopty_agent::discover::sessions(&home, std::path::Path::new(&cwd), SESSIONS_LISTED);
+        (cwd, sessions)
     }
 
     /// Start an agent. The summary is returned for the `SessionOpened` the caller broadcasts.
@@ -132,10 +150,7 @@ impl Driven {
     ///
     /// When the process cannot be spawned.
     pub fn open(&self, daemon: &Daemon, req: &OpenAgent) -> Result<SessionSummary, DrivenError> {
-        let cwd = req
-            .cwd
-            .clone()
-            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_unset| "/".to_owned()));
+        let cwd = req.cwd.clone().unwrap_or_else(default_cwd);
         let mut command = launch(req, &cwd);
         let mut child = command.spawn().map_err(DrivenError::Spawn)?;
         let session = SessionId::new();
@@ -170,6 +185,11 @@ impl Driven {
                 partial: String::new(),
                 pending: Vec::new(),
                 event: event.clone(),
+                info: AgentInfo {
+                    agent_session: req.resume.clone(),
+                    model: req.model.clone(),
+                    ..AgentInfo::default()
+                },
             },
         );
         let _sent = daemon.events.send(HostMsg::Agent(event));
@@ -232,6 +252,20 @@ impl Driven {
         self.send(session, Cmd::Interrupt)
     }
 
+    /// Switch the agent's model and/or permission mode in place.
+    ///
+    /// # Errors
+    ///
+    /// When `session` is not a driven agent.
+    pub fn set(
+        &self,
+        session: SessionId,
+        model: Option<String>,
+        permission_mode: Option<String>,
+    ) -> Result<(), DrivenError> {
+        self.send(session, Cmd::Set { model, permission_mode })
+    }
+
     /// Close the agent: stdin closes, the process gets [`EXIT_GRACE`], then it is killed. The
     /// session ends through the pump, which broadcasts `SessionClosed`.
     ///
@@ -251,6 +285,11 @@ impl Driven {
             Some(Err(_)) | None => Err(DrivenError::Unknown(session)),
         }
     }
+}
+
+/// Where an agent runs when the client names no directory: the daemon's home.
+fn default_cwd() -> String {
+    std::env::var("HOME").unwrap_or_else(|_unset| "/".to_owned())
 }
 
 /// The `claude` invocation: the binary named by [`CLAUDE_BIN_ENV`], else `claude` through the
@@ -295,6 +334,9 @@ impl Pump {
     ) {
         let mut lines = BufReader::new(stdout).lines();
         let mut fold = Fold::default();
+        // Retune requests in flight, by request id: what to record when the agent acks.
+        let mut asked: HashMap<String, Ask> = HashMap::new();
+        let mut set_seq = 0_u64;
         let mut partial_dirty = false;
         let mut partial_tick = tokio::time::interval(PARTIAL_EVERY);
         partial_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -306,6 +348,14 @@ impl Pump {
                         tracing::debug!(session = %self.session, "claude said: {line}");
                         continue;
                     };
+                    if let stream::Event::ControlAck { request_id, error } = &event
+                        && let Some(ask) = asked.remove(request_id)
+                    {
+                        match error {
+                            None => self.acked(ask),
+                            Some(e) => tracing::warn!(session = %self.session, %e, ?ask, "retune refused"),
+                        }
+                    }
                     for update in fold.apply(event, now_millis()) {
                         // Streamed text is coalesced to the tick; its end (the text became an
                         // entry) goes at once, so no client shows it twice beside the entry.
@@ -340,6 +390,23 @@ impl Pump {
                             line
                         }
                         Cmd::Interrupt => Some(stream::interrupt(&format!("slopty-{}", now_millis()))),
+                        Cmd::Set { model, permission_mode } => {
+                            let mut lines = Vec::new();
+                            for ask in model
+                                .map(Ask::Model)
+                                .into_iter()
+                                .chain(permission_mode.map(Ask::PermissionMode))
+                            {
+                                set_seq = set_seq.wrapping_add(1);
+                                let id = format!("slopty-set-{set_seq}");
+                                lines.push(match &ask {
+                                    Ask::Model(m) => stream::set_model(&id, m),
+                                    Ask::PermissionMode(m) => stream::set_permission_mode(&id, m),
+                                });
+                                asked.insert(id, ask);
+                            }
+                            (!lines.is_empty()).then(|| lines.join("\n"))
+                        }
                         Cmd::Close => {
                             let _closed = stdin.shutdown().await;
                             tokio::time::sleep(EXIT_GRACE).await;
@@ -433,8 +500,50 @@ impl Pump {
                     cost_usd = result.cost_usd,
                     "turn ended"
                 );
+                self.info(|info| {
+                    info.turns = result.turns;
+                    info.cost_micro_usd = micro_usd(result.cost_usd);
+                    if !result.session_id.is_empty() {
+                        info.agent_session = Some(result.session_id.clone());
+                    }
+                });
+            }
+            Update::Init(init) => self.info(|info| {
+                info.agent_session = Some(init.session_id.clone()).filter(|s| !s.is_empty());
+                info.model = Some(init.model.clone()).filter(|m| !m.is_empty());
+                info.permission_mode = Some(init.permission_mode.clone()).filter(|m| !m.is_empty());
+                info.slash_commands.clone_from(&init.slash_commands);
+            }),
+            Update::Model(model) => self.info(|info| info.model = Some(model.clone())),
+            Update::PermissionMode(mode) => {
+                self.info(|info| info.permission_mode = Some(mode.clone()));
             }
         }
+    }
+
+    /// The agent acknowledged a retune: the model is recorded as asked (the next assistant
+    /// record names the full one); the mode comes back as a status record, so nothing yet.
+    fn acked(&self, ask: Ask) {
+        match ask {
+            Ask::Model(model) => self.info(|info| info.model = Some(model.clone())),
+            Ask::PermissionMode(_) => {}
+        }
+    }
+
+    /// Change the agent's info and, when that changed anything, tell every client and keep
+    /// the status event's `agent_session` in step.
+    fn info(&self, change: impl FnOnce(&mut AgentInfo)) {
+        let mut table = self.table.inner.lock();
+        let Some(entry) = table.get_mut(&self.session) else { return };
+        let before = entry.info.clone();
+        change(&mut entry.info);
+        if entry.info == before {
+            return;
+        }
+        entry.event.agent_session.clone_from(&entry.info.agent_session);
+        let info = entry.info.clone();
+        drop(table);
+        let _sent = self.events.send(HostMsg::AgentInfo { session: self.session, info });
     }
 
     /// A user entry equal to the last one shown (the agent replaying the prompt just sent).
@@ -508,6 +617,30 @@ impl Pump {
         for delta in daemon.canvas.remove_session(self.session, ClientId::nil()) {
             let _sent = self.events.send(HostMsg::Canvas(delta));
         }
+    }
+}
+
+/// A retune in flight, keyed by its request id until the agent acks it.
+#[derive(Debug)]
+enum Ask {
+    Model(String),
+    PermissionMode(String),
+}
+
+/// Dollars to millionths of a dollar, saturating; a negative or NaN estimate is zero.
+fn micro_usd(usd: f64) -> u64 {
+    let micro = (usd * 1_000_000.0).round();
+    if micro.is_finite() && micro > 0.0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked finite and positive; f64 to u64 within 2^53 is exact"
+        )]
+        {
+            micro.min(9_007_199_254_740_992.0) as u64
+        }
+    } else {
+        0
     }
 }
 

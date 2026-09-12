@@ -490,6 +490,48 @@ interrupt, and asks a `Write` permission that the test allows and then denies th
 Allow / Deny buttons in the accessibility tree) and reads the card through the dump
 (`TerminalInfo.kind`, `ConversationInfo.partial`, `ConversationInfo.permission`).
 
+**What the agent says about itself, and retuning it (protocol 16).** The pump folds
+`system/init` (`Update::Init`), every `result` (`Update::Turn`), the model each assistant
+record names (`Update::Model`) and the `system/status` records that carry a permission
+mode (`Update::PermissionMode`) into one `AgentInfo { agent_session, model,
+permission_mode, slash_commands, turns, cost_micro_usd }` per session, broadcast whole as
+`HostMsg::AgentInfo` whenever any of it changes and sent with the snapshot a joining client
+gets. The card shows it as a header over the list (`conversation-header`): the model as a
+chip (`conversation-model`, "Model: …") whose click opens a row of the four aliases
+(`conversation-models`, `MODELS`: fable, opus, sonnet, haiku) — picking one sends
+`ClientMsg::AgentSet { session, model }`; the permission mode as a chip
+(`conversation-mode`, "Permission mode: …") that cycles `default → acceptEdits → plan`
+through `AgentSet { permission_mode }`; then the turn count and the cost. The host turns an
+`AgentSet` into Claude Code's `set_model` / `set_permission_mode` control requests (probed on
+2.1.269: both acknowledged in place, no restart; `supported_models` / `supported_commands` are
+not, so the model list is fixed and the slash commands come from `init`), records the model
+on the ack and the mode on the status record that follows, and the chip only changes when
+the agent has confirmed. The composer completes the announced slash commands
+(`conversation::slash_matches`): a one-word `/…` text lists its prefix matches above the
+field (`conversation-completions`, `ListBox` of `ListBoxOption`s), Tab takes the selected
+one (`CompleteSlash`, bound to Tab in the "Terminal" context ahead of gpui-kit `Root`'s
+focus-ring Tab, and propagated when there is nothing to complete), ↑/↓ choose, Esc hides the
+list until the text changes — those keys are caught in the capture phase (`completion_key`,
+and `capture_action` for the input's own `MoveUp` / `MoveDown` / `Escape` / `IndentInline`,
+which GPUI dispatches before any key event) so the composer never moves its caret or
+interrupts the agent while the list is up. **Resuming** a conversation:
+"Resume Agent…" / ⌘⌥R (`ResumeAgent`) sends `ClientMsg::ListAgentSessions { cwd }` for the
+active terminal's directory; the host lists `~/.claude/projects/<escaped cwd>/*.jsonl`
+(`slopty_agent::discover::sessions`, the directory named by the canonical cwd since Claude
+Code names it by `process.cwd()`: newest first, at most 30, each named by the first prompt
+the human typed — meta records, sidechains, subagent `agent-*.jsonl` files and
+`<command-…>` records are not prompts, and a file with none is not listed) as
+`HostMsg::AgentSessions`, which opens the `WindowPicker` in its resume form (`Dialog`
+"Resume a conversation", rows `picker-agent-<i>` labelled "title, N min ago · cwd"); a row
+sends `OpenAgent { cwd, resume: id, title }`, so the new card is titled by that first prompt
+and Claude Code continues the same session (`--resume`). Tests: the fold and the discovery
+in `slopty-agent`, the wire shapes in `driven_agent_info`, headless
+`a_driven_view_shows_the_agent_and_retunes_it` and `a_past_conversation_is_resumed_from_the_picker`,
+the app self-test (the fake acks `set_model`, answers `set_permission_mode` with a status
+record, answers `/cost`, honours `--resume`, and writes its prompts to the transcript under
+the run's private `HOME` so ⌘⌥R finds them), and `the_driven_agent_card_on_the_simulator`
+with the `ios-<device>-agent` goldens.
+
 **Conversation view.** A terminal that runs a Claude Code session can show the conversation
 instead of the grid: the "chat" pill in its title bar or ⌘⇧L (`ToggleConversation`) sends
 `ClientMsg::Transcript(TranscriptFollow { session, follow: true })`; the daemon opens a

@@ -4,6 +4,9 @@
 //! Shown by the canvas after a `Listing` arrives; a click picks, Escape dismisses. Sessions come
 //! first, and among them the ones whose agent is waiting on the human, so a wall of terminals
 //! is searched by what needs doing rather than by position.
+//!
+//! The same modal lists past Claude Code conversations the host found on disk
+//! (`AgentSessions`), for resuming one as a driven agent.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -12,6 +15,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_core::SessionId;
+use slopty_proto::agent::AgentSessionInfo;
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_theme::{Theme, alpha};
 
@@ -32,6 +36,8 @@ pub enum PickerEvent {
     },
     /// Reveal and focus this session's terminal.
     Jump(SessionId),
+    /// Resume a past Claude Code conversation as a driven agent.
+    Resume(AgentSessionInfo),
     /// Closed without choosing.
     Dismiss,
 }
@@ -69,6 +75,10 @@ pub struct WindowPicker {
     sessions: Vec<SessionRow>,
     windows: Vec<WindowInfo>,
     displays: Vec<DisplayInfo>,
+    /// Past conversations to resume (the picker's resume form), newest first.
+    agents: Vec<AgentSessionInfo>,
+    /// The picker is the resume form: only `agents` are listed, under that title.
+    resume: bool,
     theme: Theme,
     focus: FocusHandle,
 }
@@ -102,7 +112,28 @@ impl WindowPicker {
     ) -> Self {
         windows.retain(|w| w.on_screen);
         windows.sort_by(|a, b| a.app.cmp(&b.app).then_with(|| a.title.cmp(&b.title)));
-        Self { sessions, windows, displays, theme, focus: cx.focus_handle() }
+        Self {
+            sessions,
+            windows,
+            displays,
+            agents: Vec::new(),
+            resume: false,
+            theme,
+            focus: cx.focus_handle(),
+        }
+    }
+
+    /// The resume form: the conversations the host has on disk for a directory.
+    pub fn resume(agents: Vec<AgentSessionInfo>, theme: Theme, cx: &Context<Self>) -> Self {
+        Self {
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            displays: Vec::new(),
+            agents,
+            resume: true,
+            theme,
+            focus: cx.focus_handle(),
+        }
     }
 
     /// Swap the theme.
@@ -123,7 +154,7 @@ impl WindowPicker {
     /// One pickable line.
     fn row(
         &self,
-        id: impl Into<gpui::ElementId>,
+        id: (&'static str, usize),
         line: Line,
         on_pick: PickerEvent,
         cx: &Context<Self>,
@@ -136,6 +167,7 @@ impl WindowPicker {
             if secondary.is_empty() { primary.clone() } else { format!("{primary}, {secondary}") };
         let row = div()
             .id(id)
+            .debug_selector(move || format!("picker-{}-{}", id.0, id.1))
             .role(gpui::accesskit::Role::Button)
             .aria_label(SharedString::from(label))
             .w_full()
@@ -212,7 +244,22 @@ impl Render for WindowPicker {
             let line = Line::new(w.app.clone(), title);
             rows.push(self.row(("window", i), line, event, cx).into_any_element());
         }
+        for (i, a) in self.agents.iter().enumerate() {
+            let title = if a.title.is_empty() { a.id.clone() } else { a.title.clone() };
+            let line = Line::new(title, format!("{} · {}", ago(a.modified_ms), a.cwd));
+            rows.push(
+                self.row(("agent", i), line, PickerEvent::Resume(a.clone()), cx).into_any_element(),
+            );
+        }
         let empty = rows.is_empty();
+        let (title, nothing): (&'static str, &'static str) = if self.resume {
+            ("Resume a conversation", "no conversation on the host for this directory")
+        } else {
+            (
+                "Jump to a session, or add a window from the host",
+                "nothing on the canvas or shareable on the host",
+            )
+        };
 
         div()
             .id("picker-backdrop")
@@ -235,7 +282,7 @@ impl Render for WindowPicker {
                 div()
                     .id("picker")
                     .role(gpui::accesskit::Role::Dialog)
-                    .aria_label("Jump to a session, or add a window from the host")
+                    .aria_label(title)
                     .w(px(560.0))
                     .max_h(px(520.0))
                     .flex()
@@ -255,7 +302,7 @@ impl Render for WindowPicker {
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
                             .text_color(hsla(theme.surfaces.text))
-                            .child("Jump to a session, or add a window from the host"),
+                            .child(title),
                     )
                     .child(
                         div()
@@ -269,10 +316,27 @@ impl Render for WindowPicker {
                                     div()
                                         .p(px(theme.spacing.md))
                                         .text_color(hsla(theme.surfaces.text_muted))
-                                        .child("nothing on the canvas or shareable on the host"),
+                                        .child(nothing),
                                 )
                             }),
                     ),
             )
+    }
+}
+
+/// How long ago a transcript was written, in the coarsest unit that is not zero.
+#[must_use]
+pub fn ago(modified_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    let secs = now.saturating_sub(modified_ms) / 1000;
+    match secs {
+        0..60 => "just now".to_owned(),
+        60..3600 => format!("{} min ago", secs / 60),
+        3600..86_400 => format!("{} h ago", secs / 3600),
+        _ => format!("{} d ago", secs / 86_400),
     }
 }

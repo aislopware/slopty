@@ -272,6 +272,51 @@ mod golden {
         );
     }
 
+    /// A driven agent's own word on itself (protocol 16): the info the host relays whole,
+    /// the retune request, and the conversations on disk a client can resume.
+    #[test]
+    fn driven_agent_info() {
+        use slopty_proto::agent::{AgentInfo, AgentSessionInfo, AgentSet};
+        snap(
+            "host_agent_info",
+            &HostMsg::AgentInfo {
+                session: session(),
+                info: AgentInfo {
+                    agent_session: Some("19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned()),
+                    model: Some("claude-fable-5-1".to_owned()),
+                    permission_mode: Some("acceptEdits".to_owned()),
+                    slash_commands: vec!["/compact".to_owned(), "/clear".to_owned()],
+                    turns: 3,
+                    cost_micro_usd: 12_500,
+                },
+            },
+        );
+        snap(
+            "client_agent_set",
+            &ClientMsg::AgentSet(AgentSet {
+                session: session(),
+                model: Some("opus".to_owned()),
+                permission_mode: None,
+            }),
+        );
+        snap(
+            "client_list_agent_sessions",
+            &ClientMsg::ListAgentSessions { cwd: Some("/w/slopty".to_owned()) },
+        );
+        snap(
+            "host_agent_sessions",
+            &HostMsg::AgentSessions {
+                cwd: "/w/slopty".to_owned(),
+                sessions: vec![AgentSessionInfo {
+                    id: "19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned(),
+                    cwd: "/w/slopty".to_owned(),
+                    title: "fix the build".to_owned(),
+                    modified_ms: 1_788_000_000_000,
+                }],
+            },
+        );
+    }
+
     #[test]
     fn transcript() {
         use slopty_proto::agent::{

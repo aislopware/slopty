@@ -14,8 +14,15 @@
 //! mtime forward, so it is found the same way; a session that has not written since the host
 //! restarted is found as soon as it writes again.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+use slopty_proto::agent::AgentSessionInfo;
+
+/// How much of a transcript is read to name it: the first prompt is in the first records.
+const TITLE_SCAN_BYTES: u64 = 64 * 1024;
 
 /// Claude Code's per-project directory under the home directory.
 #[must_use]
@@ -24,9 +31,14 @@ pub fn projects_dir(home: &Path) -> PathBuf {
 }
 
 /// The directory Claude Code writes a session's transcript into, for an agent running in `cwd`.
+///
+/// Claude Code names the directory after the working directory as the process sees it, which
+/// on macOS is the resolved path (`/private/var/…` for a `/var/…` the host was given), so
+/// `cwd` is canonicalised first when it exists; a directory that does not is used as given.
 #[must_use]
 pub fn project_dir(home: &Path, cwd: &Path) -> PathBuf {
-    projects_dir(home).join(escape(cwd))
+    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_missing| cwd.to_path_buf());
+    projects_dir(home).join(escape(&resolved))
 }
 
 /// A working directory as Claude Code names its project directory: every character that is not
@@ -64,6 +76,81 @@ pub fn transcript_for(home: &Path, cwd: &Path, since: SystemTime) -> Option<Path
     newest_transcript(&project_dir(home, cwd), since)
 }
 
+/// The conversations Claude Code has on disk for an agent in `cwd`, newest first.
+///
+/// One per `.jsonl` in its project directory (subagent files, `agent-*.jsonl`, are not
+/// conversations), named by the first prompt the human typed, at most `limit`. A file with no
+/// prompt in it is not listed: there is nothing to resume.
+#[must_use]
+pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> Vec<AgentSessionInfo> {
+    let dir = project_dir(home, cwd);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut found: Vec<AgentSessionInfo> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "jsonl") {
+                return None;
+            }
+            let id = path.file_stem()?.to_str()?;
+            if id.starts_with("agent-") {
+                return None;
+            }
+            let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
+            let (title, seen_cwd) = first_prompt(&path)?;
+            Some(AgentSessionInfo {
+                id: id.to_owned(),
+                cwd: seen_cwd.unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+                title,
+                modified_ms: modified
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .and_then(|d| u64::try_from(d.as_millis()).ok())
+                    .unwrap_or(0),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.id.cmp(&b.id)));
+    found.truncate(limit);
+    found
+}
+
+/// The first line the human typed into a transcript (and the working directory the record
+/// names), from its first [`TITLE_SCAN_BYTES`]; `None` when no prompt is in them. Slash
+/// commands and their output are recorded as `<command-…>` tagged user records and are not
+/// prompts; neither are meta records or sidechains.
+fn first_prompt(path: &Path) -> Option<(String, Option<String>)> {
+    let mut head = String::new();
+    let file = std::fs::File::open(path).ok()?;
+    let _read = file.take(TITLE_SCAN_BYTES).read_to_string(&mut head);
+    head.lines().find_map(|line| {
+        let record: Value = serde_json::from_str(line).ok()?;
+        if record.get("type").and_then(Value::as_str) != Some("user")
+            || record.get("isMeta").and_then(Value::as_bool) == Some(true)
+            || record.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        {
+            return None;
+        }
+        let content = record.get("message")?.get("content")?;
+        let text = match content {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _other => return None,
+        };
+        let first = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+        if first.starts_with('<') {
+            return None;
+        }
+        let cwd = record.get("cwd").and_then(Value::as_str).map(str::to_owned);
+        Some((crate::truncate(first), cwd))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -86,7 +173,15 @@ mod tests {
         assert_eq!(escape(Path::new("/private/tmp/a_b")), "-private-tmp-a-b");
         assert_eq!(
             project_dir(Path::new("/Users/x"), Path::new("/tmp/p")),
-            Path::new("/Users/x/.claude/projects/-tmp-p")
+            Path::new("/Users/x/.claude/projects/-tmp-p"),
+            "a directory that does not exist is named as given"
+        );
+        // One that exists is named by its resolved path, as the agent's own cwd would be.
+        let real = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(real.path()).expect("canonical");
+        assert_eq!(
+            project_dir(Path::new("/Users/x"), real.path()),
+            Path::new("/Users/x/.claude/projects").join(escape(&canonical))
         );
     }
 
@@ -147,5 +242,63 @@ mod tests {
             transcript_for(home.path(), cwd, started).as_deref(),
             Some(dir.join("after.jsonl").as_path())
         );
+    }
+
+    #[test]
+    fn the_conversations_on_disk_are_listed_newest_first_by_their_first_prompt() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/tmp/project");
+        assert!(sessions(home.path(), cwd, 10).is_empty(), "no directory: nothing, no error");
+        let dir = project_dir(home.path(), cwd);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let at = |secs: u64| {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)).expect("in range")
+        };
+        let write = |name: &str, body: &str, when: SystemTime| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).expect("write");
+            std::fs::File::open(&path).expect("open").set_modified(when).expect("mtime");
+        };
+        // A slash command's record and a meta record come before the first real prompt.
+        write(
+            "b2.jsonl",
+            concat!(
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Caveat: local"}}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+                "\n",
+                r#"{"type":"user","cwd":"/tmp/project","message":{"role":"user","content":[{"type":"text","text":"  fix the build\nplease"}]}}"#,
+                "\n",
+            ),
+            at(2_000),
+        );
+        write(
+            "a1.jsonl",
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"add tests"}}"#,
+                "\n",
+            ),
+            at(1_000),
+        );
+        // Never prompted, a subagent's file, and not a transcript: none of them is listed.
+        write("c3.jsonl", r#"{"type":"assistant"}"#, at(3_000));
+        write(
+            "agent-x.jsonl",
+            r#"{"type":"user","message":{"role":"user","content":"sub"}}"#,
+            at(4_000),
+        );
+        write("notes.txt", "hello", at(5_000));
+
+        let listed = sessions(home.path(), cwd, 10);
+        let lines: Vec<(&str, &str, &str)> =
+            listed.iter().map(|s| (s.id.as_str(), s.title.as_str(), s.cwd.as_str())).collect();
+        assert_eq!(
+            lines,
+            [("b2", "fix the build", "/tmp/project"), ("a1", "add tests", "/tmp/project")]
+        );
+        assert_eq!(listed[0].modified_ms, 2_000_000);
+        assert_eq!(sessions(home.path(), cwd, 1).len(), 1, "the limit keeps the newest");
     }
 }

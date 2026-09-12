@@ -309,6 +309,7 @@ mod tests {
             return;
         }
         let mut stack = Stack::launch_with_driven_claude("e2e-host").await.unwrap();
+        let home = stack.home().unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         stack
             .driver
@@ -356,6 +357,88 @@ mod tests {
             conv.partial.is_empty() && conv.composer.is_empty() && conv.attention.is_none(),
             "{conv:?}"
         );
+        // What the agent said about itself, in the header: the model, the mode, the turn.
+        assert_eq!(conv.model.as_deref(), Some("fake-model"), "{conv:?}");
+        assert_eq!(conv.permission_mode.as_deref(), Some("default"), "{conv:?}");
+        assert_eq!(conv.agent_session.as_deref(), Some("fake-session"), "{conv:?}");
+        assert_eq!(conv.turns, 1, "{conv:?}");
+        assert!(conv.slash_commands.iter().any(|c| c == "/cost"), "{conv:?}");
+        assert!(dump.a11y_node("Button", Some("Model: fake-model")).is_some(), "{:#?}", dump.a11y);
+
+        // The model chip opens the menu; picking Opus retunes the agent in place (no
+        // restart: the same session id) and the chip follows the agent's word.
+        let chip = dump.a11y_node("Button", Some("Model: fake-model")).unwrap();
+        let [bx, by, bw, bh] = chip.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        let dump = drv
+            .wait_for("the model menu", STEP, |d| {
+                chat(d).is_some_and(|(_, conv)| conv.model_menu)
+                    && d.a11y_node("MenuItem", Some("Opus 5")).is_some()
+            })
+            .await
+            .unwrap();
+        let opus = dump.a11y_node("MenuItem", Some("Opus 5")).unwrap();
+        let [bx, by, bw, bh] = opus.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        let dump = drv
+            .wait_for("the agent on opus", STEP, |d| {
+                chat(d).is_some_and(|(_, conv)| {
+                    conv.model.as_deref() == Some("opus") && !conv.model_menu
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(chat(&dump).unwrap().1.agent_session.as_deref(), Some("fake-session"));
+        // The mode chip cycles to the next mode; the agent's status record confirms it.
+        let mode = dump.a11y_node("Button", Some("Permission mode: Ask")).unwrap();
+        let [bx, by, bw, bh] = mode.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        drv.wait_for("accept edits", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| conv.permission_mode.as_deref() == Some("acceptEdits"))
+        })
+        .await
+        .unwrap();
+
+        // Slash completion: `/c` lists the three, Esc hides them without interrupting,
+        // `/cos` + Tab completes `/cost`, ↩ sends it and the agent answers it.
+        drv.type_text("/c").await.unwrap();
+        drv.wait_for("the completions", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| conv.completions == ["/compact", "/clear", "/cost"])
+        })
+        .await
+        .unwrap();
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the list hidden", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                conv.completions.is_empty() && agent.as_deref() == Some("done")
+            })
+        })
+        .await
+        .unwrap();
+        drv.type_text("os").await.unwrap();
+        drv.wait_for("one completion", STEP, |d| {
+            chat(d).is_some_and(|(_, conv)| conv.completions == ["/cost"])
+        })
+        .await
+        .unwrap();
+        drv.keys("tab").await.unwrap();
+        drv.wait_for("the completed command", STEP, |d| {
+            chat(d)
+                .is_some_and(|(_, conv)| conv.composer == "/cost " && conv.completions.is_empty())
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the command's answer", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("done")
+                    && conv.entries.last().map(String::as_str)
+                        == Some("assistant: Total cost: $0.02")
+                    && conv.turns == 2
+            })
+        })
+        .await
+        .unwrap();
 
         // A turn that streams and stops: the partial shows under the list while the agent is
         // working; Esc interrupts it, and the turn ends with the interrupted record.
@@ -449,6 +532,51 @@ mod tests {
         })
         .await
         .unwrap();
+
+        // ⌘⌥R: the host lists the conversations in the active shell's directory (the private
+        // HOME, where the fake wrote its transcript); the row named by the first prompt opens
+        // the same Claude Code session again, as a new card titled by that prompt.
+        drv.keys("cmd-alt-r").await.unwrap();
+        let dump = drv
+            .wait_for("the resume picker", STEP, |d| {
+                d.a11y_node("Dialog", Some("Resume a conversation")).is_some()
+                    && d.a11y.iter().any(|n| {
+                        n.role == "Button"
+                            && n.label.as_deref().is_some_and(|l| l.starts_with("hello, "))
+                    })
+            })
+            .await
+            .unwrap();
+        let row = dump
+            .a11y
+            .iter()
+            .find(|n| {
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("hello, "))
+            })
+            .unwrap();
+        // The directory as the agent's process saw it (macOS resolves `/var` to `/private/var`).
+        let seen = std::fs::canonicalize(&home).unwrap();
+        assert!(
+            row.label.as_deref().is_some_and(|l| l.contains(&*seen.to_string_lossy())),
+            "the row names the directory: {row:?}"
+        );
+        let [bx, by, bw, bh] = row.bounds;
+        drv.click(bx + bw / 2.0, by + bh / 2.0).await.unwrap();
+        let dump = drv
+            .wait_for("the resumed card", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.kind == "agent"
+                        && t.conversation.as_ref().is_some_and(|c| {
+                            c.agent_session.as_deref() == Some("fake-session") && c.composer_focused
+                        })
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.items.len(), 2, "{:?}", dump.items);
+        assert!(dump.a11y_node("Dialog", None).is_none(), "the picker closed");
+        let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
+        assert_eq!(card.title.as_deref(), Some("hello"), "titled by the first prompt: {card:?}");
         stack.shutdown().await;
     }
 

@@ -1384,6 +1384,12 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::AgentPermission { session, request }) => {
             canvas.update(cx, |c, cx| c.agent_permission(session, request, cx));
         }
+        LinkEvent::Control(HostMsg::AgentInfo { session, info }) => {
+            canvas.update(cx, |c, cx| c.agent_info(session, info, cx));
+        }
+        LinkEvent::Control(HostMsg::AgentSessions { sessions, .. }) => {
+            canvas.update(cx, |c, cx| c.agent_sessions(sessions, cx));
+        }
         LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
             let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
             if !ok {

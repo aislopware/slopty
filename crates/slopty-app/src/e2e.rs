@@ -441,11 +441,22 @@ fn apply(
             });
             Reply::Ok
         }
-        Command::OpenAgent { cwd } => {
+        Command::OpenAgent { cwd, resume } => {
             let Some(canvas) = workspace.read(cx).active_canvas() else {
                 return Reply::Error { message: "no active canvas".into() };
             };
-            canvas.update(cx, |canvas, cx| canvas.open_agent(cwd, cx));
+            canvas.update(cx, |canvas, cx| match resume {
+                None => canvas.open_agent(cwd, cx),
+                Some(id) => canvas.open_agent_with(
+                    slopty_proto::agent::OpenAgent {
+                        cwd,
+                        resume: Some(id),
+                        model: None,
+                        title: Some("resumed".to_owned()),
+                    },
+                    cx,
+                ),
+            });
             Reply::Ok
         }
         Command::FramesReset => {
@@ -757,6 +768,13 @@ impl Workspace {
                     pinned: c.pinned(),
                     partial: view.partial().to_owned(),
                     permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
+                    model: view.info().model.clone(),
+                    permission_mode: view.info().permission_mode.clone(),
+                    agent_session: view.info().agent_session.clone(),
+                    slash_commands: view.info().slash_commands.clone(),
+                    turns: view.info().turns,
+                    completions: view.completions(cx),
+                    model_menu: c.model_menu_open(),
                     attention: view.attention().map(|a| match a {
                         Attention::Permission { tool, answered: None, .. } => {
                             format!("permission:{tool}")
@@ -769,7 +787,7 @@ impl Workspace {
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
                     kind: if view.is_driven() { "agent" } else { "terminal" }.to_owned(),
-                    title: view.title().map(str::to_owned),
+                    title: Some(canvas.terminal_title(session, cx)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
                     rows: view.rows(),

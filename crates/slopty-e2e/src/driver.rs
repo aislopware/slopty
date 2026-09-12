@@ -234,7 +234,20 @@ impl Driver {
     ///
     /// When the socket breaks or there is no canvas.
     pub async fn open_agent(&mut self, cwd: Option<&str>) -> Result<()> {
-        self.ok(&Command::OpenAgent { cwd: cwd.map(str::to_owned) }).await
+        self.ok(&Command::OpenAgent { cwd: cwd.map(str::to_owned), resume: None }).await
+    }
+
+    /// Resume a Claude Code conversation as a driven agent, as picking it in ⌘⌥R's list would.
+    ///
+    /// # Errors
+    ///
+    /// When the app answers with an error.
+    pub async fn resume_agent(&mut self, cwd: Option<&str>, session: &str) -> Result<()> {
+        self.ok(&Command::OpenAgent {
+            cwd: cwd.map(str::to_owned),
+            resume: Some(session.to_owned()),
+        })
+        .await
     }
 
     /// Add the host's first display to the canvas.

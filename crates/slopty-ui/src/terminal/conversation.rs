@@ -8,6 +8,12 @@
 //! first lines) start folded and open on a click. Under the list sits the composer, a
 //! multi-line input whose ↩ types the text into the session followed by Enter, and above it
 //! the attention row: Allow / Deny when the agent waits for a permission.
+//!
+//! A driven session (the host speaks Claude Code's protocol) adds a header over the list with
+//! what the agent said about itself: the model as a chip that opens a menu of the others, the
+//! permission mode as a chip that cycles through the modes, the turn count and the cost. Its
+//! composer completes the slash commands the agent announced: a `/` prefix lists the matches
+//! above the field, Tab takes the selected one, ↑/↓ move, Esc hides the list.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -22,7 +28,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
-use slopty_proto::agent::{Clipped, TranscriptBody, TranscriptEntry, TranscriptUpdate};
+use slopty_proto::agent::{AgentInfo, Clipped, TranscriptBody, TranscriptEntry, TranscriptUpdate};
 use slopty_theme::{Theme, alpha};
 
 use crate::a11y::tab_stop;
@@ -33,6 +39,70 @@ use crate::terminal::view::TerminalView;
 pub const RESULT_PREVIEW_LINES: usize = 4;
 /// The composer grows with its text up to this many rows, then scrolls.
 const COMPOSER_MAX_ROWS: usize = 6;
+/// The models the chip offers, as Claude Code's `--model` aliases with their names.
+pub const MODELS: [(&str, &str); 4] =
+    [("fable", "Fable 5.1"), ("opus", "Opus 5"), ("sonnet", "Sonnet 5"), ("haiku", "Haiku 4.5")];
+/// The permission modes the chip cycles through, in order.
+pub const MODES: [&str; 3] = ["default", "acceptEdits", "plan"];
+
+/// The slash commands that complete `text`.
+///
+/// Every command `text` is a prefix of, in the agent's order, when `text` is one word
+/// starting with `/`; nothing once `text` is exactly the only match (there is nothing left
+/// to complete).
+#[must_use]
+pub fn slash_matches(text: &str, commands: &[String]) -> Vec<String> {
+    if !text.starts_with('/') || text.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let needle = text.to_ascii_lowercase();
+    let matches: Vec<String> =
+        commands.iter().filter(|c| c.to_ascii_lowercase().starts_with(&needle)).cloned().collect();
+    match matches.as_slice() {
+        [only] if only.eq_ignore_ascii_case(text) => Vec::new(),
+        _ => matches,
+    }
+}
+
+/// A model as the chip shows it: an alias by its name, a full name without the `claude-`.
+#[must_use]
+pub fn model_label(model: &str) -> String {
+    MODELS.iter().find(|(alias, _name)| *alias == model).map_or_else(
+        || model.strip_prefix("claude-").unwrap_or(model).to_owned(),
+        |(_a, name)| (*name).to_owned(),
+    )
+}
+
+/// A permission mode as the chip shows it.
+#[must_use]
+pub fn mode_label(mode: &str) -> &str {
+    match mode {
+        "default" => "Ask",
+        "acceptEdits" => "Accept edits",
+        "plan" => "Plan",
+        "bypassPermissions" => "Bypass",
+        "dontAsk" => "Don't ask",
+        other => other,
+    }
+}
+
+/// The mode after `mode` in [`MODES`] (the first after an unknown one).
+#[must_use]
+pub fn next_mode(mode: &str) -> &'static str {
+    MODES
+        .iter()
+        .position(|m| *m == mode)
+        .and_then(|i| MODES.get(i.wrapping_add(1)))
+        .copied()
+        .unwrap_or(MODES[0])
+}
+
+/// The cost as the header shows it: cents under a dollar, else dollars to the cent.
+#[must_use]
+pub fn cost_label(micro_usd: u64) -> String {
+    let cents = micro_usd / 10_000;
+    if cents < 100 { format!("{cents}¢") } else { format!("${}.{:02}", cents / 100, cents % 100) }
+}
 
 /// What the agent is waiting for, as the view shows it above the composer.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -61,6 +131,12 @@ pub struct Conversation {
     /// The text being written.
     composer: Entity<TextareaState>,
     _composer_events: Subscription,
+    /// The model menu under the header is open.
+    model_menu: bool,
+    /// Which slash completion is selected, an index into the current matches.
+    completion: usize,
+    /// Esc hid the completions for the text as it is now; typing shows them again.
+    completions_hidden: bool,
 }
 
 impl std::fmt::Debug for Conversation {
@@ -80,11 +156,12 @@ impl Conversation {
                 .auto_grow(1, COMPOSER_MAX_ROWS)
                 .submit_on_enter(true)
         });
-        let events = cx.subscribe_in(&composer, window, |this, _input, event, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = event {
-                this.submit_composer(window, cx);
-            }
-        });
+        let events =
+            cx.subscribe_in(&composer, window, |this, _input, event, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.submit_composer(window, cx),
+                InputEvent::Change => this.composer_changed(cx),
+                InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
+            });
         let list = ListState::new(0, ListAlignment::Bottom, px(512.0));
         list.set_follow_mode(FollowMode::Tail);
         Self {
@@ -93,7 +170,70 @@ impl Conversation {
             open: Rc::new(HashSet::new()),
             composer,
             _composer_events: events,
+            model_menu: false,
+            completion: 0,
+            completions_hidden: false,
         }
+    }
+
+    /// The slash commands completing the composer's text, unless Esc hid them.
+    #[must_use]
+    pub fn completions(&self, commands: &[String], cx: &App) -> Vec<String> {
+        if self.completions_hidden {
+            return Vec::new();
+        }
+        slash_matches(&self.composer_text(cx), commands)
+    }
+
+    /// Which completion ↑/↓ have selected.
+    #[must_use]
+    pub const fn selected_completion(&self) -> usize {
+        self.completion
+    }
+
+    /// ↓ (`1`) or ↑ (`-1`) among `count` completions, wrapping.
+    pub fn step_completion(&mut self, delta: i32, count: usize) {
+        if count == 0 {
+            self.completion = 0;
+            return;
+        }
+        let at = i64::try_from(self.completion.min(count.saturating_sub(1))).unwrap_or(0);
+        let n = i64::try_from(count).unwrap_or(1);
+        let next = at.saturating_add(i64::from(delta)).rem_euclid(n);
+        self.completion = usize::try_from(next).unwrap_or(0);
+    }
+
+    /// The text changed: the list starts over from its first match and shows again.
+    pub const fn composer_changed(&mut self) {
+        self.completion = 0;
+        self.completions_hidden = false;
+    }
+
+    /// Esc: hide the completions until the text changes.
+    pub const fn hide_completions(&mut self) {
+        self.completions_hidden = true;
+    }
+
+    /// Put `command` and a space in the composer, the caret after them.
+    pub fn complete(&mut self, command: &str, window: &mut Window, cx: &mut App) {
+        let text = format!("{command} ");
+        self.composer.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.insert(text, window, cx);
+        });
+        self.completion = 0;
+        self.completions_hidden = false;
+    }
+
+    /// Whether the model menu is open.
+    #[must_use]
+    pub const fn model_menu_open(&self) -> bool {
+        self.model_menu
+    }
+
+    /// Open or close the model menu.
+    pub const fn set_model_menu(&mut self, open: bool) {
+        self.model_menu = open;
     }
 
     /// The entries shown.
@@ -175,14 +315,20 @@ impl Conversation {
     /// The chat, filling its container: the list, the attention row, the composer
     /// (`composer_focused` draws its focus ring).
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one call site; the view's render passes its state through"
+    )]
     pub fn render(
         &self,
+        info: Option<&AgentInfo>,
         attention: Option<&Attention>,
         partial: &str,
         composer_focused: bool,
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
+        let completions = info.map(|i| self.completions(&i.slash_commands, cx)).unwrap_or_default();
         let entries = Rc::clone(&self.entries);
         let open = Rc::clone(&self.open);
         let theme = theme.clone();
@@ -202,6 +348,7 @@ impl Conversation {
             .text_size(px(theme.typography.ui_size))
             .text_color(hsla(s.text))
             .font_family(theme.typography.ui_family.clone())
+            .when_some(info, |el, info| el.child(self.header_row(info, &theme, cx)))
             .child(
                 div()
                     .relative()
@@ -260,7 +407,194 @@ impl Conversation {
             )
             .when(!partial.is_empty(), |el| el.child(partial_row(partial, &theme)))
             .when_some(attention, |el, attention| el.child(attention_row(attention, &theme, cx)))
+            .when(!completions.is_empty(), |el| {
+                el.child(self.completions_row(&completions, &theme, cx))
+            })
             .child(self.composer_row(composer_focused, &theme, cx))
+            .into_any_element()
+    }
+
+    /// What the agent says about itself, over the list: the model chip (its menu below it
+    /// while open), the permission-mode chip, the turns and the cost.
+    fn header_row(
+        &self,
+        info: &AgentInfo,
+        theme: &Theme,
+        cx: &Context<TerminalView>,
+    ) -> AnyElement {
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let small = theme.typography.small();
+        let chip = |id: &'static str, label: String, aria: String| {
+            let el = div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(Role::Button)
+                .aria_label(SharedString::from(aria))
+                .px(px(spacing.sm))
+                .py(px(spacing.xxs))
+                .rounded(px(theme.radii.xs))
+                .bg(hsla_alpha(s.accent, alpha::TINT))
+                .text_color(hsla(s.text))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::TINT_STRONG)))
+                .child(SharedString::from(label));
+            tab_stop(el, s.accent)
+        };
+        let model = info.model.as_deref().map_or_else(|| "Claude".to_owned(), model_label);
+        let mode = info.permission_mode.as_deref().unwrap_or("default");
+        let mut meta = format!("{} {}", info.turns, if info.turns == 1 { "turn" } else { "turns" });
+        if info.cost_micro_usd > 0 {
+            meta.push_str(" · ");
+            meta.push_str(&cost_label(info.cost_micro_usd));
+        }
+        let menu_open = self.model_menu;
+        div()
+            .id("conversation-header")
+            .debug_selector(|| "conversation-header".to_owned())
+            .role(Role::Group)
+            .aria_label("Agent")
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.panel))
+            .text_size(px(small))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.sm))
+                    .px(px(spacing.md))
+                    .py(px(spacing.xs))
+                    .child(
+                        chip("conversation-model", model.clone(), format!("Model: {model}"))
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.toggle_model_menu(cx);
+                            })),
+                    )
+                    .child(
+                        chip(
+                            "conversation-mode",
+                            mode_label(mode).to_owned(),
+                            format!("Permission mode: {}", mode_label(mode)),
+                        )
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.cycle_permission_mode(cx);
+                        })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(hsla(s.text_muted))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(meta)),
+                    ),
+            )
+            .when(menu_open, |el| {
+                let current = info.model.clone().unwrap_or_default();
+                el.child(
+                    div()
+                        .id("conversation-models")
+                        .debug_selector(|| "conversation-models".to_owned())
+                        .role(Role::Menu)
+                        .aria_label("Models")
+                        .w_full()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(spacing.xs))
+                        .px(px(spacing.md))
+                        .pb(px(spacing.xs))
+                        .children(MODELS.iter().map(|(alias, name)| {
+                            let alias: &'static str = alias;
+                            let chosen = current == alias
+                                || current
+                                    .strip_prefix("claude-")
+                                    .is_some_and(|m| m.starts_with(alias));
+                            let row = div()
+                                .id(ElementId::Name(format!("conversation-model-{alias}").into()))
+                                .debug_selector(move || format!("conversation-model-{alias}"))
+                                .role(Role::MenuItem)
+                                .aria_label(SharedString::from((*name).to_owned()))
+                                .px(px(spacing.sm))
+                                .py(px(spacing.xxs))
+                                .rounded(px(theme.radii.xs))
+                                .bg(hsla_alpha(
+                                    if chosen { s.accent } else { s.text_muted },
+                                    if chosen { alpha::TINT_STRONG } else { alpha::TINT },
+                                ))
+                                .cursor_pointer()
+                                .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::TINT_PRESSED)))
+                                .child(SharedString::from((*name).to_owned()));
+                            tab_stop(row, s.accent).on_click(cx.listener(
+                                move |this, _ev, _window, cx| {
+                                    this.set_model(alias, cx);
+                                },
+                            ))
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The slash commands completing the composer, above it: the selected one highlighted,
+    /// a click takes any of them.
+    fn completions_row(
+        &self,
+        completions: &[String],
+        theme: &Theme,
+        cx: &Context<TerminalView>,
+    ) -> AnyElement {
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let selected = self.completion.min(completions.len().saturating_sub(1));
+        div()
+            .id("conversation-completions")
+            .debug_selector(|| "conversation-completions".to_owned())
+            .role(Role::ListBox)
+            .aria_label("Slash commands")
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_wrap()
+            .gap(px(spacing.xs))
+            .px(px(spacing.md))
+            .py(px(spacing.xs))
+            .border_t_1()
+            .border_color(hsla(s.border))
+            .text_size(px(theme.typography.small()))
+            .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
+            .children(completions.iter().enumerate().map(|(ix, command)| {
+                let chosen = ix == selected;
+                let command = command.clone();
+                let label = command.clone();
+                div()
+                    .id(ElementId::NamedInteger(
+                        "conversation-completion".into(),
+                        u64::try_from(ix).unwrap_or(0),
+                    ))
+                    .debug_selector(move || format!("conversation-completion-{ix}"))
+                    .role(Role::ListBoxOption)
+                    .aria_label(SharedString::from(label.clone()))
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xxs))
+                    .rounded(px(theme.radii.xs))
+                    .bg(hsla_alpha(s.accent, if chosen { alpha::TINT_STRONG } else { alpha::TINT }))
+                    .text_color(hsla(s.text))
+                    .cursor_pointer()
+                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
+                        // The composer keeps the caret; the click must not blur it.
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.complete_slash(&command, window, cx);
+                    }))
+                    .child(SharedString::from(label))
+            }))
             .into_any_element()
     }
 

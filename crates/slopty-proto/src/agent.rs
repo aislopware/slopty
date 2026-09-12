@@ -81,6 +81,53 @@ pub struct OpenAgent {
     pub title: Option<String>,
 }
 
+/// Host → client: what a driven agent said about itself.
+///
+/// From `system/init`, the turn results and the answers to `ClientMsg::AgentSet`; sent whole
+/// whenever any of it changes and with the snapshot a late client gets.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct AgentInfo {
+    /// Claude Code's session id, the one `OpenAgent::resume` takes; known after `init`.
+    pub agent_session: Option<String>,
+    /// The model in use (`claude-fable-5-1`, …), as the agent last named it.
+    pub model: Option<String>,
+    /// The permission mode in force (`default`, `acceptEdits`, `plan`, …).
+    pub permission_mode: Option<String>,
+    /// Slash commands the agent takes as prompts (`/compact`, `/clear`, …).
+    pub slash_commands: Vec<String>,
+    /// Turns the conversation has had.
+    pub turns: u32,
+    /// Claude Code's own cost estimate for the conversation, in millionths of a dollar.
+    pub cost_micro_usd: u64,
+}
+
+/// Client → host: retune a driven agent in place.
+///
+/// Claude Code's `set_model` and `set_permission_mode` control requests. A `None` leaves that
+/// setting alone; the host answers with `HostMsg::AgentInfo` once the agent acknowledged.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct AgentSet {
+    /// The agent session.
+    pub session: SessionId,
+    /// The model to switch to: an alias (`fable`, `opus`, `sonnet`, `haiku`) or a full name.
+    pub model: Option<String>,
+    /// The permission mode to switch to.
+    pub permission_mode: Option<String>,
+}
+
+/// One past Claude Code conversation the host found on disk, for resuming.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct AgentSessionInfo {
+    /// Claude Code's session id (`OpenAgent::resume`).
+    pub id: String,
+    /// The working directory it ran in.
+    pub cwd: String,
+    /// Its first prompt, clipped to a line; empty when the file holds none.
+    pub title: String,
+    /// When the transcript was last written, in milliseconds since the Unix epoch.
+    pub modified_ms: u64,
+}
+
 /// Host → client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
