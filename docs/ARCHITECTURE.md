@@ -409,7 +409,10 @@ tables (`canvas::palette_items` for the canvas's and the terminal's, the app's o
 with `extend_palette`; the View menu's "Commands…" opens it on the Mac): typing
 keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
 closes; a path typed in (`src/lib.rs:7`, `~/notes.md`) is an `Open <path>` line first, which
-opens a file card against the active shell's directory (`palette::path_query`); the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
+opens a file card against the active shell's directory (`palette::path_query`), and a word is
+also asked of the host's files under that directory (`ClientMsg::FindFiles` →
+`HostMsg::FoundFiles`, protocol 36, the `@` completion's matcher) whose hits are `Open <path>`
+lines after the commands; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
 to every action. The palette remembers where the keyboard was (`window.focused`), puts it
 back when it closes and dispatches the choice on the next frame from there, so a terminal's
 own actions (find, the prompts) reach the terminal that had the focus.

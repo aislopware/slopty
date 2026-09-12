@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 35;
+pub const PROTOCOL_VERSION: u16 = 36;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -113,6 +113,14 @@ pub enum ClientMsg {
         /// Absolute path on the host.
         path: String,
     },
+    /// Paths under `root` that `query` matches, for the palette's quick open; answered with
+    /// `HostMsg::FoundFiles`.
+    FindFiles {
+        /// An absolute directory on the host, or `~` for its home.
+        root: String,
+        /// What was typed.
+        query: String,
+    },
 }
 
 impl ClientMsg {
@@ -136,6 +144,7 @@ impl ClientMsg {
             Self::ListAgentSessions { .. } => "ListAgentSessions",
             Self::ListFiles { .. } => "ListFiles",
             Self::ReadFile { .. } => "ReadFile",
+            Self::FindFiles { .. } => "FindFiles",
         }
     }
 }
@@ -235,6 +244,15 @@ pub enum HostMsg {
         /// What was there.
         read: file::FileRead,
     },
+    /// The answer to `ClientMsg::FindFiles`.
+    FoundFiles {
+        /// The root asked.
+        root: String,
+        /// The query answered, so a stale answer can be told from the current one.
+        query: String,
+        /// Paths relative to `root`, best first; a directory ends in `/`.
+        paths: Vec<String>,
+    },
 }
 
 impl HostMsg {
@@ -260,6 +278,7 @@ impl HostMsg {
             Self::AgentSessions { .. } => "AgentSessions",
             Self::Files { .. } => "Files",
             Self::File { .. } => "File",
+            Self::FoundFiles { .. } => "FoundFiles",
         }
     }
 }

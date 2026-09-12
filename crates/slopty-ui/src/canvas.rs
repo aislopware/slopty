@@ -47,7 +47,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::file::{FileView, FileViewEvent};
 use crate::note::{NoteView, NoteViewEvent};
-use crate::palette::{CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
+use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
@@ -1399,6 +1399,10 @@ impl CanvasView {
         let theme = self.theme.clone();
         let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
         self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
+            if let PaletteEvent::Changed(text) = event {
+                this.palette_changed(text);
+                return;
+            }
             this.palette = None;
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
@@ -1417,13 +1421,29 @@ impl CanvasView {
                     let path = this.absolute_in_active_shell(path);
                     this.open_file(&path, *line, cx);
                 }
-                PaletteEvent::Dismiss => {}
+                PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
             cx.notify();
         }));
         self.pending_focus_palette = true;
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// The palette's field changed: a word worth a lookup is asked of the host's files under
+    /// the active shell's directory, or the host's home when no shell is active.
+    fn palette_changed(&self, text: &str) {
+        if let Some(query) = palette::files_query(text) {
+            let root = self.active_cwd().unwrap_or_else(|| "~".to_owned());
+            self.send(ClientMsg::FindFiles { root, query: query.to_owned() });
+        }
+    }
+
+    /// The host found files for the palette's text: they are its `Open <path>` lines.
+    pub fn files_found(&self, root: &str, query: &str, paths: &[String], cx: &mut Context<Self>) {
+        if let Some(palette) = &self.palette {
+            palette.update(cx, |p, cx| p.set_found(root, query, paths, cx));
+        }
     }
 
     /// Whether the palette is up.
@@ -2368,10 +2388,14 @@ impl CanvasView {
 
     /// The working directory of an item's session, for grouping. Only terminals have one.
     fn cwd_of(&self, item: &CanvasItem) -> Option<String> {
-        match item.kind {
+        match &item.kind {
             ItemKind::Terminal { session } => {
-                self.sessions.get(&session).and_then(|s| s.cwd.clone())
+                self.sessions.get(session).and_then(|s| s.cwd.clone())
             }
+            // A file card's directory, when the path is spelled from the root.
+            ItemKind::File { path } if path.starts_with('/') => path
+                .rsplit_once('/')
+                .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned()),
             _ => None,
         }
     }
@@ -5626,6 +5650,65 @@ mod tests {
             "read asked for the absolute path"
         );
 
+        // A word is asked of the host's files under the active item's directory — the file
+        // card's while it is active, the shell's once revealed; what the host finds are `Open`
+        // lines after the commands (a directory is not a card), ↩ opens one.
+        drain(&mut rx);
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l i");
+        cx.run_until_parked();
+        let asked = drain(&mut rx);
+        assert!(
+            asked.iter().any(|m| matches!(m, ClientMsg::FindFiles { root, query }
+                if root == "/tmp/work/src" && query == "li")),
+            "the active card's directory: {asked:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |c, _window, cx| c.reveal_session(shell, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("m a i n");
+        cx.run_until_parked();
+        let asked = drain(&mut rx);
+        assert!(
+            asked.iter().any(|m| matches!(m, ClientMsg::FindFiles { root, query }
+                if root == "/tmp/work" && query == "main")),
+            "{asked:?}"
+        );
+        view.update_in(cx, |c, _window, cx| {
+            c.files_found(
+                "/tmp/work",
+                "main",
+                &["src/main.rs".to_owned(), "docs/manual/".to_owned()],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(options, ["Open src/main.rs file"], "{tree:#?}");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let paths: Vec<String> = view.read_with(cx, |c, _| {
+            c.items()
+                .into_iter()
+                .filter_map(|i| match &i.kind {
+                    ItemKind::File { path } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(paths, ["/tmp/work/src/lib.rs", "/tmp/work/src/main.rs"]);
+        view.update_in(cx, |c, _window, cx| c.reveal_session(shell, cx));
+        cx.run_until_parked();
+
         // `~` is the host's home, not the shell's directory; a word without a slash is a command.
         cx.simulate_keystrokes("cmd-shift-p");
         cx.run_until_parked();
@@ -5640,7 +5723,7 @@ mod tests {
                 })
                 .collect()
         });
-        assert_eq!(paths, ["/tmp/work/src/lib.rs", "~/notes.md"]);
+        assert_eq!(paths, ["/tmp/work/src/lib.rs", "/tmp/work/src/main.rs", "~/notes.md"]);
         cx.simulate_keystrokes("cmd-shift-p");
         cx.run_until_parked();
         cx.simulate_keystrokes("n o t e");
@@ -5651,7 +5734,12 @@ mod tests {
             .filter(|n| n.role == "ListBoxOption")
             .filter_map(|n| n.label.as_deref())
             .collect();
-        assert_eq!(options, ["Go to notes.md · ~ file", "New note ⇧⌘N"], "no Open line for a word");
+        assert_eq!(options, ["Go to notes.md · ~ file", "New note ⇧⌘N"], "no typed-path line");
+        assert!(
+            drain(&mut rx).iter().any(|m| matches!(m, ClientMsg::FindFiles { root, query }
+                if root == "~" && query == "note")),
+            "no shell active: the host's home is searched"
+        );
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
     }

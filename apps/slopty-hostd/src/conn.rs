@@ -586,6 +586,20 @@ impl Peer<'_> {
                 };
                 let _sent = self.out.send(HostMsg::Files { session, query, paths }).await;
             }
+            ClientMsg::FindFiles { root, query } => {
+                let paths = if query.is_empty() {
+                    Vec::new()
+                } else {
+                    let (dir, needle) = (root.clone(), query.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let dir = slopty_host::file::expand_home(std::path::Path::new(&dir));
+                        slopty_agent::files::matching(&dir, &needle, crate::driven::FILES_LISTED)
+                    })
+                    .await
+                    .unwrap_or_default()
+                };
+                let _sent = self.out.send(HostMsg::FoundFiles { root, query, paths }).await;
+            }
             ClientMsg::ReadFile { path } => {
                 // A paired client already has a shell here; a read is nothing it could not do.
                 let target = path.clone();

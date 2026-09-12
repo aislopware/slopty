@@ -98,6 +98,19 @@ impl PaletteItem {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
     }
 
+    /// `Open <relative>` for a file the host found under `root`, `file` on the right.
+    #[must_use]
+    pub fn found_file(root: &str, relative: &str) -> Self {
+        Self {
+            label: format!("Open {relative}"),
+            keys: "file".to_owned(),
+            run: PaletteRun::OpenFile {
+                path: format!("{}/{relative}", root.trim_end_matches('/')),
+                line: None,
+            },
+        }
+    }
+
     /// `Open <path>` for a path typed into the field, `line N` or `file` on the right.
     #[must_use]
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
@@ -200,6 +213,15 @@ pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
     Some((path.to_owned(), line))
 }
 
+/// The query worth asking the host's files for: one word of two characters or more that is
+/// not a path already spelled from its root (`/…`, `~…`, `.…`).
+#[must_use]
+pub fn files_query(query: &str) -> Option<&str> {
+    let word = query.trim();
+    let rooted = word.starts_with('/') || word.starts_with('~') || word.starts_with('.');
+    (word.chars().count() >= 2 && !word.contains(char::is_whitespace) && !rooted).then_some(word)
+}
+
 /// The items `query` keeps, in their order: every word of the query is found in the label,
 /// case-insensitive; an empty query keeps all.
 #[must_use]
@@ -217,6 +239,8 @@ pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem>
 /// What the palette decided.
 #[derive(Debug)]
 pub enum PaletteEvent {
+    /// The field changed; the canvas asks the host for the files it names.
+    Changed(String),
     /// Run this, once the palette is gone and the focus is back.
     Run(PaletteRun),
     /// Esc, or a click outside.
@@ -228,6 +252,8 @@ pub struct CommandPalette {
     items: Vec<PaletteItem>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
     path_item: Option<PaletteItem>,
+    /// `Open <path>` for the files the host found for the field's text; dropped on a change.
+    found: Vec<PaletteItem>,
     input: Entity<InputState>,
     /// Which match ↑/↓ have selected.
     selected: usize,
@@ -264,21 +290,49 @@ impl CommandPalette {
         let events = cx.subscribe(&input, |this, _input, event, cx| match event {
             InputEvent::Change => {
                 this.selected = 0;
-                this.path_item = path_query(&this.input.read(cx).value())
-                    .map(|(path, line)| PaletteItem::open_file(&path, line));
+                let text = this.input.read(cx).value().to_string();
+                this.path_item =
+                    path_query(&text).map(|(path, line)| PaletteItem::open_file(&path, line));
+                this.found.clear();
+                cx.emit(PaletteEvent::Changed(text));
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => this.run(cx),
             InputEvent::Focus | InputEvent::Blur => {}
         });
-        Self { items, path_item: None, input, selected: 0, theme, _events: events }
+        Self {
+            items,
+            path_item: None,
+            found: Vec::new(),
+            input,
+            selected: 0,
+            theme,
+            _events: events,
+        }
     }
 
-    /// The items matching the field, in order; a path typed into it is `Open <path>` first.
+    /// The host found `paths` under `root` for `query`: they are `Open <path>` lines after
+    /// the commands, while the field still says `query`. Directories are left out (a card
+    /// shows a file).
+    pub fn set_found(&mut self, root: &str, query: &str, paths: &[String], cx: &mut Context<Self>) {
+        if self.input.read(cx).value().trim() != query {
+            return;
+        }
+        self.found = paths
+            .iter()
+            .filter(|p| !p.ends_with('/'))
+            .map(|p| PaletteItem::found_file(root, p))
+            .collect();
+        cx.notify();
+    }
+
+    /// The items matching the field, in order: a path typed into it as `Open <path>` first,
+    /// the commands the text matches, then the files the host found for it.
     #[must_use]
     pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
         let mut out: Vec<&PaletteItem> = self.path_item.iter().collect();
         out.extend(filter(&self.input.read(cx).value(), &self.items));
+        out.extend(&self.found);
         out
     }
 
@@ -457,6 +511,21 @@ mod tests {
         let item = PaletteItem::open_file("/w/lib.rs", Some(3));
         assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
         assert_eq!(PaletteItem::open_file("/w", None).keys, "file");
+
+        // What is asked of the host's files: a word, not a rooted path, not one letter.
+        assert_eq!(files_query("main"), Some("main"));
+        assert_eq!(files_query(" src/ma "), Some("src/ma"));
+        assert_eq!(files_query("m"), None, "one letter matches everything");
+        assert_eq!(files_query("/w/lib.rs"), None, "spelled from the root already");
+        assert_eq!(files_query("~/x"), None);
+        assert_eq!(files_query("./x"), None);
+        assert_eq!(files_query("go to"), None);
+        let found = PaletteItem::found_file("/tmp/work/", "src/main.rs");
+        assert_eq!(found.label, "Open src/main.rs");
+        assert!(
+            matches!(&found.run, PaletteRun::OpenFile { path, line: None } if path == "/tmp/work/src/main.rs"),
+            "{found:?}"
+        );
     }
 
     #[test]

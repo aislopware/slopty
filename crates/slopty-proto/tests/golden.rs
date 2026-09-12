@@ -432,6 +432,18 @@ mod golden {
         );
         snap("client_read_file", &ClientMsg::ReadFile { path: "/w/slopty/src/main.rs".to_owned() });
         snap(
+            "client_find_files",
+            &ClientMsg::FindFiles { root: "~".to_owned(), query: "main".to_owned() },
+        );
+        snap(
+            "host_found_files",
+            &HostMsg::FoundFiles {
+                root: "~".to_owned(),
+                query: "main".to_owned(),
+                paths: vec!["w/slopty/src/main.rs".to_owned(), "w/manuals/".to_owned()],
+            },
+        );
+        snap(
             "host_file",
             &HostMsg::File {
                 path: "/w/slopty/src/main.rs".to_owned(),

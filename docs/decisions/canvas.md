@@ -174,9 +174,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Canvas::open_file`, a relative path against the active shell's directory and `~` left for
   the host, which expands it to its own home (`slopty_host::file::expand_home`) since the
   client cannot know it. Added 2026-09-12: a file the agent never touched had no way onto
-  the canvas but a shell command, and the palette already had a field. Tests:
-  `a_path_in_the_field_is_told_from_a_command` (unit), `a_tilde_is_the_hosts_home` (host
-  unit), `a_path_typed_into_the_palette_opens_a_file_card` (headless). Earlier tests:
+  the canvas but a shell command, and the palette already had a field; (10) the field is a
+  quick open too (protocol 36, same day): a word of two characters or more that is not a
+  rooted path (`palette::files_query`) is asked of the host as `ClientMsg::FindFiles { root,
+  query }` — the root the active shell's directory, or `~` when no shell is active, which the
+  host expands — answered with `HostMsg::FoundFiles` from the same `files::matching` walk the
+  composer's `@` completion uses (best eight, `.gitignore` honoured); the files are `Open
+  <relative>` lines after the commands the word matches (a command is still the likelier
+  intent), directories left out, and each change of the field drops them until the answer
+  for the new text arrives, so a stale list never sits under ↩; a file card counts as the
+  active item's directory too (`cwd_of`: its parent, when the path is spelled from the root),
+  so ⌘N beside a card and a lookup over it start where the file is. Tests:
+  `a_path_in_the_field_is_told_from_a_command` (unit, with `files_query` and `found_file`),
+  `a_tilde_is_the_hosts_home` (host unit), `a_path_typed_into_the_palette_opens_a_file_card`
+  (headless: the typed path, the host lookup asked with the shell's root and with `~`, the
+  found lines and ↩ on one). Earlier tests:
   `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
