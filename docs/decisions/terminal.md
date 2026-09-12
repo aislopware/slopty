@@ -174,10 +174,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   shell, and single quotes keep any name whole (`url::shell_word`) — rather than asking the
   host for the file: what opens is the human's editor in the human's shell, on the phone too;
   (3) while a command is running there is no prompt to type at (`TermState::command_running`,
-  from the shell integration marks), so the path goes to the clipboard and the top bar says
-  so; (4) ⌘-hover underlines a path as it does a link (`link_highlight`). Tests:
-  `paths_are_found_with_their_line_and_nothing_else_is` (the reader),
-  `cmd_click_on_a_path_opens_it_in_the_shells_editor` (the click, headless).
+  from the shell integration marks), so the path opens as a **file card** on the canvas
+  instead (amended 2026-09-12 once cards existed; before that it went to the clipboard, which
+  left the human to find a place to paste) — the view emits `ViewFile` with the path as
+  printed and the canvas makes it absolute against the shell's directory as the host last
+  reported it (`canvas::absolute_in_session`: OSC 7, else where the shell started), since only
+  the canvas holds the session summaries; (4) ⌘-hover underlines a path as it does a link
+  (`link_highlight`). Tests: `paths_are_found_with_their_line_and_nothing_else_is` (the
+  reader), `cmd_click_on_a_path_opens_it_in_the_shells_editor` (the click, headless),
+  `cmd_click_on_a_path_while_a_command_runs_views_it` (nothing typed, `ViewFile` raised),
+  `a_shells_relative_path_opens_a_card_in_its_directory` (the canvas resolves it).
 - ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
   linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
   flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the

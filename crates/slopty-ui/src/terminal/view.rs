@@ -215,8 +215,9 @@ pub enum TerminalViewEvent {
     /// "Ask the agent" on a block's menu: the block as a Markdown fence for a driven agent's
     /// composer. The canvas picks the agent card (or opens one) and puts it there.
     AskAgent(String),
-    /// "View" on a tool call that named a file: the canvas opens (or reveals) a file card for
-    /// the absolute path.
+    /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
+    /// the canvas opens (or reveals) a file card for it, a relative path made absolute
+    /// against the session's directory.
     ViewFile(String),
 }
 
@@ -1170,12 +1171,12 @@ impl TerminalView {
 
     /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
     /// line the text named) by typing the command at the prompt. While a command runs the
-    /// prompt is not there to type at, so the path goes to the clipboard instead.
+    /// prompt is not there to type at, so the path opens as a file card on the canvas
+    /// instead (the canvas makes it absolute against this shell's directory).
     fn open_path(&mut self, span: &url::PathSpan, cx: &mut Context<Self>) {
         if self.state.command_running() {
-            tracing::info!(path = %span.path, "path copied: a command is running");
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(span.path.clone()));
-            cx.emit(TerminalViewEvent::Notice(format!("Copied {}", span.path)));
+            tracing::info!(path = %span.path, "path viewed: a command is running");
+            cx.emit(TerminalViewEvent::ViewFile(span.path.clone()));
             return;
         }
         let command = url::editor_command(&span.path, span.line);
@@ -3827,6 +3828,71 @@ mod tests {
         }
         assert_eq!(pastes, ["${EDITOR:-vi} +12 'src/main.rs'"]);
         assert_eq!(keys, 1, "then ↩");
+    }
+
+    /// While a command runs there is no prompt to type at: ⌘-click on a path asks the canvas
+    /// for a file card instead (`ViewFile` with the path as printed), and types nothing.
+    #[gpui::test]
+    fn cmd_click_on_a_path_while_a_command_runs_views_it(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&viewed);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::ViewFile(path) = event {
+                    seen.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        // A prompt whose command is running: the block head is `cargo build`, the cursor sits
+        // in its output, so `command_running` holds.
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor { row: 2, ..Cursor::default() },
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![
+                        RowUpdate {
+                            row: 0,
+                            line: {
+                                let mut l = Line::from_text("$ cargo build", 30, Style::DEFAULT);
+                                l.mark = SemanticMark::Prompt { exit: None, input: Some(2) };
+                                l
+                            },
+                        },
+                        RowUpdate {
+                            row: 1,
+                            line: Line::from_text(
+                                "error: src/main.rs:12:5 bad",
+                                30,
+                                Style::DEFAULT,
+                            ),
+                        },
+                    ],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.state.command_running()), "the build is running");
+        drain_words(&mut rx);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = metrics.origin + point(metrics.cell_width * 10.5, metrics.line_height * 1.5);
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        cx.simulate_click(cell, cmd);
+        cx.run_until_parked();
+        assert_eq!(*viewed.borrow(), ["src/main.rs"]);
+        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "nothing typed into the build");
     }
 
     /// The key bar's ⌘ arms exactly one tap: the next left press opens the link under it and

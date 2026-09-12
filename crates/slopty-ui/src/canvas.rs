@@ -1726,7 +1726,10 @@ impl CanvasView {
                     }
                     TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
                     TerminalViewEvent::AskAgent(text) => this.ask_agent(text.clone(), cx),
-                    TerminalViewEvent::ViewFile(path) => this.open_file(path, cx),
+                    TerminalViewEvent::ViewFile(path) => {
+                        let path = this.absolute_in_session(sid, path);
+                        this.open_file(&path, cx);
+                    }
                 },
             ));
             if self.is_driven(*session) {
@@ -2049,6 +2052,18 @@ impl CanvasView {
         self.active = Some(id);
         self.reveal_pending = Some(id);
         cx.notify();
+    }
+
+    /// `path` made absolute against the session's directory as the host last reported it
+    /// (OSC 7, else where it started); a path with no directory known stays as it is.
+    fn absolute_in_session(&self, session: SessionId, path: &str) -> String {
+        if path.starts_with('/') {
+            return path.to_owned();
+        }
+        match self.sessions.get(&session).and_then(|s| s.cwd.as_deref()) {
+            Some(cwd) => format!("{}/{path}", cwd.trim_end_matches('/')),
+            None => path.to_owned(),
+        }
     }
 
     /// Ask the host for a file card's text (again).
@@ -5410,6 +5425,36 @@ mod tests {
             "{sent:?}"
         );
         assert!(view.read_with(cx, |c, _| c.file(file).is_none()), "the view is dropped");
+    }
+
+    /// A path a shell's view asks to see is made absolute against that shell's directory.
+    #[gpui::test]
+    fn a_shells_relative_path_opens_a_card_in_its_directory(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let shell = SessionId::new();
+        host_opens_in(&view, cx, shell, me, SHELL, 1, Where::loose("/tmp/work"));
+        view.update_in(cx, |c, _window, cx| {
+            c.session_moved(shell, "/tmp/work/sub".to_owned(), None);
+            let terminal = c.terminals[&shell].clone();
+            terminal.update(cx, |_v, cx| cx.emit(TerminalViewEvent::ViewFile("a/b.rs".to_owned())));
+        });
+        cx.run_until_parked();
+        let paths: Vec<String> = view.read_with(cx, |c, _| {
+            c.items()
+                .into_iter()
+                .filter_map(|i| match &i.kind {
+                    ItemKind::File { path } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(paths, ["/tmp/work/sub/a/b.rs"], "the directory the shell moved to");
+        assert!(
+            drain(&mut rx).iter().any(
+                |m| matches!(m, ClientMsg::ReadFile { path } if path == "/tmp/work/sub/a/b.rs")
+            ),
+            "read asked for the absolute path"
+        );
     }
 
     #[test]
