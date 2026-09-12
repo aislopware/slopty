@@ -1198,8 +1198,31 @@ mod tests {
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
 
-        drv.keys("cmd-shift-n").await.unwrap();
-        let dump = drv.wait_for("a note", STEP, |d| d.item("note").is_some()).await.unwrap();
+        // The note comes from the command palette: ⌘⇧P, "new note", ↩ — the same action the
+        // shortcut runs, once the palette is gone and the keyboard is back.
+        drv.keys("cmd-shift-p").await.unwrap();
+        let dump = drv
+            .wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
+        assert!(
+            dump.a11y_node("ListBoxOption", Some("New note ⇧⌘N")).is_some(),
+            "the lines carry their keys: {:#?}",
+            dump.a11y
+        );
+        drv.type_text("new note").await.unwrap();
+        drv.wait_for("one line", STEP, |d| {
+            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("a note", STEP, |d| {
+                d.item("note").is_some() && d.a11y_node("Dialog", Some("Commands")).is_none()
+            })
+            .await
+            .unwrap();
         let before = dump.item("note").unwrap().bounds;
         assert!((dump.zoom - 1.0).abs() < 1e-3, "{}", dump.zoom);
 

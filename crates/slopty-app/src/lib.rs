@@ -428,9 +428,9 @@ impl Workspace {
                     let theme = ws.theme.clone();
                     let sessions = ack.sessions.clone();
                     let canvas = cx.new(|cx| {
-                        #[cfg_attr(not(feature = "e2e"), expect(unused_mut, reason = "the self-test is the only caller that mutates it"))]
                         let mut canvas =
                             CanvasView::new(me, sender, sessions, open_screen, theme, cx);
+                        canvas.extend_palette(app_palette_items());
                         // Under the self-test a frame is a step, not a moment: a camera still
                         // flying when `dump` runs would report where it was passing through.
                         // The tests assert the destination.
@@ -1544,6 +1544,30 @@ fn frame_nominal() -> std::time::Duration {
         })
 }
 
+/// The app's own bindings, outside any view's context.
+fn app_key_bindings() -> Vec<gpui::KeyBinding> {
+    vec![
+        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
+        gpui::KeyBinding::new("cmd-alt-right", NextHost, None),
+        gpui::KeyBinding::new("cmd-alt-left", PrevHost, None),
+        gpui::KeyBinding::new("cmd-shift-h", AddHost, None),
+    ]
+}
+
+/// The app's lines for the command palette, after the canvas's.
+fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
+    let bindings = app_key_bindings();
+    let item = |label: &str, action: Box<dyn gpui::Action>| {
+        slopty_ui::palette::PaletteItem::new(label, action, &bindings)
+    };
+    vec![
+        item("Open settings", Box::new(OpenSettings)),
+        item("Next host", Box::new(NextHost)),
+        item("Previous host", Box::new(PrevHost)),
+        item("Add a host", Box::new(AddHost)),
+    ]
+}
+
 /// Open the workspace window and start the host link loop on `handle`'s runtime. Call once
 /// from inside the GPUI application callback, after `gpui_kit::init`.
 ///
@@ -1562,12 +1586,7 @@ pub fn open_workspace(
     }
     cx.bind_keys(slopty_ui::canvas::key_bindings());
     cx.bind_keys(slopty_ui::terminal::key_bindings());
-    cx.bind_keys([
-        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
-        gpui::KeyBinding::new("cmd-alt-right", NextHost, None),
-        gpui::KeyBinding::new("cmd-alt-left", PrevHost, None),
-        gpui::KeyBinding::new("cmd-shift-h", AddHost, None),
-    ]);
+    cx.bind_keys(app_key_bindings());
     cx.on_action(|_: &OpenSettings, cx| open_settings_file(cx));
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.

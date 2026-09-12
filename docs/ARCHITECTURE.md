@@ -373,7 +373,13 @@ line, then plain shells — and a click reveals and focuses that terminal; below
 windows and displays. Remote-window items are
 created from the picker; `reconcile_screens` opens a stream for every window/display item
 that lacks one and closes streams for items that disappeared, so the document, not the UI, is
-the source of truth for what is being streamed.
+the source of truth for what is being streamed. The command palette (⌘⇧P, `slopty-ui::palette`)
+lists every action by name with its keys read from the binding tables (`canvas::palette_items`
+for the canvas's and the terminal's, the app's own appended with `extend_palette`): typing
+keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
+closes. The palette remembers where the keyboard was (`window.focused`), puts it back when it
+closes and dispatches the choice on the next frame from there, so a terminal's own actions
+(find, the prompts) reach the terminal that had the focus.
 
 ## 5. Agents
 

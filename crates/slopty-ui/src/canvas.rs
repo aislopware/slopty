@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
+    Action, App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
@@ -44,6 +44,7 @@ use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::note::{NoteView, NoteViewEvent};
+use crate::palette::{CommandPalette, PaletteEvent, PaletteItem};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
@@ -96,13 +97,15 @@ pub mod actions {
             FocusNext,
             /// Move the keyboard focus to the previous control.
             FocusPrev,
+            /// Open the command palette: every action by name, run by ↩.
+            OpenPalette,
         ]
     );
 }
 pub use actions::{
     AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewDrivenAgent,
-    NewNote, NewTerminal, NextAttention, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut,
-    ZoomReset, ZoomToItem,
+    NewNote, NewTerminal, NextAttention, OpenPalette, ResumeAgent, ToggleMute, ToggleStats, ZoomIn,
+    ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -141,6 +144,40 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
         KeyBinding::new("ctrl-tab", FocusNext, CTX),
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
+        KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
+    ]
+}
+
+/// The palette's lines for the canvas's and the terminal's actions, with their keys.
+#[must_use]
+pub fn palette_items() -> Vec<PaletteItem> {
+    use crate::terminal::{CopyLastOutput, Find, NextPrompt, PrevPrompt, ToggleConversation};
+    let canvas = key_bindings();
+    let terminal = crate::terminal::key_bindings();
+    let c = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &canvas);
+    let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
+    vec![
+        c("New terminal", Box::new(NewTerminal)),
+        c("New agent", Box::new(NewAgent)),
+        c("New conversation (driven agent)", Box::new(NewDrivenAgent)),
+        c("Resume a conversation", Box::new(ResumeAgent)),
+        c("New note", Box::new(NewNote)),
+        c("Add a window or display", Box::new(AddWindow)),
+        c("Close item", Box::new(CloseItem)),
+        c("Zoom in", Box::new(ZoomIn)),
+        c("Zoom out", Box::new(ZoomOut)),
+        c("Zoom to 100%", Box::new(ZoomReset)),
+        c("Fit all", Box::new(FitAll)),
+        c("Zoom to item", Box::new(ZoomToItem)),
+        c("Arrange by repository", Box::new(ArrangeByRepo)),
+        c("Next attention", Box::new(NextAttention)),
+        c("Mute or unmute window", Box::new(ToggleMute)),
+        c("Stream stats", Box::new(ToggleStats)),
+        t("Find in terminal", Box::new(Find)),
+        t("Previous prompt", Box::new(PrevPrompt)),
+        t("Next prompt", Box::new(NextPrompt)),
+        t("Copy last output", Box::new(CopyLastOutput)),
+        t("Show or hide the conversation", Box::new(ToggleConversation)),
     ]
 }
 
@@ -297,6 +334,16 @@ pub struct CanvasView {
     picker: Option<Entity<WindowPicker>>,
     /// A `List` is in flight for the picker.
     picker_wanted: bool,
+    /// The command palette, while ⌘⇧P has it up.
+    palette: Option<Entity<CommandPalette>>,
+    /// Where the keyboard was when the palette opened; it goes back there when it closes.
+    palette_return: Option<FocusHandle>,
+    /// What the palette chose, dispatched on the next frame once the focus is back.
+    palette_action: Option<Box<dyn Action>>,
+    /// The app's own lines for the palette (settings, hosts), after the canvas's.
+    palette_extra: Vec<PaletteItem>,
+    /// Focus the palette's field on the next frame.
+    pending_focus_palette: bool,
     /// A `ListAgentSessions` is in flight for the resume picker.
     resume_wanted: bool,
     /// The next listing adds its first display straight away (the self-test socket's way
@@ -396,6 +443,11 @@ impl CanvasView {
             open_screen,
             picker: None,
             picker_wanted: false,
+            palette: None,
+            palette_return: None,
+            palette_action: None,
+            palette_extra: Vec::new(),
+            pending_focus_palette: false,
             resume_wanted: false,
             display_wanted: false,
             show_stats: false,
@@ -1028,6 +1080,47 @@ impl CanvasView {
         let zoom = self.camera.zoom.clamp(0.25, 1.0);
         let scale = (zoom * 4.0).ceil() / 4.0;
         Quality { scale, ..Quality::default() }
+    }
+
+    /// Lines the app adds to the palette after the canvas's own (settings, hosts).
+    pub fn extend_palette(&mut self, items: Vec<PaletteItem>) {
+        self.palette_extra = items;
+    }
+
+    /// Every line the palette offers.
+    #[must_use]
+    pub fn palette_lines(&self) -> Vec<PaletteItem> {
+        let mut items = palette_items();
+        items.extend(self.palette_extra.iter().cloned());
+        items
+    }
+
+    /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is
+    /// gone and the focus is back.
+    pub fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        self.palette_return = window.focused(cx);
+        let items = self.palette_lines();
+        let theme = self.theme.clone();
+        let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
+        self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
+            if let PaletteEvent::Run(action) = event {
+                this.palette_action = Some(action.boxed_clone());
+            }
+            this.palette = None;
+            cx.notify();
+        }));
+        self.pending_focus_palette = true;
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// Whether the palette is up.
+    #[must_use]
+    pub const fn palette_open(&self) -> bool {
+        self.palette.is_some()
     }
 
     fn show_picker(
@@ -2393,6 +2486,21 @@ impl Render for CanvasView {
         if std::mem::take(&mut self.pending_focus_self) {
             window.focus(&self.focus, cx);
         }
+        if std::mem::take(&mut self.pending_focus_palette)
+            && let Some(palette) = &self.palette
+        {
+            let handle = palette.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        if self.palette.is_none()
+            && let Some(handle) = self.palette_return.take()
+        {
+            window.focus(&handle, cx);
+            if let Some(action) = self.palette_action.take() {
+                // Once this frame is done, from the element that had the keyboard.
+                cx.defer_in(window, move |_this, window, cx| window.dispatch_action(action, cx));
+            }
+        }
         self.keep_focus_rendered(window, cx);
         self.reconcile_notes(window, cx);
         // A zoom that differs from the one drawn last frame is in motion. Once the changes
@@ -2428,6 +2536,7 @@ impl Render for CanvasView {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
         let picker = self.picker.clone();
+        let palette = self.palette.clone();
         let items = self.doc.by_z().into_iter().cloned().collect::<Vec<_>>();
         let entity = cx.entity();
         let record_bounds = canvas(
@@ -2514,6 +2623,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::find_in_active))
+            .on_action(cx.listener(Self::open_palette))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -2527,6 +2637,7 @@ impl Render for CanvasView {
             .children(rendered)
             .children(minimap)
             .children(picker)
+            .children(palette)
             .when(empty, |el| {
                 el.child(
                     div()
@@ -2834,7 +2945,10 @@ mod tests {
     ) -> (Entity<CanvasView>, mpsc::Receiver<ClientMsg>, ClientId, &mut VisualTestContext) {
         let me = ClientId::new();
         let (tx, rx) = mpsc::channel(64);
-        cx.update(|cx| cx.bind_keys(key_bindings()));
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys(key_bindings());
+        });
         let (view, cx) = cx.add_window_view(|window, cx| {
             let factory: ScreenFactory =
                 Arc::new(|_stream, _codec| panic!("this canvas opens no screens"));
@@ -4079,6 +4193,62 @@ mod tests {
     /// resume list, and a row opens that conversation as a driven agent in its directory,
     /// titled by its first prompt. A list for one directory offers every directory on the
     /// host; the whole-host list does not.
+    /// ⌘⇧P opens the command palette over the canvas: typing filters the lines by every
+    /// word, ↩ runs the selected one once the palette is gone and the focus is back, Esc
+    /// closes it with nothing run.
+    #[gpui::test]
+    fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
+        assert!(view.read_with(cx, |v, _| v.palette_open()));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Dialog", Some("Commands"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Find in terminal ⌘F"))));
+        let field_focused = cx.update(|window, cx| {
+            view.read(cx)
+                .palette
+                .as_ref()
+                .is_some_and(|p| p.read(cx).focus_handle(cx).is_focused(window))
+        });
+        assert!(field_focused, "the field has the keyboard");
+
+        // Esc: nothing runs, the keyboard goes back where it was.
+        cx.simulate_keystrokes("z o o m down");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "Esc closes it");
+        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(focused, "the canvas has the keyboard back");
+        let zoom = view.read_with(cx, |v, _| v.zoom());
+        assert!((zoom - 1.0).abs() < f32::EPSILON, "nothing ran: {zoom}");
+
+        // ↩: the one line left runs, once the palette is gone.
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n o t e");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(options, ["New note ⇧⌘N"], "one line matches");
+        assert!(view.read_with(cx, |v, _| v.items().is_empty()));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "gone after ↩");
+        let notes = view.read_with(cx, |v, _| {
+            v.items().iter().filter(|i| matches!(i.kind, ItemKind::Note { .. })).count()
+        });
+        assert_eq!(notes, 1, "the action ran");
+    }
+
     #[gpui::test]
     fn a_past_conversation_is_resumed_from_the_picker(cx: &mut TestAppContext) {
         let (view, mut rx, _me, cx) = canvas(cx);

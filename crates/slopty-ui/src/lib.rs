@@ -22,6 +22,7 @@ pub mod frames;
 pub mod keys;
 pub mod kit;
 pub mod note;
+pub mod palette;
 pub mod picker;
 pub mod screen;
 pub mod terminal;

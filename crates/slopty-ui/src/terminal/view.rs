@@ -66,6 +66,7 @@ mod actions {
             NextPrompt,
             /// Copy the output of the last command.
             CopyLastOutput,
+            /// Show the agent's conversation instead of the grid, or the grid again.
             ToggleConversation,
             /// Tab in a driven composer with the slash list up: take the selected
             /// completion. Bound in the Terminal context so it is tried before gpui-kit's

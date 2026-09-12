@@ -2971,6 +2971,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   the queries sent as the word grows, the stale answer dropped, the word replaced) and the
   app self-test's driven scenario (a file in the private home, `see @no` → `@notes.txt`,
   Tab → `see @notes.txt `).
+- ✅ **A command palette on ⌘⇧P** (2026-09-12). Warp, Zed and every editor since Sublime have
+  one, and Slopty's shortcuts had grown past what a menu bar teaches (the phone has no menu
+  bar at all); a hardware keyboard on an iPad had no way to an action it did not know the
+  chord for. Rulings: (1) the palette is a canvas overlay like the picker, one `Input` over a
+  list of every action with its keys, the keys read from the binding tables at build time
+  (`PaletteItem::new` finds the first binding whose action `partial_eq`s) so a rebinding
+  never desynchronises the label — shown in Apple's menu-bar order `⌃⌥⇧⌘` and the same on
+  every platform (`palette::keys_label`, not GPUI's `Display`, which spells `cmd-` outside
+  macOS); (2) the filter keeps a line when every word of the text is found in its label, any
+  order, any case — no fuzzy scoring, since the list is thirty lines and a word narrows it to
+  one or two; (3) the choice is not run from inside the palette: it closes, the focus goes
+  back to where it was when ⌘⇧P was pressed (`window.focused` remembered), and the action is
+  dispatched on the next frame from that element — so `Find in terminal` finds in the
+  terminal that had the keyboard, and `New note` reaches the canvas the way ⌘⇧N does; (4)
+  the app's own lines (settings, hosts) are appended by the app (`extend_palette`) since
+  those actions live outside `slopty-ui`; (5) ↑/↓/Esc are caught in the capture phase from
+  the field's own `MoveUp`/`MoveDown`/`Escape` actions, the pattern the composer uses. Tests:
+  `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
+  `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
+  keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
+  nothing run, `note` + ↩ leaving one note), and the app self-test's notes scenario, which now
+  makes its note through the palette.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

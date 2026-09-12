@@ -12,6 +12,6 @@ pub use element::{CellMetrics, Prepared, TerminalElement};
 #[cfg(test)]
 pub(crate) use element::{family_picks, rows_prepared};
 pub use view::{
-    CloseFind, Copy, Find, FindNext, FindPrev, Paste, Selection, TerminalView, TerminalViewEvent,
-    key_bindings,
+    CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt,
+    Selection, TerminalView, TerminalViewEvent, ToggleConversation, key_bindings,
 };
