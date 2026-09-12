@@ -339,7 +339,7 @@ fn user_bodies(tools: &ToolNames, content: &Value) -> Vec<TranscriptBody> {
         Value::Array(blocks) => blocks,
         _ => return Vec::new(),
     };
-    blocks
+    let mut bodies: Vec<TranscriptBody> = blocks
         .iter()
         .filter_map(|block| match block.get("type").and_then(Value::as_str) {
             Some("text") => user_text(block.get("text")?.as_str()?),
@@ -353,13 +353,27 @@ fn user_bodies(tools: &ToolNames, content: &Value) -> Vec<TranscriptBody> {
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    // The pictures ride on the prompt they were sent with (one entry, not one per block);
+    // sent alone they are an entry with nothing typed.
+    let pictures =
+        blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("image")).count();
+    if let Ok(pictures) = u32::try_from(pictures)
+        && pictures > 0
+    {
+        match bodies.iter_mut().find(|b| matches!(b, TranscriptBody::User { .. })) {
+            Some(TranscriptBody::User { images, .. }) => *images = pictures,
+            _ => bodies.insert(0, TranscriptBody::User { text: String::new(), images: pictures }),
+        }
+    }
+    bodies
 }
 
 /// A typed prompt, unless empty or one of the app's injected texts.
 fn user_text(text: &str) -> Option<TranscriptBody> {
     let t = text.trim();
-    (!t.is_empty() && !t.starts_with('<')).then(|| TranscriptBody::User { text: t.to_owned() })
+    (!t.is_empty() && !t.starts_with('<'))
+        .then(|| TranscriptBody::User { text: t.to_owned(), images: 0 })
 }
 
 /// The text of a `content` field: a string, or the `text` of each text block joined by
@@ -649,7 +663,7 @@ mod tests {
     );
 
     fn user(at: Option<u64>, text: &str) -> TranscriptEntry {
-        TranscriptEntry { at, body: TranscriptBody::User { text: text.to_owned() } }
+        TranscriptEntry { at, body: TranscriptBody::User { text: text.to_owned(), images: 0 } }
     }
 
     #[test]
@@ -713,6 +727,11 @@ mod tests {
             "\n",
             r#"{"type":"summary","summary":"s"}"#,
             "\n",
+            // Pictures ride on the prompt they went with; alone they are an entry of their own.
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"what colour?"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/"}}]}}"#,
+            "\n",
         );
         let got = entries(jsonl);
         assert_eq!(
@@ -755,7 +774,9 @@ mod tests {
                     output: Clipped::default(),
                     is_error: false,
                 },
-                TranscriptBody::User { text: "and then?".to_owned() },
+                TranscriptBody::User { text: "and then?".to_owned(), images: 0 },
+                TranscriptBody::User { text: "what colour?".to_owned(), images: 1 },
+                TranscriptBody::User { text: String::new(), images: 2 },
             ],
             "{got:#?}"
         );

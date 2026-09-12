@@ -160,6 +160,20 @@ pub struct AgentTask {
     pub done: bool,
 }
 
+/// The most pictures one prompt carries.
+pub const IMAGES_MAX: usize = 4;
+/// The most bytes one picture carries: what the model accepts, with room for the JSON.
+pub const IMAGE_BYTES_MAX: usize = 4 * 1024 * 1024;
+
+/// A picture attached to a prompt, as the model takes it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Image {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`: the types the model reads.
+    pub media_type: String,
+    /// The encoded picture.
+    pub data: Vec<u8>,
+}
+
 /// Client → host: the human's answer to a driven agent's `PermissionRequest`, by id.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentAnswer {
@@ -228,10 +242,12 @@ pub struct TranscriptEntry {
 /// What one [`TranscriptEntry`] holds.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum TranscriptBody {
-    /// What the human typed.
+    /// What the human typed, and how many pictures went with it.
     User {
-        /// Prompt text.
+        /// Prompt text; empty when only pictures were sent.
         text: String,
+        /// Pictures attached to the prompt (their bytes stay with the agent).
+        images: u32,
     },
     /// What the agent said (Markdown).
     Assistant {

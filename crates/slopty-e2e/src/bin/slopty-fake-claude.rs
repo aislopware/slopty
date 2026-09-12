@@ -133,6 +133,27 @@ fn emit(out: &mut impl Write, record: &Value) -> std::io::Result<()> {
     out.flush()
 }
 
+/// The pictures in a user line: each block's media type and its decoded size.
+fn pictures_of(line: &Value) -> Vec<(String, usize)> {
+    line.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("image"))
+                .filter_map(|p| {
+                    let source = p.get("source")?;
+                    let media_type = source.get("media_type")?.as_str()?.to_owned();
+                    let data = source.get("data")?.as_str()?;
+                    let bytes = data_encoding::BASE64.decode(data.as_bytes()).ok()?.len();
+                    Some((media_type, bytes))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn text_of(line: &Value) -> Option<String> {
     let message = line.get("message")?;
     match message.get("content")? {
@@ -321,15 +342,32 @@ fn run() -> std::io::Result<()> {
             continue;
         }
         let Some(text) = text_of(&value) else { continue };
+        let pictures = pictures_of(&value);
         fake.turns = fake.turns.wrapping_add(1);
         fake.note_prompt(&text);
-        // Claude Code replays the prompt as a user record first.
+        // Claude Code replays the prompt as a user record first, blocks and all.
+        let replayed = value
+            .get("message")
+            .cloned()
+            .unwrap_or_else(|| json!({"role": "user", "content": text}));
         emit(
             &mut out,
-            &json!({"type": "user", "message": {"role": "user", "content": text}, "session_id": fake.session,
+            &json!({"type": "user", "message": replayed, "session_id": fake.session,
                     "parent_tool_use_id": null, "uuid": "p", "timestamp": "2026-09-12T00:00:00.000Z", "isReplay": true}),
         )?;
-        if text.starts_with("write") {
+        if !pictures.is_empty() {
+            // A prompt with pictures: the reply says what arrived, so the test can check the
+            // blocks reached the agent whole (probed on CLI 2.1.269: the model read a PNG).
+            let seen = pictures
+                .iter()
+                .map(|(media_type, bytes)| format!("{media_type} {bytes} B"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let line = format!("Saw {} picture(s): {seen}", pictures.len());
+            fake.note_reply(&line);
+            emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": line}])))?;
+            emit(&mut out, &fake.result("success", &line))?;
+        } else if text.starts_with("write") {
             requests = requests.wrapping_add(1);
             let tool_use = format!("toolu_{requests}");
             let input = json!({"file_path": "note.txt", "content": "hi"});

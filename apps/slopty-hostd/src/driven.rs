@@ -23,7 +23,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_proto::HostMsg;
 use slopty_proto::agent::{
     AgentAnswer, AgentEvent, AgentInfo, AgentKind, AgentSessionInfo, AgentSource, AgentStatus,
-    AgentTask, BlockReason, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
+    AgentTask, BlockReason, Image, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_proto::terminal::{CloseReason, SessionKind, SessionState, SessionSummary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -47,7 +47,7 @@ const SESSIONS_LISTED: usize = 30;
 /// What a client can ask a driven agent.
 #[derive(Debug)]
 enum Cmd {
-    Say(String),
+    Say { text: String, images: Vec<Image> },
     Answer(AgentAnswer),
     Interrupt,
     Set { model: Option<String>, permission_mode: Option<String> },
@@ -100,6 +100,9 @@ pub enum DrivenError {
     /// No driven agent has that session id.
     #[error("no driven agent {0}")]
     Unknown(SessionId),
+    /// A prompt carried more pictures, or a larger one, than the wire allows.
+    #[error("too many pictures or one too large: {0} pictures, largest {1} bytes")]
+    Pictures(usize, usize),
 }
 
 impl Driven {
@@ -237,8 +240,19 @@ impl Driven {
     /// # Errors
     ///
     /// When `session` is not a driven agent.
-    pub fn say(&self, session: SessionId, text: String) -> Result<(), DrivenError> {
-        self.send(session, Cmd::Say(text))
+    pub fn say(
+        &self,
+        session: SessionId,
+        text: String,
+        images: Vec<Image>,
+    ) -> Result<(), DrivenError> {
+        let largest = images.iter().map(|i| i.data.len()).max().unwrap_or(0);
+        if images.len() > slopty_proto::agent::IMAGES_MAX
+            || largest > slopty_proto::agent::IMAGE_BYTES_MAX
+        {
+            return Err(DrivenError::Pictures(images.len(), largest));
+        }
+        self.send(session, Cmd::Say { text, images })
     }
 
     /// Answer a permission request.
@@ -385,9 +399,9 @@ impl Pump {
                 cmd = cmds.recv() => {
                     let Some(cmd) = cmd else { break };
                     let line = match cmd {
-                        Cmd::Say(text) => {
-                            self.said(&text);
-                            Some(stream::user_message(&text))
+                        Cmd::Say { text, images } => {
+                            self.said(&text, images.len());
+                            Some(stream::user_message(&text, &images))
                         }
                         Cmd::Answer(answer) => {
                             let line = fold.answer(
@@ -452,10 +466,13 @@ impl Pump {
 
     /// The human's prompt is shown at once, before the agent replays it; the replay is then
     /// the same entry again, so it is dropped (see [`Pump::publish`]).
-    fn said(&self, text: &str) {
+    fn said(&self, text: &str, images: usize) {
         let entry = TranscriptEntry {
             at: Some(now_millis()),
-            body: slopty_proto::agent::TranscriptBody::User { text: text.to_owned() },
+            body: slopty_proto::agent::TranscriptBody::User {
+                text: text.to_owned(),
+                images: u32::try_from(images).unwrap_or(u32::MAX),
+            },
         };
         self.append(vec![entry]);
         self.status(AgentStatus::Working, Some(slopty_agent::truncate(text)));
@@ -574,11 +591,12 @@ impl Pump {
     /// A user entry equal to the last one shown (the agent replaying the prompt just sent).
     fn is_replay(&self, entry: &TranscriptEntry) -> bool {
         use slopty_proto::agent::TranscriptBody;
-        let TranscriptBody::User { text } = &entry.body else { return false };
+        let TranscriptBody::User { text, images } = &entry.body else { return false };
         let table = self.table.inner.lock();
-        table.get(&self.session).and_then(|e| e.entries.back()).is_some_and(
-            |last| matches!(&last.body, TranscriptBody::User { text: shown } if shown == text),
-        )
+        table.get(&self.session).and_then(|e| e.entries.back()).is_some_and(|last| {
+            matches!(&last.body, TranscriptBody::User { text: shown, images: pictures }
+                if shown == text && pictures == images)
+        })
     }
 
     /// A resumed conversation's past, read from its transcript off the runtime and shown

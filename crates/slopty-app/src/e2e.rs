@@ -334,6 +334,20 @@ fn apply(
             }
             Reply::Ok
         }
+        Command::Attach { media_type, data } => {
+            let Ok(data) = data_encoding::BASE64.decode(data.as_bytes()) else {
+                return Reply::Error { message: "attach: data is not base64".into() };
+            };
+            let Some(view) =
+                workspace.read(cx).active_canvas().and_then(|c| c.read(cx).active_terminal())
+            else {
+                return Reply::Error { message: "no active terminal".into() };
+            };
+            view.update(cx, |view, cx| {
+                view.attach_image(slopty_proto::agent::Image { media_type, data }, cx);
+            });
+            Reply::Ok
+        }
         Command::Type { text } => {
             for ch in text.chars() {
                 let keystroke = Keystroke {
@@ -659,7 +673,10 @@ fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
 fn entry_line(entry: &TranscriptEntry) -> String {
     let first = |text: &str| text.lines().next().unwrap_or_default().to_owned();
     match &entry.body {
-        TranscriptBody::User { text } => format!("user: {}", first(text)),
+        TranscriptBody::User { text, images } if *images > 0 => {
+            format!("user: {} [+{images}]", first(text))
+        }
+        TranscriptBody::User { text, .. } => format!("user: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("assistant: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "thinking".to_owned(),
         TranscriptBody::ToolUse { name, summary, detail, .. } => match detail {
@@ -788,6 +805,11 @@ impl Workspace {
                         .usage
                         .as_ref()
                         .map(slopty_ui::terminal::conversation::usage_label),
+                    attachments: view
+                        .attachments()
+                        .iter()
+                        .map(slopty_ui::terminal::conversation::attachment_label)
+                        .collect(),
                     tasks: c
                         .tasks()
                         .iter()

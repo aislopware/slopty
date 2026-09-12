@@ -2693,6 +2693,32 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   permission), headless `a_driven_view_shows_the_agent_and_retunes_it` (the usage chip in the
   tree), the app self-test (the fake sends the probe's event after init; the dump's `usage`
   reads "5h 23% · 7d 74%").
+- ✅ **A picture pasted into the composer goes to the agent as an image block, protocol 23**
+  (2026-09-12). Probed on CLI 2.1.269: a stream-json user message whose content is
+  `[{type: image, source: {type: base64, media_type, data}}, {type: text}]` is accepted,
+  replayed as sent, written to the transcript as sent, and the model read a 64×64 PNG ("What
+  colour is this image?" → "Blue"). On the phone a screenshot is the fastest way to show the
+  agent something; without this the card could only type. Rulings: (1) the client decides
+  what is a picture — ⌘V captures the input's `Paste` action and takes the clipboard's image
+  entries, letting a text clipboard fall through to the input — rather than the host sniffing
+  bytes, because the clipboard's format is known where it is read; (2) only the types the
+  model reads are attached (PNG, JPEG, GIF, WebP): a TIFF, what a copied macOS screenshot
+  can be, is dropped with a log line rather than transcoded, until a measurement says the
+  paste path needs it; (3) caps live in `slopty-proto` (`IMAGES_MAX` 4, `IMAGE_BYTES_MAX`
+  4 MiB, under the model's 5 MB with room for the JSON) and the host refuses a prompt over
+  them whole — a half-sent prompt would be worse than none; (4) the wire carries the bytes
+  only client → host: the transcript entry says how many pictures went with the prompt, so
+  a joining client and a resumed card show "1 picture" without shipping megabytes back, and
+  the host's own user entry and the agent's replay agree (`is_replay` compares the count).
+  Wire: `AgentSay.images: Vec<Image>`, `TranscriptBody::User.images`; goldens
+  `client_agent_say` / `host_transcript` / `client_hello` re-accepted, PROTOCOL_VERSION
+  22 → 23. Tests: `tool_results_are_named_after_their_call_and_injected_texts_are_not_entries`
+  (`transcript`: a picture with text is one entry, two alone are an entry of their own),
+  `a_policy_denial_and_the_rest_are_named_or_ignored` (`stream`: the blocks, no empty text
+  block), headless `a_picture_pasted_into_the_composer_goes_with_the_prompt` (chip label,
+  the tap, text still text, TIFF refused, sent with the text and alone), the app self-test
+  (the socket's `attach`, the chip in the dump, the fake reading back "image/png 70 B", the
+  bubble's "1 picture").
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

@@ -525,7 +525,18 @@ whole percent and reset time, drawn as a Status chip (`conversation-usage`, "5h 
 74%", or "limited until HH:MM"); API-key runs never send one and show nothing. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
-nothing yet to draw; it never displaces a permission or a question. Both kinds coexist: ⌘⇧T
+nothing yet to draw; it never displaces a permission or a question. **Pictures** go with a
+prompt (protocol 23): ⌘V in the composer with a picture on the clipboard (`composer_paste`
+captures the input's `Paste` before it reads text) attaches it — PNG, JPEG, GIF or WebP, the
+types the model reads, at most `IMAGES_MAX` of `IMAGE_BYTES_MAX` each — as a chip above the
+composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it); ↩ sends
+`AgentSay { text, images }` and the host writes the stream-json user message as blocks, each
+picture base64 with its media type before the text (`stream::user_message`), refusing a
+prompt over the caps whole. The transcript reader counts image blocks into
+`TranscriptBody::User.images`, so the bubble says "1 picture" whether the prompt came from
+this client, another, or the file; the bytes never come back over the wire. The e2e socket's
+`attach` stands in for the clipboard read (a test must not touch the system pasteboard); the
+headless test pastes through the test platform's. Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
 (`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test

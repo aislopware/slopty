@@ -802,6 +802,40 @@ mod tests {
             ],
             "the whole past, oldest first (the fake logs text replies only)"
         );
+
+        // A picture attached to the next prompt (the socket's stand-in for ⌘V with one on the
+        // clipboard): a chip names it, ↩ sends it as an image block the fake reads back, the
+        // bubble says a picture went with the prompt, and the chip is gone.
+        drv.attach("image/png", &[0x89; 70]).await.unwrap();
+        drv.wait_for("the attachment chip", STEP, |d| {
+            d.terminals
+                .iter()
+                .any(|t| t.conversation.as_ref().is_some_and(|c| c.attachments == ["PNG · 70 B"]))
+        })
+        .await
+        .unwrap();
+        drv.type_text("what colour?").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the picture read back", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.conversation.as_ref().is_some_and(|c| {
+                        c.attachments.is_empty()
+                            && c.entries.ends_with(&[
+                                "user: what colour? [+1]".to_owned(),
+                                "assistant: Saw 1 picture(s): image/png 70 B".to_owned(),
+                            ])
+                    })
+                })
+            })
+            .await
+            .unwrap();
+        let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
+        assert!(
+            dump.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("1 picture"))),
+            "the bubble says a picture went with it: {:?}",
+            card.conversation
+        );
         stack.shutdown().await;
     }
 

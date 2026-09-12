@@ -198,7 +198,8 @@ mod golden {
     fn driven_agent() {
         use slopty_proto::agent::{
             AgentAnswer, AgentEvent, AgentKind, AgentSource, AgentStatus, AgentTask, BlockReason,
-            Choice, Clipped, OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
+            Choice, Clipped, Image, OpenAgent, PermissionRequest, Question, QuestionAnswer,
+            ToolDetail,
         };
         use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
         snap(
@@ -212,7 +213,14 @@ mod golden {
         );
         snap(
             "client_agent_say",
-            &ClientMsg::AgentSay { session: session(), text: "fix the build".to_owned() },
+            &ClientMsg::AgentSay {
+                session: session(),
+                text: "fix the build".to_owned(),
+                images: vec![Image {
+                    media_type: "image/png".to_owned(),
+                    data: vec![0x89, b'P', b'N', b'G'],
+                }],
+            },
         );
         snap(
             "client_agent_answer",
@@ -415,7 +423,7 @@ mod golden {
                 entries: vec![
                     TranscriptEntry {
                         at: at(0),
-                        body: TranscriptBody::User { text: "fix it".to_owned() },
+                        body: TranscriptBody::User { text: "fix it".to_owned(), images: 0 },
                     },
                     TranscriptEntry {
                         at: at(1000),

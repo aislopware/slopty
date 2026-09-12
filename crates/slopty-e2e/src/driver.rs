@@ -95,6 +95,19 @@ impl Driver {
         self.ok(&Command::Type { text: text.to_owned() }).await
     }
 
+    /// Attach a picture to the active driven conversation's next prompt.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or no driven conversation is active.
+    pub async fn attach(&mut self, media_type: &str, data: &[u8]) -> Result<()> {
+        self.ok(&Command::Attach {
+            media_type: media_type.to_owned(),
+            data: data_encoding::BASE64.encode(data),
+        })
+        .await
+    }
+
     /// Left click at a window point.
     ///
     /// # Errors

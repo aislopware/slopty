@@ -28,6 +28,7 @@ ignored = [ "gpui_platform" ]
 
 [dependencies]
 anyhow.workspace = true
+data-encoding.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 gpui_platform = { workspace = true, optional = true }

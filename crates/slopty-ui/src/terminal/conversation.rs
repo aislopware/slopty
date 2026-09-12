@@ -103,6 +103,29 @@ pub fn next_mode(mode: &str) -> &'static str {
         .unwrap_or(MODES[0])
 }
 
+/// "1 picture" / "3 pictures": how a bubble and its label say what went with a prompt.
+#[must_use]
+pub fn pictures_label(images: u32) -> String {
+    if images == 1 { "1 picture".to_owned() } else { format!("{images} pictures") }
+}
+
+/// How an attachment chip names a picture waiting in the composer: its kind and size
+/// ("PNG · 12 KB").
+#[must_use]
+pub fn attachment_label(image: &slopty_proto::agent::Image) -> String {
+    let kind = image.media_type.rsplit('/').next().unwrap_or("image").to_ascii_uppercase();
+    let bytes = image.data.len();
+    let size = if bytes >= 1024 * 1024 {
+        let tenths = bytes.saturating_mul(10) / (1024 * 1024);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    };
+    format!("{kind} · {size}")
+}
+
 /// The subscription's windows as "5h 23% · 7d 74%", or "limited until HH:MM" when the
 /// agent is refused (the earliest reset shown); empty windows read as nothing.
 #[must_use]
@@ -389,6 +412,7 @@ impl Conversation {
         info: Option<&AgentInfo>,
         attention: Option<&Attention>,
         partial: &str,
+        attachments: &[slopty_proto::agent::Image],
         composer_focused: bool,
         working: bool,
         theme: &Theme,
@@ -485,6 +509,7 @@ impl Conversation {
             .when(!completions.is_empty(), |el| {
                 el.child(self.completions_row(&completions, &theme, cx))
             })
+            .when(!attachments.is_empty(), |el| el.child(attachments_row(attachments, &theme, cx)))
             .child(self.composer_row(composer_focused, working, &theme, cx))
             .into_any_element()
     }
@@ -801,6 +826,57 @@ fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
 
 /// What the agent waits for, with the one-tap answers, above the composer: the warn tone,
 /// faint, since the agent is blocked on the human.
+/// The pictures waiting to go with the next prompt, one chip each (`composer-attachment-<i>`,
+/// a button that drops it).
+fn attachments_row(
+    attachments: &[slopty_proto::agent::Image],
+    theme: &Theme,
+    cx: &Context<TerminalView>,
+) -> AnyElement {
+    let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    div()
+        .id("composer-attachments")
+        .debug_selector(|| "composer-attachments".to_owned())
+        .role(Role::Group)
+        .aria_label("Attachments")
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .gap(px(spacing.sm))
+        .px(px(spacing.md))
+        .py(px(spacing.xs))
+        .border_t_1()
+        .border_color(hsla(s.border))
+        .bg(hsla(s.panel))
+        .children(attachments.iter().enumerate().map(|(i, image)| {
+            let label = attachment_label(image);
+            let chip = div()
+                .id(("composer-attachment", i))
+                .debug_selector(move || format!("composer-attachment-{i}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!(
+                    "Remove picture {}: {label}",
+                    i.saturating_add(1)
+                )))
+                .px(px(spacing.sm))
+                .py(px(spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .border_1()
+                .border_color(hsla(s.border))
+                .bg(hsla(s.raised))
+                .text_size(px(theme.typography.ui_size))
+                .text_color(hsla(s.text))
+                .cursor_pointer()
+                .child(SharedString::from(format!("🖼 {label} ×")));
+            tab_stop(chip, s.accent).on_click(cx.listener(move |view, _ev, _window, cx| {
+                view.remove_attachment(i, cx);
+            }))
+        }))
+        .into_any_element()
+}
+
 fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
     let s = &theme.surfaces;
     let spacing = theme.spacing;
@@ -1096,7 +1172,7 @@ fn entry(
         }
     };
     match &entry.body {
-        TranscriptBody::User { text } => row
+        TranscriptBody::User { text, images } => row
             .flex()
             .items_end()
             .justify_end()
@@ -1110,7 +1186,16 @@ fn entry(
                     .rounded(px(theme.radii.md))
                     .bg(hsla_alpha(s.accent, alpha::TINT_STRONG))
                     .line_height(prose)
-                    .child(SharedString::from(text.clone())),
+                    .when(*images > 0, |el| {
+                        // The pictures stay with the agent; the bubble says they were sent.
+                        el.child(
+                            div()
+                                .text_size(px(theme.typography.ui_size))
+                                .text_color(hsla(s.text_muted))
+                                .child(SharedString::from(pictures_label(*images))),
+                        )
+                    })
+                    .when(!text.is_empty(), |el| el.child(SharedString::from(text.clone()))),
             )
             .into_any_element(),
         TranscriptBody::Assistant { markdown } => row
@@ -1243,7 +1328,10 @@ fn task_counts(task: &AgentTask) -> Vec<String> {
 pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String {
     let first = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_owned();
     match &entry.body {
-        TranscriptBody::User { text } => format!("You: {}", first(text)),
+        TranscriptBody::User { text, images } if *images > 0 => {
+            format!("You: {} {}", pictures_label(*images), first(text)).trim_end().to_owned()
+        }
+        TranscriptBody::User { text, .. } => format!("You: {}", first(text)),
         TranscriptBody::Assistant { markdown } => format!("Claude: {}", first(markdown)),
         TranscriptBody::Thinking { .. } => "Claude thinking".to_owned(),
         TranscriptBody::ToolUse { name, summary, detail, .. } => match (task, detail) {

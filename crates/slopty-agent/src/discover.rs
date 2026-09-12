@@ -329,7 +329,7 @@ mod tests {
         std::fs::write(dir.join("s1.jsonl"), body).expect("write");
         let all = conversation(home.path(), cwd, "s1", 10);
         assert_eq!(all.len(), 6, "{all:?}");
-        assert!(matches!(&all[0].body, TranscriptBody::User { text } if text == "ask 1"));
+        assert!(matches!(&all[0].body, TranscriptBody::User { text, .. } if text == "ask 1"));
         let last = conversation(home.path(), cwd, "s1", 3);
         assert_eq!(last.len(), 3, "the limit keeps the newest: {last:?}");
         assert!(

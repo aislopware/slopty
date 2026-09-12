@@ -527,8 +527,8 @@ impl Peer<'_> {
                         self.out.send(HostMsg::Term { session: SessionId::nil(), event }).await;
                 }
             },
-            ClientMsg::AgentSay { session, text } => {
-                if let Err(e) = self.daemon.driven.say(session, text) {
+            ClientMsg::AgentSay { session, text, images } => {
+                if let Err(e) = self.daemon.driven.say(session, text, images) {
                     tracing::debug!(client = %self.client, %session, error = %e, "agent say");
                 }
             }

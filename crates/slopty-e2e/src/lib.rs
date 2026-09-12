@@ -66,6 +66,15 @@ pub enum Command {
         /// What to type.
         text: String,
     },
+    /// Attach a picture to the active driven conversation's next prompt, as pasting one into
+    /// its composer would (the paste itself reads the system clipboard, which a test must
+    /// not touch; the headless layer covers that read).
+    Attach {
+        /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+        media_type: String,
+        /// The encoded picture, base64.
+        data: String,
+    },
     /// Press and release a pointer button at a window point.
     Click {
         /// Window x in points.
@@ -781,6 +790,10 @@ pub struct ConversationInfo {
     /// The subscription's windows as the header shows them ("5h 23% · 7d 74%").
     #[serde(default)]
     pub usage: Option<String>,
+    /// The pictures waiting to go with the next prompt, as their chips name them
+    /// ("PNG · 70 B").
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 impl Dump {

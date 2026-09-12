@@ -247,6 +247,8 @@ pub struct TerminalView {
     permission: Option<PermissionRequest>,
     /// The labels picked so far for each question of a pending `AskUserQuestion`.
     chosen: Vec<Vec<String>>,
+    /// Pictures pasted into the composer, going with the next prompt.
+    attachments: Vec<slopty_proto::agent::Image>,
     /// The text the driven agent is writing now, ahead of its next entry.
     partial: String,
     /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
@@ -317,6 +319,7 @@ impl TerminalView {
             search_regex: false,
             driven: false,
             chosen: Vec::new(),
+            attachments: Vec::new(),
             open_conversation: false,
             permission: None,
             partial: String::new(),
@@ -652,13 +655,15 @@ impl TerminalView {
         let Some(conversation) = &self.conversation else { return };
         let text = conversation.take_composer_text(window, cx);
         if self.driven {
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && self.attachments.is_empty() {
                 return;
             }
             // While the agent asks a question, the typed text is its answer ("Other"), not
-            // a new prompt.
-            if !self.answer_question_with(text.clone(), cx) {
-                self.say(ClientMsg::AgentSay { session: self.session, text });
+            // a new prompt; the pictures wait for the next prompt.
+            if text.trim().is_empty() || !self.answer_question_with(text.clone(), cx) {
+                let images = std::mem::take(&mut self.attachments);
+                self.say(ClientMsg::AgentSay { session: self.session, text, images });
+                cx.notify();
             }
             return;
         }
@@ -1201,6 +1206,73 @@ impl TerminalView {
             }
         }
         cx.notify();
+    }
+
+    /// ⌘V in a driven composer with a picture on the clipboard: the picture becomes an
+    /// attachment of the next prompt instead of text (a text clipboard pastes as text).
+    fn composer_paste(
+        &mut self,
+        _: &gpui_kit::component::input::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.driven || !self.composer_focused(window, cx) {
+            return;
+        }
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let pictures: Vec<slopty_proto::agent::Image> = item
+            .into_entries()
+            .filter_map(|entry| match entry {
+                gpui::ClipboardEntry::Image(image) => Some(slopty_proto::agent::Image {
+                    media_type: image.format.mime_type().to_owned(),
+                    data: image.bytes,
+                }),
+                gpui::ClipboardEntry::String(_) | gpui::ClipboardEntry::ExternalPaths(_) => None,
+            })
+            .collect();
+        if pictures.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        for picture in pictures {
+            self.attach_image(picture, cx);
+        }
+    }
+
+    /// Attach a picture to the next prompt: only the types the model reads, within the wire's
+    /// caps; anything else is dropped with a log line, never sent half.
+    pub fn attach_image(&mut self, image: slopty_proto::agent::Image, cx: &mut Context<Self>) {
+        use slopty_proto::agent::{IMAGE_BYTES_MAX, IMAGES_MAX};
+        let readable = matches!(
+            image.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        );
+        if !readable || image.data.len() > IMAGE_BYTES_MAX || self.attachments.len() >= IMAGES_MAX {
+            tracing::warn!(
+                session = %self.session,
+                media_type = %image.media_type,
+                bytes = image.data.len(),
+                attached = self.attachments.len(),
+                "picture not attached"
+            );
+            return;
+        }
+        self.attachments.push(image);
+        cx.notify();
+    }
+
+    /// Drop the `i`th attachment (its chip was tapped).
+    pub fn remove_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.attachments.len() {
+            self.attachments.remove(i);
+            cx.notify();
+        }
+    }
+
+    /// The pictures waiting to go with the next prompt.
+    #[must_use]
+    pub fn attachments(&self) -> &[slopty_proto::agent::Image] {
+        &self.attachments
     }
 
     /// ⌘V: the clipboard into the session (the host brackets it when the program asked).
@@ -1952,6 +2024,7 @@ impl Render for TerminalView {
                 info,
                 attention.as_ref(),
                 &self.partial,
+                &self.attachments,
                 composer_focused,
                 working,
                 &self.theme,
@@ -2007,6 +2080,7 @@ impl Render for TerminalView {
                     this.composer_action("tab", window, cx);
                 },
             ))
+            .capture_action(cx.listener(Self::composer_paste))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -2039,6 +2113,7 @@ mod tests {
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
+    use crate::terminal::conversation::attachment_label;
     use crate::terminal::element::separator_color;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
@@ -2062,7 +2137,10 @@ mod tests {
     }
 
     fn user(text: &str) -> TranscriptEntry {
-        TranscriptEntry { at: None, body: TranscriptBody::User { text: text.to_owned() } }
+        TranscriptEntry {
+            at: None,
+            body: TranscriptBody::User { text: text.to_owned(), images: 0 },
+        }
     }
 
     fn assistant(markdown: &str) -> TranscriptEntry {
@@ -3288,6 +3366,87 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
         assert!(drain_words(&mut rx).is_empty());
+    }
+
+    /// ⌘V with a picture on the clipboard attaches it to the next prompt: a chip above the
+    /// composer names it, its tap drops it, ↩ sends it with the text (or alone) and clears
+    /// the chips; a text clipboard still pastes as text, and a type the model cannot read
+    /// is not attached.
+    #[gpui::test]
+    fn a_picture_pasted_into_the_composer_goes_with_the_prompt(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx));
+        assert_eq!(drain_words(&mut rx), ["follow:true"]);
+        let picture = |format, bytes: &[u8]| {
+            gpui::ClipboardItem::new_image(&gpui::Image { format, bytes: bytes.to_vec(), id: 1 })
+        };
+
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 70])));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.is("Button", Some("Remove picture 1: PNG · 70 B"))),
+            "the chip names the picture: {tree:#?}"
+        );
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some(""), "nothing pasted as text");
+
+        // A second picture and the first's chip tapped away.
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Jpeg, &[0xff; 2048])));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 2);
+        let chip = cx.debug_bounds("composer-attachment-0").expect("the first chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let left: Vec<String> =
+            view.read_with(cx, |v, _| v.attachments().iter().map(attachment_label).collect());
+        assert_eq!(left, ["JPEG · 2 KB"]);
+
+        // Text still pastes as text; a TIFF is not something the model reads.
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hue".into())));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("hue"));
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Tiff, &[0x4d; 10])));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1, "TIFF not attached");
+
+        // ↩ sends the text with the picture and clears the chips.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let sent: Vec<(String, Vec<String>)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::AgentSay { text, images, .. } => {
+                    Some((text, images.iter().map(|i| i.media_type.clone()).collect()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [("hue".to_owned(), vec!["image/jpeg".to_owned()])]);
+        assert!(view.read_with(cx, |v, _| v.attachments().is_empty()));
+        assert!(cx.debug_bounds("composer-attachments").is_none(), "no chips left");
+
+        // A picture alone is a prompt too.
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 3])));
+        cx.simulate_keystrokes("cmd-v enter");
+        cx.run_until_parked();
+        let sent: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::AgentSay { text, images, .. } => {
+                    Some(format!("{text}+{}", images.len()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, ["+1"]);
     }
 
     /// A driven agent's question is answered in place: the options are buttons, one tap on

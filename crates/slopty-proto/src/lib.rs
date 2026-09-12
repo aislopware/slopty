@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 22;
+pub const PROTOCOL_VERSION: u16 = 23;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -69,12 +69,16 @@ pub enum ClientMsg {
     /// Start an agent the host drives; the host answers with `HostMsg::SessionOpened` of
     /// `SessionKind::Agent`.
     OpenAgent(agent::OpenAgent),
-    /// Send the human's words to a driven agent as its next prompt.
+    /// Send the human's words, and the images they attached, to a driven agent as its next
+    /// prompt.
     AgentSay {
         /// The agent session.
         session: SessionId,
         /// The prompt.
         text: String,
+        /// Pictures that go with it, at most [`agent::IMAGES_MAX`] of at most
+        /// [`agent::IMAGE_BYTES_MAX`] each; the host refuses a larger prompt whole.
+        images: Vec<agent::Image>,
     },
     /// Answer a driven agent's permission request.
     AgentAnswer(agent::AgentAnswer),

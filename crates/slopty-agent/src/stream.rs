@@ -391,8 +391,23 @@ fn shell_quote(word: &str) -> String {
 
 /// The line that sends the human's words as the next prompt.
 #[must_use]
-pub fn user_message(text: &str) -> String {
-    json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+pub fn user_message(text: &str, images: &[slopty_proto::agent::Image]) -> String {
+    if images.is_empty() {
+        return json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
+    }
+    // With pictures the content is blocks: each picture as the API takes it (base64 with its
+    // media type; probed on CLI 2.1.269, the model read a pasted PNG), then the text.
+    let mut blocks: Vec<Value> = images
+        .iter()
+        .map(|image| {
+            json!({"type": "image", "source": {"type": "base64", "media_type": image.media_type,
+                   "data": data_encoding::BASE64.encode(&image.data)}})
+        })
+        .collect();
+    if !text.trim().is_empty() {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+    json!({"type": "user", "message": {"role": "user", "content": blocks}}).to_string()
 }
 
 /// The line that asks Claude Code to stop the running turn. `request_id` is the host's own;
@@ -1151,8 +1166,29 @@ mod tests {
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"no":"type"}"#), None);
         assert_eq!(
-            serde_json::from_str::<Value>(&user_message("fix it\nplease")).ok(),
+            serde_json::from_str::<Value>(&user_message("fix it\nplease", &[])).ok(),
             Some(json!({"type":"user","message":{"role":"user","content":"fix it\nplease"}}))
+        );
+        // With a picture the content is blocks, the picture first as the API takes it.
+        let picture = slopty_proto::agent::Image {
+            media_type: "image/png".to_owned(),
+            data: vec![0x89, b'P', b'N', b'G'],
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&user_message(
+                "what colour?",
+                std::slice::from_ref(&picture)
+            ))
+            .ok(),
+            Some(json!({"type":"user","message":{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw=="}},
+                {"type":"text","text":"what colour?"}]}}))
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&user_message("  ", std::slice::from_ref(&picture))).ok(),
+            Some(json!({"type":"user","message":{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw=="}}]}})),
+            "nothing typed: no empty text block"
         );
     }
 
