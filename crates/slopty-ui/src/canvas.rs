@@ -142,6 +142,7 @@ pub enum KeyTarget {
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
     const CTX: Option<&str> = Some("Canvas");
+    const FILE_CTX: Option<&str> = Some("Canvas && file_card");
     vec![
         KeyBinding::new("cmd-t", NewTerminal, CTX),
         KeyBinding::new("cmd-n", NewTerminal, CTX),
@@ -167,16 +168,17 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", FocusNext, CTX),
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
-        // The active file card's reading line, with the canvas itself focused (a terminal or
-        // a remote window takes these keys first).
-        KeyBinding::new("up", LineUp, CTX),
-        KeyBinding::new("down", LineDown, CTX),
-        KeyBinding::new("pageup", PageUp, CTX),
-        KeyBinding::new("pagedown", PageDown, CTX),
-        KeyBinding::new("home", LineFirst, CTX),
-        KeyBinding::new("end", LineLast, CTX),
-        KeyBinding::new("cmd-up", LineFirst, CTX),
-        KeyBinding::new("cmd-down", LineLast, CTX),
+        // The active file card's reading line. Only while a file card is active (the canvas
+        // sets `file_card` on its context then): a binding matches before a focused terminal's
+        // key handler runs, so an unscoped `up` would take the arrows from the shell.
+        KeyBinding::new("up", LineUp, FILE_CTX),
+        KeyBinding::new("down", LineDown, FILE_CTX),
+        KeyBinding::new("pageup", PageUp, FILE_CTX),
+        KeyBinding::new("pagedown", PageDown, FILE_CTX),
+        KeyBinding::new("home", LineFirst, FILE_CTX),
+        KeyBinding::new("end", LineLast, FILE_CTX),
+        KeyBinding::new("cmd-up", LineFirst, FILE_CTX),
+        KeyBinding::new("cmd-down", LineLast, FILE_CTX),
         // A file card's find bar: the terminal's find keys, in the bar's own context (no
         // terminal around it).
         KeyBinding::new("escape", crate::terminal::CloseFind, Some("FileSearch")),
@@ -3233,10 +3235,19 @@ impl Render for CanvasView {
             .map(|item| self.render_item(item, window, cx))
             .collect();
         let minimap = (!empty).then(|| self.render_minimap(cx));
+        let file_card_active = self
+            .active
+            .and_then(|id| self.doc.get(id))
+            .is_some_and(|i| matches!(i.kind, ItemKind::File { .. }));
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add("Canvas");
+        if file_card_active {
+            key_context.add("file_card");
+        }
         div()
             .id("canvas")
             .debug_selector(|| "canvas".to_owned())
-            .key_context("Canvas")
+            .key_context(key_context)
             .track_focus(&self.focus)
             .role(Role::Group)
             .aria_label("Canvas")
@@ -5917,6 +5928,37 @@ mod tests {
         assert!(cx.debug_bounds("file-search").is_some(), "the pill opens the bar");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Button", Some("Find in the file"))), "{tree:#?}");
+    }
+
+    /// The reading-line keys are bound only while a file card is active: a binding matches
+    /// before a focused terminal's key handler runs, so an unscoped arrow would never reach
+    /// the shell (the iOS hardware-keyboard self-test caught exactly that).
+    #[gpui::test]
+    fn arrow_keys_reach_a_focused_shell_beside_a_file_card(cx: &mut TestAppContext) {
+        use slopty_proto::input::KeyCode;
+        let (view, mut rx, me, cx) = canvas(cx);
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/a.txt", None, cx));
+        cx.run_until_parked();
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, Rect { x: 760.0, ..SHELL }, 2);
+        view.update_in(cx, |c, _window, cx| c.reveal_session(shell, cx));
+        cx.run_until_parked();
+        assert!(terminal_focused(&view, cx, shell));
+        drain(&mut rx);
+        cx.simulate_keystrokes("down up pagedown home end");
+        cx.run_until_parked();
+        let keys: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { req: TermRequest::Key(key), .. } => Some(key.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [KeyCode::ArrowDown, KeyCode::ArrowUp, KeyCode::PageDown, KeyCode::Home, KeyCode::End],
+            "every key went to the shell"
+        );
     }
 
     #[gpui::test]

@@ -378,13 +378,42 @@ mod tests {
             .unwrap();
         let (vx, vy) = centre(&dump, "Button", "View note.txt on the canvas");
         drv.ui_tap(vx, vy).await.unwrap();
-        drv.wait_for("the file card", STEP, |d| {
-            d.item("file").is_some_and(|i| {
-                i.active
-                    && i.file.as_ref().is_some_and(|f| {
-                        f.path.ends_with("/note.txt") && f.summary.starts_with("missing:")
-                    })
+        let dump = drv
+            .wait_for("the file card", STEP, |d| {
+                d.item("file").is_some_and(|i| {
+                    i.active
+                        && i.file.as_ref().is_some_and(|f| {
+                            f.path.ends_with("/note.txt") && f.summary.starts_with("missing:")
+                        })
+                })
             })
+            .await
+            .unwrap();
+
+        // The file lands on the host (the simulator's host is this Mac): "reload" reads it.
+        let file = dump.item("file").unwrap().file.clone().unwrap();
+        std::fs::write(&file.path, "hello\nthere\n").unwrap();
+        let (rx, ry) = centre(&dump, "Button", "Read the file again");
+        drv.ui_tap(rx, ry).await.unwrap();
+        let dump = drv
+            .wait_for("the file's lines", STEP, |d| {
+                d.item("file").is_some_and(|i| i.file.as_ref().is_some_and(|f| f.lines == 2))
+            })
+            .await
+            .unwrap();
+
+        // The "find" pill is the phone's ⌘F: the bar opens with its field focused, the soft
+        // keyboard's text finds line 2, and that hit is the card's reading line.
+        let (fx, fy) = centre(&dump, "Button", "Find in the file");
+        drv.ui_tap(fx, fy).await.unwrap();
+        drv.wait_for("the find bar", STEP, |d| {
+            d.a11y_node("Group", Some("Find in file")).is_some()
+        })
+        .await
+        .unwrap();
+        drv.ui_insert_text("there").await.unwrap();
+        drv.wait_for("the hit as the reading line", STEP, |d| {
+            d.item("file").is_some_and(|i| i.file.as_ref().is_some_and(|f| f.line == Some(2)))
         })
         .await
         .unwrap();

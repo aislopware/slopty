@@ -579,6 +579,9 @@ pub struct FileItemInfo {
     pub summary: String,
     /// Lines drawn.
     pub lines: usize,
+    /// The reading line, 1-based: the current find hit, else the line the card is on.
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// One terminal.

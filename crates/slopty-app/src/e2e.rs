@@ -805,6 +805,7 @@ impl Workspace {
                         .file(item.id)
                         .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary()),
                     lines: canvas.file(item.id).map_or(0, |v| v.read(cx).line_count()),
+                    line: canvas.file(item.id).and_then(|v| v.read(cx).reading_line()),
                 }),
                 _ => None,
             };
