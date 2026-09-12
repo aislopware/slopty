@@ -1001,7 +1001,18 @@ fn teardown_script(pids: &[u32], root: &str, gentle: bool) -> String {
             if gentle { format!("kill {pids} 2>/dev/null; sleep 0.3; ") } else { String::new() };
         format!("{term}kill -9 {pids} 2>/dev/null; ")
     };
-    format!("{kill}pkill -9 -f {root} 2>/dev/null; rm -rf {root}; true")
+    let pattern = self_excluding(root);
+    format!("{kill}pkill -9 -f {pattern} 2>/dev/null; rm -rf {root}; true")
+}
+
+/// A `pgrep -f`/`pkill -f` pattern for everything started from `root`'s `bin/` that does not
+/// match the shell running the script itself: the remote runs `zsh -c "<script>"`, whose
+/// command line holds every literal in the script, so a plain `pkill -f /tmp/…` killed that
+/// shell first and ssh came back with SIGKILL. `/[b]in/` matches the daemons' paths
+/// (`…/bin/slopty-hostd`) while the script's own text, which spells it with the brackets and
+/// names the root bare only in `rm -rf`, no longer does.
+fn self_excluding(root: &str) -> String {
+    format!("{root}/[b]in/")
 }
 
 /// The two-host suite's gate, from the two environment variables.
@@ -1168,15 +1179,33 @@ impl RemoteHost {
         }
     }
 
-    /// Mint a fresh pairing ticket over the remote hostd's control socket.
+    /// Mint a fresh pairing ticket over the remote hostd's control socket. The socket file
+    /// appears before the daemon answers on it (over a fast link the first call can land in
+    /// that gap), so a refused call is retried within [`STARTUP`]; the last error carries the
+    /// remote hostd's log tail, which the guard's teardown would otherwise take with it.
     async fn mint_ticket(&self) -> Result<String> {
-        let ticket = ssh_out(
-            &self.ssh,
-            &format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host ticket", self.ctl_sock, self.bin),
-        )
-        .await?;
-        ensure!(ticket.starts_with("sloptypair"), "remote hostd did not mint a ticket: {ticket:?}");
-        Ok(ticket)
+        let script =
+            format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host ticket", self.ctl_sock, self.bin);
+        let deadline = tokio::time::Instant::now().checked_add(STARTUP);
+        loop {
+            match ssh_out(&self.ssh, &script).await {
+                Ok(ticket) => {
+                    ensure!(
+                        ticket.starts_with("sloptypair"),
+                        "remote hostd did not mint a ticket: {ticket:?}"
+                    );
+                    return Ok(ticket);
+                }
+                Err(e) if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) => {
+                    let log =
+                        ssh_out(&self.ssh, &format!("tail -n 20 {}/hostd.log || true", self.root))
+                            .await
+                            .unwrap_or_default();
+                    return Err(e.context(format!("remote hostd log:\n{log}")));
+                }
+                Err(_) => tokio::time::sleep(POLL).await,
+            }
+        }
     }
 
     /// Play a Claude Code hook for `session` (the id from the dump) against the remote hostd,
@@ -1213,7 +1242,7 @@ impl RemoteHost {
     ///
     /// When ssh cannot be reached.
     pub async fn stray_processes(&self) -> Result<String> {
-        ssh_out(&self.ssh, &format!("pgrep -lf {} || true", self.root)).await
+        ssh_out(&self.ssh, &format!("pgrep -lf {} || true", self_excluding(&self.root))).await
     }
 
     /// Kill the remote daemons, remove the temp root, and confirm nothing of ours is left.
@@ -1224,7 +1253,8 @@ impl RemoteHost {
     pub async fn shutdown(self) -> Result<()> {
         let script = teardown_script(&[self.ptyd_pid, self.hostd_pid], &self.root, true);
         ssh_out(&self.ssh, &script).await?;
-        let stray = ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self.root)).await?;
+        let stray =
+            ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self_excluding(&self.root))).await?;
         ensure!(stray.trim() == "0", "remote processes survived teardown: {stray}");
         Ok(())
     }
@@ -1273,14 +1303,27 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host2_gate, teardown_script};
+    use super::{host2_gate, self_excluding, teardown_script};
+
+    /// The kill pattern must match the daemons under the root but not the script that holds
+    /// the pattern (the remote shell's own command line).
+    #[test]
+    fn the_kill_pattern_spares_the_shell_that_runs_it() {
+        let pattern = self_excluding("/tmp/slopty-e2e/host2-1");
+        assert_eq!(pattern, "/tmp/slopty-e2e/host2-1/[b]in/");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(re.is_match("/tmp/slopty-e2e/host2-1/bin/slopty-hostd --port 45560"));
+        assert!(re.is_match("/tmp/slopty-e2e/host2-1/bin/slopty hook"));
+        assert!(!re.is_match(&teardown_script(&[7], "/tmp/slopty-e2e/host2-1", true)));
+        assert!(!re.is_match(&format!("pgrep -lf {pattern} || true")));
+    }
 
     #[test]
     fn an_unstarted_daemon_is_not_in_the_kill_list() {
         let s = teardown_script(&[0, 4242], "/tmp/slopty-e2e/host2-1", false);
         assert_eq!(
             s,
-            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/host2-1 2>/dev/null; rm -rf /tmp/slopty-e2e/host2-1; true"
+            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/host2-1/[b]in/ 2>/dev/null; rm -rf /tmp/slopty-e2e/host2-1; true"
         );
         let s = teardown_script(&[0, 0], "/tmp/r", true);
         assert!(s.starts_with("pkill "), "no kill of pids when nothing started: {s}");

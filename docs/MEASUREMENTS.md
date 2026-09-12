@@ -2187,6 +2187,28 @@ one-time ssh setup (copy three binaries, start two daemons, mint a ticket); it d
 and is not on any latency-critical path. The remote left exactly the two daemons it started
 (`strays before teardown: 2`), both reaped, `rm -rf` clean.
 
+## 2026-09-12 — cross-host attention, second run (LAN address, ticket retry, teardown fix)
+
+The same suite re-run from main cfb03d8 with three harness changes and no product change.
+`ssh macbook-pro` resolves to the overlay address (`100.64.0.2`), which on this day could not
+move 5 MB in 40 s (the LAN address `192.168.100.240` moved it in 0.2 s), so the 60 MB of
+binaries the harness ships never arrived and the run hit nextest's 120 s cap. Over the LAN
+address the ticket mint then raced the daemon's start-up (`Socket is not connected`) and the
+teardown's `pkill -f <root>` killed the ssh shell running it (its own command line holds the
+pattern): `mint_ticket` retries for `STARTUP` and the pattern is `<root>/[b]in/`.
+
+```
+SLOPTY_HOST2=congtran@192.168.100.240 cargo xtask e2e hosts
+```
+
+| host B up | mesh RTT (path) | hook → pill | full run |
+| --- | --- | --- | --- |
+| 2.8 s | 0.8 ms (direct) | 6 ms | 34.5 s |
+
+Host B comes up in **2.8 s** over the LAN against 31–51 s on 2026-09-06 (the copy is the whole
+of it), and the mesh chose the direct LAN path (0.8 ms). Hook → pill stays in the single-digit
+milliseconds. Two daemons before teardown, none after.
+
 ## 2026-09-06 — checkpoint cost (the number behind the 500 ms / 1 MiB policy)
 
 `GhosttyEngine::checkpoint` is libghostty-vt's VT formatter over the whole terminal, run by the

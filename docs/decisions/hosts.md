@@ -60,6 +60,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   silently when `SLOPTY_HOST2_E2E` was set but `SLOPTY_HOST2` empty — `host2_gate` errors,
   naming both variables, and the test panics on it (unit-tested).
 
+- ✅ **Two-host harness, second hardening** (2026-09-12, from re-running the suite on main).
+  Three findings, none in product code. (1) The `pkill -9 -f <root>` in `teardown_script`
+  matched the remote `zsh -c "<script>"` running it — every literal in the script is in that
+  shell's command line — so the shell died first and ssh reported SIGKILL, failing a run whose
+  scenario had passed; the pattern is now `<root>/[b]in/` (`self_excluding`), which matches the
+  daemons and the hook relay under `bin/` but not the script that spells it with the brackets,
+  unit-tested against the script text itself. (2) Over a fast link the ticket mint reached the
+  remote hostd's control socket before it answered (`Socket is not connected`); `mint_ticket`
+  retries within `STARTUP` and the last error carries the remote `hostd.log` tail, which the
+  guard's teardown would otherwise take with it. (3) `SLOPTY_HOST2` is an ssh destination, not
+  a machine: the `macbook-pro` alias resolves to the overlay address, which can be too slow for
+  the 60 MB the harness ships (5 MB did not move in 40 s that evening; the LAN address moved
+  it in 0.2 s and brought host B up in 2.8 s). The measurement records the address used
+  (MEASUREMENTS "cross-host attention, second run").
+
 - ✅ **`slopty-hostd --direct-only` reads the same env spellings as the client** (2026-09-06).
   The flag was a plain clap bool with `env = SLOPTY_DIRECT_ONLY`, which rejects `1` (clap only
   accepts the flag's presence, and an env value must parse as the value type), so
