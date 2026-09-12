@@ -218,6 +218,9 @@ mod tests {
         assert_eq!(found.matches, vec![m(0, 4, 1)]);
         let found = find("日本x", "本x", LineIndex(0), 10);
         assert_eq!(found.matches, vec![m(0, 2, 3)]);
+        // Each non-ASCII row is laid out by its own widths, never the previous row's.
+        let found = find("日本x\nx日本x", "x", LineIndex(0), 10);
+        assert_eq!(found.matches, vec![m(0, 4, 1), m(1, 0, 1), m(1, 5, 1)]);
     }
 
     #[test]

@@ -173,6 +173,12 @@ mod tests {
         let mut s = Scanner::default();
         assert_eq!(s.scan(b"\x1b]133;C\x07\x1b]0;title\x07\x1b[31m\x1b]8;;http://x\x1b\\"), None);
         assert_eq!(s.scan(b"\x1b]133;D;3\x1b[0m"), None, "ESC that is not ST aborts the OSC");
+        assert_eq!(
+            s.scan(b"\x1b]133;D;3\x1b\x1b]133;D;4\x07"),
+            Some(end(20, Some(4))),
+            "the escape that cut the OSC short starts the next sequence"
+        );
+        assert_eq!(s.scan(b"\x1b\x1b]133;D;2\x07"), Some(end(11, Some(2))), "ESC ESC");
         assert_eq!(s.scan(b"\x1b]133;D;0\x07"), Some(end(10, Some(0))));
         let long = [b"\x1b]133;D;".as_slice(), &[b'9'; 64], b"\x07"].concat();
         assert_eq!(s.scan(&long), None, "overlong payloads are dropped");

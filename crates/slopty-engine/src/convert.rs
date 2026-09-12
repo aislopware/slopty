@@ -165,3 +165,30 @@ pub const fn cursor_shape(s: CursorVisualStyle) -> CursorShape {
         _ => CursorShape::Block,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_underline_and_cursor_shape_maps_to_its_own() {
+        for (vt, ours) in [
+            (VtUnderline::None, Underline::None),
+            (VtUnderline::Single, Underline::Single),
+            (VtUnderline::Double, Underline::Double),
+            (VtUnderline::Curly, Underline::Curly),
+            (VtUnderline::Dotted, Underline::Dotted),
+            (VtUnderline::Dashed, Underline::Dashed),
+        ] {
+            assert_eq!(underline(vt), ours);
+        }
+        for (vt, ours) in [
+            (CursorVisualStyle::Block, CursorShape::Block),
+            (CursorVisualStyle::Bar, CursorShape::Bar),
+            (CursorVisualStyle::Underline, CursorShape::Underline),
+            (CursorVisualStyle::BlockHollow, CursorShape::BlockHollow),
+        ] {
+            assert_eq!(cursor_shape(vt), ours);
+        }
+    }
+}

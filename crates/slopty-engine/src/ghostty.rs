@@ -1228,7 +1228,147 @@ mod tests {
         .unwrap();
         let b = e.full_frame(0).unwrap();
         assert_ne!(a.epoch, b.epoch);
+        assert_eq!((a.epoch, e.epoch()), (0, b.epoch));
         assert_eq!((b.cols, b.rows), (20, 4));
+        assert_eq!(
+            e.size(),
+            TermSize { cols: 20, rows: 4, metrics: CellMetrics { cell_width: 8, cell_height: 16 } }
+        );
+        // New metrics alone are no reflow; one of the dimensions alone is.
+        let metrics = CellMetrics { cell_width: 9, cell_height: 18 };
+        e.resize(TermSize { cols: 20, rows: 4, metrics }).unwrap();
+        assert_eq!(e.epoch(), b.epoch, "metrics only");
+        e.resize(TermSize { cols: 21, rows: 4, metrics }).unwrap();
+        assert_eq!(e.epoch(), b.epoch + 1, "columns");
+        e.resize(TermSize { cols: 21, rows: 5, metrics }).unwrap();
+        assert_eq!(e.epoch(), b.epoch + 2, "rows");
+        e.resize(TermSize { cols: 21, rows: 5, metrics }).unwrap();
+        assert_eq!(e.epoch(), b.epoch + 2, "the same size again");
+    }
+
+    #[test]
+    fn a_zero_size_or_metric_is_refused() {
+        let size = |cols, rows, cell_width, cell_height| TermSize {
+            cols,
+            rows,
+            metrics: CellMetrics { cell_width, cell_height },
+        };
+        let mut e = engine(10, 3);
+        for bad in [size(0, 3, 8, 16), size(10, 0, 8, 16), size(10, 3, 0, 16), size(10, 3, 8, 0)] {
+            assert!(
+                matches!(e.resize(bad), Err(EngineError::InvalidSize(_))),
+                "{bad:?} should be refused"
+            );
+            assert!(
+                GhosttyEngine::new(EngineConfig { size: bad, scrollback_lines: 1 }).is_err(),
+                "{bad:?} should not open"
+            );
+        }
+        assert_eq!(e.size(), size(10, 3, 8, 16), "a refused resize leaves the size");
+    }
+
+    #[test]
+    fn synchronized_output_holds_frames_until_it_ends() {
+        let mut e = engine(10, 3);
+        let _first = e.full_frame(0).unwrap();
+        e.write(b"\x1b[?2026hheld");
+        assert!(e.modes().unwrap().contains(TermModes::SYNC_OUTPUT));
+        assert!(e.take_frame(0).unwrap().is_none(), "held back");
+        assert!(e.take_frame(0).unwrap().is_none(), "still");
+        e.write(b"\x1b[?2026l");
+        let f = e.take_frame(1).unwrap().expect("released");
+        assert!(f.updates.iter().any(|u| u.line.text() == "held"), "{f:?}");
+        assert!(e.viewport_pinned());
+    }
+
+    #[test]
+    fn the_kitty_keyboard_mode_is_on_when_any_flag_is_pushed() {
+        let mut e = engine(10, 3);
+        assert!(!e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
+        e.write(b"\x1b[>1u");
+        assert!(e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
+        e.write(b"\x1b[<u");
+        assert!(!e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
+    }
+
+    #[test]
+    fn the_alternate_switch_prefix_is_a_proper_prefix_only() {
+        assert_eq!(alt_prefix_of(b"abc\x1b[?10"), b"\x1b[?10");
+        assert_eq!(alt_prefix_of(b"\x1b[?4"), b"\x1b[?4");
+        assert_eq!(alt_prefix_of(b"\x1b[?1049h"), b"", "complete: nothing pending");
+        assert_eq!(alt_prefix_of(b"x\x1b[31m"), b"", "short but not a prefix");
+        assert_eq!(alt_prefix_of(b"\x1b[?1049l"), b"");
+        assert_eq!(alt_prefix_of(b"plain"), b"");
+    }
+
+    #[test]
+    fn link_runs_merge_one_uri_and_drop_empty_ones() {
+        let mut r = LinkRuns::default();
+        r.push(0, Some(b"a"), false);
+        r.push(1, Some(b"a"), false);
+        r.push(2, None, true);
+        r.push(3, Some(b"b"), false);
+        r.push(4, None, false);
+        r.push(5, Some(b"c"), false);
+        let runs = r.finish(6);
+        let seen: Vec<(u16, u16, &str)> =
+            runs.iter().map(|h| (h.col, h.len, h.uri.as_str())).collect();
+        assert_eq!(seen, [(0, 3, "a"), (3, 1, "b"), (5, 1, "c")]);
+        let mut r = LinkRuns::default();
+        r.push(2, Some(b"a"), false);
+        r.close(2);
+        assert!(r.finish(6).is_empty(), "a run of no cells is no run");
+    }
+
+    /// Two links side by side are two runs, and a wide character's tail stays in its link.
+    #[test]
+    fn adjacent_links_are_separate_runs() {
+        let mut e = engine(8, 1);
+        e.write(b"\x1b]8;;http://a\x1b\\A\x1b]8;;http://b\x1b\\B\x1b]8;;\x1b\\");
+        let f = e.full_frame(0).unwrap();
+        let seen: Vec<(u16, u16, &str)> =
+            f.updates[0].line.links.iter().map(|h| (h.col, h.len, h.uri.as_str())).collect();
+        assert_eq!(seen, [(0, 1, "http://a"), (1, 1, "http://b")]);
+        let mut e = engine(8, 1);
+        e.write("\x1b]8;;http://w\x1b\\字\x1b]8;;\x1b\\x".as_bytes());
+        let f = e.full_frame(0).unwrap();
+        let seen: Vec<(u16, u16, &str)> =
+            f.updates[0].line.links.iter().map(|h| (h.col, h.len, h.uri.as_str())).collect();
+        assert_eq!(seen, [(0, 2, "http://w")]);
+    }
+
+    /// A horizontal wheel is buttons 6 and 7, one per column; under button-event tracking
+    /// (1002) a motion is reported only while a button is down.
+    #[test]
+    fn horizontal_wheel_and_drag_reports() {
+        let at = |action, button| MouseEvent {
+            action,
+            button,
+            mods: Mods::empty(),
+            col: 1,
+            row: 1,
+            px: 12,
+            py: 20,
+        };
+        let mut e = engine(10, 3);
+        e.write(b"\x1b[?1002h\x1b[?1006h");
+        let mut out = Vec::new();
+        e.encode_mouse(&at(MouseAction::Wheel { rows: 0, cols: 2 }, None), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<66;2;2M\x1b[<66;2;2M");
+        out.clear();
+        e.encode_mouse(&at(MouseAction::Wheel { rows: 0, cols: -1 }, None), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<67;2;2M");
+        out.clear();
+        let left = Some(slopty_proto::input::MouseButton::Left);
+        e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
+        assert!(out.is_empty(), "no button down: no motion report");
+        e.encode_mouse(&at(MouseAction::Press, left), &mut out).unwrap();
+        e.encode_mouse(&at(MouseAction::Motion, left), &mut out).unwrap();
+        e.encode_mouse(&at(MouseAction::Release, left), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<0;2;2M\x1b[<32;2;2M\x1b[<0;2;2m");
+        out.clear();
+        e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
+        assert!(out.is_empty(), "released: no motion report");
     }
 
     #[test]

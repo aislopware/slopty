@@ -148,6 +148,17 @@ mod tests {
         assert!(!ground_after(b"\x1b("));
         assert!(!ground_after(b"\xe2\x94"));
         assert!(!ground_after(b"\xf0\x9f\x98"));
+        assert!(!ground_after(b"\xc3"), "half of a two-byte character");
+        // Every string introducer opens a string, and ESC ESC is still an escape.
+        assert!(!ground_after(b"\x1bP+q"));
+        assert!(!ground_after(b"\x1b_Gx"));
+        assert!(!ground_after(b"\x1b^x"));
+        assert!(!ground_after(b"\x1bXx"));
+        assert!(!ground_after(b"\x1b\x1b"));
+        assert!(ground_after(b"\x1b\x1b[0m"));
+        // An escape that cuts a string short is followed, not dropped.
+        assert!(!ground_after(b"\x1b]0;half\x1b["));
+        assert!(!ground_after(b"\x1bP+q\x1b["));
     }
 
     #[test]
