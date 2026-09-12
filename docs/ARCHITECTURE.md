@@ -393,7 +393,10 @@ one). Titled `name · parent` (`canvas::file_title`); its dump entry is `ItemInf
 (`conversation-view-<entry>`, a11y "View <path> on the canvas"), a relative path made
 absolute against the agent's `cwd` (`TerminalView::view_file`); the palette lists every card
 as "Go to <title>" after the sessions (`PaletteRun::Item`), and the card's "ask" pill puts
-`@<path>` into the agent's composer. The picker (⌘O) lists the
+`@<path>` into the agent's composer. ⌘F with the card active opens a find bar like the
+terminal's (`FileView::find`, key context `FileSearch`): a hit is a line holding the text,
+case-insensitive (`file::find_hits`), tinted in the warn tone, stepped with ⌘G/↩ and wrapped;
+Esc closes it and the canvas takes the keyboard back. The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are

@@ -227,6 +227,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   fake's edit → a card that says missing, the file written on disk → "reload" shows its two
   lines, ⌘W closes it).
 
+- ✅ **⌘F in a file card finds lines** (2026-09-12). A 2 000-line card is scrolled with the
+  wheel or not at all on a phone; the terminal already had a find bar, and the same chord
+  with the card active should do the same thing. Rulings: (1) the canvas's ⌘F
+  (`find_in_active`) reaches the active terminal as before, else the active file card
+  (`FileView::find`); the bar is the terminal's in shape and position (top-right, the field,
+  `n/total`, ↑ ↓ ✕) with its own key context `FileSearch` bound in the canvas's table (Esc
+  closes, ⌘G/⌘⇧G step, ↩/⇧↩ step from the field) since no terminal is around it; (2) a hit
+  is a line, not a span — plain case-insensitive `contains` on the client
+  (`file::find_hits`), no regex and no host round trip, because the card already holds every
+  line it draws and a line is what the gutter numbers; hit lines are tinted in the warn tone,
+  the current one stronger, over the edit's accent and the change's success tints; (3) the
+  first hit landed on is the first at or after the line the card opened at, since a search
+  usually starts from the edit that opened it; the hits follow a re-read under an open bar
+  and wrap at the ends; (4) closing the bar hands the keyboard to the canvas
+  (`FileViewEvent::FindClosed` → `pending_focus_self`), the card having no focus of its own;
+  (5) the title bar carries a "find" pill (`find-<item>`, a11y "Find in the file") beside
+  "reload", the phone's ⌘F. The palette line reads "Find in terminal or file". Tests:
+  `hits_are_the_lines_holding_the_needle_in_any_case` (unit),
+  `find_in_a_file_card_steps_through_its_lines` (headless: ⌘F opens the bar with the field
+  focused, the count reads 1/2, ⌘G/↩/⇧↩ step and wrap, a re-read recounts, Esc closes and
+  the canvas is focused).
+
 - ✅ **A tool call's file opens in the canvas's shell** (2026-09-12). The card shows the
   agent editing `src/a.rs`; the human's next move is to look at that file, and finding it
   by hand meant a shell, a `cd` and a typed path. Ruling: an edit, a write and a read

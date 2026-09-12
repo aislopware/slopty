@@ -11,15 +11,54 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
+    div, px, uniform_list,
 };
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::ItemId;
 use slopty_proto::file::FileRead;
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
+use crate::terminal::{CloseFind, FindNext, FindPrev};
+
+/// What a file card tells the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileViewEvent {
+    /// The find bar closed (Esc, ✕): the keyboard should go back to the canvas.
+    FindClosed,
+}
+
+impl EventEmitter<FileViewEvent> for FileView {}
+
+/// The open find bar of a file card.
+struct FileSearch {
+    input: Entity<InputState>,
+    /// What the hits are for.
+    needle: String,
+    /// Lines (indices into the card's lines) holding the needle, in order.
+    hits: Vec<usize>,
+    /// Index into `hits` of the one the card is on.
+    current: Option<usize>,
+    _subscription: Subscription,
+}
+
+/// The lines holding `needle`, case-insensitive, in order; none for an empty needle.
+#[must_use]
+pub fn find_hits(lines: &[SharedString], needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let needle = needle.to_lowercase();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.to_lowercase().contains(&needle))
+        .map(|(ix, _)| ix)
+        .collect()
+}
 
 /// The view of one file item.
 pub struct FileView {
@@ -41,6 +80,8 @@ pub struct FileView {
     text_size: f32,
     theme: Theme,
     scroll: UniformListScrollHandle,
+    /// The find bar, while open.
+    search: Option<FileSearch>,
 }
 
 impl std::fmt::Debug for FileView {
@@ -70,7 +111,186 @@ impl FileView {
             text_size: 12.0,
             theme,
             scroll: UniformListScrollHandle::new(),
+            search: None,
         }
+    }
+
+    /// ⌘F: open the find bar, or put the caret back in it with the text selected.
+    pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("find"));
+            let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
+                InputEvent::Change => this.search_changed(cx),
+                InputEvent::PressEnter { shift, .. } => {
+                    this.step_hit(if *shift { -1 } else { 1 }, cx);
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            });
+            self.search = Some(FileSearch {
+                input,
+                needle: String::new(),
+                hits: Vec::new(),
+                current: None,
+                _subscription: subscription,
+            });
+        }
+        if let Some(search) = &self.search {
+            search.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Esc or ✕ in the find bar: close it; the canvas takes the keyboard back.
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            cx.emit(FileViewEvent::FindClosed);
+            cx.notify();
+        }
+    }
+
+    /// Whether the find bar is open.
+    #[must_use]
+    pub const fn finding(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The lines found (indices into what is drawn) and which one the card is on.
+    #[must_use]
+    pub fn hits(&self) -> Option<(&[usize], Option<usize>)> {
+        self.search.as_ref().map(|s| (s.hits.as_slice(), s.current))
+    }
+
+    /// The field changed: the hits follow, the card landing on the first one at or after
+    /// the line it opened at (an edit's neighbourhood is where a search usually starts).
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let needle = search.input.read(cx).value().to_string();
+        if needle == search.needle {
+            return;
+        }
+        search.needle = needle;
+        self.refresh_hits(cx);
+    }
+
+    /// Recount the hits for the needle (it, or the text, changed) and land on the first.
+    fn refresh_hits(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        search.hits = find_hits(&self.lines, &search.needle);
+        let from = self.focus.unwrap_or(0);
+        search.current = if search.hits.is_empty() {
+            None
+        } else {
+            Some(search.hits.iter().position(|&line| line >= from).unwrap_or(0))
+        };
+        self.scroll_to_hit();
+        cx.notify();
+    }
+
+    /// ⌘G / ↩ (+1) and ⌘⇧G / ⇧↩ (−1), wrapping.
+    pub fn step_hit(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let count = i64::try_from(search.hits.len()).unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let at = i64::try_from(search.current.unwrap_or(0)).unwrap_or(0);
+        search.current = usize::try_from(at.saturating_add(delta).rem_euclid(count)).ok();
+        self.scroll_to_hit();
+        cx.notify();
+    }
+
+    fn scroll_to_hit(&self) {
+        let Some(search) = &self.search else { return };
+        if let Some(line) = search.current.and_then(|c| search.hits.get(c)) {
+            self.scroll.scroll_to_item(*line, ScrollStrategy::Center);
+        }
+    }
+
+    /// The find bar over the top-right corner, as the terminal's.
+    fn render_search(&self, search: &FileSearch, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        let wash = hsla_alpha(s.text, alpha::HOVER);
+        let bare = move |id: &'static str| {
+            div()
+                .id(id)
+                .px(px(spacing.xs))
+                .rounded(px(radii.xs))
+                .cursor_pointer()
+                .text_color(hsla(s.text_muted))
+                .hover(move |st| st.bg(wash))
+        };
+        let count: SharedString = if search.needle.is_empty() {
+            SharedString::default()
+        } else if search.hits.is_empty() {
+            "none".into()
+        } else {
+            let at = search.current.map_or(0, |c| c.saturating_add(1));
+            format!("{at}/{}", search.hits.len()).into()
+        };
+        div()
+            .id("file-search")
+            .debug_selector(|| "file-search".to_owned())
+            .key_context("FileSearch")
+            .absolute()
+            .top(px(spacing.sm))
+            .right(px(spacing.sm))
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
+            .py(px(spacing.xs))
+            .rounded(px(radii.sm))
+            .bg(hsla(s.panel))
+            .border_1()
+            .border_color(hsla(s.border))
+            .shadow_sm()
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(s.text))
+            .font_family(theme.typography.ui_family.clone())
+            .on_action(cx.listener(|this, _: &CloseFind, _window, cx| this.close_find(cx)))
+            .on_action(cx.listener(|this, _: &FindNext, _window, cx| this.step_hit(1, cx)))
+            .on_action(cx.listener(|this, _: &FindPrev, _window, cx| this.step_hit(-1, cx)))
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .role(Role::Group)
+            .aria_label("Find in file")
+            .child(div().w(px(180.0)).child(Input::new(&search.input).aria_label("Find in file")))
+            .child(
+                div()
+                    .id("file-search-count")
+                    .min_w(px(40.0))
+                    .text_color(hsla(s.text_secondary))
+                    .role(Role::Label)
+                    .aria_label("Matches")
+                    .aria_value(count.clone())
+                    .child(count),
+            )
+            .child(
+                bare("file-search-prev")
+                    .role(Role::Button)
+                    .aria_label("Previous match")
+                    .child("↑")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(-1, cx))),
+            )
+            .child(
+                bare("file-search-next")
+                    .role(Role::Button)
+                    .aria_label("Next match")
+                    .child("↓")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(1, cx))),
+            )
+            .child(
+                bare("file-search-close")
+                    .role(Role::Button)
+                    .aria_label("Close find")
+                    .child("✕")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_find(cx))),
+            )
+            .into_any_element()
     }
 
     /// Item this card belongs to.
@@ -151,6 +371,10 @@ impl FileView {
         }
         self.lines = lines;
         self.read = Some(read);
+        // An open find bar follows the new text.
+        if self.search.is_some() {
+            self.refresh_hits(cx);
+        }
         cx.notify();
     }
 
@@ -250,8 +474,9 @@ pub fn size_label(bytes: u64) -> String {
 }
 
 impl Render for FileView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.as_uuid();
+        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let theme = self.theme.clone();
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
@@ -268,10 +493,15 @@ impl Render for FileView {
                 let lines = self.lines.clone();
                 let changed = self.changed.clone();
                 let focus = self.focus;
+                let (hits, current) = self.search.as_ref().map_or((Vec::new(), None), |s| {
+                    (s.hits.clone(), s.current.and_then(|c| s.hits.get(c).copied()))
+                });
                 let muted = hsla(theme.surfaces.text_muted);
                 let fg = hsla(theme.surfaces.text);
                 let tint = hsla_alpha(theme.surfaces.success, alpha::TINT);
                 let mark = hsla_alpha(theme.surfaces.accent, alpha::TINT);
+                let hit = hsla_alpha(theme.surfaces.warn, alpha::TINT);
+                let here = hsla_alpha(theme.surfaces.warn, alpha::TINT_STRONG);
                 let list = uniform_list(
                     SharedString::from(format!("file-lines-{id}")),
                     count,
@@ -287,6 +517,8 @@ impl Render for FileView {
                                         .whitespace_nowrap()
                                         .when(focus == Some(ix), |el| el.bg(mark))
                                         .when(changed.binary_search(&ix).is_ok(), |el| el.bg(tint))
+                                        .when(hits.binary_search(&ix).is_ok(), |el| el.bg(hit))
+                                        .when(current == Some(ix), |el| el.bg(here))
                                         .child(
                                             div()
                                                 .flex_none()
@@ -335,12 +567,25 @@ impl Render for FileView {
             .font_family(mono)
             .text_size(px(text_size))
             .child(body)
+            .children(search)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hits_are_the_lines_holding_the_needle_in_any_case() {
+        let lines: Vec<SharedString> = ["Alpha", "beta", "alpha beta", "gamma"]
+            .iter()
+            .map(|l| SharedString::from(*l))
+            .collect();
+        assert_eq!(find_hits(&lines, "alpha"), [0, 2]);
+        assert_eq!(find_hits(&lines, "BETA"), [1, 2]);
+        assert_eq!(find_hits(&lines, "delta"), Vec::<usize>::new());
+        assert_eq!(find_hits(&lines, ""), Vec::<usize>::new(), "an empty needle finds nothing");
+    }
 
     #[test]
     fn changed_lines_point_at_inserts_replacements_and_deletions() {

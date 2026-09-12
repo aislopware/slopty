@@ -45,7 +45,7 @@ use tokio::sync::mpsc;
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
-use crate::file::FileView;
+use crate::file::{FileView, FileViewEvent};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::palette::{CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -154,6 +154,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", FocusNext, CTX),
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
+        // A file card's find bar: the terminal's find keys, in the bar's own context (no
+        // terminal around it).
+        KeyBinding::new("escape", crate::terminal::CloseFind, Some("FileSearch")),
+        KeyBinding::new("cmd-g", crate::terminal::FindNext, Some("FileSearch")),
+        KeyBinding::new("cmd-shift-g", crate::terminal::FindPrev, Some("FileSearch")),
     ]
 }
 
@@ -186,7 +191,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Next attention", Box::new(NextAttention)),
         c("Mute or unmute window", Box::new(ToggleMute)),
         c("Stream stats", Box::new(ToggleStats)),
-        t("Find in terminal", Box::new(Find)),
+        t("Find in terminal or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
         t("Copy last output", Box::new(CopyLastOutput)),
@@ -1874,7 +1879,8 @@ impl CanvasView {
 
     // ----- commands ------------------------------------------------------------------------
 
-    /// ⌘F with the canvas (not a terminal) focused: search in the active terminal.
+    /// ⌘F with the canvas (not a terminal) focused: search in the active terminal, or in the
+    /// active file card.
     pub fn find_in_active(
         &mut self,
         action: &crate::terminal::Find,
@@ -1883,6 +1889,8 @@ impl CanvasView {
     ) {
         if let Some(view) = self.active_terminal() {
             view.update(cx, |view, cx| view.find(action, window, cx));
+        } else if let Some(view) = self.active.and_then(|id| self.files.get(&id)).cloned() {
+            view.update(cx, |view, cx| view.find(window, cx));
         }
     }
 
@@ -2142,6 +2150,12 @@ impl CanvasView {
                 continue;
             }
             let view = cx.new(|_cx| FileView::new(*id, path, self.theme.clone()));
+            self.subscriptions.push(cx.subscribe(&view, |this, _view, event, cx| match event {
+                FileViewEvent::FindClosed => {
+                    this.pending_focus_self = true;
+                    cx.notify();
+                }
+            }));
             if let Some(line) = self.file_focus.remove(id) {
                 view.update(cx, |v, cx| v.focus_line(Some(line), cx));
             }
@@ -2681,6 +2695,11 @@ impl CanvasView {
             ItemKind::File { .. } => Some(reload_button(id, theme, chrome, cx)),
             _ => None,
         };
+        // A file card: its find bar, for a phone without ⌘F.
+        let find = match item.kind {
+            ItemKind::File { .. } => Some(find_button(id, theme, chrome, cx)),
+            _ => None,
+        };
         // An agent the host had to guess at: offer the hooks that would make it precise.
         let hooks = agent
             .filter(|(_session, a)| a.source != AgentSource::Hook && !self.hooks_offered)
@@ -2755,6 +2774,7 @@ impl CanvasView {
                     .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming)),
             )
             .when_some(ask, gpui::ParentElement::child)
+            .when_some(find, gpui::ParentElement::child)
             .when_some(reload, gpui::ParentElement::child)
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
@@ -3222,6 +3242,27 @@ fn reload_button(
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             this.request_file(id);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// The "find" pill in a file card's title bar: ⌘F for a phone (see [`FileView::find`]).
+fn find_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("find", id, "find", theme.surfaces.text_secondary, theme, chrome)
+        .role(Role::Button)
+        .aria_label("Find in the file");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, window, cx| {
+            if let Some(view) = this.files.get(&id).cloned() {
+                this.activate(id, cx);
+                view.update(cx, |v, cx| v.find(window, cx));
+            }
             cx.notify();
         }))
         .into_any_element()
@@ -5010,7 +5051,7 @@ mod tests {
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Dialog", Some("Commands"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Find in terminal ⌘F"))));
+        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Find in terminal or file ⌘F"))));
         let field_focused = cx.update(|window, cx| {
             view.read(cx)
                 .palette
@@ -5613,6 +5654,87 @@ mod tests {
         assert_eq!(options, ["Go to notes.md · ~ file", "New note ⇧⌘N"], "no Open line for a word");
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn find_in_a_file_card_steps_through_its_lines(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/a.txt", None, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/w/a.txt",
+                &FileRead::Text {
+                    text: "Alpha\nbeta\nalpha beta\ngamma".to_owned(),
+                    more_lines: 0,
+                    size: 27,
+                    modified_ms: 1,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let id = view.read_with(cx, |c, _| c.active_item().expect("the card is active"));
+        let hits = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, cx| {
+                c.file(id).unwrap().read(cx).hits().map(|(h, c)| (h.to_vec(), c))
+            })
+        };
+
+        // ⌘F on the canvas with the card active opens its bar and gives the field the keys.
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("file-search").is_some(), "the bar is up");
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 2], Some(0))), "two lines, on the first");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let count = tree.iter().find(|n| n.label.as_deref() == Some("Matches"));
+        assert_eq!(count.and_then(|n| n.value.as_deref()), Some("1/2"), "{tree:#?}");
+
+        // ⌘G, ↩ and ⇧↩ step and wrap.
+        cx.simulate_keystrokes("cmd-g");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 2], Some(1))));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 2], Some(0))), "wrapped");
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 2], Some(1))), "back around");
+
+        // The text changes under an open bar: the hits follow.
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/w/a.txt",
+                &FileRead::Text {
+                    text: "beta\nalpha".to_owned(),
+                    more_lines: 0,
+                    size: 10,
+                    modified_ms: 2,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![1], Some(0))));
+
+        // Esc closes the bar and the canvas has the keyboard again.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("file-search").is_none(), "closed");
+        assert_eq!(hits(cx), None);
+        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(focused, "the canvas has the keyboard back");
+
+        // The title bar's "find" pill is the phone's ⌘F.
+        let pill = cx.debug_bounds(selector("find", id)).expect("the card's find pill");
+        cx.simulate_click(pill.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("file-search").is_some(), "the pill opens the bar");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Find in the file"))), "{tree:#?}");
     }
 
     #[gpui::test]
