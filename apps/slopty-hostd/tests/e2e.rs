@@ -207,10 +207,12 @@ mod tests {
         assert!(host.ack.sessions.is_empty());
 
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
+        // `~` as the directory: the client does not know the host's home.
+        let home = std::env::var("HOME").unwrap();
         host.tx
             .send(&ClientMsg::OpenSession(OpenSession {
                 size,
-                cwd: None,
+                cwd: Some("~".to_owned()),
                 command: vec!["/bin/sh".to_owned()],
                 env: vec![("PS1".to_owned(), "$ ".to_owned())],
                 title: None,
@@ -254,6 +256,14 @@ mod tests {
             }
         }
         assert!(saw_driver, "first attached client drives the size");
+        host.tx
+            .send(&ClientMsg::Term {
+                session,
+                req: TermRequest::Raw(b"echo cwd=$(pwd)\n".to_vec()),
+            })
+            .await
+            .unwrap();
+        wait_for_text(&mut events, &format!("cwd={home}")).await;
 
         host.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         loop {

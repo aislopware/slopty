@@ -1657,6 +1657,12 @@ impl CanvasView {
                     let path = this.absolute_in_active_shell(path);
                     this.open_file(&path, *line, cx);
                 }
+                PaletteEvent::Run(PaletteRun::OpenShell { cwd }) => {
+                    this.open_session_in(Some(cwd.clone()), Vec::new(), None, cx);
+                }
+                PaletteEvent::Run(PaletteRun::OpenAgent { cwd }) => {
+                    this.open_agent(Some(cwd.clone()), cx);
+                }
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
             cx.notify();
@@ -2239,10 +2245,21 @@ impl CanvasView {
     }
 
     fn open_session(&self, command: Vec<String>, title: Option<String>, cx: &mut Context<Self>) {
-        tracing::debug!(?command, "open session");
+        self.open_session_in(self.active_cwd(), command, title, cx);
+    }
+
+    /// Open a session in `cwd` (the host's default when `None`; `~` is the host's home).
+    fn open_session_in(
+        &self,
+        cwd: Option<String>,
+        command: Vec<String>,
+        title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!(?command, ?cwd, "open session");
         self.send(ClientMsg::OpenSession(OpenSession {
             size: TermSize::default(),
-            cwd: self.active_cwd(),
+            cwd,
             command,
             env: Vec::new(),
             title,
@@ -6414,6 +6431,58 @@ mod tests {
     /// resume list, and a row opens that conversation as a driven agent in its directory,
     /// titled by its first prompt. A list for one directory offers every directory on the
     /// host; the whole-host list does not.
+    /// A directory typed into the palette, spelled from the host's root or home with a
+    /// slash at the end, offers a shell and a conversation there: the phone's way to a
+    /// project no card is in yet.
+    #[gpui::test]
+    fn a_directory_in_the_palette_opens_a_shell_or_a_conversation_there(cx: &mut TestAppContext) {
+        let (view, mut rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("/ s r v / a /");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(
+            options,
+            ["New terminal in /srv/a shell", "New conversation in /srv/a agent"],
+            "{tree:#?}"
+        );
+        let _asked = drain(&mut rx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "gone after ↩");
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
+                    if cwd == "/srv/a" && command.is_empty()
+            ),
+            "{sent:?}"
+        );
+        assert!(view.read_with(cx, |v, _| v.items().is_empty()), "the host places it");
+
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("/ s r v / a / down enter");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), resume: None, worktree: false, .. })]
+                    if cwd == "/srv/a"
+            ),
+            "{sent:?}"
+        );
+    }
+
     /// ⌘⇧P opens the command palette over the canvas: typing filters the lines by every
     /// word, ↩ runs the selected one once the palette is gone and the focus is back, Esc
     /// closes it with nothing run.
@@ -7053,7 +7122,38 @@ mod tests {
             .filter(|n| n.role == "ListBoxOption")
             .filter_map(|n| n.label.as_deref())
             .collect();
-        assert_eq!(options, ["Open src/main.rs file"], "{tree:#?}");
+        assert_eq!(
+            options,
+            [
+                "Open src/main.rs file",
+                "New terminal in docs/manual shell",
+                "New conversation in docs/manual agent"
+            ],
+            "{tree:#?}"
+        );
+        // The found directory: a shell there, rooted where the host looked.
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenSession(OpenSession { cwd: Some(cwd), command, .. })]
+                    if cwd == "/tmp/work/docs/manual" && command.is_empty()
+            ),
+            "{sent:?}"
+        );
+        view.update_in(cx, |c, _window, cx| c.reveal_session(shell, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("m a i n");
+        cx.run_until_parked();
+        drain(&mut rx);
+        view.update_in(cx, |c, _window, cx| {
+            c.files_found("/tmp/work", "main", &["src/main.rs".to_owned()], cx);
+        });
+        cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         let paths: Vec<String> = view.read_with(cx, |c, _| {

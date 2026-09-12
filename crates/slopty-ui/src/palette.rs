@@ -35,6 +35,16 @@ pub enum PaletteRun {
         /// The `:line` suffix, 1-based.
         line: Option<u32>,
     },
+    /// Open a shell in the directory the field holds (spelled from the host's root or home).
+    OpenShell {
+        /// As typed, without its trailing slash.
+        cwd: String,
+    },
+    /// Open a driven agent in the directory the field holds.
+    OpenAgent {
+        /// As typed, without its trailing slash.
+        cwd: String,
+    },
 }
 
 impl Clone for PaletteRun {
@@ -45,6 +55,8 @@ impl Clone for PaletteRun {
             Self::Item(item) => Self::Item(*item),
             Self::Follow(client) => Self::Follow(*client),
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
+            Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
+            Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
         }
     }
 }
@@ -59,6 +71,8 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenFile { path, line } => {
                 f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
             }
+            Self::OpenShell { cwd } => f.debug_struct("OpenShell").field("cwd", cwd).finish(),
+            Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
         }
     }
 }
@@ -125,6 +139,23 @@ impl PaletteItem {
         }
     }
 
+    /// A directory the host found under `root`: a shell and a conversation in it.
+    #[must_use]
+    pub fn found_dir(root: &str, relative: &str) -> [Self; 2] {
+        let cwd = format!("{}/{}", root.trim_end_matches('/'), relative.trim_end_matches('/'));
+        let shell = Self {
+            label: format!("New terminal in {}", relative.trim_end_matches('/')),
+            keys: "shell".to_owned(),
+            run: PaletteRun::OpenShell { cwd: cwd.clone() },
+        };
+        let agent = Self {
+            label: format!("New conversation in {}", relative.trim_end_matches('/')),
+            keys: "agent".to_owned(),
+            run: PaletteRun::OpenAgent { cwd },
+        };
+        [shell, agent]
+    }
+
     /// `Open <path>` for a path typed into the field, `line N` or `file` on the right.
     #[must_use]
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
@@ -132,6 +163,26 @@ impl PaletteItem {
             label: format!("Open {path}"),
             keys: line.map_or_else(|| "file".to_owned(), |n| format!("line {n}")),
             run: PaletteRun::OpenFile { path: path.to_owned(), line },
+        }
+    }
+
+    /// `New terminal in <dir>` for a directory typed into the field, `shell` on the right.
+    #[must_use]
+    pub fn open_shell(cwd: &str) -> Self {
+        Self {
+            label: format!("New terminal in {cwd}"),
+            keys: "shell".to_owned(),
+            run: PaletteRun::OpenShell { cwd: cwd.to_owned() },
+        }
+    }
+
+    /// `New conversation in <dir>` for a directory typed into the field, `agent` on the right.
+    #[must_use]
+    pub fn open_agent(cwd: &str) -> Self {
+        Self {
+            label: format!("New conversation in {cwd}"),
+            keys: "agent".to_owned(),
+            run: PaletteRun::OpenAgent { cwd: cwd.to_owned() },
         }
     }
 
@@ -227,6 +278,25 @@ pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
     Some((path.to_owned(), line))
 }
 
+/// What a path typed into the field offers.
+///
+/// A directory — a slash at the end, spelled from the host's root or home — offers a shell
+/// and a conversation there; anything else with the shape of a path opens as a file card. A
+/// relative directory is a file line: the host resolves a file against the active shell, but
+/// a shell has to know its directory from the start.
+#[must_use]
+pub fn path_items(query: &str) -> Vec<PaletteItem> {
+    let Some((path, line)) = path_query(query) else {
+        return Vec::new();
+    };
+    let rooted = path.starts_with('/') || path.starts_with("~/");
+    if line.is_none() && path.ends_with('/') && rooted {
+        let cwd = if path == "/" { "/" } else { path.trim_end_matches('/') };
+        return vec![PaletteItem::open_shell(cwd), PaletteItem::open_agent(cwd)];
+    }
+    vec![PaletteItem::open_file(&path, line)]
+}
+
 /// The query worth asking the host's files for: one word of two characters or more that is
 /// not a path already spelled from its root (`/…`, `~…`, `.…`).
 #[must_use]
@@ -265,7 +335,7 @@ pub enum PaletteEvent {
 pub struct CommandPalette {
     items: Vec<PaletteItem>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
-    path_item: Option<PaletteItem>,
+    path_items: Vec<PaletteItem>,
     /// `Open <path>` for the files the host found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
     input: Entity<InputState>,
@@ -305,8 +375,7 @@ impl CommandPalette {
             InputEvent::Change => {
                 this.selected = 0;
                 let text = this.input.read(cx).value().to_string();
-                this.path_item =
-                    path_query(&text).map(|(path, line)| PaletteItem::open_file(&path, line));
+                this.path_items = path_items(&text);
                 this.found.clear();
                 cx.emit(PaletteEvent::Changed(text));
                 cx.notify();
@@ -316,7 +385,7 @@ impl CommandPalette {
         });
         Self {
             items,
-            path_item: None,
+            path_items: Vec::new(),
             found: Vec::new(),
             input,
             selected: 0,
@@ -326,25 +395,31 @@ impl CommandPalette {
     }
 
     /// The host found `paths` under `root` for `query`: they are `Open <path>` lines after
-    /// the commands, while the field still says `query`. Directories are left out (a card
-    /// shows a file).
+    /// the commands, while the field still says `query`; a directory (a slash at its end)
+    /// is a shell and a conversation in it.
     pub fn set_found(&mut self, root: &str, query: &str, paths: &[String], cx: &mut Context<Self>) {
         if self.input.read(cx).value().trim() != query {
             return;
         }
         self.found = paths
             .iter()
-            .filter(|p| !p.ends_with('/'))
-            .map(|p| PaletteItem::found_file(root, p))
+            .flat_map(|p| {
+                if p.ends_with('/') {
+                    PaletteItem::found_dir(root, p).into_iter().collect::<Vec<_>>()
+                } else {
+                    vec![PaletteItem::found_file(root, p)]
+                }
+            })
             .collect();
         cx.notify();
     }
 
-    /// The items matching the field, in order: a path typed into it as `Open <path>` first,
+    /// The items matching the field, in order: a path typed into it (`Open <path>`, or a
+    /// shell and a conversation in a directory) first,
     /// the commands the text matches, then the files the host found for it.
     #[must_use]
     pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
-        let mut out: Vec<&PaletteItem> = self.path_item.iter().collect();
+        let mut out: Vec<&PaletteItem> = self.path_items.iter().collect();
         out.extend(filter(&self.input.read(cx).value(), &self.items));
         out.extend(&self.found);
         out
@@ -522,6 +597,28 @@ mod tests {
         assert_eq!(q("note"), None, "no slash: a command");
         assert_eq!(q("go to shell"), None, "words: a command");
         assert_eq!(q(""), None);
+
+        // A directory, spelled from the root or home with a slash at the end, offers a
+        // shell and a conversation there; anything else is a file.
+        let labels = |s: &str| {
+            path_items(s).iter().map(|i| format!("{} {}", i.label, i.keys)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels("~/proj/"),
+            ["New terminal in ~/proj shell", "New conversation in ~/proj agent"]
+        );
+        assert_eq!(labels("/"), ["New terminal in / shell", "New conversation in / agent"]);
+        assert!(
+            matches!(&path_items("/srv/a/")[0].run, PaletteRun::OpenShell { cwd } if cwd == "/srv/a")
+        );
+        assert!(
+            matches!(&path_items("/srv/a/")[1].run, PaletteRun::OpenAgent { cwd } if cwd == "/srv/a")
+        );
+        assert_eq!(labels("~/proj"), ["Open ~/proj file"], "no slash at the end: a file");
+        assert_eq!(labels("src/"), ["Open src/ file"], "relative: no shell to spell it from");
+        assert_eq!(labels("./x/"), ["Open ./x/ file"]);
+        assert_eq!(labels("/w/a.rs:3"), ["Open /w/a.rs line 3"]);
+        assert!(labels("note").is_empty());
         let item = PaletteItem::open_file("/w/lib.rs", Some(3));
         assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
         assert_eq!(PaletteItem::open_file("/w", None).keys, "file");
@@ -534,6 +631,14 @@ mod tests {
         assert_eq!(files_query("~/x"), None);
         assert_eq!(files_query("./x"), None);
         assert_eq!(files_query("go to"), None);
+        let [shell, agent] = PaletteItem::found_dir("~", "docs/manual/");
+        assert_eq!(
+            (shell.label.as_str(), shell.keys.as_str()),
+            ("New terminal in docs/manual", "shell")
+        );
+        assert!(matches!(&shell.run, PaletteRun::OpenShell { cwd } if cwd == "~/docs/manual"));
+        assert_eq!(agent.label, "New conversation in docs/manual");
+        assert!(matches!(&agent.run, PaletteRun::OpenAgent { cwd } if cwd == "~/docs/manual"));
         let found = PaletteItem::found_file("/tmp/work/", "src/main.rs");
         assert_eq!(found.label, "Open src/main.rs");
         assert!(

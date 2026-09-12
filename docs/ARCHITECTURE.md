@@ -428,7 +428,9 @@ tables (`canvas::palette_items` for the canvas's and the terminal's, the app's o
 with `extend_palette`; the View menu's "Commands…" opens it on the Mac): typing
 keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
 closes; a path typed in (`src/lib.rs:7`, `~/notes.md`) is an `Open <path>` line first, which
-opens a file card against the active shell's directory (`palette::path_query`), and a word is
+opens a file card against the active shell's directory (`palette::path_query`); a directory
+spelled from the root or home with a slash at the end (`~/proj/`) is instead a "New terminal
+in …" and a "New conversation in …" line (`palette::path_items`), the host expanding `~`; and a word is
 also asked of the host's files under that directory (`ClientMsg::FindFiles` →
 `HostMsg::FoundFiles`, protocol 36, the `@` completion's matcher) whose hits are `Open <path>`
 lines after the commands; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way

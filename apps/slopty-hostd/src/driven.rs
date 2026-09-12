@@ -14,6 +14,7 @@
 //! exits by itself, which ends the session as a terminal's child exiting would.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -160,9 +161,7 @@ impl Driven {
     pub fn sessions(cwd: Option<&str>) -> (Option<String>, Vec<AgentSessionInfo>) {
         let home = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
         let sessions = match cwd {
-            Some(cwd) => {
-                slopty_agent::discover::sessions(&home, std::path::Path::new(cwd), SESSIONS_LISTED)
-            }
+            Some(cwd) => slopty_agent::discover::sessions(&home, Path::new(cwd), SESSIONS_LISTED),
             None => slopty_agent::discover::all_sessions(&home, SESSIONS_LISTED),
         };
         (cwd.map(str::to_owned), sessions)
@@ -174,7 +173,10 @@ impl Driven {
     ///
     /// When the process cannot be spawned.
     pub fn open(&self, daemon: &Daemon, req: &OpenAgent) -> Result<SessionSummary, DrivenError> {
-        let cwd = req.cwd.clone().unwrap_or_else(default_cwd);
+        // `~` is this host's home: a client types it without knowing the path.
+        let cwd = req.cwd.as_deref().map_or_else(default_cwd, |cwd| {
+            slopty_host::file::expand_home(Path::new(cwd)).to_string_lossy().into_owned()
+        });
         let mut command = launch(req, &cwd);
         let mut child = command.spawn().map_err(DrivenError::Spawn)?;
         let session = SessionId::new();
@@ -637,12 +639,7 @@ impl Pump {
         let id = id.to_owned();
         let read = tokio::task::spawn_blocking(move || {
             let home = std::path::PathBuf::from(default_cwd());
-            slopty_agent::discover::conversation(
-                &home,
-                std::path::Path::new(&cwd),
-                &id,
-                KEEP_ENTRIES,
-            )
+            slopty_agent::discover::conversation(&home, Path::new(&cwd), &id, KEEP_ENTRIES)
         })
         .await;
         match read {

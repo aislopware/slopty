@@ -424,3 +424,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   terminal takes the keyboard, so ⌘] into a shell is one key, not two. Tested headless
   (`the_cards_are_walked_in_reading_order`). Not done: a spatial walk (⌘⌥→ to the card on the
   right) — reading order covers a grid, and a free-form layout has no unambiguous "right".
+
+- ✅ **A directory typed into the palette opens a shell or a conversation there**
+  (2026-09-13). A new terminal inherits the active card's directory and, with none, the
+  host's default; on the phone the way to a project no card was in yet was a shell at home
+  and `cd`. Rulings: (1) a path typed into the palette that ends in a slash and is spelled
+  from the host's root or home (`/srv/a/`, `~/proj/`) offers "New terminal in …" and "New
+  conversation in …" (`palette::path_items`) in place of the file line; a relative one
+  (`src/`) stays a file line, since a file resolves against the active shell but a shell has
+  to know its directory from the start; a directory the host finds for a typed word
+  (`FoundFiles` carried them with a slash already; the palette dropped them) is the same
+  two lines, rooted where the host looked; (2) `~` goes to the host as typed and both the shell
+  (`Host::open`) and the driven agent (`Driven::open`) expand it with `file::expand_home`,
+  the client never knowing the host's home; (3) a directory that does not exist fails the
+  spawn and the host reports it as it does any failed open. Tests: `path_items` (palette),
+  headless `a_directory_in_the_palette_opens_a_shell_or_a_conversation_there` (both lines,
+  the `OpenSession` and `OpenAgent` sent), and the hostd e2e's shell round trip, which
+  opens its shell in `~` and reads `pwd` back as the host's home.

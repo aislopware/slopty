@@ -1,7 +1,7 @@
 //! Session table + ptyd connection.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -104,7 +104,8 @@ impl Host {
         env.push((SESSION_ENV.to_owned(), id.to_string()));
         let spec = SpawnSpec {
             command: req.command.clone(),
-            cwd: req.cwd.clone().map(PathBuf::from),
+            // `~` is this host's home: a client types it without knowing the path.
+            cwd: req.cwd.as_deref().map(|cwd| crate::file::expand_home(Path::new(cwd))),
             env,
             size: req.size,
         };
