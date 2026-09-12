@@ -825,6 +825,11 @@ impl Workspace {
                         .usage
                         .as_ref()
                         .map(slopty_ui::terminal::conversation::usage_label),
+                    context: view
+                        .info()
+                        .context
+                        .as_ref()
+                        .map(slopty_ui::terminal::conversation::context_label),
                     attachments: view
                         .attachments()
                         .iter()

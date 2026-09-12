@@ -3708,6 +3708,10 @@ mod tests {
                             resets_at: 1_789_257_600,
                         }),
                     }),
+                    context: Some(slopty_proto::agent::Context {
+                        tokens: 31_000,
+                        window: Some(200_000),
+                    }),
                 },
                 cx,
             );
@@ -3716,6 +3720,15 @@ mod tests {
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Status", Some("Usage: 5h 23% · 7d 74%"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Status", Some("Context: ctx 16%"))), "{tree:#?}");
+        let context = |tokens, window| {
+            conversation::context_label(&slopty_proto::agent::Context { tokens, window })
+        };
+        assert_eq!(context(900, None), "ctx 900");
+        assert_eq!(context(31_000, None), "ctx 31k");
+        assert_eq!(context(1_250_000, None), "ctx 1.3M");
+        assert_eq!(context(200_000, Some(200_000)), "ctx 100%");
+        assert_eq!(context(1, Some(200_000)), "ctx 1%");
         assert!(tree.iter().any(|n| n.is("Button", Some("Model: sonnet-5"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Button", Some("Permission mode: Ask"))), "{tree:#?}");
         assert_eq!(conversation::cost_label(12_500), "1¢");

@@ -88,7 +88,9 @@ impl Fake {
         self.record(
             "assistant",
             &json!({"model": self.model, "id": "msg", "type": "message", "role": "assistant",
-                   "content": content, "stop_reason": null, "usage": {"input_tokens": 1, "output_tokens": 1}}),
+                   "content": content, "stop_reason": null,
+                   "usage": {"input_tokens": 10, "cache_creation_input_tokens": 1990,
+                             "cache_read_input_tokens": 38_000, "output_tokens": 1}}),
         )
     }
 
@@ -98,6 +100,8 @@ impl Fake {
             "num_turns": self.turns, "result": text, "session_id": self.session,
             "total_cost_usd": 0.01 * f64::from(self.turns),
             "duration_ms": 1, "duration_api_ms": 1, "permission_denials": [], "uuid": "r",
+            "modelUsage": {&self.model: {"inputTokens": 10, "outputTokens": 1,
+                                         "contextWindow": 200_000}},
         })
     }
 

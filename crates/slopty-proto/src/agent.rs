@@ -102,6 +102,29 @@ pub struct AgentInfo {
     /// The subscription's usage windows, as the agent last reported them (`None` until a
     /// `rate_limit_event`, and for API-key runs that never send one).
     pub usage: Option<Usage>,
+    /// How full the model's context window is, from the last assistant record's `usage`
+    /// (`None` before the first one).
+    pub context: Option<Context>,
+}
+
+/// The context window's fill: what the last request carried, against the model's window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Context {
+    /// Tokens the last request carried (input, cache reads and cache writes together).
+    pub tokens: u64,
+    /// The model's window in tokens, once a turn result named it.
+    pub window: Option<u64>,
+}
+
+impl Context {
+    /// How full the window is, in whole percent (the smallest integer not below the
+    /// fraction); `None` until the window is known.
+    #[must_use]
+    pub fn percent(&self) -> Option<u8> {
+        let window = self.window.filter(|&w| w > 0)?;
+        let hundredths = self.tokens.saturating_mul(100).saturating_add(window.saturating_sub(1));
+        u8::try_from(hundredths.checked_div(window)?.min(100)).ok()
+    }
 }
 
 /// The subscription's rate-limit state, from Claude Code's `rate_limit_event`.

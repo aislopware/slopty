@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use slopty_proto::agent::{
-    AgentStatus, AgentTask, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail,
+    AgentStatus, AgentTask, BlockReason, Context, PermissionRequest, QuestionAnswer, ToolDetail,
     TranscriptEntry, Usage, UsageWindow,
 };
 
@@ -54,6 +54,8 @@ pub struct TurnResult {
     pub text: Option<String>,
     /// Claude Code's session id.
     pub session_id: String,
+    /// The widest context window among the models the turn used (`modelUsage.*.contextWindow`).
+    pub context_window: Option<u64>,
 }
 
 /// The kind of content block a streamed message opened.
@@ -239,11 +241,30 @@ pub fn parse(line: &str) -> Option<Event> {
                     .filter(|t| !t.trim().is_empty())
                     .map(str::to_owned),
                 session_id: string(&record, "session_id"),
+                context_window: record.get("modelUsage").and_then(Value::as_object).and_then(
+                    |models| {
+                        models
+                            .values()
+                            .filter_map(|m| m.get("contextWindow").and_then(Value::as_u64))
+                            .max()
+                    },
+                ),
             })
         }
         _ => Event::Other,
     };
     Some(event)
+}
+
+/// What the request behind an assistant record carried: its `usage` input tokens, cache
+/// reads and cache writes together, which is the context the model saw.
+fn context_tokens(message: &Value) -> Option<u64> {
+    let usage = message.get("usage")?;
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let tokens = count("input_tokens")
+        .saturating_add(count("cache_creation_input_tokens"))
+        .saturating_add(count("cache_read_input_tokens"));
+    (tokens > 0).then_some(tokens)
 }
 
 fn string(record: &Value, key: &str) -> String {
@@ -536,6 +557,9 @@ pub enum Update {
     Task(AgentTask),
     /// The subscription's usage windows changed.
     Usage(Usage),
+    /// The context window's fill changed (an assistant record's `usage`, or a turn result
+    /// naming the window).
+    Context(Context),
     /// A turn ended.
     Turn(TurnResult),
     /// The session is up and said what it is.
@@ -561,6 +585,7 @@ pub struct Fold {
     status: Option<(AgentStatus, Option<String>)>,
     init: Option<Init>,
     model: Option<String>,
+    context: Option<Context>,
 }
 
 impl Fold {
@@ -663,6 +688,14 @@ impl Fold {
                     out.push(Update::Partial(String::new()));
                 }
                 out.extend(self.status(AgentStatus::Done, detail));
+                if let Some(window) = result.context_window
+                    && let Some(context) = self.context
+                    && context.window != Some(window)
+                {
+                    let context = Context { window: Some(window), ..context };
+                    self.context = Some(context);
+                    out.push(Update::Context(context));
+                }
                 out.push(Update::Turn(result));
                 out
             }
@@ -741,6 +774,14 @@ impl Fold {
         {
             self.model = Some(model.to_owned());
             out.push(Update::Model(model.to_owned()));
+        }
+        if is_assistant
+            && let Some(tokens) = record.get("message").and_then(context_tokens)
+            && self.context.is_none_or(|c| c.tokens != tokens)
+        {
+            let context = Context { tokens, window: self.context.and_then(|c| c.window) };
+            self.context = Some(context);
+            out.push(Update::Context(context));
         }
         let entries: Vec<TranscriptEntry> = transcript::record_entries(&mut self.tools, record)
             .into_iter()
@@ -828,6 +869,7 @@ mod tests {
                     | Update::Permission(_)
                     | Update::Task(_)
                     | Update::Usage(_)
+                    | Update::Context(_)
                     | Update::Model(_)
                     | Update::PermissionMode(_) => {}
                 }
@@ -1115,6 +1157,56 @@ mod tests {
         assert!(
             matches!(updates.get(1), Some(Update::Entries(e)) if e.len() == 1 && e[0].at == Some(7))
         );
+    }
+
+    #[test]
+    fn the_context_fill_follows_the_usage_and_the_result_names_the_window() {
+        let mut fold = Fold::default();
+        let assistant = |tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":10,"cache_creation_input_tokens":{tokens},"cache_read_input_tokens":990,"output_tokens":7}}}}}}"#
+            )
+        };
+        let Some(first) = parse(&assistant(30_000)) else { panic!("parses") };
+        let context = |updates: &[Update]| {
+            updates.iter().find_map(|u| match u {
+                Update::Context(c) => Some(*c),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            context(&fold.apply(first, 0)),
+            Some(Context { tokens: 31_000, window: None }),
+            "input, cache writes and cache reads together; the window unknown"
+        );
+        let Some(again) = parse(&assistant(30_000)) else { panic!("parses") };
+        assert_eq!(context(&fold.apply(again, 0)), None, "unchanged, not repeated");
+        let Some(result) = parse(
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"result":"ok","session_id":"s","modelUsage":{"claude-haiku-4-5-20251001":{"contextWindow":200000},"claude-fable-5-1":{"contextWindow":1000000}}}"#,
+        ) else {
+            panic!("parses")
+        };
+        let Event::Result(turn) = &result else { panic!("a result") };
+        assert_eq!(turn.context_window, Some(1_000_000), "the widest window");
+        let updates = fold.apply(result, 0);
+        assert_eq!(
+            context(&updates),
+            Some(Context { tokens: 31_000, window: Some(1_000_000) }),
+            "the result names the window"
+        );
+        assert!(matches!(updates.last(), Some(Update::Turn(_))));
+        let Some(less) = parse(&assistant(4_000)) else { panic!("parses") };
+        assert_eq!(
+            context(&fold.apply(less, 0)),
+            Some(Context { tokens: 5_000, window: Some(1_000_000) }),
+            "after a compaction the fill drops and keeps the window"
+        );
+        let Some(no_usage) = parse(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#,
+        ) else {
+            panic!("parses")
+        };
+        assert_eq!(context(&fold.apply(no_usage, 0)), None, "a record without usage says nothing");
     }
 
     #[test]

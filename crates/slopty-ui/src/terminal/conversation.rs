@@ -126,6 +126,34 @@ pub fn attachment_label(image: &slopty_proto::agent::Image) -> String {
     format!("{kind} · {size}")
 }
 
+/// The context chip: "ctx 16%" once the window is known, the token count ("ctx 31k")
+/// before a turn result names it.
+#[must_use]
+pub fn context_label(context: &slopty_proto::agent::Context) -> String {
+    match context.percent() {
+        Some(percent) => format!("ctx {percent}%"),
+        None => format!("ctx {}", tokens_label(context.tokens)),
+    }
+}
+
+/// A token count in short form: "900", "31k", "1.2M".
+fn tokens_label(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let tenths = tokens.saturating_add(50_000).checked_div(100_000).unwrap_or(0);
+        format!("{}.{}M", tenths.checked_div(10).unwrap_or(0), tenths.checked_rem(10).unwrap_or(0))
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens.saturating_add(500).checked_div(1_000).unwrap_or(0))
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Whether the context chip should warn: four fifths of the window spent.
+#[must_use]
+pub fn context_is_tight(context: &slopty_proto::agent::Context) -> bool {
+    context.percent().is_some_and(|p| p >= 80)
+}
+
 /// The subscription's windows as "5h 23% · 7d 74%", or "limited until HH:MM" when the
 /// agent is refused (the earliest reset shown); empty windows read as nothing.
 #[must_use]
@@ -558,6 +586,8 @@ impl Conversation {
         }
         let usage = info.usage.as_ref().map(usage_label);
         let limited = info.usage.as_ref().is_some_and(|u| u.limited);
+        let context = info.context.as_ref().map(context_label);
+        let tight = info.context.as_ref().is_some_and(context_is_tight);
         let menu_open = self.model_menu;
         div()
             .id("conversation-header")
@@ -604,6 +634,21 @@ impl Conversation {
                             .text_ellipsis()
                             .child(SharedString::from(meta)),
                     )
+                    .when_some(context, |el, context| {
+                        // How full the context window is, in the warn tone once four fifths
+                        // are spent (auto-compaction is near).
+                        el.child(
+                            div()
+                                .id("conversation-context")
+                                .debug_selector(|| "conversation-context".to_owned())
+                                .role(Role::Status)
+                                .aria_label(SharedString::from(format!("Context: {context}")))
+                                .flex_none()
+                                .text_size(px(theme.typography.caption()))
+                                .text_color(hsla(if tight { s.warn } else { s.text_muted }))
+                                .child(SharedString::from(context)),
+                        )
+                    })
                     .when_some(usage, |el, usage| {
                         // The subscription's windows, in the warn tone once a limit bites.
                         el.child(

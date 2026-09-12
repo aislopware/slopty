@@ -803,6 +803,9 @@ pub struct ConversationInfo {
     /// The subscription's windows as the header shows them ("5h 23% · 7d 74%").
     #[serde(default)]
     pub usage: Option<String>,
+    /// The context window's fill as the header shows it ("ctx 16%", "ctx 31k").
+    #[serde(default)]
+    pub context: Option<String>,
     /// The pictures waiting to go with the next prompt, as their chips name them
     /// ("PNG · 70 B").
     #[serde(default)]

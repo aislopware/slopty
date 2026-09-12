@@ -2780,6 +2780,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   thinking block and waits; the dump's new `agent_detail` reads "thinking…", Stop interrupts
   it). Every fake turn now opens its text block first, as the real CLI does.
 
+- ✅ **The card shows how full the context window is, protocol 24** (2026-09-12). Claude
+  Code's own status line answers "how much room is left" and Slopty's card did not: the
+  only way to know a compaction was near was to be surprised by it. Probed on CLI 2.1.269:
+  every assistant record's `message.usage` carries `input_tokens`,
+  `cache_creation_input_tokens` and `cache_read_input_tokens`, whose sum is the context the
+  request carried (the model's view of the conversation), and each `result` carries
+  `modelUsage.<model>.contextWindow` (200 000 for haiku, 1 000 000 for the 1M models). There
+  is also a `get_context_usage` control request with a per-category breakdown, but it is
+  answered only where a callback is registered (the SDK host), not over stdio, and a
+  round-trip per turn buys nothing the records do not say. Rulings: (1) `AgentInfo.context:
+  Option<Context { tokens, window: Option<u64> }>` — the sum from the latest assistant
+  record, the widest window the turn's `modelUsage` named (the main model's; a haiku subagent
+  never widens it); it rides in `AgentInfo` because a joining client needs it with the
+  snapshot; (2) the chip reads "ctx 16%" once the window is known and "ctx 31k" before the
+  first result (never a guessed window), in the warn tone from 80% since auto-compaction is
+  near; (3) the fold reports only changes, and a compaction needs no special case: the next
+  assistant record's smaller sum lowers the chip by itself. Wire: `AgentInfo.context`,
+  `Context`; goldens `host_agent_info` / `client_hello` re-accepted, PROTOCOL_VERSION 23 →
+  24. Tests: `the_context_fill_follows_the_usage_and_the_result_names_the_window` (`stream`),
+  headless `a_driven_view_shows_the_agent_and_retunes_it` (the chip in the tree, the labels),
+  the app self-test (the fake's records carry 40 000 tokens against a 200 000 window: "ctx
+  20%" in the dump's `context`).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

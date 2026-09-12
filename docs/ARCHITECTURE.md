@@ -522,7 +522,12 @@ Claude Code's `rate_limit_event` (`rate_limit_info.unifiedWindows.{five_hour,sev
 `utilization` as a fraction, `resetsAt` in seconds; `status: "rejected"` when refused) folds
 into `AgentInfo.usage: Option<Usage { limited, five_hour, seven_day }>` with each window as
 whole percent and reset time, drawn as a Status chip (`conversation-usage`, "5h 23% · 7d
-74%", or "limited until HH:MM"); API-key runs never send one and show nothing. A
+74%", or "limited until HH:MM"); API-key runs never send one and show nothing. Next to it
+the context chip (`conversation-context`, protocol 24): every assistant record's
+`message.usage` (input + cache writes + cache reads = the context the request carried) and
+the turn result's widest `modelUsage.*.contextWindow` fold into `AgentInfo.context:
+Option<Context { tokens, window }>`, drawn as "ctx 16%" (or "ctx 31k" before a result names
+the window), in the warn tone from 80%. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
 nothing yet to draw; it never displaces a permission or a question. So does a streamed
