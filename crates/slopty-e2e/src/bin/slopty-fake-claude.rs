@@ -8,6 +8,8 @@
 //! * a prompt starting with `linger` — the deltas, then nothing until an `interrupt` control
 //!   request arrives, which it acknowledges before writing the interrupted user record and an
 //!   `error_during_execution` result (the way Claude Code ends a stopped turn);
+//! * a prompt starting with `ponder` — a thinking block opening and one thinking delta, then the
+//!   same wait for an `interrupt`;
 //! * a prompt starting with `write` — a `Write` tool call and a `can_use_tool` control request; an
 //!   `allow` answer produces a tool result and a closing message, a `deny` a failed tool result
 //!   with the host's message and a closing message that says so;
@@ -102,6 +104,12 @@ impl Fake {
     fn delta(&self, text: &str) -> Value {
         json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                "delta": {"type": "text_delta", "text": text}}, "session_id": self.session})
+    }
+
+    /// A content block opening, the way `--include-partial-messages` streams one.
+    fn block_start(&self, index: u32, block: &Value) -> Value {
+        json!({"type": "stream_event", "event": {"type": "content_block_start", "index": index,
+               "content_block": block}, "session_id": self.session})
     }
 
     /// Append a prompt to the transcript file as Claude Code writes it.
@@ -205,6 +213,7 @@ fn ack(id: &str, response: &Value) -> Value {
 }
 
 fn stream_deltas(fake: &Fake, out: &mut impl Write) -> std::io::Result<()> {
+    emit(out, &fake.block_start(0, &json!({"type": "text", "text": ""})))?;
     for text in DELTAS {
         emit(out, &fake.delta(text))?;
     }
@@ -504,6 +513,16 @@ fn run() -> std::io::Result<()> {
             emit(&mut out, &fake.result("success", closing))?;
         } else if text.starts_with("linger") {
             stream_deltas(&fake, &mut out)?;
+            waiting = Some(Wait::Interrupt);
+        } else if text.starts_with("ponder") {
+            let thinking = json!({"type": "thinking", "thinking": "", "signature": ""});
+            emit(&mut out, &fake.block_start(0, &thinking))?;
+            emit(
+                &mut out,
+                &json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": "Hmm."}},
+                        "session_id": fake.session}),
+            )?;
             waiting = Some(Wait::Interrupt);
         } else if text.trim() == "/cost" {
             let line = format!("Total cost: ${:.2}", 0.01 * f64::from(fake.turns));

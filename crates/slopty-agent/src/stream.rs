@@ -56,6 +56,29 @@ pub struct TurnResult {
     pub session_id: String,
 }
 
+/// The kind of content block a streamed message opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Block {
+    /// Extended thinking: nothing to show until the text starts.
+    Thinking,
+    /// The answer's text: the deltas that follow fill the partial.
+    Text,
+    /// A tool call being composed, by name.
+    Tool(String),
+}
+
+impl Block {
+    /// The Working detail while this block streams; `None` for text (the partial says it).
+    #[must_use]
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Thinking => Some("thinking…".to_owned()),
+            Self::Text => None,
+            Self::Tool(name) => Some(format!("calling {name}…")),
+        }
+    }
+}
+
 /// One line Claude Code wrote to stdout, decoded as far as Slopty needs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -65,6 +88,9 @@ pub enum Event {
     Record(Value),
     /// A text delta of the message being streamed (`stream_event`, `text_delta`).
     TextDelta(String),
+    /// A content block of the streamed message opened (`stream_event`, `content_block_start`):
+    /// what the agent is doing before any record says.
+    BlockStart(Block),
     /// The streamed message ended; the `Record` that follows carries its final form.
     MessageStop,
     /// A tool waits on the human. The raw input the host echoes back on allow rides here.
@@ -242,6 +268,15 @@ fn stream_event(event: Option<&Value>) -> Event {
             .filter(|d| d.get("type").and_then(Value::as_str) == Some("text_delta"))
             .and_then(|d| d.get("text").and_then(Value::as_str))
             .map_or(Event::Other, |text| Event::TextDelta(text.to_owned())),
+        Some("content_block_start") => event
+            .get("content_block")
+            .and_then(|block| match block.get("type").and_then(Value::as_str)? {
+                "thinking" => Some(Block::Thinking),
+                "text" => Some(Block::Text),
+                "tool_use" => Some(Block::Tool(string(block, "name"))),
+                _ => None,
+            })
+            .map_or(Event::Other, Event::BlockStart),
         Some("message_stop") => Event::MessageStop,
         _ => Event::Other,
     }
@@ -574,6 +609,15 @@ impl Fold {
             Event::TextDelta(text) => {
                 self.partial.push_str(&text);
                 vec![Update::Partial(self.partial.clone())]
+            }
+            // A block opening names what the agent is doing between records; like a status
+            // record it never overwrites a permission, a question or a finished turn.
+            Event::BlockStart(block) => {
+                if matches!(self.status.as_ref(), Some((AgentStatus::Working, _)) | None) {
+                    self.status(AgentStatus::Working, block.detail()).into_iter().collect()
+                } else {
+                    Vec::new()
+                }
             }
             Event::Task(task) => {
                 let mut task = task;
@@ -1032,6 +1076,26 @@ mod tests {
                 r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{t}"}}}}}}"#
             )
         };
+        // The blocks opening say what the agent is doing until the text arrives.
+        let start = |block: &str| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_start","index":0,"content_block":{block}}}}}"#
+            )
+        };
+        let Some(thinking) = parse(&start(r#"{"type":"thinking","thinking":"","signature":""}"#))
+        else {
+            panic!("parses")
+        };
+        assert_eq!(thinking, Event::BlockStart(Block::Thinking));
+        assert_eq!(
+            fold.apply(thinking, 0),
+            [Update::Status { status: AgentStatus::Working, detail: Some("thinking…".into()) }]
+        );
+        let Some(text) = parse(&start(r#"{"type":"text","text":""}"#)) else { panic!("parses") };
+        assert_eq!(
+            fold.apply(text, 0),
+            [Update::Status { status: AgentStatus::Working, detail: None }]
+        );
         let Some(first) = parse(&delta("Loo")) else { panic!("parses") };
         assert_eq!(fold.apply(first, 0), [Update::Partial("Loo".into())]);
         let Some(second) = parse(&delta("king.")) else { panic!("parses") };
@@ -1163,6 +1227,20 @@ mod tests {
             panic!()
         };
         assert!(fold.apply(event, 0).is_empty(), "a blocked agent keeps its reason");
+        let Some(event) = parse(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Write","input":{}}}}"#,
+        ) else {
+            panic!()
+        };
+        assert_eq!(event, Event::BlockStart(Block::Tool("Write".to_owned())));
+        assert!(fold.apply(event, 0).is_empty(), "a blocked agent keeps its reason");
+        assert_eq!(
+            Fold::default().apply(Event::BlockStart(Block::Tool("Write".to_owned())), 0),
+            [Update::Status {
+                status: AgentStatus::Working,
+                detail: Some("calling Write…".into())
+            }]
+        );
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"no":"type"}"#), None);
         assert_eq!(

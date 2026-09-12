@@ -876,6 +876,7 @@ impl Workspace {
                     cursor: [cursor.col, cursor.row],
                     rows: view.rows(),
                     agent: view.agent_status().map(agent_line),
+                    agent_detail: canvas.agent(session).and_then(|a| a.detail.clone()),
                     agent_source: canvas
                         .agent(session)
                         .map(|a| match a.source {

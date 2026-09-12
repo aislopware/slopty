@@ -525,7 +525,10 @@ whole percent and reset time, drawn as a Status chip (`conversation-usage`, "5h 
 74%", or "limited until HH:MM"); API-key runs never send one and show nothing. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
-nothing yet to draw; it never displaces a permission or a question. **Pictures** go with a
+nothing yet to draw; it never displaces a permission or a question. So does a streamed
+block's opening (`content_block_start` → `stream::Block`): "thinking…" for a thinking block,
+"calling Write…" for a tool call being composed, cleared when the text block starts and the
+partial takes over. The badge shows the Working detail when there is one. **Pictures** go with a
 prompt (protocol 23): ⌘V in the composer with a picture on the clipboard (`composer_paste`
 captures the input's `Paste` before it reads text) attaches it — PNG, JPEG, GIF or WebP, the
 types the model reads, at most `IMAGES_MAX` of `IMAGE_BYTES_MAX` each — as a chip above the

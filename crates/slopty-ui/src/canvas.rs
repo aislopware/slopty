@@ -2659,7 +2659,7 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
     match &agent.status {
         AgentStatus::None => String::new(),
         AgentStatus::Idle => "claude".to_owned(),
-        AgentStatus::Working => "working".to_owned(),
+        AgentStatus::Working => detail.unwrap_or("working").to_owned(),
         AgentStatus::Tool { tool } => detail.unwrap_or(tool).to_owned(),
         AgentStatus::Blocked(BlockReason::Permission { tool }) => {
             format!("allow? {}", detail.unwrap_or(tool))

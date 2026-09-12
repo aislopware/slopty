@@ -463,6 +463,32 @@ mod tests {
         .await
         .unwrap();
 
+        // While the model thinks, before any text, the badge says so; Stop interrupts it.
+        drv.type_text("ponder").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the thinking detail", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.agent.as_deref() == Some("working")
+                        && t.agent_detail.as_deref() == Some("thinking…")
+                })
+            })
+            .await
+            .unwrap();
+        let stop =
+            dump.a11y_node("Button", Some("Stop")).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (sx, sy) = a11y_center(stop);
+        drv.click(sx, sy).await.unwrap();
+        drv.wait_for("the interrupted thought", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("done")
+                    && conv.entries.last().map(String::as_str)
+                        == Some("user: [Request interrupted by user]")
+            })
+        })
+        .await
+        .unwrap();
+
         // A turn that streams and stops: the partial shows under the list while the agent is
         // working, Send has become Stop; a click on it interrupts, and the turn ends with the
         // interrupted record.
@@ -775,7 +801,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 15))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 16))
             })
             .await
             .unwrap();
@@ -788,6 +814,7 @@ mod tests {
                 "assistant: Hello from the fake".to_owned(),
                 "user: /cost".to_owned(),
                 "assistant: Total cost: $0.02".to_owned(),
+                "user: ponder".to_owned(),
                 "user: linger".to_owned(),
                 "user: write the note".to_owned(),
                 "user: edit the note".to_owned(),

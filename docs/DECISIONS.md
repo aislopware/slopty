@@ -2761,6 +2761,25 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `a_picture_pasted_into_the_composer_goes_with_the_prompt` (the big one lands shrunk as a
   JPEG, the TIFF's and the fifth's notices), the app and simulator scenarios on the real
   PNG.
+- ✅ **The badge says what the agent is doing between records: thinking, or which tool it is
+  composing** (2026-09-12). With `--include-partial-messages` Claude Code streams every
+  content block's opening (`content_block_start` with `content_block.type` `thinking`,
+  `text` or `tool_use` + `name`) before any delta, and a long think or a large tool input
+  (a whole file for `Write`) can take many seconds during which only `text_delta` was read:
+  the badge sat on "working" — and the protocol 21 "waiting for the model…" detail was never
+  drawn either, since the badge text ignored a Working detail. Rulings: (1) `Block::{Thinking,
+  Text, Tool(name)}` parse into `Event::BlockStart`, and the fold turns them into the Working
+  detail ("thinking…", "calling Write…", none for text — the partial says it) under the
+  protocol 21 rule: never over a Blocked or Done status; (2) the badge shows the Working
+  detail when there is one ("working" otherwise), so `requesting`, `compacting`, a thought
+  and a tool being composed all move the chip; (3) thinking deltas are not shown — Claude
+  Code's own UI hides them — and no wire change: `AgentEvent.detail` already carries it.
+  Tests: `text_deltas_stream_the_partial_and_the_record_clears_it` and
+  `a_policy_denial_and_the_rest_are_named_or_ignored` (`stream`: the openings as detail, a
+  tool opening not over a permission), the app self-test's `ponder` turn (the fake opens a
+  thinking block and waits; the dump's new `agent_detail` reads "thinking…", Stop interrupts
+  it). Every fake turn now opens its text block first, as the real CLI does.
+
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

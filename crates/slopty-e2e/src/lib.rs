@@ -578,6 +578,10 @@ pub struct TerminalInfo {
     /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
     /// `blocked:idle`, `done`; `None` without an agent.
     pub agent: Option<String>,
+    /// What the host says the agent is doing ("thinking…", "calling Write…", a prompt's
+    /// first line, a permission's summary); `None` without one.
+    #[serde(default)]
+    pub agent_detail: Option<String>,
     /// Which signal the host read the agent's state from: `process`, `title`, `transcript`
     /// or `hook`; `None` without an agent.
     pub agent_source: Option<String>,
