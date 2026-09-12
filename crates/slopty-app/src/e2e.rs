@@ -783,6 +783,11 @@ impl Workspace {
                     partial: view.partial().to_owned(),
                     permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
                     always: view.permission().and_then(|p| p.always.clone()),
+                    usage: view
+                        .info()
+                        .usage
+                        .as_ref()
+                        .map(slopty_ui::terminal::conversation::usage_label),
                     tasks: c
                         .tasks()
                         .iter()

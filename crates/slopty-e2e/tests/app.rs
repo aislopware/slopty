@@ -385,6 +385,7 @@ mod tests {
         assert_eq!(conv.agent_session.as_deref(), Some("fake-session"), "{conv:?}");
         assert_eq!(conv.turns, 1, "{conv:?}");
         assert!(conv.slash_commands.iter().any(|c| c == "/cost"), "{conv:?}");
+        assert_eq!(conv.usage.as_deref(), Some("5h 23% · 7d 74%"), "{conv:?}");
         assert!(dump.a11y_node("Button", Some("Model: fake-model")).is_some(), "{:#?}", dump.a11y);
 
         // The model chip opens the menu; picking Opus retunes the agent in place (no

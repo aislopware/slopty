@@ -216,6 +216,14 @@ fn run() -> std::io::Result<()> {
                 "session_id": fake.session, "tools": ["Bash", "Edit", "Read", "Write"], "model": fake.model,
                 "permissionMode": "default", "slash_commands": ["/compact", "/clear", "/cost"], "uuid": "i"}),
     )?;
+    emit(
+        &mut out,
+        &json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1_789_195_800,
+                "rateLimitType": "five_hour", "unifiedWindows": {
+                    "five_hour": {"utilization": 0.23, "resetsAt": 1_789_195_800},
+                    "seven_day": {"utilization": 0.735, "resetsAt": 1_789_257_600}}},
+                "session_id": fake.session, "uuid": "rl"}),
+    )?;
     let mut requests = 0_u32;
     // What the turn in progress waits for.
     let mut waiting: Option<Wait> = None;

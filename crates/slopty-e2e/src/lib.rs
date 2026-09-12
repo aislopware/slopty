@@ -778,6 +778,9 @@ pub struct ConversationInfo {
     /// The subagents the agent spawned, `<call>:<description>:<tool uses>:<running|done>`.
     #[serde(default)]
     pub tasks: Vec<String>,
+    /// The subscription's windows as the header shows them ("5h 23% · 7d 74%").
+    #[serde(default)]
+    pub usage: Option<String>,
 }
 
 impl Dump {

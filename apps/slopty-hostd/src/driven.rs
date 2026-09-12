@@ -535,6 +535,7 @@ impl Pump {
                 drop(table);
                 let _sent = self.events.send(HostMsg::AgentTask { session: self.session, task });
             }
+            Update::Usage(usage) => self.info(|info| info.usage = Some(usage.clone())),
             Update::Model(model) => self.info(|info| info.model = Some(model.clone())),
             Update::PermissionMode(mode) => {
                 self.info(|info| info.permission_mode = Some(mode.clone()));

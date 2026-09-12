@@ -99,6 +99,29 @@ pub struct AgentInfo {
     pub turns: u32,
     /// Claude Code's own cost estimate for the conversation, in millionths of a dollar.
     pub cost_micro_usd: u64,
+    /// The subscription's usage windows, as the agent last reported them (`None` until a
+    /// `rate_limit_event`, and for API-key runs that never send one).
+    pub usage: Option<Usage>,
+}
+
+/// The subscription's rate-limit state, from Claude Code's `rate_limit_event`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Usage {
+    /// Requests are refused until a window resets.
+    pub limited: bool,
+    /// The five-hour window, when reported.
+    pub five_hour: Option<UsageWindow>,
+    /// The seven-day window, when reported.
+    pub seven_day: Option<UsageWindow>,
+}
+
+/// One usage window: how much of it is spent, and when it resets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// Spent, in whole percent (0–100).
+    pub percent: u8,
+    /// When the window resets, in seconds since the Unix epoch.
+    pub resets_at: u64,
 }
 
 /// Client → host: retune a driven agent in place.

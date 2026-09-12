@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use slopty_proto::agent::{
     AgentStatus, AgentTask, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail,
-    TranscriptEntry,
+    TranscriptEntry, Usage, UsageWindow,
 };
 
 use crate::transcript::{self, ToolNames};
@@ -97,8 +97,12 @@ pub enum Event {
     Status {
         /// The mode now in force, when the record names one.
         permission_mode: Option<String>,
+        /// What the agent is doing, when the record says (`requesting`, `compacting`).
+        doing: Option<String>,
     },
-    /// Anything else: rate limits, hook bookkeeping, thinking token counts.
+    /// `rate_limit_event`: the subscription's usage windows.
+    RateLimit(Usage),
+    /// Anything else: hook bookkeeping, thinking token counts.
     Other,
 }
 
@@ -122,7 +126,30 @@ pub fn parse(line: &str) -> Option<Event> {
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
                 .map(str::to_owned),
+            doing: record
+                .get("status")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
         },
+        ("rate_limit_event", _) => record.get("rate_limit_info").map_or(Event::Other, |info| {
+            let window = |name: &str| {
+                let w = info.get("unifiedWindows")?.get(name)?;
+                let utilization = w.get("utilization").and_then(Value::as_f64)?;
+                let spent = (utilization * 100.0).round().clamp(0.0, 100.0);
+                // The first whole percent at or above the fraction; no float cast needed.
+                let percent = (0..=100_u8).find(|&n| f64::from(n) >= spent).unwrap_or(100);
+                Some(UsageWindow {
+                    percent,
+                    resets_at: w.get("resetsAt").and_then(Value::as_u64).unwrap_or(0),
+                })
+            };
+            Event::RateLimit(Usage {
+                limited: info.get("status").and_then(Value::as_str).is_some_and(|s| s != "allowed"),
+                five_hour: window("five_hour"),
+                seven_day: window("seven_day"),
+            })
+        }),
         ("system", Some("task_started" | "task_progress")) => Event::Task(AgentTask {
             call: string(&record, "tool_use_id"),
             description: string(&record, "description"),
@@ -457,6 +484,8 @@ pub enum Update {
     Permission(PermissionRequest),
     /// A subagent started, progressed or finished; the client shows it under its call.
     Task(AgentTask),
+    /// The subscription's usage windows changed.
+    Usage(Usage),
     /// A turn ended.
     Turn(TurnResult),
     /// The session is up and said what it is.
@@ -508,9 +537,24 @@ impl Fold {
                 out.extend(self.status(AgentStatus::Idle, None));
                 out
             }
-            Event::Status { permission_mode } => {
-                permission_mode.map(Update::PermissionMode).into_iter().collect()
+            Event::Status { permission_mode, doing } => {
+                let mut out: Vec<Update> =
+                    permission_mode.map(Update::PermissionMode).into_iter().collect();
+                // "requesting" is the agent waiting on the model, "compacting" its own
+                // housekeeping: both are the turn alive with nothing yet to show.
+                let detail = match doing.as_deref() {
+                    Some("requesting") => Some("waiting for the model…"),
+                    Some("compacting") => Some("compacting the conversation…"),
+                    _ => None,
+                };
+                if let Some(detail) = detail
+                    && matches!(self.status.as_ref(), Some((AgentStatus::Working, _)) | None)
+                {
+                    out.extend(self.status(AgentStatus::Working, Some(detail.to_owned())));
+                }
+                out
             }
+            Event::RateLimit(usage) => vec![Update::Usage(usage)],
             Event::Record(record) => self.record(&record, now),
             Event::TextDelta(text) => {
                 self.partial.push_str(&text);
@@ -724,6 +768,7 @@ mod tests {
                     Update::Partial(_)
                     | Update::Permission(_)
                     | Update::Task(_)
+                    | Update::Usage(_)
                     | Update::Model(_)
                     | Update::PermissionMode(_) => {}
                 }
@@ -1054,15 +1099,55 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"type":"system","subtype":"status","status":"requesting"}"#),
-            Some(Event::Status { permission_mode: None })
+            Some(Event::Status { permission_mode: None, doing: Some("requesting".into()) })
         );
         assert_eq!(
             parse(
                 r#"{"type":"system","subtype":"status","status":null,"permissionMode":"acceptEdits"}"#
             ),
-            Some(Event::Status { permission_mode: Some("acceptEdits".into()) })
+            Some(Event::Status { permission_mode: Some("acceptEdits".into()), doing: None })
         );
         assert_eq!(parse(r#"{"type":"rate_limit_event"}"#), Some(Event::Other));
+        // Probed on CLI 2.1.269: the windows ride in `unifiedWindows`, spent as a fraction.
+        let event = parse(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1789195800,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.22999999999999998,"resetsAt":1789195800},"seven_day":{"utilization":0.735,"resetsAt":1789257600}}}}"#,
+        );
+        assert_eq!(
+            event,
+            Some(Event::RateLimit(Usage {
+                limited: false,
+                five_hour: Some(UsageWindow { percent: 23, resets_at: 1_789_195_800 }),
+                seven_day: Some(UsageWindow { percent: 74, resets_at: 1_789_257_600 }),
+            }))
+        );
+        let bare = parse(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rate_limited","resetsAt":1}}"#,
+        );
+        assert_eq!(
+            bare,
+            Some(Event::RateLimit(Usage { limited: true, five_hour: None, seven_day: None }))
+        );
+        // A status record while working names what the agent is doing; a permission or a
+        // finished turn is not overwritten by it.
+        let mut fold = Fold::default();
+        let Some(event) = parse(r#"{"type":"system","subtype":"status","status":"requesting"}"#)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            fold.apply(event, 0),
+            [Update::Status {
+                status: AgentStatus::Working,
+                detail: Some("waiting for the model…".to_owned())
+            }]
+        );
+        let Some(event) = parse(CAN_USE_TOOL) else { panic!() };
+        let _blocked = fold.apply(event, 0);
+        let Some(event) = parse(r#"{"type":"system","subtype":"status","status":"compacting"}"#)
+        else {
+            panic!()
+        };
+        assert!(fold.apply(event, 0).is_empty(), "a blocked agent keeps its reason");
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"no":"type"}"#), None);
         assert_eq!(

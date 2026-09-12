@@ -350,7 +350,7 @@ mod golden {
     /// the retune request, and the conversations on disk a client can resume.
     #[test]
     fn driven_agent_info() {
-        use slopty_proto::agent::{AgentInfo, AgentSessionInfo, AgentSet};
+        use slopty_proto::agent::{AgentInfo, AgentSessionInfo, AgentSet, Usage, UsageWindow};
         snap(
             "host_agent_info",
             &HostMsg::AgentInfo {
@@ -362,6 +362,11 @@ mod golden {
                     slash_commands: vec!["/compact".to_owned(), "/clear".to_owned()],
                     turns: 3,
                     cost_micro_usd: 12_500,
+                    usage: Some(Usage {
+                        limited: false,
+                        five_hour: Some(UsageWindow { percent: 23, resets_at: 1_789_195_800 }),
+                        seven_day: Some(UsageWindow { percent: 74, resets_at: 1_789_257_600 }),
+                    }),
                 },
             },
         );

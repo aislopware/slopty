@@ -3427,6 +3427,17 @@ mod tests {
                     slash_commands: ["/compact", "/clear", "/cost"].map(str::to_owned).to_vec(),
                     turns: 2,
                     cost_micro_usd: 12_500,
+                    usage: Some(slopty_proto::agent::Usage {
+                        limited: false,
+                        five_hour: Some(slopty_proto::agent::UsageWindow {
+                            percent: 23,
+                            resets_at: 1_789_195_800,
+                        }),
+                        seven_day: Some(slopty_proto::agent::UsageWindow {
+                            percent: 74,
+                            resets_at: 1_789_257_600,
+                        }),
+                    }),
                 },
                 cx,
             );
@@ -3434,6 +3445,7 @@ mod tests {
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some("Usage: 5h 23% · 7d 74%"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Button", Some("Model: sonnet-5"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Button", Some("Permission mode: Ask"))), "{tree:#?}");
         assert_eq!(conversation::cost_label(12_500), "1¢");

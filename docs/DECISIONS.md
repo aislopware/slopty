@@ -2671,6 +2671,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   probe's six lines), headless `a_subagent_progresses_under_its_call` (the label through
   running and done, the reset), the app self-test's `delegate the listing` turn (the
   subagent's Bash absent, the task done in the dump and in the tree).
+- ✅ **The card shows the subscription's windows and what the agent is doing between tokens,
+  protocol 21** (2026-09-12). Probed on CLI 2.1.269: right after `system/init` comes a
+  `rate_limit_event` with `rate_limit_info.unifiedWindows.five_hour` / `seven_day`
+  (`utilization` 0–1, `resetsAt` epoch seconds) and a `status` that reads `rejected` when the
+  subscription is spent; an API-key run never sends one. And each turn starts with
+  `system/status { status: "requesting" }` (and `compacting` around auto-compaction), before
+  any content: until now the chip sat on "working" with an empty card and a stalled agent
+  looked the same as one waiting on the model. Rulings: (1) the windows ride in `AgentInfo`
+  as `usage: Option<Usage>` — whole percent per window, computed as the smallest integer not
+  below the fraction (no float cast, so no lint carve-out) — because it is what the agent says
+  about itself and a joining client needs it with the snapshot; (2) the chip says both
+  windows tersely ("5h 23% · 7d 74%") and only when limited names the earliest reset
+  ("limited until 14:00"), since on the phone the question is "can I keep going" not the
+  raw numbers; (3) `requesting` / `compacting` become the Working detail and never touch a
+  Blocked status, so a permission or a question is not overwritten by the next poll. Wire:
+  `AgentInfo.usage`, `Usage`, `UsageWindow`; goldens `host_agent_info` / `client_hello`
+  re-accepted, PROTOCOL_VERSION 20 → 21. Tests:
+  `a_policy_denial_and_the_rest_are_named_or_ignored` (`stream`: the probe's rate-limit
+  line, the bare rejected one, `requesting` and `compacting` as detail and not over a
+  permission), headless `a_driven_view_shows_the_agent_and_retunes_it` (the usage chip in the
+  tree), the app self-test (the fake sends the probe's event after init; the dump's `usage`
+  reads "5h 23% · 7d 74%").
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

@@ -517,7 +517,15 @@ it skips a sidechain in the file (no entries, no status, no model), while Claude
 travel as `HostMsg::AgentTask` (kept per session for a joining client). Every `ToolUse`
 entry now carries its `call` id, and the card draws the task under the call that spawned it
 (`conversation::task_line`: "Explore running · 1 tool use · 3 s · Bash", muted once done);
-the label reads the same. Both kinds coexist: ⌘⇧T
+the label reads the same. The header also shows the subscription's windows (protocol 21):
+Claude Code's `rate_limit_event` (`rate_limit_info.unifiedWindows.{five_hour,seven_day}`,
+`utilization` as a fraction, `resetsAt` in seconds; `status: "rejected"` when refused) folds
+into `AgentInfo.usage: Option<Usage { limited, five_hour, seven_day }>` with each window as
+whole percent and reset time, drawn as a Status chip (`conversation-usage`, "5h 23% · 7d
+74%", or "limited until HH:MM"); API-key runs never send one and show nothing. A
+`system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
+("waiting for the model…", "compacting the conversation…") so the chip moves while there is
+nothing yet to draw; it never displaces a permission or a question. Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
 (`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test

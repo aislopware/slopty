@@ -103,6 +103,33 @@ pub fn next_mode(mode: &str) -> &'static str {
         .unwrap_or(MODES[0])
 }
 
+/// The subscription's windows as "5h 23% · 7d 74%", or "limited until HH:MM" when the
+/// agent is refused (the earliest reset shown); empty windows read as nothing.
+#[must_use]
+pub fn usage_label(usage: &slopty_proto::agent::Usage) -> String {
+    if usage.limited {
+        let reset = [usage.five_hour, usage.seven_day]
+            .into_iter()
+            .flatten()
+            .map(|w| w.resets_at)
+            .filter(|&t| t > 0)
+            .min()
+            .and_then(|t| clock(Some(t.saturating_mul(1000))));
+        return match reset {
+            Some(at) => format!("limited until {at}"),
+            None => "rate limited".to_owned(),
+        };
+    }
+    let mut parts = Vec::new();
+    if let Some(w) = usage.five_hour {
+        parts.push(format!("5h {}%", w.percent));
+    }
+    if let Some(w) = usage.seven_day {
+        parts.push(format!("7d {}%", w.percent));
+    }
+    parts.join(" · ")
+}
+
 /// The cost as the header shows it: cents under a dollar, else dollars to the cent.
 #[must_use]
 pub fn cost_label(micro_usd: u64) -> String {
@@ -496,6 +523,8 @@ impl Conversation {
             meta.push_str(" · ");
             meta.push_str(&cost_label(info.cost_micro_usd));
         }
+        let usage = info.usage.as_ref().map(usage_label);
+        let limited = info.usage.as_ref().is_some_and(|u| u.limited);
         let menu_open = self.model_menu;
         div()
             .id("conversation-header")
@@ -541,7 +570,21 @@ impl Conversation {
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(SharedString::from(meta)),
-                    ),
+                    )
+                    .when_some(usage, |el, usage| {
+                        // The subscription's windows, in the warn tone once a limit bites.
+                        el.child(
+                            div()
+                                .id("conversation-usage")
+                                .debug_selector(|| "conversation-usage".to_owned())
+                                .role(Role::Status)
+                                .aria_label(SharedString::from(format!("Usage: {usage}")))
+                                .flex_none()
+                                .text_size(px(theme.typography.caption()))
+                                .text_color(hsla(if limited { s.warn } else { s.text_muted }))
+                                .child(SharedString::from(usage)),
+                        )
+                    }),
             )
             .when(menu_open, |el| {
                 let current = info.model.clone().unwrap_or_default();
