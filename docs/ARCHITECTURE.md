@@ -383,7 +383,10 @@ host read-only: the item names the absolute path and lives in the shared documen
 does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`)
 and draws the `HostMsg::File` answer (`slopty-host::file::read`: the first 512 KiB, then the
 first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
-`uniform_list`, or one line saying why not; a read that follows one tints the lines that
+`uniform_list`, coloured by the grammar the path names (`slopty-ui::highlight`: syntect's
+bundled grammars on the pure-Rust regex engine, reduced to nine tokens painted from the
+theme's palette, parsed on a background thread after each read; the same hook colours a
+fenced block in an answer through gpui-kit's `TextViewDefaults`), or one line saying why not; a read that follows one tints the lines that
 differ (`file::changed_lines`, `similar` over the lines) and scrolls the first into view; a
 card opened from an edit lands on the edit's line (`ToolDetail::Diff.line`, protocol 35: the
 host finds `old_string` in the file, or `new_string` once the edit landed,

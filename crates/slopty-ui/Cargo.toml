@@ -31,6 +31,8 @@ slopty-grid.workspace = true
 slopty-predict.workspace = true
 slopty-proto.workspace = true
 slopty-theme.workspace = true
+# Syntax colouring for a file card and a fenced code block (`highlight`).
+syntect.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

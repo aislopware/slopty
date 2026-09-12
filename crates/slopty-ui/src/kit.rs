@@ -7,6 +7,7 @@
 //! or a link looks like the chrome around it in both variants.
 
 use gpui::App;
+use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use slopty_theme::{Theme, Variant};
 
@@ -52,6 +53,10 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.warning = hsla(s.warn);
     c.scrollbar_thumb = hsla_alpha(s.text_muted, slopty_theme::alpha::TINT_PRESSED);
     KitTheme::sync_base(cx);
+    // `sync_base` reinstalls the Markdown defaults, so the code colouring goes on after it.
+    TextViewDefaults::global(cx)
+        .with_code_block_highlighter(crate::highlight::code_block(theme.clone()))
+        .install(cx);
 }
 
 #[cfg(test)]
@@ -76,6 +81,10 @@ mod tests {
                 assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_fg));
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.accent));
+                assert!(
+                    TextViewDefaults::global(cx).has_code_block_highlighter(),
+                    "fenced code is coloured after the sync"
+                );
             });
         }
     }

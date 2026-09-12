@@ -2660,3 +2660,23 @@ rather than the sum; the unexplained 29–73 s listing gap of the old gate did n
 (the tests lane goes from `Finished` to `Starting` in about 20 s here, most of it the
 package-cache lock while the other lanes start). The cold run is paid once per target dir
 and again after a toolchain or dependency bump.
+
+## 2026-09-12 — syntax colouring: what a parse costs
+
+`AWS_LC_SYS_CMAKE_BUILDER=1 cargo nextest run -p slopty-ui --target aarch64-apple-darwin
+--run-ignored ignored-only -E 'test(timing_of_a_full_card)' --no-capture`, Mac Studio, the
+dev profile (optimised) and `--release` (one run each; both numbers alike, the regex engine
+dominates):
+
+```
+grammar set on first use        1.5 ms  (dev)   0.8 ms  (release)
+canvas.rs, 6 582 lines, parse   639 ms          541 ms      ≈ 80 µs a line, 50 149 spans
+the same text again             590 ms          500 ms      (no per-text cache to warm)
+a 4 000-byte fenced block       7.4 ms          6.3 ms
+```
+
+What follows: a full file card (2 000 lines, the host's cap) is ≈ 165 ms of a background
+thread, never the UI thread, and the card shows plain text meanwhile; a fenced block is
+coloured at layout on the UI thread, once per block (gpui-kit caches the ranges against the
+highlighter), so a long answer pays a few ms on its first frame. `regex-fancy` is the price of
+pure Rust: syntect's onig engine is reported 2–3× faster, which would be a C dependency.

@@ -8,13 +8,15 @@
 //! the lines that changed and scrolls the first of them into view, so the card shows what the
 //! agent just did without the human hunting for it.
 
+use std::sync::Arc;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, ElementId, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
-    div, px, uniform_list,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::ItemId;
@@ -22,6 +24,7 @@ use slopty_proto::file::FileRead;
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
+use crate::highlight::{self, Span, Syntax};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 
 /// How the reading line moves on a key.
@@ -95,6 +98,14 @@ pub struct FileView {
     scroll: UniformListScrollHandle,
     /// The find bar, while open.
     search: Option<FileSearch>,
+    /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
+    syntax: Option<Syntax>,
+    /// One span list per line, once the background parse of the current text lands.
+    spans: Option<Arc<[Vec<Span>]>>,
+    /// Which text the running parse is for: a read that lands mid-parse drops the old result.
+    generation: u64,
+    /// The parse in flight, dropped (cancelled) with the card.
+    highlighting: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for FileView {
@@ -125,7 +136,42 @@ impl FileView {
             theme,
             scroll: UniformListScrollHandle::new(),
             search: None,
+            syntax: None,
+            spans: None,
+            generation: 0,
+            highlighting: None,
         }
+    }
+
+    /// The grammar's name ("Rust") once the text is coloured; none before the parse lands or
+    /// for a file the bundle cannot colour.
+    #[must_use]
+    pub fn coloured_as(&self) -> Option<&'static str> {
+        self.spans.as_ref().and(self.syntax).map(Syntax::name)
+    }
+
+    /// Parse `text` on a background thread and take the spans when they land, if this is
+    /// still the text they are for.
+    fn recolour(&mut self, text: Arc<str>, cx: &Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.spans = None;
+        let first = text.split('\n').next().unwrap_or_default();
+        self.syntax = Syntax::for_path(&self.path, first);
+        let Some(syntax) = self.syntax else {
+            self.highlighting = None;
+            return;
+        };
+        let generation = self.generation;
+        let parsing = cx.background_spawn(async move { highlight::spans(&text, syntax) });
+        self.highlighting = Some(cx.spawn(async move |this, cx| {
+            let spans = parsing.await;
+            let _gone = this.update(cx, |view, cx| {
+                if view.generation == generation {
+                    view.spans = Some(spans.into());
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// ↑/↓, ⇞/⇟, Home/End with the card active: move the reading line (the tinted one an
@@ -416,11 +462,12 @@ impl FileView {
         if self.read.as_ref() == Some(&read) {
             return;
         }
-        let lines: Vec<SharedString> = match &read {
-            FileRead::Text { text, .. } => {
-                text.split('\n').map(|l| SharedString::from(l.to_owned())).collect()
-            }
-            FileRead::Binary { .. } | FileRead::Missing { .. } => Vec::new(),
+        let (lines, text): (Vec<SharedString>, Arc<str>) = match &read {
+            FileRead::Text { text, .. } => (
+                text.split('\n').map(|l| SharedString::from(l.to_owned())).collect(),
+                Arc::from(text.as_str()),
+            ),
+            FileRead::Binary { .. } | FileRead::Missing { .. } => (Vec::new(), Arc::from("")),
         };
         let had_text = matches!(self.read, Some(FileRead::Text { .. }));
         self.changed = if had_text && !lines.is_empty() {
@@ -439,6 +486,7 @@ impl FileView {
         }
         self.lines = lines;
         self.read = Some(read);
+        self.recolour(text, cx);
         // An open find bar follows the new text.
         if self.search.is_some() {
             self.refresh_hits(cx);
@@ -473,11 +521,13 @@ impl FileView {
                 let lines = if n == 1 { "1 line".to_owned() } else { format!("{n} lines") };
                 let more =
                     if *more_lines > 0 { format!(", {more_lines} more") } else { String::new() };
+                let coloured =
+                    self.coloured_as().map_or_else(String::new, |name| format!(", {name}"));
                 let changed = match self.changed.len() {
                     0 => String::new(),
                     c => format!(", {c} changed"),
                 };
-                format!("{lines}{more}{changed}")
+                format!("{lines}{more}{changed}{coloured}")
             }
             Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
             Some(FileRead::Missing { error }) => format!("missing: {error}"),
@@ -559,6 +609,9 @@ impl Render for FileView {
                 // The gutter is as wide as the last line number, in the mono face.
                 let gutter_ch = f32::from(u8::try_from(digits).unwrap_or(u8::MAX));
                 let lines = self.lines.clone();
+                let spans = self.spans.clone();
+                let font = crate::fonts::terminal_font(&mono, false, false);
+                let run_theme = theme.clone();
                 let changed = self.changed.clone();
                 let focus = self.focus;
                 let (hits, current) = self.search.as_ref().map_or((Vec::new(), None), |s| {
@@ -578,6 +631,12 @@ impl Render for FileView {
                         range
                             .filter_map(|ix| {
                                 let line = lines.get(ix)?.clone();
+                                let runs = highlight::runs(
+                                    line.len(),
+                                    spans.as_ref().and_then(|s| s.get(ix)).map(Vec::as_slice),
+                                    &font,
+                                    &run_theme,
+                                );
                                 let number = ix.saturating_add(1);
                                 let this = this.clone();
                                 Some(
@@ -609,7 +668,11 @@ impl Render for FileView {
                                                     "{number:>digits$}"
                                                 ))),
                                         )
-                                        .child(div().text_color(fg).child(line)),
+                                        .child(
+                                            div()
+                                                .text_color(fg)
+                                                .child(StyledText::new(line).with_runs(runs)),
+                                        ),
                                 )
                             })
                             .collect()
@@ -681,6 +744,43 @@ mod tests {
             "a deleted tail points at the last line"
         );
         assert_eq!(changed_lines(&l(&["a"]), &l(&["a"])), Vec::<usize>::new());
+    }
+
+    /// A Rust file is coloured once the background parse lands; a plain file is not; a read
+    /// that follows drops the earlier colours and takes the new ones.
+    #[gpui::test]
+    fn a_file_is_coloured_by_its_grammar_after_the_read(cx: &mut gpui::TestAppContext) {
+        let read = |text: &str| FileRead::Text {
+            text: text.to_owned(),
+            more_lines: 0,
+            size: u64::try_from(text.len()).unwrap_or(0),
+            modified_ms: 0,
+        };
+        let coloured = |v: &FileView, _: &gpui::App| v.coloured_as();
+        let view = cx.new(|_| FileView::new(ItemId::new(), "/w/src/main.rs", Theme::default()));
+        view.update(cx, |v, cx| v.set_read(read("fn main() {}\n// end"), cx));
+        assert_eq!(view.read_with(cx, coloured), None, "not before the parse");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, coloured), Some("Rust"));
+        view.read_with(cx, |v, _| {
+            let spans = v.spans.as_deref().unwrap_or_default();
+            assert_eq!(spans.len(), 2);
+            let first = |ix: usize| spans.get(ix).and_then(|l| l.first());
+            assert_eq!(first(0).map(|s| s.token), Some(highlight::Token::Keyword));
+            assert_eq!(first(1).map(|s| s.italic), Some(true), "a comment is italic");
+            assert_eq!(v.summary(), "2 lines, Rust");
+        });
+        view.update(cx, |v, cx| v.set_read(read("fn main() {}\n// end\nlet"), cx));
+        assert_eq!(view.read_with(cx, coloured), None, "a new text starts over");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(v.spans.as_ref().map(|s| s.len()), Some(3)));
+
+        let plain =
+            cx.new(|_| FileView::new(ItemId::new(), "/w/notes.unknownext", Theme::default()));
+        plain.update(cx, |v, cx| v.set_read(read("just words"), cx));
+        cx.run_until_parked();
+        assert_eq!(plain.read_with(cx, coloured), None);
+        assert_eq!(plain.read_with(cx, |v, _| v.summary()), "1 line");
     }
 
     #[test]

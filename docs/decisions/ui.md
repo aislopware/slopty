@@ -660,3 +660,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   smooth test: the same tree's max swings 27 → 59 with load. Not done, with the number: caching
   an item's taffy layout across steps (a retained-layout fork hook for ~9 % of a draw shared by
   the whole window's tree) and flattening the item tree.
+
+- ✅ **Code is coloured by grammar and painted from the theme** (2026-09-12). A file card and a
+  fenced block in an answer read as plain mono, so a Rust function and its comment looked the
+  same as a diff of prose. Ruled: `slopty-ui::highlight` parses with `syntect` — the bundled
+  Sublime grammars on `regex-fancy`, the pure-Rust engine, no onig and no C — and reduces its
+  TextMate scopes to nine tokens (`Token`: comment, string, constant, keyword, type, function,
+  punctuation, invalid, plain) whose colours are looked up in the app's theme at draw time:
+  keyword = ANSI magenta, string = green, constant = yellow, type = cyan, function = blue,
+  comment = `text_muted` italic, punctuation = `text_secondary`, invalid = `error`. The theme
+  (a settings reload, light or dark) recolours without parsing again, and code reads in the
+  shell's own palette. Not the alternatives: gpui-kit's own highlighter is tree-sitter (a C
+  runtime and a C grammar per language, against the pure-Rust rule, and its feature is off in
+  our build); a TextMate theme in syntect would hold a second palette that drifts from the
+  tokens. Where it runs: the file card parses on a background thread after every read
+  (`FileView::recolour`, a generation guard drops a parse the next read overtook, plain text
+  until the spans land, `"2 lines, Rust"` in the summary once they have) and draws each visible
+  row as a `StyledText` with one `TextRun` per span; a fenced block is coloured through
+  gpui-kit's `TextViewDefaults` code-block hook (`highlight::code_block`, installed by
+  `kit::sync` after `sync_base` reinstalls the defaults), on the UI thread at layout, cached per
+  block by the view. Numbers (`highlight::tests::timing_of_a_full_card`, MEASUREMENTS
+  2026-09-12): a 2 000-line card ≈ 165 ms on the background thread, a 4 KB block ≈ 6 ms; a line
+  past 4 000 bytes stays plain (`LINE_MAX`), so a minified bundle costs nothing. Tests:
+  `highlight::tests` (tokens by extension, name, first line and fence; a block comment across
+  lines; runs cover the line; byte ranges of a block), `file::tests::a_file_is_coloured_by_its_grammar_after_the_read`
+  (background parse, generation guard, summary), `kit::tests` (the hook is installed after a sync).
