@@ -44,7 +44,7 @@ use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 use crate::note::{NoteView, NoteViewEvent};
-use crate::palette::{CommandPalette, PaletteEvent, PaletteItem};
+use crate::palette::{CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::{TerminalView, TerminalViewEvent};
@@ -1087,10 +1087,18 @@ impl CanvasView {
         self.palette_extra = items;
     }
 
-    /// Every line the palette offers.
+    /// Every line the palette offers: the canvas's sessions to go to (agents waiting on the
+    /// human first, as the picker orders them), then every action, then the app's own.
     #[must_use]
-    pub fn palette_lines(&self) -> Vec<PaletteItem> {
-        let mut items = palette_items();
+    pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
+        let mut items: Vec<PaletteItem> = self
+            .session_rows(cx)
+            .into_iter()
+            .map(|row| {
+                PaletteItem::session(&row.title, &row.status.unwrap_or_default(), row.session)
+            })
+            .collect();
+        items.extend(palette_items());
         items.extend(self.palette_extra.iter().cloned());
         items
     }
@@ -1102,14 +1110,22 @@ impl CanvasView {
             return;
         }
         self.palette_return = window.focused(cx);
-        let items = self.palette_lines();
+        let items = self.palette_lines(cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
         self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
-            if let PaletteEvent::Run(action) = event {
-                this.palette_action = Some(action.boxed_clone());
-            }
             this.palette = None;
+            match event {
+                PaletteEvent::Run(PaletteRun::Action(action)) => {
+                    this.palette_action = Some(action.boxed_clone());
+                }
+                PaletteEvent::Run(PaletteRun::Session(session)) => {
+                    // The terminal takes the keyboard, not whoever had it before.
+                    this.palette_return = None;
+                    this.reveal_session(*session, cx);
+                }
+                PaletteEvent::Dismiss => {}
+            }
             cx.notify();
         }));
         self.pending_focus_palette = true;
@@ -4247,6 +4263,25 @@ mod tests {
             v.items().iter().filter(|i| matches!(i.kind, ItemKind::Note { .. })).count()
         });
         assert_eq!(notes, 1, "the action ran");
+
+        // A session on the canvas is a line too: "Go to <title>" reveals and focuses it.
+        let session = SessionId::new();
+        let id = host_opens(&view, cx, session, ClientId::new(), SHELL, 1);
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let first = tree.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.clone());
+        assert_eq!(first.as_deref(), Some("Go to shell"), "sessions come first: {tree:#?}");
+        cx.simulate_keystrokes("g o space t o space s h e l l enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none());
+        assert_eq!(view.read_with(cx, |v, _| v.active_item()), Some(id), "revealed");
+        let terminal_focused = cx.update(|window, cx| {
+            view.read(cx)
+                .active_terminal()
+                .is_some_and(|t| t.read(cx).focus_handle(cx).is_focused(window))
+        });
+        assert!(terminal_focused, "and its terminal has the keyboard");
     }
 
     #[gpui::test]

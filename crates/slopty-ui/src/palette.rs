@@ -12,18 +12,46 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use slopty_core::SessionId;
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
-/// One line of the palette: a name, the keys that do the same, the action ↩ dispatches.
+/// What a line does when it is chosen.
+pub enum PaletteRun {
+    /// Dispatch this from the element that had the keyboard.
+    Action(Box<dyn Action>),
+    /// Reveal and focus this session's terminal on the canvas.
+    Session(SessionId),
+}
+
+impl Clone for PaletteRun {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Action(action) => Self::Action(action.boxed_clone()),
+            Self::Session(session) => Self::Session(*session),
+        }
+    }
+}
+
+impl std::fmt::Debug for PaletteRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
+            Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
+        }
+    }
+}
+
+/// One line of the palette: a name, what the right side says (the keys that do the same, or
+/// a session's status), and what ↩ does.
 pub struct PaletteItem {
-    /// What the line says (`New note`).
+    /// What the line says (`New note`, `Go to shell`).
     pub label: String,
-    /// The shortcut as the line shows it (`⌘⇧N`), empty when there is none.
+    /// The right side, muted: the shortcut (`⌘⇧N`) or a session's status; empty for none.
     pub keys: String,
     /// What runs.
-    pub action: Box<dyn Action>,
+    pub run: PaletteRun,
 }
 
 impl PaletteItem {
@@ -35,7 +63,17 @@ impl PaletteItem {
             .find(|b| b.action().partial_eq(action.as_ref()))
             .map(|b| b.keystrokes().iter().map(|k| keys_label(k.inner())).collect::<String>())
             .unwrap_or_default();
-        Self { label: label.to_owned(), keys, action }
+        Self { label: label.to_owned(), keys, run: PaletteRun::Action(action) }
+    }
+
+    /// A line that goes to a session on the canvas: `Go to <title>`, its status on the right.
+    #[must_use]
+    pub fn session(title: &str, status: &str, session: SessionId) -> Self {
+        Self {
+            label: format!("Go to {title}"),
+            keys: status.to_owned(),
+            run: PaletteRun::Session(session),
+        }
     }
 
     /// The line as a screen reader reads it: the label, then the keys.
@@ -51,11 +89,7 @@ impl PaletteItem {
 
 impl Clone for PaletteItem {
     fn clone(&self) -> Self {
-        Self {
-            label: self.label.clone(),
-            keys: self.keys.clone(),
-            action: self.action.boxed_clone(),
-        }
+        Self { label: self.label.clone(), keys: self.keys.clone(), run: self.run.clone() }
     }
 }
 
@@ -64,7 +98,7 @@ impl std::fmt::Debug for PaletteItem {
         f.debug_struct("PaletteItem")
             .field("label", &self.label)
             .field("keys", &self.keys)
-            .field("action", &self.action.name())
+            .field("run", &self.run)
             .finish()
     }
 }
@@ -118,20 +152,12 @@ pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem>
 }
 
 /// What the palette decided.
+#[derive(Debug)]
 pub enum PaletteEvent {
     /// Run this, once the palette is gone and the focus is back.
-    Run(Box<dyn Action>),
+    Run(PaletteRun),
     /// Esc, or a click outside.
     Dismiss,
-}
-
-impl std::fmt::Debug for PaletteEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Run(action) => f.debug_tuple("Run").field(&action.name()).finish(),
-            Self::Dismiss => f.write_str("Dismiss"),
-        }
-    }
 }
 
 /// The palette: a field and the items that match it.
@@ -196,8 +222,8 @@ impl CommandPalette {
         let matches = self.matches(cx);
         let at = self.selected(matches.len());
         if let Some(item) = matches.get(at) {
-            let action = item.action.boxed_clone();
-            cx.emit(PaletteEvent::Run(action));
+            let run = item.run.clone();
+            cx.emit(PaletteEvent::Run(run));
         }
     }
 
@@ -220,7 +246,7 @@ impl CommandPalette {
     ) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let action = item.action.boxed_clone();
+        let run = item.run.clone();
         let (raised, overlay) = (s.raised, s.overlay);
         div()
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
@@ -240,7 +266,7 @@ impl CommandPalette {
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(move |_this, _ev, _window, cx| {
-                cx.emit(PaletteEvent::Run(action.boxed_clone()));
+                cx.emit(PaletteEvent::Run(run.clone()));
             }))
             .child(
                 div()
@@ -354,23 +380,8 @@ mod tests {
         assert_eq!(label("ctrl-tab"), "⌃⇥");
         assert_eq!(label("cmd-alt-r"), "⌥⌘R");
         assert_eq!(label("cmd-="), "⌘=");
-        let items = vec![
-            PaletteItem {
-                label: "New note".to_owned(),
-                keys: String::new(),
-                action: Box::new(MoveUp),
-            },
-            PaletteItem {
-                label: "Zoom in".to_owned(),
-                keys: String::new(),
-                action: Box::new(MoveUp),
-            },
-            PaletteItem {
-                label: "Zoom to item".to_owned(),
-                keys: String::new(),
-                action: Box::new(MoveUp),
-            },
-        ];
+        let item = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
+        let items = vec![item("New note"), item("Zoom in"), item("Zoom to item")];
         let labels =
             |q: &str| filter(q, &items).iter().map(|i| i.label.as_str()).collect::<Vec<_>>();
         assert_eq!(labels(""), ["New note", "Zoom in", "Zoom to item"]);

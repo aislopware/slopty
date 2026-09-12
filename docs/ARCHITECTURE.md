@@ -374,8 +374,10 @@ windows and displays. Remote-window items are
 created from the picker; `reconcile_screens` opens a stream for every window/display item
 that lacks one and closes streams for items that disappeared, so the document, not the UI, is
 the source of truth for what is being streamed. The command palette (⌘⇧P, `slopty-ui::palette`)
-lists every action by name with its keys read from the binding tables (`canvas::palette_items`
-for the canvas's and the terminal's, the app's own appended with `extend_palette`): typing
+lists the canvas's sessions to go to ("Go to <title>", agents waiting on the human first,
+their status on the right) and every action by name with its keys read from the binding
+tables (`canvas::palette_items` for the canvas's and the terminal's, the app's own appended
+with `extend_palette`; the View menu's "Commands…" opens it on the Mac): typing
 keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
 closes; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
 to every action. The palette remembers where the keyboard was (`window.focused`), puts it

@@ -2993,12 +2993,18 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   hardware keyboard has no ⌘⇧P and the bar had no room for one button per action; on a
   phone-wide bar "+ window" yields its place to it (the palette lists "Add a window or
   display"), since with both the last button sat at x = 405 on a 402-pt screen — the iOS
-  self-test taps it, types into the field through the soft keyboard and runs "New note".
-  Tests: `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
+  self-test taps it, types into the field through the soft keyboard and runs "New note";
+  (7) the canvas's sessions are lines too — "Go to <title>" with the agent's status on the
+  right, ordered as the picker orders them (waiting on the human first) and ahead of the
+  actions, since on a wall of terminals the thing most often wanted is one of them; a
+  session line reveals and focuses the terminal instead of returning the keyboard to where
+  it was (`PaletteRun::Session` beside `PaletteRun::Action`). Tests:
+  `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
-  nothing run, `note` + ↩ leaving one note), and the app self-test's notes scenario, which now
-  makes its note through the palette.
+  nothing run, `note` + ↩ leaving one note, "Go to shell" first once a shell is on the canvas
+  and revealing it with the keyboard in its terminal), and the app self-test's notes scenario,
+  which now makes its note through the palette.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the
