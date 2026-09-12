@@ -22,9 +22,9 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
-    px,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
@@ -906,7 +906,7 @@ impl Conversation {
                     .cursor_pointer()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
                         // The composer keeps the caret; the click must not blur it.
                         cx.stop_propagation();
                     })
@@ -1584,10 +1584,68 @@ fn entry(
                         )))
                         .on_click(toggle),
                 )
-                .when(!shown.text.is_empty(), |el| el.child(clipped_block(&shown, &mono, theme)))
+                .when(!shown.text.is_empty(), |el| {
+                    el.child(result_block(ix, &shown, view, &mono, theme))
+                })
                 .into_any_element()
         }
     }
+}
+
+/// A tool's result, line by line: a line that names a file (a grep hit's `src/a.rs:12:`, a
+/// compiler's ` --> src/b.rs:3:5`) is a button that views the file on the canvas at that
+/// line; the rest is text.
+fn result_block(
+    ix: usize,
+    text: &Clipped,
+    view: &Entity<TerminalView>,
+    mono: &str,
+    theme: &Theme,
+) -> AnyElement {
+    let s = &theme.surfaces;
+    let wash = hsla_alpha(s.text, alpha::HOVER);
+    let rows: Vec<AnyElement> = text
+        .text
+        .lines()
+        .enumerate()
+        .map(|(n, line)| match crate::terminal::url::first_path(line) {
+            Some((_, path, at)) => {
+                let id = format!("result-path-{ix}-{n}");
+                let label = at.map_or_else(|| path.clone(), |l| format!("{path}:{l}"));
+                let view = view.clone();
+                div()
+                    .id(ElementId::Name(id.clone().into()))
+                    .debug_selector(move || id)
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("View {label} on the canvas")))
+                    .cursor_pointer()
+                    .rounded(px(theme.radii.xs))
+                    .hover(move |st| st.bg(wash))
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .on_click(move |_ev, _window, cx| {
+                        cx.stop_propagation();
+                        view.update(cx, |v, cx| v.view_file(&path, at, cx));
+                    })
+                    .child(SharedString::from(line.to_owned()))
+                    .into_any_element()
+            }
+            None => div().child(SharedString::from(line.to_owned())).into_any_element(),
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .pl(px(theme.spacing.lg))
+        .font_family(mono.to_owned())
+        .text_size(px(theme.typography.small()))
+        .whitespace_normal()
+        .children(rows)
+        .when(text.more_lines > 0, |el| {
+            el.child(
+                div().italic().child(SharedString::from(format!("{} more lines", text.more_lines))),
+            )
+        })
+        .into_any_element()
 }
 
 /// A subagent's progress under the call that spawned it: "Explore running · 1 tool use ·
@@ -1855,7 +1913,7 @@ fn view_button(
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
             .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(move |_ev, _window, cx| {
                 cx.stop_propagation();
                 view.update(cx, |v, cx| v.view_file(&path, line, cx));
@@ -1891,7 +1949,7 @@ fn open_button(
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
             .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(move |_ev, _window, cx| {
                 cx.stop_propagation();
                 let command = crate::terminal::url::editor_command(&path, line);

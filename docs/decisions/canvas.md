@@ -270,6 +270,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   focused, the count reads 1/2, ⌘G/↩/⇧↩ step and wrap, a re-read recounts, Esc closes and
   the canvas is focused).
 
+- ✅ **A result line that names a file views it on the canvas** (2026-09-12). A grep's hits
+  (`src/a.rs:12:fn x`), a compiler's locations (` --> src/b.rs:3:5`), a glob's paths: the
+  agent's tool results are full of places the human wants to look at, and the card had "view"
+  only on the call's header. Ruling: every line of a tool result that holds a path
+  (`url::first_path`, the first whitespace-delimited token `path_range_at` accepts — the
+  terminal's ⌘-click rule, so the same text reads the same in both) is a button
+  (`result-path-<entry>-<line>`, a11y "View <path>:<line> on the canvas") that opens the file
+  card at that line through `TerminalView::view_file` (relative to the agent's cwd); a line
+  without one is text. A grep hit's `path:12:text` is cut at the text (`url::grep_cut`) so
+  the path and line are read off it, while a bare `path:12:5` stays whole for the ⌘-click
+  underline. The click stops propagation so it does not toggle the result's fold. Tests:
+  `the_first_path_of_a_result_line_is_found_with_its_line` (unit),
+  `a_results_path_lines_view_the_file` (headless: the two buttons, the text line, a click's
+  `ViewFile` made absolute, the fold untouched).
+
 - ✅ **A tool call's file opens in the canvas's shell** (2026-09-12). The card shows the
   agent editing `src/a.rs`; the human's next move is to look at that file, and finding it
   by hand meant a shell, a `cd` and a typed path. Ruling: an edit, a write and a read

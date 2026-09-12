@@ -3837,6 +3837,66 @@ mod tests {
         assert_eq!(keys, 1, "then ↩");
     }
 
+    /// A tool result's lines that name a file — a grep hit, a compiler's location — are
+    /// buttons that view the file on the canvas at that line, relative to the agent's cwd.
+    #[gpui::test]
+    fn a_results_path_lines_view_the_file(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&viewed);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::ViewFile { path, line } = event {
+                    seen.borrow_mut().push((path.clone(), *line));
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("cmd-shift-l");
+        let session = view.read_with(cx, |v, _| v.session);
+        let result = TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolResult {
+                tool: Some("Grep".to_owned()),
+                output: Clipped::whole(
+                    "src/a.rs:12:fn x() {\nno path here\n  --> src/b.rs:3:5".to_owned(),
+                ),
+                is_error: false,
+            },
+        };
+        view.update(cx, |v, cx| {
+            v.agent_info(AgentInfo { cwd: Some("/w".to_owned()), ..AgentInfo::default() }, cx);
+            v.transcript_update(
+                TranscriptUpdate { session, reset: true, entries: vec![tool("grep"), result] },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let buttons: Vec<&str> = tree
+            .iter()
+            .filter(|n| {
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("View "))
+            })
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(
+            buttons,
+            ["View src/a.rs:12 on the canvas", "View src/b.rs:3 on the canvas"],
+            "{tree:#?}"
+        );
+        assert!(cx.debug_bounds("result-path-1-1").is_none(), "a line without a path is text");
+        let hit = cx.debug_bounds("result-path-1-2").expect("the compiler's location");
+        cx.simulate_click(hit.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(viewed.borrow().as_slice(), [("/w/src/b.rs".to_owned(), Some(3))]);
+        assert!(
+            view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(1))),
+            "the click did not toggle the fold"
+        );
+    }
+
     /// While a command runs there is no prompt to type at: ⌘-click on a path asks the canvas
     /// for a file card instead (`ViewFile` with the path as printed), and types nothing.
     #[gpui::test]

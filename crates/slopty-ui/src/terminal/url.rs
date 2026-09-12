@@ -131,6 +131,8 @@ fn path_range_at(text: &str, offset: usize) -> Option<(Range<usize>, String, Opt
     if run.contains("://") {
         return None;
     }
+    // A grep hit's `path:12:text` (or `path:12:5:text`): the path and line end at the text.
+    let run = grep_cut(run).and_then(|cut| run.get(..cut)).unwrap_or(run);
     // `path:12:5` → `path`, 12; `path:12` → `path`, 12; a lone `path` → no line.
     let mut path = run;
     let mut line = None;
@@ -152,6 +154,47 @@ fn path_range_at(text: &str, offset: usize) -> Option<(Range<usize>, String, Opt
         return None;
     }
     Some((start..start.saturating_add(run.len()), path.to_owned(), line))
+}
+
+/// Where `path:12:` or `path:12:5:` ends in `run` (after the last digits, before the colon
+/// that starts the text), when `run` reads as a grep hit.
+fn grep_cut(run: &str) -> Option<usize> {
+    let digits_at =
+        |at: usize| run.get(at..).map_or(0, |r| r.bytes().take_while(u8::is_ascii_digit).count());
+    let colon = run.find(':')?;
+    let line = digits_at(colon.saturating_add(1));
+    if line == 0 {
+        return None;
+    }
+    let mut end = colon.saturating_add(1).saturating_add(line);
+    // An optional column, kept when it is the end or another colon follows it.
+    if run.get(end..).is_some_and(|r| r.starts_with(':')) {
+        let col = digits_at(end.saturating_add(1));
+        let after_col = end.saturating_add(1).saturating_add(col);
+        if col > 0 && run.get(after_col..).is_some_and(|r| r.is_empty() || r.starts_with(':')) {
+            end = after_col;
+        }
+    }
+    // Only a hit with text after the location is cut; a bare `path:12:5` stays whole.
+    match run.get(end..) {
+        Some(rest) if rest.starts_with(':') && rest.len() > 1 => Some(end),
+        _ => None,
+    }
+}
+
+/// The first file path in `text` — a grep hit's `src/a.rs:12:…`, a compiler's
+/// ` --> src/b.rs:3:5` — with its byte range and the line number after it.
+#[must_use]
+pub fn first_path(text: &str) -> Option<(Range<usize>, String, Option<u32>)> {
+    let mut at_word_start = true;
+    for (i, c) in text.char_indices() {
+        let starts_word = at_word_start && !c.is_whitespace();
+        at_word_start = c.is_whitespace();
+        if starts_word && let Some(found) = path_range_at(text, i) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// `s` as one word for a POSIX or fish shell: single-quoted, a quote inside spelled out.
@@ -231,6 +274,20 @@ mod tests {
     use slopty_grid::{Cell, Hyperlink, Style};
 
     use super::*;
+
+    #[test]
+    fn the_first_path_of_a_result_line_is_found_with_its_line() {
+        let first = |t: &str| first_path(t).map(|(_, p, l)| (p, l));
+        assert_eq!(first("src/a.rs:12:fn x() {"), Some(("src/a.rs".to_owned(), Some(12))));
+        assert_eq!(first("  --> src/b.rs:3:5"), Some(("src/b.rs".to_owned(), Some(3))));
+        assert_eq!(first("/tmp/w/note.txt"), Some(("/tmp/w/note.txt".to_owned(), None)));
+        assert_eq!(first("Found 3 files in lib.rs"), Some(("lib.rs".to_owned(), None)));
+        assert_eq!(first("no path here"), None);
+        assert_eq!(first("src/a.rs:12:5:x = 1"), Some(("src/a.rs".to_owned(), Some(12))));
+        assert_eq!(first("a.rs:12:34:56"), Some(("a.rs".to_owned(), Some(12))));
+        assert_eq!(first("see https://x.y/z"), None, "a URL is not a path");
+        assert_eq!(first(""), None);
+    }
 
     #[test]
     fn text_links_come_with_their_columns() {

@@ -2602,6 +2602,13 @@ ran right after the file scenario's daemons shut down in the same `cargo test` p
 tail is the known content-keyed-cache worst case, not a regression the file card introduced
 (the card is not on that canvas). No optimisation follows from this: nothing to fix.
 
+A second run the same evening (main `0fa1bee`) repeated the shape — (e) 3.9 / 4.1 / 4.4 ms,
+0 dropped; (f) 9.5 / 11.6 / 16.7 ms, 1 dropped; (b) p90 29.7 ms, 16 dropped — but the
+machine was not idle (load average 12 on ten cores: a VM, a booted simulator left by the
+iOS self-test, other sessions), so the (a)/(b) tails of both evening runs are the
+environment's until a run on an idle machine says otherwise; the file-card numbers held
+regardless.
+
 ## 2026-09-12 — gate wall time, third look: a snapshot and parallel lanes
 
 `cargo gate` before and after the rewrite in `xtask/src/gate.rs` (snapshot of the tree under

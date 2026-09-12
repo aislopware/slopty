@@ -736,7 +736,10 @@ slice or filter. A call that named a file (an edit, a write, a read; `conversati
 carries an "open" button in its header (`conversation-open-<entry>`, a11y "Open <path> in the
 editor") under the same rule as the answer's "run" button: drawn only while the canvas has a
 plain shell, and a click types `url::editor_command` for the path into that shell the way
-⌘-click on a path in a terminal does, without folding the call. A screen reader hears the
+⌘-click on a path in a terminal does, without folding the call. Every line of a result that
+names a file (`url::first_path`: a grep hit `src/a.rs:12:…`, a compiler's ` --> src/b.rs:3:5`)
+is a button (`result-path-<entry>-<line>`, a11y "View <path>:<line> on the canvas") that opens
+the file card at that line (`TerminalView::view_file`). A screen reader hears the
 counts ("Tool Edit: src/a.rs, 2 added, 1 removed", "Tool TodoWrite: 1 of 3 done"); headless
 `an_edit_shows_its_diff_and_a_todo_list_its_checklist` and `a_tool_calls_path_opens_in_the_canvas_shell`,
 the app self-test's `edit` turn against the fake (golden `conversation-tools`). Under the list sits the
