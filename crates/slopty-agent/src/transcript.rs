@@ -1014,6 +1014,8 @@ mod tests {
         std::io::Write::write_all(&mut &file, b"needle\n").expect("write");
         file.set_len(LOCATE_BYTES + 1).expect("grow");
         assert_eq!(edit_line(&path, "needle", ""), None);
+        file.set_len(LOCATE_BYTES).expect("shrink");
+        assert_eq!(edit_line(&path, "needle", ""), Some(1), "at the cap it is searched");
     }
 
     #[test]
@@ -1120,6 +1122,23 @@ mod tests {
             }
         );
         assert_eq!(tool_summary("AskUserQuestion", Some(&ask)), "Which colour?");
+        // Each tool's own field, not the first string in its input.
+        let summary = |name: &str, input: Value| tool_summary(name, Some(&input));
+        assert_eq!(summary("Grep", serde_json::json!({"glob":"*.rs","pattern":"todo"})), "todo");
+        assert_eq!(
+            summary("Glob", serde_json::json!({"path":"src","pattern":"**/*.rs"})),
+            "**/*.rs"
+        );
+        assert_eq!(
+            summary("WebFetch", serde_json::json!({"prompt":"summarise","url":"https://x.test"})),
+            "https://x.test"
+        );
+        assert_eq!(summary("WebSearch", serde_json::json!({"query":"gpui"})), "gpui");
+        assert_eq!(summary("Agent", serde_json::json!({"model":"opus","prompt":"do it"})), "do it");
+        assert_eq!(
+            summary("Task", serde_json::json!({"description":"scan","prompt":"do it"})),
+            "scan"
+        );
         // A known tool with a strange input, and a tool the host does not know.
         assert_eq!(
             tool_detail("Bash", Some(&serde_json::json!({"cmd": "ls"}))),
@@ -1161,6 +1180,11 @@ mod tests {
         assert_eq!(lines.len(), CLIP_LINES);
         assert_eq!(usize::try_from(more).unwrap_or(0), 60 - CLIP_LINES);
         assert!(lines.iter().all(|l| l.kind != DiffKind::Context), "{lines:?}");
+        // The character cap is inclusive: a line that lands exactly on it is kept.
+        let (lines, more) = diff_lines("", &"x".repeat(CLIP_CHARS));
+        assert_eq!((lines.len(), more), (1, 0));
+        let (lines, more) = diff_lines("", &"x".repeat(CLIP_CHARS + 1));
+        assert_eq!((lines.len(), more), (0, 1));
         // A text without a final newline diffs the same as one with it.
         let (lines, more) = diff_lines("a\nb", "a\nc\n");
         assert_eq!(
