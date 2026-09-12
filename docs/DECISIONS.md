@@ -2927,6 +2927,36 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+- ✅ **A long shell command that ends unwatched badges its item** (2026-09-12). Agents
+  already badge their title bar when they need the human; a `cargo build` or a test run left
+  in a shell the human has panned away from ended silently, and Warp/iTerm both notify on
+  exactly that. Rulings: (1) it is read from the shell-integration marks the client already
+  holds, no wire change: `TermState::track_command` runs every frame on the prompt's rows
+  alone (`block_head`), treats a command as running once the cursor has left the rows it was
+  typed on (Enter moves it to the output or the next prompt; typing, including a multi-line
+  command on `Input` rows, never does) and as finished when a newer prompt start appears,
+  whose `exit` is the status the shell reported (`OSC 133;D`); a command that starts and
+  ends inside one frame reports nothing, which is fine — it could not have been slow; (2)
+  the first prompt of a new epoch (reflow, reset, alt screen) ends nothing: the numbering
+  changed, so "newer" means nothing across it (`vim` returning from the alt screen therefore
+  never badges, right for an interactive program); (3) the client measures with wall time
+  in the view (`command_started: Instant`), not the host: the badge is about the human's
+  attention on this client, and the state machine stays pure; (4) the canvas badges only
+  when the command ran at least `SLOW_COMMAND` (5 s: shorter commands end before anyone has
+  looked away) and its item is not the active one; `set_slow_command` exists for tests and a
+  future setting; (5) the badge is a Button in the success tone ("done 12.3 s") or the warn
+  tone on a non-zero status ("failed (1) 1 min 4 s"), between the chat pill and the agent
+  badge, and a press activates the item, which is also what clears it (`activate`), so the
+  human's look is the acknowledgement; (6) no system notification and no `needs-you` count:
+  those mean an agent is waiting on the human, and a finished command is waiting on nobody.
+  Tests: `a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts`
+  (`slopty-client`, the state machine: typed-not-entered, entered, still running, the next
+  prompt with its status, a new epoch), `a_long_command_that_ends_unwatched_badges_its_item`
+  (headless canvas: the active item badges nothing, the other item's badge reads "done
+  0.0 s" as a Button, a press activates and clears), `a_finished_badge_says_the_status_and_the_time`,
+  and the app self-test's first scenario (`sleep 6` in the first shell, ⌘N to a second: the
+  badge appears from the real zsh marks through ptyd, the engine and the wire, and the click
+  back on the first card clears it).
 - ✅ **Slash completions say what a command does and takes, protocol 29** (2026-09-12).
   The list was bare names in chips; Claude Code has forty-odd commands and skills, and a name
   like `/compact` says nothing about its optional instructions. Read from the CLI (2.1.269):

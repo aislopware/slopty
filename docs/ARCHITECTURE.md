@@ -840,6 +840,15 @@ rows have all scrolled above, a one-row header over the grid (`block-header`, ro
 `TerminalView::block_header`, reading `TermState::block_head` — the prompt's rows alone, never
 the output) names the command in the mono face on the panel colour, ruled
 under with the block's separator colour; a click on it puts the prompt back at the top.
+`TermState` also follows the blocks frame by frame (`track_command`, the prompt's rows
+alone): a command is running once the cursor has left the rows it was typed on
+(`Effect::CommandStarted`) and finished when a newer prompt starts, whose `exit` is its
+status (`Effect::CommandFinished`); the view times the two and emits
+`TerminalViewEvent::CommandFinished { command, exit, elapsed }`, and the canvas badges the
+item's title bar ("done 12.3 s", "failed (1) 1 min 4 s" in the success or warn tone,
+`finished-<uuid>`, role Button) when the command ran at least `SLOW_COMMAND` (5 s) and its
+item was not the active one — the shell's answer to the agent attention badge. The badge
+goes when the item is activated (a press on it does that).
 Headless `#[gpui::test]`s in `terminal/view.rs` read the
 separators back from `painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
 for the conversation view (§5), whose composer takes the typing.

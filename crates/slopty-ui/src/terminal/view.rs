@@ -191,6 +191,17 @@ pub enum TerminalViewEvent {
     },
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
+    /// A shell command finished (shell integration marks): what was typed, its status, and how
+    /// long it ran from the frame the cursor left its prompt to the frame the next prompt
+    /// arrived. The canvas badges the item when that was long and nobody was watching.
+    CommandFinished {
+        /// What was typed.
+        command: String,
+        /// Its exit status, when the shell said.
+        exit: Option<u8>,
+        /// How long it ran.
+        elapsed: Duration,
+    },
 }
 
 /// One session's view.
@@ -229,6 +240,8 @@ pub struct TerminalView {
     files: Option<(String, Vec<String>)>,
     /// The `@` query last asked of the host, so a keystroke that leaves it alone asks nothing.
     files_asked: Option<String>,
+    /// When the running shell command left its prompt.
+    command_started: Option<Instant>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
     /// ⌘ is down: links under the pointer show as links.
@@ -321,6 +334,7 @@ impl TerminalView {
             block_menu: None,
             files: None,
             files_asked: None,
+            command_started: None,
             selection: None,
             selecting: false,
             hover: None,
@@ -1798,6 +1812,12 @@ impl TerminalView {
                 }
                 Effect::SearchInvalid { needle, message } => {
                     self.search_invalid(&needle, message, cx);
+                }
+                Effect::CommandStarted(_) => self.command_started = Some(Instant::now()),
+                Effect::CommandFinished { command, exit } => {
+                    let elapsed =
+                        self.command_started.take().map_or(Duration::ZERO, |t| t.elapsed());
+                    cx.emit(TerminalViewEvent::CommandFinished { command, exit, elapsed });
                 }
             }
         }

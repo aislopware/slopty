@@ -122,6 +122,11 @@ mod tests {
         assert!(fg > 0.01, "frame is blank ({fg:.4} foreground)");
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
+        // A long command left running in this shell while the human moves on: the badge on its
+        // title bar says it finished, read from the shell integration marks ptyd injected.
+        drv.type_text("sleep 6").await.unwrap();
+        drv.keys("enter").await.unwrap();
+
         // ⌘N opens a second shell beside the first and takes the keyboard.
         drv.keys("cmd-n").await.unwrap();
         let dump = drv
@@ -131,6 +136,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
+        let finished = |d: &slopty_e2e::Dump| {
+            d.a11y.iter().any(|n| {
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("done "))
+            })
+        };
+        drv.wait_for("the sleep to badge its shell", STEP + Duration::from_secs(8), finished)
+            .await
+            .unwrap();
 
         // The camera panned to reveal the new shell; ⌘1 fits both into the viewport. In this
         // window that is below the card zoom: the shells draw as cards and the keyboard goes
@@ -159,6 +172,7 @@ mod tests {
             .unwrap();
         assert_eq!(dump.items.len(), 2);
         assert_eq!(dump.focused, "canvas", "{dump:#?}");
+        assert!(!finished(&dump), "looking at the shell clears its badge: {:#?}", dump.a11y);
 
         // ⌘0 brings the grids back and the active shell takes the keyboard again.
         drv.keys("cmd-0").await.unwrap();

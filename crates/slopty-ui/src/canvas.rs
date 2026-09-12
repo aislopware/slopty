@@ -9,6 +9,7 @@
 //! geometry change is applied locally first and proposed to the host on release.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -195,7 +196,7 @@ const TITLE_H: f32 = 28.0;
 const GRIP: f32 = 14.0;
 /// How long after the last zoom change the settled frame (exact rasters) is asked for. A
 /// gesture reports every few milliseconds; a frame per report and one more after the pause.
-const SETTLE: std::time::Duration = std::time::Duration::from_millis(80);
+const SETTLE: Duration = Duration::from_millis(80);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
@@ -231,6 +232,39 @@ pub enum CanvasEvent {
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
 }
+
+/// A shell command that finished while nobody was looking: what the title-bar badge says.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Finished {
+    /// What was typed.
+    pub command: String,
+    /// Its exit status, when the shell said.
+    pub exit: Option<u8>,
+    /// How long it ran.
+    pub elapsed: Duration,
+}
+
+impl Finished {
+    /// The badge text: "done 3.2 s", "failed (1) 1 min 4 s".
+    #[must_use]
+    pub fn label(&self) -> String {
+        let secs = self.elapsed.as_secs_f64();
+        let took = if secs < 60.0 {
+            format!("{secs:.1} s")
+        } else {
+            let whole = self.elapsed.as_secs();
+            format!("{} min {} s", whole / 60, whole % 60)
+        };
+        match self.exit {
+            Some(0) | None => format!("done {took}"),
+            Some(code) => format!("failed ({code}) {took}"),
+        }
+    }
+}
+
+/// How long a shell command has to run before its end, unwatched, is worth a badge: shorter
+/// commands end before the human has looked away.
+pub const SLOW_COMMAND: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug)]
 enum Drag {
@@ -319,6 +353,11 @@ pub struct CanvasView {
     awake: Option<Task<()>>,
     /// Badge answers sent but not yet reflected by the host.
     answered: HashMap<SessionId, Answer>,
+    /// Shell commands that ran long and finished while their item was not the active one, by
+    /// session: badged on the title bar until the item is activated.
+    finished: HashMap<SessionId, Finished>,
+    /// A command that ran at least this long earns the badge when it ends unwatched.
+    slow_command: Duration,
     /// `slopty hook install` has been offered to this human once; the offer stops showing
     /// whether they took it or not, and comes back only if the host reports it failed.
     hooks_offered: bool,
@@ -352,7 +391,7 @@ pub struct CanvasView {
     /// The stats overlay is on (applies to windows opened later too).
     show_stats: bool,
     /// Latest link RTT, handed to windows opened later.
-    rtt: Option<std::time::Duration>,
+    rtt: Option<Duration>,
     /// Viewport origin (window coordinates) and size, recorded each frame.
     viewport: (Point<Pixels>, Size<Pixels>),
     /// Fit every item into the viewport on the next frame (once the viewport is known).
@@ -434,6 +473,8 @@ impl CanvasView {
             agents: HashMap::new(),
             awake: None,
             answered: HashMap::new(),
+            finished: HashMap::new(),
+            slow_command: SLOW_COMMAND,
             hooks_offered: false,
             screens: HashMap::new(),
             notes: HashMap::new(),
@@ -748,6 +789,29 @@ impl CanvasView {
         self.agents.get(&session)
     }
 
+    /// A shell command ended in `session`. Long enough, and in an item the human is not on,
+    /// it earns a title-bar badge (like an agent's), cleared when the item is activated. A
+    /// new end replaces an older badge.
+    pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
+        let watched = self.doc.item_for_session(session).is_some_and(|i| self.active == Some(i.id));
+        if watched || done.elapsed < self.slow_command {
+            return;
+        }
+        self.finished.insert(session, done);
+        cx.notify();
+    }
+
+    /// The badge a session's last long command left, if the item has not been looked at since.
+    #[must_use]
+    pub fn finished(&self, session: SessionId) -> Option<&Finished> {
+        self.finished.get(&session)
+    }
+
+    /// How long a command has to run before its unwatched end is badged.
+    pub const fn set_slow_command(&mut self, after: Duration) {
+        self.slow_command = after;
+    }
+
     /// Whether `slopty hook install` has already been offered on this canvas.
     #[must_use]
     pub const fn hooks_offered(&self) -> bool {
@@ -970,7 +1034,7 @@ impl CanvasView {
     }
 
     /// Link RTT (fanned out to every terminal's predictor and every window's overlay).
-    pub fn set_rtt(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+    pub fn set_rtt(&mut self, rtt: Option<Duration>, cx: &mut Context<Self>) {
         self.rtt = rtt;
         for view in self.terminals.values() {
             view.update(cx, |v, _| v.set_rtt(rtt));
@@ -1433,6 +1497,11 @@ impl CanvasView {
                         );
                     }
                     TerminalViewEvent::Notice(text) => cx.emit(CanvasEvent::Notice(text.clone())),
+                    TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
+                        let done =
+                            Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
+                        this.command_finished(sid, done, cx);
+                    }
                 },
             ));
             if self.is_driven(*session) {
@@ -2057,6 +2126,9 @@ impl CanvasView {
 
     fn activate(&mut self, id: ItemId, cx: &mut Context<Self>) {
         self.active = Some(id);
+        if let Some(ItemKind::Terminal { session }) = self.doc.get(id).map(|i| &i.kind) {
+            self.finished.remove(session);
+        }
         if self.doc.by_z().last().is_none_or(|top| top.id != id) {
             self.propose(CanvasOp::Raise(id));
         }
@@ -2175,6 +2247,12 @@ impl CanvasView {
             _ => None,
         };
         let badge = agent.map(|(session, a)| self.agent_badge(id, session, a, chrome, cx));
+        let finished = match &item.kind {
+            ItemKind::Terminal { session } => {
+                self.finished.get(session).map(|f| self.finished_badge(id, *session, f, chrome, cx))
+            }
+            _ => None,
+        };
         // A session with an agent offers its conversation in place of the grid.
         let chat = agent.and_then(|(session, _)| {
             let view = self.terminals.get(&session)?;
@@ -2256,6 +2334,7 @@ impl CanvasView {
             )
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
+            .when_some(finished, gpui::ParentElement::child)
             .when_some(badge, gpui::ParentElement::child);
 
         let body: gpui::AnyElement = match &item.kind {
@@ -2937,6 +3016,52 @@ impl CanvasView {
     }
 }
 
+impl CanvasView {
+    /// The badge for a long shell command that ended unwatched: its status and how long it
+    /// took, in the success or warn tone. A press activates the item (which clears it).
+    fn finished_badge(
+        &self,
+        item: ItemId,
+        session: SessionId,
+        done: &Finished,
+        chrome: Chrome,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let k = chrome.k;
+        let tone = match done.exit {
+            Some(0) | None => theme.surfaces.success,
+            Some(_) => theme.surfaces.warn,
+        };
+        let label = done.label();
+        let pill = div()
+            .id(element_id("finished", item))
+            .debug_selector(move || format!("finished-{}", item.as_uuid()))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .flex_none()
+            .overflow_hidden()
+            .px(px(theme.spacing.sm * k))
+            .py(px(theme.spacing.xxs * k))
+            .rounded(px(theme.radii.xs * k))
+            .bg(hsla_alpha(tone, alpha::TINT))
+            .text_size(px(theme.typography.small() * k))
+            .text_color(hsla(tone))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
+            .child(
+                ChromeText::new(label, px(theme.typography.small()), k)
+                    .fill()
+                    .zooming(chrome.zooming),
+            );
+        tab_stop(pill, theme.surfaces.accent)
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                this.reveal_session(session, cx);
+            }))
+            .into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The canvas in a headless GPUI window: real layout, real key and mouse dispatch, no
@@ -2946,7 +3071,7 @@ mod tests {
     use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
-    use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, Style, TermModes};
+    use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::agent::AgentKind;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
@@ -3190,6 +3315,92 @@ mod tests {
         })
     }
 
+    /// A frame of marked rows with the cursor on `cursor_row`, the shell-integration shape a
+    /// host sends for a command block.
+    fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> TermEvent {
+        TermEvent::Frame(Frame {
+            seq,
+            full: seq == 1,
+            epoch: 0,
+            cols: 80,
+            rows: u16::try_from(rows.len()).unwrap(),
+            cursor: Cursor { row: cursor_row, ..Cursor::default() },
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(0),
+            total_lines: rows.len() as u64,
+            input_ack: 0,
+            updates: rows
+                .iter()
+                .enumerate()
+                .map(|(row, (text, mark))| {
+                    let mut line = Line::from_text(text, 80, Style::DEFAULT);
+                    line.mark = *mark;
+                    RowUpdate { row: u16::try_from(row).unwrap(), line }
+                })
+                .collect(),
+        })
+    }
+
+    /// A shell command that ran long and ended in an item the human is not on badges its
+    /// title bar with the status and the time; the same end in the active item badges
+    /// nothing; pressing the badge goes to the item and clears it.
+    #[gpui::test]
+    fn a_long_command_that_ends_unwatched_badges_its_item(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let other = SessionId::new();
+        let id = host_opens(&view, cx, session, me, SHELL, 1);
+        let other_id = host_opens(&view, cx, other, me, Rect { x: 800.0, ..SHELL }, 2);
+        view.update_in(cx, |c, window, _cx| {
+            c.set_slow_command(Duration::ZERO);
+            window.set_a11y_active(true);
+        });
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(other_id), "on the other");
+
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let run = |view: &Entity<CanvasView>, cx: &mut VisualTestContext, session: SessionId| {
+            let typed = [
+                ("$ sleep 9", prompt(None)),
+                ("", SemanticMark::Output),
+                ("", SemanticMark::Output),
+            ];
+            let done =
+                [("$ sleep 9", prompt(None)), ("", SemanticMark::Output), ("$ ", prompt(Some(0)))];
+            view.update_in(cx, |c, _window, cx| {
+                c.term_event(session, marked_frame(1, &typed, 0), cx);
+                c.term_event(session, marked_frame(2, &typed, 1), cx);
+                c.term_event(session, marked_frame(3, &done, 2), cx);
+            });
+            cx.run_until_parked();
+        };
+
+        run(&view, cx, other);
+        assert!(view.read_with(cx, |c, _| c.finished(other).is_none()), "watched: no badge");
+
+        run(&view, cx, session);
+        let label = view.read_with(cx, |c, _| c.finished(session).map(Finished::label));
+        assert_eq!(label.as_deref(), Some("done 0.0 s"));
+        let badge = cx.debug_bounds(selector("finished", id)).expect("the badge is drawn");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("done 0.0 s"))), "{tree:?}");
+
+        cx.simulate_click(badge.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id), "the badge goes there");
+        assert!(view.read_with(cx, |c, _| c.finished(session).is_none()), "and clears");
+        assert!(cx.debug_bounds(selector("finished", id)).is_none());
+    }
+
+    #[test]
+    fn a_finished_badge_says_the_status_and_the_time() {
+        let done =
+            |exit, secs| Finished { command: "x".into(), exit, elapsed: Duration::from_secs(secs) };
+        assert_eq!(done(Some(0), 7).label(), "done 7.0 s");
+        assert_eq!(done(None, 7).label(), "done 7.0 s");
+        assert_eq!(done(Some(1), 65).label(), "failed (1) 1 min 5 s");
+    }
+
     fn drain(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ClientMsg> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
@@ -3311,7 +3522,6 @@ mod tests {
 
         let session = SessionId::new();
         let id = host_opens(&view, cx, session, me, SHELL, 1);
-
         // Our own upsert: the item is drawn at its rect, active, the terminal takes the
         // keyboard, it attached itself to the host and the minimap appears.
         let bounds = cx.debug_bounds(selector("item", id)).expect("item drawn");

@@ -44,6 +44,15 @@ pub enum Effect {
         /// Why.
         message: String,
     },
+    /// A shell command left its prompt: it is running (shell integration marks only).
+    CommandStarted(String),
+    /// The shell printed its next prompt: the running command finished.
+    CommandFinished {
+        /// What was typed.
+        command: String,
+        /// Its exit status, when the shell said.
+        exit: Option<u8>,
+    },
 }
 
 /// One row as the UI should draw it.
@@ -74,6 +83,10 @@ pub struct TermState {
     driving: bool,
     resync_pending: bool,
     frames: u64,
+    /// The newest prompt start seen this epoch; a newer one ends the running command.
+    latest_prompt: Option<LineIndex>,
+    /// The command running since the cursor left its prompt, with the prompt it was typed at.
+    running: Option<(LineIndex, String)>,
 }
 
 /// The head of a command block, as [`TermState::block_head`] reads it from the marks.
@@ -127,6 +140,8 @@ impl TermState {
             driving: false,
             resync_pending: false,
             frames: 0,
+            latest_prompt: None,
+            running: None,
         }
     }
 
@@ -247,6 +262,7 @@ impl TermState {
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
+                self.running = None;
                 vec![Effect::Exited(status)]
             }
             TermEvent::Resized { cols, rows } => {
@@ -277,6 +293,7 @@ impl TermState {
             self.scrollback = Scrollback::new(CACHE_LINES);
             self.epoch = Some(frame.epoch);
             self.view_offset = 0;
+            self.latest_prompt = None;
         }
         let gap = match self.last_seq {
             Some(prev) => frame.seq != prev.wrapping_add(1),
@@ -310,10 +327,50 @@ impl TermState {
         *self.screen.cursor_mut() = frame.cursor;
         self.screen.set_modes(frame.modes);
         self.input_ack = frame.input_ack;
+        self.track_command(&mut effects);
         // Keep the viewport anchored on content while scrolled (offset counts from the bottom, so
         // nothing to do); clamp if history shrank.
         self.view_offset = self.view_offset.min(self.history_len());
         effects
+    }
+
+    /// Follow the shell's command blocks from the marks: a command is running once the cursor
+    /// has left the rows it was typed on, and finished when a newer prompt starts (whose `exit`
+    /// is its status). Reads the prompt's rows only, so it runs on every frame.
+    fn track_command(&mut self, effects: &mut Vec<Effect>) {
+        let Some(prompt) = self.newest_prompt() else { return };
+        match self.latest_prompt {
+            // The first prompt of an epoch (a reflow, a reset, the alt screen coming or going)
+            // says nothing about what ran before it.
+            None => self.latest_prompt = Some(prompt),
+            Some(seen) if prompt.0 > seen.0 => {
+                self.latest_prompt = Some(prompt);
+                if let Some((_, command)) = self.running.take() {
+                    let exit = self.line(prompt).and_then(|l| l.mark.exit());
+                    effects.push(Effect::CommandFinished { command, exit });
+                }
+            }
+            Some(_) => {}
+        }
+        if self.running.is_some() {
+            return;
+        }
+        let cursor = self.first_visible.offset(u64::from(self.screen.cursor().row));
+        if let Some(head) = self.block_head(prompt)
+            && cursor.0 >= head.body.0
+            && let Some(command) = head.command
+        {
+            self.running = Some((prompt, command.clone()));
+            effects.push(Effect::CommandStarted(command));
+        }
+    }
+
+    /// The newest prompt start on the screen.
+    fn newest_prompt(&self) -> Option<LineIndex> {
+        (0..self.screen.rows())
+            .rev()
+            .map(|r| self.first_visible.offset(u64::from(r)))
+            .find(|&index| self.line(index).is_some_and(|l| l.mark.starts_prompt()))
     }
 
     /// Scroll the viewport by `delta` lines (positive = up into history). Returns fetch requests
@@ -613,6 +670,51 @@ mod tests {
         let mut line = Line::from_text(text, 10, Style::DEFAULT);
         line.mark = mark;
         line
+    }
+
+    #[test]
+    fn a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let at = |mut f: Frame, row: u16| {
+            f.cursor.row = row;
+            f
+        };
+        let commands = |effects: Vec<Effect>| {
+            effects
+                .into_iter()
+                .filter(|e| matches!(e, Effect::CommandStarted(_) | Effect::CommandFinished { .. }))
+                .collect::<Vec<_>>()
+        };
+        // An empty prompt: nothing runs.
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ")]);
+        f.updates[0].line.mark = prompt(None);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        // Typed but not entered: the cursor is still on the prompt row.
+        let mut f = frame(2, false, 0, 0, 3, &[(0, "$ sleep 9")]);
+        f.updates[0].line.mark = prompt(None);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        // Enter: the cursor left the command's rows.
+        let f = frame(3, false, 0, 0, 3, &[(1, "")]);
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandStarted("sleep 9".to_owned())]
+        );
+        // Still running: nothing new.
+        let f = frame(4, false, 0, 0, 3, &[(1, "")]);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
+        // The next prompt carries the status.
+        let mut f = frame(5, false, 0, 0, 3, &[(2, "$ ")]);
+        f.updates[0].line.mark = prompt(Some(1));
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 2)))),
+            vec![Effect::CommandFinished { command: "sleep 9".to_owned(), exit: Some(1) }]
+        );
+        // A new epoch forgets which prompt was newest, so its first prompt ends nothing.
+        let mut f = frame(6, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
+        f.updates[0].line.mark = prompt(None);
+        f.updates[1].line.mark = prompt(Some(0));
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
     }
 
     #[test]

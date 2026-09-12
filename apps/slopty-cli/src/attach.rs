@@ -142,7 +142,9 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                             | Effect::Cwd { .. }
                             | Effect::ClipboardWrite(_)
                             | Effect::Matches { .. }
-                            | Effect::SearchInvalid { .. } => {}
+                            | Effect::SearchInvalid { .. }
+                            | Effect::CommandStarted(_)
+                            | Effect::CommandFinished { .. } => {}
                         }
                     }
                     paint(&state)?;
