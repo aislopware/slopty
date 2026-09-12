@@ -404,7 +404,8 @@ impl Conversation {
     }
 
     /// Put `insert` and a space in the composer, the caret after them: a `/command`
-    /// replaces the text, an `@path` replaces the `@` word the text ends in.
+    /// replaces the text, an `@path` replaces the `@` word the text ends in. A directory
+    /// (`@docs/`) gets no space, so the next keystrokes descend into it.
     pub fn complete(&mut self, insert: &str, window: &mut Window, cx: &mut App) {
         let mut text = if insert.starts_with('@') {
             let current = self.composer_text(cx);
@@ -414,7 +415,9 @@ impl Conversation {
             String::new()
         };
         text.push_str(insert);
-        text.push(' ');
+        if !insert.ends_with('/') {
+            text.push(' ');
+        }
         self.composer.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.insert(text, window, cx);

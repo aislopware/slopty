@@ -4228,6 +4228,17 @@ mod tests {
         assert_eq!(text.as_deref(), Some("see @src/main.rs "), "the word alone is replaced");
         assert!(completions(cx).is_empty(), "the space ends the word");
         assert!(drain_words(&mut rx).is_empty(), "no word: nothing asked");
+        // A directory gets no space: the word goes on, and the host is asked for what is in it.
+        cx.simulate_keystrokes("@ d");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["files:d"]);
+        view.update(cx, |v, cx| v.files("d".to_owned(), vec!["docs/".to_owned()], cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("see @src/main.rs @docs/"), "no space after a directory");
+        assert_eq!(drain_words(&mut rx), ["files:docs/"], "its contents are asked for");
         assert_eq!(conversation::file_query("look at @src/ma"), Some("src/ma"));
         assert_eq!(conversation::file_query("@"), Some(""));
         assert_eq!(conversation::file_query("mail@x y"), None);
