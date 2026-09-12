@@ -1001,6 +1001,22 @@ mod tests {
     }
 
     #[test]
+    fn a_file_of_a_few_megabytes_is_searched_and_a_huge_one_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.txt");
+        let rows = 1024 * 1024;
+        let mut text = "x\n".repeat(rows);
+        text.push_str("needle\n");
+        std::fs::write(&path, &text).expect("write");
+        assert_eq!(edit_line(&path, "needle", ""), Some(u32::try_from(rows + 1).expect("fits")));
+        // Past the cap the file is left alone, whatever it holds.
+        let file = std::fs::File::create(&path).expect("create");
+        std::io::Write::write_all(&mut &file, b"needle\n").expect("write");
+        file.set_len(LOCATE_BYTES + 1).expect("grow");
+        assert_eq!(edit_line(&path, "needle", ""), None);
+    }
+
+    #[test]
     fn an_edit_is_a_diff_a_todo_list_a_checklist_and_a_stranger_its_json() {
         let edit = serde_json::json!({
             "file_path": "src/a.rs",
@@ -1180,7 +1196,13 @@ mod tests {
         );
         let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"in blocks"}]}}"#;
         assert_eq!(progress(blocks).and_then(|p| p.detail).as_deref(), Some("in blocks"));
-        // An assistant record whose content is one string: its last line, still working.
+        // An assistant record whose content is one string is one Markdown entry, and its
+        // progress is its last line, still working.
+        let words_only = r#"{"type":"assistant","message":{"role":"assistant","content":"Just words.\nLast line."}}"#;
+        assert_eq!(
+            entries(words_only).into_iter().map(|e| e.body).collect::<Vec<_>>(),
+            vec![TranscriptBody::Assistant { markdown: "Just words.\nLast line.".to_owned() }]
+        );
         let words = r#"{"type":"assistant","message":{"role":"assistant","content":"Just words.\nLast line."}}"#;
         assert_eq!(
             progress(words),

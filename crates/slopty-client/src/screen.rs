@@ -932,6 +932,8 @@ mod tests {
         assert_eq!(count(0).len(), 1_000, "no loss by default");
         let half = count(500);
         assert!((400..=600).contains(&half.len()), "about half survive: {}", half.len());
+        // The seeded stream is part of the contract: a run at a rate sees the same losses.
+        assert_eq!(half.len(), 512, "the seed's own count");
         assert_eq!(half, count(500), "the same seed drops the same datagrams");
         assert_ne!(half, count(100));
         assert!(count(1_000).is_empty(), "a thousand per thousand drops everything");
