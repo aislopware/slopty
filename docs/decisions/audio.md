@@ -62,3 +62,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   measurement has shown late packets as a problem on the links tried). No `Quality` field for
   audio on purpose: keeping it off the wire avoided a protocol bump, and the gate makes "on"
   free.
+
+- ✅ **The player opens on a blocking thread; the worker never waits for it** (2026-09-13,
+  `AudioSlot::Opening`). The first AudioToolbox client in a process initialises the HAL through
+  coreaudiod, which took ~7 s on the mac-studio (`docs/MEASUREMENTS.md`, 2026-09-13). Created
+  inline on the first audio datagram, that wait stopped the whole screen worker: no
+  reassembly, no NACK, no report, no picture. Now `Worker::open_audio` starts `Audio::new` on
+  `spawn_blocking` and polls a `oneshot` on each packet; packets that land before it is open
+  count as `audio_lost` (they were not played, and a 7 s prefill would be worse than the
+  silence). Decode and playback stay together in `Audio`, so the sequence baseline is the
+  first packet the open player sees. The worker test proves a video frame goes through while
+  the player is still opening.

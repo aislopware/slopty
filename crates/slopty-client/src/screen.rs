@@ -24,7 +24,7 @@ use slopty_media::{
 use slopty_proto::ClientMsg;
 use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
 use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::pacing::{CaptureClock, FrameStamp};
@@ -309,6 +309,10 @@ pub struct ScreenStats {
 enum AudioSlot {
     /// No audio has arrived yet.
     Unopened,
+    /// The player is being created on a blocking thread: `CoreAudio`'s first client in a process
+    /// initialises the HAL, which took ~7 s on the mac-studio (`docs/MEASUREMENTS.md`,
+    /// 2026-09-13), and the worker must keep reassembling and reporting meanwhile.
+    Opening(oneshot::Receiver<Result<Audio, slopty_codec::CodecError>>),
     /// Playing.
     Open(Audio),
     /// Playback could not start; packets are dropped.
@@ -554,18 +558,39 @@ struct Worker {
 }
 
 impl Worker {
-    /// Decode and queue one Opus packet; late duplicates are dropped, gaps counted.
-    fn play_audio(&mut self, seq: u32, payload: &Bytes) {
-        if matches!(self.audio, AudioSlot::Unopened) {
-            self.audio = match Audio::new() {
-                Ok(audio) => AudioSlot::Open(audio),
-                Err(e) => {
-                    tracing::warn!(error = %e, "audio playback unavailable");
+    /// Move the player towards open: start creating it on the first packet, pick it up once
+    /// the blocking thread is done. Never waits.
+    fn open_audio(&mut self) {
+        self.audio = match std::mem::replace(&mut self.audio, AudioSlot::Failed) {
+            AudioSlot::Unopened => {
+                let (tx, rx) = oneshot::channel();
+                drop(tokio::task::spawn_blocking(move || {
+                    let _no_worker = tx.send(Audio::new());
+                }));
+                AudioSlot::Opening(rx)
+            }
+            AudioSlot::Opening(mut rx) => match rx.try_recv() {
+                Ok(Ok(audio)) => AudioSlot::Open(audio),
+                Ok(Err(e)) => {
+                    tracing::warn!(stream = %self.stream, error = %e, "audio playback unavailable");
                     AudioSlot::Failed
                 }
-            };
-        }
-        let AudioSlot::Open(audio) = &mut self.audio else { return };
+                Err(oneshot::error::TryRecvError::Empty) => AudioSlot::Opening(rx),
+                Err(oneshot::error::TryRecvError::Closed) => AudioSlot::Failed,
+            },
+            open_or_failed => open_or_failed,
+        };
+    }
+
+    /// Decode and queue one Opus packet; late duplicates are dropped, gaps counted. A packet
+    /// that lands while the player is still opening (or after it failed) is lost to playback
+    /// and counted as such.
+    fn play_audio(&mut self, seq: u32, payload: &Bytes) {
+        self.open_audio();
+        let AudioSlot::Open(audio) = &mut self.audio else {
+            self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
+            return;
+        };
         let gap = seq.wrapping_sub(audio.seq);
         if audio.seq != 0 && (gap == 0 || gap > u32::MAX / 2) {
             self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
@@ -931,5 +956,229 @@ mod tests {
         }
         assert_eq!(arrivals.0.len(), ARRIVALS, "bounded");
         assert_eq!(arrivals.take(0), None, "the oldest were dropped to make room");
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use std::sync::atomic::AtomicBool;
+
+    use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES, OpusEncoder};
+    use slopty_media::{EncodedFrame, Packetizer, audio_datagram, cursor_datagram};
+
+    use super::*;
+
+    const STREAM: StreamId = StreamId(5);
+
+    /// A worker on its own runtime, with what it sent back caught for inspection.
+    struct Harness {
+        rt: tokio::runtime::Runtime,
+        router: ScreenRouter,
+        handle: ScreenHandle,
+        control: mpsc::Receiver<ClientMsg>,
+        feedback: Arc<Mutex<Vec<Feedback>>>,
+        /// The connection is up; `false` makes the next feedback send fail.
+        alive: Arc<AtomicBool>,
+        /// Datagrams handed to the router, to know when the worker has seen them all.
+        routed: Arc<AtomicU64>,
+    }
+
+    impl Harness {
+        fn start() -> Self {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let router = ScreenRouter::with_loss(0);
+            let (control_tx, control) = mpsc::channel(64);
+            let feedback = Arc::new(Mutex::new(Vec::new()));
+            let alive = Arc::new(AtomicBool::new(true));
+            let caught = Arc::clone(&feedback);
+            let up = Arc::clone(&alive);
+            let uplink = Uplink {
+                control: control_tx,
+                feedback: Box::new(move |bytes| {
+                    if let Ok(fb) = slopty_proto::codec::decode_body::<Feedback>(&bytes) {
+                        caught.lock().push(fb);
+                    }
+                    up.load(Ordering::Relaxed)
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(10))),
+            };
+            let handle = spawn_screen(rt.handle(), &router, STREAM, VideoCodec::Hevc, uplink);
+            Self { rt, router, handle, control, feedback, alive, routed: Arc::default() }
+        }
+
+        /// Poll `done` every few milliseconds for up to `secs`, draining the reports the worker
+        /// sends meanwhile (its report send awaits a slot).
+        fn wait_for(&mut self, what: &str, secs: u64, mut done: impl FnMut(&ScreenHandle) -> bool) {
+            let deadline = Instant::now().checked_add(Duration::from_secs(secs)).unwrap();
+            self.rt.block_on(async {
+                loop {
+                    while let Ok(msg) = self.control.try_recv() {
+                        assert!(
+                            matches!(msg, ClientMsg::Screen(ScreenRequest::Report { stream, .. }) if stream == STREAM),
+                            "{msg:?}"
+                        );
+                    }
+                    if done(&self.handle) {
+                        return;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {what}: {:?}",
+                        self.handle.stats()
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+        }
+
+        fn route(&self, datagram: Bytes) {
+            self.routed.fetch_add(1, Ordering::Relaxed);
+            self.router.route(datagram, Instant::now());
+        }
+
+        /// Wait until a report has counted every datagram routed so far.
+        fn settle(&mut self) -> ScreenStats {
+            let routed = Arc::clone(&self.routed);
+            self.wait_for("the worker to catch up", 3, |handle| {
+                handle.stats().datagrams == routed.load(Ordering::Relaxed)
+            });
+            self.handle.stats()
+        }
+    }
+
+    /// A 3000-byte HEVC-shaped access unit with no parameter sets: the decoder rejects it, which
+    /// is what a unit test can see of "the frame reached the decoder".
+    fn frame_bytes() -> Vec<u8> {
+        let mut data = vec![0, 0, 0, 1, 0x02, 0x01];
+        data.resize(3000, 0xaa);
+        data
+    }
+
+    fn packetize(packetizer: &mut Packetizer, keyframe: bool, capture_ts_us: u32) -> Vec<Bytes> {
+        let data = frame_bytes();
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe,
+            ltr_token: None,
+            ltr_refresh: false,
+            capture_ts_us,
+        };
+        packetizer.packetize(&frame, 0).unwrap().datagrams.clone()
+    }
+
+    #[test]
+    fn a_worker_reassembles_nacks_reports_and_stops_with_the_connection() {
+        let mut h = Harness::start();
+
+        // Cursor: the newest sequence wins, an older one is ignored.
+        h.route(cursor_datagram(STREAM, 2, 0, 10, 20, true));
+        h.wait_for("the cursor", 3, |handle| {
+            *handle.cursor().borrow() == CursorState { x: 10, y: 20, visible: true }
+        });
+        h.route(cursor_datagram(STREAM, 1, 0, 99, 99, false));
+        h.route(cursor_datagram(STREAM, 3, 0, 11, 21, false));
+        h.wait_for("the newer cursor", 3, |handle| {
+            *handle.cursor().borrow() == CursorState { x: 11, y: 21, visible: false }
+        });
+
+        // A keyframe with one fragment held back: the worker asks for it, the retransmission
+        // completes the frame, and the (rejected) frame is counted at the decoder.
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        let datagrams = packetize(&mut packetizer, true, 1_000);
+        assert!(datagrams.len() >= 3, "{} datagrams", datagrams.len());
+        for (i, d) in datagrams.iter().enumerate() {
+            if i != 1 {
+                h.route(d.clone());
+            }
+        }
+        let feedback = Arc::clone(&h.feedback);
+        h.wait_for("a nack", 3, |_handle| {
+            feedback.lock().iter().any(|fb| {
+                matches!(fb, Feedback::Nack { stream, frame: 0, fragments } if *stream == STREAM && fragments == &[1])
+            })
+        });
+        for d in packetizer.retransmit(0, &[1]) {
+            h.route(d);
+        }
+        h.wait_for("the frame", 3, |handle| {
+            let s = handle.stats();
+            s.frames == 1 && s.frames_retransmit == 1 && s.decode_errors == 1
+        });
+        let stats = h.handle.stats();
+        assert_eq!(stats.nacks, 1);
+        assert_eq!(stats.datagrams_lost, 0, "recovered, so not lost");
+        assert!(stats.first_datagram_at.is_some() && stats.first_frame_at.is_some());
+        assert_eq!(stats.first_decoded_at, None, "nothing decoded");
+        assert_eq!(stats.parity_permille, 0);
+        assert!(stats.bytes > 3000 && stats.datagrams >= 5, "{stats:?}");
+
+        // Audio, muted: the first packet starts opening the player off the worker, which keeps
+        // delivering video meanwhile (CoreAudio's first client took ~7 s on this machine).
+        assert!(!h.handle.muted());
+        h.handle.set_muted(true);
+        assert!(h.handle.muted());
+        let mut enc = OpusEncoder::new().unwrap();
+        let tone: Vec<f32> = (0..u16::try_from(FRAME_SAMPLES * CHANNELS).unwrap())
+            .map(|i| (f32::from(i) * 0.05).sin() * 0.5)
+            .collect();
+        let mut packets = Vec::new();
+        for _ in 0..3 {
+            enc.push(&tone, |p| packets.push(p.to_vec())).unwrap();
+        }
+        assert_eq!(packets.len(), 3);
+        let mut seq = 1;
+        h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
+        for d in packetize(&mut packetizer, false, 2_000) {
+            h.route(d);
+        }
+        h.wait_for("a frame while the player opens", 3, |handle| handle.stats().frames == 2);
+        let router = h.router.clone();
+        let routed = Arc::clone(&h.routed);
+        let opus = packets.clone();
+        h.wait_for("the player", 20, |handle| {
+            seq += 1;
+            routed.fetch_add(1, Ordering::Relaxed);
+            router.route(
+                audio_datagram(STREAM, seq, 0, &opus[seq as usize % 3]).unwrap(),
+                Instant::now(),
+            );
+            handle.stats().audio_packets >= 1
+        });
+        let before = h.settle();
+        assert!(before.audio_lost >= 1, "the packets that landed while opening: {before:?}");
+        // A gap of one, then a late duplicate.
+        seq += 2;
+        h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
+        let after = h.settle();
+        assert_eq!(after.audio_packets, before.audio_packets + 1);
+        assert_eq!(after.audio_lost, before.audio_lost + 1, "one missing");
+        assert_eq!(after.audio_concealed, before.audio_concealed + 1, "and concealed");
+        h.route(audio_datagram(STREAM, seq - 1, 0, &packets[1]).unwrap());
+        let late = h.settle();
+        assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
+        assert_eq!(late.audio_packets, after.audio_packets, "not played");
+
+        // The host's source hint reaches the worker.
+        assert!(h.handle.source_live());
+        h.handle.set_source_live(false);
+        assert!(!h.handle.source_live());
+
+        // The connection goes: the next feedback fails and the worker stops.
+        h.alive.store(false, Ordering::Relaxed);
+        let datagrams = packetize(&mut packetizer, false, 3_000);
+        for d in datagrams.iter().skip(1) {
+            h.route(d.clone());
+        }
+        h.wait_for("the worker to finish", 3, |handle| {
+            handle.task.as_ref().is_some_and(JoinHandle::is_finished)
+        });
+        assert_eq!(h.handle.stream(), STREAM);
+        drop(h.handle);
+        assert!(h.router.inner.lock().attached.is_empty(), "dropping the handle unroutes");
     }
 }

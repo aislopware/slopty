@@ -2807,3 +2807,31 @@ main + both  (b) draw 0.7 / 1.8 / 3.9 / 16.7 ms · every 3.1 / 15.9 ms · 857 fr
 well under their `72e7754` numbers (3.9 → 1.4 ms and 9.4 → 4.7 ms at p50) because the five
 flooding shells beside the card were paying the same walk. The unit is now bounded by the
 prompts cached, not the lines.
+
+## 2026-09-13 — the first audio packet: the player's creation blocked the screen worker
+
+A unit test that drives `slopty_client::screen`'s worker end to end (`worker_tests` in
+`crates/slopty-client/src/screen.rs`: cursor, a NACKed keyframe, reports, audio, shutdown)
+timed out on its audio step with the video counters frozen. `sample` on the test process:
+
+```
+Worker::ingest → Player::new → AudioQueueNewOutput → AQ::Server::global
+  → AT::MixServer::macOSImpl → AudioObjectAddPropertyListener
+  → HALSystem::CheckOutInstance → HALSystem::InitializeDevices → mach_msg
+```
+
+The first AudioToolbox client in a process initialises the HAL through coreaudiod, and on the
+mac-studio that takes seconds:
+
+```
+cargo nextest run -p slopty-codec player_starts_and_drains     (a 100 ms test)
+  7.467 s, 7.4 s on a second run in a fresh process
+```
+
+The worker called `Player::new` inline on the first `Kind::Audio` datagram, so for that long
+it read no datagrams, ran no NACK or refresh timers, decoded nothing and sent no report — a
+remote window's picture froze the moment sound started, and the host's rate controller saw a
+receiver gone quiet. Fixed in the same change: the player opens on `spawn_blocking`, packets
+that land meanwhile count as `audio_lost`, and the test asserts a second video frame is
+delivered while the player is still opening (the whole test runs in ~7.6 s, nearly all of it
+that HAL initialisation).
