@@ -64,3 +64,21 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   confirms the fan-out. Revisit if many viewers of one high-resolution display becomes real: a
   shared base layer with per-client rate would cap the cost, at the price of the per-client
   adaptation.
+
+- ✅ **Where each client looks is drawn on the others' canvases, protocol 38** (2026-09-13).
+  Two people on one canvas could not tell where the other was: a phone zoomed on a shell and a
+  Mac panning the whole plane were invisible to each other. The client tells the host its
+  viewport in canvas units (`ClientMsg::Look { view }`) once the camera has rested for
+  `LOOK_EVERY` (100 ms): a pan of many frames is one message, and an unmoved viewport is never
+  repeated. The host keeps a `slopty_host::presence::Presence` table — ephemeral, never in the
+  document or its version — and fans each change out as `CanvasSync::Presence { client, kind,
+  name, view }` to every connection; a newcomer hears the table right after the snapshot, and
+  a connection's drop announces `view: None`. The client's `CanvasDoc` keeps the lookers
+  (never itself: its own echo is `CanvasChange::Echo`) and the canvas draws each as an outline
+  in a colour picked from the client id with its name in the corner, over the items; the
+  outline has no listeners so it is never in the way, and the name is a button that flies the
+  camera to what that client sees ("go where they look" without asking where that is). Tested at every layer: the table, the document, the
+  headless canvas (the outline's a11y node and bounds; one `Look` per rest), and two clients on
+  a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
+  (a viewport is what the other person can see, which is what matters for "look at this";
+  a pointer at 20 Hz is a stream), and presence across hosts (a canvas is per host).

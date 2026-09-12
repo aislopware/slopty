@@ -51,6 +51,21 @@ mod golden {
     }
 
     #[test]
+    fn look_and_presence() {
+        let view = slopty_proto::canvas::Rect { x: -120.0, y: 40.0, w: 1440.0, h: 900.0 };
+        snap("client_look", &ClientMsg::Look { view: Some(view) });
+        snap(
+            "host_presence",
+            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Presence {
+                client: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                kind: ClientKind::IPhone,
+                name: "iPhone".to_owned(),
+                view: Some(view),
+            }),
+        );
+    }
+
+    #[test]
     fn key_press() {
         snap(
             "client_key",

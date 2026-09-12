@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -121,6 +121,13 @@ pub enum ClientMsg {
         /// What was typed.
         query: String,
     },
+    /// Where this client's viewport is on the canvas, in canvas units, whenever it settles;
+    /// `None` when the canvas is no longer on show. The host fans it out as
+    /// `CanvasSync::Presence` so the other clients can draw where each other looks.
+    Look {
+        /// The viewport, or nothing.
+        view: Option<canvas::Rect>,
+    },
 }
 
 impl ClientMsg {
@@ -143,6 +150,7 @@ impl ClientMsg {
             Self::AgentSet(_) => "AgentSet",
             Self::ListAgentSessions { .. } => "ListAgentSessions",
             Self::ListFiles { .. } => "ListFiles",
+            Self::Look { .. } => "Look",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
         }

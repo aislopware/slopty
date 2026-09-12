@@ -435,6 +435,13 @@ to every action. The palette remembers where the keyboard was (`window.focused`)
 back when it closes and dispatches the choice on the next frame from there, so a terminal's
 own actions (find, the prompts) reach the terminal that had the focus.
 
+**Presence.** Each client tells the host where its viewport is on the canvas
+(`ClientMsg::Look`, once the camera rests for 100 ms); the host keeps that in an ephemeral
+table beside the document and fans it out as `CanvasSync::Presence`, newcomers hearing the
+table after the snapshot and a dropped connection announced with no view. The canvas draws
+every other client as an outline in its colour with its name at the corner, so two people on
+one canvas can see what the other sees (`docs/decisions/multi-client.md`, 2026-09-13).
+
 ## 5. Agents
 
 Claude Code only, for now. The bar's "+ agent" pill opens a menu (`agent-menu`, `Menu`

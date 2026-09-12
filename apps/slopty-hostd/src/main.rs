@@ -85,6 +85,8 @@ pub struct Daemon {
     pub driven: driven::Driven,
     /// The host's pasteboard, synced with remote-window clients.
     pub pasteboard: Arc<slopty_input::Pasteboard>,
+    /// Where each connected client is looking on the canvas.
+    pub presence: Arc<parking_lot::Mutex<slopty_host::presence::Presence>>,
     /// When the daemon came up (for `doctor`).
     pub started_at: std::time::Instant,
     /// The UDP port it listens on.
@@ -179,6 +181,7 @@ async fn main() -> Result<()> {
         agents: Arc::default(),
         driven: driven::Driven::default(),
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
+        presence: Arc::default(),
         started_at: std::time::Instant::now(),
         port: args.port,
         screens,

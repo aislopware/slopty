@@ -11,6 +11,7 @@ pub mod canvas;
 pub mod ctl;
 pub mod file;
 pub mod manager;
+pub mod presence;
 pub mod repo;
 pub mod screen;
 pub mod session;

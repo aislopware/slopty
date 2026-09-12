@@ -13,7 +13,7 @@ use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
-use slopty_proto::handshake::{Caps, HelloAck};
+use slopty_proto::handshake::{Caps, ClientKind, HelloAck};
 use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use tokio::sync::mpsc;
@@ -74,6 +74,11 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
     out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
+    // Collected first: the lock must not be held across the sends.
+    let lookers = daemon.presence.lock().all_but(hello.client);
+    for presence in lookers {
+        out.send(HostMsg::Canvas(presence)).await.map_err(|_gone| NetError::Closed)?;
+    }
     let mut agents = daemon.agents.lock().snapshot();
     agents.extend(daemon.driven.events());
     for event in agents {
@@ -92,6 +97,8 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         daemon,
         conn,
         client: hello.client,
+        kind: hello.kind,
+        name: hello.name,
         out,
         attached: HashMap::new(),
         screens: HashMap::new(),
@@ -425,6 +432,10 @@ struct Peer<'d> {
     daemon: &'d Daemon,
     conn: Connection,
     client: ClientId,
+    /// What kind of device, for the presence it broadcasts.
+    kind: ClientKind,
+    /// Its name from `Hello`, for the same.
+    name: String,
     out: mpsc::Sender<HostMsg>,
     /// Per attached session: the stream pump and the sink the actor writes into.
     attached: HashMap<SessionId, (JoinHandle<()>, ClientSink)>,
@@ -456,6 +467,10 @@ impl Drop for Peer<'_> {
         self.health.abort();
         self.feedback.abort();
         self.daemon.wake.lock().client_left();
+        let gone = self.daemon.presence.lock().leave(self.client);
+        if let Some(gone) = gone {
+            let _sent = self.daemon.events.send(HostMsg::Canvas(gone));
+        }
     }
 }
 
@@ -491,6 +506,13 @@ impl Peer<'_> {
                     tracing::trace!(client = %self.client, %session, "term input received");
                 }
                 self.term(session, req).await;
+            }
+            ClientMsg::Look { view } => {
+                let told =
+                    self.daemon.presence.lock().look(self.client, self.kind, &self.name, view);
+                if let Some(presence) = told {
+                    let _sent = self.daemon.events.send(HostMsg::Canvas(presence));
+                }
             }
             ClientMsg::Canvas(op) => match self.daemon.canvas.apply(op, self.client) {
                 Ok(delta) => {

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, ItemId, SessionId, WindowId};
 
+use crate::handshake::ClientKind;
+
 /// Position and size in canvas units (1 unit = 1 logical point at zoom 1).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct Rect {
@@ -113,5 +115,17 @@ pub enum CanvasSync {
         by: ClientId,
         /// The op.
         op: CanvasOp,
+    },
+    /// Where another client is looking (`ClientMsg::Look`), or that it stopped: ephemeral, not
+    /// part of the document. Every connected client hears it, the looker included.
+    Presence {
+        /// Who.
+        client: ClientId,
+        /// What kind of device.
+        kind: ClientKind,
+        /// Its name from `Hello`.
+        name: String,
+        /// Its viewport in canvas units; `None` when it left or looked away.
+        view: Option<Rect>,
     },
 }

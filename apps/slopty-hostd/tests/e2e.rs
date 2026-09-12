@@ -329,6 +329,66 @@ mod tests {
     }
 
     /// The terminal lives in ptyd; the screen lives in hostd's engine. When hostd dies and comes
+    /// Two clients on one host: where one looks reaches the other as `CanvasSync::Presence`,
+    /// a newcomer hears where everyone already looks, and a client that drops off is announced
+    /// gone.
+    #[tokio::test]
+    async fn where_a_client_looks_reaches_the_others() {
+        use slopty_proto::canvas::{CanvasSync, Rect};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, ticket) = daemons(dir.path(), Reach::Anywhere).await;
+        let (endpoint_a, mut a) = dial(&ticket, Reach::Anywhere).await;
+        guard.1 = Some(endpoint_a);
+        let view = Rect { x: 10.0, y: 20.0, w: 1200.0, h: 800.0 };
+        a.tx.send(&ClientMsg::Look { view: Some(view) }).await.unwrap();
+        // A's own presence comes back to it too (the client filters its own).
+        let mine = next_presence(&mut a).await;
+        assert!(
+            matches!(mine, CanvasSync::Presence { view: Some(v), .. } if v == view),
+            "{mine:?}"
+        );
+
+        // B connects afterwards and is told where A looks before anything else happens.
+        let ctl_sock = dir.path().join("hostd.sock");
+        let (endpoint_b, mut b) = dial(&mint(&ctl_sock).await, Reach::Anywhere).await;
+        let heard = next_presence(&mut b).await;
+        let CanvasSync::Presence { client: a_client, name, view: Some(seen), .. } = heard else {
+            panic!("{heard:?}");
+        };
+        assert_eq!((name.as_str(), seen), ("e2e", view));
+
+        // A moves; B hears it. A repeats itself; nothing more is said.
+        let moved = Rect { x: -300.0, ..view };
+        a.tx.send(&ClientMsg::Look { view: Some(moved) }).await.unwrap();
+        a.tx.send(&ClientMsg::Look { view: Some(moved) }).await.unwrap();
+        let heard = next_presence(&mut b).await;
+        assert!(
+            matches!(heard, CanvasSync::Presence { client, view: Some(v), .. } if client == a_client && v == moved)
+        );
+
+        // A goes away: B is told.
+        drop(a);
+        let heard = next_presence(&mut b).await;
+        assert!(
+            matches!(heard, CanvasSync::Presence { client, view: None, .. } if client == a_client),
+            "{heard:?}"
+        );
+        drop(endpoint_b);
+    }
+
+    /// The next presence sync on `host`'s control stream, skipping everything else.
+    async fn next_presence(host: &mut HostConn) -> slopty_proto::canvas::CanvasSync {
+        loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::Canvas(sync @ slopty_proto::canvas::CanvasSync::Presence { .. }) => {
+                    break sync;
+                }
+                _other => {}
+            }
+        }
+    }
+
     /// back on the same ptyd, the screen it shows is the one the shell drew before, rebuilt
     /// from the checkpoint and the tapped output ptyd kept, not a blank grid.
     #[tokio::test]

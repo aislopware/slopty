@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use slopty_core::{ClientId, ItemId};
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
+use slopty_proto::handshake::ClientKind;
 
 /// Smallest zoom: everything is a card.
 pub const MIN_ZOOM: f32 = 0.1;
@@ -27,6 +28,21 @@ pub const TERMINAL_SIZE: (f32, f32) = (720.0, 440.0);
 pub struct CanvasDoc {
     version: u64,
     items: BTreeMap<ItemId, CanvasItem>,
+    /// Other clients and where they look; never this client.
+    lookers: BTreeMap<ClientId, Looker>,
+}
+
+/// Another client's viewport on the canvas, from `CanvasSync::Presence`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Looker {
+    /// Who.
+    pub client: ClientId,
+    /// What kind of device.
+    pub kind: ClientKind,
+    /// Its name.
+    pub name: String,
+    /// Where it looks, in canvas units.
+    pub view: Rect,
 }
 
 /// What changed after applying a sync.
@@ -40,6 +56,8 @@ pub enum CanvasChange {
     Removed(ItemId),
     /// The host echoed our own op: nothing to do.
     Echo,
+    /// Another client moved its viewport, or left.
+    Presence(ClientId),
 }
 
 impl CanvasDoc {
@@ -47,6 +65,11 @@ impl CanvasDoc {
     #[must_use]
     pub const fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Other clients and where they look, in a stable order.
+    pub fn lookers(&self) -> impl Iterator<Item = &Looker> {
+        self.lookers.values()
     }
 
     /// Items, unordered.
@@ -98,6 +121,18 @@ impl CanvasDoc {
                     return CanvasChange::Echo;
                 }
                 self.apply_op(&op)
+            }
+            CanvasSync::Presence { client, .. } if client == me => CanvasChange::Echo,
+            CanvasSync::Presence { client, kind, name, view } => {
+                match view {
+                    Some(view) => {
+                        self.lookers.insert(client, Looker { client, kind, name, view });
+                    }
+                    None => {
+                        self.lookers.remove(&client);
+                    }
+                }
+                CanvasChange::Presence(client)
             }
         }
     }
@@ -380,6 +415,53 @@ mod tests {
     use slopty_core::SessionId;
 
     use super::*;
+
+    #[test]
+    fn presence_keeps_the_others_and_never_me() {
+        let me = ClientId::new();
+        let other = ClientId::new();
+        let mut doc = CanvasDoc::default();
+        let view = Rect { x: 1.0, y: 2.0, w: 300.0, h: 200.0 };
+        let mine = CanvasSync::Presence {
+            client: me,
+            kind: ClientKind::Mac,
+            name: "me".to_owned(),
+            view: Some(view),
+        };
+        assert_eq!(doc.apply_sync(mine, me), CanvasChange::Echo);
+        assert_eq!(doc.lookers().count(), 0, "my own echo is not a looker");
+        let theirs = CanvasSync::Presence {
+            client: other,
+            kind: ClientKind::IPhone,
+            name: "phone".to_owned(),
+            view: Some(view),
+        };
+        assert_eq!(doc.apply_sync(theirs, me), CanvasChange::Presence(other));
+        let looker = doc.lookers().next().expect("one looker");
+        assert_eq!(
+            (looker.client, looker.kind, looker.name.as_str()),
+            (other, ClientKind::IPhone, "phone")
+        );
+        assert_eq!(looker.view, view);
+        let moved = Rect { x: 50.0, ..view };
+        let again = CanvasSync::Presence {
+            client: other,
+            kind: ClientKind::IPhone,
+            name: "phone".to_owned(),
+            view: Some(moved),
+        };
+        doc.apply_sync(again, me);
+        assert_eq!(doc.lookers().next().map(|l| l.view), Some(moved), "replaced, not added");
+        let gone = CanvasSync::Presence {
+            client: other,
+            kind: ClientKind::IPhone,
+            name: "phone".to_owned(),
+            view: None,
+        };
+        assert_eq!(doc.apply_sync(gone, me), CanvasChange::Presence(other));
+        assert_eq!(doc.lookers().count(), 0);
+        assert_eq!(doc.version(), 0, "presence never touches the document version");
+    }
 
     fn term(x: f32, z: u32) -> CanvasItem {
         CanvasItem {

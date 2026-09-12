@@ -247,6 +247,9 @@ const GRIP: f32 = 14.0;
 /// How long after the last zoom change the settled frame (exact rasters) is asked for. A
 /// gesture reports every few milliseconds; a frame per report and one more after the pause.
 const SETTLE: Duration = Duration::from_millis(80);
+/// How long a moved viewport waits before the host is told where this client looks: a pan
+/// reports every frame, and the other clients only need the places the camera rests.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
@@ -512,6 +515,11 @@ pub struct CanvasView {
     viewport: (Point<Pixels>, Size<Pixels>),
     /// Fit every item into the viewport on the next frame (once the viewport is known).
     fit_pending: bool,
+    /// The viewport last told to the host (`ClientMsg::Look`).
+    looked: Option<Rect>,
+    /// A `Look` is scheduled for `LOOK_EVERY` from the first change; it reads the viewport
+    /// as it is then, so a pan of many frames is one message.
+    look_pending: bool,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
     /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
@@ -625,6 +633,8 @@ impl CanvasView {
             rtt: None,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
+            looked: None,
+            look_pending: false,
             flight: None,
             zoom_drawn: None,
             zooming: false,
@@ -2466,6 +2476,105 @@ impl CanvasView {
         (f32::from(vp.width), f32::from(vp.height))
     }
 
+    /// The viewport in canvas units, once a frame has measured it.
+    fn view_rect(&self) -> Option<Rect> {
+        let (w, h) = self.viewport_size();
+        if w <= 1.0 || h <= 1.0 {
+            return None;
+        }
+        let (x, y) = self.camera.to_canvas(0.0, 0.0);
+        let (right, bottom) = self.camera.to_canvas(w, h);
+        Some(Rect { x, y, w: right - x, h: bottom - y })
+    }
+
+    /// Tell the host where this client looks once the viewport has rested for `LOOK_EVERY`.
+    /// Called every frame; a frame that shows the same viewport as the last message costs
+    /// nothing.
+    fn note_view(&mut self, cx: &Context<Self>) {
+        if self.look_pending || self.view_rect() == self.looked {
+            return;
+        }
+        self.look_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LOOK_EVERY).await;
+            let _gone = this.update(cx, |this, _cx| {
+                this.look_pending = false;
+                let view = this.view_rect();
+                if view != this.looked {
+                    this.looked = view;
+                    this.send(ClientMsg::Look { view });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The other clients' viewports: an outline in each one's colour with its name at the
+    /// corner, drawn over the items and never in their way (the outline has no listeners); the
+    /// name is a button that flies the camera to what that client sees.
+    fn render_lookers(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = &self.theme;
+        let palette = [
+            theme.surfaces.accent,
+            theme.surfaces.success,
+            theme.surfaces.warn,
+            theme.surfaces.error,
+        ];
+        self.doc
+            .lookers()
+            .filter(|l| self.on_screen(l.view))
+            .map(|l| {
+                let s = self.camera.to_screen(l.view);
+                let hue = (l.client.as_uuid().as_u128() % 4) as usize;
+                let colour = palette.get(hue).copied().unwrap_or(theme.surfaces.accent);
+                let label = SharedString::from(l.name.clone());
+                let view = l.view;
+                let tag = div()
+                    .id(ElementId::from(SharedString::from(format!("follow-{}", l.client))))
+                    .debug_selector({
+                        let name = l.name.clone();
+                        move || format!("follow-{name}")
+                    })
+                    .role(Role::Button)
+                    .aria_label(format!("follow {}", l.name))
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .px(px(theme.spacing.xs))
+                    .bg(hsla_alpha(colour, 0.9))
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(theme.surfaces.accent_fg))
+                    .font_family(theme.typography.ui_family.clone())
+                    .cursor_pointer()
+                    .child(label.clone());
+                let tag = tab_stop(tag, theme.surfaces.accent).on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
+                        let target = Camera::fitted([view], this.viewport_size());
+                        this.fly_to(target, cx);
+                    },
+                ));
+                div()
+                    .id(ElementId::from(SharedString::from(format!("looker-{}", l.client))))
+                    .debug_selector({
+                        let name = l.name.clone();
+                        move || format!("looker-{name}")
+                    })
+                    .role(Role::Group)
+                    .aria_label(label)
+                    .absolute()
+                    .left(px(s.x))
+                    .top(px(s.y))
+                    .w(px(s.w.max(1.0)))
+                    .h(px(s.h.max(1.0)))
+                    .border_1()
+                    .border_color(hsla_alpha(colour, 0.9))
+                    .rounded(px(theme.radii.md))
+                    .child(tag)
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     /// Whether camera moves are animated. The self-test turns this off so a dump right after
     /// an action sees where the camera ended up, not where it was passing through.
     pub const fn set_animation(&mut self, on: bool) {
@@ -3379,6 +3488,8 @@ impl Render for CanvasView {
             .filter(|item| self.draws(item))
             .map(|item| self.render_item(item, window, cx))
             .collect();
+        let lookers = self.render_lookers(cx);
+        self.note_view(cx);
         let minimap = (!empty).then(|| self.render_minimap(cx));
         let file_card_active = self
             .active
@@ -3461,6 +3572,7 @@ impl Render for CanvasView {
             .child(record_bounds)
             .children(headings)
             .children(rendered)
+            .children(lookers)
             .children(minimap)
             .children(picker)
             .children(palette)
@@ -3888,6 +4000,7 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::agent::{AgentKind, TranscriptBody, TranscriptEntry};
+    use slopty_proto::handshake::ClientKind;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
     use super::*;
@@ -4274,6 +4387,135 @@ mod tests {
         assert_eq!(done(Some(0), 7).label(), "done 7.0 s");
         assert_eq!(done(None, 7).label(), "done 7.0 s");
         assert_eq!(done(Some(1), 65).label(), "failed (1) 1 min 5 s");
+    }
+
+    /// Another client's viewport is an outline labelled with its name, placed where the
+    /// camera puts it; when that client leaves, the outline goes.
+    #[gpui::test]
+    fn another_clients_viewport_is_an_outline_with_its_name(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let phone = ClientId::new();
+        let looking = |view: Option<Rect>| CanvasSync::Presence {
+            client: phone,
+            kind: ClientKind::IPhone,
+            name: "phone".to_owned(),
+            view,
+        };
+        let at = Rect { x: 40.0, y: 60.0, w: 300.0, h: 500.0 };
+        view.update(cx, |c, cx| c.apply_sync(looking(Some(at)), cx));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let outline = tree
+            .iter()
+            .find(|n| n.role == "Group" && n.label.as_deref() == Some("phone"))
+            .expect("the phone's outline is in the tree");
+        let expected = view.read_with(cx, |c, _| c.camera.to_screen(at));
+        assert!(
+            (outline.bounds[0] - expected.x).abs() < 1.0
+                && (outline.bounds[2] - expected.w).abs() < 1.0,
+            "{:?} vs {expected:?}",
+            outline.bounds
+        );
+        // My own presence, echoed by the host, is not drawn.
+        view.update(cx, |c, cx| {
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: me,
+                    kind: ClientKind::Mac,
+                    name: "me".to_owned(),
+                    view: Some(at),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(!tree.iter().any(|n| n.label.as_deref() == Some("me")));
+
+        view.update(cx, |c, cx| c.apply_sync(looking(None), cx));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(!tree.iter().any(|n| n.label.as_deref() == Some("phone")), "gone with the client");
+    }
+
+    /// The name on another client's outline is a button: it flies the camera to what that
+    /// client sees.
+    #[gpui::test]
+    fn the_name_tag_goes_to_what_they_see(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let far = Rect { x: 5_000.0, y: 3_000.0, w: 400.0, h: 700.0 };
+        view.update(cx, |c, cx| {
+            // Pan so the outline is on screen; only its tag has to be clickable.
+            c.camera = Camera::fitted([far], c.viewport_size());
+            c.camera.pan(200.0, 100.0);
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: ClientId::new(),
+                    kind: ClientKind::IPad,
+                    name: "pad".to_owned(),
+                    view: Some(far),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("follow pad"))), "{tree:?}");
+        let tag = cx.debug_bounds("follow-pad").expect("the tag is drawn");
+        cx.simulate_click(tag.center(), Modifiers::default());
+        cx.run_until_parked();
+        let (camera, viewport) = view.read_with(cx, |c, _| (c.camera, c.viewport_size()));
+        let expected = Camera::fitted([far], viewport);
+        assert!(
+            (camera.x - expected.x).abs() < 0.5 && (camera.y - expected.y).abs() < 0.5,
+            "{camera:?} vs {expected:?}"
+        );
+    }
+
+    /// The host hears where this client looks once the viewport rests, and again only when it
+    /// moves: a pan of many frames is one message.
+    #[gpui::test]
+    fn a_resting_viewport_is_told_to_the_host_once(cx: &mut TestAppContext) {
+        let (view, mut rx, _me, cx) = canvas(cx);
+        let looks = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            drain(rx)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Look { view } => Some(view),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(looks(&mut rx).is_empty(), "nothing before the wait");
+        cx.executor().advance_clock(LOOK_EVERY);
+        cx.run_until_parked();
+        let first = looks(&mut rx);
+        let expected = view.read_with(cx, |c, _| c.view_rect());
+        assert_eq!(first, vec![expected], "the viewport as measured");
+        assert!(expected.is_some_and(|r| (r.w - VIEWPORT.0).abs() < f32::EPSILON), "{expected:?}");
+
+        for _ in 0..5 {
+            view.update(cx, |c, cx| {
+                c.camera.pan(-20.0, 0.0);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        assert!(looks(&mut rx).is_empty(), "a pan in progress says nothing");
+        cx.executor().advance_clock(LOOK_EVERY);
+        cx.run_until_parked();
+        let moved = looks(&mut rx);
+        assert_eq!(moved.len(), 1, "one message for the whole pan: {moved:?}");
+        let start = expected.map_or(0.0, |r| r.x);
+        assert!(moved[0].is_some_and(|r| (r.x - start - 100.0).abs() < 1.0), "{moved:?}");
+
+        view.update(cx, |_c, cx| cx.notify());
+        cx.run_until_parked();
+        cx.executor().advance_clock(LOOK_EVERY);
+        cx.run_until_parked();
+        assert!(looks(&mut rx).is_empty(), "an unmoved viewport is not repeated");
     }
 
     fn drain(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ClientMsg> {
