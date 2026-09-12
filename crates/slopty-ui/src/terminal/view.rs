@@ -2187,11 +2187,8 @@ impl TerminalView {
         // history that way — and otherwise lets it through, so the canvas pans under a grid
         // at the end of its history rather than swallowing the gesture.
         let usable = to_program
-            || if lines > 0.0 {
-                self.state.view_offset() < self.state.history_len()
-            } else {
-                self.state.view_offset() > 0
-            };
+            || (lines > 0.0 && self.state.view_offset() < self.state.history_len())
+            || (lines < 0.0 && self.state.view_offset() > 0);
         if !usable {
             self.wheel_remainder = 0.0;
             return;

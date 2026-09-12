@@ -483,9 +483,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   while mode 1007 (alternate scroll, on by default in ghostty) is set — the engine's
   business, since the mode lives in the terminal; the encoder has no such option
   (`mouse.rs`, checked at `44f2a44d`), so it is done through `encode_key`; on the primary
-  screen an un-tracked wheel encodes nothing. Tests: engine
+  screen an un-tracked wheel encodes nothing; (5) on the phone a finger pan arrives as the
+  same scroll events, so a finger over a shell scrolls its history while there is some that
+  way and moves the canvas otherwise, the way a list inside a page scrolls; a pan with no
+  vertical part passes through. Tests: engine
   `the_wheel_is_arrow_keys_on_the_alternate_screen_and_presses_when_tracked`, headless
-  `the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it`.
+  `the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it`, canvas
+  `a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas`.
   Found on the way: the binding's `Encoder::encode_to_vec` (key and mouse alike) reserved
   `required - remaining` on a vector with too little spare room, then handed the encoder the
   old capacity, so an encode into a reused buffer failed with `OutOfSpace`; fixed in the fork

@@ -4385,6 +4385,63 @@ mod tests {
         assert_eq!(after.origin.y, before.origin.y);
     }
 
+    /// A finger pan over a shell (gpui's touch recognizer turns it into scroll events) scrolls
+    /// the shell's history while there is some that way, and the canvas holds still; a shell
+    /// with nothing to scroll lets the same pan move the canvas.
+    #[gpui::test]
+    fn a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, TouchPhase};
+
+        let (view, _rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let a = host_opens(&view, cx, session, me, Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 }, 1);
+        let touch = |cx: &mut VisualTestContext, phase: TouchPhase, at: Point<Pixels>| {
+            cx.simulate_event(TouchEvent {
+                id: TouchId(1),
+                phase,
+                position: at,
+                predicted_position: None,
+                force: None,
+            });
+        };
+        let pan_down = |cx: &mut VisualTestContext, start: Point<Pixels>| {
+            touch(cx, TouchPhase::Started, start);
+            for step in 1_u8..=6 {
+                touch(cx, TouchPhase::Moved, point(start.x, start.y + px(20.0 * f32::from(step))));
+            }
+            touch(cx, TouchPhase::Ended, point(start.x, start.y + px(120.0)));
+            cx.run_until_parked();
+        };
+        let offset = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, cx| {
+                c.terminal(session).map_or(0, |t| t.read(cx).state().view_offset())
+            })
+        };
+        // No history: the pan is the canvas's.
+        let before = cx.debug_bounds(selector("item", a)).expect("the item");
+        pan_down(cx, before.center());
+        let after = cx.debug_bounds(selector("item", a)).expect("the item");
+        assert!(
+            (f32::from(after.origin.y - before.origin.y) - 120.0).abs() < 2.0,
+            "nothing to scroll: the canvas moved {before:?} → {after:?}"
+        );
+        assert_eq!(offset(cx), 0);
+        // With history above, a finger pulling down scrolls the shell into it and the canvas
+        // holds still.
+        view.update_in(cx, |c, _window, cx| {
+            let TermEvent::Frame(mut f) = frame(&["$ echo hi", "hi", ""]) else { return };
+            f.first_visible_line = LineIndex(50);
+            f.total_lines = 53;
+            c.term_event(session, TermEvent::Frame(f), cx);
+        });
+        cx.run_until_parked();
+        let before = cx.debug_bounds(selector("item", a)).expect("the item");
+        pan_down(cx, before.center());
+        let after = cx.debug_bounds(selector("item", a)).expect("the item");
+        assert!(offset(cx) > 0, "the shell scrolled into its history");
+        assert_eq!(after.origin, before.origin, "and the canvas stayed");
+    }
+
     #[gpui::test]
     fn cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it(cx: &mut TestAppContext) {
         let (view, mut rx, me, cx) = canvas(cx);
