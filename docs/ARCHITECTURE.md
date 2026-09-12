@@ -524,12 +524,14 @@ the human typed — meta records, sidechains, subagent `agent-*.jsonl` files and
 `HostMsg::AgentSessions`, which opens the `WindowPicker` in its resume form (`Dialog`
 "Resume a conversation", rows `picker-agent-<i>` labelled "title, N min ago · cwd"); a row
 sends `OpenAgent { cwd, resume: id, title }`, so the new card is titled by that first prompt
-and Claude Code continues the same session (`--resume`). Tests: the fold and the discovery
+and Claude Code continues the same session (`--resume`); before the agent says anything the
+pump reads the transcript's last entries (`discover::conversation`, off the runtime) and
+appends them, so the card opens with its past instead of empty. Tests: the fold and the discovery
 in `slopty-agent`, the wire shapes in `driven_agent_info`, headless
 `a_driven_view_shows_the_agent_and_retunes_it` and `a_past_conversation_is_resumed_from_the_picker`,
 the app self-test (the fake acks `set_model`, answers `set_permission_mode` with a status
-record, answers `/cost`, honours `--resume`, and writes its prompts to the transcript under
-the run's private `HOME` so ⌘⌥R finds them), and `the_driven_agent_card_on_the_simulator`
+record, answers `/cost`, honours `--resume`, and writes its prompts and replies to the
+transcript under the run's private `HOME` so ⌘⌥R finds them and the resumed card shows them), and `the_driven_agent_card_on_the_simulator`
 with the `ios-<device>-agent` goldens.
 
 **Conversation view.** A terminal that runs a Claude Code session can show the conversation

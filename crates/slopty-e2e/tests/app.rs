@@ -577,6 +577,30 @@ mod tests {
         assert!(dump.a11y_node("Dialog", None).is_none(), "the picker closed");
         let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
         assert_eq!(card.title.as_deref(), Some("hello"), "titled by the first prompt: {card:?}");
+        // Its past, read from the transcript, is shown before the agent says anything new.
+        let dump = drv
+            .wait_for("the resumed past", STEP, |d| {
+                d.terminals
+                    .iter()
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 7))
+            })
+            .await
+            .unwrap();
+        let card = dump.terminals.iter().find(|t| t.kind == "agent").unwrap();
+        let entries = &card.conversation.as_ref().unwrap().entries;
+        assert_eq!(
+            entries,
+            &[
+                "user: hello".to_owned(),
+                "assistant: Hello from the fake".to_owned(),
+                "user: /cost".to_owned(),
+                "assistant: Total cost: $0.02".to_owned(),
+                "user: linger".to_owned(),
+                "user: write the note".to_owned(),
+                "user: write it again".to_owned(),
+            ],
+            "the whole past, oldest first (the fake logs text replies only)"
+        );
         stack.shutdown().await;
     }
 

@@ -16,9 +16,10 @@
 //! It also does what a retune asks: `set_model` is acknowledged and the assistant records
 //! that follow name the new model; `set_permission_mode` is acknowledged and followed by the
 //! `system/status` record Claude Code writes. `--resume <id>` makes `<id>` the session id
-//! (and the `init` says so), `--model <m>` the starting model. Every prompt is appended to
-//! `$HOME/.claude/projects/<escaped cwd>/<session>.jsonl` as Claude Code writes its
-//! transcript, so the host's resume list finds the conversation afterwards.
+//! (and the `init` says so), `--model <m>` the starting model. Every prompt and text reply is
+//! appended to `$HOME/.claude/projects/<escaped cwd>/<session>.jsonl` as Claude Code writes its
+//! transcript, so the host's resume list finds the conversation afterwards and a resumed
+//! card shows its past.
 //!
 //! Stdin closing ends it, as it ends Claude Code.
 
@@ -102,12 +103,22 @@ impl Fake {
 
     /// Append a prompt to the transcript file as Claude Code writes it.
     fn note_prompt(&self, text: &str) {
+        self.note(&json!({"type": "user", "cwd": self.cwd, "sessionId": self.session,
+                          "message": {"role": "user", "content": text}}));
+    }
+
+    /// Append a reply to the transcript file as Claude Code writes it.
+    fn note_reply(&self, text: &str) {
+        self.note(&json!({"type": "assistant", "cwd": self.cwd, "sessionId": self.session,
+                          "message": {"role": "assistant", "model": self.model,
+                                      "content": [{"type": "text", "text": text}]}}));
+    }
+
+    fn note(&self, line: &Value) {
         let Some(path) = &self.transcript else { return };
         if let Some(dir) = path.parent() {
             let _made = std::fs::create_dir_all(dir);
         }
-        let line = json!({"type": "user", "cwd": self.cwd, "sessionId": self.session,
-                          "message": {"role": "user", "content": text}});
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _written = writeln!(file, "{line}");
         }
@@ -166,6 +177,7 @@ fn stream_deltas(fake: &Fake, out: &mut impl Write) -> std::io::Result<()> {
 
 fn finish_text(fake: &Fake, out: &mut impl Write) -> std::io::Result<()> {
     let text: String = DELTAS.concat();
+    fake.note_reply(&text);
     emit(out, &json!({"type": "stream_event", "event": {"type": "message_stop"}}))?;
     emit(out, &fake.assistant(&json!([{"type": "text", "text": text}])))?;
     emit(out, &fake.result("success", &text))
@@ -295,6 +307,7 @@ fn run() -> std::io::Result<()> {
             waiting = Some(Wait::Interrupt);
         } else if text.trim() == "/cost" {
             let line = format!("Total cost: ${:.2}", 0.01 * f64::from(fake.turns));
+            fake.note_reply(&line);
             emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": line}])))?;
             emit(&mut out, &fake.result("success", &line))?;
         } else {

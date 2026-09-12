@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use slopty_proto::agent::AgentSessionInfo;
+use slopty_proto::agent::{AgentSessionInfo, TranscriptEntry};
 
 /// How much of a transcript is read to name it: the first prompt is in the first records.
 const TITLE_SCAN_BYTES: u64 = 64 * 1024;
@@ -74,6 +74,19 @@ pub fn newest_transcript(dir: &Path, since: SystemTime) -> Option<PathBuf> {
 #[must_use]
 pub fn transcript_for(home: &Path, cwd: &Path, since: SystemTime) -> Option<PathBuf> {
     newest_transcript(&project_dir(home, cwd), since)
+}
+
+/// The last `limit` entries of conversation `id` on disk for an agent running in `cwd`.
+///
+/// What a card resuming it shows before the agent says anything new. A transcript that is
+/// not there (or unreadable) is an empty past, not an error: the agent will still run.
+#[must_use]
+pub fn conversation(home: &Path, cwd: &Path, id: &str, limit: usize) -> Vec<TranscriptEntry> {
+    let path = project_dir(home, cwd).join(format!("{id}.jsonl"));
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let mut entries = crate::transcript::entries(&text);
+    entries.drain(..entries.len().saturating_sub(limit));
+    entries
 }
 
 /// The conversations Claude Code has on disk for an agent in `cwd`, newest first.
@@ -241,6 +254,39 @@ mod tests {
         assert_eq!(
             transcript_for(home.path(), cwd, started).as_deref(),
             Some(dir.join("after.jsonl").as_path())
+        );
+    }
+
+    #[test]
+    fn a_conversation_on_disk_is_read_back_as_its_last_entries() {
+        use std::fmt::Write as _;
+
+        use slopty_proto::agent::TranscriptBody;
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/tmp/project");
+        assert!(conversation(home.path(), cwd, "gone", 10).is_empty(), "no file: no past");
+        let dir = project_dir(home.path(), cwd);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut body = String::new();
+        for n in 1..=3 {
+            writeln!(
+                body,
+                r#"{{"type":"user","message":{{"role":"user","content":"ask {n}"}}}}
+{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"answer {n}"}}]}}}}"#
+            )
+            .expect("string");
+        }
+        std::fs::write(dir.join("s1.jsonl"), body).expect("write");
+        let all = conversation(home.path(), cwd, "s1", 10);
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert!(matches!(&all[0].body, TranscriptBody::User { text } if text == "ask 1"));
+        let last = conversation(home.path(), cwd, "s1", 3);
+        assert_eq!(last.len(), 3, "the limit keeps the newest: {last:?}");
+        assert!(
+            matches!(&last[0].body, TranscriptBody::Assistant { markdown } if markdown == "answer 2")
+        );
+        assert!(
+            matches!(&last[2].body, TranscriptBody::Assistant { markdown } if markdown == "answer 3")
         );
     }
 

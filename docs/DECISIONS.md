@@ -2540,7 +2540,10 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   listing found nothing until then; (9) after ⌘W removes the active item, `reconcile` makes
   the canvas take the keyboard back on its next frame instead of leaving focus on the dead
   handle, which is why ⌘⌥R right after a close now lands (and why the arrange-by-repo golden
-  moved: the remaining note draws as the active item, as it should). The self-test's private
+  moved: the remaining note draws as the active item, as it should); (10) a resumed card is
+  seeded with the transcript's last entries before the agent speaks — Claude Code's
+  `--resume` replays nothing over stream-json, and a card that opens empty on "Resume" is
+  worse than no resume at all. The self-test's private
   `HOME` (also given to the driven launch now, the way the fake-claude launch already did)
   keeps the fake's transcripts out of the developer's `~/.claude`.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**

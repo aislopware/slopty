@@ -198,8 +198,12 @@ impl Driven {
         let stderr = child.stderr.take();
         let table = self.clone();
         let daemon = daemon.clone();
+        let resumed = req.resume.clone();
         tokio::spawn(async move {
             let pump = Pump { session, table: table.clone(), events: daemon.events.clone() };
+            if let Some(id) = resumed {
+                pump.seed_past(&id).await;
+            }
             if let Some(stderr) = stderr {
                 tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
@@ -554,6 +558,35 @@ impl Pump {
         table.get(&self.session).and_then(|e| e.entries.back()).is_some_and(
             |last| matches!(&last.body, TranscriptBody::User { text: shown } if shown == text),
         )
+    }
+
+    /// A resumed conversation's past, read from its transcript off the runtime and shown
+    /// before the agent says anything new, so the card does not open empty.
+    async fn seed_past(&self, id: &str) {
+        let cwd = {
+            let table = self.table.inner.lock();
+            table.get(&self.session).and_then(|e| e.summary.cwd.clone())
+        };
+        let Some(cwd) = cwd else { return };
+        let id = id.to_owned();
+        let read = tokio::task::spawn_blocking(move || {
+            let home = std::path::PathBuf::from(default_cwd());
+            slopty_agent::discover::conversation(
+                &home,
+                std::path::Path::new(&cwd),
+                &id,
+                KEEP_ENTRIES,
+            )
+        })
+        .await;
+        match read {
+            Ok(entries) if !entries.is_empty() => {
+                tracing::info!(session = %self.session, entries = entries.len(), "resumed past");
+                self.append(entries);
+            }
+            Ok(_none) => {}
+            Err(e) => tracing::warn!(session = %self.session, error = %e, "transcript read"),
+        }
     }
 
     fn append(&self, entries: Vec<TranscriptEntry>) {
