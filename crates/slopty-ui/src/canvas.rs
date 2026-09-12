@@ -14,11 +14,11 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, App, AppContext as _, BorderStyle, Bounds, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Action, App, AppContext as _, BorderStyle, Bounds, Context, Div, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Size, StatefulInteractiveElement as _, Styled as _, SystemNotification,
+    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, SystemNotification,
     SystemNotificationAction, Task, Window, canvas, div, fill, outline, point, px, size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -115,6 +115,11 @@ pub mod actions {
             /// Point the other clients at the active card: each of them is offered a jump
             /// to it.
             PointOthers,
+            /// Activate and reveal the next card in reading order (rows top to bottom, left
+            /// to right), wrapping; nothing active starts at the first.
+            NextCard,
+            /// Activate and reveal the previous card in reading order, wrapping.
+            PrevCard,
             /// Move the active file card's reading line up one line.
             LineUp,
             /// Move the active file card's reading line down one line.
@@ -133,8 +138,9 @@ pub mod actions {
 pub use actions::{
     AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
     LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote, NewTerminal,
-    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, PointOthers, RenameItem,
-    ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    NewWorktreeAgent, NextAttention, NextCard, OpenPalette, PageDown, PageUp, PointOthers,
+    PrevCard, RenameItem, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
+    ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -178,6 +184,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
         KeyBinding::new("cmd-e", RenameItem, CTX),
         KeyBinding::new("cmd-shift-o", PointOthers, CTX),
+        KeyBinding::new("cmd-]", NextCard, CTX),
+        KeyBinding::new("cmd-[", PrevCard, CTX),
         // The active file card's reading line. Only while a file card is active (the canvas
         // sets `file_card` on its context then): a binding matches before a focused terminal's
         // key handler runs, so an unscoped `up` would take the arrows from the shell.
@@ -228,6 +236,8 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Stream stats", Box::new(ToggleStats)),
         c("Name this card", Box::new(RenameItem)),
         c("Point the others at this card", Box::new(PointOthers)),
+        c("Next card", Box::new(NextCard)),
+        c("Previous card", Box::new(PrevCard)),
         t("Find in terminal, conversation or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
@@ -307,14 +317,25 @@ pub enum CanvasEvent {
 }
 
 /// The field naming a card, open in its title bar (see [`CanvasView::rename_item`]).
-/// Another client's pointing (`CanvasSync::Pointed`), as the toast shows it.
-struct Pointing {
+/// The toast at the top of the canvas.
+struct Toast {
     /// Tells a stale dismiss timer from the current toast's.
     seq: u64,
-    /// Who pointed, as they are named.
-    name: String,
-    /// At what.
-    item: ItemId,
+    /// What it says.
+    what: ToastKind,
+}
+
+/// What a toast is.
+enum ToastKind {
+    /// Another client's pointing (`CanvasSync::Pointed`): a button that goes to the card.
+    Pointed {
+        /// Who pointed, as they are named.
+        name: String,
+        /// At what.
+        item: ItemId,
+    },
+    /// A word to this client alone ("nobody else is here").
+    Said(String),
 }
 
 struct Rename {
@@ -551,8 +572,9 @@ pub struct CanvasView {
     /// The client whose viewport the camera keeps up with: every move they report is flown
     /// to, until this client moves the camera itself or they leave.
     following: Option<ClientId>,
-    /// The latest card another client pointed at, on offer until a click or [`POINT_FOR`].
-    pointed: Option<Pointing>,
+    /// The toast at the top: another client's pointing on offer, or a word to this client,
+    /// until a click or [`POINT_FOR`].
+    toast: Option<Toast>,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
     /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
@@ -668,7 +690,7 @@ impl CanvasView {
             fit_pending: false,
             looked: None,
             following: None,
-            pointed: None,
+            toast: None,
             look_pending: false,
             flight: None,
             zoom_drawn: None,
@@ -770,7 +792,7 @@ impl CanvasView {
             && *client != self.me
             && self.doc.get(*item).is_some()
         {
-            self.show_pointing(name.clone(), *item, cx);
+            self.show_toast(ToastKind::Pointed { name: name.clone(), item: *item }, cx);
         }
         let change = self.doc.apply_sync(sync, self.me);
         tracing::debug!(?change, version = self.doc.version(), "canvas sync");
@@ -1629,10 +1651,7 @@ impl CanvasView {
                     this.palette_return = None;
                     this.reveal_session(*session, cx);
                 }
-                PaletteEvent::Run(PaletteRun::Item(item)) => {
-                    this.activate(*item, cx);
-                    this.reveal_pending = Some(*item);
-                }
+                PaletteEvent::Run(PaletteRun::Item(item)) => this.go_to(*item, cx),
                 PaletteEvent::Run(PaletteRun::Follow(client)) => this.follow(*client, cx),
                 PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
                     let path = this.absolute_in_active_shell(path);
@@ -2746,17 +2765,16 @@ impl CanvasView {
         self.following = Some(client);
     }
 
-    /// Offer `item`, which `name` pointed at, for [`POINT_FOR`]: a newer pointing replaces
-    /// the toast and restarts the clock.
-    fn show_pointing(&mut self, name: String, item: ItemId, cx: &mut Context<Self>) {
-        let seq = self.pointed.as_ref().map_or(0, |p| p.seq).wrapping_add(1);
-        self.pointed = Some(Pointing { seq, name, item });
+    /// Show `what` for [`POINT_FOR`]: a newer toast replaces it and restarts the clock.
+    fn show_toast(&mut self, what: ToastKind, cx: &mut Context<Self>) {
+        let seq = self.toast.as_ref().map_or(0, |t| t.seq).wrapping_add(1);
+        self.toast = Some(Toast { seq, what });
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(POINT_FOR).await;
             let _gone = this.update(cx, |this, cx| {
-                if this.pointed.as_ref().is_some_and(|p| p.seq == seq) {
-                    this.pointed = None;
+                if this.toast.as_ref().is_some_and(|t| t.seq == seq) {
+                    this.toast = None;
                     cx.notify();
                 }
             });
@@ -2764,42 +2782,125 @@ impl CanvasView {
         .detach();
     }
 
-    /// ⌘⇧O: point the other clients at the active card. Nothing active is nothing to point
-    /// at; the host relays it and this client hears its own echo as nothing.
+    /// ⌘⇧O: point the other clients at the active card, and say who was pointed — or that
+    /// nobody else is here, in which case nothing is sent. Nothing active is nothing to
+    /// point at. The host relays it and this client hears its own echo as nothing.
     pub fn point_others(&mut self, _: &PointOthers, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = self.active {
+        let Some(item) = self.active else { return };
+        let Some(title) = self.doc.get(item).map(|i| self.card_title(i, cx)) else { return };
+        let mut names = self.doc.lookers().map(|l| l.name.as_str());
+        let said = match (names.next(), names.count()) {
+            (None, _) => "nobody else is here".to_owned(),
+            (Some(one), 0) => format!("pointed {one} at {title}"),
+            (Some(_), more) => format!("pointed {} others at {title}", more.saturating_add(1)),
+        };
+        if self.doc.lookers().next().is_some() {
             self.send(ClientMsg::Point { item });
-            cx.notify();
+        }
+        self.show_toast(ToastKind::Said(said), cx);
+    }
+
+    /// ⌘]: the next card in reading order.
+    pub fn next_card(&mut self, _: &NextCard, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_card(true, cx);
+    }
+
+    /// ⌘[: the previous card in reading order.
+    pub fn prev_card(&mut self, _: &PrevCard, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_card(false, cx);
+    }
+
+    /// Every card in reading order: rows top to bottom (by the top edge; cards snap to the
+    /// grid, so neighbours placed by hand share one), left to right within a row.
+    fn reading_order(&self) -> Vec<ItemId> {
+        let mut items: Vec<&CanvasItem> = self.doc.items().collect();
+        items.sort_by(|a, b| {
+            a.rect.y.total_cmp(&b.rect.y).then_with(|| a.rect.x.total_cmp(&b.rect.x))
+        });
+        items.into_iter().map(|i| i.id).collect()
+    }
+
+    /// Go to the card after (or before) the active one in reading order, wrapping; nothing
+    /// active starts at the first (or the last).
+    fn step_card(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let order = self.reading_order();
+        let Some(last) = order.len().checked_sub(1) else { return };
+        let at = self.active.and_then(|active| order.iter().position(|id| *id == active));
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(i), true) => {
+                if i == last {
+                    0
+                } else {
+                    i.saturating_add(1)
+                }
+            }
+            (Some(i), false) => i.checked_sub(1).unwrap_or(last),
+        };
+        if let Some(&id) = order.get(next) {
+            self.go_to(id, cx);
         }
     }
 
-    /// The toast for the latest pointing: `name points at title` at the top, a button
-    /// that goes to the card (active, revealed) and takes the toast with it. A card that has
-    /// gone since takes the toast with it too.
-    fn render_pointed(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
-        let pointing = self.pointed.as_ref()?;
-        let item = self.doc.get(pointing.item)?;
-        let id = item.id;
-        let title = self.card_title(item, cx);
+    /// Activate and reveal `id`; a terminal takes the keyboard too.
+    fn go_to(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        if let Some(ItemKind::Terminal { session }) = self.doc.get(id).map(|i| &i.kind) {
+            self.reveal_session(*session, cx);
+        } else {
+            self.activate(id, cx);
+            self.reveal_pending = Some(id);
+        }
+    }
+
+    /// The toast at the top: a pointing is `name points at title`, a button that goes to
+    /// the card (active, revealed) and takes the toast with it — a card that has gone since
+    /// takes the toast with it too; a word to this client is a status line.
+    fn render_toast(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
-        let toast = div()
-            .id("pointed")
-            .debug_selector(|| "pointed".to_owned())
-            .role(Role::Button)
-            .aria_label(format!("{} points at {title}, go there", pointing.name))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.xs))
-            .rounded(px(theme.radii.md))
-            .bg(hsla(theme.surfaces.accent))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(theme.surfaces.accent_fg))
-            .font_family(theme.typography.ui_family.clone())
-            .cursor_pointer()
-            .child(SharedString::from(format!("{} points at {title}", pointing.name)))
-            .child(div().opacity(0.8).child("· go"));
+        let toast = self.toast.as_ref()?;
+        let style = |d: Stateful<Div>| {
+            d.flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.md))
+                .py(px(theme.spacing.xs))
+                .rounded(px(theme.radii.md))
+                .text_size(px(theme.typography.small()))
+                .font_family(theme.typography.ui_family.clone())
+        };
+        let inner = match &toast.what {
+            ToastKind::Pointed { name, item } => {
+                let item = self.doc.get(*item)?;
+                let id = item.id;
+                let title = self.card_title(item, cx);
+                let pill = style(div().id("pointed"))
+                    .debug_selector(|| "pointed".to_owned())
+                    .role(Role::Button)
+                    .aria_label(format!("{name} points at {title}, go there"))
+                    .bg(hsla(theme.surfaces.accent))
+                    .text_color(hsla(theme.surfaces.accent_fg))
+                    .cursor_pointer()
+                    .child(SharedString::from(format!("{name} points at {title}")))
+                    .child(div().opacity(0.8).child("· go"));
+                tab_stop(pill, theme.surfaces.accent_fg)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.toast = None;
+                        this.go_to(id, cx);
+                    }))
+                    .into_any_element()
+            }
+            ToastKind::Said(text) => style(div().id("said"))
+                .debug_selector(|| "said".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(text.clone()))
+                .bg(hsla_alpha(theme.surfaces.panel, alpha::MINIMAP))
+                .border_1()
+                .border_color(hsla_alpha(theme.surfaces.accent, alpha::LOOKER_TAG))
+                .text_color(hsla(theme.surfaces.text))
+                .child(SharedString::from(text.clone()))
+                .into_any_element(),
+        };
         let row = div()
             .absolute()
             .top(px(MINIMAP_MARGIN))
@@ -2807,13 +2908,7 @@ impl CanvasView {
             .right_0()
             .flex()
             .justify_center()
-            .child(tab_stop(toast, theme.surfaces.accent_fg).on_click(cx.listener(
-                move |this, _ev, _w, cx| {
-                    this.pointed = None;
-                    this.activate(id, cx);
-                    this.reveal_pending = Some(id);
-                },
-            )));
+            .child(inner);
         Some(row.into_any_element())
     }
 
@@ -3725,7 +3820,7 @@ impl Render for CanvasView {
             .collect();
         let lookers = self.render_lookers(cx);
         let here = self.render_here(cx);
-        let pointed = self.render_pointed(cx);
+        let pointed = self.render_toast(cx);
         self.note_view(cx);
         let minimap = (!empty).then(|| self.render_minimap(cx));
         let file_card_active = self
@@ -3789,6 +3884,8 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::rename_item))
             .on_action(cx.listener(Self::point_others))
+            .on_action(cx.listener(Self::next_card))
+            .on_action(cx.listener(Self::prev_card))
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the canvas has the keyboard.
             .capture_action(cx.listener(
@@ -4000,7 +4097,7 @@ fn pill(
     tone: slopty_theme::Rgb,
     theme: &Theme,
     chrome: Chrome,
-) -> gpui::Stateful<gpui::Div> {
+) -> Stateful<Div> {
     let k = chrome.k;
     div()
         .id(element_id(part, item))
@@ -4958,11 +5055,16 @@ mod tests {
         assert!(cx.debug_bounds("pointed").is_none(), "gone by itself");
     }
 
-    /// ⌘⇧O (and the palette's line) tells the host which card is active; nothing active
-    /// says nothing.
+    /// ⌘⇧O (and the palette's line) tells the host which card is active and says who was
+    /// pointed; nothing active says nothing, and nobody else here sends nothing and says so.
     #[gpui::test]
     fn pointing_the_others_names_the_active_card(cx: &mut TestAppContext) {
         let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let status = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.iter().find(|n| n.role == "Status").and_then(|n| n.label.clone())
+        };
         let points = |rx: &mut mpsc::Receiver<ClientMsg>| {
             drain(rx)
                 .into_iter()
@@ -4991,7 +5093,35 @@ mod tests {
         });
         cx.simulate_keystrokes("cmd-shift-o");
         cx.run_until_parked();
+        assert!(points(&mut rx).is_empty(), "nobody to point");
+        assert_eq!(status(cx).as_deref(), Some("nobody else is here"));
+        let pad = ClientId::new();
+        view.update(cx, |c, cx| {
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: pad,
+                    kind: ClientKind::IPad,
+                    name: "pad".to_owned(),
+                    view: Some(SHELL),
+                },
+                cx,
+            );
+        });
+        cx.simulate_keystrokes("cmd-shift-o");
+        cx.run_until_parked();
         assert_eq!(points(&mut rx), vec![id]);
+        assert_eq!(status(cx).as_deref(), Some("pointed pad at here"));
+        view.update(cx, |c, cx| {
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: ClientId::new(),
+                    kind: ClientKind::Mac,
+                    name: "desk".to_owned(),
+                    view: Some(SHELL),
+                },
+                cx,
+            );
+        });
         cx.simulate_keystrokes("cmd-shift-p");
         cx.run_until_parked();
         cx.simulate_keystrokes("p o i n t space t h e");
@@ -4999,6 +5129,57 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(points(&mut rx), vec![id], "the palette's line does the same");
+        assert_eq!(status(cx).as_deref(), Some("pointed 2 others at here"));
+        cx.executor().advance_clock(POINT_FOR);
+        cx.run_until_parked();
+        assert_eq!(status(cx), None, "gone by itself");
+    }
+
+    /// ⌘] and ⌘[ walk the cards in reading order — rows by their top edge, left to right —
+    /// wrapping at both ends, revealing each; nothing active starts at the first or the last.
+    #[gpui::test]
+    fn the_cards_are_walked_in_reading_order(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let note = |x: f32, y: f32| CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: format!("{x},{y}") },
+            rect: Rect { x, y, w: 200.0, h: 100.0 },
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        // Upserted out of order: the walk is by position, never by arrival or z.
+        let (right, first, below) = (note(300.0, 0.0), note(0.0, 0.0), note(0.0, 4_000.0));
+        let order = [first.id, right.id, below.id];
+        let last = below.id;
+        view.update(cx, |c, cx| {
+            for (version, item) in [1_u64, 2, 3].into_iter().zip([right, first, below]) {
+                c.apply_sync(CanvasSync::Delta { version, by: me, op: CanvasOp::Upsert(item) }, cx);
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.reading_order()), order);
+        let active = |cx: &mut VisualTestContext| view.read_with(cx, |c, _| c.active);
+        assert_eq!(active(cx), None);
+        for expected in order.iter().chain([&order[0]]) {
+            cx.simulate_keystrokes("cmd-]");
+            cx.run_until_parked();
+            assert_eq!(active(cx).as_ref(), Some(expected));
+        }
+        let far = Rect { x: 0.0, y: 4_000.0, w: 200.0, h: 100.0 };
+        assert!(!view.read_with(cx, |c, _| c.on_screen(far)), "back at the top");
+        cx.simulate_keystrokes("cmd-[");
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(last));
+        assert!(view.read_with(cx, |c, _| c.on_screen(far)), "revealed");
+        view.update(cx, |c, cx| {
+            c.active = None;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("cmd-[");
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(last), "nothing active: the last");
     }
 
     /// and ↩ follows: the camera goes to their viewport wherever it is.

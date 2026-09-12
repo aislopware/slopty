@@ -412,3 +412,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   typing landing at the end, and the document holding the edited text once the reader is back)
   and the app self-test's notes scenario, whose note is empty and so still shows the editor and
   its placeholder — both render goldens unchanged.
+
+- ✅ **⌘] and ⌘[ walk the cards in reading order** (2026-09-13). A canvas of eight cards had
+  no keyboard way from one to the next: ⌘⇧A goes to the agents that need you, the palette
+  goes to a card by name, and everything else was a scroll and a click. Rulings: (1) the
+  order is the page's — rows by the top edge, top to bottom, left to right within a row —
+  computed from the rects each time (`CanvasView::reading_order`), never from arrival or z:
+  cards snap to the grid, so neighbours placed by hand share a row exactly, and an arranged
+  block reads as its grid; (2) both keys wrap, and nothing active starts at the first (⌘])
+  or the last (⌘[); (3) the step is the palette's "go to" (`go_to`): active, revealed, and a
+  terminal takes the keyboard, so ⌘] into a shell is one key, not two. Tested headless
+  (`the_cards_are_walked_in_reading_order`). Not done: a spatial walk (⌘⌥→ to the card on the
+  right) — reading order covers a grid, and a free-form layout has no unambiguous "right".
