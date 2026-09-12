@@ -396,7 +396,9 @@ as "Go to <title>" after the sessions (`PaletteRun::Item`), and the card's "ask"
 `@<path>` into the agent's composer. ⌘F with the card active opens a find bar like the
 terminal's (`FileView::find`, key context `FileSearch`): a hit is a line holding the text,
 case-insensitive (`file::find_hits`), tinted in the warn tone, stepped with ⌘G/↩ and wrapped;
-Esc closes it and the canvas takes the keyboard back. The picker (⌘O) lists the
+Esc closes it and the canvas takes the keyboard back. An "edit" pill (`edit-<item>`, shown
+while a shell exists) types `${EDITOR:-vi} +line 'path'` into the last-used shell, the line
+being the current find hit or the one the card opened at (`FileView::reading_line`). The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are

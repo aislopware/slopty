@@ -255,7 +255,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and wrap at the ends; (4) closing the bar hands the keyboard to the canvas
   (`FileViewEvent::FindClosed` → `pending_focus_self`), the card having no focus of its own;
   (5) the title bar carries a "find" pill (`find-<item>`, a11y "Find in the file") beside
-  "reload", the phone's ⌘F. The palette line reads "Find in terminal or file". Tests:
+  "reload", the phone's ⌘F; (6) an "edit" pill (`edit-<item>`, a11y "Open the file in the
+  editor", same day) types `${EDITOR:-vi} +line 'path'` into the shell the human was last in
+  (`run_in_shell`, as the agent card's "open" does), the line being the current find hit,
+  else the line the card opened at (`FileView::reading_line`) — the card is for reading, the
+  editor for changing, and the pill is the step between; drawn only while a shell exists to
+  take it. The palette line reads "Find in terminal or file". Tests:
+  `a_file_cards_edit_pill_opens_the_editor_at_the_line_read` (headless: no pill without a
+  shell, `+2` from the opening line, `+3` from the second hit),
   `hits_are_the_lines_holding_the_needle_in_any_case` (unit),
   `find_in_a_file_card_steps_through_its_lines` (headless: ⌘F opens the bar with the field
   focused, the count reads 1/2, ⌘G/↩/⇧↩ step and wrap, a re-read recounts, Esc closes and

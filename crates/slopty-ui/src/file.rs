@@ -157,6 +157,14 @@ impl FileView {
         self.search.is_some()
     }
 
+    /// The line the human is on, 1-based, for an editor: the current hit while finding, else
+    /// the line the card opened at, else none.
+    #[must_use]
+    pub fn reading_line(&self) -> Option<u32> {
+        let hit = self.search.as_ref().and_then(|s| s.current.and_then(|c| s.hits.get(c).copied()));
+        hit.or(self.focus).and_then(|ix| u32::try_from(ix.saturating_add(1)).ok())
+    }
+
     /// The lines found (indices into what is drawn) and which one the card is on.
     #[must_use]
     pub fn hits(&self) -> Option<(&[usize], Option<usize>)> {

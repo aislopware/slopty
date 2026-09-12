@@ -2138,6 +2138,16 @@ impl CanvasView {
         }
     }
 
+    /// The card's "edit" pill: the file in `$EDITOR` in the shell the human was last in, at
+    /// the line being read (the current find hit, else the line the card opened at).
+    fn edit_file(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(ItemKind::File { path }) = self.doc.get(id).map(|i| i.kind.clone()) else {
+            return;
+        };
+        let line = self.files.get(&id).and_then(|v| v.read(cx).reading_line());
+        self.run_in_shell(crate::terminal::url::editor_command(&path, line), cx);
+    }
+
     /// Ask the host for a file card's text (again).
     fn request_file(&self, id: ItemId) {
         if let Some(ItemKind::File { path }) = self.doc.get(id).map(|i| &i.kind) {
@@ -2724,6 +2734,14 @@ impl CanvasView {
             ItemKind::File { .. } => Some(find_button(id, theme, chrome, cx)),
             _ => None,
         };
+        // A file card: the file in `$EDITOR` at the line being read, in the canvas's shell —
+        // only while there is a shell for it to go to.
+        let edit = match item.kind {
+            ItemKind::File { .. } if self.run_target().is_some() => {
+                Some(edit_button(id, theme, chrome, cx))
+            }
+            _ => None,
+        };
         // An agent the host had to guess at: offer the hooks that would make it precise.
         let hooks = agent
             .filter(|(_session, a)| a.source != AgentSource::Hook && !self.hooks_offered)
@@ -2799,6 +2817,7 @@ impl CanvasView {
             )
             .when_some(ask, gpui::ParentElement::child)
             .when_some(find, gpui::ParentElement::child)
+            .when_some(edit, gpui::ParentElement::child)
             .when_some(reload, gpui::ParentElement::child)
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
@@ -3268,6 +3287,22 @@ fn reload_button(
             this.request_file(id);
             cx.notify();
         }))
+        .into_any_element()
+}
+
+/// The "edit" pill in a file card's title bar: `$EDITOR +line path` typed into the canvas's
+/// shell (see [`CanvasView::edit_file`]).
+fn edit_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("edit", id, "edit", theme.surfaces.text_secondary, theme, chrome)
+        .role(Role::Button)
+        .aria_label("Open the file in the editor");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _window, cx| this.edit_file(id, cx)))
         .into_any_element()
 }
 
@@ -5823,6 +5858,75 @@ mod tests {
         assert!(cx.debug_bounds("file-search").is_some(), "the pill opens the bar");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Button", Some("Find in the file"))), "{tree:#?}");
+    }
+
+    #[gpui::test]
+    fn a_file_cards_edit_pill_opens_the_editor_at_the_line_read(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/a.txt", Some(2), cx));
+        cx.run_until_parked();
+        let id = view.read_with(cx, |c, _| c.active_item().expect("the card"));
+        assert!(cx.debug_bounds(selector("edit", id)).is_none(), "no shell: nowhere to edit");
+
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, Rect { x: 760.0, ..SHELL }, 2);
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/w/a.txt",
+                &FileRead::Text {
+                    text: "alpha\nbeta\nalpha".to_owned(),
+                    more_lines: 0,
+                    size: 16,
+                    modified_ms: 1,
+                },
+                cx,
+            );
+            // Back to the card: the shell's arrival panned the camera to it.
+            c.activate(id, cx);
+            c.reveal_pending = Some(id);
+        });
+        cx.run_until_parked();
+        // The reveal moved the camera during a frame; the next frame draws the card there.
+        view.update(cx, |_c, cx| cx.notify());
+        cx.run_until_parked();
+        let typed = |rx: &mut mpsc::Receiver<ClientMsg>| -> Vec<String> {
+            drain(rx)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Term { session, req: TermRequest::Paste(code) }
+                        if session == shell =>
+                    {
+                        Some(code)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        drain(&mut rx);
+
+        // The line the card opened at.
+        let edit = cx.debug_bounds(selector("edit", id)).expect("a shell: the edit pill");
+        cx.simulate_click(edit.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(typed(&mut rx), ["${EDITOR:-vi} +2 '/w/a.txt'"]);
+        assert!(terminal_focused(&view, cx, shell), "the shell took the keyboard");
+
+        // The current find hit wins while finding.
+        view.update_in(cx, |c, window, cx| {
+            c.activate(id, cx);
+            c.reveal_pending = Some(id);
+            c.files[&id].update(cx, |v, cx| v.find(window, cx));
+        });
+        cx.run_until_parked();
+        view.update(cx, |_c, cx| cx.notify());
+        cx.run_until_parked();
+        // The hits are lines 1 and 3; the card opened at line 2, so it lands on 3.
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        let edit = cx.debug_bounds(selector("edit", id)).expect("the edit pill");
+        cx.simulate_click(edit.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(typed(&mut rx), ["${EDITOR:-vi} +3 '/w/a.txt'"]);
     }
 
     #[gpui::test]
