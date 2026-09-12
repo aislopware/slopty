@@ -841,6 +841,22 @@ mod tests {
         assert_eq!(state.view_offset(), 3);
     }
 
+    /// A command continued on the next row (a `for` loop typed over two lines) is marked as
+    /// input by the shell: the head joins it and its body starts below.
+    #[test]
+    fn a_continuation_row_joins_the_command_of_its_head() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ for x"), (1, "do echo"), (2, "$ ")]);
+        f.updates[0].line.mark = prompt(None);
+        f.updates[1].line.mark = SemanticMark::Input;
+        f.updates[2].line.mark = prompt(Some(0));
+        state.apply(TermEvent::Frame(f));
+        let head = state.block_head(LineIndex(0)).expect("the loop's head");
+        assert_eq!(head.command.as_deref(), Some("for x\ndo echo"));
+        assert_eq!(head.body, LineIndex(2));
+    }
+
     fn texts(state: &TermState) -> Vec<Option<String>> {
         state.view().into_iter().map(|r| r.line.map(Line::text)).collect()
     }
