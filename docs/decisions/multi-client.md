@@ -84,8 +84,11 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   lists every other client as "Follow <name>" with its device on the right, for a client
   whose outline is off this screen. The
   minimap fits the lookers' viewports too and outlines each in its colour, so a client off
-  this screen is still in the overview. Tested at every layer: the table, the document, the
+  this screen is still in the overview, and a "here" row at the top right names every other
+  client with its colour dot, on screen or not — who is on this canvas, at a glance, with the
+  same follow on a click (nothing new on the wire: it is the lookers the document already
+  keeps). Tested at every layer: the table, the document, the
   headless canvas (the outline's a11y node and bounds; one `Look` per rest; the minimap's
-  fit), and two clients on a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
+  fit; the here row's pills and their follow), and two clients on a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
   (a viewport is what the other person can see, which is what matters for "look at this";
   a pointer at 20 Hz is a stream), and presence across hosts (a canvas is per host).

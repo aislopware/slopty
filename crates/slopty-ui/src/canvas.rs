@@ -2550,6 +2550,73 @@ impl CanvasView {
         palette.get(hue).copied().unwrap_or(theme.surfaces.accent)
     }
 
+    /// Who else is on this canvas: one pill per other client at the top right, named and
+    /// tinted like their outline, whether or not their viewport is on this screen. A click
+    /// follows them (a second click stops), like the outline's tag.
+    fn render_here(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = &self.theme;
+        let mut lookers = self.doc.lookers().peekable();
+        lookers.peek()?;
+        let row = div()
+            .id("here")
+            .debug_selector(|| "here".to_owned())
+            .role(Role::Group)
+            .aria_label("Here")
+            .absolute()
+            .top(px(MINIMAP_MARGIN))
+            .right(px(MINIMAP_MARGIN))
+            .flex()
+            .gap(px(theme.spacing.xs))
+            .font_family(theme.typography.ui_family.clone());
+        let row = lookers.fold(row, |row, l| {
+            let client = l.client;
+            let colour = self.looker_colour(client);
+            let following = self.following == Some(client);
+            let verb = if following { "following" } else { "follow" };
+            let pill = div()
+                .id(ElementId::from(SharedString::from(format!("here-{client}"))))
+                .debug_selector({
+                    let name = l.name.clone();
+                    move || format!("here-{name}")
+                })
+                .role(Role::Button)
+                .aria_label(format!("{verb} {}, {}", l.name, device_name(l.kind)))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
+                .py(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.sm))
+                .bg(if following {
+                    hsla_alpha(colour, 1.0)
+                } else {
+                    hsla_alpha(theme.surfaces.panel, alpha::MINIMAP)
+                })
+                .border_1()
+                .border_color(hsla_alpha(colour, alpha::LOOKER_TAG))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(if following {
+                    theme.surfaces.accent_fg
+                } else {
+                    theme.surfaces.text
+                }))
+                .cursor_pointer()
+                .child(div().flex_none().size(px(theme.spacing.sm)).rounded_full().bg(hsla(colour)))
+                .child(SharedString::from(l.name.clone()));
+            row.child(tab_stop(pill, theme.surfaces.accent).on_click(cx.listener(
+                move |this, _ev, _w, cx| {
+                    if this.following == Some(client) {
+                        this.following = None;
+                        cx.notify();
+                    } else {
+                        this.follow(client, cx);
+                    }
+                },
+            )))
+        });
+        Some(row.into_any_element())
+    }
+
     fn render_lookers(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         self.doc
@@ -3558,6 +3625,7 @@ impl Render for CanvasView {
             .map(|item| self.render_item(item, window, cx))
             .collect();
         let lookers = self.render_lookers(cx);
+        let here = self.render_here(cx);
         self.note_view(cx);
         let minimap = (!empty).then(|| self.render_minimap(cx));
         let file_card_active = self
@@ -3642,6 +3710,7 @@ impl Render for CanvasView {
             .children(headings)
             .children(rendered)
             .children(lookers)
+            .children(here)
             .children(minimap)
             .children(picker)
             .children(palette)
@@ -4619,7 +4688,11 @@ mod tests {
             let tree = cx.update(|window, _cx| crate::a11y::tree(window));
             tree.iter()
                 .filter(|n| {
-                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("pad"))
+                    // The outline's tag, not the here row's pill (that one names the device).
+                    n.role == "Button"
+                        && n.label
+                            .as_deref()
+                            .is_some_and(|l| l.ends_with("ing pad") || l == "follow pad")
                 })
                 .filter_map(|n| n.label.clone())
                 .collect::<Vec<_>>()
@@ -4666,6 +4739,67 @@ mod tests {
     }
 
     /// The palette lists every other client as "Follow <name>" with its device on the right,
+    /// The "here" row names every other client whether or not their viewport is on this
+    /// screen; a pill follows them like the outline's tag, and it goes when they leave.
+    #[gpui::test]
+    fn the_here_row_names_the_others_and_follows_on_a_click(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        assert!(cx.debug_bounds("here").is_none(), "alone: no row");
+        let pad = ClientId::new();
+        let phone = ClientId::new();
+        let far = Rect { x: 5_000.0, y: 3_000.0, w: 400.0, h: 700.0 };
+        let presence = |client: ClientId, kind: ClientKind, name: &str, view: Option<Rect>| {
+            CanvasSync::Presence { client, kind, name: name.to_owned(), view }
+        };
+        view.update(cx, |c, cx| {
+            c.apply_sync(presence(pad, ClientKind::IPad, "pad", Some(far)), cx);
+            c.apply_sync(
+                presence(
+                    phone,
+                    ClientKind::IPhone,
+                    "phone",
+                    Some(Rect { x: 0.0, y: 0.0, w: 300.0, h: 500.0 }),
+                ),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("follow-pad").is_none(), "off screen: no outline tag");
+        let pill = cx.debug_bounds("here-pad").expect("a pill even so");
+        assert!(cx.debug_bounds("here-phone").is_some());
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let labels: Vec<String> = tree
+            .iter()
+            .filter(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains(", i")))
+            .filter_map(|n| n.label.clone())
+            .collect();
+        assert_eq!(labels, ["follow pad, iPad", "follow phone, iPhone"], "{tree:#?}");
+        cx.simulate_click(pill.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.following), Some(pad));
+        let (camera, viewport) = view.read_with(cx, |c, _| (c.camera, c.viewport_size()));
+        let expected = Camera::fitted([far], viewport);
+        assert!(
+            (camera.x - expected.x).abs() < 0.5 && (camera.y - expected.y).abs() < 0.5,
+            "{camera:?} vs {expected:?}"
+        );
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.label.as_deref() == Some("following pad, iPad")),
+            "{tree:#?}"
+        );
+        // A second click stops following; a client that leaves loses its pill.
+        let pill = cx.debug_bounds("here-pad").expect("still here");
+        cx.simulate_click(pill.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.following), None);
+        view.update(cx, |c, cx| c.apply_sync(presence(pad, ClientKind::IPad, "pad", None), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("here-pad").is_none());
+        assert!(cx.debug_bounds("here-phone").is_some());
+    }
+
     /// and ↩ follows: the camera goes to their viewport wherever it is.
     #[gpui::test]
     fn the_palette_follows_another_client(cx: &mut TestAppContext) {
