@@ -747,3 +747,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   them. Ceiling 50 % because past a half, a smaller picture beats a better-protected one. Six
   unit tests with a deterministic clumped-loss channel pin all of it; one of them found a real
   overflow (`lost × 1000` saturating `u32` made a worse window read as *less* loss).
+
+- ✅ **An edit's diff is coloured by its file's grammar** (2026-09-12). The `+`/`−` rows of
+  an Edit call read as plain mono while the file card beside them was coloured. Ruled: the
+  changed rows take the same tokens as a file card (`conversation::diff_spans` over
+  `highlight::spans`); context rows stay muted so the change is what stands out. Each side is
+  parsed as its own text — the old side is the context and removed lines, the new side the
+  context and added lines — so a removed line that opens a block comment does not bleed into
+  the line that replaced it; context rows take the new side's spans. A diff is clipped to 40
+  lines (≈ 6 ms to parse), which is too slow for every frame, so the spans are parsed on the
+  first draw and kept by entry index (`Conversation::diffs`, entries only append; a reset
+  clears it). No wire change. Test:
+  `conversation::tests::a_diff_is_coloured_side_by_side_and_cached_by_entry`.

@@ -15,7 +15,8 @@
 //! composer completes the slash commands the agent announced: a `/` prefix lists the matches
 //! above the field, Tab takes the selected one, ↑/↓ move, Esc hides the list.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::accesskit::Role;
@@ -36,6 +37,7 @@ use slopty_theme::{Theme, alpha};
 
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
+use crate::highlight::{self, Span, Syntax};
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
 
 /// Lines of a tool result shown before it is opened.
@@ -321,7 +323,14 @@ pub struct Conversation {
     hits: Rc<[usize]>,
     /// Index into `hits` of the one the reader is on.
     hit: Option<usize>,
+    /// An edit's diff coloured by its file's grammar, by entry index, parsed on first draw
+    /// (`None`: no grammar for the path); entries only append or reset, so an index stays
+    /// good until a reset clears the map. Shared with the render closure.
+    diffs: Rc<DiffCache>,
 }
+
+/// An edit's coloured lines by entry index; `None` for an edit whose path has no grammar.
+type DiffCache = RefCell<HashMap<usize, Option<Rc<[Vec<Span>]>>>>;
 
 impl std::fmt::Debug for Conversation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -360,6 +369,7 @@ impl Conversation {
             completions_hidden: false,
             hits: Rc::from([]),
             hit: None,
+            diffs: Rc::default(),
         }
     }
 
@@ -572,6 +582,7 @@ impl Conversation {
         if update.reset {
             self.open = Rc::new(HashSet::new());
             self.tasks = Rc::from([]);
+            self.diffs.borrow_mut().clear();
             self.list.reset(after);
             self.pin();
         } else {
@@ -609,6 +620,7 @@ impl Conversation {
         let tasks = Rc::clone(&self.tasks);
         let hits = Rc::clone(&self.hits);
         let current = self.hit.and_then(|c| hits.get(c).copied());
+        let diffs = Rc::clone(&self.diffs);
         let theme = theme.clone();
         let empty = entries.is_empty();
         let view = cx.entity();
@@ -661,6 +673,7 @@ impl Conversation {
                                                 .binary_search(&ix)
                                                 .is_ok()
                                                 .then_some(current == Some(ix));
+                                            let diff = diff_spans_cached(&diffs, ix, e);
                                             entry(
                                                 ix,
                                                 e,
@@ -668,6 +681,7 @@ impl Conversation {
                                                 task,
                                                 run,
                                                 hit,
+                                                diff.as_deref(),
                                                 &view,
                                                 &theme,
                                             )
@@ -1449,6 +1463,7 @@ fn entry(
     task: Option<&AgentTask>,
     run: Option<&Entity<TerminalView>>,
     hit: Option<bool>,
+    diff: Option<&[Vec<Span>]>,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -1581,7 +1596,7 @@ fn entry(
                     .on_click(toggle),
             )
             .children(task.map(|t| task_line(t, theme)))
-            .children(tool_body(detail, open, &mono, theme))
+            .children(tool_body(detail, open, diff, &mono, theme))
             .into_any_element(),
         TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => row
             .flex()
@@ -2073,7 +2088,13 @@ fn clipped_block(text: &Clipped, mono: &str, theme: &Theme) -> AnyElement {
 /// unasked (the diff folded past [`DIFF_PREVIEW_LINES`]); a command, a written file, a
 /// subagent's brief and an unknown tool's JSON open on a click; a read or a search has
 /// only its slice or filter to add and shows it when opened.
-fn tool_body(detail: &ToolDetail, open: bool, mono: &str, theme: &Theme) -> Option<AnyElement> {
+fn tool_body(
+    detail: &ToolDetail,
+    open: bool,
+    diff: Option<&[Vec<Span>]>,
+    mono: &str,
+    theme: &Theme,
+) -> Option<AnyElement> {
     let s = &theme.surfaces;
     let small = theme.typography.small();
     let block = |text: &Clipped| clipped_block(text, mono, theme);
@@ -2089,10 +2110,15 @@ fn tool_body(detail: &ToolDetail, open: bool, mono: &str, theme: &Theme) -> Opti
             let shown = if open { lines.len() } else { lines.len().min(DIFF_PREVIEW_LINES) };
             let hidden = lines.len().saturating_sub(shown);
             let more = u32::try_from(hidden).unwrap_or(u32::MAX).saturating_add(*more_lines);
+            let font = crate::fonts::terminal_font(mono, false, false);
             let mut rows: Vec<AnyElement> = lines
                 .iter()
                 .take(shown)
-                .map(|l| diff_row(l, mono, theme).into_any_element())
+                .enumerate()
+                .map(|(i, l)| {
+                    let spans = diff.and_then(|d| d.get(i)).map(Vec::as_slice);
+                    diff_row(l, spans, &font, mono, theme).into_any_element()
+                })
                 .collect();
             if more > 0 {
                 rows.push(
@@ -2218,14 +2244,93 @@ fn diff_counts(lines: &[DiffLine]) -> (usize, usize) {
     (added, removed)
 }
 
+/// The diff's lines coloured by the grammar `path` names, one span list per line in the
+/// diff's order; none when the bundle has no grammar for the path.
+///
+/// Each side is parsed as its own text — the old side is the context and removed lines, the
+/// new side the context and added lines — so a removed line that opens a block comment does
+/// not bleed into the lines that replaced it. Context lines take the new side's spans.
+fn diff_spans(path: &str, lines: &[DiffLine]) -> Option<Rc<[Vec<Span>]>> {
+    let syntax = Syntax::for_path(path, "")?;
+    let side = |keep: DiffKind| -> String {
+        lines
+            .iter()
+            .filter(|l| l.kind != keep)
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let old = highlight::spans(&side(DiffKind::Added), syntax);
+    let new = highlight::spans(&side(DiffKind::Removed), syntax);
+    let (mut old_at, mut new_at) = (0_usize, 0_usize);
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let spans = match line.kind {
+            DiffKind::Context => {
+                old_at = old_at.saturating_add(1);
+                let at = new_at;
+                new_at = new_at.saturating_add(1);
+                new.get(at)
+            }
+            DiffKind::Removed => {
+                let at = old_at;
+                old_at = old_at.saturating_add(1);
+                old.get(at)
+            }
+            DiffKind::Added => {
+                let at = new_at;
+                new_at = new_at.saturating_add(1);
+                new.get(at)
+            }
+        };
+        out.push(spans.cloned().unwrap_or_default());
+    }
+    Some(Rc::from(out))
+}
+
+/// The entry's diff colouring from the cache, parsed on the first ask; nothing for an entry
+/// that is not an edit.
+fn diff_spans_cached(
+    cache: &DiffCache,
+    ix: usize,
+    entry: &TranscriptEntry,
+) -> Option<Rc<[Vec<Span>]>> {
+    let TranscriptBody::ToolUse { detail: ToolDetail::Diff { path, lines, .. }, .. } = &entry.body
+    else {
+        return None;
+    };
+    if let Some(known) = cache.borrow().get(&ix) {
+        return known.clone();
+    }
+    let parsed = diff_spans(path, lines);
+    cache.borrow_mut().insert(ix, parsed.clone());
+    parsed
+}
+
 /// One diff line: a sign column, then the text, the row tinted in the success tone for an
-/// addition, the error tone for a removal, nothing for context.
-fn diff_row(line: &DiffLine, mono: &str, theme: &Theme) -> impl IntoElement {
+/// addition, the error tone for a removal, nothing for context. A changed line is coloured by
+/// its grammar (`spans`); context stays muted so the change is what stands out.
+fn diff_row(
+    line: &DiffLine,
+    spans: Option<&[Span]>,
+    font: &gpui::Font,
+    mono: &str,
+    theme: &Theme,
+) -> impl IntoElement {
     let s = &theme.surfaces;
     let (sign, tone) = match line.kind {
         DiffKind::Context => (" ", None),
         DiffKind::Added => ("+", Some(s.success)),
         DiffKind::Removed => ("−", Some(s.error)),
+    };
+    let text: SharedString =
+        if line.text.is_empty() { " ".into() } else { line.text.clone().into() };
+    let body = if tone.is_some() && spans.is_some_and(|sp| !sp.is_empty()) {
+        gpui::StyledText::new(text.clone())
+            .with_runs(highlight::runs(text.len(), spans, font, theme))
+            .into_any_element()
+    } else {
+        text.into_any_element()
     };
     div()
         .flex()
@@ -2241,9 +2346,7 @@ fn diff_row(line: &DiffLine, mono: &str, theme: &Theme) -> impl IntoElement {
                 .text_color(hsla(tone.unwrap_or(s.text_muted)))
                 .child(sign),
         )
-        .child(div().flex_1().min_w(px(0.0)).whitespace_normal().child(SharedString::from(
-            if line.text.is_empty() { " ".to_owned() } else { line.text.clone() },
-        )))
+        .child(div().flex_1().min_w(px(0.0)).whitespace_normal().child(body))
 }
 
 /// One todo: a mark for its state, then the text; done items are struck through and muted,
@@ -2303,4 +2406,60 @@ pub fn clock(at: Option<u64>) -> Option<String> {
     let ms = i64::try_from(at?).ok()?;
     let utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)?;
     Some(utc.with_timezone(&chrono::Local).format("%H:%M").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::highlight::Token;
+
+    fn diff(path: &str, lines: &[(DiffKind, &str)]) -> TranscriptEntry {
+        TranscriptEntry {
+            at: None,
+            body: TranscriptBody::ToolUse {
+                call: "c1".to_owned(),
+                name: "Edit".to_owned(),
+                summary: path.to_owned(),
+                detail: ToolDetail::Diff {
+                    path: path.to_owned(),
+                    line: None,
+                    lines: lines
+                        .iter()
+                        .map(|(kind, text)| DiffLine { kind: *kind, text: (*text).to_owned() })
+                        .collect(),
+                    more_lines: 0,
+                    replace_all: false,
+                },
+            },
+        }
+    }
+
+    /// Each side is parsed whole: a removed line that opens a comment does not colour the
+    /// line that replaced it, and a context line takes the new side's spans.
+    #[test]
+    fn a_diff_is_coloured_side_by_side_and_cached_by_entry() {
+        let entry = diff(
+            "/w/src/lib.rs",
+            &[
+                (DiffKind::Context, "fn a() {}"),
+                (DiffKind::Removed, "/* gone"),
+                (DiffKind::Added, "let x = 1;"),
+                (DiffKind::Context, "// tail"),
+            ],
+        );
+        let cache = RefCell::new(HashMap::new());
+        let spans = diff_spans_cached(&cache, 3, &entry);
+        let spans = spans.as_deref().unwrap_or_default();
+        assert_eq!(spans.len(), 4);
+        let first = |ix: usize| spans.get(ix).and_then(|l| l.first()).map(|s| s.token);
+        assert_eq!(first(0), Some(Token::Keyword), "{spans:?}");
+        assert_eq!(first(1), Some(Token::Comment), "{spans:?}");
+        assert_eq!(first(2), Some(Token::Keyword), "the removed comment did not bleed in");
+        assert_eq!(first(3), Some(Token::Comment), "{spans:?}");
+        assert!(cache.borrow().contains_key(&3), "parsed once, kept by entry index");
+
+        let plain = diff("/w/notes.txt", &[(DiffKind::Added, "words")]);
+        assert!(diff_spans_cached(&cache, 4, &plain).is_none(), "no grammar, no colours");
+        assert_eq!(cache.borrow().get(&4), Some(&None), "the miss is cached too");
+    }
 }
