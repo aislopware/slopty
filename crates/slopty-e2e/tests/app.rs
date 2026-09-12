@@ -319,7 +319,29 @@ mod tests {
             .await
             .unwrap();
         let drv = &mut stack.driver;
-        drv.open_agent(None).await.unwrap();
+        // The card is opened the way a mouse does it: "+ agent" opens a menu of the three
+        // ways to an agent, "Conversation" is the driven one.
+        let dump = drv.dump().await.unwrap();
+        let pill =
+            dump.a11y_node("Button", Some("agent")).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (px_, py_) = a11y_center(pill);
+        drv.click(px_, py_).await.unwrap();
+        let dump = drv
+            .wait_for("the agent menu", STEP, |d| d.a11y_node("Menu", Some("Agent")).is_some())
+            .await
+            .unwrap();
+        assert_eq!(
+            dump.a11y
+                .iter()
+                .filter(|n| n.role == "MenuItem")
+                .map(|n| n.label.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["Terminal agent", "Conversation", "Resume conversation…"],
+            "{:#?}",
+            dump.a11y
+        );
+        let (mx, my) = a11y_center(dump.a11y_node("MenuItem", Some("Conversation")).unwrap());
+        drv.click(mx, my).await.unwrap();
         let dump = drv
             .wait_for("the agent card with the caret in its composer", STEP, |d| {
                 d.terminals.iter().any(|t| {
@@ -602,6 +624,12 @@ mod tests {
             "the whole past, oldest first (the fake logs text replies only)"
         );
         stack.shutdown().await;
+    }
+
+    /// The window point at the middle of an accessibility node.
+    fn a11y_center(node: &slopty_e2e::A11yNode) -> (f32, f32) {
+        let [x, y, w, h] = node.bounds;
+        (x + w / 2.0, y + h / 2.0)
     }
 
     /// A `claude` nobody registered hooks for: "+ agent" starts the fake one the harness put

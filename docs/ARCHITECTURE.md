@@ -376,8 +376,11 @@ the source of truth for what is being streamed.
 
 ## 5. Agents
 
-Claude Code only, for now. "+ agent" / ⌘⇧T opens a terminal running `claude` (a bare name,
-resolved on the host through the login shell). Four signals, in precedence order: hooks
+Claude Code only, for now. The bar's "+ agent" pill opens a menu (`agent-menu`, `Menu`
+"Agent") of the three ways to one: "Terminal agent" (⌘⇧T) opens a terminal running
+`claude` (a bare name, resolved on the host through the login shell), "Conversation" (⌘⌥T)
+the driven card of §5's last paragraphs, "Resume conversation…" (⌘⌥R) the picker of past
+ones — on the phone the menu is the only way to the last two. Four signals, in precedence order: hooks
 (delivered to `slopty-hostd` over its control socket by `slopty hook`, the relay Claude Code
 runs for each event) → JSONL transcript tail → terminal title/OSC → foreground-process
 presence. All four are built, and `AgentEvent.source` (`AgentSource::{Process, Title,

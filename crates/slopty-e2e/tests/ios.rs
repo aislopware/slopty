@@ -214,7 +214,24 @@ mod tests {
             .await
             .unwrap();
         let drv = &mut stack.driver;
-        drv.open_agent(None).await.unwrap();
+        // A finger opens it: "+ agent" on the bar, then "Conversation" in its menu — the
+        // phone has no ⌘⌥T.
+        let dump = drv.dump().await.unwrap();
+        let centre = |dump: &slopty_e2e::Dump, role: &str, label: &str| {
+            let node = dump
+                .a11y_node(role, Some(label))
+                .unwrap_or_else(|| panic!("{label}: {:#?}", dump.a11y));
+            let [x, y, w, h] = node.bounds;
+            (x + w / 2.0, y + h / 2.0)
+        };
+        let (ax, ay) = centre(&dump, "Button", "agent");
+        drv.ui_tap(ax, ay).await.unwrap();
+        let dump = drv
+            .wait_for("the agent menu", STEP, |d| d.a11y_node("Menu", Some("Agent")).is_some())
+            .await
+            .unwrap();
+        let (mx, my) = centre(&dump, "MenuItem", "Conversation");
+        drv.ui_tap(mx, my).await.unwrap();
         drv.wait_for("the card with the caret in its composer", STEP, |d| {
             d.terminals.iter().any(|t| {
                 t.kind == "agent" && t.conversation.as_ref().is_some_and(|c| c.composer_focused)

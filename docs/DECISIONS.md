@@ -2134,7 +2134,13 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   now keeps the request's tool and detail when the notification names none. After Esc on the
   menu no `Stop` fires (the turn is interrupted; the next hook is whatever the user does), so
   the badge keeps saying "denied" until then — acceptable, since the outline is already off.
-- ✅ "+ agent" (⌘⇧T, "New Agent" menu item) sends `OpenSession { command: ["claude"], title:
+- ✅ **"+ agent" is a menu** (2026-09-12): "Terminal agent" / "Conversation" / "Resume
+  conversation…" (`agent-terminal`, `agent-conversation`, `agent-resume`, each the action its
+  shortcut runs), because the phone has no ⌘⌥T or ⌘⌥R and the bar has no room for two more
+  pills next to the host name. The driven-agent scenarios open their first card through it
+  (a click on the Mac, a `ui_tap` on the simulator) so the path a finger takes is the one
+  tested. The pill's label and place are unchanged, so no golden moved.
+- ✅ "Terminal agent" (⌘⇧T, "New Agent" menu item) sends `OpenSession { command: ["claude"], title:
   "claude" }`; nothing else is special about the session, so the hook relay, badges and
   attention all apply as they do to a `claude` typed into a shell. The daemon's `PATH` is
   launchd's under a LaunchAgent, and `claude` is often a shell alias (`~/.claude/local`), so
