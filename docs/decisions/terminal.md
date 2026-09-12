@@ -207,7 +207,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   read; long-press stays selection. On the phone (2026-09-05) the terminal key bar has a ⌘
   key beside ⌃: it arms one tap (`TerminalView::set_sticky_command`), the next left press
   opens the link under it through `cx.open_url` (`gpui_ios`'s `UIApplication.openURL`, in the
-  fork) and disarms; covered by `sticky_command_opens_the_link_under_the_next_tap`.
+  fork) and disarms; covered by `sticky_command_opens_the_link_under_the_next_tap`. A path
+  under that tap (2026-09-12) opens as a **file card**, prompt or not — the editor ⌘-click
+  types on a Mac is `vi` in a phone-sized grid, and the card is what the phone can read —
+  covered by `sticky_command_views_the_path_under_the_next_tap`.
 
 - ✅ **Command blocks from OSC 133, shell integration injected by ptyd** (2026-09-05).
   *Injection:* the `ZDOTDIR` bootstrap every terminal uses (Kitty, Ghostty, WezTerm); the

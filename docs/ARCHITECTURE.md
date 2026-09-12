@@ -62,8 +62,8 @@ the OSC 8 run the host put on the row, else the URL found in the cached row text
 (`slopty-ui::terminal::url`); ⌘-hover underlines it. A file path under the pointer
 (`src/main.rs:12:5`, `url::path_at_col`) opens the same way: ⌘-click types
 `${EDITOR:-vi} +12 'src/main.rs'` at the prompt, or opens a file card for it while a command
-runs (`TerminalViewEvent::ViewFile`, the canvas making the path absolute against the shell's
-directory, `canvas::absolute_in_session`).
+runs and on a tap the phone's key-bar ⌘ armed (`TerminalViewEvent::ViewFile`, the canvas
+making the path absolute against the shell's directory, `canvas::absolute_in_session`).
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (the one that opened the session, else the

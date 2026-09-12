@@ -1177,10 +1177,11 @@ impl TerminalView {
     /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
     /// line the text named) by typing the command at the prompt. While a command runs the
     /// prompt is not there to type at, so the path opens as a file card on the canvas
-    /// instead (the canvas makes it absolute against this shell's directory).
-    fn open_path(&mut self, span: &url::PathSpan, cx: &mut Context<Self>) {
-        if self.state.command_running() {
-            tracing::info!(path = %span.path, "path viewed: a command is running");
+    /// instead (the canvas makes it absolute against this shell's directory); so does a tap
+    /// the key bar's ⌘ armed (`sticky`), since a phone has no comfortable editor to type into.
+    fn open_path(&mut self, span: &url::PathSpan, sticky: bool, cx: &mut Context<Self>) {
+        if sticky || self.state.command_running() {
+            tracing::info!(path = %span.path, sticky, "path viewed");
             cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
             return;
         }
@@ -2139,7 +2140,7 @@ impl TerminalView {
             } else if let Some(span) =
                 self.state.line(index).and_then(|line| url::path_at_col(line, col))
             {
-                self.open_path(&span, cx);
+                self.open_path(&span, armed, cx);
             }
             return;
         }
@@ -3953,6 +3954,55 @@ mod tests {
         cx.simulate_click(cell(2, 1), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"), "one tap, one link");
+    }
+
+    /// The key bar's ⌘ then a tap on a path at a prompt views the file as a card, not the
+    /// editor: a phone has no comfortable `vi`.
+    #[gpui::test]
+    fn sticky_command_views_the_path_under_the_next_tap(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&viewed);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::ViewFile { path, line } = event {
+                    seen.borrow_mut().push((path.clone(), *line));
+                }
+            })
+            .detach();
+        });
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![RowUpdate {
+                        row: 0,
+                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
+                    }],
+                }),
+                cx,
+            );
+            view.set_sticky_command(true, cx);
+        });
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = metrics.origin + point(metrics.cell_width * 10.5, metrics.line_height * 0.5);
+        cx.simulate_click(cell, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*viewed.borrow(), [("src/main.rs".to_owned(), Some(12))]);
+        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "nothing typed at the prompt");
+        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
     }
 
     /// The grid is a terminal to a screen reader: its title as the label, the cursor row as

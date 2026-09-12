@@ -365,6 +365,29 @@ mod tests {
         })
         .await
         .unwrap();
+
+        // An edit, then a finger on its "view": the file card is the phone's way to read the
+        // file, so it appears, active, saying the file is not there yet.
+        drv.ui_insert_text("edit the note").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the edit's view button", STEP, |d| {
+                d.a11y_node("Button", Some("View note.txt on the canvas")).is_some()
+            })
+            .await
+            .unwrap();
+        let (vx, vy) = centre(&dump, "Button", "View note.txt on the canvas");
+        drv.ui_tap(vx, vy).await.unwrap();
+        drv.wait_for("the file card", STEP, |d| {
+            d.item("file").is_some_and(|i| {
+                i.active
+                    && i.file.as_ref().is_some_and(|f| {
+                        f.path.ends_with("/note.txt") && f.summary.starts_with("missing:")
+                    })
+            })
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 }
