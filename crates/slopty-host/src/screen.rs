@@ -987,6 +987,68 @@ impl Shared {
     }
 }
 
+impl Shared {
+    /// A receiver report: acknowledged LTR tokens go to the encoder, the loss to the parity
+    /// and rate controllers; a changed target is applied to the encoder.
+    fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
+        let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
+        self.pending.lock().acked.extend(acked);
+        let sent_total = self.packetizer.lock().datagrams_sent();
+        let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
+        let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
+        let permille = self.redundancy.lock().on_report(report, sent);
+        self.packetizer.lock().set_parity_permille(permille);
+        let decision = self.rate.lock().on_report(report, sent, path)?;
+        tracing::debug!(
+            stream = %self.id,
+            verdict = ?decision.verdict,
+            target_bps = decision.target_bps,
+            capped = decision.capped,
+            loss_permille = decision.window.loss_permille(),
+            queue_max = decision.window.queue_max,
+            hold_max_ms = decision.window.hold_max.as_millis(),
+            stalled_ms = decision.window.stalled_ms,
+            stalls = decision.window.stalls,
+            "rate decision"
+        );
+        if decision.changed {
+            self.apply_bitrate(decision.target_bps);
+        }
+        Some(decision)
+    }
+
+    /// The client lost a frame it cannot recover: make the next frame stand on its own.
+    fn request_refresh(&self, last_good_frame: u32) {
+        tracing::debug!(stream = %self.id, last_good_frame, "refresh requested");
+        self.counters.refreshes.fetch_add(1, Ordering::Relaxed);
+        self.pending.lock().refresh = true;
+    }
+
+    /// Retransmit fragments of a recent frame, unless the transport is holding more than the
+    /// frame budget (see [`ScreenStream::nack`]).
+    fn nack(&self, frame: u32, fragments: &[u16]) {
+        let fits = frame_fits(
+            self.out.capacity(),
+            self.budget.held(),
+            self.counters.bitrate_bps.load(Ordering::Relaxed),
+            self.fps.load(Ordering::Relaxed),
+        );
+        if !fits {
+            tracing::debug!(stream = %self.id, frame, held = self.budget.held(), "nack not answered: transport is holding frames");
+            return;
+        }
+        let datagrams = self.packetizer.lock().retransmit(frame, fragments);
+        if datagrams.is_empty() {
+            tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
+        }
+        for datagram in datagrams {
+            if !self.push(datagram) {
+                break;
+            }
+        }
+    }
+}
+
 /// Low byte of the host millisecond clock.
 const fn send_ms_lo(now_us: u64) -> u8 {
     #[expect(clippy::cast_possible_truncation, reason = "low byte by design")]
@@ -1641,30 +1703,7 @@ impl ScreenStream {
     /// loss, queueing, stalls and the QUIC path (`path`) drive the bitrate. Returns the
     /// controller's decision when this report completed a decision window.
     pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
-        let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
-        self.shared.pending.lock().acked.extend(acked);
-        let sent_total = self.shared.packetizer.lock().datagrams_sent();
-        let previous = self.shared.sent_at_report.swap(sent_total, Ordering::Relaxed);
-        let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
-        let permille = self.shared.redundancy.lock().on_report(report, sent);
-        self.shared.packetizer.lock().set_parity_permille(permille);
-        let decision = self.shared.rate.lock().on_report(report, sent, path)?;
-        tracing::debug!(
-            stream = %self.id,
-            verdict = ?decision.verdict,
-            target_bps = decision.target_bps,
-            capped = decision.capped,
-            loss_permille = decision.window.loss_permille(),
-            queue_max = decision.window.queue_max,
-            hold_max_ms = decision.window.hold_max.as_millis(),
-            stalled_ms = decision.window.stalled_ms,
-            stalls = decision.window.stalls,
-            "rate decision"
-        );
-        if decision.changed {
-            self.shared.apply_bitrate(decision.target_bps);
-        }
-        Some(decision)
+        self.shared.report(report, path)
     }
 
     /// The bitrate the controller is asking the encoder for right now.
@@ -1675,9 +1714,7 @@ impl ScreenStream {
 
     /// The client lost a frame it cannot recover: make the next frame stand on its own.
     pub fn request_refresh(&self, last_good_frame: u32) {
-        tracing::debug!(stream = %self.id, last_good_frame, "refresh requested");
-        self.shared.counters.refreshes.fetch_add(1, Ordering::Relaxed);
-        self.shared.pending.lock().refresh = true;
+        self.shared.request_refresh(last_good_frame);
     }
 
     /// Retransmit fragments of a recent frame, unless QUIC is already holding more than the
@@ -1686,25 +1723,7 @@ impl ScreenStream {
     /// another copy of the frame into the queue (64 000 datagrams for 12 frames,
     /// MEASUREMENTS.md "start-up over the mesh").
     pub fn nack(&self, frame: u32, fragments: &[u16]) {
-        let fits = frame_fits(
-            self.shared.out.capacity(),
-            self.shared.budget.held(),
-            self.shared.counters.bitrate_bps.load(Ordering::Relaxed),
-            self.shared.fps.load(Ordering::Relaxed),
-        );
-        if !fits {
-            tracing::debug!(stream = %self.id, frame, held = self.shared.budget.held(), "nack not answered: transport is holding frames");
-            return;
-        }
-        let datagrams = self.shared.packetizer.lock().retransmit(frame, fragments);
-        if datagrams.is_empty() {
-            tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
-        }
-        for datagram in datagrams {
-            if !self.shared.push(datagram) {
-                break;
-            }
-        }
+        self.shared.nack(frame, fragments);
     }
 
     /// Stop capturing and tear down.
@@ -1863,6 +1882,8 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
 
 #[cfg(test)]
 mod tests {
+    use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES};
+
     use super::*;
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
@@ -2251,6 +2272,81 @@ mod tests {
         assert!(!shared.push(Bytes::from_static(b"d")), "closed");
         let stats = shared.stats();
         assert_eq!((stats.datagrams, stats.queue_full), (2, 2));
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<Queued>) -> Vec<Bytes> {
+        std::iter::from_fn(|| rx.try_recv().ok().map(|q| q.datagram)).collect()
+    }
+
+    /// An access unit from the encoder is packetized into the queue and counted; a NACK for a
+    /// frame in the packetizer's history answers with those fragments, one outside it with
+    /// nothing, and none at all while QUIC holds more than the frame budget.
+    #[test]
+    fn an_encoded_packet_is_queued_and_a_nack_answers_from_history() {
+        let (shared, mut rx) = shared_with_queue(DATAGRAM_QUEUE);
+        shared.counters.bitrate_bps.store(30_000_000, Ordering::Relaxed);
+        let packet = EncodedPacket {
+            data: vec![7; 3000],
+            keyframe: true,
+            ltr_token: Some(1),
+            ltr_refresh: false,
+            pts_us: host_now_us(),
+        };
+        shared.on_packet(&packet);
+        let sent = drain(&mut rx);
+        assert!(sent.len() >= 3, "3 000 bytes under the MTU: {}", sent.len());
+        let stats = shared.stats();
+        assert_eq!((stats.encoded, stats.datagrams), (1, sent.len() as u64));
+        shared.nack(0, &[0, 1]);
+        assert_eq!(drain(&mut rx).len(), 2, "two fragments of frame 0 again");
+        shared.nack(0, &[]);
+        assert!(!drain(&mut rx).is_empty(), "no fragments named: the whole frame's data");
+        shared.nack(9, &[0]);
+        assert!(drain(&mut rx).is_empty(), "frame 9 was never sent");
+        shared.budget.set_held(10_000_000);
+        shared.nack(0, &[0]);
+        assert!(drain(&mut rx).is_empty(), "QUIC is holding seconds of frames");
+    }
+
+    /// A refresh request marks the next frame; a report hands acknowledged LTR tokens to the
+    /// encoder's options and counts the datagrams sent since the last one.
+    #[test]
+    fn a_refresh_and_a_report_reach_the_next_frame_options() {
+        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        shared.request_refresh(41);
+        assert!(shared.pending.lock().refresh);
+        assert_eq!(shared.stats().refreshes, 1);
+        let mut acked_ltr = [0; 4];
+        acked_ltr[..2].copy_from_slice(&[5, 6]);
+        let report = ReceiverReport { acked_ltr, acked_ltr_len: 2, ..ReceiverReport::default() };
+        let _decision = shared.report(&report, None);
+        assert_eq!(shared.pending.lock().acked, vec![5, 6], "two of the four slots were valid");
+        assert_eq!(shared.sent_at_report.load(Ordering::Relaxed), 0, "nothing sent yet");
+    }
+
+    /// Audio goes out while the source is loud and for the hold after it; silence past the
+    /// hold sends nothing, and each packet carries the next sequence number.
+    #[test]
+    fn audio_is_gated_by_silence_and_numbered() -> Result<(), String> {
+        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        let samples = usize::try_from(FRAME_SAMPLES * CHANNELS).map_err(|e| e.to_string())?;
+        let quiet = vec![0.0_f32; samples];
+        let loud: Vec<f32> = (0..samples).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let start = 1_000_000_u64;
+        assert!(shared.encode_audio(&quiet, start).is_none(), "silence from the start");
+        let first = shared.encode_audio(&loud, start).ok_or("loud: a packet")?;
+        let second = shared.encode_audio(&loud, start + 20_000).ok_or("loud again")?;
+        let seqs: Vec<u32> = first.iter().chain(&second).map(|(seq, _)| *seq).collect();
+        assert_eq!(seqs, vec![1, 2], "one packet per frame, numbered from 1");
+        assert!(
+            shared.encode_audio(&quiet, start + 20_000 + AUDIO_HOLD_US).is_some(),
+            "silence inside the hold still goes out"
+        );
+        assert!(
+            shared.encode_audio(&quiet, start + 20_001 + AUDIO_HOLD_US).is_none(),
+            "and past it, nothing"
+        );
+        Ok(())
     }
 
     #[test]
