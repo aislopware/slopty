@@ -534,9 +534,15 @@ composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it); ↩ sends
 picture base64 with its media type before the text (`stream::user_message`), refusing a
 prompt over the caps whole. The transcript reader counts image blocks into
 `TranscriptBody::User.images`, so the bubble says "1 picture" whether the prompt came from
-this client, another, or the file; the bytes never come back over the wire. The e2e socket's
-`attach` stands in for the clipboard read (a test must not touch the system pasteboard); the
-headless test pastes through the test platform's. Both kinds coexist: ⌘⇧T
+this client, another, or the file; the bytes never come back over the wire. On the phone the
+key bar's "paste" is the way in: `paste_clipboard` on a driven card attaches the clipboard's
+pictures and puts its text into the composer (no session to paste into), and the fork's
+`gpui_ios` reads a picture off `UIPasteboard` under its uniform type (PNG first, as a
+screenshot is) and writes one the same way (fork `f629234166`). The e2e socket's `attach`
+stands in for the clipboard read on the Mac (a test must not touch the shared pasteboard);
+on the simulator, whose pasteboard is its own, the socket's `clipboard` puts a picture there
+through GPUI and the test taps "paste"; the headless test pastes through the test
+platform's. Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
 (`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test

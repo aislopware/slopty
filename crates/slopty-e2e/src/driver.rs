@@ -95,6 +95,19 @@ impl Driver {
         self.ok(&Command::Type { text: text.to_owned() }).await
     }
 
+    /// Put a picture on the app's clipboard (the simulator's own pasteboard).
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn clipboard_image(&mut self, media_type: &str, data: &[u8]) -> Result<()> {
+        self.ok(&Command::Clipboard {
+            media_type: media_type.to_owned(),
+            data: data_encoding::BASE64.encode(data),
+        })
+        .await
+    }
+
     /// Attach a picture to the active driven conversation's next prompt.
     ///
     /// # Errors

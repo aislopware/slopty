@@ -358,6 +358,11 @@ impl Conversation {
         self.composer.read(cx).value().to_string()
     }
 
+    /// Put `text` into the composer at the caret (the key bar's paste on the phone).
+    pub fn insert_composer_text(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.composer.update(cx, |input, cx| input.insert(text.to_owned(), window, cx));
+    }
+
     /// Take the composer's text, leaving it empty.
     #[must_use]
     pub fn take_composer_text(&self, window: &mut Window, cx: &mut App) -> String {

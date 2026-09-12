@@ -1275,9 +1275,33 @@ impl TerminalView {
         &self.attachments
     }
 
-    /// ⌘V: the clipboard into the session (the host brackets it when the program asked).
-    pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+    /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the host brackets
+    /// it when the program asked). On a driven card there is no session to paste into: a
+    /// picture becomes an attachment of the next prompt and text goes into the composer.
+    pub fn paste_clipboard(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if self.driven {
+            let mut text = None;
+            for entry in item.into_entries() {
+                match entry {
+                    gpui::ClipboardEntry::Image(image) => self.attach_image(
+                        slopty_proto::agent::Image {
+                            media_type: image.format.mime_type().to_owned(),
+                            data: image.bytes,
+                        },
+                        cx,
+                    ),
+                    gpui::ClipboardEntry::String(string) => text = Some(string.text().to_owned()),
+                    gpui::ClipboardEntry::ExternalPaths(_) => {}
+                }
+            }
+            if let (Some(text), Some(conversation)) = (text, &self.conversation) {
+                conversation.insert_composer_text(&text, window, cx);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(text) = item.text() else { return };
         self.selection = None;
         self.state.scroll_to_bottom();
         self.send(TermRequest::Paste(text));
@@ -3447,6 +3471,19 @@ mod tests {
             })
             .collect();
         assert_eq!(sent, ["+1"]);
+
+        // The phone key bar's "paste" (no ⌘V on glass) reaches the same place: a picture is
+        // attached, text lands in the composer, nothing goes to a session.
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 5])));
+        view.update_in(cx, |v, window, cx| v.paste_clipboard(&Paste, window, cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1);
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("tint".into())));
+        view.update_in(cx, |v, window, cx| v.paste_clipboard(&Paste, window, cx));
+        cx.run_until_parked();
+        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
+        assert_eq!(text.as_deref(), Some("tint"));
+        assert!(drain_words(&mut rx).is_empty(), "no session paste from a driven card");
     }
 
     /// A driven agent's question is answered in place: the options are buttons, one tap on

@@ -2719,6 +2719,26 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   the tap, text still text, TIFF refused, sent with the text and alone), the app self-test
   (the socket's `attach`, the chip in the dump, the fake reading back "image/png 70 B", the
   bubble's "1 picture").
+- ✅ **The phone pastes a screenshot through the key bar; the fork reads pictures off
+  `UIPasteboard`** (2026-09-12). The fork's `gpui_ios` clipboard was text-only both ways, and
+  the key bar's "paste" on a driven card sent a `TermRequest::Paste` to a session the agent
+  does not have. Rulings: (1) the fork reads a picture as the encoded bytes under the
+  format's uniform type (`public.png`, `public.jpeg`, `com.compuserve.gif`,
+  `org.webmproject.webp`, then TIFF and BMP) when `hasImages`, before text — a screenshot is
+  a PNG and the bytes are what the model wants, so no `UIImage` round trip that would
+  re-encode; it writes an `Image` entry the same way (`setData:forPasteboardType:`), which
+  is what lets a test put a picture on the simulator's own pasteboard through GPUI instead of
+  `simctl pbcopy` from the Mac's (fork `f629234166` on `8ffbc6e145`, pin moved; first try
+  crashed the app on the simulator: `-[NSData bytes]` received as `*const u8` fails objc2's
+  debug-build encoding check, it must be `*const c_void` then cast); (2) on a
+  driven card `paste_clipboard` is the composer's paste: pictures attach, text is inserted at
+  the caret (`Conversation::insert_composer_text`), nothing goes to a session; (3) the Mac
+  scenario keeps using the socket's `attach` because the Mac pasteboard is every app's.
+  Tests: headless `a_picture_pasted_into_the_composer_goes_with_the_prompt` (the key bar
+  path: a picture attached, text in the composer, no session paste), the simulator's
+  `the_driven_agent_card_on_the_simulator` (the socket's `clipboard`, a finger on "Paste",
+  the chip, ↩ and the fake reading back "image/png 70 B" — the fork's read and write on a
+  real `UIPasteboard`).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

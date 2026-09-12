@@ -66,6 +66,15 @@ pub enum Command {
         /// What to type.
         text: String,
     },
+    /// Put a picture on the app's clipboard through GPUI, as a screenshot would be. For the
+    /// simulator, whose pasteboard is its own: the Mac's is shared with every other app, so
+    /// the Mac scenario uses `Attach` instead.
+    Clipboard {
+        /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+        media_type: String,
+        /// The encoded picture, base64.
+        data: String,
+    },
     /// Attach a picture to the active driven conversation's next prompt, as pasting one into
     /// its composer would (the paste itself reads the system clipboard, which a test must
     /// not touch; the headless layer covers that read).

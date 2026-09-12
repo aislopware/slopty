@@ -334,6 +334,26 @@ fn apply(
             }
             Reply::Ok
         }
+        Command::Clipboard { media_type, data } => {
+            let Ok(bytes) = data_encoding::BASE64.decode(data.as_bytes()) else {
+                return Reply::Error { message: "clipboard: data is not base64".into() };
+            };
+            let format = match media_type.as_str() {
+                "image/png" => gpui::ImageFormat::Png,
+                "image/jpeg" => gpui::ImageFormat::Jpeg,
+                "image/gif" => gpui::ImageFormat::Gif,
+                "image/webp" => gpui::ImageFormat::Webp,
+                other => {
+                    return Reply::Error { message: format!("clipboard: not a picture: {other}") };
+                }
+            };
+            cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image {
+                format,
+                bytes,
+                id: 0,
+            }));
+            Reply::Ok
+        }
         Command::Attach { media_type, data } => {
             let Ok(data) = data_encoding::BASE64.decode(data.as_bytes()) else {
                 return Reply::Error { message: "attach: data is not base64".into() };
