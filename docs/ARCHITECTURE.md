@@ -812,7 +812,11 @@ history is not fetched first; ⌘↓ past the newest prompt goes back to followi
 integration). A right click on a block row opens the block menu (`block-menu`, protocol 28:
 the marks carry the input column, `TermState::command_block` reads the command and the
 output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
-↩ as a key) and "Select block". Headless `#[gpui::test]`s in `terminal/view.rs` read the
+↩ as a key) and "Select block". While the viewport's top row is inside a block whose prompt
+rows have all scrolled above, a one-row header over the grid (`block-header`, role Button,
+`TerminalView::block_header`) names the command in the mono face on the panel colour, ruled
+under with the block's separator colour; a click on it puts the prompt back at the top.
+Headless `#[gpui::test]`s in `terminal/view.rs` read the
 separators back from `painted_quads()` and drive the bindings with `simulate_keystrokes`. ⌘⇧L swaps the element
 for the conversation view (§5), whose composer takes the typing.
 

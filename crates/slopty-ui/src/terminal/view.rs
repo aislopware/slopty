@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::terminal::conversation::{self, Attention, Conversation};
-use crate::terminal::element::{CellMetrics, TerminalElement};
+use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
 use crate::terminal::{latency, url};
 
 /// Hits asked for per search; the host counts every hit regardless.
@@ -1231,6 +1231,69 @@ impl TerminalView {
     }
 
     /// The block menu, drawn late and anchored where the right click landed.
+    /// The command whose block the viewport's top row is inside while every row of its
+    /// prompt has scrolled above: what the sticky header shows. `None` on a prompt row, off
+    /// a block, or for a block without a typed command.
+    #[must_use]
+    pub fn block_header(&self) -> Option<CommandBlock> {
+        let top = self.state.index_at_row(0);
+        if self.state.line(top).is_none_or(|line| line.mark.is_prompt()) {
+            return None;
+        }
+        let block = self.state.command_block(top)?;
+        (block.prompt < top && block.command.as_deref().is_some_and(|c| !c.is_empty()))
+            .then_some(block)
+    }
+
+    /// One row over the grid's top naming the command whose output the viewport is inside,
+    /// so a long output is never anonymous; a click scrolls its prompt back to the top. The
+    /// hairline under it is the block's separator colour, red after a failure.
+    fn render_block_header(
+        &self,
+        block: &CommandBlock,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let metrics = self.metrics?;
+        let command = block.command.clone()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let prompt = block.prompt;
+        let family = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        Some(
+            div()
+                .id("block-header")
+                .debug_selector(|| "block-header".to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(command.clone())
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(metrics.line_height)
+                .flex()
+                .items_center()
+                .px(px(theme.spacing.sm))
+                .bg(hsla(s.panel))
+                .border_b_1()
+                .border_color(separator_color(theme, block.exit))
+                .font_family(family)
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_muted))
+                .cursor_pointer()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.jump_to(prompt, cx);
+                    }),
+                )
+                .child(command)
+                .into_any_element(),
+        )
+    }
+
     fn render_block_menu(&self, menu: &BlockMenu, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2208,6 +2271,12 @@ impl Render for TerminalView {
             .as_ref()
             .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
         let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
+        let header = self
+            .conversation
+            .is_none()
+            .then(|| self.block_header())
+            .flatten()
+            .and_then(|block| self.render_block_header(&block, cx));
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
@@ -2273,6 +2342,7 @@ impl Render for TerminalView {
                 }
                 el.child(grid)
             })
+            .children(header)
             .children(search)
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
@@ -2328,7 +2398,6 @@ mod tests {
 
     use super::*;
     use crate::terminal::conversation::attachment_label;
-    use crate::terminal::element::separator_color;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
     fn terminal(
@@ -2519,6 +2588,46 @@ mod tests {
         cx.simulate_keystrokes("cmd-down");
         assert_eq!(top_line(&view, cx), LineIndex(6), "the newest prompt cannot go higher");
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
+    }
+
+    /// A block whose prompt rows have scrolled above the viewport keeps its command in a
+    /// sticky header over the top row; on a prompt row there is none, and a click on the
+    /// header brings the prompt back to the top.
+    #[gpui::test]
+    fn a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+
+        assert_eq!(top_line(&view, cx), LineIndex(6), "inside `seq 2`'s output");
+        let header = cx.debug_bounds("block-header").expect("the header is drawn");
+        let terminal = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let line_height = view.read_with(cx, |view, _| view.metrics.expect("laid out").line_height);
+        assert_eq!(header.origin, terminal.origin, "over the top row");
+        assert_eq!(header.size.width, terminal.size.width);
+        assert_eq!(header.size.height, line_height, "one row high");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("seq 2")),
+            "the header names the command: {tree:?}"
+        );
+        let command = view.read_with(cx, |view, _| view.block_header().and_then(|b| b.command));
+        assert_eq!(command.as_deref(), Some("seq 2"));
+
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");
+        assert!(cx.debug_bounds("block-header").is_none(), "the prompt itself is visible");
+
+        cx.simulate_keystrokes("cmd-down");
+        assert_eq!(top_line(&view, cx), LineIndex(6));
+        assert!(cx.debug_bounds("block-header").is_some(), "back inside the output");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(top_line(&view, cx), LineIndex(4), "a click scrolls to the prompt");
+        assert!(cx.debug_bounds("block-header").is_none());
     }
 
     /// The shaped-word cache: three rows made of two words shape two entries, another frame

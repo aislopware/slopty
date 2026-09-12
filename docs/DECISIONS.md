@@ -2906,6 +2906,23 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   open prompt with no command), headless `a_right_click_on_a_block_offers_its_command_and_output`
   (the menu in the tree, each pick's effect on the clipboard, the paste + ↩, the selection,
   Esc and a click elsewhere).
+- ✅ **A block scrolled past its prompt keeps its command in a sticky header** (2026-09-12).
+  Warp pins the command of the block you are reading to the top of the viewport, so a
+  screenful of output is never anonymous; without it a long `cargo test` or a paged log
+  reads the same as any other wall of text. Rulings: (1) it is a GPUI child over the grid,
+  not a row the element paints — one row high (`CellMetrics::line_height`), full width,
+  panel colour, the command in the mono face and muted text, ruled under with the block's
+  separator colour (red after a failure) so the header and the rule below the output agree;
+  (2) it shows only when the top row is an output row of a block with a typed command
+  (`TerminalView::block_header`: `command_block(index_at_row(0))` with its prompt above and a
+  non-empty command) — on any prompt row the prompt itself is visible and the header would
+  duplicate it; (3) it is a Button whose click scrolls the prompt to the top (`jump_to`, the
+  same path as ⌘↑), so a reader lost in output has a one-click way back to what produced it;
+  (4) the conversation view (⌘⇧L) never shows it — its transcript has no rows. No wire change.
+  Test: `a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header` reads the
+  header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
+  high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
+  click.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the
