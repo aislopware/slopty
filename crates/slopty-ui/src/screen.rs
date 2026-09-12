@@ -1077,6 +1077,8 @@ fn is_paste_chord(keystroke: &Keystroke) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext as _;
+
     use super::*;
 
     fn chord(s: &str) -> Keystroke {
@@ -1163,6 +1165,122 @@ mod tests {
         });
         assert!(blank.contains("rtt –") && blank.contains("age –") && blank.contains("target –"));
         assert!(blank.contains("present 0.0 / 0.0 / 0.0 ms"), "{blank}");
+    }
+
+    /// A view with nowhere to draw: a detached handle and a channel that collects what it
+    /// would send the host.
+    fn view(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>) {
+        let (out, rx) = mpsc::channel(16);
+        let opened = Opened {
+            stream: StreamId(4),
+            target: CaptureTarget::Display(2),
+            size: (800, 600),
+            quality: Quality { scale: 1.0, ..Quality::default() },
+        };
+        let view = cx.new(|cx| {
+            ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
+        });
+        (view, rx)
+    }
+
+    /// An instant past the quality cooldown.
+    fn past_cooldown() -> Instant {
+        Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now)
+    }
+
+    fn sent(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ScreenRequest> {
+        let mut out = Vec::new();
+        while let Ok(ClientMsg::Screen(req)) = rx.try_recv() {
+            out.push(req);
+        }
+        out
+    }
+
+    /// Zooming the card out asks the host for a smaller picture, in quarter steps, not more
+    /// than once per cooldown; a resize from the host keeps the native size consistent with
+    /// the scale in force.
+    #[gpui::test]
+    fn the_painted_width_asks_for_a_scale_in_quarter_steps_once_per_cooldown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, mut rx) = view(cx);
+        view.update(cx, |v, _| {
+            assert_eq!(v.native(), (800.0, 600.0));
+            assert_eq!(v.a11y_label(), "Remote display 2");
+            // Pinned here, not left to `new`: a loaded machine can spend the cooldown before
+            // the ask.
+            v.quality_changed = Instant::now();
+            v.set_painted_width(300.0);
+        });
+        assert!(sent(&mut rx).is_empty(), "within the cooldown: nothing asked");
+        view.update(cx, |v, _| {
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(300.0);
+            assert_eq!(v.size(), (400, 300), "300/800 = 0.375 → the 0.5 bucket");
+        });
+        let asked = sent(&mut rx);
+        assert!(
+            matches!(asked.as_slice(), [ScreenRequest::SetQuality { stream: StreamId(4), quality }] if (quality.scale - 0.5).abs() < f32::EPSILON),
+            "{asked:?}"
+        );
+        view.update(cx, |v, _| {
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(10.0);
+            assert_eq!(v.size(), (200, 150), "never below the minimum scale");
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(10.0);
+        });
+        assert_eq!(sent(&mut rx).len(), 1, "the same bucket again asks nothing");
+        view.update(cx, |v, _| {
+            v.set_geometry(100, 50);
+            assert_eq!(v.size(), (100, 50));
+            assert_eq!(v.native(), (400.0, 200.0), "native follows the scale in force (0.25)");
+        });
+    }
+
+    /// The phone's key bar presses and releases a key in one go; an armed modifier rides on
+    /// it once, and a chord carries no text so the host does not type it as well.
+    #[gpui::test]
+    fn a_pressed_key_is_a_press_and_a_release_with_the_armed_modifier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, mut rx) = view(cx);
+        view.update(cx, |v, cx| {
+            v.set_sticky(Sticky::Command, true, cx);
+            assert!(v.sticky(Sticky::Command));
+            v.press(chord("a"), cx);
+            assert!(!v.sticky(Sticky::Command), "armed for one key only");
+        });
+        let keys: Vec<(KeyAction, Mods, Option<String>)> = sent(&mut rx)
+            .into_iter()
+            .filter_map(|req| match req {
+                ScreenRequest::Input {
+                    input: ScreenInput::Key { action, mods, text, .. }, ..
+                } => Some((action, mods, text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [(KeyAction::Press, Mods::SUPER, None), (KeyAction::Release, Mods::SUPER, None)]
+        );
+        // The soft keyboard's stroke carries the typed character.
+        let typed = Keystroke { key_char: Some("b".to_owned()), ..chord("b") };
+        view.update(cx, |v, cx| v.press(typed, cx));
+        let plain = sent(&mut rx);
+        assert!(
+            matches!(plain.as_slice(), [ScreenRequest::Input { input: ScreenInput::Key { mods, text: Some(t), .. }, .. }, _] if mods.is_empty() && t == "b"),
+            "a plain key types its text: {plain:?}"
+        );
+        view.update(cx, |v, _| {
+            assert!(!v.muted());
+            v.toggle_mute();
+            assert!(v.muted());
+            v.host_clipboard_changed("copied on the host");
+            assert_eq!(v.host_clipboard.as_deref(), Some("copied on the host"));
+        });
     }
 
     #[test]
