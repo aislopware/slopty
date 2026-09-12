@@ -188,7 +188,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_path_in_the_field_is_told_from_a_command` (unit, with `files_query` and `found_file`),
   `a_tilde_is_the_hosts_home` (host unit), `a_path_typed_into_the_palette_opens_a_file_card`
   (headless: the typed path, the host lookup asked with the shell's root and with `~`, the
-  found lines and ↩ on one). Earlier tests:
+  found lines and ↩ on one); the app self-test's driven scenario types `note.t` into the
+  palette and gets "Open note.txt" from the real host walk, ↩ bringing the card back with
+  its two lines. Earlier tests:
   `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and

@@ -729,6 +729,34 @@ mod tests {
         .await
         .unwrap();
 
+        // The palette is a quick open: a word typed there is asked of the host's files under
+        // the agent's directory, the file found is an "Open" line, and ↩ brings the card back.
+        drv.keys("cmd-shift-p").await.unwrap();
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
+        drv.type_text("note.t").await.unwrap();
+        drv.wait_for("the file found on the host", STEP, |d| {
+            d.a11y_node("ListBoxOption", Some("Open note.txt file")).is_some()
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the card from the palette", STEP, |d| {
+            d.item("file")
+                .is_some_and(|i| i.active && i.file.as_ref().is_some_and(|f| f.lines == 2))
+        })
+        .await
+        .unwrap();
+        drv.keys("cmd-w").await.unwrap();
+        drv.wait_for("the card gone again", STEP, |d| d.item("file").is_none()).await.unwrap();
+        drv.reveal(&session).await.unwrap();
+        drv.wait_for("the composer once more", STEP, |d| {
+            chat(d).is_some_and(|(_, c)| c.composer_focused)
+        })
+        .await
+        .unwrap();
+
         // A question: the options are buttons above the composer (no Allow / Deny), one
         // tap on "Blue" answers by request id with the answer filed under the question, and
         // the agent's result and closing line carry the choice.
