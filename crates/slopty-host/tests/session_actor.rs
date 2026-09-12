@@ -361,6 +361,21 @@ mod actor {
         .await;
         assert!(events.iter().any(|e| matches!(e, TermEvent::Driver { you: true })));
 
+        // Reserving the driver again is nothing to it, and a viewer's resize sizes nothing.
+        session.reserve_driver(opener).unwrap();
+        session.request(other, TermRequest::Resize(size(70, 12))).unwrap();
+        session.request(opener, TermRequest::Raw(b"z".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx_opener, |_, s| text(s).contains('z')).await;
+        assert!(
+            !events.iter().any(|e| matches!(e, TermEvent::Driver { you: false })),
+            "{events:?}"
+        );
+        let (events, _) = wait_for(&mut rx_other, |_, s| text(s).contains('z')).await;
+        assert!(
+            !events.iter().any(|e| matches!(e, TermEvent::Resized { cols: 70, .. })),
+            "{events:?}"
+        );
+
         session.request(opener, TermRequest::Raw(b"\r".to_vec())).unwrap();
         child.wait().await.unwrap();
         session.close();
@@ -468,6 +483,45 @@ mod actor {
             "{:?}",
             String::from_utf8_lossy(&state)
         );
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// OSC 7 names the directory to every viewer; an OSC 52 write reaches them up to the
+    /// clipboard cap and one past it is dropped on the host.
+    #[tokio::test]
+    async fn a_directory_and_a_bounded_clipboard_write_reach_the_viewers() {
+        let cap = slopty_proto::screen::MAX_CLIPBOARD_BYTES;
+        let clip = |n: usize| {
+            format!(
+                "printf '\\033]52;c;'; head -c {n} /dev/zero | tr '\\0' a | base64 | tr -d '\\n'; printf '\\a'"
+            )
+        };
+        let script = format!(
+            "printf '\\033]7;file://localhost/tmp/x\\a'; {}; {}; printf 'MARK\\n'; sleep 30",
+            clip(cap),
+            clip(cap + 1)
+        );
+        let (session, mut child) = start(&["/bin/sh", "-c", &script]);
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("MARK")).await;
+        let cwd: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Cwd { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cwd, ["/tmp/x"]);
+        let clips: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::ClipboardWrite { text } => Some(text.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clips, [cap], "the one at the cap arrives, the one past it does not");
         session.close();
         let _killed = child.kill().await;
     }

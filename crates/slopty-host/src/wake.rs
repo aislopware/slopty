@@ -134,4 +134,15 @@ mod tests {
         assert_eq!(wake.counts(), (1, 0));
         assert_eq!(wake.holds.0, ["system off", "system on"]);
     }
+
+    /// The daemon holds its assertions behind a box; the box forwards both.
+    #[test]
+    fn a_boxed_holder_forwards_both_holds() {
+        let mut wake: Wake<Box<dyn Holds>> = Wake::new(Box::new(Log::default()));
+        wake.client_joined();
+        wake.streams(1);
+        assert_eq!(format!("{wake:?}"), "Wake { clients: 1, streams: 1, .. }");
+        wake.holds.system(false);
+        wake.holds.display(false);
+    }
 }

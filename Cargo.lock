@@ -8414,6 +8414,7 @@ dependencies = [
  "slopty-proto",
  "slopty-theme",
  "syntect",
+ "tempfile",
  "tokio",
  "tracing",
 ]

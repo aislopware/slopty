@@ -176,4 +176,29 @@ mod tests {
         assert_eq!(Duration::from_millis(u64::MAX).as_nanos(), u64::MAX, "saturates");
         assert_eq!(format!("{:?}", Duration::from_micros(1500)), "1.500ms");
     }
+
+    /// Nanoseconds go in and out unchanged, sums and differences saturate instead of
+    /// wrapping, the standard duration converts, and the clock moves.
+    #[test]
+    fn the_arithmetic_saturates_and_the_conversions_round_trip() {
+        let d = Duration::from_nanos;
+        assert_eq!(MonoTime::from_nanos(5).as_nanos(), 5);
+        assert_eq!((MonoTime::from_nanos(5) + d(7)).as_nanos(), 12);
+        assert_eq!((MonoTime::from_nanos(u64::MAX) + d(1)).as_nanos(), u64::MAX);
+        assert_eq!(d(3) + d(4), d(7));
+        assert_eq!(d(u64::MAX) + d(1), d(u64::MAX));
+        assert_eq!(d(4) - d(3), d(1));
+        assert_eq!(d(3) - d(4), d(0), "saturates at zero");
+        assert_eq!(Duration::from(std::time::Duration::from_millis(1)), d(1_000_000));
+        assert_eq!(format!("{:?}", MonoTime::from_nanos(5)), "MonoTime(5ns)");
+        assert_eq!(format!("{:?}", d(1_500_000)), "1.500ms");
+        // The clock: a spin of 50 µs on the standard clock is at least that on ours.
+        let started = MonoTime::now();
+        let spin = std::time::Instant::now();
+        while spin.elapsed() < std::time::Duration::from_micros(50) {
+            std::hint::spin_loop();
+        }
+        assert!(started.elapsed() >= Duration::from_micros(50), "{:?}", started.elapsed());
+        assert!(MonoTime::now().as_nanos() > started.as_nanos());
+    }
 }

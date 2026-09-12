@@ -454,4 +454,15 @@ mod tests {
         let r = Radii::default();
         assert!(r.xs < r.sm && r.sm < r.md);
     }
+
+    /// Each byte of a `0xRRGGBB` literal lands in its own channel, and the cube's first
+    /// axis is the red one.
+    #[test]
+    fn a_hex_literal_splits_into_channels() {
+        assert_eq!(Rgb::hex(0x12_34_56), Rgb { r: 0x12, g: 0x34, b: 0x56 });
+        assert_eq!(Rgb::hex(0xff_00_00), Rgb { r: 255, g: 0, b: 0 });
+        let p = Theme::new(Variant::Dark).terminal;
+        assert_eq!(p.palette(52), Rgb { r: 95, g: 0, b: 0 }, "16 + 36: one step of red");
+        assert_eq!(p.palette(22), Rgb { r: 0, g: 95, b: 0 }, "16 + 6: one step of green");
+    }
 }

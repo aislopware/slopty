@@ -136,4 +136,10 @@ mod tests {
         let parsed: HostId = id.to_string().parse().unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn window_and_stream_ids_display_their_kind() {
+        assert_eq!(WindowId(3).to_string(), "window#3");
+        assert_eq!(StreamId(4).to_string(), "stream#4");
+    }
 }
