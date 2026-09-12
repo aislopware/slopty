@@ -55,7 +55,8 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - A slow link never falls behind a fast program: the host coalesces to one diff per tick.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
-  ranges are fetched, prefetched around the viewport. Mouse selection is client-side too
+  ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
+  block's prompt is a range query, not a walk. Mouse selection is client-side too
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, double/triple click,
   or long-press on touch); nothing reaches the host. ⌘-click opens the link under the pointer:
 the OSC 8 run the host put on the row, else the URL found in the cached row text

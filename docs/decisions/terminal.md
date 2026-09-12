@@ -437,3 +437,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and the app self-test's first scenario (`sleep 6` in the first shell, ⌘N to a second: the
   badge appears from the real zsh marks through ptyd, the engine and the wire, and the click
   back on the first card clears it).
+
+- ✅ **The cache indexes its prompts** (2026-09-13). The sticky block header asks for the
+  prompt above the top row on every render, and `TermState::prompt_before` walked the cache
+  a line at a time: in a flooding shell whose prompt had scrolled out of the 20 000-line
+  cache that was 20 000 map lookups a frame, and twenty such shells zooming dropped 26
+  frames of 640 (MEASUREMENTS 2026-09-13, the 20-shell zoom; bisected to the header
+  commit). Ruling: `Scrollback` keeps a `BTreeSet<LineIndex>` of the cached prompt starts,
+  maintained where a line enters (insert or replacement: a row erased in place leaves the
+  set), is evicted by the capacity, or is dropped by the host's extent, and
+  `prompt_before`/`prompt_after` are range queries; the client's two functions delegate,
+  `prompt_after` still bounded by the newest row. Not the alternatives: caching the header
+  per top row (a flood moves the top row every frame); computing the header only when the
+  marks change (the same walk, just less often, and the walk is wrong at any rate for a
+  20 000-line cache). Tests: grid `prompts_are_indexed_through_replacement_and_eviction`,
+  client `prompt_navigation_and_last_output_follow_the_marks` (unchanged, the semantics).

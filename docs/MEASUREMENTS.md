@@ -2766,3 +2766,44 @@ main + fix   (f) draw 3.7 / 9.6 / 11.7 / 12.7 ms · every 6.5 / 13.5 ms · 787 f
 `FileView` (a `SharedString` child instead of a one-run `StyledText` for a row with no spans)
 was tried first and did not move the coloured card; it stays only because a plain file's row
 saves a run vector for nothing lost.
+
+## 2026-09-13 — the 20-shell zoom: a prompt walk on every frame
+
+Scenario (b) had read 26 and 16 dropped frames in the two evening runs above and was written
+off as the machine's load; on an idle machine it stayed bad — 23 dropped beside the file
+scenario, 26 run alone (`-E 'test(twenty_streaming)'`), against 1 at `becd27e` — so it was a
+regression. `git bisect run` over `c1e679c..72e7754` with `/tmp/bisect-b.sh` (build the bins,
+run the 20-shell test, good under 8 dropped), six steps:
+
+```
+cb15efe  (b) 1.0 / 5.2 / 20.1 / 97.6 ms · 603 frames · 18 dropped   bad   ← first bad
+c4e863d  (b) 0.7 / 1.7 /  3.1 / 29.9 ms · 866 frames ·  1 dropped   good
+af3340c  (b) 0.7 / 1.8 /  4.6 / 22.1 ms · 863 frames ·  1 dropped   good
+cc4b36a  (b) 0.7 / 1.7 /  3.4 / 12.8 ms · 865 frames ·  0 dropped   good
+f9e9150  (b) 0.7 / 1.9 /  5.5 / 36.5 ms · 852 frames ·  3 dropped   good
+58854f3  (b) 0.7 / 1.7 /  2.9 / 14.4 ms · 854 frames ·  0 dropped   good
+```
+
+`cb15efe` is the sticky block header: `TerminalView::block_header` runs on every render and
+asks `TermState::prompt_before(top)`, which walked the cache line by line, a `BTreeMap`
+lookup each, from the top row down to the oldest cached line. A flooding shell holds
+`CACHE_LINES` (20 000) with its prompt long evicted, so each of the 20 shells walked 20 000
+lookups on every frame the zoom redrew: ≈ 10–15 ms a frame, the whole excess. `9554fb4`
+(read only the block head) had cut the block's *output* join out of that path, not the walk.
+Scenario (a) did not show it because the pan comes first, before the floods fill the cache.
+
+The fix: `Scrollback` keeps a `BTreeSet` of the cached indices that start a prompt (kept on
+insert, replacement, eviction and the host's drop), and `prompt_before`/`prompt_after` are
+range queries. Both fixes in, all four scenarios, the same command as the file section:
+
+```
+main + both  (e) draw 1.1 / 1.4 / 1.6 / 5.0 ms · every 3.7 / 14.1 ms · 883 frames, 0 dropped
+main + both  (f) draw 1.2 / 4.7 / 6.1 / 7.8 ms · every 4.8 / 13.3 ms · 884 frames, 0 dropped
+main + both  (a) draw 0.8 / 1.1 / 2.0 / 15.7 ms · every 8.1 / 17.5 ms · 603 frames, 0 dropped
+main + both  (b) draw 0.7 / 1.8 / 3.9 / 16.7 ms · every 3.1 / 15.9 ms · 857 frames, 1 dropped
+```
+
+(b) is back on the `becd27e` line (2.5 / 6.0 / 25.3, 1 dropped) and better; (e) and (f) fell
+well under their `72e7754` numbers (3.9 → 1.4 ms and 9.4 → 4.7 ms at p50) because the five
+flooding shells beside the card were paying the same walk. The unit is now bounded by the
+prompts cached, not the lines.

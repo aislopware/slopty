@@ -440,29 +440,15 @@ impl TermState {
     /// (uncached history is not searched).
     #[must_use]
     pub fn prompt_before(&self, index: LineIndex) -> Option<LineIndex> {
-        let oldest = self.scrollback.oldest().0.min(self.first_visible.0);
-        let mut i = index.0;
-        while i > oldest {
-            i = i.saturating_sub(1);
-            if self.line(LineIndex(i)).is_some_and(|l| l.mark.starts_prompt()) {
-                return Some(LineIndex(i));
-            }
-        }
-        None
+        // The cache indexes its prompts: a walk here cost 20 000 lookups a frame in a
+        // flooding shell whose prompt had been evicted (MEASUREMENTS 2026-09-13).
+        self.scrollback.prompt_before(index)
     }
 
     /// The start of the nearest prompt strictly below `index`, among the lines held here.
     #[must_use]
     pub fn prompt_after(&self, index: LineIndex) -> Option<LineIndex> {
-        let newest = self.newest().0;
-        let mut i = index.0;
-        while i < newest {
-            i = i.saturating_add(1);
-            if self.line(LineIndex(i)).is_some_and(|l| l.mark.starts_prompt()) {
-                return Some(LineIndex(i));
-            }
-        }
-        None
+        self.scrollback.prompt_after(index).filter(|&p| p <= self.newest())
     }
 
     /// The head of the command block a line belongs to: its prompt row and the typed command

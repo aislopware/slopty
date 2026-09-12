@@ -5,7 +5,8 @@
 //! whatever lines it has received in a sparse window and asks for the ranges it is missing when
 //! the user scrolls, so scrolling is local and instant once a range is cached.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::Line;
@@ -58,6 +59,10 @@ pub struct Scrollback {
     /// Shared with [`crate::Screen`]: a row that scrolls off the screen into history is one
     /// allocation held twice, not a copy.
     lines: BTreeMap<LineIndex, Arc<Line>>,
+    /// The indices of the cached lines that start a prompt, so a block's prompt is a range
+    /// query and not a walk over the cache (a sticky header asks on every frame of every
+    /// shell; MEASUREMENTS 2026-09-13, the 20-shell zoom).
+    prompts: BTreeSet<LineIndex>,
     capacity: usize,
     /// Number of lines the host currently has (history + visible rows).
     total: u64,
@@ -69,7 +74,13 @@ impl Scrollback {
     /// A cache holding at most `capacity` lines.
     #[must_use]
     pub const fn new(capacity: usize) -> Self {
-        Self { lines: BTreeMap::new(), capacity, total: 0, oldest: LineIndex(0) }
+        Self {
+            lines: BTreeMap::new(),
+            prompts: BTreeSet::new(),
+            capacity,
+            total: 0,
+            oldest: LineIndex(0),
+        }
     }
 
     /// Record the host's current line count and oldest retained index.
@@ -81,6 +92,7 @@ impl Scrollback {
             self.oldest = oldest;
             // Lines the host dropped are useless; drop them here too.
             self.lines = self.lines.split_off(&oldest);
+            self.prompts = self.prompts.split_off(&oldest);
         } else {
             self.oldest = oldest;
         }
@@ -109,6 +121,11 @@ impl Scrollback {
         if index < self.oldest {
             return;
         }
+        if line.mark.starts_prompt() {
+            self.prompts.insert(index);
+        } else {
+            self.prompts.remove(&index);
+        }
         self.lines.insert(index, line);
         self.total = self.total.max(index.0.saturating_add(1));
         self.trim();
@@ -121,6 +138,18 @@ impl Scrollback {
             self.insert(idx, line);
             idx = idx.next();
         }
+    }
+
+    /// The start of the nearest cached prompt strictly above `index`.
+    #[must_use]
+    pub fn prompt_before(&self, index: LineIndex) -> Option<LineIndex> {
+        self.prompts.range(..index).next_back().copied()
+    }
+
+    /// The start of the nearest cached prompt strictly below `index`.
+    #[must_use]
+    pub fn prompt_after(&self, index: LineIndex) -> Option<LineIndex> {
+        self.prompts.range((Bound::Excluded(index), Bound::Unbounded)).next().copied()
     }
 
     /// A cached line.
@@ -171,9 +200,8 @@ impl Scrollback {
     /// scroll to, so eviction is strictly oldest-first.
     fn trim(&mut self) {
         while self.lines.len() > self.capacity {
-            if self.lines.pop_first().is_none() {
-                break;
-            }
+            let Some((index, _)) = self.lines.pop_first() else { break };
+            self.prompts.remove(&index);
         }
     }
 }
@@ -217,6 +245,35 @@ mod tests {
         sb.set_extent(LineIndex(7), 60);
         assert!(sb.get(LineIndex(6)).is_none(), "an advance does drop what the host dropped");
         assert!(sb.get(LineIndex(7)).is_some());
+    }
+
+    /// The prompt index follows every insert, replacement and eviction, so a block's prompt
+    /// is found without a walk.
+    #[test]
+    fn prompts_are_indexed_through_replacement_and_eviction() {
+        let mut sb = Scrollback::new(4);
+        sb.set_extent(LineIndex(0), 10);
+        let prompt = |t: &str| {
+            let mut line = l(t);
+            line.mark = crate::SemanticMark::Prompt { exit: None, input: Some(2) };
+            line
+        };
+        sb.insert(LineIndex(1), prompt("$ a"));
+        sb.insert(LineIndex(2), l("out"));
+        sb.insert(LineIndex(3), prompt("$ b"));
+        assert_eq!(sb.prompt_before(LineIndex(3)), Some(LineIndex(1)));
+        assert_eq!(sb.prompt_before(LineIndex(1)), None, "strictly above");
+        assert_eq!(sb.prompt_after(LineIndex(1)), Some(LineIndex(3)));
+        assert_eq!(sb.prompt_after(LineIndex(3)), None, "strictly below");
+        sb.insert(LineIndex(1), l("erased in place"));
+        assert_eq!(sb.prompt_before(LineIndex(3)), None, "a replaced row leaves the index");
+        sb.insert(LineIndex(1), prompt("$ a"));
+        sb.insert(LineIndex(4), l("4"));
+        sb.insert(LineIndex(5), l("5"));
+        assert!(sb.get(LineIndex(1)).is_none(), "evicted by the capacity");
+        assert_eq!(sb.prompt_before(LineIndex(5)), Some(LineIndex(3)));
+        sb.set_extent(LineIndex(4), 10);
+        assert_eq!(sb.prompt_before(LineIndex(5)), None, "the host's drop clears it too");
     }
 
     /// A line the screen also holds is one allocation, not two.
