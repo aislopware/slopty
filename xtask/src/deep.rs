@@ -25,7 +25,7 @@ const PURE: &[&str] = &[
 
 /// Crates whose `unsafe` and threads are worth a sanitizer: the daemons and the codec, which
 /// build on a nightly toolchain without GPUI.
-const SANITIZED: &[&str] = &["slopty-pty", "slopty-transport", "slopty-host", "slopty-codec"];
+const SANITIZED: &[&str] = &["slopty-pty", "slopty-net", "slopty-host", "slopty-codec"];
 
 /// Which sanitizer to build with.
 #[derive(Clone, Copy, ValueEnum, Debug)]

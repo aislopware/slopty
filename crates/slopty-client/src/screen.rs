@@ -824,3 +824,112 @@ mod feedback_tests {
         assert_eq!(decoded, nack);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A datagram for `stream`, frame `frame`: a 16-byte little-endian header and one payload
+    /// byte, the shape `MediaHeader::parse` reads.
+    fn datagram(stream: u32, frame: u32) -> Bytes {
+        let mut d = Vec::with_capacity(17);
+        d.extend_from_slice(&stream.to_le_bytes());
+        d.extend_from_slice(&frame.to_le_bytes());
+        d.extend_from_slice(&[0_u8; 8]);
+        d.push(0xee);
+        Bytes::from(d)
+    }
+
+    fn frame_of(arrival: &Arrival) -> u32 {
+        MediaHeader::parse(&arrival.1).map_or(u32::MAX, |(h, _)| h.frame.get())
+    }
+
+    #[test]
+    fn a_stream_backlogs_until_attached_and_the_backlog_keeps_the_newest() {
+        let router = ScreenRouter::with_loss(0);
+        let now = Instant::now();
+        let sent = u32::try_from(PENDING_DEPTH).unwrap_or(u32::MAX).saturating_add(100);
+        for frame in 0..sent {
+            router.route(datagram(7, frame), now);
+        }
+        let mut rx = router.attach(StreamId(7));
+        let first = rx.try_recv().ok();
+        assert_eq!(first.as_ref().map(frame_of), Some(100), "the oldest 100 were dropped");
+        let mut got = 1;
+        while rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, PENDING_DEPTH);
+        // Attached now: a datagram goes straight through.
+        router.route(datagram(7, 9_999), now);
+        assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(9_999));
+    }
+
+    #[test]
+    fn detach_and_forget_stop_the_stream_and_a_short_datagram_is_ignored() {
+        let router = ScreenRouter::with_loss(0);
+        let now = Instant::now();
+        let mut rx = router.attach(StreamId(1));
+        router.route(datagram(1, 1), now);
+        assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(1));
+        router.detach(StreamId(1));
+        router.route(datagram(1, 2), now);
+        assert!(rx.try_recv().is_err(), "detached: nothing delivered");
+        // What lands between the detach and the host's `Closed` backlogs like a stream nobody
+        // attached yet (a re-attach would want it); `forget` on `Closed` lets it go.
+        assert!(router.inner.lock().pending.contains_key(&StreamId(1)));
+        router.forget(StreamId(1));
+
+        router.route(datagram(2, 1), now);
+        assert!(router.inner.lock().pending.contains_key(&StreamId(2)));
+        router.forget(StreamId(2));
+        assert!(router.inner.lock().pending.is_empty(), "a Closed stream keeps no backlog");
+
+        router.route(Bytes::from_static(&[1, 2, 3]), now);
+        assert!(router.inner.lock().pending.is_empty(), "too short for a header");
+    }
+
+    #[test]
+    fn loss_injection_is_proportional_and_repeats_from_its_seed() {
+        let count = |permille: u32| -> Vec<u32> {
+            let router = ScreenRouter::with_loss(permille);
+            let mut rx = router.attach(StreamId(3));
+            let now = Instant::now();
+            for frame in 0..1_000 {
+                router.route(datagram(3, frame), now);
+            }
+            let mut got = Vec::new();
+            while let Ok(arrival) = rx.try_recv() {
+                got.push(frame_of(&arrival));
+            }
+            got
+        };
+        assert_eq!(count(0).len(), 1_000, "no loss by default");
+        let half = count(500);
+        assert!((400..=600).contains(&half.len()), "about half survive: {}", half.len());
+        assert_eq!(half, count(500), "the same seed drops the same datagrams");
+        assert_ne!(half, count(100));
+        assert!(count(1_000).is_empty(), "a thousand per thousand drops everything");
+        let router = ScreenRouter::with_loss(1_001);
+        assert_eq!(router.drop_permille.load(Ordering::Relaxed), 1_000, "clamped");
+    }
+
+    #[test]
+    fn a_parked_arrival_is_taken_by_its_timestamp_and_older_ones_go_with_it() {
+        let mut arrivals = Arrivals::default();
+        let t0 = Instant::now();
+        let t = |n: u64| t0 + Duration::from_micros(n);
+        arrivals.park(10, t(1));
+        arrivals.park(20, t(2));
+        arrivals.park(30, t(3));
+        assert_eq!(arrivals.take(20), Some(t(2)));
+        assert_eq!(arrivals.take(10), None, "older than the one taken: forgotten with it");
+        assert_eq!(arrivals.take(30), Some(t(3)));
+        assert!(arrivals.0.is_empty());
+        for n in 0..u64::try_from(ARRIVALS).unwrap_or(u64::MAX).saturating_add(5) {
+            arrivals.park(n, t(n));
+        }
+        assert_eq!(arrivals.0.len(), ARRIVALS, "bounded");
+        assert_eq!(arrivals.take(0), None, "the oldest were dropped to make room");
+    }
+}

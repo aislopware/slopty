@@ -1893,6 +1893,85 @@ mod tests {
         (shared, rx)
     }
 
+    #[test]
+    fn quantiles_read_any_order_and_a_ring_keeps_the_window() {
+        assert_eq!(Quantiles::of(&[]), Quantiles::default());
+        let q = Quantiles::of(&[5, 1, 3, 2, 4]);
+        assert_eq!((q.n, q.p50_us, q.p95_us, q.max_us), (5, 3, 5, 5));
+        assert_eq!(Quantiles::of(&[7]).describe(), "0.01 / 0.01 / 0.01 ms (n=1)");
+        let mut ring = LatencyRing::default();
+        for us in 0..u64::try_from(LATENCY_WINDOW).unwrap_or(u64::MAX).saturating_add(10) {
+            ring.push(us);
+        }
+        let q = ring.quantiles();
+        assert_eq!(usize::try_from(q.n).unwrap_or(0), LATENCY_WINDOW, "bounded to the window");
+        assert_eq!(q.max_us, u64::try_from(LATENCY_WINDOW).unwrap_or(0).saturating_add(9));
+        assert!(q.p50_us > 10, "the oldest samples left first: {q:?}");
+    }
+
+    #[test]
+    fn configs_clamp_the_quality_and_keep_even_sides() {
+        let q = Quality {
+            fps: 500,
+            bitrate_bps: 1,
+            scale: 0.3333,
+            codec: VideoCodec::Hevc,
+            hdr: false,
+        };
+        let (capture, encoder) = configs((1_001, 777), &q);
+        assert_eq!((capture.width, capture.height), (334, 260), "scaled, rounded up to even");
+        assert_eq!(capture.fps, 240, "fps clamped");
+        assert_eq!(capture.format, PixelFormat::Nv12);
+        assert_eq!(encoder.bitrate_bps, 100_000, "bitrate floor");
+        assert_eq!((encoder.width, encoder.height, encoder.fps), (334, 260, 240));
+
+        let nan = Quality { scale: f32::NAN, codec: VideoCodec::HevcMain10, ..q };
+        let (capture, _encoder) = configs((100, 100), &nan);
+        assert_eq!((capture.width, capture.height), (100, 100), "a NaN scale is native");
+        assert_eq!(capture.format, PixelFormat::P010, "10-bit for Main10");
+
+        let tiny = Quality { scale: 0.0001, ..q };
+        let (capture, _encoder) = configs((10, 10), &tiny);
+        assert_eq!((capture.width, capture.height), (2, 2), "never below two pixels");
+    }
+
+    #[test]
+    fn the_registry_lists_live_streams_then_the_last_closed_and_tells_its_observer() {
+        let registry = Registry::default();
+        let counts = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&counts);
+        registry.observe(move |n| seen.lock().push(n));
+        let handle = |id: u32| {
+            let (shared, _rx) = shared_for_frames();
+            // Fresh from the helper: nothing else holds it, so the unwrap cannot fail.
+            let mut shared = Arc::try_unwrap(shared).ok().expect("fresh");
+            shared.id = StreamId(id);
+            StatsHandle(Arc::new(shared))
+        };
+        registry.insert(&"alice", CaptureTarget::Display(1), handle(1));
+        registry.insert(&"bob", CaptureTarget::Display(2), handle(2));
+        let (live, closed) = registry.summaries();
+        assert_eq!(
+            live.iter().map(|s| (s.client.as_str(), s.stream)).collect::<Vec<_>>(),
+            [("alice", 1), ("bob", 2)]
+        );
+        assert!(closed.is_empty());
+        registry.remove(&"alice", StreamId(9));
+        assert_eq!(registry.summaries().0.len(), 2, "an unknown stream is not removed");
+        registry.remove(&"alice", StreamId(1));
+        let (live, closed) = registry.summaries();
+        assert_eq!(live.len(), 1);
+        assert_eq!(closed.iter().map(|s| s.stream).collect::<Vec<_>>(), [1]);
+        assert_eq!(*counts.lock(), [1, 2, 1], "the observer hears every change, in order");
+        for id in 10..u32::try_from(CLOSED_KEEP).unwrap_or(u32::MAX).saturating_add(12) {
+            registry.insert(&"carol", CaptureTarget::Display(id), handle(id));
+            registry.remove(&"carol", StreamId(id));
+        }
+        let (_live, closed) = registry.summaries();
+        assert_eq!(closed.len(), CLOSED_KEEP, "only the last few closed are kept");
+        assert_eq!(closed.first().map(|s| s.stream), Some(12), "oldest first");
+    }
+
     /// One 16x16 frame. The contents do not matter: with no encoder nothing reads them, and
     /// what is being tested is whether `on_frame` gets that far at all.
     fn a_frame() -> CapturedFrame {

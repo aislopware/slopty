@@ -2690,7 +2690,23 @@ build sharing the machine), Mac Studio:
 deep features   cargo hack check --each-feature, 7 crates with features    517 s cold
 deep miri       slopty-proto + slopty-core, PROPTEST_CASES=8              147 s  (codec_props 79 s of it; golden failed)
 deep miri       slopty-proto alone, rerun beside a running gate            416 s  (all green)
+deep sanitize   thread: pty, net, host, codec, -Zbuild-std, 79 tests       263 s  (build ≈ 190 s, run 66 s; no race)
+deep coverage   llvm-cov nextest, 553 tests, workspace minus e2e/xtask     359 s  (73.1 % of 75 832 lines)
 ```
+
+Coverage by crate (lines, unit and headless tests only — the app, hostd, capture and the
+CLI are exercised by the live layers this report cannot see): agent 96.6 %, media 95.8 %,
+theme 95.6 %, predict 95.4 %, grid 94.4 %, engine 89.3 %, settings 89.0 %, pty 88.9 %,
+ui 86.4 % (16 587 lines), codec 84.5 %, proto 79.3 %, input 78.4 %, net 73.5 %, client
+73.4 %, core 73.0 %, host 50.7 %, cli 21.2 %, capture 10.9 %, hostd 7.0 %, app 4.0 %.
+The files with real logic and the least cover: `slopty-host/src/manager.rs` 0 %,
+`slopty-client/src/screen.rs` 23 %, `slopty-host/src/screen.rs` 34 %, `slopty-ui/src/screen.rs`
+36 %, `slopty-net/src/endpoint.rs` 46 % — the next test passes go there.
+
+Under ThreadSanitizer six tests (the four `session_actor` ones and the two that spawn a pty
+program) each took 60–61 s and passed: a 60 s wait somewhere in the pty path that the
+sanitizer's slowdown turns from an early return into a full timeout. Worth a look if it
+recurs — it is the run's whole cost — but not a race.
 
 What follows: neither belongs in the gate (its budget is 5–10 minutes for everything); both
 are the weekly `Deep` workflow's, one runner each, and run by hand before a release. The
