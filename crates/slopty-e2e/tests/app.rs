@@ -972,6 +972,46 @@ mod tests {
             .unwrap();
         assert!(dump.a11y_node("Button", Some("Copy code")).is_some(), "{:#?}", dump.a11y);
 
+        // And a "run" button beside it, because the canvas has the first shell to run it in:
+        // a click reveals that shell and types the code into it, so `echo hi` answers `hi`.
+        let run = dump
+            .a11y_node("Button", Some("Run in shell"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (rx_, ry_) = a11y_center(run);
+        drv.click(rx_, ry_).await.unwrap();
+        drv.wait_for("the code to run in the shell", STEP, |d| {
+            d.terminals.iter().any(|t| {
+                t.kind == "terminal"
+                    && t.rows.iter().any(|r| r.ends_with("echo hi"))
+                    && t.rows.iter().any(|r| r.trim() == "hi")
+            })
+        })
+        .await
+        .unwrap();
+
+        // The shell has the keyboard and the window is on it now, so the card is off-screen:
+        // the palette is the way back to the conversation (agents list before plain shells).
+        drv.keys("cmd-shift-p").await.unwrap();
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
+        drv.type_text("go to").await.unwrap();
+        drv.wait_for("the sessions to go to", STEP, |d| {
+            d.a11y
+                .iter()
+                .find(|n| n.role == "ListBoxOption")
+                .and_then(|n| n.label.clone())
+                .is_some_and(|l| l.starts_with("Go to "))
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the caret back in the composer", STEP, |d| {
+            d.terminals.iter().any(|t| t.conversation.as_ref().is_some_and(|c| c.composer_focused))
+        })
+        .await
+        .unwrap();
+
         // The agent dies on its own: the card goes, and the top bar says why (its status and
         // its last word on stderr) rather than leaving a vanished conversation unexplained.
         drv.type_text("die").await.unwrap();

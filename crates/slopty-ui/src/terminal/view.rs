@@ -202,6 +202,10 @@ pub enum TerminalViewEvent {
         /// How long it ran.
         elapsed: Duration,
     },
+    /// The "run" button on a fenced block in an answer was pressed: the canvas reveals the
+    /// shell it picked and types the code into it. The payload is the block's body, lines
+    /// joined with `\n`.
+    RunInShell(String),
 }
 
 /// One session's view.
@@ -278,6 +282,10 @@ pub struct TerminalView {
     partial: String,
     /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
     info: AgentInfo,
+    /// The canvas has a plain shell to run a fenced block in: the "run" button beside "copy"
+    /// is drawn. Set by the canvas whenever its set of shells changes, so the conversation's
+    /// render stays a pure function of the view's own state.
+    can_run_in_shell: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -354,6 +362,7 @@ impl TerminalView {
             permission: None,
             partial: String::new(),
             info: AgentInfo::default(),
+            can_run_in_shell: false,
         }
     }
 
@@ -369,6 +378,33 @@ impl TerminalView {
     #[must_use]
     pub const fn is_driven(&self) -> bool {
         self.driven
+    }
+
+    /// The canvas says whether it has a plain shell to run a fenced block in: while it has
+    /// none, the "run" button beside "copy" is not drawn, because there is nowhere to send
+    /// the code.
+    pub fn set_can_run_in_shell(&mut self, can: bool, cx: &mut Context<Self>) {
+        if self.can_run_in_shell == can {
+            return;
+        }
+        self.can_run_in_shell = can;
+        cx.notify();
+    }
+
+    /// Whether the canvas has a shell for the "run" button.
+    #[must_use]
+    pub const fn can_run_in_shell(&self) -> bool {
+        self.can_run_in_shell
+    }
+
+    /// Type `text` into this session and run it: a paste (bracketed when the shell asks, as
+    /// any paste, so a multi-line block arrives whole), then ↩ as a key, the way the human
+    /// would have. Shared by the block menu's "rerun" and the canvas's "run in shell".
+    pub fn run_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.send(TermRequest::Paste(text));
+        if let Ok(enter) = Keystroke::parse("enter") {
+            self.press(enter, cx);
+        }
     }
 
     /// The text the driven agent is writing now.
@@ -1261,13 +1297,8 @@ impl TerminalView {
                 }
             }
             BlockMenuItem::Rerun => {
-                // The command as a paste (bracketed when the shell asks, as any paste), then
-                // ↩ as a key so the shell runs it the way the human would have.
                 if let Some(command) = block.command {
-                    self.send(TermRequest::Paste(command));
-                    if let Ok(enter) = Keystroke::parse("enter") {
-                        self.press(enter, cx);
-                    }
+                    self.run_text(command, cx);
                 }
             }
             BlockMenuItem::SelectBlock => {
@@ -2323,6 +2354,7 @@ impl Render for TerminalView {
                 composer_focused,
                 working,
                 self.files.as_ref(),
+                self.can_run_in_shell,
                 &self.theme,
                 cx,
             )

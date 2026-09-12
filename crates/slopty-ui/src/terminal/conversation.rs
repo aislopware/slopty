@@ -36,7 +36,7 @@ use slopty_theme::{Theme, alpha};
 
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
-use crate::terminal::view::TerminalView;
+use crate::terminal::view::{TerminalView, TerminalViewEvent};
 
 /// Lines of a tool result shown before it is opened.
 pub const RESULT_PREVIEW_LINES: usize = 4;
@@ -552,6 +552,7 @@ impl Conversation {
         composer_focused: bool,
         working: bool,
         files: Option<&(String, Vec<String>)>,
+        can_run: bool,
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
@@ -606,7 +607,16 @@ impl Conversation {
                                                 }
                                                 _ => None,
                                             };
-                                            entry(ix, e, open.contains(&ix), task, &view, &theme)
+                                            let run = can_run.then_some(&view);
+                                            entry(
+                                                ix,
+                                                e,
+                                                open.contains(&ix),
+                                                task,
+                                                run,
+                                                &view,
+                                                &theme,
+                                            )
                                         },
                                     )
                                 },
@@ -1347,11 +1357,13 @@ fn question_block(
 
 /// One entry: the human's prompt in an accent bubble, the agent's Markdown, a folded line
 /// for thinking, a tool call that opens on its input, a tool result.
+#[expect(clippy::too_many_arguments, reason = "one call site: the list's render closure")]
 fn entry(
     ix: usize,
     entry: &TranscriptEntry,
     open: bool,
     task: Option<&AgentTask>,
+    run: Option<&Entity<TerminalView>>,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -1430,7 +1442,7 @@ fn entry(
                             .style(markdown_style(theme, &mono))
                             .into_any_element(),
                             Segment::Code { lang, body } => {
-                                code_segment(ix, si, &lang, &body, &mono, theme)
+                                code_segment(ix, si, &lang, &body, run, theme)
                             }
                         }
                     })),
@@ -1677,18 +1689,20 @@ pub fn segments(markdown: &str) -> Vec<Segment> {
     out
 }
 
-/// A fenced block of an assistant turn: its language and a "copy" button over the code in
-/// the mono face on the raised surface.
+/// A fenced block of an assistant turn: its language, a "copy" button and — when `run` is
+/// the view to ask, which the canvas only allows while it has a plain shell to run it in —
+/// a "run" button, over the code in the mono face on the raised surface.
 fn code_segment(
     ix: usize,
     si: usize,
     lang: &str,
     body: &str,
-    mono: &str,
+    run: Option<&Entity<TerminalView>>,
     theme: &Theme,
 ) -> AnyElement {
     let s = &theme.surfaces;
     let spacing = theme.spacing;
+    let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
     let text = body.to_owned();
     let copy_id = format!("conversation-code-copy-{ix}-{si}");
     let copy = div()
@@ -1705,6 +1719,27 @@ fn code_segment(
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
         })
         .child("copy");
+    let run = run.map(|view| {
+        let view = view.clone();
+        let code = body.to_owned();
+        let run_id = format!("conversation-code-run-{ix}-{si}");
+        div()
+            .id(ElementId::Name(run_id.clone().into()))
+            .debug_selector(move || run_id)
+            .role(Role::Button)
+            .aria_label("Run in shell")
+            .px(px(spacing.xs))
+            .rounded(px(theme.radii.xs))
+            .cursor_pointer()
+            .text_color(hsla(s.text_muted))
+            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+            .on_click(move |_ev, _window, cx| {
+                // The view knows the code; the canvas, which is subscribed, knows the shells.
+                let code = code.clone();
+                view.update(cx, |_v, cx| cx.emit(TerminalViewEvent::RunInShell(code)));
+            })
+            .child("run")
+    });
     div()
         .flex()
         .flex_col()
@@ -1712,7 +1747,7 @@ fn code_segment(
         .bg(hsla(s.raised))
         .px(px(spacing.sm))
         .py(px(spacing.xs))
-        .font_family(mono.to_owned())
+        .font_family(mono)
         .text_size(px(theme.typography.small()))
         .child(
             div()
@@ -1721,7 +1756,7 @@ fn code_segment(
                 .items_center()
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(lang.to_owned()))
-                .child(copy),
+                .child(div().flex().items_center().gap(px(spacing.xs)).children(run).child(copy)),
         )
         .child(
             div()

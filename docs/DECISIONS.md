@@ -3060,9 +3060,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   "copy" button (a11y "Copy code") in a header row; (2) copy takes the lines inside the
   fences alone, no trailing newline, so it pastes as one command; (3) gpui-kit's markdown
   view was not forked for a per-block button — the split is thirty lines and leaves the fork
-  in sync with upstream. Not done: "run in the shell", which needs a shell to name (the
-  active one? a new one?) — a ruling for when a use case asks. Tests: `segments` cases and
-  the button's click reading back from the headless clipboard
+  in sync with upstream. "Run in the shell" — which shell to name — is settled by "A fenced
+  block runs in the canvas's shell" below. Tests: `segments` cases and the button's click
+  reading back from the headless clipboard
   (`the_conversation_view_lists_the_transcript_and_toggles_back`), and the app self-test's
   driven scenario (`snippet`: the fake answers with a fence, the dump's a11y carries "Copy
   code").
@@ -3652,3 +3652,33 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   ~33 ms at this path's 11 ms rtt — but start-up here is dominated by the 217–304 ms to the first
   datagram and 40 ms of encode, not by the window. Keep it for LAN and loopback, where it is
   cheap and the arithmetic is the same; do not claim a Wi-Fi start-up win for it.
+
+- ✅ **A fenced block runs in the canvas's shell, and the canvas decides which one**
+  (2026-09-12, the question "A fenced block in an answer is its own element" left open).
+  "Copy" got the command out of the answer but the human still had to find a shell and paste
+  it, which on a phone is most of the work. Rulings: (1) the button is drawn only when a click
+  on it would go somewhere — the canvas tells each terminal view whether it has a **plain
+  shell** (`set_can_run_in_shell`, a flag pushed whenever the set of shells can have changed:
+  a session opening or closing, the item set reconciling, an agent event) so the
+  conversation's render stays a pure function of the view's own state and asks the canvas
+  nothing; (2) a **plain shell** is an `ItemKind::Terminal` item, drawn here, whose session is
+  a `SessionKind::Terminal` (not one the host drives as an agent) and which no coding agent
+  has been seen in (`agents` has no entry) — an agent's terminal is a conversation, not a
+  prompt, and typing a snippet into one answers whatever it was asking; (3) the target is the
+  **most recently activated** such shell, else the newest, kept as one recency list
+  (`shell_recency`: appended when a session opens, moved to the end when its item is
+  activated, entries that are not shells any more skipped rather than removed), because "the
+  shell I was just in" is the answer a human expects and "the newest" is the only defensible
+  fallback before they have been in one; (4) the click is
+  `TerminalViewEvent::RunInShell(String)` — the view knows the code, the canvas knows the
+  shells — and the canvas reveals the target and types it exactly as the block menu's "rerun"
+  does (`TerminalView::run_text`, now shared by both): a `TermRequest::Paste` of the whole
+  body, then ↩ once as a key, so a multi-line block arrives whole under the shell's bracketed
+  paste and runs the way the human would have run it. Ids
+  `conversation-code-run-<entry>-<segment>`, a11y "Run in shell". Tests: headless
+  `a_fenced_block_runs_in_the_canvas_shell` (no button with only an agent card on the canvas;
+  a shell joins and the button appears; the click reveals the shell, whose channel gets
+  `Paste("echo hi")` then one `Key(Enter)`; an agent seen in that shell takes the button away
+  again), and the app self-test's driven scenario (`snippet`: the button is in the dump's
+  a11y, a click on its bounds runs `echo hi` in the first shell and `hi` comes back in its
+  rows).

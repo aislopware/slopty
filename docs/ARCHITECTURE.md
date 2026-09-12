@@ -679,7 +679,10 @@ in `FollowMode::Tail` (pinned to the newest entry until the reader scrolls up, t
 "↓ latest" pill re-pins; a reset re-pins) with `TextView::markdown` for assistant turns —
 split at their ``` fences first (`conversation::segments`), each fenced block drawn as its own
 element with the language and a "copy" button (`conversation-code-copy-<entry>-<segment>`,
-a11y "Copy code") over the code —
+a11y "Copy code") over the code, beside a "run" button
+(`conversation-code-run-<entry>-<segment>`, a11y "Run in shell") drawn only while the canvas
+has a plain shell to run it in, which reveals that shell — the one most recently activated,
+else the newest — and types the block into it as a paste and one ↩ —
 "HH:MM" local-time stamps on prompts and answers, and folds that open on a click — thinking
 starts folded, a result shows its first 4 lines, and a tool call draws its `ToolDetail`
 (`conversation::tool_body`): an edit's diff shows unasked as rows tinted in the success tone

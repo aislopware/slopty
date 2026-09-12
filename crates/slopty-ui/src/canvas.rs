@@ -347,6 +347,11 @@ pub struct CanvasView {
     sessions: HashMap<SessionId, SessionSummary>,
     /// Coding agents the host has observed, by session.
     agents: HashMap<SessionId, AgentEvent>,
+    /// Terminal sessions oldest first, moved to the end when one is activated: the order the
+    /// "run in shell" button picks its target from (the most recently focused shell, else the
+    /// newest one). Sessions that are not shells any more are skipped, not removed, so a
+    /// terminal an agent was seen in goes back to being a candidate if it ever stops being one.
+    shell_recency: Vec<SessionId>,
     /// Holds the device out of idle sleep while an agent works in any session (thinking or
     /// running a tool): the human is waiting on it, not the other way round. Released when
     /// every agent is idle or waiting on the human.
@@ -469,6 +474,11 @@ impl CanvasView {
             out,
             theme,
             terminals: HashMap::new(),
+            shell_recency: sessions
+                .iter()
+                .filter(|s| s.kind == SessionKind::Terminal)
+                .map(|s| s.id)
+                .collect(),
             sessions: sessions.into_iter().map(|s| (s.id, s)).collect(),
             agents: HashMap::new(),
             awake: None,
@@ -646,6 +656,7 @@ impl CanvasView {
         if let Some(view) = self.terminals.get(&session) {
             view.read(cx).drive();
         }
+        self.touch_session(session);
         self.active = Some(id);
         self.pending_focus = Some(session);
         self.reveal_pending = Some(id);
@@ -654,9 +665,55 @@ impl CanvasView {
 
     /// A session appeared (ours or another client's).
     pub fn session_opened(&mut self, summary: SessionSummary, cx: &mut Context<Self>) {
+        if summary.kind == SessionKind::Terminal && !self.shell_recency.contains(&summary.id) {
+            self.shell_recency.push(summary.id);
+        }
         self.sessions.insert(summary.id, summary);
         self.reconcile(cx);
         cx.notify();
+    }
+
+    /// `session` is a plain shell on this canvas: a terminal session (not one the host drives
+    /// as an agent), drawn here, and one no coding agent has been seen in. The only thing a
+    /// fenced block from an answer may be typed into.
+    fn is_shell(&self, session: SessionId) -> bool {
+        self.terminals.contains_key(&session)
+            && !self.agents.contains_key(&session)
+            && self.sessions.get(&session).is_some_and(|s| s.kind == SessionKind::Terminal)
+    }
+
+    /// The shell a fenced block runs in: the most recently activated one, else the newest.
+    fn run_target(&self) -> Option<SessionId> {
+        self.shell_recency.iter().rev().copied().find(|s| self.is_shell(*s))
+    }
+
+    /// Remember that `session` was just activated, so a "run in shell" goes to the shell the
+    /// human was last in rather than whichever opened last.
+    fn touch_session(&mut self, session: SessionId) {
+        if let Some(at) = self.shell_recency.iter().position(|s| *s == session) {
+            let s = self.shell_recency.remove(at);
+            self.shell_recency.push(s);
+        }
+    }
+
+    /// Tell every terminal view whether there is a shell to run a fenced block in, so the
+    /// conversation draws the "run" button only when a click on it would go somewhere. Called
+    /// whenever the set of shells can have changed.
+    fn update_run_targets(&self, cx: &mut Context<Self>) {
+        let can = self.run_target().is_some();
+        for view in self.terminals.values() {
+            view.update(cx, |v, cx| v.set_can_run_in_shell(can, cx));
+        }
+    }
+
+    /// A "run" button on a fenced block was pressed: reveal the shell it goes to and type the
+    /// code into it, as the block menu's "rerun" does — a paste, then ↩ once.
+    pub fn run_in_shell(&mut self, code: String, cx: &mut Context<Self>) {
+        let Some(target) = self.run_target() else { return };
+        self.reveal_session(target, cx);
+        if let Some(view) = self.terminals.get(&target).cloned() {
+            view.update(cx, |v, cx| v.run_text(code, cx));
+        }
     }
 
     /// A session changed directory (OSC 7), and the host says which repository that is in.
@@ -693,6 +750,7 @@ impl CanvasView {
     pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.sessions.remove(&session);
         self.agents.remove(&session);
+        self.shell_recency.retain(|s| *s != session);
         self.answered.remove(&session);
         self.update_awake(cx);
         self.reconcile(cx);
@@ -780,6 +838,7 @@ impl CanvasView {
         }
         self.update_awake(cx);
         self.count_needs_you(cx);
+        self.update_run_targets(cx);
         cx.notify();
     }
 
@@ -1502,6 +1561,7 @@ impl CanvasView {
                             Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
                         this.command_finished(sid, done, cx);
                     }
+                    TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
                 },
             ));
             if self.is_driven(*session) {
@@ -1538,6 +1598,7 @@ impl CanvasView {
             self.pending_focus_self = true;
         }
         self.prune_headings();
+        self.update_run_targets(cx);
     }
 
     /// Drop the headings whose block has lost every item. An emptied repository must not keep
@@ -2130,6 +2191,13 @@ impl CanvasView {
     }
 
     fn activate(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let session = match self.doc.get(id).map(|i| &i.kind) {
+            Some(ItemKind::Terminal { session }) => Some(*session),
+            _ => None,
+        };
+        if let Some(session) = session {
+            self.touch_session(session);
+        }
         self.active = Some(id);
         if let Some(ItemKind::Terminal { session }) = self.doc.get(id).map(|i| &i.kind) {
             self.finished.remove(session);
@@ -3077,7 +3145,7 @@ mod tests {
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
-    use slopty_proto::agent::AgentKind;
+    use slopty_proto::agent::{AgentKind, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
     use super::*;
@@ -3282,6 +3350,45 @@ mod tests {
             title: "shell".into(),
             cwd: at.cwd.map(str::to_owned),
             repo: at.repo.map(str::to_owned),
+            cols: 80,
+            rows: 24,
+            state: SessionState::Running,
+            viewers: 1,
+            command: Vec::new(),
+        };
+        view.update_in(cx, |c, _window, cx| {
+            c.session_opened(summary, cx);
+            c.apply_sync(CanvasSync::Delta { version, by, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        id
+    }
+
+    /// The host opened a session it drives as an agent (`SessionKind::Agent`): the card is
+    /// the conversation, and it is never a shell a fenced block can run in.
+    fn host_opens_agent(
+        view: &Entity<CanvasView>,
+        cx: &mut VisualTestContext,
+        session: SessionId,
+        by: ClientId,
+        rect: Rect,
+        version: u64,
+    ) -> ItemId {
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            rect,
+            z: u32::try_from(version).unwrap(),
+            group: None,
+            sleeping: false,
+        };
+        let id = item.id;
+        let summary = SessionSummary {
+            kind: SessionKind::Agent,
+            id: session,
+            title: "claude".into(),
+            cwd: None,
+            repo: None,
             cols: 80,
             rows: 24,
             state: SessionState::Running,
@@ -4610,5 +4717,95 @@ mod tests {
         view.update_in(cx, |c, _window, cx| c.agent_sessions(None, Vec::new(), cx));
         cx.run_until_parked();
         assert!(view.read_with(cx, |c, _| c.picker.is_none()));
+    }
+
+    /// A fenced block in an agent's answer offers "run" only while the canvas has a plain
+    /// shell to run it in, and a click reveals that shell and types the code into it: one
+    /// paste of exactly the code, then ↩.
+    #[gpui::test]
+    fn a_fenced_block_runs_in_the_canvas_shell(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, SHELL, 1);
+        view.update_in(cx, |c, _window, cx| {
+            c.transcript_update(
+                TranscriptUpdate {
+                    session: agent,
+                    reset: true,
+                    entries: vec![TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::Assistant {
+                            markdown: "Run this:\n\n```sh\necho hi\n```".to_owned(),
+                        },
+                    }],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-code-copy-0-1").is_some(), "the block is drawn");
+        assert!(
+            cx.debug_bounds("conversation-code-run-0-1").is_none(),
+            "an agent session is not a shell: there is nowhere to run it"
+        );
+
+        // A shell joins the canvas. It takes the keyboard as the item we opened, so put the
+        // conversation back in front first: the click has to be the thing that reveals it.
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, Rect { x: 760.0, ..SHELL }, 2);
+        view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
+        cx.run_until_parked();
+        assert!(!terminal_focused(&view, cx, shell), "the conversation holds the keyboard");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Run in shell"))), "{tree:#?}");
+        let run = cx.debug_bounds("conversation-code-run-0-1").expect("the block's run button");
+        drain(&mut rx);
+
+        cx.simulate_click(run.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(terminal_focused(&view, cx, shell), "the shell was revealed and took the keyboard");
+        let sent: Vec<TermRequest> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { session, req }
+                    if session == shell
+                        && matches!(req, TermRequest::Paste(_) | TermRequest::Key(_)) =>
+                {
+                    Some(req)
+                }
+                _ => None,
+            })
+            .collect();
+        match sent.as_slice() {
+            [TermRequest::Paste(code), TermRequest::Key(key)] => {
+                assert_eq!(code, "echo hi", "the fenced lines alone, no fences and no prompt");
+                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+            }
+            other => panic!("a paste then one ↩ into the shell: {other:?}"),
+        }
+
+        // The shell stops being one (an agent is seen in it): the button goes with it.
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_event(
+                AgentEvent {
+                    session: shell,
+                    kind: AgentKind::ClaudeCode,
+                    status: AgentStatus::Working,
+                    agent_session: None,
+                    detail: None,
+                    attention: false,
+                    source: AgentSource::Hook,
+                },
+                cx,
+            );
+        });
+        view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("conversation-code-run-0-1").is_none(),
+            "a terminal an agent is working in is not a shell to run a snippet in"
+        );
     }
 }
