@@ -367,7 +367,9 @@ client do not move another (`slopty-host::canvas` owns the document,
 `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
 grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A are the keyboard surface; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
-in place (`slopty-ui::note`) and their text lives in the document. The picker (⌘O) lists the
+in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
+draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), and a
+click on it puts the caret back in the editor. The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are

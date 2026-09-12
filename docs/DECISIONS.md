@@ -3682,3 +3682,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   again), and the app self-test's driven scenario (`snippet`: the button is in the dump's
   a11y, a click on its bounds runs `echo hi` in the first shell and `hi` comes back in its
   rows).
+- ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
+  keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
+  as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note
+  that is not being edited draws its text with `TextView::markdown`; the editor comes back when
+  it has the keyboard, so the two states are exactly "has the caret" and "does not", read from
+  the focus handle rather than a flag of our own; (2) an empty note keeps the textarea, since
+  the "write…" placeholder is the editor's and there is nothing to render anyway; (3) the style
+  is one function for every Markdown surface (`slopty_ui::markdown::style`, factored out of
+  `terminal::conversation`), with a `scale` the note passes its zoom so headings and code blocks
+  grow with the canvas instead of staying at chrome size — the chrome passes `1.0` and reads as
+  it did; (4) a click on the rendered note focuses the editor with the caret **at the end of the
+  text**: rendered Markdown has no offset to map a click back to, and carrying on where the
+  writing stopped is what a note is for (`NoteView::focus`, which ⌘⇧N's own focus uses too); (5)
+  gpui-kit draws Markdown as styled text and leaves nothing in the accessibility tree, so the
+  rendered note reads itself out — `Role::Document`, label "Note", value the text — which is the
+  same text its editor's `MultilineTextInput` reads, so a screen reader hears one note either
+  way. Giving each heading inside it its own `Heading` node would need a block `MarkdownPlugin`
+  in the gpui-kit fork, which rebuilds the parse on every registration; not worth a fork move
+  for this; (6) no wire change: the text still lives in `ItemKind::Note` and is still committed
+  400 ms after typing stops and on blur. Tests:
+  `a_note_reads_as_markdown_until_it_is_edited` (headless: the rendered document and its text in
+  the a11y tree with no editor, a click swapping in the `MultilineTextInput` on the same text,
+  typing landing at the end, and the document holding the edited text once the reader is back)
+  and the app self-test's notes scenario, whose note is empty and so still shows the editor and
+  its placeholder — both render goldens unchanged.

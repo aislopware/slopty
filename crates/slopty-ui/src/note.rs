@@ -1,17 +1,25 @@
-//! A sticky note on the canvas: free text edited in place, stored in the shared document.
+//! A sticky note on the canvas: Markdown read, free text edited in place, stored in the
+//! shared document.
 //!
-//! The text lives in the canvas item (`ItemKind::Note`), so every client sees it. Edits are
-//! committed to the host after a short pause in typing and on blur; a remote change is taken
-//! only while this client is not editing (last writer wins, no merge).
+//! The text lives in the canvas item (`ItemKind::Note`), so every client sees it. A note that
+//! is not being edited draws its text as Markdown ([`crate::markdown::style`], the tokens the
+//! conversation reads by); a click or the canvas putting the caret in it swaps in the editor,
+//! and blur swaps back. Edits are committed to the host after a short pause in typing and on
+//! blur; a remote change is taken only while this client is not editing (last writer wins, no
+//! merge).
 
 use std::time::Duration;
 
+use gpui::accesskit::Role;
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, px,
+    AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::text::TextView;
 use slopty_core::ItemId;
+use slopty_theme::Theme;
 
 /// Typing pause before the text is sent to the host.
 const COMMIT_AFTER: Duration = Duration::from_millis(400);
@@ -36,6 +44,7 @@ pub struct NoteView {
     pad: f32,
     /// Text size at zoom 1 (the theme's UI size).
     text_size: f32,
+    theme: Theme,
     _subscription: gpui::Subscription,
 }
 
@@ -52,14 +61,25 @@ impl std::fmt::Debug for NoteView {
 
 impl NoteView {
     /// A note showing `text`.
-    pub fn new(id: ItemId, text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        id: ItemId,
+        text: &str,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("write…").default_value(text.to_owned())
         });
         let subscription = cx.subscribe(&state, |this, _state, event, cx| match event {
             InputEvent::Change => this.schedule_commit(cx),
-            InputEvent::Blur => this.commit(cx),
-            InputEvent::Focus | InputEvent::PressEnter { .. } => {}
+            // Focus and blur swap the reader for the editor and back.
+            InputEvent::Blur => {
+                this.commit(cx);
+                cx.notify();
+            }
+            InputEvent::Focus => cx.notify(),
+            InputEvent::PressEnter { .. } => {}
         });
         Self {
             id,
@@ -69,6 +89,7 @@ impl NoteView {
             zoom: 1.0,
             pad: 8.0,
             text_size: 13.0,
+            theme,
             _subscription: subscription,
         }
     }
@@ -98,6 +119,15 @@ impl NoteView {
         self.text_size = text_size;
     }
 
+    /// Draw by another theme (the canvas swapped it).
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme == theme {
+            return;
+        }
+        self.theme = theme;
+        cx.notify();
+    }
+
     /// The document changed under us (another client edited the note).
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if text == self.synced {
@@ -109,9 +139,14 @@ impl NoteView {
         cx.notify();
     }
 
-    /// Put the caret in the editor.
+    /// Put the caret in the editor, at the end of the text: the rendered Markdown has no
+    /// offset to click into, so entering a note means carrying on where the writing stopped.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.text.update(cx, |state, cx| state.focus(window, cx));
+        self.text.update(cx, |state, cx| {
+            let end = state.text().len();
+            state.set_selected_range(end..end, cx);
+            state.focus(window, cx);
+        });
     }
 
     fn schedule_commit(&mut self, cx: &Context<Self>) {
@@ -147,17 +182,52 @@ impl Focusable for NoteView {
 }
 
 impl Render for NoteView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .p(px(self.pad * self.zoom))
-            .text_size(px(self.text_size * self.zoom))
-            .child(
-                Textarea::new(&self.text)
-                    .appearance(false)
-                    .bordered(false)
-                    .aria_label("Note")
-                    .h(gpui::relative(1.0)),
-            )
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let text = self.text.read(cx).value().to_string();
+        // An empty note has nothing to render but the placeholder, which is the editor's own.
+        let reading = !self.editing(window, cx) && !text.is_empty();
+        let mono = self.theme.typography.mono_families.first().cloned().unwrap_or_default();
+        let body = div().size_full().p(px(self.pad * self.zoom));
+        if reading {
+            let id = self.id.as_uuid();
+            body.id(SharedString::from(format!("note-read-{id}")))
+                .debug_selector(|| format!("note-read-{id}"))
+                // gpui-kit draws Markdown as styled text, which leaves nothing in the
+                // accessibility tree: the note reads itself out, as its editor does.
+                .role(Role::Document)
+                .aria_label("Note")
+                .aria_value(SharedString::from(text.clone()))
+                .overflow_hidden()
+                .cursor_text()
+                .text_size(px(self.text_size * self.zoom))
+                .line_height(gpui::relative(self.theme.typography.markdown_line_height))
+                // A click reads as "edit this": the caret goes in and the editor takes over.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _ev, window, cx| {
+                        this.focus(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("note-md-{id}")),
+                        SharedString::from(text),
+                    )
+                    .style(crate::markdown::style(&self.theme, &mono, self.zoom))
+                    .selectable(false),
+                )
+                .into_any_element()
+        } else {
+            body.text_size(px(self.text_size * self.zoom))
+                .child(
+                    Textarea::new(&self.text)
+                        .appearance(false)
+                        .bordered(false)
+                        .aria_label("Note")
+                        .h(gpui::relative(1.0)),
+                )
+                .into_any_element()
+        }
     }
 }

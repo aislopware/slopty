@@ -1068,7 +1068,7 @@ impl CanvasView {
     }
 
     /// Swap the theme everywhere: the plane, every terminal (which re-fits its grid to the
-    /// new font on its next frame), every window's chrome and the picker.
+    /// new font on its next frame), every window's chrome, every note and the picker.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
             return;
@@ -1077,6 +1077,9 @@ impl CanvasView {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.screens.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        for view in self.notes.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         if let Some(picker) = &self.picker {
@@ -1814,7 +1817,8 @@ impl CanvasView {
                 }
                 continue;
             }
-            let view = cx.new(|cx| NoteView::new(*id, text, window, cx));
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| NoteView::new(*id, text, theme, window, cx));
             let item = *id;
             self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
                 let NoteViewEvent::Commit(text) = event;
@@ -4807,5 +4811,86 @@ mod tests {
             cx.debug_bounds("conversation-code-run-0-1").is_none(),
             "a terminal an agent is working in is not a shell to run a snippet in"
         );
+    }
+
+    /// A note reads as Markdown until someone edits it: unfocused it is the rendered
+    /// document a screen reader reads out, a click on it puts the caret in the editor, and
+    /// the text survives the round trip unchanged.
+    #[gpui::test]
+    fn a_note_reads_as_markdown_until_it_is_edited(cx: &mut TestAppContext) {
+        const TEXT: &str = "# Title\n- item";
+        let (view, _rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: TEXT.to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+        };
+        let id = item.id;
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        let editing = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                view.read(cx).notes.get(&id).is_some_and(|n| n.read(cx).editing(window, cx))
+            })
+        };
+
+        // Nobody is editing: the rendered document, with the text to read out and no editor.
+        assert!(!editing(cx), "a note nobody touched is not being edited");
+        let read = selector("note-read", id);
+        let bounds = cx.debug_bounds(read).expect("the rendered note");
+        assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0), "{bounds:?}");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let document = tree
+            .iter()
+            .find(|n| n.is("Document", Some("Note")))
+            .unwrap_or_else(|| panic!("the rendered note reads itself out: {tree:#?}"));
+        assert_eq!(document.value.as_deref(), Some(TEXT));
+        assert!(!tree.iter().any(|n| n.role.ends_with("TextInput")), "no editor yet: {tree:#?}");
+
+        // A click on it means "edit this": the editor takes over, carrying the same text.
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(editing(cx), "the caret is in the note");
+        assert!(cx.debug_bounds(read).is_none(), "the rendered note gave way to the editor");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let input = tree
+            .iter()
+            .find(|n| n.role.ends_with("TextInput"))
+            .unwrap_or_else(|| panic!("the editor is what is on screen: {tree:#?}"));
+        assert_eq!(input.label.as_deref(), Some("Note"));
+        assert_eq!(input.value.as_deref(), Some(TEXT), "the editor opened on the same text");
+
+        // Typing appends at the end and settles into the document; the blur puts the reader
+        // back, now reading the new text.
+        cx.simulate_keystrokes("!");
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        view.update_in(cx, |c, window, cx| window.focus(&c.focus, cx));
+        cx.run_until_parked();
+        assert!(!editing(cx), "the keyboard left the note");
+        let edited = format!("{TEXT}!");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let document = tree
+            .iter()
+            .find(|n| n.is("Document", Some("Note")))
+            .unwrap_or_else(|| panic!("the reader is back: {tree:#?}"));
+        assert_eq!(document.value.as_deref(), Some(edited.as_str()), "the text round-trips");
+        let stored = view.read_with(cx, |c, _| {
+            c.items()
+                .iter()
+                .find_map(|i| match &i.kind {
+                    ItemKind::Note { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("the note is in the document")
+        });
+        assert_eq!(stored, edited, "the document holds the text the editor typed");
     }
 }

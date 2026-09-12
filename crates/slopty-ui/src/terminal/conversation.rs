@@ -27,7 +27,7 @@ use gpui::{
     px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::text::TextView;
 use slopty_proto::agent::{
     AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, NoticeLevel, Question, SlashCommand, Todo,
     TodoStatus, ToolDetail, TranscriptBody, TranscriptEntry, TranscriptUpdate,
@@ -1015,7 +1015,7 @@ fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
         .line_height(prose)
         .child(
             TextView::markdown("conversation-partial-md", SharedString::from(partial.to_owned()))
-                .style(markdown_style(theme, &mono)),
+                .style(crate::markdown::style(theme, &mono, 1.0)),
         )
         .into_any_element()
 }
@@ -1439,7 +1439,7 @@ fn entry(
                                 ElementId::Name(format!("conversation-md-{ix}-{si}").into()),
                                 SharedString::from(text),
                             )
-                            .style(markdown_style(theme, &mono))
+                            .style(crate::markdown::style(theme, &mono, 1.0))
                             .into_any_element(),
                             Segment::Code { lang, body } => {
                                 code_segment(ix, si, &lang, &body, run, theme)
@@ -1765,37 +1765,6 @@ fn code_segment(
                 .child(SharedString::from(body.to_owned())),
         )
         .into_any_element()
-}
-
-/// Markdown in an assistant turn: paragraphs one base unit apart, headings stepping down
-/// from the title size to the base, code in the terminal mono at `small()` on the raised
-/// surface with `radii.xs` corners. Colours come from the gpui-kit theme, which
-/// [`crate::kit::sync`] keeps on the same tokens.
-fn markdown_style(theme: &Theme, mono: &str) -> TextViewStyle {
-    let small = theme.typography.small();
-    let code_block = gpui::StyleRefinement::default()
-        .font_family(mono.to_owned())
-        .text_size(px(small))
-        .bg(hsla(theme.surfaces.raised))
-        .rounded(px(theme.radii.xs))
-        .px(px(theme.spacing.sm))
-        .py(px(theme.spacing.xs));
-    let inline_code = gpui::HighlightStyle {
-        background_color: Some(hsla(theme.surfaces.raised)),
-        color: Some(hsla(theme.surfaces.text)),
-        ..gpui::HighlightStyle::default()
-    };
-    let (title, base) = (theme.typography.title(), theme.typography.ui_size);
-    TextViewStyle {
-        paragraph_gap: gpui::rems(theme.spacing.sm / base),
-        heading_base_font_size: px(base),
-        heading_font_size: Some(std::sync::Arc::new(move |level: u8, _base| {
-            px((title - f32::from(level.saturating_sub(1))).max(base))
-        })),
-        code_block,
-        inline_code,
-        ..TextViewStyle::default()
-    }
 }
 
 /// A clipped text as a mono block at `small()`, with the count of what the host or the fold

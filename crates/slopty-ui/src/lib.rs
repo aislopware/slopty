@@ -5,7 +5,9 @@
 //! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
 //! * [`canvas`] — the infinite plane: items, camera, drag/zoom, actions.
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
-//! * [`note`] — a sticky note edited in place, text shared through the document.
+//! * [`note`] — a sticky note read as Markdown and edited in place, text shared through the
+//!   document.
+//! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`picker`] — the "add a window" chooser.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
@@ -21,6 +23,7 @@ pub mod fonts;
 pub mod frames;
 pub mod keys;
 pub mod kit;
+pub mod markdown;
 pub mod note;
 pub mod palette;
 pub mod picker;
