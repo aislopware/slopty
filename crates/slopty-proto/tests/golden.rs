@@ -476,6 +476,25 @@ mod golden {
                     z: 3,
                     group: None,
                     sleeping: false,
+                    name: None,
+                }),
+            }),
+        );
+        snap(
+            "host_canvas_named",
+            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Delta {
+                version: 10,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: slopty_proto::canvas::CanvasOp::Upsert(slopty_proto::canvas::CanvasItem {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x78)),
+                    kind: slopty_proto::canvas::ItemKind::Terminal {
+                        session: SessionId::from_uuid(Uuid::from_u128(0x79)),
+                    },
+                    rect: slopty_proto::canvas::Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 },
+                    z: 4,
+                    group: Some("slopty".to_owned()),
+                    sleeping: false,
+                    name: Some("build box".to_owned()),
                 }),
             }),
         );

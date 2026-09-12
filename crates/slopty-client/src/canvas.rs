@@ -389,6 +389,7 @@ mod tests {
             z,
             group: None,
             sleeping: false,
+            name: None,
         }
     }
 

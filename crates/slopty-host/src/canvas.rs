@@ -12,7 +12,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, ItemId, SessionId};
-use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
+use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, NAME_MAX, Rect};
 
 use crate::HostError;
 
@@ -113,6 +113,7 @@ impl CanvasStore {
                 z,
                 group: None,
                 sleeping: false,
+                name: None,
             };
             doc.items.insert(item.id, item.clone());
             doc.version = doc.version.saturating_add(1);
@@ -228,6 +229,11 @@ fn sanitize(op: CanvasOp) -> Result<CanvasOp, HostError> {
             {
                 return Err(HostError::Canvas("bad file path".to_owned()));
             }
+            // A name is what the human typed, trimmed; blank is no name at all.
+            item.name = item.name.take().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+            if item.name.as_ref().is_some_and(|n| n.chars().count() > NAME_MAX) {
+                return Err(HostError::Canvas("name too long".to_owned()));
+            }
             CanvasOp::Upsert(item)
         }
         CanvasOp::Place { id, rect } => CanvasOp::Place { id, rect: check_rect(rect)? },
@@ -299,6 +305,35 @@ mod tests {
         assert_eq!(version, 3);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, b.id);
+    }
+
+    /// A card's name is kept as typed but trimmed, a blank one is no name, and one past
+    /// `NAME_MAX` characters is refused rather than cut (the client shows what was typed).
+    #[test]
+    fn a_name_is_trimmed_blank_is_none_and_too_long_is_refused() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let CanvasSync::Delta { op: CanvasOp::Upsert(item), .. } =
+            store.ensure_terminal(SessionId::new(), by).unwrap()
+        else {
+            panic!("an upsert");
+        };
+        let named = |name: &str| {
+            CanvasOp::Upsert(CanvasItem { name: Some(name.to_owned()), ..item.clone() })
+        };
+        let name_of = |delta: CanvasSync| match delta {
+            CanvasSync::Delta { op: CanvasOp::Upsert(i), .. } => i.name,
+            _ => panic!("an upsert"),
+        };
+        assert_eq!(
+            name_of(store.apply(named("  build box "), by).unwrap()).as_deref(),
+            Some("build box")
+        );
+        assert_eq!(name_of(store.apply(named("   "), by).unwrap()), None);
+        let long = "n".repeat(NAME_MAX);
+        assert_eq!(name_of(store.apply(named(&long), by).unwrap()).as_deref(), Some(long.as_str()));
+        let err = store.apply(named(&"n".repeat(NAME_MAX + 1)), by).unwrap_err();
+        assert!(matches!(err, HostError::Canvas(_)), "{err:?}");
     }
 
     #[test]

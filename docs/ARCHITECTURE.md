@@ -374,7 +374,10 @@ shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are ed
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), and a
 click on it puts the caret back in the editor; its title bar reads the first non-empty
-line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty. A
+line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty.
+Any card takes a **name** (⌘E, or a double-click on its title bar; `CanvasItem.name`,
+protocol 37, host-sanitised to 128 characters): document state every client shows in place
+of the derived title until it is cleared, and what the palette's "Go to" line says. A
 **file card** (`ItemKind::File { path }`, protocol 34, `slopty-ui::file`) shows a file on the
 host read-only: the item names the absolute path and lives in the shared document, the text
 does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`)

@@ -364,6 +364,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_right_click_on_a_block_offers_its_command_and_output` (the menu item and the fence) and
   `asking_the_agent_opens_a_card_when_there_is_none` (headless canvas: `OpenAgent` sent with
   the shell's cwd, the block lands in the composer of the card that opens).
+- ✅ **A card takes a name, protocol 37** (2026-09-12). A canvas of six shells reads
+  "zsh, zsh, zsh, cargo, zsh, claude"; the human knows them as "build box", "logs", "the
+  worktree". Rulings: (1) the name is document state (`CanvasItem.name`, trimmed, at most
+  `NAME_MAX` 128 characters, blank is none; the host sanitises and refuses a longer one rather
+  than cutting it), so every client sees the same title and it survives a relaunch; (2) it
+  overrides the derived title (`canvas::card_title` over `derived_title`: the shell's OSC title,
+  a window's, "display N", a note's first line, a file's `name · parent`) without replacing it —
+  clearing the name brings the derived title back, and the derived title is the field's
+  placeholder; (3) the way in is ⌘E on the active card or a double-click on its title bar
+  (`click_count == 2` on the same mouse-down that begins a move; the first click's move ended on
+  its mouse-up), a gpui-kit `Input` in the title's place (`rename-<item>`, a11y "Card name"),
+  ↩ keeps, Esc leaves it as it was, a click elsewhere leaves it too and whoever was clicked
+  keeps the keyboard; after ↩ or Esc the keyboard goes back to whoever had it before the field
+  (`Rename::return_to`, applied from `render` as the palette's return is), so naming a shell
+  never costs its focus; (4) the palette lists a named terminal by its name ("Go to build box"),
+  a file card by its title, and any other card only once it is named — a name is a wish to
+  find the card again; "Name this card" is a palette line too; (5) the notification-centre
+  banner for a named card's agent leads with the name ("build box · Claude wants to use
+  Bash", `canvas::banner_title`) — with several agents on a canvas the badge text alone does
+  not say which card wants the human. Tests:
+  `a_card_is_named_from_its_title_bar` (headless), `a_name_is_trimmed_blank_is_none_and_too_long_is_refused`
+  (host), goldens `host_canvas_named` and the re-accepted `host_canvas_file` / `client_hello`.
+
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note

@@ -1460,6 +1460,24 @@ mod tests {
         })
         .await
         .unwrap();
+        // First it takes a name: ⌘E puts a field in its title bar, ↩ keeps the name, the
+        // heading says it, and the shell has the keyboard back (⌘W below needs it active).
+        drv.keys("cmd-e").await.unwrap();
+        // (The field's focus does not show in the tree — gpui-kit tracks it on an element
+        // without a role — so the name landing is the proof the keys went to it.)
+        drv.wait_for("the name field", STEP, |d| {
+            d.a11y_node("TextInput", Some("Card name")).is_some()
+        })
+        .await
+        .unwrap();
+        drv.type_text("build box").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the shell named", STEP, |d| {
+            d.a11y_node("Heading", Some("terminal build box")).is_some()
+                && d.a11y_node("TextInput", Some("Card name")).is_none()
+        })
+        .await
+        .unwrap();
         drv.keys("cmd-w").await.unwrap();
         drv.wait_for("the shell to go", STEP, |d| d.item("terminal").is_none()).await.unwrap();
         drv.keys("cmd-shift-r").await.unwrap();

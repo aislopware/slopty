@@ -61,7 +61,14 @@ pub struct CanvasItem {
     pub group: Option<String>,
     /// Sleeping: kept on the canvas but its session/stream is released.
     pub sleeping: bool,
+    /// The name the human gave the card, shown as its title over whatever its content would
+    /// say (a shell's title, a window's, a note's first line, a file's name); trimmed and at
+    /// most [`NAME_MAX`] characters, or none.
+    pub name: Option<String>,
 }
+
+/// The longest name a card takes, in characters.
+pub const NAME_MAX: usize = 128;
 
 /// A proposed change. The host validates and rebroadcasts as [`CanvasSync::Delta`].
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

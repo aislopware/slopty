@@ -21,6 +21,7 @@ use gpui::{
     SharedString, Size, StatefulInteractiveElement as _, Styled as _, SystemNotification,
     SystemNotificationAction, Task, Window, canvas, div, fill, outline, point, px, size,
 };
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::arrange::{self, Arrangeable, Heading};
 use slopty_client::canvas::{
     CARD_ZOOM, Camera, CanvasDoc, FLIGHT, Flight, GAP, TERMINAL_SIZE, snap,
@@ -107,6 +108,9 @@ pub mod actions {
             FocusPrev,
             /// Open the command palette: every action by name, run by ↩.
             OpenPalette,
+            /// Name the active card: a field in its title bar, ↩ keeps the name (blank
+            /// clears it), Esc leaves it as it was.
+            RenameItem,
             /// Move the active file card's reading line up one line.
             LineUp,
             /// Move the active file card's reading line down one line.
@@ -125,8 +129,8 @@ pub mod actions {
 pub use actions::{
     AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
     LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote, NewTerminal,
-    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, ResumeAgent, ToggleMute,
-    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, RenameItem, ResumeAgent,
+    ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -168,6 +172,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", FocusNext, CTX),
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
+        KeyBinding::new("cmd-e", RenameItem, CTX),
         // The active file card's reading line. Only while a file card is active (the canvas
         // sets `file_card` on its context then): a binding matches before a focused terminal's
         // key handler runs, so an unscoped `up` would take the arrows from the shell.
@@ -216,6 +221,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Next attention", Box::new(NextAttention)),
         c("Mute or unmute window", Box::new(ToggleMute)),
         c("Stream stats", Box::new(ToggleStats)),
+        c("Name this card", Box::new(RenameItem)),
         t("Find in terminal, conversation or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
@@ -277,6 +283,25 @@ pub enum CanvasEvent {
     NeedsYou(usize),
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
+}
+
+/// The field naming a card, open in its title bar (see [`CanvasView::rename_item`]).
+struct Rename {
+    id: ItemId,
+    input: Entity<InputState>,
+    /// Who had the keyboard before the field: it goes back there after ↩ or Esc.
+    return_to: Option<FocusHandle>,
+    _subscription: gpui::Subscription,
+}
+
+/// A banner's title: what the agent is doing, led by the card's name when the human gave it
+/// one, so a banner from a canvas of several agents says which card it is about.
+#[must_use]
+pub fn banner_title(name: Option<&str>, what: &str) -> String {
+    match name {
+        Some(name) => format!("{name} · {what}"),
+        None => what.to_owned(),
+    }
 }
 
 /// A note's title: its first non-empty line with Markdown's heading, list and quote marks
@@ -459,6 +484,13 @@ pub struct CanvasView {
     picker_wanted: bool,
     /// The command palette, while ⌘⇧P has it up.
     palette: Option<Entity<CommandPalette>>,
+    /// The field naming a card, while one is open in a title bar.
+    rename: Option<Rename>,
+    /// Where the keyboard goes once the name field closed (applied from `render`).
+    rename_return: Option<FocusHandle>,
+    /// The name field just opened: it takes the keyboard from `render`, after any focus the
+    /// click that activated the card left pending.
+    pending_focus_rename: bool,
     /// Where the keyboard was when the palette opened; it goes back there when it closes.
     palette_return: Option<FocusHandle>,
     /// What the palette chose, dispatched on the next frame once the focus is back.
@@ -580,6 +612,9 @@ impl CanvasView {
             picker: None,
             picker_wanted: false,
             palette: None,
+            rename: None,
+            rename_return: None,
+            pending_focus_rename: false,
             palette_return: None,
             palette_action: None,
             palette_extra: Vec::new(),
@@ -1006,7 +1041,7 @@ impl CanvasView {
             let attention = event.attention;
             let needs_human = needs_human(&event);
             if attention {
-                Self::notify_system(&event, cx);
+                self.notify_system(&event, cx);
             } else if !needs_human {
                 cx.dismiss_system_notification(&session.to_string());
             }
@@ -1072,14 +1107,21 @@ impl CanvasView {
     }
 
     /// A banner through the notification centre when the human is not looking at the app:
-    /// the badge text as title, the detail as body, allow/deny buttons for a permission.
-    /// GPUI drops it silently outside a bundle or when the user declined notifications.
-    fn notify_system(event: &AgentEvent, cx: &Context<Self>) {
+    /// the badge text as title (led by the card's name when it has one — with several
+    /// agents, "build box · Claude wants to use Bash" says which), the detail as body,
+    /// allow/deny buttons for a permission. GPUI drops it silently outside a bundle or when
+    /// the user declined notifications.
+    fn notify_system(&self, event: &AgentEvent, cx: &Context<Self>) {
         let active = cx.active_window().is_some();
         tracing::debug!(active, session = %event.session, "agent banner");
         if active {
             return;
         }
+        let name = self
+            .doc
+            .items()
+            .find(|i| matches!(i.kind, ItemKind::Terminal { session } if session == event.session))
+            .and_then(|i| i.name.as_deref());
         let actions = match &event.status {
             AgentStatus::Blocked(BlockReason::Permission { .. }) => vec![
                 SystemNotificationAction { id: "allow".into(), label: "Allow".into() },
@@ -1099,6 +1141,7 @@ impl CanvasView {
             AgentStatus::Done => "Claude finished".to_owned(),
             _ => agent_status_text(event),
         };
+        let title = banner_title(name, &title);
         let body = event.detail.clone().filter(|d| !d.is_empty()).unwrap_or_default();
         cx.show_system_notification(SystemNotification {
             tag: event.session.to_string().into(),
@@ -1407,13 +1450,96 @@ impl CanvasView {
                 PaletteItem::session(&row.title, &row.status.unwrap_or_default(), row.session)
             })
             .collect();
+        // Every file card, and every other card the human named: a name is a wish to find
+        // it again.
         items.extend(self.doc.items().filter_map(|i| match &i.kind {
-            ItemKind::File { path } => Some(PaletteItem::item(&file_title(path), "file", i.id)),
-            _ => None,
+            ItemKind::Terminal { .. } => None,
+            ItemKind::File { .. } => Some(PaletteItem::item(&self.card_title(i, cx), "file", i.id)),
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => {
+                i.name.as_deref().map(|name| PaletteItem::item(name, Self::kind_name(i), i.id))
+            }
         }));
         items.extend(palette_items());
         items.extend(self.palette_extra.iter().cloned());
         items
+    }
+
+    /// The word for what a card is: `terminal`, `window`, `display`, `note`, `file`.
+    const fn kind_name(item: &CanvasItem) -> &'static str {
+        match item.kind {
+            ItemKind::Terminal { .. } => "terminal",
+            ItemKind::Window { .. } => "window",
+            ItemKind::Display { .. } => "display",
+            ItemKind::Note { .. } => "note",
+            ItemKind::File { .. } => "file",
+        }
+    }
+
+    /// What a card's title bar says without a name: the shell's title, the window's, "display
+    /// N", a note's first line, a file's `name · parent`.
+    fn derived_title(&self, item: &CanvasItem, cx: &App) -> String {
+        match &item.kind {
+            ItemKind::Terminal { session } => self.terminal_title(*session, cx),
+            ItemKind::Window { window } => {
+                self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("window {}", window.0))
+            }
+            ItemKind::Display { display } => format!("display {display}"),
+            ItemKind::Note { text } => note_title(text),
+            ItemKind::File { path } => file_title(path),
+        }
+    }
+
+    /// What a card's title bar says: the name the human gave it, else [`Self::derived_title`].
+    #[must_use]
+    pub fn card_title(&self, item: &CanvasItem, cx: &App) -> String {
+        item.name.clone().unwrap_or_else(|| self.derived_title(item, cx))
+    }
+
+    /// ⌘E (or a double-click on a title bar): name the active card. The field in its title
+    /// bar starts with the current name and shows the derived title as its placeholder; ↩
+    /// keeps what is typed (blank clears the name), Esc or a click elsewhere leaves it.
+    pub fn rename_item(&mut self, _: &RenameItem, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active {
+            self.start_rename(id, window, cx);
+        }
+    }
+
+    fn start_rename(&mut self, id: ItemId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.doc.get(id).cloned() else { return };
+        let placeholder = self.derived_title(&item, cx);
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(item.name.clone().unwrap_or_default())
+        });
+        let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.finish_rename(true, true, cx),
+            // A click elsewhere: the field goes, the name stays, whoever was clicked keeps
+            // the keyboard.
+            InputEvent::Blur => this.finish_rename(false, false, cx),
+            InputEvent::Change | InputEvent::Focus => {}
+        });
+        let return_to = window.focused(cx);
+        self.activate(id, cx);
+        self.rename = Some(Rename { id, input, return_to, _subscription: subscription });
+        self.pending_focus_rename = true;
+        cx.notify();
+    }
+
+    /// The name field closes. `keep` writes its text into the document as the card's name
+    /// (blank clears it); `back` gives the keyboard back to whoever had it before the field
+    /// (after the frame, not from inside the input's own event).
+    fn finish_rename(&mut self, keep: bool, back: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else { return };
+        if keep && let Some(mut item) = self.doc.get(rename.id).cloned() {
+            let text = rename.input.read(cx).value().trim().to_owned();
+            item.name = (!text.is_empty()).then_some(text);
+            self.propose(CanvasOp::Upsert(item));
+        }
+        if back {
+            self.rename_return = rename.return_to.or_else(|| Some(self.focus.clone()));
+        }
+        cx.notify();
     }
 
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is
@@ -1514,10 +1640,11 @@ impl CanvasView {
             .doc
             .items()
             .filter_map(|i| match i.kind {
-                ItemKind::Terminal { session } => Some((i.rect, session)),
+                ItemKind::Terminal { session } => Some((i, session)),
                 _ => None,
             })
-            .map(|(rect, session)| {
+            .map(|(i, session)| {
+                let rect = i.rect;
                 let agent = self.agents.get(&session);
                 let needs_you =
                     agent.is_some_and(needs_human) && !self.answered.contains_key(&session);
@@ -1528,7 +1655,7 @@ impl CanvasView {
                 };
                 let row = SessionRow {
                     session,
-                    title: self.terminal_title(session, cx),
+                    title: self.card_title(i, cx),
                     status: agent.map(agent_status_text),
                     needs_you,
                 };
@@ -1607,6 +1734,7 @@ impl CanvasView {
             z: self.doc.top_z().saturating_add(1),
             group: None,
             sleeping: false,
+            name: None,
         };
         self.propose(CanvasOp::Upsert(item));
         self.active = Some(id);
@@ -2053,6 +2181,7 @@ impl CanvasView {
             z: self.doc.top_z().saturating_add(1),
             group: None,
             sleeping: false,
+            name: None,
         };
         self.propose(CanvasOp::Upsert(item));
         self.active = Some(id);
@@ -2122,6 +2251,7 @@ impl CanvasView {
                 z: self.doc.top_z().saturating_add(1),
                 group: None,
                 sleeping: false,
+                name: None,
             };
             tracing::info!(%id, %path, ?line, "open file card");
             self.propose(CanvasOp::Upsert(item));
@@ -2701,41 +2831,23 @@ impl CanvasView {
         let ui_base = self.theme.typography.ui_size - 1.0;
         let ui_size = ui_base * k;
 
-        let kind = match item.kind {
-            ItemKind::Terminal { .. } => "terminal",
-            ItemKind::Window { .. } => "window",
-            ItemKind::Display { .. } => "display",
-            ItemKind::Note { .. } => "note",
-            ItemKind::File { .. } => "file",
+        let kind = Self::kind_name(item);
+        let title = self.card_title(item, cx);
+        let focused = match &item.kind {
+            ItemKind::Terminal { session } => self
+                .terminals
+                .get(session)
+                .is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window)),
+            ItemKind::Window { .. } | ItemKind::Display { .. } => self
+                .screens
+                .get(&item.id)
+                .is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window)),
+            ItemKind::Note { .. } => {
+                self.notes.get(&item.id).is_some_and(|v| v.read(cx).editing(window, cx))
+            }
+            ItemKind::File { .. } => false,
         };
-        let (title, focused) = match &item.kind {
-            ItemKind::Terminal { session } => {
-                let view = self.terminals.get(session);
-                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
-                (self.terminal_title(*session, cx), focused)
-            }
-            ItemKind::Window { window: host_window } => {
-                let view = self.screens.get(&item.id);
-                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
-                let title = self
-                    .titles
-                    .get(&item.id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("window {}", host_window.0));
-                (title, focused)
-            }
-            ItemKind::Display { display } => {
-                let view = self.screens.get(&item.id);
-                let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
-                (format!("display {display}"), focused)
-            }
-            ItemKind::Note { text } => {
-                let focused =
-                    self.notes.get(&item.id).is_some_and(|v| v.read(cx).editing(window, cx));
-                (note_title(text), focused)
-            }
-            ItemKind::File { path } => (file_title(path), false),
-        };
+        let renaming = self.rename.as_ref().filter(|r| r.id == id).map(|r| r.input.clone());
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
             _ => None,
@@ -2838,7 +2950,16 @@ impl CanvasView {
             .cursor_grab()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, ev, _w, cx| this.begin_move(id, ev, cx)),
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    // The second click of a double-click names the card; the first began a
+                    // move that the mouse-up already ended.
+                    if ev.click_count == 2 {
+                        this.start_rename(id, window, cx);
+                        cx.stop_propagation();
+                    } else {
+                        this.begin_move(id, ev, cx);
+                    }
+                }),
             )
             .child(div().size(px(theme.spacing.sm * k)).rounded_full().bg(hsla(if focused {
                 theme.surfaces.accent
@@ -2848,12 +2969,23 @@ impl CanvasView {
             // "take" sits left of the title so it stays reachable on a phone when the item is
             // wider than the screen.
             .when_some(take, gpui::ParentElement::child)
-            .child(
-                div()
+            .child(match renaming {
+                // The name field takes the title's place; a click in it must not start a move.
+                Some(input) => div()
+                    .id(element_id("rename", id))
+                    .debug_selector(|| format!("rename-{}", id.as_uuid()))
                     .flex_1()
                     .overflow_hidden()
-                    .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming)),
-            )
+                    .cursor_text()
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .child(Input::new(&input).aria_label("Card name"))
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming))
+                    .into_any_element(),
+            })
             .when_some(ask, gpui::ParentElement::child)
             .when_some(find, gpui::ParentElement::child)
             .when_some(edit, gpui::ParentElement::child)
@@ -3132,6 +3264,19 @@ impl Render for CanvasView {
             let handle = palette.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        if std::mem::take(&mut self.pending_focus_rename)
+            && let Some(rename) = &self.rename
+        {
+            rename.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        if self.rename.is_none()
+            && let Some(handle) = self.rename_return.take()
+        {
+            window.focus(&handle, cx);
+        }
         if self.palette.is_none()
             && let Some(handle) = self.palette_return.take()
         {
@@ -3294,6 +3439,17 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::rename_item))
+            // Esc in the name field: the input's own action, taken here so the field closes
+            // without a change and the canvas has the keyboard.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, _window, cx| {
+                    if this.rename.is_some() {
+                        this.finish_rename(false, true, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -3789,6 +3945,7 @@ mod tests {
             z: 1,
             group: None,
             sleeping,
+            name: None,
         };
         let mut placed = item(false);
         let id = placed.id;
@@ -3928,6 +4085,7 @@ mod tests {
             z: u32::try_from(version).unwrap(),
             group: None,
             sleeping: false,
+            name: None,
         };
         let id = item.id;
         let summary = SessionSummary {
@@ -3967,6 +4125,7 @@ mod tests {
             z: u32::try_from(version).unwrap(),
             group: None,
             sleeping: false,
+            name: None,
         };
         let id = item.id;
         let summary = SessionSummary {
@@ -4088,6 +4247,15 @@ mod tests {
         assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id), "the badge goes there");
         assert!(view.read_with(cx, |c, _| c.finished(session).is_none()), "and clears");
         assert!(cx.debug_bounds(selector("finished", id)).is_none());
+    }
+
+    #[test]
+    fn a_named_card_leads_its_banner() {
+        assert_eq!(banner_title(None, "Claude wants to use Bash"), "Claude wants to use Bash");
+        assert_eq!(
+            banner_title(Some("build box"), "Claude wants to use Bash"),
+            "build box · Claude wants to use Bash"
+        );
     }
 
     #[test]
@@ -5933,6 +6101,112 @@ mod tests {
         assert!(tree.iter().any(|n| n.is("Button", Some("Find in the file"))), "{tree:#?}");
     }
 
+    /// ⌘E names the active card in its title bar: ↩ keeps the name (the document, the
+    /// heading, the palette's "Go to" line and the host all see it), Esc leaves the old one,
+    /// a blank name clears it, and a double-click on the title bar opens the same field.
+    #[gpui::test]
+    fn a_card_is_named_from_its_title_bar(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let session = SessionId::new();
+        let id = host_opens(&view, cx, session, me, SHELL, 1);
+        view.update_in(cx, |c, _window, cx| c.reveal_session(session, cx));
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let heading = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.iter().find(|n| n.role == "Heading").and_then(|n| n.label.clone())
+        };
+        let name = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, _| c.doc.get(id).and_then(|i| i.name.clone()))
+        };
+        assert_eq!(heading(cx).as_deref(), Some("terminal shell"));
+
+        // ⌘E from the shell: the field is up with the keys, ↩ keeps the name.
+        cx.simulate_keystrokes("cmd-e");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("rename", id)).is_some(), "the field is in the bar");
+        cx.simulate_keystrokes("b u i l d space b o x enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("rename", id)).is_none(), "closed on ↩");
+        assert_eq!(name(cx).as_deref(), Some("build box"));
+        assert_eq!(heading(cx).as_deref(), Some("terminal build box"));
+        let sent = rx.try_recv();
+        assert!(
+            matches!(&sent, Ok(ClientMsg::Canvas(CanvasOp::Upsert(i))) if i.name.as_deref() == Some("build box")),
+            "the name goes to the host: {sent:?}"
+        );
+        let shell_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                view.read(cx)
+                    .active_terminal()
+                    .is_some_and(|t| t.read(cx).focus_handle(cx).is_focused(window))
+            })
+        };
+        assert!(shell_focused(cx), "the shell has the keyboard back");
+
+        // The palette goes to the card by its name.
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let first = tree.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.clone());
+        assert_eq!(first.as_deref(), Some("Go to build box"), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Name this card ⌘E"))));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        // Esc leaves the name as it was; the field started with it.
+        cx.simulate_keystrokes("cmd-e");
+        cx.run_until_parked();
+        let text = view.read_with(cx, |c, cx| c.rename.as_ref().map(|r| r.input.read(cx).value()));
+        assert_eq!(text.as_deref(), Some("build box"));
+        cx.simulate_keystrokes("x escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("rename", id)).is_none(), "closed on Esc");
+        assert_eq!(name(cx).as_deref(), Some("build box"), "unchanged");
+        assert!(rx.try_recv().is_err(), "nothing sent");
+        assert!(shell_focused(cx), "the shell has the keyboard back after Esc");
+
+        // Zoomed out to cards (the arranged canvas of the app self-test), the field still
+        // takes the keyboard: the card's own focus rules must not blur it.
+        cx.simulate_keystrokes("cmd-- cmd-- cmd-- cmd--");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.zoom()) < CARD_ZOOM, "cards now");
+        cx.simulate_keystrokes("cmd-e");
+        cx.run_until_parked();
+        let field_focused = cx.update(|window, cx| {
+            view.read(cx)
+                .rename
+                .as_ref()
+                .is_some_and(|r| r.input.read(cx).focus_handle(cx).is_focused(window))
+        });
+        assert!(field_focused, "the field has the keyboard at card zoom");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-0");
+        cx.run_until_parked();
+
+        // A double-click on the title bar opens the field too; a blank name clears it.
+        let bar = cx.debug_bounds(selector("title", id)).expect("the title bar");
+        let at = gpui::point(bar.origin.x + bar.size.width / 2.0, bar.center().y);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_event(MouseDownEvent {
+            position: at,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("rename", id)).is_some(), "a double-click names");
+        cx.simulate_keystrokes("cmd-a backspace enter");
+        cx.run_until_parked();
+        assert_eq!(name(cx), None, "blank clears the name");
+        assert_eq!(heading(cx).as_deref(), Some("terminal shell"));
+    }
+
     /// The reading-line keys are bound only while a file card is active: a binding matches
     /// before a focused terminal's key handler runs, so an unscoped arrow would never reach
     /// the shell (the iOS hardware-keyboard self-test caught exactly that).
@@ -6176,6 +6450,7 @@ mod tests {
             z: 1,
             group: None,
             sleeping: false,
+            name: None,
         };
         view.update_in(cx, |c, _window, cx| {
             let op = CanvasOp::Upsert(item.clone());
@@ -6237,6 +6512,7 @@ mod tests {
             z: 1,
             group: None,
             sleeping: false,
+            name: None,
         };
         let id = item.id;
         view.update_in(cx, |c, _window, cx| {
