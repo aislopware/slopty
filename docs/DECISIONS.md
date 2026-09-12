@@ -2927,6 +2927,11 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+- ✅ **A note is titled by its first line** (2026-09-12). Every note's title bar said "note",
+  so the picker, the palette's "Go to …" lines and a canvas of cards could not tell them
+  apart. Ruling: `note_title` takes the first non-empty line with Markdown's `#`, `-`, `*`,
+  `>` stripped, cut to 40 characters with an ellipsis, "note" while empty — no stored title,
+  so nothing to keep in sync and nothing on the wire. Test: `a_note_is_titled_by_its_first_line`.
 - ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
   click on the block; the command a human reruns most is the one that just finished, and
   Warp puts that on a key. Ruling: `TermState::last_command` is the command of the block

@@ -236,6 +236,27 @@ pub enum CanvasEvent {
     Notice(String),
 }
 
+/// A note's title: its first non-empty line with Markdown's heading, list and quote marks
+/// stripped, cut to [`NOTE_TITLE_CHARS`]; "note" while it is empty.
+#[must_use]
+pub fn note_title(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['#', '-', '*', '>', ' ']).trim())
+        .find(|l| !l.is_empty());
+    match line {
+        None => "note".to_owned(),
+        Some(line) if line.chars().count() > NOTE_TITLE_CHARS => {
+            let cut: String = line.chars().take(NOTE_TITLE_CHARS).collect();
+            format!("{}…", cut.trim_end())
+        }
+        Some(line) => line.to_owned(),
+    }
+}
+
+/// How much of a note's first line the title bar shows.
+pub const NOTE_TITLE_CHARS: usize = 40;
+
 /// A shell command that finished while nobody was looking: what the title-bar badge says.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Finished {
@@ -2316,10 +2337,10 @@ impl CanvasView {
                 let focused = view.is_some_and(|v| v.read(cx).focus_handle(cx).is_focused(window));
                 (format!("display {display}"), focused)
             }
-            ItemKind::Note { .. } => {
+            ItemKind::Note { text } => {
                 let focused =
                     self.notes.get(&item.id).is_some_and(|v| v.read(cx).editing(window, cx));
-                ("note".to_owned(), focused)
+                (note_title(text), focused)
             }
         };
         let agent = match item.kind {
@@ -3509,6 +3530,15 @@ mod tests {
         assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id), "the badge goes there");
         assert!(view.read_with(cx, |c, _| c.finished(session).is_none()), "and clears");
         assert!(cx.debug_bounds(selector("finished", id)).is_none());
+    }
+
+    #[test]
+    fn a_note_is_titled_by_its_first_line() {
+        assert_eq!(note_title(""), "note");
+        assert_eq!(note_title("\n  \n# Plan for today\n- x"), "Plan for today");
+        assert_eq!(note_title("- first item"), "first item");
+        let long = "a".repeat(NOTE_TITLE_CHARS + 5);
+        assert_eq!(note_title(&long), format!("{}…", "a".repeat(NOTE_TITLE_CHARS)));
     }
 
     #[test]

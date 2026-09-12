@@ -369,7 +369,8 @@ grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A are the keyboar
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), and a
-click on it puts the caret back in the editor. The picker (⌘O) lists the
+click on it puts the caret back in the editor; its title bar reads the first non-empty
+line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty. The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are
