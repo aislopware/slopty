@@ -25,6 +25,8 @@ pub enum PaletteRun {
     Session(SessionId),
     /// Reveal this item (a file card, a note) on the canvas.
     Item(slopty_core::ItemId),
+    /// Follow another client's viewport on the canvas.
+    Follow(slopty_core::ClientId),
     /// Open a file card for the path the field holds (relative to the active shell, `~` the
     /// host's home), landing on `line`.
     OpenFile {
@@ -41,6 +43,7 @@ impl Clone for PaletteRun {
             Self::Action(action) => Self::Action(action.boxed_clone()),
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
+            Self::Follow(client) => Self::Follow(*client),
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
         }
     }
@@ -52,6 +55,7 @@ impl std::fmt::Debug for PaletteRun {
             Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
+            Self::Follow(client) => f.debug_tuple("Follow").field(client).finish(),
             Self::OpenFile { path, line } => {
                 f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
             }
@@ -96,6 +100,16 @@ impl PaletteItem {
     #[must_use]
     pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
+    }
+
+    /// `Follow <name>` for another client on the canvas, what device it is on the right.
+    #[must_use]
+    pub fn looker(name: &str, device: &str, client: slopty_core::ClientId) -> Self {
+        Self {
+            label: format!("Follow {name}"),
+            keys: device.to_owned(),
+            run: PaletteRun::Follow(client),
+        }
     }
 
     /// `Open <relative>` for a file the host found under `root`, `file` on the right.

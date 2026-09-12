@@ -80,7 +80,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   camera to what that client sees ("go where they look" without asking where that is), and
   keeps following: every move they report is flown to until this client moves the camera
   itself (wheel, pinch, drag, minimap, ⌘0/1/2, arrange) or they leave — a follow is a mode
-  you leave by doing anything, never one you have to remember to switch off. The
+  you leave by doing anything, never one you have to remember to switch off. The palette
+  lists every other client as "Follow <name>" with its device on the right, for a client
+  whose outline is off this screen. The
   minimap fits the lookers' viewports too and outlines each in its colour, so a client off
   this screen is still in the overview. Tested at every layer: the table, the document, the
   headless canvas (the outline's a11y node and bounds; one `Look` per rest; the minimap's

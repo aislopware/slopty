@@ -34,6 +34,7 @@ use slopty_proto::agent::{
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::file::FileRead;
+use slopty_proto::handshake::ClientKind;
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
 };
@@ -234,6 +235,16 @@ pub fn palette_items() -> Vec<PaletteItem> {
 
 /// The program a "+ agent" terminal runs.
 pub const AGENT_COMMAND: &str = "claude";
+
+/// What a client is, for a human: `Mac`, `iPad`, `iPhone`, `tool`.
+const fn device_name(kind: ClientKind) -> &'static str {
+    match kind {
+        ClientKind::Mac => "Mac",
+        ClientKind::IPad => "iPad",
+        ClientKind::IPhone => "iPhone",
+        ClientKind::Tool => "tool",
+    }
+}
 
 /// A stable element id for `(part, item)`.
 fn element_id(part: &str, id: ItemId) -> ElementId {
@@ -1478,6 +1489,10 @@ impl CanvasView {
                 i.name.as_deref().map(|name| PaletteItem::item(name, Self::kind_name(i), i.id))
             }
         }));
+        // Every other client looking at the canvas: "Follow <name>".
+        items.extend(
+            self.doc.lookers().map(|l| PaletteItem::looker(&l.name, device_name(l.kind), l.client)),
+        );
         items.extend(palette_items());
         items.extend(self.palette_extra.iter().cloned());
         items
@@ -1590,6 +1605,7 @@ impl CanvasView {
                     this.activate(*item, cx);
                     this.reveal_pending = Some(*item);
                 }
+                PaletteEvent::Run(PaletteRun::Follow(client)) => this.follow(*client, cx),
                 PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
                     let path = this.absolute_in_active_shell(path);
                     this.open_file(&path, *line, cx);
@@ -4053,7 +4069,6 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::agent::{AgentKind, TranscriptBody, TranscriptEntry};
-    use slopty_proto::handshake::ClientKind;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
     use super::*;
@@ -4648,6 +4663,50 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |c, _| c.following), None);
         assert!(labels(cx).is_empty(), "no tag without a viewport");
+    }
+
+    /// The palette lists every other client as "Follow <name>" with its device on the right,
+    /// and ↩ follows: the camera goes to their viewport wherever it is.
+    #[gpui::test]
+    fn the_palette_follows_another_client(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let pad = ClientId::new();
+        let far = Rect { x: 5_000.0, y: 3_000.0, w: 400.0, h: 700.0 };
+        view.update(cx, |c, cx| {
+            c.apply_sync(
+                CanvasSync::Presence {
+                    client: pad,
+                    kind: ClientKind::IPad,
+                    name: "pad".to_owned(),
+                    view: Some(far),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("follow-pad").is_none(), "off screen: no tag to click");
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("f o l l o w space p a d");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<String> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.clone())
+            .collect();
+        assert_eq!(options, ["Follow pad iPad"], "{tree:#?}");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none());
+        assert_eq!(view.read_with(cx, |c, _| c.following), Some(pad));
+        let (camera, viewport) = view.read_with(cx, |c, _| (c.camera, c.viewport_size()));
+        let expected = Camera::fitted([far], viewport);
+        assert!(
+            (camera.x - expected.x).abs() < 0.5 && (camera.y - expected.y).abs() < 0.5,
+            "{camera:?} vs {expected:?}"
+        );
     }
 
     /// The host hears where this client looks once the viewport rests, and again only when it
