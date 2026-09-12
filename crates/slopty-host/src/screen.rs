@@ -1870,7 +1870,12 @@ mod tests {
     /// A stream's shared state with no encoder and nowhere to send: enough to drive
     /// [`Shared::on_frame`] and read what it counted.
     fn shared_for_frames() -> (Arc<Shared>, mpsc::Receiver<Queued>) {
-        let (out, rx) = mpsc::channel(8);
+        shared_with_queue(8)
+    }
+
+    /// [`shared_for_frames`] with a datagram queue of `capacity`.
+    fn shared_with_queue(capacity: usize) -> (Arc<Shared>, mpsc::Receiver<Queued>) {
+        let (out, rx) = mpsc::channel(capacity);
         let shared = Arc::new(Shared {
             id: StreamId(1),
             encoder: RwLock::new(None),
@@ -2205,6 +2210,47 @@ mod tests {
         // Nothing committed, nothing in flight: the next tick may ask again.
         assert_eq!(t.settle(), Settled::Idle);
         assert!(t.begin(WindowPath::Filter, None, 2));
+    }
+
+    /// The encode latency is the time between a frame's submit and its return, matched by
+    /// pts whatever order the encoder returns them in; a return with no submit on record is
+    /// not a sample, and the record holds `IN_FLIGHT_MAX` frames at most.
+    #[test]
+    fn encode_latency_is_matched_by_pts_and_bounded_in_flight() {
+        let counters = Counters::new();
+        counters.submitted(1, 1_000);
+        counters.submitted(2, 2_000);
+        counters.returned(2, 2_500);
+        counters.returned(1, 4_000);
+        counters.returned(9, 5_000);
+        let encode = counters.snapshot().encode;
+        assert_eq!((encode.n, encode.p50_us, encode.max_us), (2, 3_000, 3_000), "500 and 3 000 µs");
+        for pts in 0..u64::try_from(IN_FLIGHT_MAX).unwrap_or(u64::MAX) {
+            counters.submitted(100 + pts, 10_000);
+        }
+        counters.submitted(200, 10_000);
+        assert_eq!(
+            counters.in_flight.lock().front().map(|f| f.0),
+            Some(101),
+            "the oldest forgotten"
+        );
+        counters.returned(100, 20_000);
+        assert_eq!(counters.snapshot().encode.n, 2, "a forgotten frame is not a sample");
+    }
+
+    /// A datagram goes out when the queue has room; a full or closed queue drops it and counts
+    /// the drop, so the stats say what the link never saw.
+    #[test]
+    fn a_full_or_closed_queue_drops_the_datagram_and_counts_it() {
+        let (shared, mut rx) = shared_with_queue(1);
+        assert!(shared.push(Bytes::from_static(b"a")));
+        assert!(!shared.push(Bytes::from_static(b"b")), "the queue holds one");
+        assert_eq!(rx.try_recv().map(|q| q.datagram), Ok(Bytes::from_static(b"a")));
+        assert!(shared.push(Bytes::from_static(b"c")), "room again once drained");
+        drop(rx);
+        assert!(!shared.push(Bytes::from_static(b"d")), "closed");
+        let stats = shared.stats();
+        assert_eq!((stats.datagrams, stats.queue_full), (2, 2));
     }
 
     #[test]
