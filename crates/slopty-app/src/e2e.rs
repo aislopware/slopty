@@ -260,7 +260,7 @@ mod uikit {
             assert_eq!(modifier_flags("cmd-shift"), Ok(COMMAND | SHIFT));
             assert_eq!(modifier_flags("ctrl"), Ok(CONTROL));
             assert_eq!(modifier_flags("alt-capslock"), Ok(ALTERNATE | ALPHA_SHIFT));
-            assert!(modifier_flags("fn").is_err());
+            modifier_flags("fn").unwrap_err();
         }
     }
 }

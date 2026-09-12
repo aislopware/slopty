@@ -33,7 +33,7 @@ pub use reassemble::{
 pub use redundancy::Redundancy;
 
 /// Errors from packetizing.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum MediaError {
     /// The frame has no bytes.
     #[error("empty frame")]

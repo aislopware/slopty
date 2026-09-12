@@ -25,7 +25,7 @@ pub mod hevc {
     /// The type of an HEVC NAL unit: bits 1..7 of the first header byte.
     #[must_use]
     pub fn nal_type(nal: &[u8]) -> Option<u8> {
-        nal.first().map(|b| (b >> 1) & 0x3F)
+        nal.first().map(|b| (b >> 1) & 0x3f)
     }
 
     /// True for VPS/SPS/PPS.
@@ -47,7 +47,7 @@ pub mod h264 {
     /// The type of an H.264 NAL unit: low five bits of the first header byte.
     #[must_use]
     pub fn nal_type(nal: &[u8]) -> Option<u8> {
-        nal.first().map(|b| b & 0x1F)
+        nal.first().map(|b| b & 0x1f)
     }
 
     /// True for SPS/PPS.
@@ -199,9 +199,9 @@ mod tests {
 
     #[test]
     fn length_prefixed_round_trip() {
-        let avcc = [0, 0, 0, 2, 0x26, 0xAA, 0, 0, 0, 1, 0x02];
+        let avcc = [0, 0, 0, 2, 0x26, 0xaa, 0, 0, 0, 1, 0x02];
         let annexb = length_prefixed_to_annexb(&avcc, 4);
-        assert_eq!(annexb, vec![0, 0, 0, 1, 0x26, 0xAA, 0, 0, 0, 1, 0x02]);
+        assert_eq!(annexb, vec![0, 0, 0, 1, 0x26, 0xaa, 0, 0, 0, 1, 0x02]);
         let back = annexb_to_length_prefixed(&annexb, hevc::is_parameter_set);
         assert_eq!(back, avcc.to_vec());
         // A truncated length stops conversion without panicking.
@@ -214,9 +214,9 @@ mod tests {
     fn parameter_sets_are_prepended_and_stripped() {
         let mut out = Vec::new();
         prepend_parameter_sets(&mut out, [&[0x40, 1][..], &[0x42, 2], &[0x44, 3]]);
-        out.extend_from_slice(&[0, 0, 0, 1, 0x26, 0xFF]);
+        out.extend_from_slice(&[0, 0, 0, 1, 0x26, 0xff]);
         assert_eq!(nal_units(&out).count(), 4);
         let lp = annexb_to_length_prefixed(&out, hevc::is_parameter_set);
-        assert_eq!(lp, vec![0, 0, 0, 2, 0x26, 0xFF]);
+        assert_eq!(lp, vec![0, 0, 0, 2, 0x26, 0xff]);
     }
 }

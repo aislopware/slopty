@@ -1489,7 +1489,7 @@ impl CanvasView {
         }
     }
 
-    /// What a card's title bar says: the name the human gave it, else [`Self::derived_title`].
+    /// What a card's title bar says: the name the human gave it, else `Self::derived_title`.
     #[must_use]
     pub fn card_title(&self, item: &CanvasItem, cx: &App) -> String {
         item.name.clone().unwrap_or_else(|| self.derived_title(item, cx))
@@ -2415,12 +2415,12 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// ⌘=
+    /// ⌘=.
     pub fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_by(ZOOM_STEP, cx);
     }
 
-    /// ⌘-
+    /// ⌘-.
     pub fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_by(1.0 / ZOOM_STEP, cx);
     }
@@ -2440,7 +2440,7 @@ impl CanvasView {
         self.fly_to(target, cx);
     }
 
-    /// ⌘1
+    /// ⌘1.
     pub fn fit_all(&mut self, _: &FitAll, _window: &mut Window, cx: &mut Context<Self>) {
         self.fit_now(cx);
     }

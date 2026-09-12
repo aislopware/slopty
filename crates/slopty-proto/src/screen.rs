@@ -31,7 +31,7 @@ pub struct WindowInfo {
 }
 
 /// A display on the host.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DisplayInfo {
     /// CoreGraphics display id.
     pub id: u32,

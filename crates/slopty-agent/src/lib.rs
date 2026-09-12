@@ -25,6 +25,8 @@
 //! An agent Slopty starts itself is not observed at all: it is driven over Claude Code's
 //! stream-json protocol ([`stream`]), which reports every record and permission directly.
 
+#![forbid(unsafe_code)]
+
 pub mod detect;
 pub mod discover;
 pub mod files;
@@ -329,7 +331,7 @@ impl Tracker {
     ///
     /// A foreground process that is not an agent clears the session. When a hook has spoken,
     /// the hooks decide when it ends and this only steps in for an agent the host actually saw
-    /// running that has now been gone for [`ABSENT_BEFORE_GONE`] probes — a `claude` killed
+    /// running that has now been gone for `ABSENT_BEFORE_GONE` probes — a `claude` killed
     /// without a `SessionEnd` would otherwise keep its pill until the terminal exits.
     /// Otherwise the title decides working from idle, and the mere presence of the process
     /// means [`AgentStatus`] `Idle`; neither ever overwrites what the transcript or a hook said.

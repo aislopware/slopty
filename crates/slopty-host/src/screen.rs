@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 
 /// Datagrams buffered between the pipeline and the transport. At 1.2 kB each this is a few
 /// 4K keyframes; the capture callback starts dropping frames when fewer than
-/// [`LOW_WATER`] slots are free.
+/// `LOW_WATER` slots are free.
 pub const DATAGRAM_QUEUE: usize = 4096;
 /// Free queue slots below which a captured frame is dropped instead of encoded.
 const LOW_WATER: usize = 256;
@@ -182,7 +182,7 @@ pub const fn frame_fits(free: usize, held: usize, target_bps: u64, fps: u16) -> 
     (held as u64) <= limit
 }
 
-/// p50 / p95 / max of a latency over the last [`LATENCY_WINDOW`] samples, microseconds.
+/// p50 / p95 / max of a latency over the last `LATENCY_WINDOW` samples, microseconds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Quantiles {
     /// Samples in the window.
@@ -302,20 +302,20 @@ pub struct ScreenStats {
     /// Bitrate the controller last asked the encoder for.
     pub bitrate_bps: u64,
     /// Capture latency: the window server's display time of a frame → ScreenCaptureKit's
-    /// callback (what SCK adds), over the last [`LATENCY_WINDOW`] frames.
+    /// callback (what SCK adds), over the last `LATENCY_WINDOW` frames.
     pub capture: Quantiles,
     /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
     pub encode: Quantiles,
-    /// Time between two heartbeats, over the last [`LATENCY_WINDOW`] of them. The beat is what
+    /// Time between two heartbeats, over the last `LATENCY_WINDOW` of them. The beat is what
     /// tells the receiver the host is alive while nothing is being drawn, and the receiver calls
     /// a silence of `STALL_GAP` a stall, so this is the number that says whether the host is
     /// keeping its own promise.
     pub beat_gap: Quantiles,
     /// How long the window-geometry call in the cursor loop took, over the last
-    /// [`LATENCY_WINDOW`] of them: the work the beat used to wait behind.
+    /// `LATENCY_WINDOW` of them: the work the beat used to wait behind.
     pub bounds: Quantiles,
     /// The longest gap between two beats since the stream opened, microseconds. The quantiles
-    /// above are over a sliding window of [`LATENCY_WINDOW`] beats — about twenty seconds — so
+    /// above are over a sliding window of `LATENCY_WINDOW` beats — about twenty seconds — so
     /// a single late beat early in a long stream would be gone from them by the end. This is
     /// the one that cannot forget, and it is what a rule about the beat has to be written on.
     pub beat_gap_worst_us: u64,
@@ -345,7 +345,7 @@ pub const SOURCE_QUIET_AFTER: Duration = Duration::from_secs(2);
 /// A latch on "has ever encoded a frame" gets the first answer right and every later one wrong —
 /// a window that draws once and then hides, or is closed and left up, stays `Live` for the rest
 /// of the stream.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SourceTracker {
     /// The last state the client was told.
     reported: Option<SourceState>,
@@ -505,7 +505,7 @@ const SHAREABLE_TTL: Duration = Duration::from_secs(2);
 /// The last enumeration and when it was taken.
 static SHAREABLE: Mutex<Option<(Instant, Arc<Shareable>)>> = Mutex::new(None);
 
-/// Enumerate shareable content, reusing an enumeration younger than [`SHAREABLE_TTL`].
+/// Enumerate shareable content, reusing an enumeration younger than `SHAREABLE_TTL`.
 pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
     if let Some((taken, content)) = SHAREABLE.lock().as_ref()
         && taken.elapsed() < SHAREABLE_TTL

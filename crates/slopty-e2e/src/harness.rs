@@ -449,7 +449,7 @@ impl Stack {
         Self::launch_with(host_name, &[]).await
     }
 
-    /// [`Self::launch`] with a fake `claude` ([`FAKE_CLAUDE`]) first on the daemons' `PATH`
+    /// [`Self::launch`] with a fake `claude` (`FAKE_CLAUDE`) first on the daemons' `PATH`
     /// and a `HOME` of their own, so "+ agent" opens a session the host must attribute
     /// without any hook ever firing. Drive it with [`Self::fake_claude_stage`].
     ///
@@ -862,7 +862,7 @@ impl Drop for Stack {
 /// `slopty-ptyd` and `slopty-hostd` run under one temporary root there, so the app can pair with
 /// two hosts at once and the cross-host attention path can be driven against a real remote daemon.
 ///
-/// Everything it creates on the remote lives under [`Self::root`] and is torn down on
+/// Everything it creates on the remote lives under `Self::root` and is torn down on
 /// [`Self::shutdown`] (and best-effort on drop). The remote's own `~/.claude` is never touched:
 /// the daemons and the hook relay run with a private `HOME` under the root, and
 /// `slopty hook install` is never run — so no user settings file is written.
@@ -1345,7 +1345,7 @@ mod tests {
             host2_gate(Some("1"), Some(" macbook-pro ")).unwrap().as_deref(),
             Some("macbook-pro")
         );
-        assert!(host2_gate(Some("1"), None).is_err());
-        assert!(host2_gate(Some("1"), Some("")).is_err());
+        host2_gate(Some("1"), None).unwrap_err();
+        host2_gate(Some("1"), Some("")).unwrap_err();
     }
 }

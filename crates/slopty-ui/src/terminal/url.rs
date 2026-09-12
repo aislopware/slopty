@@ -265,7 +265,7 @@ fn trim_trailing(mut s: &str) -> &str {
         if !cut {
             return s;
         }
-        s = &s[..s.len().saturating_sub(last.len_utf8())];
+        s = s.strip_suffix(last).unwrap_or(s);
     }
 }
 

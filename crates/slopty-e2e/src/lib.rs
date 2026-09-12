@@ -313,12 +313,12 @@ pub mod hid {
         if let (Some(c), None) = (chars.next(), chars.next()) {
             return Some(match c {
                 'a'..='z' => 0x04_u32.saturating_add(u32::from(c).saturating_sub(u32::from('a'))),
-                '1'..='9' => 0x1E_u32.saturating_add(u32::from(c).saturating_sub(u32::from('1'))),
+                '1'..='9' => 0x1e_u32.saturating_add(u32::from(c).saturating_sub(u32::from('1'))),
                 '0' => 0x27,
-                ' ' => 0x2C,
-                '-' => 0x2D,
-                '=' => 0x2E,
-                '[' => 0x2F,
+                ' ' => 0x2c,
+                '-' => 0x2d,
+                '=' => 0x2e,
+                '[' => 0x2f,
                 ']' => 0x30,
                 '\\' => 0x31,
                 ';' => 0x33,
@@ -333,16 +333,16 @@ pub mod hid {
         Some(match key {
             "enter" => 0x28,
             "escape" => 0x29,
-            "backspace" => 0x2A,
-            "tab" => 0x2B,
-            "space" => 0x2C,
+            "backspace" => 0x2a,
+            "tab" => 0x2b,
+            "space" => 0x2c,
             "capslock" => 0x39,
-            "f1" => 0x3A,
-            "f2" => 0x3B,
-            "f3" => 0x3C,
-            "f4" => 0x3D,
-            "f5" => 0x3E,
-            "f6" => 0x3F,
+            "f1" => 0x3a,
+            "f2" => 0x3b,
+            "f3" => 0x3c,
+            "f4" => 0x3d,
+            "f5" => 0x3e,
+            "f6" => 0x3f,
             "f7" => 0x40,
             "f8" => 0x41,
             "f9" => 0x42,
@@ -350,12 +350,12 @@ pub mod hid {
             "f11" => 0x44,
             "f12" => 0x45,
             "insert" => 0x49,
-            "home" => 0x4A,
-            "pageup" => 0x4B,
-            "delete" => 0x4C,
-            "end" => 0x4D,
-            "pagedown" => 0x4E,
-            "right" => 0x4F,
+            "home" => 0x4a,
+            "pageup" => 0x4b,
+            "delete" => 0x4c,
+            "end" => 0x4d,
+            "pagedown" => 0x4e,
+            "right" => 0x4f,
             "left" => 0x50,
             "down" => 0x51,
             "up" => 0x52,
@@ -440,7 +440,7 @@ pub struct Dump {
 /// How long the window took to draw each frame and how evenly frames came, over the last 1024
 /// frames; the counters run since the last reset. `dropped` counts display slots lost to draws
 /// that ran past the period (a 30 ms draw at 60 Hz loses one); an idle app drops nothing.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct FrameInfo {
     /// Frames drawn.
     pub frames: u64,
@@ -510,7 +510,7 @@ pub struct A11yNode {
 }
 
 /// The window.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct WindowInfo {
     /// Content width in points.
     pub width: f32,
@@ -627,7 +627,7 @@ pub struct TerminalInfo {
 /// `echo_*` runs from the key to the paint of the first frame the host produced after applying
 /// it; `predicted_*` from the key to the paint that showed the local-echo guess, counted only
 /// while the predictor was drawing.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct LatencyInfo {
     /// Keys echoed.
     pub echoed: u64,
@@ -668,7 +668,7 @@ impl LatencyInfo {
 
 /// The face the grid was derived from, in device pixels at `size` pixels per em: the font's
 /// own numbers where it has them, `None` where ghostty's estimate stood in.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct FaceInfo {
     /// Device pixels per em the face was measured at (font size × display scale).
     pub size: f32,
@@ -738,7 +738,7 @@ pub struct ScreenInfo {
 ///
 /// A subset of `slopty_client`'s `ScreenStats`, so an app self-test can build the injected-loss
 /// table the in-process host test does. All are cumulative over the stream's life.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct RecoveryInfo {
     /// Frames delivered to the decoder.
     pub frames: u64,
@@ -904,23 +904,23 @@ mod tests {
     #[test]
     fn hid_usages_follow_the_keyboard_page() {
         assert_eq!(hid::usage("a"), Some(0x04));
-        assert_eq!(hid::usage("l"), Some(0x0F));
-        assert_eq!(hid::usage("z"), Some(0x1D));
-        assert_eq!(hid::usage("1"), Some(0x1E));
+        assert_eq!(hid::usage("l"), Some(0x0f));
+        assert_eq!(hid::usage("z"), Some(0x1d));
+        assert_eq!(hid::usage("1"), Some(0x1e));
         assert_eq!(hid::usage("0"), Some(0x27));
         assert_eq!(hid::usage("up"), Some(0x52));
         assert_eq!(hid::usage("enter"), Some(0x28));
-        assert_eq!(hid::usage("-"), Some(0x2D));
+        assert_eq!(hid::usage("-"), Some(0x2d));
         assert_eq!(hid::usage("é"), None);
         assert_eq!(hid::usage("fn"), None);
-        assert_eq!(hid::chord("cmd-shift-l"), Some((0x0F, "cmd-shift".to_owned())));
+        assert_eq!(hid::chord("cmd-shift-l"), Some((0x0f, "cmd-shift".to_owned())));
         assert_eq!(hid::chord("up"), Some((0x52, String::new())));
         assert_eq!(hid::chord("ctrl-c"), Some((0x06, "ctrl".to_owned())));
-        assert_eq!(hid::chord("cmd--"), Some((0x2D, "cmd".to_owned())));
-        assert_eq!(hid::chord("-"), Some((0x2D, String::new())));
+        assert_eq!(hid::chord("cmd--"), Some((0x2d, "cmd".to_owned())));
+        assert_eq!(hid::chord("-"), Some((0x2d, String::new())));
         assert_eq!(hid::chord("cmd-fn"), None);
         let cmd = Command::UiKeyPress {
-            usage: 0x0F,
+            usage: 0x0f,
             modifiers: "cmd-shift".into(),
             phase: UiPressPhase::Began,
         };

@@ -207,7 +207,7 @@ mod tests {
         drv.keys("ctrl-u").await.unwrap();
         let term = dump.terminals.iter().max_by_key(|t| t.latency.echoed).unwrap();
         println!("MEASURE frames while typing: {}", dump.frames.row());
-        term.latency.clone()
+        term.latency
     }
 
     /// Focus the first shell at zoom 1 (⌘0 then a click on it).

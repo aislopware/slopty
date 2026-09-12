@@ -5,6 +5,8 @@
 //! the child never blocks; on attach it hands the master over `SCM_RIGHTS` with the backlog.
 //! Deliberately tiny: no VT parsing, no networking, nothing that changes often.
 
+#![forbid(unsafe_code)]
+
 mod daemon;
 mod session;
 

@@ -2284,7 +2284,7 @@ impl TerminalView {
 
 /// Text input on top of the key path.
 ///
-/// Keys reach the terminal through [`TerminalView::key_down`]; this handler makes the platform
+/// Keys reach the terminal through `TerminalView::key_down`; this handler makes the platform
 /// treat a focused terminal as a text field: iOS raises the soft keyboard, and macOS routes
 /// printable keys through the active input method, which previews its composition here
 /// (`replace_and_mark_text_in_range`, drawn underlined at the cursor) and commits it with

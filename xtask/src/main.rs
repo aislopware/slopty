@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
 mod bundle;
+mod deep;
 mod e2e;
 mod gate;
 mod icon;
@@ -57,6 +58,19 @@ enum Cmd {
         /// (CI, or a tree nobody edits while the gate runs).
         #[arg(long)]
         in_place: bool,
+    },
+    /// The slow checks that run on a schedule, not per commit: Miri, sanitizers, the feature
+    /// powerset, coverage, mutation testing.
+    Deep {
+        #[command(subcommand)]
+        cmd: deep::DeepCmd,
+    },
+    /// Record a CPU profile of a command with samply (pure Rust, Firefox Profiler UI):
+    /// `cargo xtask profile -- cargo nextest run -p slopty-ui -E 'test(smooth)'`.
+    Profile {
+        /// The command to profile.
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
     },
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
@@ -126,6 +140,19 @@ fn main() -> Result<()> {
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         Cmd::Gate { fix, quick, in_place } => {
             gate::run(&sh, gate::Options { fix, quick, in_place })
+        }
+        Cmd::Deep { cmd } => deep::run(&sh, &cmd),
+        Cmd::Profile { cmd } => {
+            sh.create_dir("target/profile")?;
+            let out = format!(
+                "target/profile/{}.json.gz",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            );
+            cmd!(sh, "samply record --save-only -o {out} {cmd...}").run()?;
+            println!("profile saved to {out}; view with `samply load {out}`");
+            Ok(())
         }
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
         Cmd::Fmt => gate::fmt(&sh, true),

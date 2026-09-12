@@ -230,7 +230,7 @@ impl RateController {
         self.target_bps = self.target_bps.min(self.max_bps);
     }
 
-    /// Fold in one report. Returns the decision every [`DECIDE_EVERY`] reports.
+    /// Fold in one report. Returns the decision every `DECIDE_EVERY` reports.
     pub fn on_report(
         &mut self,
         report: &ReceiverReport,

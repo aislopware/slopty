@@ -5,6 +5,8 @@
 //! process can restart without killing shells. A local control socket lets `slopty` (the CLI)
 //! mint pairing tickets and inspect state.
 
+#![forbid(unsafe_code)]
+
 mod agents;
 mod conn;
 mod ctl;
@@ -271,6 +273,6 @@ mod tests {
             let arg = format!("--direct-only={no}");
             assert!(!Args::try_parse_from(["hostd", &arg]).unwrap().direct_only, "{no}");
         }
-        assert!(Args::try_parse_from(["hostd", "--direct-only=maybe"]).is_err());
+        Args::try_parse_from(["hostd", "--direct-only=maybe"]).unwrap_err();
     }
 }

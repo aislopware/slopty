@@ -70,7 +70,7 @@ impl Default for Font {
 }
 
 /// `[theme]`.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeSettings {
     /// `dark`, `light` or `system`.
@@ -89,7 +89,7 @@ pub struct Settings {
 
 /// Why a file could not be used.
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum SettingsError {
     /// The file exists but could not be read.
     #[error("read {path}: {source}")]
     Read {
@@ -117,7 +117,7 @@ pub struct Loaded {
     /// Unknown keys, one message each.
     pub warnings: Vec<String>,
     /// Why the file was ignored, if it was.
-    pub error: Option<Error>,
+    pub error: Option<SettingsError>,
 }
 
 impl Settings {
@@ -133,12 +133,12 @@ impl Settings {
                 return Loaded {
                     settings: Self::default(),
                     warnings: Vec::new(),
-                    error: Some(Error::Read { path: path.to_path_buf(), source }),
+                    error: Some(SettingsError::Read { path: path.to_path_buf(), source }),
                 };
             }
         };
         let mut loaded = Self::parse(&text);
-        if let Some(Error::Parse { path: p, .. }) = &mut loaded.error {
+        if let Some(SettingsError::Parse { path: p, .. }) = &mut loaded.error {
             *p = path.to_path_buf();
         }
         loaded
@@ -211,7 +211,7 @@ impl Loaded {
         Self {
             settings: Settings::default(),
             warnings: Vec::new(),
-            error: Some(Error::Parse { path: PathBuf::new(), message }),
+            error: Some(SettingsError::Parse { path: PathBuf::new(), message }),
         }
     }
 }

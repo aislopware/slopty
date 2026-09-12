@@ -15,6 +15,8 @@
 //! reset, alternate-screen switches, a write that scrolls more than the whole scrollback — the
 //! frame's `epoch` is bumped and clients drop their cache.
 
+#![forbid(unsafe_code)]
+
 pub mod boundary;
 pub mod convert;
 pub mod ghostty;

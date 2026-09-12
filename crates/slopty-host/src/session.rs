@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::boundary::Boundary;
-use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine};
+use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine as _};
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
 use slopty_proto::terminal::{TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
@@ -167,7 +167,7 @@ impl SessionHandle {
 }
 
 /// What the actor hands ptyd so the session outlives this host: a copy of every byte read from
-/// the master, and now and then the engine's whole state (see [`Actor::checkpoint`]).
+/// the master, and now and then the engine's whole state (see `Actor::checkpoint`).
 #[derive(Debug)]
 pub enum Tap {
     /// Output just read from the master.

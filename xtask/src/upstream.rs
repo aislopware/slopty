@@ -13,7 +13,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use serde::Deserialize;

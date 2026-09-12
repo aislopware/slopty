@@ -300,7 +300,7 @@ mod tests {
         let path = settings_path(home.path());
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&path, "[1, 2]").expect("write");
-        assert!(read(&path).is_err());
+        read(&path).unwrap_err();
         std::fs::write(&path, "   ").expect("write");
         assert_eq!(read(&path).expect("empty is an object"), json!({}));
     }

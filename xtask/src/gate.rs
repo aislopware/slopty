@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use xshell::{Shell, cmd};
 

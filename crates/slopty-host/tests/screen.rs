@@ -216,7 +216,7 @@ mod crop_path {
         assert!(!slopty_capture::window_on_screen(id), "the window is gone");
         // Once: further ticks stay quiet.
         let _event = stream.check_geometry().unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.is_err());
+        tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.unwrap_err();
         stream.close().await;
     }
 }

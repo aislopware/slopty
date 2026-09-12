@@ -689,7 +689,7 @@ mod golden {
                     owd_jitter: slopty_core::Duration::from_micros(700),
                     queue_depth: 1,
                     late_frames: 3,
-                    acked_ltr: [0xABCD, 0, 0, 0],
+                    acked_ltr: [0xabcd, 0, 0, 0],
                     acked_ltr_len: 1,
                     stalled_ms: 180,
                     stalls: 1,
@@ -729,7 +729,7 @@ mod golden {
             parity_count: 0,
             kind: Kind::Heartbeat as u8,
             flags: 0,
-            send_ms_lo: 0xAB,
+            send_ms_lo: 0xab,
         };
         insta::assert_snapshot!("media_heartbeat", hex(header.as_bytes()));
     }

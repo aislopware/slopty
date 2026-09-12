@@ -29,14 +29,14 @@ mod tests {
 
     fn frame_bytes(seed: u32, len: usize) -> Vec<u8> {
         let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                (state & 0xFF) as u8
-            })
-            .collect()
+        std::iter::repeat_with(|| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state & 0xff) as u8
+        })
+        .take(len)
+        .collect()
     }
 
     struct Harness {
@@ -89,7 +89,7 @@ mod tests {
             let frame = EncodedFrame {
                 data,
                 keyframe,
-                ltr_token: keyframe.then_some(0xABCD),
+                ltr_token: keyframe.then_some(0xabcd),
                 ltr_refresh,
                 capture_ts_us: 1_000,
             };
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].info.frame, 1);
         assert!(out[0].info.keyframe);
-        assert_eq!(out[0].info.ltr_token, Some(0xABCD));
+        assert_eq!(out[0].info.ltr_token, Some(0xabcd));
         assert!(!h.rx.awaiting_refresh());
     }
 
@@ -925,7 +925,7 @@ mod tests {
             (2, 1, 0, 2)
         );
         assert_eq!(report.last_host_send_ts_us, 1_000);
-        assert_eq!((report.acked_ltr_len, report.acked_ltr[0]), (1, 0xABCD));
+        assert_eq!((report.acked_ltr_len, report.acked_ltr[0]), (1, 0xabcd));
         assert_eq!(report.late_frames, 1);
         assert_eq!(report.queue_depth, 0);
         assert_eq!((report.stalled_ms, report.stalls), (0, 0), "4 ms of silence is not a stall");

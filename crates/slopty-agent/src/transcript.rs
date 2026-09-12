@@ -662,7 +662,7 @@ pub fn locate(detail: &mut ToolDetail, input: Option<&Value>, cwd: Option<&str>)
 }
 
 /// The 1-based line where `old` starts in the file at `path`, else where `new` does; `None`
-/// when neither is there, the file is not text, or it is past [`LOCATE_BYTES`].
+/// when neither is there, the file is not text, or it is past `LOCATE_BYTES`.
 #[must_use]
 pub fn edit_line(path: &Path, old: &str, new: &str) -> Option<u32> {
     let meta = std::fs::metadata(path).ok()?;
@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn a_cut_first_line_is_skipped() {
-        let cut = &TAIL[10..];
+        let cut = TAIL.get(10..).unwrap_or_default();
         assert_eq!(last_assistant_line_in(cut, true).as_deref(), Some("Running the tests now."));
         assert_eq!(last_assistant_line_in("garbage\n", true), None);
         assert_eq!(last_assistant_line_in("", false), None);
@@ -1280,7 +1280,7 @@ mod tests {
         std::fs::write(&path, &appended).expect("append");
         let read = tail.read(&path).expect("read");
         assert!(
-            matches!(&read.entries[..], [TranscriptEntry { body: TranscriptBody::ToolResult { tool: Some(t), .. }, .. }] if t == "Bash"),
+            matches!(&*read.entries, [TranscriptEntry { body: TranscriptBody::ToolResult { tool: Some(t), .. }, .. }] if t == "Bash"),
             "{read:#?}"
         );
 

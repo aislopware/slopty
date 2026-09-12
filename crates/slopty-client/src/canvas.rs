@@ -30,7 +30,7 @@ pub struct CanvasDoc {
 }
 
 /// What changed after applying a sync.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CanvasChange {
     /// Everything (snapshot).
     Reset,

@@ -26,7 +26,7 @@ use slopty_proto::agent::{
     AgentTask, BlockReason, Image, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_proto::terminal::{CloseReason, SessionKind, SessionState, SessionSummary};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc};
 
@@ -578,7 +578,7 @@ impl Pump {
                 drop(table);
                 let _sent = self.events.send(HostMsg::AgentTask { session: self.session, task });
             }
-            Update::Usage(usage) => self.info(|info| info.usage = Some(usage.clone())),
+            Update::Usage(usage) => self.info(|info| info.usage = Some(usage)),
             Update::Context(context) => self.info(|info| info.context = Some(context)),
             Update::Model(model) => self.info(|info| info.model = Some(model.clone())),
             Update::PermissionMode(mode) => {

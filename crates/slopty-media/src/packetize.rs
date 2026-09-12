@@ -2,14 +2,14 @@
 
 use std::collections::VecDeque;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut as _, Bytes, BytesMut};
 use reed_solomon_simd::ReedSolomonEncoder;
 use slopty_core::StreamId;
 use slopty_proto::media::{
     FRAME_PREFIX_BYTES, FramePrefix, HEADER_BYTES, Kind, MAX_PAYLOAD, MediaHeader, flags,
 };
 use zerocopy::little_endian::{U16, U32, U64};
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::{FromBytes as _, IntoBytes as _};
 
 use crate::MediaError;
 

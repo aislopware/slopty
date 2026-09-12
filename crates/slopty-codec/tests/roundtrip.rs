@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn decoder_rejects_p_frames_before_parameter_sets() {
         let mut decoder = Decoder::new(VideoCodec::Hevc, |_f| {});
-        let err = decoder.decode(&[0, 0, 0, 1, 0x02, 0x01, 0xAA], 0).unwrap_err();
+        let err = decoder.decode(&[0, 0, 0, 1, 0x02, 0x01, 0xaa], 0).unwrap_err();
         assert!(matches!(err, slopty_codec::CodecError::NoParameterSets), "{err}");
     }
 }

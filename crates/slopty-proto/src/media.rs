@@ -176,15 +176,15 @@ mod tests {
             parity_count: 2,
             kind: Kind::VideoParity as u8,
             flags: flags::KEYFRAME | flags::LTR,
-            send_ms_lo: 0xAB,
+            send_ms_lo: 0xab,
         };
         let mut buf = vec![0_u8; MAX_DATAGRAM];
-        buf.get_mut(..HEADER_BYTES).unwrap().copy_from_slice(h.as_bytes());
-        buf[HEADER_BYTES] = 0xEE;
+        buf[..HEADER_BYTES].copy_from_slice(h.as_bytes());
+        buf[HEADER_BYTES] = 0xee;
         let (parsed, payload) = MediaHeader::parse(&buf).unwrap();
         assert_eq!(parsed, &h);
         assert_eq!(payload.len(), MAX_PAYLOAD);
-        assert_eq!(payload[0], 0xEE);
+        assert_eq!(payload[0], 0xee);
         assert!(parsed.is_parity());
         assert_eq!(parsed.kind(), Some(Kind::VideoParity));
     }
@@ -197,10 +197,10 @@ mod tests {
             ltr_token: U64::new(0x0807_0605_0403_0201),
         };
         let mut body = prefix.as_bytes().to_vec();
-        body.push(0xCC);
+        body.push(0xcc);
         let (parsed, rest) = FramePrefix::parse(&body).unwrap();
         assert_eq!(parsed, &prefix);
-        assert_eq!(rest, &[0xCC]);
+        assert_eq!(rest, &[0xcc]);
         assert_eq!(&body[..4], &[4, 3, 2, 1]);
         assert_eq!(&body[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(FramePrefix::parse(&body[..FRAME_PREFIX_BYTES - 1]).is_none());

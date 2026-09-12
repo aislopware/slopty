@@ -56,8 +56,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ objc2 0.6.4 / objc2-* 0.3.2 / block2 0.6.2 / dispatch2 0.3.1, pinned exact, `CFRetained`
   ownership in the type system; one counted `from_raw`/`retain` admission per wrapper crate.
 
-- ✅ **The gate checks a snapshot, in parallel lanes** (2026-09-12, user: "tăng tốc độ gate lên
-  tối đa … trong lúc chạy gate thì không được chờ"). Two costs were paid every cycle: the
+- ✅ **The gate checks a snapshot, in parallel lanes** (2026-09-12, at the user's request that
+  the gate be as fast as possible and never waited on). Two costs were paid every cycle: the
   cargo steps ran one after another because they share `target/`'s build lock (MEASUREMENTS
   2026-09-06 (iii)), and nothing could be edited while they ran because the tree under test
   was the tree being edited. Rulings: (1) `cargo gate` syncs the tree (`git ls-files
@@ -81,3 +81,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   lane's fingerprint, so cargo calls the stale build fresh (the iOS lane kept a `slopty-proto`
   without `TermRequest::Clear` while the host lane, which had built earlier, rebuilt). A copied
   file is therefore stamped with the time of the copy.
+
+- ✅ **The guardrails, surveyed and tightened to what catches something** (2026-09-12, at the
+  user's request for the strictest tooling that still finds real defects). What was already in place: clippy
+  all/pedantic/nursery/cargo, a curated restriction set, rustfmt nightly, taplo, typos,
+  committed, cargo-deny (advisories, licences, bans, sources), cargo-shear, nextest with
+  per-test timeouts, rustdoc `-D warnings`, overflow checks in release, `target-cpu` per
+  triple, every tool at its latest release (checked against crates.io the same day). The
+  survey: every allow-by-default rustc and clippy lint was switched on once over the whole
+  tree and counted (`/tmp/lints.log`, 1 439 warnings). Rulings: (1) the panic family
+  (`unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, `unimplemented`,
+  `indexing_slicing`, `arithmetic_side_effects`) is `deny` in the manifest, not only under
+  `-D warnings` — a library never panics, tests may (`clippy.toml`); (2) 9 rustc and 35 clippy
+  lints adopted, each of which fired nowhere or at a handful of sites fixed in the same change:
+  `string_slice` (four `&s[..n]` that could split a UTF-8 character, now `strip_prefix`/`get`),
+  `missing_copy_implementations` (17 types that are `Copy` now, and three `clone()` calls gone
+  with them), `unused_trait_names` (20 imports now `as _`), `mod_module_files`
+  (`terminal/mod.rs` → `terminal.rs`), `get_unwrap`, `deref_by_slicing`,
+  `map_with_unused_argument_over_ranges` (`repeat_with().take()`), `needless_raw_strings`,
+  `error_impl_error` (`settings::Error` → `SettingsError`), `doc_paragraphs_missing_punctuation`,
+  and the zero-hit ones (`mutex_atomic`, `mutex_integer`, `string_add`, `format_push_string`,
+  `large_stack_frames`, `unchecked_time_subtraction`, `set_contains_or_insert`,
+  `non_std_lazy_statics`, `let_underscore_drop`, `unit_bindings`, `redundant_lifetimes`, …);
+  (3) fifteen rejected, each with its count and reason in the manifest comment
+  (`pattern_type_mismatch` 342, `default_numeric_fallback` 309, `elided_lifetimes_in_paths`
+  282, `wildcard_enum_match_arm` 119, `integer_division` 77, `ffi_unwind_calls` 34 — the
+  `C-unwind` ABI is what lets objc2 catch an exception —, `iter_over_hash_type` 17 order-free
+  loops, `non_ascii_idents` firing on zerocopy's derive output, …); (4) `#![forbid(unsafe_code)]`
+  on every crate that has none (eleven more: the Mac app and daemons, agent, client, core,
+  engine, net, predict; not the iOS crate, whose `#[unsafe(no_mangle)]` exports are unsafe code
+  by definition), so `unsafe` cannot creep in unseen — it lives in capture, codec, pty, platform,
+  input, host, ui and e2e, each block with its rule; (5) rustfmt gains the stable house-style
+  options (`use_field_init_shorthand`, `use_try_shorthand`, `hex_literal_case = "Lower"`,
+  `condense_wildcard_suffixes`) and the nightly normalisers (`normalize_comments`,
+  `normalize_doc_attributes`, `format_macro_matchers`, `format_macro_bodies`,
+  `doc_comment_code_block_width`) — measured first: each at 0–4 files of churn;
+  `hex_literal_case` touched 52; not `error_on_line_overflow`/`error_on_unformatted` (229 lines
+  rustfmt leaves alone on purpose: long string literals, `if` inside arguments) and not
+  `match_block_trailing_comma`/`overflow_delimited_expr` (1 057 and 138 sites of pure style);
+  (6) the slow checks the gate cannot afford are `cargo xtask deep <check>` (`xtask/src/deep.rs`)
+  and a weekly workflow (`.github/workflows/deep.yml`, one runner per check): Miri over the
+  pure crates, ThreadSanitizer and AddressSanitizer over the daemons and the codec with
+  `-Zbuild-std`, `cargo hack --each-feature`, `cargo llvm-cov` coverage, and `cargo mutants`
+  per crate on demand; `cargo xtask profile -- <cmd>` records with samply (pure Rust, Firefox
+  Profiler). What was verified on this machine: `deep features` and `deep miri -p slopty-proto
+  -p slopty-core` (numbers in MEASUREMENTS "deep checks"); the sanitizer and coverage builds
+  are the workflow's, not yet run here. Not adopted, with the reason: `cargo vet`/`crev`
+  (a review ledger for ~600 crates nobody here would keep honest; deny's advisories, sources
+  and licence gates are the supply-chain check), `cargo-audit` (deny covers it), `cargo-udeps`
+  (shear), `cargo-fuzz` (libFuzzer is a C++ runtime; proptest covers the codec and the grid),
+  release `debug-assertions` (cost on every frame for what the test profile already runs).

@@ -1,6 +1,8 @@
 //! The Slopty macOS app: logging, tokio runtime, latency-critical activity, then the shared
 //! workspace from `slopty-app`.
 
+#![forbid(unsafe_code)]
+
 use anyhow::Result;
 use gpui::{
     Bounds, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, WindowBounds, WindowOptions, px,

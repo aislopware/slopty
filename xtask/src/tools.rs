@@ -1,6 +1,6 @@
 //! Shared helpers: repo root discovery, tool presence, target triples.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use camino::Utf8PathBuf;
 use xshell::{Shell, cmd};
 

@@ -8,6 +8,7 @@
 //!   without) the GPUI apps.
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "a CLI; stdout is its UI")]
+#![forbid(unsafe_code)]
 
 mod attach;
 mod bench;
@@ -200,17 +201,18 @@ async fn main() -> Result<()> {
         Cmd::Bench { cmd: BenchCmd::Echo { host, count } } => {
             bench::echo(&data_dir, host.as_deref(), count).await
         }
+        Cmd::Bench { cmd: BenchCmd::Screen { host, list, .. } } if list => {
+            bench::list(&data_dir, host.as_deref()).await
+        }
         Cmd::Bench {
             cmd:
-                BenchCmd::Screen { host, list, window, display, seconds, scale, fps, mbit, max_stalls },
+                BenchCmd::Screen {
+                    host, window, display, seconds, scale, fps, mbit, max_stalls, ..
+                },
         } => {
-            if list {
-                bench::list(&data_dir, host.as_deref()).await
-            } else {
-                let spec =
-                    bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
-                bench::screen(&data_dir, host.as_deref(), spec).await
-            }
+            let spec =
+                bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
+            bench::screen(&data_dir, host.as_deref(), spec).await
         }
     }
 }

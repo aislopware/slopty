@@ -46,7 +46,7 @@ pub struct RowUpdate {
 }
 
 /// Errors from applying updates.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ScreenError {
     /// A row index beyond the screen height.
     #[error("row {row} out of range for a screen with {rows} rows")]
@@ -85,7 +85,9 @@ impl Screen {
         Self {
             cols,
             rows,
-            lines: (0..rows).map(|_| Arc::new(Line::blank(cols))).collect(),
+            lines: std::iter::repeat_with(|| Arc::new(Line::blank(cols)))
+                .take(usize::from(rows))
+                .collect(),
             cursor: Cursor { visible: true, ..Cursor::default() },
             modes: TermModes::empty(),
         }
@@ -202,7 +204,7 @@ impl Screen {
     pub fn scroll_up(&mut self, n: u16) -> Vec<Arc<Line>> {
         let n = usize::from(n.min(self.rows));
         let evicted: Vec<Arc<Line>> = self.lines.drain(..n).collect();
-        self.lines.extend((0..n).map(|_| Arc::new(Line::blank(self.cols))));
+        self.lines.extend(std::iter::repeat_with(|| Arc::new(Line::blank(self.cols))).take(n));
         evicted
     }
 

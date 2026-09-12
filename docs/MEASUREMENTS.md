@@ -2680,3 +2680,19 @@ thread, never the UI thread, and the card shows plain text meanwhile; a fenced b
 coloured at layout on the UI thread, once per block (gpui-kit caches the ranges against the
 highlighter), so a long answer pays a few ms on its first frame. `regex-fancy` is the price of
 pure Rust: syntect's onig engine is reported 2–3× faster, which would be a C dependency.
+
+## 2026-09-12 — deep checks: what each costs on this machine
+
+First runs of `cargo xtask deep …` (cold `target/deep/<check>` dirs, sccache warm, a Miri
+build sharing the machine), Mac Studio:
+
+```
+deep features   cargo hack check --each-feature, 7 crates with features    517 s cold
+deep miri       slopty-proto + slopty-core, PROPTEST_CASES=8              147 s  (codec_props 79 s of it; golden failed)
+deep miri       slopty-proto alone, rerun beside a running gate            416 s  (all green)
+```
+
+What follows: neither belongs in the gate (its budget is 5–10 minutes for everything); both
+are the weekly `Deep` workflow's, one runner each, and run by hand before a release. The
+first Miri run failed on `tests/golden.rs` — insta shells out to `cargo metadata` and Miri
+cannot `fork` — so `deep miri` sets `INSTA_WORKSPACE_ROOT`; the rerun is the number kept.

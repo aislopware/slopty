@@ -411,7 +411,7 @@ impl CommandPalette {
 impl Render for CommandPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let s = theme.surfaces.clone();
+        let s = theme.surfaces;
         let matches: Vec<PaletteItem> = self.matches(cx).into_iter().cloned().collect();
         let chosen = self.selected(matches.len());
         let rows: Vec<gpui::AnyElement> = matches

@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut as _, Bytes, BytesMut};
 use slopty_core::StreamId;
 use slopty_proto::media::{HEADER_BYTES, Kind, MediaHeader};
 use zerocopy::IntoBytes as _;

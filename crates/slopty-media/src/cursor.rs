@@ -1,10 +1,10 @@
 //! Cursor position datagrams: one tiny unreliable packet per pointer move.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut as _, Bytes, BytesMut};
 use slopty_core::StreamId;
 use slopty_proto::media::{CURSOR_BYTES, CursorUpdate, HEADER_BYTES, Kind, MediaHeader};
 use zerocopy::little_endian::{I32, U16, U32};
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::{FromBytes as _, IntoBytes as _};
 
 /// Build a cursor datagram. `seq` orders updates; the receiver keeps the highest.
 #[must_use]

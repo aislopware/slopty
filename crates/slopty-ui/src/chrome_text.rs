@@ -12,7 +12,7 @@
 //! shaping, the same baseline, the same glyph origins.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
 use gpui::{

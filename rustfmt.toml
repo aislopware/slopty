@@ -12,3 +12,16 @@ wrap_comments = true
 comment_width = 100
 format_code_in_doc_comments = true
 reorder_impl_items = true
+# Stable options that were already the house style; on so a drift is a diff, not a review note.
+use_field_init_shorthand = true
+use_try_shorthand = true
+hex_literal_case = "Lower"
+# Nightly: `/* */` → `//`, `#[doc = ""]` → `///`, macro matchers and bodies formatted, comment
+# code blocks reflowed at the width. Not `error_on_line_overflow`/`error_on_unformatted`: 229
+# lines (long string literals, `if` inside arguments) rustfmt leaves alone on purpose.
+normalize_comments = true
+normalize_doc_attributes = true
+format_macro_matchers = true
+format_macro_bodies = true
+condense_wildcard_suffixes = true
+doc_comment_code_block_width = 100

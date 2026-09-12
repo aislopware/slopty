@@ -612,7 +612,7 @@ impl Conversation {
         let theme = theme.clone();
         let empty = entries.is_empty();
         let view = cx.entity();
-        let s = theme.surfaces.clone();
+        let s = theme.surfaces;
         let spacing = theme.spacing;
         div()
             .id("conversation")

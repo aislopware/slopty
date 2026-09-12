@@ -184,7 +184,7 @@ impl Driver {
         self.ui_touch(&finger, UiTouchPhase::Ended).await
     }
 
-    /// One finger down at `from`, moved to `to` in `steps`, resting [`REST`] before it lifts
+    /// One finger down at `from`, moved to `to` in `steps`, resting `REST` before it lifts
     /// so the release carries no velocity (no fling), and lifted (iOS): a pan once GPUI
     /// recognizes it.
     ///

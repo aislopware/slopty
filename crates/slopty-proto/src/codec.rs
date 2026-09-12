@@ -4,7 +4,7 @@
 //! type, pinned by snapshot tests. The length prefix lets a reader allocate exactly once and
 //! reject oversize frames before decoding.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

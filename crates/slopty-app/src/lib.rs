@@ -6,6 +6,8 @@
 //! through channels only. The platform binaries set up logging, the runtime and the GPUI
 //! application, then call [`open_workspace`].
 
+#![forbid(unsafe_code)]
+
 mod e2e;
 pub mod hosts;
 pub mod net;

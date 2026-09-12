@@ -495,7 +495,7 @@ impl Player {
         Ok(player)
     }
 
-    /// Queue interleaved samples for playback; the oldest are dropped past [`RING_MAX`].
+    /// Queue interleaved samples for playback; the oldest are dropped past `RING_MAX`.
     pub fn push(&self, samples: &[f32]) {
         let mut ring = self.ring.lock();
         ring.samples.extend(samples);

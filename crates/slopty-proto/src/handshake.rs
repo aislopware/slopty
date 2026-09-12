@@ -77,7 +77,7 @@ pub struct HelloAck {
 }
 
 /// Why a `Hello` was refused.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Rejection {
     /// Protocol mismatch.
     ProtocolVersion {

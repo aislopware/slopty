@@ -154,7 +154,7 @@ impl Context {
 }
 
 /// The subscription's rate-limit state, from Claude Code's `rate_limit_event`.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Usage {
     /// Requests are refused until a window resets.
     pub limited: bool,

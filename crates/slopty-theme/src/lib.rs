@@ -32,7 +32,7 @@ impl Rgb {
 }
 
 /// Terminal colours.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct TerminalPalette {
     /// Default text.
     pub fg: Rgb,
@@ -56,59 +56,59 @@ impl TerminalPalette {
     /// The default dark palette.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const DARK: Self = Self {
-        fg: Rgb::hex(0xE6E6E6),
-        bg: Rgb::hex(0x0E0F12),
-        cursor: Rgb::hex(0x8AB4F8),
-        cursor_text: Rgb::hex(0x0E0F12),
-        selection: Rgb::hex(0x2B3A55),
-        search_match: Rgb::hex(0x4A4020),
-        search_current: Rgb::hex(0x8C6A1F),
+        fg: Rgb::hex(0xe6e6e6),
+        bg: Rgb::hex(0x0e0f12),
+        cursor: Rgb::hex(0x8ab4f8),
+        cursor_text: Rgb::hex(0x0e0f12),
+        selection: Rgb::hex(0x2b3a55),
+        search_match: Rgb::hex(0x4a4020),
+        search_current: Rgb::hex(0x8c6a1f),
         ansi: [
-            Rgb::hex(0x1A1B1F),
-            Rgb::hex(0xF06C75),
-            Rgb::hex(0x98C379),
-            Rgb::hex(0xE5C07B),
-            Rgb::hex(0x61AFEF),
-            Rgb::hex(0xC678DD),
-            Rgb::hex(0x56B6C2),
-            Rgb::hex(0xC8CCD4),
-            Rgb::hex(0x5C6370),
-            Rgb::hex(0xFF7B86),
-            Rgb::hex(0xA6D68A),
-            Rgb::hex(0xF0CC8C),
-            Rgb::hex(0x74BEFF),
-            Rgb::hex(0xD68AEE),
-            Rgb::hex(0x66C7D4),
-            Rgb::hex(0xFFFFFF),
+            Rgb::hex(0x1a1b1f),
+            Rgb::hex(0xf06c75),
+            Rgb::hex(0x98c379),
+            Rgb::hex(0xe5c07b),
+            Rgb::hex(0x61afef),
+            Rgb::hex(0xc678dd),
+            Rgb::hex(0x56b6c2),
+            Rgb::hex(0xc8ccd4),
+            Rgb::hex(0x5c6370),
+            Rgb::hex(0xff7b86),
+            Rgb::hex(0xa6d68a),
+            Rgb::hex(0xf0cc8c),
+            Rgb::hex(0x74beff),
+            Rgb::hex(0xd68aee),
+            Rgb::hex(0x66c7d4),
+            Rgb::hex(0xffffff),
         ],
     };
     /// The default light palette (GitHub-light hues: legible on white without glare).
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
-        fg: Rgb::hex(0x1F2328),
-        bg: Rgb::hex(0xFFFFFF),
-        cursor: Rgb::hex(0x2F6FDB),
-        cursor_text: Rgb::hex(0xFFFFFF),
-        selection: Rgb::hex(0xC9DDFB),
-        search_match: Rgb::hex(0xFFE9A8),
-        search_current: Rgb::hex(0xF5B942),
+        fg: Rgb::hex(0x1f2328),
+        bg: Rgb::hex(0xffffff),
+        cursor: Rgb::hex(0x2f6fdb),
+        cursor_text: Rgb::hex(0xffffff),
+        selection: Rgb::hex(0xc9ddfb),
+        search_match: Rgb::hex(0xffe9a8),
+        search_current: Rgb::hex(0xf5b942),
         ansi: [
-            Rgb::hex(0x24292F),
-            Rgb::hex(0xCF222E),
+            Rgb::hex(0x24292f),
+            Rgb::hex(0xcf222e),
             Rgb::hex(0x116329),
-            Rgb::hex(0x9A6700),
-            Rgb::hex(0x0969DA),
-            Rgb::hex(0x8250DF),
-            Rgb::hex(0x1B7C83),
-            Rgb::hex(0x6E7781),
-            Rgb::hex(0x57606A),
-            Rgb::hex(0xA40E26),
-            Rgb::hex(0x1A7F37),
-            Rgb::hex(0xBF8700),
-            Rgb::hex(0x218BFF),
-            Rgb::hex(0xA475F9),
-            Rgb::hex(0x3192AA),
-            Rgb::hex(0x8C959F),
+            Rgb::hex(0x9a6700),
+            Rgb::hex(0x0969da),
+            Rgb::hex(0x8250df),
+            Rgb::hex(0x1b7c83),
+            Rgb::hex(0x6e7781),
+            Rgb::hex(0x57606a),
+            Rgb::hex(0xa40e26),
+            Rgb::hex(0x1a7f37),
+            Rgb::hex(0xbf8700),
+            Rgb::hex(0x218bff),
+            Rgb::hex(0xa475f9),
+            Rgb::hex(0x3192aa),
+            Rgb::hex(0x8c959f),
         ],
     };
 
@@ -271,7 +271,7 @@ pub mod alpha {
 
 /// Surface colours for chrome (not the terminal grid): a four-step ladder, three text
 /// levels, the accent and what sits on it, and three status tones.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Surfaces {
     /// Step 0: window, canvas, bars.
     pub canvas: Rgb,
@@ -305,36 +305,36 @@ impl Surfaces {
     /// Dark.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const DARK: Self = Self {
-        canvas: Rgb::hex(0x0A0B0E),
-        panel: Rgb::hex(0x14161B),
-        raised: Rgb::hex(0x1B1E25),
-        overlay: Rgb::hex(0x23272F),
-        border: Rgb::hex(0x24272E),
-        text: Rgb::hex(0xE6E6E6),
-        text_secondary: Rgb::hex(0xB4B9C3),
-        text_muted: Rgb::hex(0x8B919C),
-        accent: Rgb::hex(0x8AB4F8),
-        accent_fg: Rgb::hex(0x0A0B0E),
-        success: Rgb::hex(0x98C379),
-        warn: Rgb::hex(0xE5C07B),
-        error: Rgb::hex(0xF06C75),
+        canvas: Rgb::hex(0x0a0b0e),
+        panel: Rgb::hex(0x14161b),
+        raised: Rgb::hex(0x1b1e25),
+        overlay: Rgb::hex(0x23272f),
+        border: Rgb::hex(0x24272e),
+        text: Rgb::hex(0xe6e6e6),
+        text_secondary: Rgb::hex(0xb4b9c3),
+        text_muted: Rgb::hex(0x8b919c),
+        accent: Rgb::hex(0x8ab4f8),
+        accent_fg: Rgb::hex(0x0a0b0e),
+        success: Rgb::hex(0x98c379),
+        warn: Rgb::hex(0xe5c07b),
+        error: Rgb::hex(0xf06c75),
     };
     /// Light.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
-        canvas: Rgb::hex(0xF4F5F7),
-        panel: Rgb::hex(0xFFFFFF),
-        raised: Rgb::hex(0xEEF0F3),
-        overlay: Rgb::hex(0xE4E7EC),
-        border: Rgb::hex(0xD8DBE1),
-        text: Rgb::hex(0x1D1D1F),
-        text_secondary: Rgb::hex(0x4B4F58),
-        text_muted: Rgb::hex(0x6E6E73),
-        accent: Rgb::hex(0x2F6FDB),
-        accent_fg: Rgb::hex(0xFFFFFF),
-        success: Rgb::hex(0x1A7F37),
-        warn: Rgb::hex(0x9A6700),
-        error: Rgb::hex(0xCF222E),
+        canvas: Rgb::hex(0xf4f5f7),
+        panel: Rgb::hex(0xffffff),
+        raised: Rgb::hex(0xeef0f3),
+        overlay: Rgb::hex(0xe4e7ec),
+        border: Rgb::hex(0xd8dbe1),
+        text: Rgb::hex(0x1d1d1f),
+        text_secondary: Rgb::hex(0x4b4f58),
+        text_muted: Rgb::hex(0x6e6e73),
+        accent: Rgb::hex(0x2f6fdb),
+        accent_fg: Rgb::hex(0xffffff),
+        success: Rgb::hex(0x1a7f37),
+        warn: Rgb::hex(0x9a6700),
+        error: Rgb::hex(0xcf222e),
     };
 }
 

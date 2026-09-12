@@ -1068,7 +1068,7 @@ mod tests {
             };
             assert_eq!(set, 0, "pthread_set_qos_class_self_np");
         }
-        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             for _ in 0..4_096 {
                 x = x
@@ -1085,7 +1085,7 @@ mod tests {
 
         let dir = scratch.join(format!("churn-{worker}"));
         std::fs::create_dir_all(&dir).expect("scratch dir");
-        let block = vec![0x5A_u8; 8 << 20];
+        let block = vec![0x5a_u8; 8 << 20];
         let mut round = 0_u64;
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             let big = dir.join(format!("big-{round}"));

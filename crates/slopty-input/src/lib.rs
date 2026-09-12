@@ -40,7 +40,7 @@ pub use pasteboard::Pasteboard;
 const BOUNDS_TTL: Duration = Duration::from_millis(100);
 
 /// What went wrong posting an event.
-#[derive(thiserror::Error, Debug)]
+#[derive(Clone, Copy, thiserror::Error, Debug)]
 pub enum InputError {
     /// The target window is gone (no bounds in the window list).
     #[error("target has no bounds; window closed?")]

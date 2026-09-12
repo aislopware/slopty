@@ -6,7 +6,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2::{AnyThread as _, DefinedClass as _, define_class, msg_send};
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
     kAudioFormatLinearPCM,

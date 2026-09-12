@@ -11,6 +11,8 @@
 //! unidirectional session stream per attached terminal (opened by the host), and unreliable
 //! datagrams for media.
 
+#![forbid(unsafe_code)]
+
 pub mod client;
 pub mod endpoint;
 pub mod framed;

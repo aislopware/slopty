@@ -28,7 +28,7 @@ pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
 pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions, RateControl};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum CodecError {
     /// A `VideoToolbox` or `CoreMedia` call failed.
     #[error("{call} failed: OSStatus {status}")]

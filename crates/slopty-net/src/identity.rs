@@ -158,7 +158,10 @@ mod tests {
         assert_eq!(me.client(), client);
         assert_eq!(me.secret().to_bytes(), secret.to_bytes());
         assert_eq!(me.find("mac").unwrap().0, host_key.public());
-        assert_eq!(me.find(&host_key.public().to_string()[..8]).unwrap().1.name, "Mac Studio");
+        assert_eq!(
+            me.find(host_key.public().to_string().get(..8).unwrap_or_default()).unwrap().1.name,
+            "Mac Studio"
+        );
         assert!(me.find("zzz").is_none());
     }
 }

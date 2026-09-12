@@ -177,8 +177,8 @@ mod tests {
 
     #[test]
     fn bad_regex_is_an_error_and_plain_never_is() {
-        assert!(Pattern::new("(", true).is_err());
-        assert!(Pattern::new("(", false).is_ok());
+        Pattern::new("(", true).unwrap_err();
+        Pattern::new("(", false).unwrap();
     }
 
     #[test]

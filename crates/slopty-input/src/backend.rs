@@ -348,7 +348,7 @@ mod tests {
         let mut r = Recorder::window(42, Rect::default());
         assert!(!r.is_active(42));
         assert!(r.activate(7).is_err());
-        assert!(r.activate(42).is_ok());
+        r.activate(42).unwrap();
         assert!(r.is_active(42));
         assert_eq!(r.activations, [7, 42]);
     }

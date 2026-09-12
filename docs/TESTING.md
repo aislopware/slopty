@@ -37,3 +37,11 @@
 4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.
+
+## Beyond the layers: the deep checks
+`cargo xtask deep <check>` (and the weekly `Deep` workflow) runs what no layer above can see
+in the gate's budget: Miri over the pure crates (undefined behaviour under the interpreter),
+ThreadSanitizer/AddressSanitizer builds of the daemons and the codec, `cargo hack
+--each-feature` (every feature alone and together), `cargo llvm-cov` line coverage per crate,
+and `cargo mutants` on one crate to find the lines no test would notice changing. A finding
+there becomes a test in the layer that can hold it. `docs/DEV.md` has the commands.

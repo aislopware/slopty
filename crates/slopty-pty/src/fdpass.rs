@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::{IoSlice, IoSliceMut};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 
 use bytes::BytesMut;
 use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr, recvmsg, sendmsg};

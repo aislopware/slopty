@@ -869,7 +869,7 @@ impl Element for TerminalElement {
                     })
                     .collect();
                 let link = link
-                    .filter(|&(at, _, _)| at == index)
+                    .filter(|&(at, ..)| at == index)
                     .map(|(_, start, end)| (start, end.min(grid_cols)));
                 // A prompt starts here: rule off the command above it, red when it failed.
                 let separator = (line.mark.starts_prompt() && index.0 > 0)

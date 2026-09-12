@@ -428,7 +428,7 @@ mod tests {
     /// `OSC 133;<mark>` with either terminator, `mark` possibly followed by parameters.
     fn has_mark(text: &str, mark: &str) -> bool {
         text.split("\x1b]133;").skip(1).any(|rest| {
-            rest.starts_with(mark) && rest[mark.len()..].starts_with(['\x07', '\x1b', ';'])
+            rest.strip_prefix(mark).is_some_and(|after| after.starts_with(['\x07', '\x1b', ';']))
         })
     }
 

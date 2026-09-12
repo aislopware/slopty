@@ -47,7 +47,7 @@ const DEFAULT_RTT: Duration = Duration::from_millis(20);
 
 /// Seed of the loss-injection sequence. Fixed, so a run at a given drop rate repeats exactly
 /// and two builds can be compared on the same losses.
-const LOSS_SEED: u64 = 0x2545_F491_4F6C_DD1D;
+const LOSS_SEED: u64 = 0x2545_f491_4f6c_dd1d;
 
 /// Fans incoming datagrams out to per-stream queues.
 #[derive(Clone, Debug)]

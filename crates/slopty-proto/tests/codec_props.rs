@@ -51,7 +51,7 @@ mod props {
 
         #[test]
         fn garbage_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
-            let mut buf = BytesMut::from(&bytes[..]);
+            let mut buf = BytesMut::from(&*bytes);
             // Either decodes, needs more, or errors — all are fine; a panic is not.
             let _outcome = codec::try_decode::<ClientMsg>(&mut buf);
         }
