@@ -493,10 +493,20 @@ impl GhosttyEngine {
                 line.links = links.finish(x);
                 line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
                 let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
+                let semantic =
+                    raw.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None);
+                // A row erased in place (`CSI 2 J`, ⌃L at a prompt) keeps its number but not
+                // its prompt: the marks the shell wrote there are gone with it, else the next
+                // prompt drawn below would read as a continuation of a start that no longer
+                // exists.
+                if semantic != libghostty_vt::screen::RowSemanticPrompt::Prompt
+                    && self.prompt_starts.remove(&abs)
+                {
+                    self.exit_marks.remove(&abs);
+                }
                 line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
                     convert::semantic_mark(
-                        raw.semantic_prompt()
-                            .unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None),
+                        semantic,
                         first,
                         self.prompt_starts.contains(&abs),
                         exit_for(&self.exit_marks, &self.prompt_starts, abs),
@@ -1370,6 +1380,34 @@ mod tests {
         assert_eq!(marks[4], prompt(Some(0), None));
         assert_eq!(marks[5], prompt(None, None));
         assert_eq!(marks[6], SemanticMark::PromptContinuation { input: None });
+    }
+
+    /// ⌘K: the history is erased, then zsh answers ⌃L with home + erase and redraws its
+    /// prompt with the marks PS1 carries. The erased rows keep their numbers but lose their
+    /// marks, so the redrawn prompt is the one start on the screen and the prompt after the
+    /// next command carries its status without a stale start in between.
+    #[test]
+    fn a_screen_erased_in_place_drops_the_marks_of_its_rows() {
+        let mut e = engine(80, 12);
+        let ps1 = b"\x1b]133;A\x07\r\n\x1b[1m/tmp\x1b[0m \r\n> \x1b]133;B\x07".as_slice();
+        e.write(ps1);
+        e.write(b"echo hi\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07");
+        e.write(ps1);
+        e.write(b"\x1b[3J\x1b[H\x1b[2J");
+        e.write(ps1);
+        let f = e.full_frame(0).unwrap();
+        let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
+        let prompt = |exit| SemanticMark::Prompt { exit, input: None };
+        assert_eq!(f.first_visible_line, LineIndex(0), "numbering survives an erase in place");
+        assert_eq!(marks[0], prompt(None));
+        assert_eq!(marks[4], SemanticMark::Output, "the old prompt's start went with its row");
+        e.write(b"sleep 6\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        e.write(ps1);
+        let f = e.full_frame(0).unwrap();
+        let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
+        assert_eq!(marks[3], prompt(Some(0)));
+        assert_eq!(marks[4], SemanticMark::PromptContinuation { input: None });
+        assert_eq!(marks[5], SemanticMark::PromptContinuation { input: None });
     }
 
     /// Bytes captured from a real zsh with the integration loaded (synchronized output,

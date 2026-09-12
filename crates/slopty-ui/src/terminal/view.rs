@@ -68,6 +68,8 @@ mod actions {
             CopyLastOutput,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
+            /// Clear the screen and the history (⌘K, as in every Mac terminal).
+            ClearScreen,
             /// Show the agent's conversation instead of the grid, or the grid again.
             ToggleConversation,
             /// Tab in a driven composer with the slash list up: take the selected
@@ -79,8 +81,8 @@ mod actions {
     );
 }
 pub use actions::{
-    CloseFind, CompleteSlash, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt, Paste,
-    PrevPrompt, RerunLast, ToggleConversation,
+    ClearScreen, CloseFind, CompleteSlash, Copy, CopyLastOutput, Find, FindNext, FindPrev,
+    NextPrompt, Paste, PrevPrompt, RerunLast, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -97,6 +99,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-down", NextPrompt, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
         KeyBinding::new("cmd-shift-enter", RerunLast, CTX),
+        KeyBinding::new("cmd-k", ClearScreen, CTX),
         KeyBinding::new("cmd-shift-l", ToggleConversation, CTX),
         KeyBinding::new("tab", CompleteSlash, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
@@ -209,6 +212,9 @@ pub enum TerminalViewEvent {
     /// shell it picked and types the code into it. The payload is the block's body, lines
     /// joined with `\n`.
     RunInShell(String),
+    /// "Ask the agent" on a block's menu: the block as a Markdown fence for a driven agent's
+    /// composer. The canvas picks the agent card (or opens one) and puts it there.
+    AskAgent(String),
 }
 
 /// One session's view.
@@ -273,6 +279,9 @@ pub struct TerminalView {
     driven: bool,
     /// Open the conversation on the next frame (a driven view is born without a window).
     open_conversation: bool,
+    /// Text for the composer once the conversation exists (a driven view opens it on its
+    /// first frame, so a block asked of a card that was just opened has to wait).
+    pending_compose: Option<String>,
     /// The permission the driven agent waits on, with the input it would run with.
     permission: Option<PermissionRequest>,
     /// The labels picked so far for each question of a pending `AskUserQuestion`.
@@ -362,6 +371,7 @@ impl TerminalView {
             attachments: Vec::new(),
             preparing: 0,
             open_conversation: false,
+            pending_compose: None,
             permission: None,
             partial: String::new(),
             info: AgentInfo::default(),
@@ -374,6 +384,13 @@ impl TerminalView {
     pub fn set_driven(&mut self, cx: &mut Context<Self>) {
         self.driven = true;
         self.open_conversation = true;
+        cx.notify();
+    }
+
+    /// Put `text` into the conversation's composer, now or as soon as the conversation
+    /// exists.
+    pub fn compose(&mut self, text: String, cx: &mut Context<Self>) {
+        self.pending_compose = Some(text);
         cx.notify();
     }
 
@@ -1280,6 +1297,7 @@ impl TerminalView {
         if block.command.is_some() {
             items.push(BlockMenuItem::Rerun);
         }
+        items.push(BlockMenuItem::Ask);
         items.push(BlockMenuItem::SelectBlock);
         items
     }
@@ -1303,6 +1321,14 @@ impl TerminalView {
                 if let Some(command) = block.command {
                     self.run_text(command, cx);
                 }
+            }
+            BlockMenuItem::Ask => {
+                // A selection is what the human meant; the block is the default.
+                let text = self
+                    .selected_text()
+                    .filter(|t| !t.trim().is_empty())
+                    .map_or_else(|| block_markdown(&block), |t| format!("```\n{t}\n```\n\n"));
+                cx.emit(TerminalViewEvent::AskAgent(text));
             }
             BlockMenuItem::SelectBlock => {
                 let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
@@ -1449,6 +1475,13 @@ impl TerminalView {
         if let Some(command) = self.state.last_command() {
             self.run_text(command, cx);
         }
+    }
+
+    /// ⌘K: the host drops the history and the shell repaints its prompt at the top.
+    pub fn clear_screen(&mut self, _: &ClearScreen, _window: &mut Window, cx: &mut Context<Self>) {
+        self.state.scroll_to_bottom();
+        self.send(TermRequest::Clear);
+        cx.notify();
     }
 
     /// ⌘↑: the prompt above the viewport's top row, scrolled to the top.
@@ -2328,7 +2361,8 @@ impl Render for TerminalView {
         if zooming {
             self.motion_frames = self.motion_frames.saturating_add(1);
         }
-        if std::mem::take(&mut self.open_conversation) && self.conversation.is_none() {
+        let opened = std::mem::take(&mut self.open_conversation) && self.conversation.is_none();
+        if opened {
             // A driven view opens its chat on its first frame (it needs the window) and asks
             // for the conversation so far, which may have arrived before there was a chat.
             self.conversation = Some(Conversation::new(window, cx));
@@ -2337,6 +2371,14 @@ impl Render for TerminalView {
                 session: self.session,
                 follow: true,
             }));
+            cx.notify();
+        } else if let Some(conversation) = &self.conversation
+            && let Some(text) = self.pending_compose.take()
+        {
+            // The frame after the composer first drew: an insert into an input that has never
+            // been laid out is lost.
+            conversation.append_composer_text(&text, window, cx);
+            self.focus_composer = true;
         }
         if self.driven && focused && self.conversation.is_some() {
             // The canvas gives the view the keyboard; in a driven view that is the composer.
@@ -2397,6 +2439,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::rerun_last))
+            .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(Self::toggle_conversation_action))
             .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
                 if !this.completion_nav("tab", window, cx) {
@@ -2469,8 +2512,28 @@ enum BlockMenuItem {
     CopyOutput,
     /// Type the command again and press ↩.
     Rerun,
+    /// The block, as a fence, into the agent's composer.
+    Ask,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
+}
+
+/// A command block as the agent should read it: the command on a `$` line and its output,
+/// fenced, with a blank line after for the question.
+#[must_use]
+pub fn block_markdown(block: &CommandBlock) -> String {
+    let mut text = String::from("```\n");
+    if let Some(command) = &block.command {
+        text.push_str("$ ");
+        text.push_str(command);
+        text.push('\n');
+    }
+    if !block.output.is_empty() {
+        text.push_str(&block.output);
+        text.push('\n');
+    }
+    text.push_str("```\n\n");
+    text
 }
 
 impl BlockMenuItem {
@@ -2479,6 +2542,7 @@ impl BlockMenuItem {
             Self::CopyCommand => "copy-command",
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
+            Self::Ask => "ask",
             Self::SelectBlock => "select-block",
         }
     }
@@ -2488,6 +2552,7 @@ impl BlockMenuItem {
             Self::CopyCommand => "Copy command",
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
+            Self::Ask => "Ask the agent",
             Self::SelectBlock => "Select block",
         }
     }
@@ -2779,7 +2844,7 @@ mod tests {
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.
     #[gpui::test]
     fn cmd_shift_c_copies_the_last_commands_output(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
+        let (view, mut rx, cx) = terminal(cx);
         cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into())));
         cx.simulate_keystrokes("cmd-shift-c");
         let text = |cx: &mut VisualTestContext| {
@@ -2790,6 +2855,11 @@ mod tests {
         with_command_blocks(&view, cx);
         cx.simulate_keystrokes("cmd-shift-c");
         assert_eq!(text(cx).as_deref(), Some("1\n2"), "blank tail trimmed, prompt rows excluded");
+
+        // ⌘K is the host's to do: one request, nothing typed.
+        drain_words(&mut rx);
+        cx.simulate_keystrokes("cmd-k");
+        assert_eq!(drain_words(&mut rx), ["clear"]);
     }
 
     /// A right click on a block's row opens its menu: the typed command and the output to
@@ -2825,9 +2895,12 @@ mod tests {
         right_click(cx);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Menu", Some("Command block"))), "{tree:#?}");
-        for label in ["Copy command", "Copy output", "Rerun", "Select block"] {
+        for label in ["Copy command", "Copy output", "Rerun", "Ask the agent", "Select block"] {
             assert!(tree.iter().any(|n| n.is("MenuItem", Some(label))), "{label}: {tree:#?}");
         }
+        let block = view.read_with(cx, |v, _| v.block_menu.as_ref().map(|m| m.block.clone()));
+        let block = block.expect("the menu holds its block");
+        assert_eq!(block_markdown(&block), "```\n$ seq 2\n1\n2\n```\n\n");
         assert!(drain_input(&mut rx).is_empty(), "a right click on a block is not reported");
         pick(cx, "copy-output");
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
@@ -3787,6 +3860,7 @@ mod tests {
                 ),
                 ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
                 ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
+                ClientMsg::Term { req: TermRequest::Clear, .. } => "clear".to_owned(),
                 ClientMsg::ListFiles { query, .. } => format!("files:{query}"),
                 // Resizes and the like: not what these tests are about.
                 _ => continue,

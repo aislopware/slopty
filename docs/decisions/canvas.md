@@ -201,6 +201,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a11y, a click on its bounds runs `echo hi` in the first shell and `hi` comes back in its
   rows).
 
+- ✅ **A command block can be asked of the agent** (2026-09-12). The human reads a failing
+  command in a shell and wants Claude's view of it; copying the block and pasting it into a
+  card was four steps and a decision about which card. Rulings: (1) "Ask the agent" on the
+  block menu puts the block into an agent's composer as a fence (`$ command` then the
+  output, a blank line after for the question) and focuses it — it does not send, the human
+  frames the question — a selection under the click goes instead of the block, since a
+  human who selected three lines means those; (2) the card is the one the human is on when it is an agent, else the
+  topmost agent card, else a new driven agent opened in the active shell's directory, the
+  block waiting in `CanvasView::pending_ask` for the session to open and in
+  `TerminalView::compose` for the card's first frame (a driven view opens its conversation
+  only then); (3) the same `AskAgent` event carries any text, so a "send this to the agent"
+  from elsewhere is one emit away. Tests: `block_markdown` in
+  `a_right_click_on_a_block_offers_its_command_and_output` (the menu item and the fence) and
+  `asking_the_agent_opens_a_card_when_there_is_none` (headless canvas: `OpenAgent` sent with
+  the shell's cwd, the block lands in the composer of the card that opens).
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note

@@ -75,6 +75,11 @@ mod golden {
     }
 
     #[test]
+    fn clear() {
+        snap("client_term_clear", &ClientMsg::Term { session: session(), req: TermRequest::Clear });
+    }
+
+    #[test]
     fn search() {
         snap(
             "client_search",

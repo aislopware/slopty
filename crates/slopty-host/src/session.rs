@@ -754,6 +754,17 @@ impl Actor {
                 bytes = raw;
                 Ok(())
             }
+            TermRequest::Clear => {
+                // The scrollback goes as if the program had printed the erase: through the
+                // engine and the tap, so a checkpoint replay ends up in the same place. The
+                // screen is the shell's: ⌃L repaints its prompt at the top.
+                const ERASE_SCROLLBACK: &[u8] = b"\x1b[3J";
+                self.engine.write(ERASE_SCROLLBACK);
+                self.tap_output(ERASE_SCROLLBACK);
+                self.after_output().await;
+                bytes = vec![0x0c];
+                Ok(())
+            }
             TermRequest::Focus { focused } => self.engine.encode_focus(focused, &mut bytes),
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(4096)) {

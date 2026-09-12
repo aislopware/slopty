@@ -493,6 +493,14 @@ impl Conversation {
         self.composer.update(cx, |input, cx| input.insert(text.to_owned(), window, cx));
     }
 
+    /// Append `text` to the composer's text (a block asked of the agent lands after whatever
+    /// the human had started to type).
+    pub fn append_composer_text(&self, text: &str, window: &mut Window, cx: &mut App) {
+        let mut value = self.composer_text(cx);
+        value.push_str(text);
+        self.composer.update(cx, |input, cx| input.set_value(value, window, cx));
+    }
+
     /// Take the composer's text, leaving it empty.
     #[must_use]
     pub fn take_composer_text(&self, window: &mut Window, cx: &mut App) -> String {

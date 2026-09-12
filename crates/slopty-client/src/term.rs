@@ -343,7 +343,9 @@ impl TermState {
             // The first prompt of an epoch (a reflow, a reset, the alt screen coming or going)
             // says nothing about what ran before it.
             None => self.latest_prompt = Some(prompt),
-            Some(seen) if prompt.0 > seen.0 => {
+            // Newer, or the screen was erased in place (⌃L at a prompt keeps the numbering
+            // and redraws the prompt higher up): either way a prompt the shell just drew.
+            Some(seen) if prompt != seen => {
                 self.latest_prompt = Some(prompt);
                 if let Some((_, command)) = self.running.take() {
                     let exit = self.line(prompt).and_then(|l| l.mark.exit());
@@ -719,8 +721,28 @@ mod tests {
             commands(state.apply(TermEvent::Frame(at(f, 2)))),
             vec![Effect::CommandFinished { command: "sleep 9".to_owned(), exit: Some(1) }]
         );
+        // ⌃L at the prompt: the shell erases the screen in place and redraws its prompt on the
+        // first row, a lower index than the one it replaces. The command typed there is
+        // finished by the prompt below it as usual.
+        let mut f = frame(6, true, 0, 0, 3, &[(0, "$ "), (1, ""), (2, "")]);
+        f.updates[0].line.mark = prompt(None);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        let mut f = frame(7, false, 0, 0, 3, &[(0, "$ sleep 2")]);
+        f.updates[0].line.mark = prompt(None);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        let f = frame(8, false, 0, 0, 3, &[(1, "")]);
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandStarted("sleep 2".to_owned())]
+        );
+        let mut f = frame(9, false, 0, 0, 3, &[(1, "$ ")]);
+        f.updates[0].line.mark = prompt(Some(0));
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandFinished { command: "sleep 2".to_owned(), exit: Some(0) }]
+        );
         // A new epoch forgets which prompt was newest, so its first prompt ends nothing.
-        let mut f = frame(6, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
+        let mut f = frame(10, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
         f.updates[0].line.mark = prompt(None);
         f.updates[1].line.mark = prompt(Some(0));
         assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());

@@ -153,7 +153,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
     use crate::terminal::{
-        CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast, ToggleConversation,
+        ClearScreen, CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast, ToggleConversation,
     };
     let canvas = key_bindings();
     let terminal = crate::terminal::key_bindings();
@@ -181,6 +181,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Next prompt", Box::new(NextPrompt)),
         t("Copy last output", Box::new(CopyLastOutput)),
         t("Rerun last command", Box::new(RerunLast)),
+        t("Clear the screen and history", Box::new(ClearScreen)),
         t("Show or hide the conversation", Box::new(ToggleConversation)),
     ]
 }
@@ -454,6 +455,10 @@ pub struct CanvasView {
     active: Option<ItemId>,
     /// A terminal to focus on the next frame (one we just opened).
     pending_focus: Option<SessionId>,
+    /// A block waiting for the agent card that "Ask the agent" is opening.
+    pending_ask: Option<String>,
+    /// A block waiting for its card's view (the session is known, the item not placed yet).
+    pending_compose: Option<(SessionId, String)>,
     /// A note to put the caret in on the next frame (one we just created).
     pending_focus_note: Option<ItemId>,
     /// Focus the picker on the next frame.
@@ -544,6 +549,8 @@ impl CanvasView {
             minimap: None,
             active: None,
             pending_focus: None,
+            pending_ask: None,
+            pending_compose: None,
             pending_focus_note: None,
             pending_focus_picker: false,
             pending_focus_self: false,
@@ -692,9 +699,46 @@ impl CanvasView {
         if summary.kind == SessionKind::Terminal && !self.shell_recency.contains(&summary.id) {
             self.shell_recency.push(summary.id);
         }
-        self.sessions.insert(summary.id, summary);
+        let asked = (summary.kind == SessionKind::Agent).then(|| self.pending_ask.take()).flatten();
+        let id = summary.id;
+        self.sessions.insert(id, summary);
         self.reconcile(cx);
+        if let Some(text) = asked {
+            self.compose_in(id, text, cx);
+        }
         cx.notify();
+    }
+
+    /// "Ask the agent" on a command block: the block goes into the composer of the agent card
+    /// the human is on, else the topmost one, else a new one opened in the active shell's
+    /// directory (the block waits for it).
+    pub fn ask_agent(&mut self, text: String, cx: &mut Context<Self>) {
+        let is_agent = |item: &CanvasItem| match &item.kind {
+            ItemKind::Terminal { session } => self.is_driven(*session).then_some(*session),
+            _ => None,
+        };
+        let target = self
+            .active
+            .and_then(|id| self.doc.get(id))
+            .and_then(is_agent)
+            .or_else(|| self.doc.by_z().into_iter().rev().find_map(is_agent));
+        if let Some(session) = target {
+            self.reveal_session(session, cx);
+            self.compose_in(session, text, cx);
+        } else {
+            self.pending_ask = Some(text);
+            self.open_agent(self.active_cwd(), cx);
+        }
+    }
+
+    /// Put `text` into a driven session's composer, as soon as the session has a view (the
+    /// host says a session opened before it places the item that draws it).
+    fn compose_in(&mut self, session: SessionId, text: String, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(&session) {
+            view.update(cx, |v, cx| v.compose(text, cx));
+        } else {
+            self.pending_compose = Some((session, text));
+        }
     }
 
     /// `session` is a plain shell on this canvas: a terminal session (not one the host drives
@@ -1589,6 +1633,7 @@ impl CanvasView {
                         this.command_finished(sid, done, cx);
                     }
                     TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
+                    TerminalViewEvent::AskAgent(text) => this.ask_agent(text.clone(), cx),
                 },
             ));
             if self.is_driven(*session) {
@@ -1626,6 +1671,9 @@ impl CanvasView {
         }
         self.prune_headings();
         self.update_run_targets(cx);
+        if let Some((session, text)) = self.pending_compose.take() {
+            self.compose_in(session, text, cx);
+        }
     }
 
     /// Drop the headings whose block has lost every item. An emptied repository must not keep
@@ -4844,6 +4892,32 @@ mod tests {
             cx.debug_bounds("conversation-code-run-0-1").is_none(),
             "a terminal an agent is working in is not a shell to run a snippet in"
         );
+    }
+
+    /// "Ask the agent" with no agent card on the canvas opens one in the active shell's
+    /// directory, and the block lands in its composer once the card has one.
+    #[gpui::test]
+    fn asking_the_agent_opens_a_card_when_there_is_none(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let shell = SessionId::new();
+        host_opens_in(&view, cx, shell, me, SHELL, 1, Where::loose("/tmp/work"));
+        drain(&mut rx);
+        view.update_in(cx, |c, _window, cx| c.ask_agent("```\n$ false\n```\n\n".into(), cx));
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::OpenAgent(OpenAgent { cwd: Some(cwd), resume: None, .. })] if cwd == "/tmp/work"
+            ),
+            "{sent:?}"
+        );
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, Rect { x: 800.0, ..SHELL }, 2);
+        cx.run_until_parked();
+        let text = view.read_with(cx, |c, cx| {
+            c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
+        });
+        assert_eq!(text.as_deref(), Some("```\n$ false\n```\n\n"), "the block waited for the card");
     }
 
     /// A note reads as Markdown until someone edits it: unfocused it is the rendered

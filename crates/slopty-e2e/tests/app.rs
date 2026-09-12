@@ -101,6 +101,10 @@ mod tests {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 
+        // The prompt's own height, measured before anything is typed: a fresh screen puts the
+        // cursor back on this row.
+        let prompt_row = dump.terminals[0].cursor[1];
+
         // Typed text goes client → host → PTY → shell → host → client rows.
         drv.type_text("echo e2e-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();
@@ -121,6 +125,17 @@ mod tests {
         let fg = foreground_fraction(&frame);
         assert!(fg > 0.01, "frame is blank ({fg:.4} foreground)");
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // ⌘K: the host erases the history and the shell repaints its prompt at the top, so
+        // the echo is gone and the cursor is back where a fresh prompt puts it.
+        drv.keys("cmd-k").await.unwrap();
+        drv.wait_for("the screen to clear", STEP, |d| {
+            d.rows_containing("e2e-42").is_empty()
+                && d.terminals[0].cursor[1] == prompt_row
+                && d.terminals[0].rows.iter().any(|r| !r.trim().is_empty())
+        })
+        .await
+        .unwrap();
 
         // A long command left running in this shell while the human moves on: the badge on its
         // title bar says it finished, read from the shell integration marks ptyd injected.

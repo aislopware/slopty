@@ -838,6 +838,9 @@ at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 ⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output),
+⌘K clears the screen and the history (`TermRequest::Clear`, protocol 31: the host writes
+`CSI 3 J` through its engine and output tap, as if the program had, then ⌃L to the shell so
+the prompt repaints at the top; the view drops its scroll offset),
 ⌘⇧↩ runs the last finished command again (`TermState::last_command`, the block before the
 newest prompt, typed as the block menu's rerun types it; also "Rerun last command" in the
 palette), ⌘⇧C copies the last finished command's output (`TermState::last_command_output`: the
@@ -845,7 +848,10 @@ palette), ⌘⇧C copies the last finished command's output (`TermState::last_co
 integration). A right click on a block row opens the block menu (`block-menu`, protocol 28:
 the marks carry the input column, `TermState::command_block` reads the command and the
 output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
-↩ as a key) and "Select block". While the viewport's top row is inside a block whose prompt
+↩ as a key), "Ask the agent" (the block as a fence, `block_markdown`, into the composer of the
+agent card the human is on, else the topmost, else one the canvas opens in the active
+shell's directory — `TerminalViewEvent::AskAgent` → `CanvasView::ask_agent`, the text
+waiting in `TerminalView::compose` until the card has its conversation) and "Select block". While the viewport's top row is inside a block whose prompt
 rows have all scrolled above, a one-row header over the grid (`block-header`, role Button,
 `TerminalView::block_header`, reading `TermState::block_head` — the prompt's rows alone, never
 the output) names the command in the mono face on the panel colour, ruled

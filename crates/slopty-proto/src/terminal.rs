@@ -150,6 +150,10 @@ pub enum TermRequest {
     Paste(String),
     /// Raw bytes to the PTY (tooling, tests).
     Raw(Vec<u8>),
+    /// ⌘K: drop the history and repaint the prompt at the top. The host erases the
+    /// scrollback as if the program had asked (`CSI 3 J`, so a replay agrees) and sends the
+    /// shell ⌃L for the screen.
+    Clear,
     /// Focus changed (DEC 1004).
     Focus {
         /// True when focused.

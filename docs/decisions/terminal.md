@@ -351,6 +351,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
 
+- ✅ **⌘K clears the screen and the history, protocol 31** (2026-09-12). Every Mac terminal
+  has it; here the engine lives on the host, so it is a request. Rulings: (1) the scrollback
+  is erased by feeding `CSI 3 J` through the host session's own output path (engine, tap,
+  `after_output`) as if the program had printed it — a checkpoint replay then lands in the
+  same place, and no engine API is needed; (2) the screen is left to the shell: ⌃L as PTY
+  input, which zsh, bash and fish all bind to repaint the prompt at the top (`CSI 2 J` erases
+  in place in ghostty, so nothing is pushed back into history); a program that is not a
+  shell gets the ⌃L it would have got from the keyboard; (3) the view resets its scroll
+  offset and sends one `TermRequest::Clear`; ⌘K in the terminal context, "Clear the screen
+  and history" in the palette. Tests: golden `client_term_clear`, the ⌘K assertion in
+  `cmd_shift_c_copies_the_last_commands_output`, and the app self-test's ⌘K step (a real zsh
+  through ptyd: the echoed output is gone and the cursor is back on the row a fresh prompt
+  puts it — the prompt's height is measured before anything is typed, so a three-line theme
+  passes too). What the step then caught: after the clear, the `sleep 6` badge never came.
+  An erase in place keeps the line numbers, but the engine kept the `133;A`/`133;D` marks it
+  had recorded on the erased rows, so the next prompt drawn over them read as a continuation
+  of a start that no longer existed, and the client only counted a prompt as new when its
+  index grew. Rulings: (4) the engine drops a recorded start (and the status on its row) the
+  moment its row is no longer a prompt row in ghostty's eyes (the frame walk sees every dirty
+  row, so an erase is noticed on the next frame; a row scrolled into history is untouched);
+  (5) the client treats any change of the newest prompt's index as a new prompt, not only an
+  increase. Tests: `a_screen_erased_in_place_drops_the_marks_of_its_rows` (engine bytes) and
+  the ⌃L frames in `a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts`.
+
 - ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
   click on the block; the command a human reruns most is the one that just finished, and
   Warp puts that on a key. Ruling: `TermState::last_command` is the command of the block
