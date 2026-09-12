@@ -21,6 +21,26 @@ pub fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden")
 }
 
+/// A small real PNG (a 64×48 gradient), for pasting into a driven card: the app decodes a
+/// pasted picture, so a scenario cannot hand it made-up bytes.
+#[must_use]
+pub fn tiny_png() -> Vec<u8> {
+    let picture = RgbaImage::from_fn(64, 48, |x, y| {
+        Rgba([
+            u8::try_from(x.saturating_mul(4)).unwrap_or(255),
+            u8::try_from(y.saturating_mul(5)).unwrap_or(255),
+            90,
+            255,
+        ])
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    // A fixed picture always encodes; the size in the chip label is read off the result.
+    if picture.write_to(&mut out, image::ImageFormat::Png).is_err() {
+        return Vec::new();
+    }
+    out.into_inner()
+}
+
 /// The outcome of a comparison.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Diff {

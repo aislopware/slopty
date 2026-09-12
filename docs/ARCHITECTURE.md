@@ -529,7 +529,14 @@ nothing yet to draw; it never displaces a permission or a question. **Pictures**
 prompt (protocol 23): ⌘V in the composer with a picture on the clipboard (`composer_paste`
 captures the input's `Paste` before it reads text) attaches it — PNG, JPEG, GIF or WebP, the
 types the model reads, at most `IMAGES_MAX` of `IMAGE_BYTES_MAX` each — as a chip above the
-composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it); ↩ sends
+composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it). Before it lands the
+picture is made fit off the UI thread (`terminal::attachment::fit`, a "preparing…" chip
+meanwhile): one over 1568 px on the long side or over the cap is decoded, shrunk and
+re-encoded — PNG when it has transparency, JPEG otherwise — so a 6 MB phone screenshot goes
+as a few hundred KB the model reads at full detail anyway; one already inside both bounds
+passes through byte for byte. A refused picture (a TIFF, undecodable bytes, a fifth) says
+why in the top bar (`TerminalViewEvent::Notice` → `CanvasEvent::Notice` →
+`Workspace::show_notice`). ↩ sends
 `AgentSay { text, images }` and the host writes the stream-json user message as blocks, each
 picture base64 with its media type before the text (`stream::user_message`), refusing a
 prompt over the caps whole. The transcript reader counts image blocks into

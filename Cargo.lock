@@ -8380,6 +8380,7 @@ dependencies = [
  "core-video",
  "gpui",
  "gpui-kit",
+ "image",
  "slopty-client",
  "slopty-core",
  "slopty-grid",

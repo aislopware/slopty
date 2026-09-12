@@ -191,6 +191,8 @@ pub enum CanvasEvent {
     Attention(SessionId),
     /// How many agents are waiting on the human right now (for a count in the chrome).
     NeedsYou(usize),
+    /// Something the human should read in the top bar for a moment (a picture refused).
+    Notice(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1308,6 +1310,7 @@ impl CanvasView {
                             cx,
                         );
                     }
+                    TerminalViewEvent::Notice(text) => cx.emit(CanvasEvent::Notice(text.clone())),
                 },
             ));
             if self.is_driven(*session) {

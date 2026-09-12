@@ -187,6 +187,8 @@ pub enum TerminalViewEvent {
         /// Allow and take the agent's suggestion for not asking again.
         always: bool,
     },
+    /// Something the human should read in the top bar for a moment (a picture refused).
+    Notice(String),
 }
 
 /// One session's view.
@@ -249,6 +251,8 @@ pub struct TerminalView {
     chosen: Vec<Vec<String>>,
     /// Pictures pasted into the composer, going with the next prompt.
     attachments: Vec<slopty_proto::agent::Image>,
+    /// Pictures being made fit off the UI thread, not yet in `attachments`.
+    preparing: usize,
     /// The text the driven agent is writing now, ahead of its next entry.
     partial: String,
     /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
@@ -320,6 +324,7 @@ impl TerminalView {
             driven: false,
             chosen: Vec::new(),
             attachments: Vec::new(),
+            preparing: 0,
             open_conversation: false,
             permission: None,
             partial: String::new(),
@@ -1239,26 +1244,40 @@ impl TerminalView {
         }
     }
 
-    /// Attach a picture to the next prompt: only the types the model reads, within the wire's
-    /// caps; anything else is dropped with a log line, never sent half.
+    /// Attach a picture to the next prompt. It is made fit off the UI thread
+    /// (`attachment::fit`: shrunk and re-encoded when over the model's size or the wire's
+    /// cap) and shows as a "preparing" chip meanwhile; a picture the model cannot read, or
+    /// one too many, is refused with a notice in the top bar, never sent half.
     pub fn attach_image(&mut self, image: slopty_proto::agent::Image, cx: &mut Context<Self>) {
-        use slopty_proto::agent::{IMAGE_BYTES_MAX, IMAGES_MAX};
-        let readable = matches!(
-            image.media_type.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        );
-        if !readable || image.data.len() > IMAGE_BYTES_MAX || self.attachments.len() >= IMAGES_MAX {
-            tracing::warn!(
-                session = %self.session,
-                media_type = %image.media_type,
-                bytes = image.data.len(),
-                attached = self.attachments.len(),
-                "picture not attached"
-            );
+        use slopty_proto::agent::IMAGES_MAX;
+        if self.attachments.len().saturating_add(self.preparing) >= IMAGES_MAX {
+            cx.emit(TerminalViewEvent::Notice(format!("At most {IMAGES_MAX} pictures per prompt")));
             return;
         }
-        self.attachments.push(image);
+        self.preparing = self.preparing.saturating_add(1);
         cx.notify();
+        let fitting = cx.background_spawn(async move { super::attachment::fit(image) });
+        cx.spawn(async move |this, cx| {
+            let fitted = fitting.await;
+            let _updated = this.update(cx, |view, cx| {
+                view.preparing = view.preparing.saturating_sub(1);
+                match fitted {
+                    Ok(picture) => view.attachments.push(picture),
+                    Err(refused) => {
+                        tracing::warn!(session = %view.session, %refused, "picture not attached");
+                        cx.emit(TerminalViewEvent::Notice(refused.to_string()));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Pictures being made fit right now, not yet attached.
+    #[must_use]
+    pub const fn preparing(&self) -> usize {
+        self.preparing
     }
 
     /// Drop the `i`th attachment (its chip was tapped).
@@ -2049,6 +2068,7 @@ impl Render for TerminalView {
                 attention.as_ref(),
                 &self.partial,
                 &self.attachments,
+                self.preparing,
                 composer_focused,
                 working,
                 &self.theme,
@@ -2158,6 +2178,16 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
+    }
+
+    /// A real picture of `width`×`height` encoded as `format`, for pasting.
+    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let buffer = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([u8::try_from(x % 256).unwrap_or(0), u8::try_from(y % 256).unwrap_or(0), 90])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(buffer).write_to(&mut out, format).expect("encodes");
+        out.into_inner()
     }
 
     fn user(text: &str) -> TranscriptEntry {
@@ -3407,32 +3437,54 @@ mod tests {
             gpui::ClipboardItem::new_image(&gpui::Image { format, bytes: bytes.to_vec(), id: 1 })
         };
 
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 70])));
+        let notices = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&notices);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::Notice(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        let small = encoded(64, 48, image::ImageFormat::Png);
+        let small_label = attachment_label(&slopty_proto::agent::Image {
+            media_type: "image/png".to_owned(),
+            data: small.clone(),
+        });
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(
-            tree.iter().any(|n| n.is("Button", Some("Remove picture 1: PNG · 70 B"))),
+            tree.iter().any(|n| n.is("Button", Some(&format!("Remove picture 1: {small_label}")))),
             "the chip names the picture: {tree:#?}"
         );
         let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
         assert_eq!(text.as_deref(), Some(""), "nothing pasted as text");
 
-        // A second picture and the first's chip tapped away.
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Jpeg, &[0xff; 2048])));
+        // A second picture, a screenshot too big for the model, is made fit off the UI
+        // thread (a "preparing" chip meanwhile) and lands shrunk as a JPEG; then the first's
+        // chip is tapped away.
+        let big = encoded(3200, 1400, image::ImageFormat::Png);
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &big)));
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 2);
+        assert_eq!(view.read_with(cx, |v, _| (v.preparing(), v.attachments().len())), (0, 2));
+        let fitted = view.read_with(cx, |v, _| v.attachments()[1].clone());
+        assert_eq!(fitted.media_type, "image/jpeg", "shrunk and recompressed");
+        let shrunk = image::load_from_memory(&fitted.data).expect("decodes");
+        assert_eq!((shrunk.width(), shrunk.height()), (1568, 686), "long side clamped");
         let chip = cx.debug_bounds("composer-attachment-0").expect("the first chip");
         cx.simulate_click(chip.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         let left: Vec<String> =
             view.read_with(cx, |v, _| v.attachments().iter().map(attachment_label).collect());
-        assert_eq!(left, ["JPEG · 2 KB"]);
+        assert_eq!(left, [attachment_label(&fitted)]);
 
-        // Text still pastes as text; a TIFF is not something the model reads.
+        // Text still pastes as text; a TIFF is not something the model reads, and says so.
         cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hue".into())));
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
@@ -3442,6 +3494,26 @@ mod tests {
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1, "TIFF not attached");
+        assert_eq!(notices.borrow().as_slice(), ["image/tiff is not a picture the agent can read"]);
+        notices.borrow_mut().clear();
+
+        // Past the cap the fifth is refused before any work is done.
+        for _ in 0..3 {
+            cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
+            cx.simulate_keystrokes("cmd-v");
+        }
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 4);
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 4);
+        assert_eq!(notices.borrow().as_slice(), ["At most 4 pictures per prompt"]);
+        for _ in 0..3 {
+            view.update(cx, |v, cx| v.remove_attachment(1, cx));
+        }
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1);
 
         // ↩ sends the text with the picture and clears the chips.
         cx.simulate_keystrokes("enter");
@@ -3458,9 +3530,11 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.attachments().is_empty()));
         assert!(cx.debug_bounds("composer-attachments").is_none(), "no chips left");
 
-        // A picture alone is a prompt too.
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 3])));
-        cx.simulate_keystrokes("cmd-v enter");
+        // A picture alone is a prompt too (↩ once it is fit: the chip is what says so).
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         let sent: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|msg| match msg {
@@ -3474,7 +3548,7 @@ mod tests {
 
         // The phone key bar's "paste" (no ⌘V on glass) reaches the same place: a picture is
         // attached, text lands in the composer, nothing goes to a session.
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[0x89; 5])));
+        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
         view.update_in(cx, |v, window, cx| v.paste_clipboard(&Paste, window, cx));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1);

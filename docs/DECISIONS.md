@@ -2739,6 +2739,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `the_driven_agent_card_on_the_simulator` (the socket's `clipboard`, a finger on "Paste",
   the chip, ↩ and the fake reading back "image/png 70 B" — the fork's read and write on a
   real `UIPasteboard`).
+- ✅ **A pasted picture is made fit off the UI thread, and a refused one says why**
+  (2026-09-12). A phone screenshot is a 2–6 MB PNG, a photo a 3–12 MB JPEG; the first cut
+  dropped anything over the 4 MiB cap with a log line nobody sees, and pasted a TIFF into
+  silence. Rulings: (1) `terminal::attachment::fit` decodes the picture and, when it is over
+  1568 px on the long side (what the model reads at full detail) or over the cap, shrinks it
+  (Triangle: a few times faster than Lanczos, indistinguishable to the model) and re-encodes
+  it — PNG when it has transparency, JPEG q85 otherwise, q70 as a second try — so the wire
+  carries hundreds of KB, not megabytes; a picture already inside both bounds passes through
+  untouched, because re-encoding what fits would only lose; (2) the fit runs in
+  `cx.background_spawn`, with the count of pictures in flight drawn as a muted "preparing…"
+  chip, because decoding a 12 MB JPEG on the UI thread is a visible hitch on a phone; (3)
+  what is refused — a type the model does not read, undecodable bytes, a fifth picture —
+  reaches the top bar as a notice through a new `TerminalViewEvent::Notice` /
+  `CanvasEvent::Notice` pair, the route `HooksInstalled` already used; the fifth is refused
+  before any decoding; (4) `slopty-ui` takes `image` with the four decoders, which GPUI
+  already builds, so the binaries grow by nothing; the e2e scenarios paste a real 64×48 PNG
+  (`snapshot::tiny_png`) since made-up bytes no longer decode. Tests: `attachment` (a small
+  picture passes through byte for byte, 3200×1400 → 1568×686 JPEG, transparent 600×2000 →
+  470×1568 PNG, a TIFF and garbage refused by name), headless
+  `a_picture_pasted_into_the_composer_goes_with_the_prompt` (the big one lands shrunk as a
+  JPEG, the TIFF's and the fifth's notices), the app and simulator scenarios on the real
+  PNG.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

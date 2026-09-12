@@ -418,6 +418,7 @@ impl Conversation {
         attention: Option<&Attention>,
         partial: &str,
         attachments: &[slopty_proto::agent::Image],
+        preparing: usize,
         composer_focused: bool,
         working: bool,
         theme: &Theme,
@@ -514,7 +515,9 @@ impl Conversation {
             .when(!completions.is_empty(), |el| {
                 el.child(self.completions_row(&completions, &theme, cx))
             })
-            .when(!attachments.is_empty(), |el| el.child(attachments_row(attachments, &theme, cx)))
+            .when(!attachments.is_empty() || preparing > 0, |el| {
+                el.child(attachments_row(attachments, preparing, &theme, cx))
+            })
             .child(self.composer_row(composer_focused, working, &theme, cx))
             .into_any_element()
     }
@@ -832,9 +835,11 @@ fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
 /// What the agent waits for, with the one-tap answers, above the composer: the warn tone,
 /// faint, since the agent is blocked on the human.
 /// The pictures waiting to go with the next prompt, one chip each (`composer-attachment-<i>`,
-/// a button that drops it).
+/// a button that drops it), and a muted chip for those still being made fit
+/// (`composer-attachment-preparing`).
 fn attachments_row(
     attachments: &[slopty_proto::agent::Image],
+    preparing: usize,
     theme: &Theme,
     cx: &Context<TerminalView>,
 ) -> AnyElement {
@@ -879,6 +884,29 @@ fn attachments_row(
                 view.remove_attachment(i, cx);
             }))
         }))
+        .when(preparing > 0, |el| {
+            el.child(
+                div()
+                    .id("composer-attachment-preparing")
+                    .debug_selector(|| "composer-attachment-preparing".to_owned())
+                    .role(Role::Status)
+                    .aria_label(SharedString::from(format!(
+                        "Preparing {}",
+                        pictures_label(u32::try_from(preparing).unwrap_or(u32::MAX))
+                    )))
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xs))
+                    .rounded(px(theme.radii.sm))
+                    .border_1()
+                    .border_color(hsla(s.border))
+                    .text_size(px(theme.typography.ui_size))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(format!(
+                        "preparing {}…",
+                        pictures_label(u32::try_from(preparing).unwrap_or(u32::MAX))
+                    ))),
+            )
+        })
         .into_any_element()
 }
 

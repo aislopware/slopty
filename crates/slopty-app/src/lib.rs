@@ -456,6 +456,7 @@ impl Workspace {
                             slopty_platform::bounce();
                         }
                         CanvasEvent::Bell(_session) => {}
+                        CanvasEvent::Notice(text) => ws.show_notice(text.clone(), cx),
                     });
                     // The chrome follows the active item (key bar target), so every canvas
                     // change re-renders it; the workspace is a few labels, so this is cheap.

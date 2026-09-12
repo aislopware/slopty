@@ -17,6 +17,9 @@ core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
+# The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
+# already builds these decoders, so the binary grows by nothing.
+image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 slopty-client.workspace = true
 slopty-platform.workspace = true
 slopty-core.workspace = true

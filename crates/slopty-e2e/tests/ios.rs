@@ -314,14 +314,17 @@ mod tests {
         // A picture: a screenshot on the simulator's own pasteboard (put there through GPUI,
         // read back through UIPasteboard by the fork), the key bar's "paste" attaches it as a
         // chip, and ↩ sends it as an image block the fake reads back.
-        drv.clipboard_image("image/png", &[0x89; 70]).await.unwrap();
+        let png = slopty_e2e::snapshot::tiny_png();
+        let chip = format!("PNG · {} B", png.len());
+        let read_back = format!("assistant: Saw 1 picture(s): image/png {} B", png.len());
+        drv.clipboard_image("image/png", &png).await.unwrap();
         let dump = drv.dump().await.unwrap();
         let (px, py) = centre(&dump, "Button", "Paste");
         drv.ui_tap(px, py).await.unwrap();
         drv.wait_for("the attachment chip", STEP, |d| {
             d.terminals
                 .iter()
-                .any(|t| t.conversation.as_ref().is_some_and(|c| c.attachments == ["PNG · 70 B"]))
+                .any(|t| t.conversation.as_ref().is_some_and(|c| c.attachments == [chip.clone()]))
         })
         .await
         .unwrap();
@@ -331,10 +334,8 @@ mod tests {
             d.terminals.iter().any(|t| {
                 t.conversation.as_ref().is_some_and(|c| {
                     c.attachments.is_empty()
-                        && c.entries.ends_with(&[
-                            "user: what colour? [+1]".to_owned(),
-                            "assistant: Saw 1 picture(s): image/png 70 B".to_owned(),
-                        ])
+                        && c.entries
+                            .ends_with(&["user: what colour? [+1]".to_owned(), read_back.clone()])
                 })
             })
         })
