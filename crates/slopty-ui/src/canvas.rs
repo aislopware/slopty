@@ -1408,6 +1408,10 @@ impl CanvasView {
                     this.activate(*item, cx);
                     this.reveal_pending = Some(*item);
                 }
+                PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
+                    let path = this.absolute_in_active_shell(path);
+                    this.open_file(&path, *line, cx);
+                }
                 PaletteEvent::Dismiss => {}
             }
             cx.notify();
@@ -2090,6 +2094,19 @@ impl CanvasView {
         match self.sessions.get(&session).and_then(|s| s.cwd.as_deref()) {
             Some(cwd) => format!("{}/{path}", cwd.trim_end_matches('/')),
             None => path.to_owned(),
+        }
+    }
+
+    /// `path` made absolute against the active shell's directory, when it is a shell; `~`
+    /// is left for the host, whose home it names.
+    fn absolute_in_active_shell(&self, path: &str) -> String {
+        let session = self.active.and_then(|id| self.doc.get(id)).and_then(|i| match i.kind {
+            ItemKind::Terminal { session } => Some(session),
+            _ => None,
+        });
+        match session {
+            Some(session) if !path.starts_with('~') => self.absolute_in_session(session, path),
+            _ => path.to_owned(),
         }
     }
 
@@ -5522,6 +5539,82 @@ mod tests {
     }
 
     /// A path a shell's view asks to see is made absolute against that shell's directory.
+    #[gpui::test]
+    fn a_path_typed_into_the_palette_opens_a_file_card(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let shell = SessionId::new();
+        host_opens_in(&view, cx, shell, me, SHELL, 1, Where::loose("/tmp/work"));
+        view.update_in(cx, |c, _window, cx| c.reveal_session(shell, cx));
+        cx.run_until_parked();
+        drain(&mut rx);
+
+        // A relative path with a line: the line is offered first and alone, ↩ opens the card in
+        // the active shell's directory, landed on the line.
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("s r c / l i b . r s : 7");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(options, ["Open src/lib.rs line 7"], "{tree:#?}");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "gone after ↩");
+        let (id, path) = view.read_with(cx, |c, _| {
+            c.items()
+                .into_iter()
+                .find_map(|i| match &i.kind {
+                    ItemKind::File { path } => Some((i.id, path.clone())),
+                    _ => None,
+                })
+                .expect("a file card")
+        });
+        assert_eq!(path, "/tmp/work/src/lib.rs");
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id), "active");
+        let focus = view.read_with(cx, |c, cx| c.file(id).map(|f| f.read(cx).focus()));
+        assert_eq!(focus, Some(Some(6)), "landed on line 7");
+        assert!(
+            drain(&mut rx).iter().any(
+                |m| matches!(m, ClientMsg::ReadFile { path } if path == "/tmp/work/src/lib.rs")
+            ),
+            "read asked for the absolute path"
+        );
+
+        // `~` is the host's home, not the shell's directory; a word without a slash is a command.
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("~ / n o t e s . m d enter");
+        cx.run_until_parked();
+        let paths: Vec<String> = view.read_with(cx, |c, _| {
+            c.items()
+                .into_iter()
+                .filter_map(|i| match &i.kind {
+                    ItemKind::File { path } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(paths, ["/tmp/work/src/lib.rs", "~/notes.md"]);
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n o t e");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(options, ["Go to notes.md · ~ file", "New note ⇧⌘N"], "no Open line for a word");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn a_shells_relative_path_opens_a_card_in_its_directory(cx: &mut TestAppContext) {
         let (view, mut rx, me, cx) = canvas(cx);

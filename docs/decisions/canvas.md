@@ -167,7 +167,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the sessions — "Go to main.rs · src" with "file" on the right (`PaletteRun::Item`, which
   activates and reveals the item; added 2026-09-12 with the cards), since a card put down
   while reading an agent's edit is soon off-screen and the palette is how a phone gets back
-  to anything. Tests:
+  to anything; (9) a path typed into the field is a line of its own, first — `Open
+  src/lib.rs` with `line 7` (or `file`) on the right, offered when the text is one word with a
+  `/` in it and no empty segment (`palette::path_query`; `note` stays a command, `a//b` is
+  not a path), an optional `:N` split off as the line to land on; ↩ opens the card through
+  `Canvas::open_file`, a relative path against the active shell's directory and `~` left for
+  the host, which expands it to its own home (`slopty_host::file::expand_home`) since the
+  client cannot know it. Added 2026-09-12: a file the agent never touched had no way onto
+  the canvas but a shell command, and the palette already had a field. Tests:
+  `a_path_in_the_field_is_told_from_a_command` (unit), `a_tilde_is_the_hosts_home` (host
+  unit), `a_path_typed_into_the_palette_opens_a_file_card` (headless). Earlier tests:
   `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and

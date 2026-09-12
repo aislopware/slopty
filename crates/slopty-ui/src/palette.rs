@@ -25,6 +25,14 @@ pub enum PaletteRun {
     Session(SessionId),
     /// Reveal this item (a file card, a note) on the canvas.
     Item(slopty_core::ItemId),
+    /// Open a file card for the path the field holds (relative to the active shell, `~` the
+    /// host's home), landing on `line`.
+    OpenFile {
+        /// As typed, with any `:line` suffix removed.
+        path: String,
+        /// The `:line` suffix, 1-based.
+        line: Option<u32>,
+    },
 }
 
 impl Clone for PaletteRun {
@@ -33,6 +41,7 @@ impl Clone for PaletteRun {
             Self::Action(action) => Self::Action(action.boxed_clone()),
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
+            Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
         }
     }
 }
@@ -43,6 +52,9 @@ impl std::fmt::Debug for PaletteRun {
             Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
+            Self::OpenFile { path, line } => {
+                f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
+            }
         }
     }
 }
@@ -84,6 +96,16 @@ impl PaletteItem {
     #[must_use]
     pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
+    }
+
+    /// `Open <path>` for a path typed into the field, `line N` or `file` on the right.
+    #[must_use]
+    pub fn open_file(path: &str, line: Option<u32>) -> Self {
+        Self {
+            label: format!("Open {path}"),
+            keys: line.map_or_else(|| "file".to_owned(), |n| format!("line {n}")),
+            run: PaletteRun::OpenFile { path: path.to_owned(), line },
+        }
     }
 
     /// The line as a screen reader reads it: the label, then the keys.
@@ -147,6 +169,37 @@ pub fn keys_label(keystroke: &gpui::Keystroke) -> String {
     out
 }
 
+/// The path a query spells, when it is one.
+///
+/// A single word starting with `/`, `~/`, `./` or `../`, or holding a `/` with no empty
+/// segment — with an optional `:line` suffix (`src/main.rs:12`) split off. A word with no
+/// `/` is a command, never a file, so `note` keeps matching `New note`.
+#[must_use]
+pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
+    let word = query.trim();
+    if word.is_empty() || word.contains(char::is_whitespace) || !word.contains('/') {
+        return None;
+    }
+    let looks_like_a_path = word.starts_with('/')
+        || word.starts_with("~/")
+        || word.starts_with("./")
+        || word.starts_with("../")
+        || word.split('/').all(|part| !part.is_empty() || word.ends_with('/'));
+    if !looks_like_a_path {
+        return None;
+    }
+    let (path, line) = match word.rsplit_once(':') {
+        Some((path, digits)) if !path.is_empty() && !digits.is_empty() => {
+            match digits.parse::<u32>() {
+                Ok(line) => (path, Some(line)),
+                Err(_) => (word, None),
+            }
+        }
+        _ => (word, None),
+    };
+    Some((path.to_owned(), line))
+}
+
 /// The items `query` keeps, in their order: every word of the query is found in the label,
 /// case-insensitive; an empty query keeps all.
 #[must_use]
@@ -173,6 +226,8 @@ pub enum PaletteEvent {
 /// The palette: a field and the items that match it.
 pub struct CommandPalette {
     items: Vec<PaletteItem>,
+    /// `Open <path>` when the field spells a path; recomputed on every change.
+    path_item: Option<PaletteItem>,
     input: Entity<InputState>,
     /// Which match ↑/↓ have selected.
     selected: usize,
@@ -209,18 +264,22 @@ impl CommandPalette {
         let events = cx.subscribe(&input, |this, _input, event, cx| match event {
             InputEvent::Change => {
                 this.selected = 0;
+                this.path_item = path_query(&this.input.read(cx).value())
+                    .map(|(path, line)| PaletteItem::open_file(&path, line));
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => this.run(cx),
             InputEvent::Focus | InputEvent::Blur => {}
         });
-        Self { items, input, selected: 0, theme, _events: events }
+        Self { items, path_item: None, input, selected: 0, theme, _events: events }
     }
 
-    /// The items matching the field, in order.
+    /// The items matching the field, in order; a path typed into it is `Open <path>` first.
     #[must_use]
     pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
-        filter(&self.input.read(cx).value(), &self.items)
+        let mut out: Vec<&PaletteItem> = self.path_item.iter().collect();
+        out.extend(filter(&self.input.read(cx).value(), &self.items));
+        out
     }
 
     /// The selected match's index, clamped to the matches.
@@ -381,6 +440,24 @@ mod tests {
     use gpui::Keystroke;
 
     use super::*;
+
+    #[test]
+    fn a_path_in_the_field_is_told_from_a_command() {
+        let q = |s: &str| path_query(s);
+        assert_eq!(q("/w/lib.rs"), Some(("/w/lib.rs".to_owned(), None)));
+        assert_eq!(q(" /w/lib.rs:12 "), Some(("/w/lib.rs".to_owned(), Some(12))));
+        assert_eq!(q("~/notes.md"), Some(("~/notes.md".to_owned(), None)));
+        assert_eq!(q("./a"), Some(("./a".to_owned(), None)));
+        assert_eq!(q("src/main.rs:7"), Some(("src/main.rs".to_owned(), Some(7))));
+        assert_eq!(q("src/main.rs:x"), Some(("src/main.rs:x".to_owned(), None)), "not a line");
+        assert_eq!(q("a//b"), None, "an empty segment is no path");
+        assert_eq!(q("note"), None, "no slash: a command");
+        assert_eq!(q("go to shell"), None, "words: a command");
+        assert_eq!(q(""), None);
+        let item = PaletteItem::open_file("/w/lib.rs", Some(3));
+        assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
+        assert_eq!(PaletteItem::open_file("/w", None).keys, "file");
+    }
 
     #[test]
     fn keys_read_as_glyphs_and_the_filter_takes_every_word() {

@@ -2,7 +2,7 @@
 //! machine, or the word for why not.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead};
@@ -16,7 +16,8 @@ use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead};
 /// it had within it and `more_lines` from there.
 #[must_use]
 pub fn read(path: &Path) -> FileRead {
-    let mut file = match std::fs::File::open(path) {
+    let path = expand_home(path);
+    let mut file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
@@ -56,6 +57,17 @@ pub fn read(path: &Path) -> FileRead {
     FileRead::Text { text, more_lines, size, modified_ms }
 }
 
+/// `~` or `~/…` as the host's home directory (`$HOME`, `/tmp` when unset); any other path
+/// as is. A client types `~/notes.md` into its palette without knowing the host's home.
+#[must_use]
+pub fn expand_home(path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    home.join(rest)
+}
+
 /// The first [`FILE_LINES`] lines of `text` and the count of the rest; a byte-capped read
 /// drops its last, possibly partial, line and counts it.
 fn clip(text: &str, truncated: bool) -> (String, u32) {
@@ -82,6 +94,15 @@ fn os_word(e: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tilde_is_the_hosts_home() {
+        let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        assert_eq!(expand_home(Path::new("~/a/b.rs")), home.join("a/b.rs"));
+        assert_eq!(expand_home(Path::new("~")), home);
+        assert_eq!(expand_home(Path::new("/x/~/y")), PathBuf::from("/x/~/y"), "only a leading ~");
+        assert_eq!(expand_home(Path::new("~user/y")), PathBuf::from("~user/y"), "not ~user");
+    }
 
     #[test]
     fn text_binary_missing_and_clipped() {
