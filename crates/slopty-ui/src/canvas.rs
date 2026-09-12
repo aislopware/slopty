@@ -172,7 +172,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("New agent", Box::new(NewAgent)),
         c("New conversation (driven agent)", Box::new(NewDrivenAgent)),
         c("New conversation in a fresh worktree", Box::new(NewWorktreeAgent)),
-        c("Ask the agent about this window", Box::new(AskAgentAboutWindow)),
+        c("Ask the agent about this window or file", Box::new(AskAgentAboutWindow)),
         c("Resume a conversation", Box::new(ResumeAgent)),
         c("New note", Box::new(NewNote)),
         c("Add a window or display", Box::new(AddWindow)),
@@ -753,8 +753,8 @@ impl CanvasView {
         self.ask(Ask::Picture(target, title), cx);
     }
 
-    /// The palette's "Ask the agent about this window": the active item, when it is a window
-    /// or a display.
+    /// The palette's "Ask the agent about this window or file": the active item, when it is a
+    /// window, a display or a file card.
     pub fn ask_agent_about_window(
         &mut self,
         _: &AskAgentAboutWindow,
@@ -766,9 +766,14 @@ impl CanvasView {
         }
     }
 
-    /// The "ask" pill of a window or display item.
+    /// The "ask" pill of a window, display or file item.
     fn ask_about_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(item) = self.doc.get(id) else { return };
+        if let ItemKind::File { path } = &item.kind {
+            let mention = format!("@{path} ");
+            self.ask_agent(mention, cx);
+            return;
+        }
         let (target, title) = match item.kind {
             ItemKind::Window { window } => (
                 CaptureTarget::Window(window),
@@ -2647,9 +2652,11 @@ impl CanvasView {
         // A window or display: its picture for the agent's next prompt.
         let ask = match item.kind {
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
-                Some(ask_button(id, theme, chrome, cx))
+                Some(ask_button(id, "window", theme, chrome, cx))
             }
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => None,
+            // A file card: `@path` into the agent's composer, the way the human would name it.
+            ItemKind::File { .. } => Some(ask_button(id, "file", theme, chrome, cx)),
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
         };
         // A file card: read it again (the human edited it in a shell; an agent's edit reloads
         // it unasked).
@@ -3250,13 +3257,14 @@ fn take_button(
 /// The "ask" pill in a window's or display's title bar: its picture goes to the agent.
 fn ask_button(
     id: ItemId,
+    what: &'static str,
     theme: &Theme,
     chrome: Chrome,
     cx: &Context<CanvasView>,
 ) -> gpui::AnyElement {
     let pill = pill("ask", id, "ask", theme.surfaces.text_secondary, theme, chrome)
         .role(Role::Button)
-        .aria_label("Ask the agent about this window");
+        .aria_label(SharedString::from(format!("Ask the agent about this {what}")));
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| this.ask_about_item(id, cx)))
         .into_any_element()
@@ -5437,6 +5445,17 @@ mod tests {
         );
         assert!(tree.iter().any(|n| n.is("Button", Some("Read the file again"))), "{tree:#?}");
         assert_eq!(view.read_with(cx, |c, cx| c.file(file).unwrap().read(cx).line_count()), 2);
+
+        // The card's "ask" pill names the file in the agent's composer.
+        let ask = cx.debug_bounds(selector("ask", file)).expect("the card's ask pill");
+        cx.simulate_click(ask.center(), Modifiers::default());
+        cx.run_until_parked();
+        let text = view.read_with(cx, |c, cx| {
+            c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
+        });
+        assert_eq!(text.as_deref(), Some("@/tmp/work/note.txt "), "the mention in the composer");
+        view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
+        cx.run_until_parked();
 
         // An agent's edit lands: the card reads again unasked.
         view.update_in(cx, |c, _window, cx| {

@@ -392,7 +392,8 @@ one). Titled `name · parent` (`canvas::file_title`); its dump entry is `ItemInf
 (path, summary, lines). The way in is the agent card: "view" on an edit, a write or a read
 (`conversation-view-<entry>`, a11y "View <path> on the canvas"), a relative path made
 absolute against the agent's `cwd` (`TerminalView::view_file`); the palette lists every card
-as "Go to <title>" after the sessions (`PaletteRun::Item`). The picker (⌘O) lists the
+as "Go to <title>" after the sessions (`PaletteRun::Item`), and the card's "ask" pill puts
+`@<path>` into the agent's composer. The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are

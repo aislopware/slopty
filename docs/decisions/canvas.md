@@ -202,7 +202,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   replaced lines, a deletion pointed at by the line now standing there) and scrolls the first
   into view, the summary saying "12 lines, 3 changed" — the whole point of a card that reads
   again is to show what the agent just did, and a 2 000-line file hides a one-line edit
-  otherwise; the tint stays until the next read (nothing times out under the reader). Ids: `conversation-view-<entry>`
+  otherwise; the tint stays until the next read (nothing times out under the reader); (10)
+  the card's title bar has the same **"ask" pill** a window has, which puts `@<path> ` into
+  the agent's composer (`ask_agent`, the card the human is on, else the topmost, else a new
+  one) — the mention is how a human names a file to Claude Code, and reading a file is
+  usually a step before asking about it. Ids: `conversation-view-<entry>`
   (a11y "View <path> on the canvas"), `file-<item>` (a11y Document "File <path>" whose value
   is the summary: "212 lines", "12 lines, 40 more", "binary, 1.2 MB", "missing: No such
   file"), `reload-<item>` (a11y "Read the file again"). Goldens `client_read_file`,
