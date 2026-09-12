@@ -171,6 +171,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and revealing it with the keyboard in its terminal), and the app self-test's notes scenario,
   which now makes its note through the palette.
 
+- ✅ **A file the agent touched is a card on the canvas, protocol 34** (2026-09-12). "Open in
+  the editor" needs a shell and a keyboard; on a phone neither is comfortable, and the human
+  mostly wants to *read* what the agent just changed, with the diff's context around it.
+  Rulings: (1) a **file card** is an item (`ItemKind::File { path }`) so every client sees it
+  where it was put, but the **text is not document state** — a file is the host's, can be
+  large and changes under the agent, so each client asks (`ClientMsg::ReadFile`) and the host
+  answers (`HostMsg::File`, `slopty-host::file::read`) with the first 512 KiB then the first
+  2 000 lines, `Binary` on a NUL or invalid UTF-8, `Missing` with the OS's word; (2) **no path
+  restriction** on the host: a paired client already has a shell there, so a read is nothing
+  it could not do (logged like the rest); (3) **one card per path** — "view" on another call
+  for the same file reveals the card and reads it again (`canvas::open_file`), because two
+  copies of one file drift; (4) the card **reads again unasked when an agent's Edit or Write
+  result lands** anywhere on the canvas (a result does not name its file, cards are few, and
+  a stale card is worse than a spare read), and on its "reload" pill for edits made in a
+  shell; (5) the card is read-only — editing is the editor's job (`open`), viewing is the
+  card's; (6) drawn with `uniform_list` (line-numbered rows, the gutter as wide as the last
+  number) so a 2 000-line file lays out only what is on screen; (7) the way in is a **"view"
+  button on every edit, write and read in the agent card**, always shown (a card needs no
+  shell, unlike "open"), a relative path made absolute against the agent's `cwd`
+  (`TerminalView::view_file`) because Claude Code's tools take absolute paths but a fake or a
+  hook need not; (8) a byte-capped read drops its last, possibly partial, line and counts it
+  in `more_lines`, so the card never shows half a character. Ids: `conversation-view-<entry>`
+  (a11y "View <path> on the canvas"), `file-<item>` (a11y Document "File <path>" whose value
+  is the summary: "212 lines", "12 lines, 40 more", "binary, 1.2 MB", "missing: No such
+  file"), `reload-<item>` (a11y "Read the file again"). Goldens `client_read_file`,
+  `host_file`, `host_file_missing`, `host_canvas_file`. Tests: `slopty-host::file` unit
+  (text, binary, latin-1, missing, directory, line clip, byte clip); headless
+  `a_tool_calls_path_opens_a_file_card` (one item for the absolute path, the read asked, the
+  text drawn and read out, a second read after an Edit result, the same card on a second
+  "view", ⌘W removes it and its view); the app self-test's driven scenario ("view" on the
+  fake's edit → a card that says missing, the file written on disk → "reload" shows its two
+  lines, ⌘W closes it).
+
 - ✅ **A tool call's file opens in the canvas's shell** (2026-09-12). The card shows the
   agent editing `src/a.rs`; the human's next move is to look at that file, and finding it
   by hand meant a shell, a `cd` and a typed path. Ruling: an edit, a write and a read

@@ -586,6 +586,24 @@ impl Peer<'_> {
                 };
                 let _sent = self.out.send(HostMsg::Files { session, query, paths }).await;
             }
+            ClientMsg::ReadFile { path } => {
+                // A paired client already has a shell here; a read is nothing it could not do.
+                let target = path.clone();
+                let read = tokio::task::spawn_blocking(move || {
+                    slopty_host::file::read(std::path::Path::new(&target))
+                })
+                .await
+                .unwrap_or_else(|_| slopty_proto::file::FileRead::Missing {
+                    error: "read failed".to_owned(),
+                });
+                let kind = match &read {
+                    slopty_proto::file::FileRead::Text { .. } => "text",
+                    slopty_proto::file::FileRead::Binary { .. } => "binary",
+                    slopty_proto::file::FileRead::Missing { .. } => "missing",
+                };
+                tracing::info!(client = %self.client, %path, kind, "read file");
+                let _sent = self.out.send(HostMsg::File { path, read }).await;
+            }
             ClientMsg::InstallHooks => {
                 let (ok, message) = install_hooks().await;
                 tracing::info!(client = %self.client, ok, %message, "install hooks");

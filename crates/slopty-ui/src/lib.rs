@@ -19,6 +19,7 @@ pub mod a11y;
 pub mod canvas;
 pub mod chrome_text;
 pub mod colors;
+pub mod file;
 pub mod fonts;
 pub mod frames;
 pub mod keys;

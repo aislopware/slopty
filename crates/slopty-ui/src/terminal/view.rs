@@ -215,6 +215,9 @@ pub enum TerminalViewEvent {
     /// "Ask the agent" on a block's menu: the block as a Markdown fence for a driven agent's
     /// composer. The canvas picks the agent card (or opens one) and puts it there.
     AskAgent(String),
+    /// "View" on a tool call that named a file: the canvas opens (or reveals) a file card for
+    /// the absolute path.
+    ViewFile(String),
 }
 
 /// One session's view.
@@ -564,6 +567,21 @@ impl TerminalView {
             conversation.set_task(task);
             cx.notify();
         }
+    }
+
+    /// "View" on a tool call: a file card for its path, made absolute against the agent's
+    /// working directory when the agent gave it relative (Claude Code's tools take absolute
+    /// paths, but a fake or a hook may not).
+    pub fn view_file(&self, path: &str, cx: &mut Context<Self>) {
+        let absolute = if path.starts_with('/') {
+            path.to_owned()
+        } else {
+            match &self.info.cwd {
+                Some(cwd) => format!("{}/{path}", cwd.trim_end_matches('/')),
+                None => path.to_owned(),
+            }
+        };
+        cx.emit(TerminalViewEvent::ViewFile(absolute));
     }
 
     /// What the driven agent last said about itself.

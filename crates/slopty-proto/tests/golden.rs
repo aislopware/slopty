@@ -430,6 +430,43 @@ mod golden {
                 paths: vec!["src/main.rs".to_owned(), "docs/manual/".to_owned()],
             },
         );
+        snap("client_read_file", &ClientMsg::ReadFile { path: "/w/slopty/src/main.rs".to_owned() });
+        snap(
+            "host_file",
+            &HostMsg::File {
+                path: "/w/slopty/src/main.rs".to_owned(),
+                read: slopty_proto::file::FileRead::Text {
+                    text: "fn main() {}\n// more".to_owned(),
+                    more_lines: 3,
+                    size: 4096,
+                    modified_ms: 1_788_000_000_000,
+                },
+            },
+        );
+        snap(
+            "host_file_missing",
+            &HostMsg::File {
+                path: "/w/gone".to_owned(),
+                read: slopty_proto::file::FileRead::Missing { error: "No such file".to_owned() },
+            },
+        );
+        snap(
+            "host_canvas_file",
+            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Delta {
+                version: 9,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: slopty_proto::canvas::CanvasOp::Upsert(slopty_proto::canvas::CanvasItem {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
+                    kind: slopty_proto::canvas::ItemKind::File {
+                        path: "/w/slopty/src/main.rs".to_owned(),
+                    },
+                    rect: slopty_proto::canvas::Rect { x: 10.0, y: 20.0, w: 520.0, h: 400.0 },
+                    z: 3,
+                    group: None,
+                    sleeping: false,
+                }),
+            }),
+        );
         snap(
             "host_agent_sessions",
             &HostMsg::AgentSessions {

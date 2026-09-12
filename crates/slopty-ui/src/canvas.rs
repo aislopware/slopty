@@ -32,6 +32,7 @@ use slopty_proto::agent::{
     BlockReason, OpenAgent, PermissionRequest, TranscriptUpdate,
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
+use slopty_proto::file::FileRead;
 use slopty_proto::screen::{
     CaptureTarget, DisplayInfo, Quality, ScreenEvent, ScreenRequest, WindowInfo,
 };
@@ -44,6 +45,7 @@ use tokio::sync::mpsc;
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
+use crate::file::FileView;
 use crate::note::{NoteView, NoteViewEvent};
 use crate::palette::{CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -213,6 +215,8 @@ const SETTLE: Duration = Duration::from_millis(80);
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
 const NOTE_SIZE: (f32, f32) = (320.0, 240.0);
+/// A new file card's size in canvas units.
+const FILE_SIZE: (f32, f32) = (560.0, 420.0);
 /// Minimap box (points) and its distance from the viewport's bottom-right corner.
 const MINIMAP: (f32, f32) = (160.0, 100.0);
 const MINIMAP_MARGIN: f32 = 12.0;
@@ -410,6 +414,7 @@ pub struct CanvasView {
     hooks_offered: bool,
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
+    files: HashMap<ItemId, Entity<FileView>>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// A `List` is in flight to name restored window items.
@@ -534,6 +539,7 @@ impl CanvasView {
             hooks_offered: false,
             screens: HashMap::new(),
             notes: HashMap::new(),
+            files: HashMap::new(),
             pending_opens: HashMap::new(),
             titles_requested: false,
             titles: HashMap::new(),
@@ -768,7 +774,7 @@ impl CanvasView {
             ItemKind::Display { display } => {
                 (CaptureTarget::Display(display), format!("display {display}"))
             }
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } => return,
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => return,
         };
         self.ask_agent_about(target, title, cx);
     }
@@ -898,7 +904,7 @@ impl CanvasView {
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 self.screens.get(&item.id).cloned()
             }
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => None,
         }
     }
 
@@ -1212,6 +1218,9 @@ impl CanvasView {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.notes.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        for view in self.files.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         if let Some(picker) = &self.picker {
@@ -1626,6 +1635,24 @@ impl CanvasView {
 
     /// A slice of an agent session's conversation, for the terminal showing it.
     pub fn transcript_update(&self, update: TranscriptUpdate, cx: &mut Context<Self>) {
+        // An agent's edit landed: the file cards read again, whichever file it was (a result
+        // does not name its file, and cards are few).
+        let edited = !self.files.is_empty()
+            && update.entries.iter().any(|e| match &e.body {
+                slopty_proto::agent::TranscriptBody::ToolResult {
+                    tool: Some(tool),
+                    is_error: false,
+                    ..
+                } => {
+                    matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+                }
+                _ => false,
+            });
+        if edited {
+            for id in self.files.keys() {
+                self.request_file(*id);
+            }
+        }
         if let Some(view) = self.terminals.get(&update.session) {
             view.update(cx, |v, cx| v.transcript_update(update, cx));
         }
@@ -1699,6 +1726,7 @@ impl CanvasView {
                     }
                     TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
                     TerminalViewEvent::AskAgent(text) => this.ask_agent(text.clone(), cx),
+                    TerminalViewEvent::ViewFile(path) => this.open_file(path, cx),
                 },
             ));
             if self.is_driven(*session) {
@@ -1781,7 +1809,7 @@ impl CanvasView {
             .filter_map(|i| match i.kind {
                 ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                 ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
-                ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+                ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => None,
             })
             .collect();
         for &(id, target) in &wanted {
@@ -1992,6 +2020,81 @@ impl CanvasView {
         self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
     }
 
+    /// A file card for `path` on the host: an existing card for it is revealed, else a new
+    /// one opens in the next free slot and asks the host for the text (the item goes into the
+    /// shared document; every client reads the file for itself).
+    pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        let existing = self.doc.items().find_map(|i| match &i.kind {
+            ItemKind::File { path: p } if p == path => Some(i.id),
+            _ => None,
+        });
+        let id = if let Some(id) = existing {
+            self.request_file(id);
+            id
+        } else {
+            let rect = self.doc.free_slot(FILE_SIZE);
+            let id = ItemId::new();
+            let item = CanvasItem {
+                id,
+                kind: ItemKind::File { path: path.to_owned() },
+                rect,
+                z: self.doc.top_z().saturating_add(1),
+                group: None,
+                sleeping: false,
+            };
+            tracing::info!(%id, %path, "open file card");
+            self.propose(CanvasOp::Upsert(item));
+            id
+        };
+        self.active = Some(id);
+        self.reveal_pending = Some(id);
+        cx.notify();
+    }
+
+    /// Ask the host for a file card's text (again).
+    fn request_file(&self, id: ItemId) {
+        if let Some(ItemKind::File { path }) = self.doc.get(id).map(|i| &i.kind) {
+            self.send(ClientMsg::ReadFile { path: path.clone() });
+        }
+    }
+
+    /// The host read a file: every card for that path shows it.
+    pub fn file_read(&self, path: &str, read: &FileRead, cx: &mut Context<Self>) {
+        for view in self.files.values() {
+            if view.read(cx).path() == path {
+                view.update(cx, |v, cx| v.set_read(read.clone(), cx));
+            }
+        }
+    }
+
+    /// Create views for file items and ask the host for their text; drop the views whose
+    /// items are gone. Runs from `render`, as the notes do.
+    fn reconcile_files(&mut self, cx: &mut Context<Self>) {
+        let files: Vec<(ItemId, String)> = self
+            .doc
+            .items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::File { path } => Some((i.id, path.clone())),
+                _ => None,
+            })
+            .collect();
+        for (id, path) in &files {
+            if self.files.contains_key(id) {
+                continue;
+            }
+            let view = cx.new(|_cx| FileView::new(*id, path, self.theme.clone()));
+            self.files.insert(*id, view);
+            self.send(ClientMsg::ReadFile { path: path.clone() });
+        }
+        self.files.retain(|id, _| files.iter().any(|(f, _)| f == id));
+    }
+
+    /// The file cards on the canvas, for tests and the self-test dump.
+    #[must_use]
+    pub fn file(&self, id: ItemId) -> Option<&Entity<FileView>> {
+        self.files.get(&id)
+    }
+
     /// ⌘O: ask the host for its windows, then show the picker (which also lists the canvas's
     /// sessions, agents first, to jump to).
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2021,7 +2124,8 @@ impl CanvasView {
             ItemKind::Terminal { .. }
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
-            | ItemKind::Note { .. } => {
+            | ItemKind::Note { .. }
+            | ItemKind::File { .. } => {
                 self.propose(CanvasOp::Remove(id));
             }
         }
@@ -2453,6 +2557,7 @@ impl CanvasView {
             ItemKind::Window { .. } => "window",
             ItemKind::Display { .. } => "display",
             ItemKind::Note { .. } => "note",
+            ItemKind::File { .. } => "file",
         };
         let (title, focused) = match &item.kind {
             ItemKind::Terminal { session } => {
@@ -2480,6 +2585,7 @@ impl CanvasView {
                     self.notes.get(&item.id).is_some_and(|v| v.read(cx).editing(window, cx));
                 (note_title(text), focused)
             }
+            ItemKind::File { path } => (file_title(path), false),
         };
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
@@ -2503,7 +2609,13 @@ impl CanvasView {
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 Some(ask_button(id, theme, chrome, cx))
             }
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => None,
+        };
+        // A file card: read it again (the human edited it in a shell; an agent's edit reloads
+        // it unasked).
+        let reload = match item.kind {
+            ItemKind::File { .. } => Some(reload_button(id, theme, chrome, cx)),
+            _ => None,
         };
         // An agent the host had to guess at: offer the hooks that would make it precise.
         let hooks = agent
@@ -2579,6 +2691,7 @@ impl CanvasView {
                     .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming)),
             )
             .when_some(ask, gpui::ParentElement::child)
+            .when_some(reload, gpui::ParentElement::child)
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
             .when_some(finished, gpui::ParentElement::child)
@@ -2673,6 +2786,25 @@ impl CanvasView {
                     .text_color(hsla(theme.surfaces.text_muted))
                     .font_family(theme.typography.ui_family.clone())
                     .child(SharedString::from(note_summary(note_text)))
+                    .into_any_element(),
+            },
+            ItemKind::File { .. } => match (card, self.files.get(&item.id)) {
+                (false, Some(view)) => {
+                    let (pad, text_size) = (theme.spacing.sm, theme.typography.small());
+                    view.update(cx, |v, _| v.set_layout(zoom, pad, text_size));
+                    div().flex_1().w_full().overflow_hidden().child(view.clone()).into_any_element()
+                }
+                (_, view) => div()
+                    .flex_1()
+                    .w_full()
+                    .p(px(theme.spacing.sm))
+                    .overflow_hidden()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .font_family(theme.typography.ui_family.clone())
+                    .child(SharedString::from(
+                        view.map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary()),
+                    ))
                     .into_any_element(),
             },
         };
@@ -2845,6 +2977,7 @@ impl Render for CanvasView {
         }
         self.keep_focus_rendered(window, cx);
         self.reconcile_notes(window, cx);
+        self.reconcile_files(cx);
         // A zoom that differs from the one drawn last frame is in motion. Once the changes
         // pause for `SETTLE`, one more frame is asked for so the final zoom paints exact;
         // asking right away doubled the frames of a gesture (a settle frame per step, each
@@ -2997,6 +3130,37 @@ impl Render for CanvasView {
                 )
             })
     }
+}
+
+/// A file card's title: the file's name, with the directory it is in when there is one
+/// (`main.rs · src`), so two `mod.rs` cards can be told apart.
+#[must_use]
+pub fn file_title(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let mut parts = trimmed.rsplit('/');
+    let name = parts.next().filter(|n| !n.is_empty()).unwrap_or(trimmed);
+    match parts.next().filter(|d| !d.is_empty()) {
+        Some(dir) => format!("{name} · {dir}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The "reload" pill in a file card's title bar: read the file again.
+fn reload_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("reload", id, "reload", theme.surfaces.text_secondary, theme, chrome)
+        .role(Role::Button)
+        .aria_label("Read the file again");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            this.request_file(id);
+            cx.notify();
+        }))
+        .into_any_element()
 }
 
 /// What a zoomed-out note card shows: its first non-empty line, clipped.
@@ -5099,6 +5263,160 @@ mod tests {
             c.terminals[&agent].read(cx).conversation().is_some_and(|conv| conv.is_open(0))
         });
         assert_eq!(folded_before, folded_after, "the click did not fold the call");
+    }
+
+    /// "View" on a tool call that named a file puts a file card on the canvas: one item for
+    /// the absolute path (a relative one resolved against the agent's directory), a read
+    /// asked of the host, the text drawn when it answers, read again when an agent's edit
+    /// lands, the same card revealed on a second "view", and closed like any item.
+    #[gpui::test]
+    fn a_tool_calls_path_opens_a_file_card(cx: &mut TestAppContext) {
+        use slopty_proto::agent::{AgentInfo, DiffKind, DiffLine, ToolDetail};
+        let (view, mut rx, me, cx) = canvas(cx);
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, SHELL, 1);
+        view.update_in(cx, |c, _window, cx| {
+            c.agent_info(
+                agent,
+                AgentInfo { cwd: Some("/tmp/work".to_owned()), ..AgentInfo::default() },
+                cx,
+            );
+            c.transcript_update(
+                TranscriptUpdate {
+                    session: agent,
+                    reset: true,
+                    entries: vec![TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::ToolUse {
+                            call: "t1".to_owned(),
+                            name: "Edit".to_owned(),
+                            summary: "note.txt".to_owned(),
+                            detail: ToolDetail::Diff {
+                                path: "note.txt".to_owned(),
+                                lines: vec![DiffLine { kind: DiffKind::Added, text: "x".into() }],
+                                more_lines: 0,
+                                replace_all: false,
+                            },
+                        },
+                    }],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("conversation-view-0").expect("the call's view button");
+        drain(&mut rx);
+
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let (file, path) = view.read_with(cx, |c, _| {
+            let files: Vec<_> = c
+                .items()
+                .into_iter()
+                .filter_map(|i| match &i.kind {
+                    ItemKind::File { path } => Some((i.id, path.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(files.len(), 1, "{files:?}");
+            files[0].clone()
+        });
+        assert_eq!(path, "/tmp/work/note.txt", "made absolute against the agent's directory");
+        assert!(view.read_with(cx, |c, _| c.active_item() == Some(file)), "the card is active");
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Upsert(i)) if i.id == file)),
+            "{sent:?}"
+        );
+        let reads = |sent: &[ClientMsg]| {
+            sent.iter()
+                .filter(
+                    |m| matches!(m, ClientMsg::ReadFile { path } if path == "/tmp/work/note.txt"),
+                )
+                .count()
+        };
+        assert_eq!(reads(&sent), 1, "one read asked of the host: {sent:?}");
+        assert!(
+            cx.debug_bounds(selector("file", file)).is_some(),
+            "the card draws its view while waiting"
+        );
+
+        // The host answers: the text is drawn, and a screen reader hears what the card holds.
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/tmp/work/note.txt",
+                &FileRead::Text {
+                    text: "hello\nthere".to_owned(),
+                    more_lines: 0,
+                    size: 12,
+                    modified_ms: 1,
+                },
+                cx,
+            );
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        let doc = tree
+            .iter()
+            .find(|n| n.is("Document", Some("File /tmp/work/note.txt")))
+            .unwrap_or_else(|| panic!("{tree:#?}"));
+        assert_eq!(doc.value.as_deref(), Some("2 lines"));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Read the file again"))), "{tree:#?}");
+        assert_eq!(view.read_with(cx, |c, cx| c.file(file).unwrap().read(cx).line_count()), 2);
+
+        // An agent's edit lands: the card reads again unasked.
+        view.update_in(cx, |c, _window, cx| {
+            c.transcript_update(
+                TranscriptUpdate {
+                    session: agent,
+                    reset: false,
+                    entries: vec![TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::ToolResult {
+                            tool: Some("Edit".to_owned()),
+                            output: slopty_proto::agent::Clipped::whole("ok".to_owned()),
+                            is_error: false,
+                        },
+                    }],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(reads(&drain(&mut rx)), 1, "the edit's result reads the file again");
+
+        // A second "view" of the same path reveals the card instead of adding another.
+        view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
+        cx.run_until_parked();
+        let button = cx.debug_bounds("conversation-view-0").expect("the view button again");
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let files = view.read_with(cx, |c, _| {
+            c.items().iter().filter(|i| matches!(i.kind, ItemKind::File { .. })).count()
+        });
+        assert_eq!(files, 1, "one card per path");
+        assert!(view.read_with(cx, |c, _| c.active_item() == Some(file)));
+        assert_eq!(reads(&drain(&mut rx)), 1, "revealing reads it again");
+
+        // ⌘W on the card removes it from the document, and its view goes with it.
+        view.update_in(cx, |c, window, cx| c.close_item(&CloseItem, window, cx));
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Remove(id)) if *id == file)),
+            "{sent:?}"
+        );
+        assert!(view.read_with(cx, |c, _| c.file(file).is_none()), "the view is dropped");
+    }
+
+    #[test]
+    fn a_file_card_is_titled_by_its_name_and_directory() {
+        assert_eq!(file_title("/w/slopty/src/main.rs"), "main.rs · src");
+        assert_eq!(file_title("/main.rs"), "main.rs");
+        assert_eq!(file_title("main.rs"), "main.rs");
     }
 
     /// "Ask the agent" with no agent card on the canvas opens one in the active shell's

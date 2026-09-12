@@ -39,6 +39,11 @@ pub enum ItemKind {
         /// Markdown.
         text: String,
     },
+    /// A file on the host, read-only: the text comes over `HostMsg::File`, not the document.
+    File {
+        /// Absolute path on the host.
+        path: String,
+    },
 }
 
 /// One item on the canvas.

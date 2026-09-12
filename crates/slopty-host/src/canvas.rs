@@ -223,6 +223,11 @@ fn sanitize(op: CanvasOp) -> Result<CanvasOp, HostError> {
             {
                 return Err(HostError::Canvas("note too long".to_owned()));
             }
+            if let ItemKind::File { path } = &item.kind
+                && (path.is_empty() || path.len() > 4096)
+            {
+                return Err(HostError::Canvas("bad file path".to_owned()));
+            }
             CanvasOp::Upsert(item)
         }
         CanvasOp::Place { id, rect } => CanvasOp::Place { id, rect: check_rect(rect)? },

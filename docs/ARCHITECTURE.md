@@ -360,7 +360,7 @@ window (`slopty-net::endpoint`).
 ## 4. Canvas
 
 One infinite 2D plane per workspace (kolu model). Items: terminal, remote window, remote display,
-note (`ItemKind` in `crates/slopty-proto/src/canvas.rs`). Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
+note, file (`ItemKind` in `crates/slopty-proto/src/canvas.rs`). Camera `{x, y, zoom}`; zoom is real (we own the renderer), with semantic LOD: full terminal
 at ≥ 0.6×, summary card (title, last lines, agent state) below. Off-screen terminals keep their
 line cache and stop painting; off-screen video pauses decode (kind-aware culling). Layout is a
 document synced through the host so every client sees the same canvas — item geometry, z, sleep
@@ -372,7 +372,19 @@ shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are ed
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), and a
 click on it puts the caret back in the editor; its title bar reads the first non-empty
-line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty. The picker (⌘O) lists the
+line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty. A
+**file card** (`ItemKind::File { path }`, protocol 34, `slopty-ui::file`) shows a file on the
+host read-only: the item names the absolute path and lives in the shared document, the text
+does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`)
+and draws the `HostMsg::File` answer (`slopty-host::file::read`: the first 512 KiB, then the
+first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
+`uniform_list`, or one line saying why not. The card reads again when any agent's
+Edit/Write result arrives on the canvas, on its "reload" pill, and when "view" is pressed on
+another call for the same path (one card per path: `canvas::open_file` reveals the existing
+one). Titled `name · parent` (`canvas::file_title`); its dump entry is `ItemInfo.file`
+(path, summary, lines). The way in is the agent card: "view" on an edit, a write or a read
+(`conversation-view-<entry>`, a11y "View <path> on the canvas"), a relative path made
+absolute against the agent's `cwd` (`TerminalView::view_file`). The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are

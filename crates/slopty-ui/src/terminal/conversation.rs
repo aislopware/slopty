@@ -1536,6 +1536,7 @@ fn entry(
                             .child(SharedString::from(summary.clone())),
                     )
                     .children(tool_badge(detail, theme))
+                    .children(view_button(ix, detail, view, theme))
                     .children(run.and_then(|r| open_button(ix, detail, r, theme)))
                     .on_click(toggle),
             )
@@ -1826,6 +1827,41 @@ pub fn tool_path(detail: &ToolDetail) -> Option<(&str, Option<u32>)> {
         ToolDetail::Read { path, offset, .. } => Some((path, *offset)),
         _ => None,
     }
+}
+
+/// A "view" button on a tool call that named a file: a file card for it on the canvas, the
+/// way to read the file on a phone. Always drawn: a card needs no shell.
+fn view_button(
+    ix: usize,
+    detail: &ToolDetail,
+    view: &Entity<TerminalView>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let (path, _line) = tool_path(detail)?;
+    let path = path.to_owned();
+    let s = &theme.surfaces;
+    let view = view.clone();
+    let id = format!("conversation-view-{ix}");
+    Some(
+        div()
+            .id(ElementId::Name(id.clone().into()))
+            .debug_selector(move || id)
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("View {path} on the canvas")))
+            .flex_none()
+            .px(px(theme.spacing.xs))
+            .rounded(px(theme.radii.xs))
+            .cursor_pointer()
+            .text_color(hsla(s.text_muted))
+            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_click(move |_ev, _window, cx| {
+                cx.stop_propagation();
+                view.update(cx, |v, cx| v.view_file(&path, cx));
+            })
+            .child("view")
+            .into_any_element(),
+    )
 }
 
 /// An "open" button on a tool call that named a file: it types the editor command for that

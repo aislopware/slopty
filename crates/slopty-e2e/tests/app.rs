@@ -383,10 +383,11 @@ mod tests {
         let session = card.session.clone();
         assert_eq!(card.agent_source.as_deref(), Some("driven"), "{card:?}");
         assert_eq!(dump.items.len(), 2, "{:?}", dump.items);
+        let chat_session = session.clone();
         let chat = move |d: &slopty_e2e::Dump| {
             d.terminals
                 .iter()
-                .find(|t| t.session == session)
+                .find(|t| t.session == chat_session)
                 .and_then(|t| t.conversation.clone().map(|c| (t.agent.clone(), c)))
         };
 
@@ -676,6 +677,57 @@ mod tests {
         );
         let frame = drv.render(&stack.dir.path().join("tools.png")).await.unwrap();
         assert_matches("conversation-tools", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // "View" on the edit puts a file card for its path on the canvas (the fake's relative
+        // `note.txt` made absolute against the agent's directory); the host has no such file,
+        // and the card says so. Once the file exists, "reload" reads it and the lines show.
+        let view = dump
+            .a11y_node("Button", Some("View note.txt on the canvas"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (vx, vy) = a11y_center(view);
+        drv.click(vx, vy).await.unwrap();
+        let dump = drv
+            .wait_for("the file card, missing", STEP, |d| {
+                d.item("file").is_some_and(|i| {
+                    i.active
+                        && i.file.as_ref().is_some_and(|f| {
+                            f.path.ends_with("/note.txt") && f.summary.starts_with("missing:")
+                        })
+                })
+            })
+            .await
+            .unwrap();
+        let file = dump.item("file").unwrap().file.clone().unwrap();
+        assert!(file.path.starts_with('/'), "{file:?}");
+        std::fs::write(&file.path, "hello\nthere\n").unwrap();
+        let reload = dump
+            .a11y_node("Button", Some("Read the file again"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (lx, ly) = a11y_center(reload);
+        drv.click(lx, ly).await.unwrap();
+        let dump = drv
+            .wait_for("the file's lines", STEP, |d| {
+                d.item("file").is_some_and(|i| {
+                    i.file.as_ref().is_some_and(|f| f.lines == 2 && f.summary == "2 lines")
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(dump.items.len(), 3, "{:?}", dump.items);
+        // ⌘W closes the card like any item.
+        drv.keys("cmd-w").await.unwrap();
+        drv.wait_for("the file card gone", STEP, |d| {
+            d.items.len() == 2 && d.item("file").is_none()
+        })
+        .await
+        .unwrap();
+        // Back to the conversation, with the caret in its composer, for the steps that type.
+        drv.reveal(&session).await.unwrap();
+        drv.wait_for("the composer again", STEP, |d| {
+            chat(d).is_some_and(|(_, c)| c.composer_focused)
+        })
+        .await
+        .unwrap();
 
         // A question: the options are buttons above the composer (no Allow / Deny), one
         // tap on "Blue" answers by request id with the answer filed under the question, and

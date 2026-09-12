@@ -1519,6 +1519,9 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::Files { session, query, paths }) => {
             canvas.update(cx, |c, cx| c.agent_files(session, query, paths, cx));
         }
+        LinkEvent::Control(HostMsg::File { path, read }) => {
+            canvas.update(cx, |c, cx| c.file_read(&path, &read, cx));
+        }
         LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
             let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
             if !ok {

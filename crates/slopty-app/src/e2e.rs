@@ -27,8 +27,8 @@ use gpui::{
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
-    Button, Command, ConversationInfo, Dump, FaceInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
-    Reply, ScreenInfo, TerminalInfo, WindowInfo,
+    Button, Command, ConversationInfo, Dump, FaceInfo, FileItemInfo, FrameInfo, HostInfo, ItemInfo,
+    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo,
 };
 use slopty_proto::agent::{
     AgentSource, AgentStatus, BlockReason, DiffKind, NoticeLevel, TodoStatus, ToolDetail,
@@ -785,9 +785,20 @@ impl Workspace {
                 ItemKind::Window { .. } => ("window", None),
                 ItemKind::Display { .. } => ("display", None),
                 ItemKind::Note { .. } => ("note", None),
+                ItemKind::File { .. } => ("file", None),
             };
             let note = match &item.kind {
                 ItemKind::Note { text } => Some(text.clone()),
+                _ => None,
+            };
+            let file = match &item.kind {
+                ItemKind::File { path } => Some(FileItemInfo {
+                    path: path.clone(),
+                    summary: canvas
+                        .file(item.id)
+                        .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary()),
+                    lines: canvas.file(item.id).map_or(0, |v| v.read(cx).line_count()),
+                }),
                 _ => None,
             };
             let b = canvas.window_bounds(item.rect);
@@ -805,6 +816,7 @@ impl Workspace {
                 active: canvas.active_item() == Some(item.id),
                 sleeping: item.sleeping,
                 note,
+                file,
             });
             if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
                 && let Some(view) = canvas.screen(item.id)

@@ -18,6 +18,7 @@
 pub mod agent;
 pub mod canvas;
 pub mod codec;
+pub mod file;
 pub mod handshake;
 pub mod input;
 pub mod media;
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 33;
+pub const PROTOCOL_VERSION: u16 = 34;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -107,6 +108,11 @@ pub enum ClientMsg {
         /// What was typed after the `@`.
         query: String,
     },
+    /// Read a file on the host for a file card; answered with `HostMsg::File`.
+    ReadFile {
+        /// Absolute path on the host.
+        path: String,
+    },
 }
 
 impl ClientMsg {
@@ -129,6 +135,7 @@ impl ClientMsg {
             Self::AgentSet(_) => "AgentSet",
             Self::ListAgentSessions { .. } => "ListAgentSessions",
             Self::ListFiles { .. } => "ListFiles",
+            Self::ReadFile { .. } => "ReadFile",
         }
     }
 }
@@ -221,6 +228,13 @@ pub enum HostMsg {
         /// Paths relative to the working directory, best first; a directory ends in `/`.
         paths: Vec<String>,
     },
+    /// The answer to `ClientMsg::ReadFile`.
+    File {
+        /// The path asked for, as asked.
+        path: String,
+        /// What was there.
+        read: file::FileRead,
+    },
 }
 
 impl HostMsg {
@@ -245,6 +259,7 @@ impl HostMsg {
             Self::AgentTask { .. } => "AgentTask",
             Self::AgentSessions { .. } => "AgentSessions",
             Self::Files { .. } => "Files",
+            Self::File { .. } => "File",
         }
     }
 }

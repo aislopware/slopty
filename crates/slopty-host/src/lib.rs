@@ -5,10 +5,11 @@
 //! sinks. [`manager::Host`] owns the session table and talks to `slopty-ptyd`.
 //! [`canvas::CanvasStore`] is the authoritative, persisted canvas document.
 //! [`repo`] answers which repository a session's working directory is in, which only the
-//! machine the shell runs on can know.
+//! machine the shell runs on can know; [`file::read`] reads a file for a file card.
 
 pub mod canvas;
 pub mod ctl;
+pub mod file;
 pub mod manager;
 pub mod repo;
 pub mod screen;

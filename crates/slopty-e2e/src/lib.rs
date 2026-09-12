@@ -556,6 +556,20 @@ pub struct ItemInfo {
     /// A note's text, as the document holds it.
     #[serde(default)]
     pub note: Option<String>,
+    /// A file card's path and what it shows.
+    #[serde(default)]
+    pub file: Option<FileItemInfo>,
+}
+
+/// A file card.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct FileItemInfo {
+    /// Absolute path on the host.
+    pub path: String,
+    /// The card's one-line summary ("12 lines", "missing: …", "reading…").
+    pub summary: String,
+    /// Lines drawn.
+    pub lines: usize,
 }
 
 /// One terminal.
