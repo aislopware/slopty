@@ -145,12 +145,21 @@ fn text_of(line: &Value) -> Option<String> {
     }
 }
 
-/// The answer to a `can_use_tool`: `Some(true)` allow, `Some(false)` deny with the message.
-fn answer_of(line: &Value) -> Option<(bool, String)> {
+/// The answer to a `can_use_tool`: allow or deny with the message, and the `answers` the
+/// allow filed into the input (an `AskUserQuestion`), as `"question"="answer"` pairs.
+fn answer_of(line: &Value) -> Option<(bool, String, Vec<String>)> {
     let response = line.get("response")?.get("response")?;
     let allow = response.get("behavior").and_then(Value::as_str)? == "allow";
     let message = response.get("message").and_then(Value::as_str).unwrap_or("").to_owned();
-    Some((allow, message))
+    let answers = response
+        .get("updatedInput")
+        .and_then(|i| i.get("answers"))
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter().map(|(q, a)| format!("\"{q}\"=\"{}\"", a.as_str().unwrap_or(""))).collect()
+        })
+        .unwrap_or_default();
+    Some((allow, message, answers))
 }
 
 /// A control request's subtype and id, when the line is one.
@@ -254,9 +263,21 @@ fn run() -> std::io::Result<()> {
             }
             continue;
         }
-        if let Some((allow, message)) = answer_of(&value) {
+        if let Some((allow, message, answers)) = answer_of(&value) {
             let Some(Wait::Permission { tool_use }) = waiting.take() else { continue };
-            let (content, closing) = if allow {
+            // A question's answer comes back the way Claude Code words it, and the closing
+            // line is the choice itself.
+            let filed = format!(
+                "Your questions have been answered: {}. You can now continue with these answers in mind.",
+                answers.join(", ")
+            );
+            let choice = answers
+                .first()
+                .and_then(|a| a.rsplit_once('=').map(|(_, v)| v.trim_matches('"').to_owned()))
+                .unwrap_or_default();
+            let (content, closing) = if !answers.is_empty() {
+                (filed.as_str(), choice.as_str())
+            } else if allow {
                 ("wrote note.txt", "Done: the note is written.")
             } else {
                 (message.as_str(), "Understood, I did not write it.")
@@ -332,6 +353,27 @@ fn run() -> std::io::Result<()> {
             fake.note_reply(closing);
             emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": closing}])))?;
             emit(&mut out, &fake.result("success", closing))?;
+        } else if text.starts_with("ask") {
+            // A question to the human: a `can_use_tool` for AskUserQuestion, answered with
+            // the answers filed into the input (probed on CLI 2.1.269).
+            requests = requests.wrapping_add(1);
+            let tool_use = format!("toolu_{requests}");
+            let input = json!({"questions": [{"question": "Which colour do you prefer?", "header": "Colour",
+                "options": [{"label": "Red", "description": "The colour red"}, {"label": "Blue", "description": "The colour blue"}],
+                "multiSelect": false}]});
+            emit(
+                &mut out,
+                &fake.assistant(
+                    &json!([{"type": "tool_use", "id": tool_use, "name": "AskUserQuestion", "input": input}]),
+                ),
+            )?;
+            emit(
+                &mut out,
+                &json!({"type": "control_request", "request_id": format!("req_{requests}"),
+                        "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "display_name": "AskUserQuestion",
+                                    "input": input, "tool_use_id": tool_use, "requires_user_interaction": true}}),
+            )?;
+            waiting = Some(Wait::Permission { tool_use });
         } else if text.starts_with("linger") {
             stream_deltas(&fake, &mut out)?;
             waiting = Some(Wait::Interrupt);

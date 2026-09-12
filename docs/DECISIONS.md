@@ -2584,6 +2584,38 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `an_edit_shows_its_diff_and_a_todo_list_its_checklist` (tinted rows counted in the scene,
   the fold, the labels), and the app self-test's `edit` turn against the fake (an `Edit` and
   a `TodoWrite` the settings allow, golden `conversation-tools`).
+- ✅ **A question is answered on the card, not allowed, protocol 18** (2026-09-12).
+  Probed on CLI 2.1.269 over stdio: `AskUserQuestion` arrives as an ordinary `can_use_tool`
+  control request (`tool_name: "AskUserQuestion"`, `requires_user_interaction: true`, the
+  input `{questions: [{question, header, options: [{label, description}], multiSelect}]}`),
+  and the answer is an *allow* whose `updatedInput` is the input plus
+  `answers: {"<question text>": "<label>"}`; the agent then receives the tool result "Your
+  questions have been answered: "…"="…". You can now continue with these answers in mind."
+  and goes on. Before this the card offered Allow / Deny for it: Allow sent the input back
+  with no answers, which is a question nobody answered. Rulings: (1) the fold reports the
+  request as `Blocked(Question)`, the same reason the hook path uses for the TUI's question,
+  so the badge, the notification ("Claude has a question", an "answer" pill that reveals the
+  card, no Allow / Deny buttons) and the caret-in-composer rule already apply; the
+  `PermissionRequest` still rides beside it, carrying the `ToolDetail::Question`; (2) the
+  options are buttons, and a single-select question is answered by the one tap — the
+  fewest gestures on a phone — while a multi-select one toggles and sends on Answer, which
+  is disabled until every question has a pick; (3) typed text is the "Other" answer to the
+  first question without one, since the TUI offers exactly that and a prompt while the
+  agent waits would be lost anyway; (4) the answer is filed under the question's text,
+  never its index, because that is the key Claude Code reads (the probe confirmed the
+  wording of the result); labels of a multi-select are joined with ", " (the SDK's
+  convention; unverified on the wire, marked in `Question::multi`'s doc); (5) the wire
+  carries `answers: Vec<QuestionAnswer>` on `AgentAnswer` (empty for a permission) rather
+  than a new message, so the host's one answer path and the "answered once" rule serve both.
+  Wire: `ToolDetail::Question`, `Question`, `Choice`, `QuestionAnswer`, goldens
+  `client_agent_answer` / `client_hello` / `host_transcript_tools` re-accepted,
+  `client_agent_answer_question` and `host_agent_question` added, PROTOCOL_VERSION 17 → 18.
+  Tests: `a_question_blocks_as_a_question_and_the_answers_are_filed_into_the_input`
+  (`slopty_agent::stream`, on the probe's line), headless
+  `a_driven_view_answers_a_question_in_place` (one tap; two questions with a multi-select
+  and Answer; typed text), the app self-test's `ask me` turn against the fake (the options
+  in the accessibility tree, no Allow, the tap on "Blue", the result's wording, golden
+  `conversation-question`).
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

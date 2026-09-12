@@ -17,7 +17,9 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use slopty_proto::agent::{AgentStatus, BlockReason, PermissionRequest, TranscriptEntry};
+use slopty_proto::agent::{
+    AgentStatus, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail, TranscriptEntry,
+};
 
 use crate::transcript::{self, ToolNames};
 
@@ -419,13 +421,15 @@ impl Fold {
             }
             Event::Permission { request, input } => {
                 self.pending.insert(request.id.clone(), input);
+                // A question is a `can_use_tool` on the wire but not a permission to the
+                // human: it blocks as a question, the way the hook path reports one.
+                let reason = if matches!(request.detail, ToolDetail::Question { .. }) {
+                    BlockReason::Question
+                } else {
+                    BlockReason::Permission { tool: request.tool.clone() }
+                };
                 let mut out = self
-                    .status(
-                        AgentStatus::Blocked(BlockReason::Permission {
-                            tool: request.tool.clone(),
-                        }),
-                        Some(crate::truncate(&request.summary)),
-                    )
+                    .status(AgentStatus::Blocked(reason), Some(crate::truncate(&request.summary)))
                     .into_iter()
                     .collect::<Vec<_>>();
                 out.push(Update::Permission(request));
@@ -459,9 +463,21 @@ impl Fold {
         request_id: &str,
         allowed: bool,
         message: Option<&str>,
+        answers: &[QuestionAnswer],
     ) -> Option<String> {
-        let input = self.pending.remove(request_id)?;
+        let mut input = self.pending.remove(request_id)?;
         self.status = Some((AgentStatus::Working, None));
+        if allowed && !answers.is_empty() {
+            // `AskUserQuestion` is allowed with the answers filed into its input, keyed by
+            // the question text; Claude Code turns them into the tool's result.
+            let filed: serde_json::Map<String, Value> = answers
+                .iter()
+                .map(|a| (a.question.clone(), Value::String(a.answer.clone())))
+                .collect();
+            if let Value::Object(map) = &mut input {
+                map.insert("answers".to_owned(), Value::Object(filed));
+            }
+        }
         Some(if allowed {
             allow_line(request_id, &input)
         } else {
@@ -605,6 +621,43 @@ mod tests {
         assert_eq!(fold.init().map(|i| i.model.as_str()), Some("claude-haiku-4-5-20251001"));
     }
 
+    /// Probed on CLI 2.1.269: `AskUserQuestion` arrives as a `can_use_tool` (with
+    /// `requires_user_interaction`), and the answer is an allow whose `updatedInput` files
+    /// the answers under the question text.
+    #[test]
+    fn a_question_blocks_as_a_question_and_the_answers_are_filed_into_the_input() {
+        let mut fold = Fold::default();
+        let line = r#"{"type":"control_request","request_id":"07dd1978-3d77-4b8d-8f39-d1ed20e653ba","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","display_name":"AskUserQuestion","input":{"questions":[{"question":"Which colour do you prefer?","header":"Colour","options":[{"label":"Red","description":"The colour red"},{"label":"Blue","description":"The colour blue"}],"multiSelect":false}]},"tool_use_id":"toolu_01UMP2qYNcjojzv7BrqSiRzT","requires_user_interaction":true}}"#;
+        let Some(event) = parse(line) else { panic!("parses") };
+        let updates = fold.apply(event, 0);
+        let Some(Update::Status { status, detail }) = updates.first() else {
+            panic!("blocked first: {updates:?}")
+        };
+        assert_eq!(*status, AgentStatus::Blocked(BlockReason::Question));
+        assert_eq!(detail.as_deref(), Some("Which colour do you prefer?"));
+        let Some(Update::Permission(request)) = updates.get(1) else { panic!("then the request") };
+        let ToolDetail::Question { questions } = &request.detail else {
+            panic!("a question: {request:?}")
+        };
+        assert_eq!(questions.len(), 1);
+        assert_eq!(
+            questions[0].options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
+            ["Red", "Blue"]
+        );
+        let answers = [QuestionAnswer {
+            question: "Which colour do you prefer?".to_owned(),
+            answer: "Blue".to_owned(),
+        }];
+        let line = fold.answer(&request.id, true, None, &answers).expect("open");
+        let sent: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(
+            sent["response"]["response"]["updatedInput"]["answers"],
+            json!({"Which colour do you prefer?": "Blue"})
+        );
+        assert_eq!(sent["response"]["response"]["behavior"], "allow");
+        assert!(sent["response"]["response"]["updatedInput"]["questions"].is_array());
+    }
+
     #[test]
     fn a_permission_blocks_the_agent_and_the_answer_echoes_the_input() {
         let mut fold = Fold::default();
@@ -621,21 +674,21 @@ mod tests {
         assert_eq!(request.summary, "/private/tmp/sj-probe/probe4.txt");
         assert_eq!(
             request.detail,
-            slopty_proto::agent::ToolDetail::Write {
+            ToolDetail::Write {
                 path: "/private/tmp/sj-probe/probe4.txt".to_owned(),
                 content: slopty_proto::agent::Clipped::whole("hi".to_owned()),
             }
         );
         assert_eq!(fold.pending(), [request.id.as_str()]);
 
-        let line = fold.answer(&request.id, true, None).expect("open");
+        let line = fold.answer(&request.id, true, None, &[]).expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(
             sent,
             json!({"type":"control_response","response":{"subtype":"success","request_id":"e2f45975-aa92-4c0c-ad9b-05cd456d9b00","response":{"behavior":"allow","updatedInput":{"file_path":"/private/tmp/sj-probe/probe4.txt","content":"hi"}}}})
         );
         assert!(fold.pending().is_empty());
-        assert!(fold.answer(&request.id, true, None).is_none(), "answered once");
+        assert!(fold.answer(&request.id, true, None, &[]).is_none(), "answered once");
     }
 
     #[test]
@@ -643,7 +696,8 @@ mod tests {
         let mut fold = Fold::default();
         let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
         let _updates = fold.apply(event, 0);
-        let line = fold.answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, None).expect("open");
+        let line =
+            fold.answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, None, &[]).expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(sent["response"]["response"]["behavior"], "deny");
         assert_eq!(sent["response"]["response"]["message"], DENIED);
@@ -651,7 +705,7 @@ mod tests {
         let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
         let _updates = fold.apply(event, 0);
         let line = fold
-            .answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, Some("not that file"))
+            .answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, Some("not that file"), &[])
             .expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(sent["response"]["response"]["message"], "not that file");

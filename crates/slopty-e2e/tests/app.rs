@@ -552,6 +552,51 @@ mod tests {
         let frame = drv.render(&stack.dir.path().join("tools.png")).await.unwrap();
         assert_matches("conversation-tools", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
+        // A question: the options are buttons above the composer (no Allow / Deny), one
+        // tap on "Blue" answers by request id with the answer filed under the question, and
+        // the agent's result and closing line carry the choice.
+        drv.type_text("ask me").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the question", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("blocked:question")
+                        && conv.attention.as_deref() == Some("question")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert_eq!(conv.question_options, ["Red", "Blue"], "{conv:?}");
+        assert_eq!(
+            conv.entries.last().map(String::as_str),
+            Some("tool AskUserQuestion: Which colour do you prefer?"),
+            "{conv:?}"
+        );
+        assert!(dump.a11y_node("Button", Some("Allow")).is_none(), "{:#?}", dump.a11y);
+        let frame = drv.render(&stack.dir.path().join("question.png")).await.unwrap();
+        assert_matches("conversation-question", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        let blue = dump.a11y_node("Button", Some("Blue")).unwrap();
+        let (bx, by) = a11y_center(blue);
+        drv.click(bx, by).await.unwrap();
+        let dump = drv
+            .wait_for("the answer's result and the closing line", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv.entries.last().map(String::as_str) == Some("assistant: Blue")
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(
+            conv.entries.contains(
+                &"result AskUserQuestion: Your questions have been answered: \"Which colour do you prefer?\"=\"Blue\". You can now continue with these answers in mind.".to_owned()
+            ),
+            "{conv:?}"
+        );
+        assert!(conv.attention.is_none() && conv.question_options.is_empty(), "{conv:?}");
+
         // Deny: the call fails with the host's message and the agent says so.
         drv.type_text("write it again").await.unwrap();
         drv.keys("enter").await.unwrap();
@@ -635,7 +680,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 9))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 10))
             })
             .await
             .unwrap();
@@ -652,6 +697,7 @@ mod tests {
                 "user: write the note".to_owned(),
                 "user: edit the note".to_owned(),
                 "assistant: Edited: hi is now hello.".to_owned(),
+                "user: ask me".to_owned(),
                 "user: write it again".to_owned(),
             ],
             "the whole past, oldest first (the fake logs text replies only)"

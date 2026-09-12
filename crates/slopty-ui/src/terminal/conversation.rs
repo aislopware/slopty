@@ -29,7 +29,7 @@ use gpui::{
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{
-    AgentInfo, Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
+    AgentInfo, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail, TranscriptBody,
     TranscriptEntry, TranscriptUpdate,
 };
 use slopty_theme::{Theme, alpha};
@@ -122,6 +122,15 @@ pub enum Attention {
         /// One line about the call (the command, the file), when the host knows it: a driven
         /// agent says what the tool would do; a watched one only names the tool.
         detail: Option<String>,
+    },
+    /// A driven agent asks with options: the card answers in place.
+    Question {
+        /// The questions, in the agent's order.
+        questions: Vec<Question>,
+        /// The labels picked so far, per question.
+        chosen: Vec<Vec<String>>,
+        /// The answer went out; waiting for the host to report the next state.
+        answered: bool,
     },
     /// The agent asked something: the composer has the focus.
     Prompt,
@@ -729,6 +738,16 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
         }
         Attention::Permission { tool, answered: Some(true), .. } => format!("{tool}: allowed"),
         Attention::Permission { tool, answered: Some(false), .. } => format!("{tool}: denied"),
+        Attention::Question { questions, answered: false, .. } => format!(
+            "Claude asks: {}",
+            questions.first().map(|q| q.text.as_str()).unwrap_or_default()
+        ),
+        Attention::Question { chosen, answered: true, .. } => {
+            format!(
+                "Answered: {}",
+                chosen.iter().map(|c| c.join(", ")).collect::<Vec<_>>().join("; ")
+            )
+        }
         Attention::Prompt => "Claude is waiting for your answer".to_owned(),
     };
     let row = div()
@@ -808,11 +827,127 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
                 if *allowed { "allowed" } else { "denied" }
             )))
             .into_any_element(),
+        Attention::Question { questions, chosen, answered: false } => {
+            let all_single = questions.iter().all(|q| !q.multi);
+            let complete = chosen.len() == questions.len() && chosen.iter().all(|c| !c.is_empty());
+            row.items_start()
+                .flex_col()
+                .child(div().w_full().flex().flex_col().gap(px(spacing.sm)).children(
+                    questions.iter().enumerate().map(|(qi, q)| {
+                        question_block(
+                            qi,
+                            q,
+                            chosen.get(qi).map_or(&[][..], Vec::as_slice),
+                            theme,
+                            cx,
+                        )
+                    }),
+                ))
+                .when(!all_single || questions.len() > 1, |el| {
+                    let send = button("question-answer", "Answer", complete);
+                    el.child(div().w_full().flex().justify_end().child(
+                        send.on_click(
+                            cx.listener(|this, _ev, _window, cx| this.answer_question(cx)),
+                        ),
+                    ))
+                })
+                .into_any_element()
+        }
+        Attention::Question { chosen, answered: true, .. } => row
+            .text_color(hsla(s.text_muted))
+            .child(SharedString::from(format!(
+                "Answered: {}",
+                chosen.iter().map(|c| c.join(", ")).collect::<Vec<_>>().join("; ")
+            )))
+            .into_any_element(),
         Attention::Prompt => row
             .text_color(hsla(s.text_muted))
             .child("Claude is waiting for your answer")
             .into_any_element(),
     }
+}
+
+/// One question of a pending `AskUserQuestion`: the header as a small chip, the question,
+/// then the options as buttons (`question-option-<q>-<o>`, labelled by their label, the
+/// picked ones in the accent tone) with each description under its label. The composer
+/// below takes a typed answer instead.
+fn question_block(
+    qi: usize,
+    question: &Question,
+    picked: &[String],
+    theme: &Theme,
+    cx: &Context<TerminalView>,
+) -> AnyElement {
+    let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(spacing.xs))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(spacing.sm))
+                .when(!question.header.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px(px(spacing.xs))
+                            .rounded(px(theme.radii.xs))
+                            .bg(hsla_alpha(s.text_secondary, alpha::TINT_STRONG))
+                            .text_size(px(theme.typography.caption()))
+                            .text_color(hsla(s.text_secondary))
+                            .child(SharedString::from(question.header.clone())),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .whitespace_normal()
+                        .text_color(hsla(s.text))
+                        .child(SharedString::from(question.text.clone())),
+                ),
+        )
+        .child(div().flex().flex_wrap().gap(px(spacing.xs)).children(
+            question.options.iter().enumerate().map(|(oi, option)| {
+                let on = picked.iter().any(|l| l == &option.label);
+                let tone = if on { s.accent } else { s.text_secondary };
+                let label = option.label.clone();
+                let id = ElementId::NamedInteger(
+                    "question-option".into(),
+                    u64::try_from(qi.saturating_mul(64).saturating_add(oi)).unwrap_or(0),
+                );
+                let pill = div()
+                    .id(id)
+                    .debug_selector(move || format!("question-option-{qi}-{oi}"))
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(option.label.clone()))
+                    .flex()
+                    .flex_col()
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xs))
+                    .rounded(px(theme.radii.xs))
+                    .bg(hsla_alpha(tone, if on { alpha::TINT_PRESSED } else { alpha::TINT_STRONG }))
+                    .text_color(hsla(s.text))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
+                    .child(SharedString::from(option.label.clone()))
+                    .when(!option.description.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(theme.typography.caption()))
+                                .text_color(hsla(s.text_muted))
+                                .child(SharedString::from(option.description.clone())),
+                        )
+                    });
+                tab_stop(pill, s.accent).on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.choose(qi, &label, cx);
+                }))
+            }),
+        ))
+        .into_any_element()
 }
 
 /// One entry: the human's prompt in an accent bubble, the agent's Markdown, a folded line
@@ -1120,6 +1255,20 @@ fn tool_body(detail: &ToolDetail, open: bool, mono: &str, theme: &Theme) -> Opti
                 .gap(px(theme.spacing.xs))
                 .children(kind.as_ref().map(|k| line(format!("as {k}"))))
                 .child(block(prompt))
+                .into_any_element(),
+        ),
+        ToolDetail::Question { questions } if open => Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xs))
+                .children(questions.iter().map(|q| {
+                    line(format!(
+                        "{}: {}",
+                        q.text,
+                        q.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>().join(" / ")
+                    ))
+                }))
                 .into_any_element(),
         ),
         ToolDetail::Json { input } if open => Some(block(input)),

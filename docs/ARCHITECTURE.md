@@ -483,14 +483,29 @@ composer and cannot be hidden, there is no grid behind it, ↩ in the composer s
 *and what it would do* (`Attention::Permission.detail` from the `PermissionRequest`), with
 Allow / Deny raising `TerminalViewEvent::AgentAnswered { request, allowed }` so the canvas
 sends `AgentAnswer` by request id (`answer_driven`) — the title-bar badge and the
-notification-centre buttons go the same way for a driven session. Both kinds coexist: ⌘⇧T
+notification-centre buttons go the same way for a driven session. An `AskUserQuestion` is a
+`can_use_tool` on the wire too (protocol 18, probed on 2.1.269: `requires_user_interaction`),
+but the fold reports it as `Blocked(Question)` and the card answers it in place
+(`Attention::Question`, `conversation::question_block`): each question with its header chip
+and its options as buttons (`question-option-<q>-<o>`, labelled by their label, the picked
+ones in the accent tone, the description under the label); one tap on a single-select
+question is the whole answer, a multi-select question toggles and an Answer button
+(`question-answer`) sends when every question has a pick, and text typed into the composer
+is the "Other" answer to the first question without one, not a prompt (`choose`,
+`answer_question`, `answer_question_with`). The answer travels as
+`AgentAnswer { allowed: true, answers: [QuestionAnswer { question, answer }] }` and the
+host files it into the request's input as `updatedInput.answers = { question: answer }`
+(labels of a multi-select joined with ", "), which Claude Code turns into the tool's
+"Your questions have been answered" result. The badge and the notification treat it as the
+question it is (an "answer" pill that reveals the card, no Allow / Deny). Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
-(`driven_agent`), headless `a_driven_view_speaks_to_the_agent`, and the app self-test
+(`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test
 `a_driven_agent_talks_over_stream_json`, which runs the host against `slopty-fake-claude`
 (`crates/slopty-e2e/src/bin`, a scripted stream-json agent: it streams, lingers for an
-interrupt, and asks a `Write` permission that the test allows and then denies through the
-Allow / Deny buttons in the accessibility tree) and reads the card through the dump
+interrupt, asks a `Write` permission that the test allows and then denies through the
+Allow / Deny buttons in the accessibility tree, edits with a todo list, and asks a question
+the test answers by tapping "Blue"; goldens `conversation-tools`, `conversation-question`) and reads the card through the dump
 (`TerminalInfo.kind`, `ConversationInfo.partial`, `ConversationInfo.permission`).
 
 **What the agent says about itself, and retuning it (protocol 16).** The pump folds
@@ -553,7 +568,8 @@ query the tool was given) and a `ToolDetail` (protocol 17: what the call would d
 the host from the input by tool — `Edit` as a `Diff` of `old_string` against `new_string`
 line by line through `similar`, `Write` with its content, `Bash` as a `Command`, `Read` with
 its slice, `Grep`/`Glob` as a `Search`, `TodoWrite` as `Todos`, `Agent`/`Task` with the
-brief, and any other tool or a known one with a strange input as its `Json`), `tool_result`
+brief, `AskUserQuestion` as `Question`s with their `Choice`s, and any other tool or a known
+one with a strange input as its `Json`), `tool_result`
 blocks with `is_error` and named after their `tool_use_id` (the `Tail` remembers the last
 512 calls). Thinking, tool input, a diff and tool output are `Clipped` on the host: the
 first 40 whole lines or 4 000 characters, whichever comes first, and the count of lines

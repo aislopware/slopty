@@ -795,8 +795,17 @@ impl Workspace {
                         }
                         Attention::Permission { answered: Some(true), .. } => "allowed".to_owned(),
                         Attention::Permission { answered: Some(false), .. } => "denied".to_owned(),
+                        Attention::Question { answered: false, .. } => "question".to_owned(),
+                        Attention::Question { answered: true, .. } => "answered".to_owned(),
                         Attention::Prompt => "prompt".to_owned(),
                     }),
+                    question_options: match view.attention() {
+                        Some(Attention::Question { questions, answered: false, .. }) => questions
+                            .iter()
+                            .flat_map(|q| q.options.iter().map(|o| o.label.clone()))
+                            .collect(),
+                        _ => Vec::new(),
+                    },
                 });
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),

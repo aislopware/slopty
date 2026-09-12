@@ -295,11 +295,48 @@ pub enum ToolDetail {
         /// The whole brief, clipped.
         prompt: Clipped,
     },
+    /// A question to the human (`AskUserQuestion`): the card answers it in place.
+    Question {
+        /// The questions, in the agent's order (Claude Code asks up to four at once).
+        questions: Vec<Question>,
+    },
     /// Any other tool: the input as pretty JSON, clipped.
     Json {
         /// The input.
         input: Clipped,
     },
+}
+
+/// One question of an `AskUserQuestion` call.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Question {
+    /// The question as the agent wrote it; the key its answer is filed under.
+    pub text: String,
+    /// The agent's short label for it ("Auth method").
+    pub header: String,
+    /// Several options may be picked; the answer joins their labels with ", " (the SDK's
+    /// convention, not yet seen on the wire).
+    pub multi: bool,
+    /// The offered options; the human may also type an answer of their own.
+    pub options: Vec<Choice>,
+}
+
+/// One option of a [`Question`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Choice {
+    /// What is picked, and what the agent receives.
+    pub label: String,
+    /// What it means, under the label.
+    pub description: String,
+}
+
+/// The human's answer to one [`Question`], as `ClientMsg::AgentAnswer` carries it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    /// [`Question::text`].
+    pub question: String,
+    /// The picked label, the picked labels joined with ", ", or the typed text.
+    pub answer: String,
 }
 
 /// One line of a [`ToolDetail::Diff`].

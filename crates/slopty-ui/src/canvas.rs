@@ -28,7 +28,7 @@ use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
     AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, BlockReason, OpenAgent,
-    PermissionRequest, TranscriptUpdate,
+    PermissionRequest, QuestionAnswer, TranscriptUpdate,
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
@@ -875,9 +875,10 @@ impl CanvasView {
         session: SessionId,
         request: String,
         allowed: bool,
+        answers: Vec<QuestionAnswer>,
         cx: &mut Context<Self>,
     ) {
-        self.send(ClientMsg::AgentAnswer { session, request, allowed, message: None });
+        self.send(ClientMsg::AgentAnswer { session, request, allowed, message: None, answers });
         let answer = if allowed { Answer::Allowed } else { Answer::Denied };
         self.answered.insert(session, answer);
         cx.dismiss_system_notification(&session.to_string());
@@ -1282,8 +1283,8 @@ impl CanvasView {
                     }
                     TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
                     TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
-                    TerminalViewEvent::AgentAnswered { request, allowed } => {
-                        this.answer_driven(sid, request.clone(), *allowed, cx);
+                    TerminalViewEvent::AgentAnswered { request, allowed, answers } => {
+                        this.answer_driven(sid, request.clone(), *allowed, answers.clone(), cx);
                     }
                 },
             ));

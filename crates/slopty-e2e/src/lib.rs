@@ -741,7 +741,8 @@ pub struct ConversationInfo {
     pub composer_focused: bool,
     /// The list follows new entries (the reader has not scrolled up).
     pub pinned: bool,
-    /// The row above the composer: `permission:<tool>`, `allowed`, `denied`, `prompt`.
+    /// The row above the composer: `permission:<tool>`, `allowed`, `denied`, `question`,
+    /// `answered`, `prompt`.
     pub attention: Option<String>,
     /// What a driven agent is writing now (empty otherwise).
     pub partial: String,
@@ -768,6 +769,9 @@ pub struct ConversationInfo {
     /// The model menu is open under the header.
     #[serde(default)]
     pub model_menu: bool,
+    /// The option labels of a pending question, every question's in order.
+    #[serde(default)]
+    pub question_options: Vec<String>,
 }
 
 impl Dump {

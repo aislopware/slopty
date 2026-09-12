@@ -17,8 +17,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use slopty_proto::agent::{
-    AgentStatus, Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
-    TranscriptEntry,
+    AgentStatus, Choice, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail,
+    TranscriptBody, TranscriptEntry,
 };
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
@@ -459,6 +459,12 @@ pub fn tool_detail(name: &str, input: Option<&Value>) -> ToolDetail {
             .map_or_else(json, |todos| ToolDetail::Todos {
                 items: todos.iter().filter_map(todo).collect(),
             }),
+        "AskUserQuestion" => input
+            .and_then(|i| i.get("questions"))
+            .and_then(Value::as_array)
+            .map_or_else(json, |questions| ToolDetail::Question {
+                questions: questions.iter().filter_map(question).collect(),
+            }),
         "Agent" | "Task" => match (field("description"), field("prompt")) {
             (Some(description), Some(prompt)) => ToolDetail::Agent {
                 description: description.to_owned(),
@@ -469,6 +475,35 @@ pub fn tool_detail(name: &str, input: Option<&Value>) -> ToolDetail {
         },
         _ => json(),
     }
+}
+
+/// One `AskUserQuestion` question; `None` when it has no text.
+fn question(item: &Value) -> Option<Question> {
+    let text = item.get("question")?.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let string = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    let options = item
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter(|o| o.get("label").and_then(Value::as_str).is_some_and(|l| !l.is_empty()))
+                .map(|o| Choice {
+                    label: string(o, "label"),
+                    description: string(o, "description"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Question {
+        text: text.to_owned(),
+        header: string(item, "header"),
+        multi: item.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+        options,
+    })
 }
 
 /// One `TodoWrite` item; `None` when it has no text.
@@ -560,6 +595,9 @@ pub fn tool_summary(name: &str, input: Option<&Value>) -> String {
         "WebFetch" => field("url"),
         "WebSearch" => field("query"),
         "Agent" | "Task" => field("description").or_else(|| field("prompt")),
+        "AskUserQuestion" => input
+            .and_then(|i| i.get("questions")?.as_array()?.first()?.get("question")?.as_str())
+            .map(str::to_owned),
         _ => input
             .and_then(Value::as_object)
             .and_then(|o| o.values().find_map(|v| v.as_str().map(str::to_owned))),
@@ -785,6 +823,35 @@ mod tests {
                 prompt: Clipped::whole("Look everywhere".to_owned()),
             }
         );
+        let ask = serde_json::json!({"questions": [
+            {"question": "Which colour?", "header": "Colour", "multiSelect": false,
+             "options": [{"label": "Red", "description": "warm"}, {"label": "Blue"}, {"label": ""}]},
+            {"question": "  "},
+            {"question": "Which sizes?", "multiSelect": true}
+        ]});
+        assert_eq!(
+            tool_detail("AskUserQuestion", Some(&ask)),
+            ToolDetail::Question {
+                questions: vec![
+                    Question {
+                        text: "Which colour?".to_owned(),
+                        header: "Colour".to_owned(),
+                        multi: false,
+                        options: vec![
+                            Choice { label: "Red".to_owned(), description: "warm".to_owned() },
+                            Choice { label: "Blue".to_owned(), description: String::new() },
+                        ],
+                    },
+                    Question {
+                        text: "Which sizes?".to_owned(),
+                        header: String::new(),
+                        multi: true,
+                        options: Vec::new(),
+                    },
+                ]
+            }
+        );
+        assert_eq!(tool_summary("AskUserQuestion", Some(&ask)), "Which colour?");
         // A known tool with a strange input, and a tool the host does not know.
         assert_eq!(
             tool_detail("Bash", Some(&serde_json::json!({"cmd": "ls"}))),

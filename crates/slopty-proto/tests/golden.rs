@@ -197,8 +197,8 @@ mod golden {
     #[test]
     fn driven_agent() {
         use slopty_proto::agent::{
-            AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Clipped, OpenAgent,
-            PermissionRequest, ToolDetail,
+            AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Choice, Clipped,
+            OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
         };
         use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
         snap(
@@ -221,6 +221,49 @@ mod golden {
                 request: "e2f45975-aa92-4c0c-ad9b-05cd456d9b00".to_owned(),
                 allowed: false,
                 message: Some("not that file".to_owned()),
+                answers: Vec::new(),
+            },
+        );
+        snap(
+            "client_agent_answer_question",
+            &ClientMsg::AgentAnswer {
+                session: session(),
+                request: "07dd1978-3d77-4b8d-8f39-d1ed20e653ba".to_owned(),
+                allowed: true,
+                message: None,
+                answers: vec![QuestionAnswer {
+                    question: "Which colour do you prefer?".to_owned(),
+                    answer: "Blue".to_owned(),
+                }],
+            },
+        );
+        snap(
+            "host_agent_question",
+            &HostMsg::AgentPermission {
+                session: session(),
+                request: PermissionRequest {
+                    id: "07dd1978-3d77-4b8d-8f39-d1ed20e653ba".to_owned(),
+                    tool_use: "toolu_01UMP2qYNcjojzv7BrqSiRzT".to_owned(),
+                    tool: "AskUserQuestion".to_owned(),
+                    summary: "Which colour do you prefer?".to_owned(),
+                    detail: ToolDetail::Question {
+                        questions: vec![Question {
+                            text: "Which colour do you prefer?".to_owned(),
+                            header: "Colour".to_owned(),
+                            multi: false,
+                            options: vec![
+                                Choice {
+                                    label: "Red".to_owned(),
+                                    description: "The colour red".to_owned(),
+                                },
+                                Choice {
+                                    label: "Blue".to_owned(),
+                                    description: "The colour blue".to_owned(),
+                                },
+                            ],
+                        }],
+                    },
+                },
             },
         );
         snap("client_agent_interrupt", &ClientMsg::AgentInterrupt { session: session() });

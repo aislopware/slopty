@@ -18,8 +18,8 @@ use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentInfo, AgentSet, AgentStatus, BlockReason, PermissionRequest, TranscriptFollow,
-    TranscriptUpdate,
+    AgentInfo, AgentSet, AgentStatus, BlockReason, PermissionRequest, QuestionAnswer, ToolDetail,
+    TranscriptFollow, TranscriptUpdate,
 };
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
@@ -175,13 +175,15 @@ pub enum TerminalViewEvent {
         /// Allow (Enter) or deny (Esc).
         allowed: bool,
     },
-    /// A driven session's Allow / Deny row was pressed: the canvas answers the host's
-    /// permission request by id.
+    /// A driven session's Allow / Deny row was pressed, or its question answered: the
+    /// canvas answers the host's permission request by id.
     AgentAnswered {
         /// The request id (`PermissionRequest::id`).
         request: String,
         /// Allow or deny.
         allowed: bool,
+        /// The answers when the request was a question; empty otherwise.
+        answers: Vec<QuestionAnswer>,
     },
 }
 
@@ -241,6 +243,8 @@ pub struct TerminalView {
     open_conversation: bool,
     /// The permission the driven agent waits on, with the input it would run with.
     permission: Option<PermissionRequest>,
+    /// The labels picked so far for each question of a pending `AskUserQuestion`.
+    chosen: Vec<Vec<String>>,
     /// The text the driven agent is writing now, ahead of its next entry.
     partial: String,
     /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
@@ -310,6 +314,7 @@ impl TerminalView {
             focus_composer: false,
             search_regex: false,
             driven: false,
+            chosen: Vec::new(),
             open_conversation: false,
             permission: None,
             partial: String::new(),
@@ -352,11 +357,94 @@ impl TerminalView {
         }
     }
 
-    /// The driven agent asks to run a tool; shown above the composer with Allow / Deny.
+    /// The driven agent asks to run a tool; shown above the composer with Allow / Deny, or
+    /// as the question's options when the tool is `AskUserQuestion`.
     pub fn agent_permission(&mut self, request: PermissionRequest, cx: &mut Context<Self>) {
+        self.chosen = match &request.detail {
+            ToolDetail::Question { questions } => vec![Vec::new(); questions.len()],
+            _ => Vec::new(),
+        };
         self.permission = Some(request);
         self.answered = None;
         cx.notify();
+    }
+
+    /// An option of a pending question was tapped: picked (or, for a multi-select question,
+    /// toggled). When every question has its pick and none is multi-select, the answer goes
+    /// out at once — one tap is the whole exchange; otherwise the Answer button sends it.
+    pub fn choose(&mut self, question: usize, label: &str, cx: &mut Context<Self>) {
+        if self.answered.is_some() {
+            return;
+        }
+        let Some(ToolDetail::Question { questions }) = self.permission.as_ref().map(|p| &p.detail)
+        else {
+            return;
+        };
+        let Some(q) = questions.get(question) else { return };
+        let multi = q.multi;
+        let all_single = questions.iter().all(|q| !q.multi);
+        let Some(picked) = self.chosen.get_mut(question) else { return };
+        if multi {
+            if let Some(ix) = picked.iter().position(|l| l == label) {
+                picked.remove(ix);
+            } else {
+                picked.push(label.to_owned());
+            }
+        } else {
+            *picked = vec![label.to_owned()];
+        }
+        if all_single && self.chosen.iter().all(|c| !c.is_empty()) {
+            self.answer_question(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Send the pending question's answers, when every question has one: each question's
+    /// picks joined with ", ", under the question's own text.
+    pub fn answer_question(&mut self, cx: &mut Context<Self>) {
+        if self.answered.is_some() {
+            return;
+        }
+        let Some(request) = self.permission.as_ref() else { return };
+        let ToolDetail::Question { questions } = &request.detail else { return };
+        if questions.len() != self.chosen.len() || self.chosen.iter().any(Vec::is_empty) {
+            cx.notify();
+            return;
+        }
+        let answers = questions
+            .iter()
+            .zip(&self.chosen)
+            .map(|(q, picks)| QuestionAnswer { question: q.text.clone(), answer: picks.join(", ") })
+            .collect();
+        let request = request.id.clone();
+        self.answered = Some(true);
+        cx.emit(TerminalViewEvent::AgentAnswered { request, allowed: true, answers });
+        cx.notify();
+    }
+
+    /// Typed text as the answer to the first question still without one; `false` when no
+    /// question is pending.
+    fn answer_question_with(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        let pending = self.answered.is_none()
+            && matches!(
+                self.permission.as_ref().map(|p| &p.detail),
+                Some(ToolDetail::Question { .. })
+            );
+        if !pending {
+            return false;
+        }
+        if let Some(picks) = self.chosen.iter_mut().find(|c| c.is_empty()) {
+            picks.push(text);
+        }
+        self.answer_question(cx);
+        true
+    }
+
+    /// The labels picked so far, per question of the pending `AskUserQuestion`.
+    #[must_use]
+    pub fn chosen(&self) -> &[Vec<String>] {
+        &self.chosen
     }
 
     /// What the driven agent says about itself, whole.
@@ -549,7 +637,12 @@ impl TerminalView {
         let Some(conversation) = &self.conversation else { return };
         let text = conversation.take_composer_text(window, cx);
         if self.driven {
-            if !text.trim().is_empty() {
+            if text.trim().is_empty() {
+                return;
+            }
+            // While the agent asks a question, the typed text is its answer ("Other"), not
+            // a new prompt.
+            if !self.answer_question_with(text.clone(), cx) {
                 self.say(ClientMsg::AgentSay { session: self.session, text });
             }
             return;
@@ -574,7 +667,7 @@ impl TerminalView {
         if self.driven {
             let Some(request) = self.permission.as_ref().map(|p| p.id.clone()) else { return };
             self.answered = Some(allowed);
-            cx.emit(TerminalViewEvent::AgentAnswered { request, allowed });
+            cx.emit(TerminalViewEvent::AgentAnswered { request, allowed, answers: Vec::new() });
             cx.notify();
             return;
         }
@@ -587,8 +680,12 @@ impl TerminalView {
     /// elicitation puts the caret in the composer when the conversation is on.
     pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
         self.answered = None;
-        if !matches!(status, Some(AgentStatus::Blocked(BlockReason::Permission { .. }))) {
+        if !matches!(
+            status,
+            Some(AgentStatus::Blocked(BlockReason::Permission { .. } | BlockReason::Question))
+        ) {
             self.permission = None;
+            self.chosen.clear();
         }
         if self.conversation.is_some()
             && matches!(
@@ -618,9 +715,17 @@ impl TerminalView {
                 answered: self.answered,
                 detail: self.permission.as_ref().map(|p| p.summary.clone()),
             }),
-            AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation) => {
-                Some(Attention::Prompt)
-            }
+            AgentStatus::Blocked(BlockReason::Question) => match &self.permission {
+                Some(PermissionRequest { detail: ToolDetail::Question { questions }, .. }) => {
+                    Some(Attention::Question {
+                        questions: questions.clone(),
+                        chosen: self.chosen.clone(),
+                        answered: self.answered.is_some(),
+                    })
+                }
+                _ => Some(Attention::Prompt),
+            },
+            AgentStatus::Blocked(BlockReason::Elicitation) => Some(Attention::Prompt),
             _ => None,
         }
     }
@@ -2948,8 +3053,10 @@ mod tests {
                     format!("follow:{follow}")
                 }
                 ClientMsg::AgentSay { text, .. } => format!("say:{text}"),
-                ClientMsg::AgentAnswer { request, allowed, .. } => {
-                    format!("answer:{request}:{allowed}")
+                ClientMsg::AgentAnswer { request, allowed, answers, .. } => {
+                    let filed: Vec<String> =
+                        answers.iter().map(|a| format!(":{}={}", a.question, a.answer)).collect();
+                    format!("answer:{request}:{allowed}{}", filed.concat())
                 }
                 ClientMsg::AgentInterrupt { .. } => "interrupt".to_owned(),
                 ClientMsg::AgentSet(AgentSet { model, permission_mode, .. }) => format!(
@@ -2979,7 +3086,7 @@ mod tests {
         let seen = std::rc::Rc::clone(&answers);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AgentAnswered { request, allowed } = event {
+                if let TerminalViewEvent::AgentAnswered { request, allowed, .. } = event {
                     seen.borrow_mut().push(format!("{request}:{allowed}"));
                 }
             })
@@ -3059,6 +3166,122 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
         assert!(drain_words(&mut rx).is_empty());
+    }
+
+    /// A driven agent's question is answered in place: the options are buttons, one tap on
+    /// a single-select question is the whole answer (by request id, filed under the
+    /// question's text); a multi-select question toggles and sends on Answer; typed text
+    /// in the composer is the "Other" answer, not a prompt.
+    #[gpui::test]
+    fn a_driven_view_answers_a_question_in_place(cx: &mut TestAppContext) {
+        use slopty_proto::agent::{Choice, Question};
+        let (view, mut rx, cx) = terminal(cx);
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&answers);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::AgentAnswered { request, allowed, answers } = event {
+                    let filed: Vec<String> =
+                        answers.iter().map(|a| format!("{}={}", a.question, a.answer)).collect();
+                    seen.borrow_mut().push(format!("{request}:{allowed}:{}", filed.join(";")));
+                }
+            })
+            .detach();
+        });
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        let _follow = drain_words(&mut rx);
+        let choice = |label: &str, description: &str| Choice {
+            label: label.to_owned(),
+            description: description.to_owned(),
+        };
+        let colour = Question {
+            text: "Which colour?".to_owned(),
+            header: "Colour".to_owned(),
+            multi: false,
+            options: vec![choice("Red", "warm"), choice("Blue", "cool")],
+        };
+        let ask = |id: &str, questions: Vec<Question>| PermissionRequest {
+            id: id.to_owned(),
+            tool_use: "toolu_q".to_owned(),
+            tool: "AskUserQuestion".to_owned(),
+            summary: "Which colour?".to_owned(),
+            detail: ToolDetail::Question { questions },
+        };
+        let blocked = || AgentStatus::Blocked(BlockReason::Question);
+        view.update(cx, |v, cx| {
+            v.agent_permission(ask("req_q1", vec![colour.clone()]), cx);
+            v.set_agent_status(Some(blocked()), cx);
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        assert!(matches!(
+            view.read_with(cx, |v, _| v.attention()),
+            Some(Attention::Question { answered: false, .. })
+        ));
+        assert!(cx.debug_bounds("conversation-allow").is_none(), "a question has no Allow");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Red"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Button", Some("Blue"))), "{tree:#?}");
+        assert!(
+            tree.iter().any(|n| n.is("Status", Some("Claude asks: Which colour?"))),
+            "{tree:#?}"
+        );
+        let blue = cx.debug_bounds("question-option-0-1").expect("Blue is drawn");
+        cx.simulate_click(blue.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*answers.borrow(), ["req_q1:true:Which colour?=Blue"], "one tap answers");
+        assert!(drain_words(&mut rx).is_empty(), "nothing typed, nothing said");
+        assert!(cx.debug_bounds("question-option-0-1").is_none(), "one tap, one answer");
+
+        // Two questions, the second multi-select: taps pick and toggle, Answer sends both.
+        let sizes = Question {
+            text: "Which sizes?".to_owned(),
+            header: "Sizes".to_owned(),
+            multi: true,
+            options: vec![choice("S", ""), choice("M", ""), choice("L", "")],
+        };
+        view.update(cx, |v, cx| {
+            v.set_agent_status(Some(AgentStatus::Working), cx);
+            v.agent_permission(ask("req_q2", vec![colour.clone(), sizes]), cx);
+            v.set_agent_status(Some(blocked()), cx);
+        });
+        cx.run_until_parked();
+        let answer = cx.debug_bounds("question-answer").expect("Answer is drawn");
+        cx.simulate_click(answer.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(answers.borrow().len(), 1, "nothing sent before every question has a pick");
+        for id in ["question-option-0-0", "question-option-1-0", "question-option-1-2"] {
+            let b = cx.debug_bounds(id).expect(id);
+            cx.simulate_click(b.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            view.read_with(cx, |v, _| v.chosen().to_vec()),
+            [vec!["Red".to_owned()], vec!["S".to_owned(), "L".to_owned()]]
+        );
+        let s = cx.debug_bounds("question-option-1-0").expect("S");
+        cx.simulate_click(s.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.chosen()[1].clone()), ["L"], "toggled off");
+        assert_eq!(answers.borrow().len(), 1, "a multi-select question waits for Answer");
+        let answer = cx.debug_bounds("question-answer").expect("Answer is drawn");
+        cx.simulate_click(answer.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(answers.borrow()[1], "req_q2:true:Which colour?=Red;Which sizes?=L");
+
+        // Typed text is the answer to the question, not a prompt.
+        view.update(cx, |v, cx| {
+            v.set_agent_status(Some(AgentStatus::Working), cx);
+            v.agent_permission(ask("req_q3", vec![colour]), cx);
+            v.set_agent_status(Some(blocked()), cx);
+        });
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx), "a question puts the caret in the composer");
+        cx.simulate_keystrokes("g r e e n enter");
+        cx.run_until_parked();
+        assert_eq!(answers.borrow()[2], "req_q3:true:Which colour?=green");
+        assert!(drain_words(&mut rx).is_empty(), "not said as a prompt");
     }
 
     /// A driven view shows what the agent said about itself over the list — the model as a
