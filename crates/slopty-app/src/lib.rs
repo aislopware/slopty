@@ -33,7 +33,7 @@ use slopty_theme::{Theme, alpha};
 use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::canvas::{
     AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewDrivenAgent, NewNote,
-    NewTerminal, NextAttention, ResumeAgent,
+    NewTerminal, NextAttention, OpenPalette, ResumeAgent,
 };
 use slopty_ui::colors::{hsla, hsla_alpha};
 use slopty_ui::screen::{ScreenView, Sticky};
@@ -998,6 +998,14 @@ impl Workspace {
                 }
             },
         ));
+        // Every action by name: the phone's way to what has no button, and the Mac's index.
+        let commands_button = button("commands", "⋯", "⌘⇧P").aria_label("Commands").on_click(
+            cx.listener(|this, _ev, window, cx| {
+                if let Some(canvas) = this.active_canvas() {
+                    canvas.update(cx, |c, cx| c.open_palette(&OpenPalette, window, cx));
+                }
+            }),
+        );
         let fit_button =
             button("fit-all", "fit", "⌘1").on_click(cx.listener(|this, _ev, window, cx| {
                 if let Some(canvas) = this.active_canvas() {
@@ -1120,7 +1128,9 @@ impl Workspace {
             .child(new_button)
             .child(agent_button)
             .child(note_button)
-            .child(window_button)
+            // A phone-wide bar has no room for both: the palette lists "Add a window".
+            .when(!narrow, |bar| bar.child(window_button))
+            .child(commands_button)
     }
 }
 

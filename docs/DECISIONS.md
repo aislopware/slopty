@@ -2963,7 +2963,8 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   the paths list in the same box as the slash commands (`Completion { insert, hint,
   description }` is the list's row; slash commands fill all three, paths the insert) and
   Tab replaces the `@` word alone, leaving the sentence around it, with a space after so
-  the next word can follow; (5) slash commands win when both would match — a `/…` text is
+  the next word can follow — none after a directory, so the word goes on and the host is
+  asked for what is inside it; (5) slash commands win when both would match — a `/…` text is
   never an `@` word. Wire: `ListFiles` / `Files`; goldens `client_list_files`,
   `host_files`, `client_hello` (re-accepted), PROTOCOL_VERSION 29 → 30. Tests:
   `a_name_that_starts_with_the_query_ranks_first_and_ignored_paths_are_skipped` (`agent`,
@@ -2987,8 +2988,13 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   terminal that had the keyboard, and `New note` reaches the canvas the way ⌘⇧N does; (4)
   the app's own lines (settings, hosts) are appended by the app (`extend_palette`) since
   those actions live outside `slopty-ui`; (5) ↑/↓/Esc are caught in the capture phase from
-  the field's own `MoveUp`/`MoveDown`/`Escape` actions, the pattern the composer uses. Tests:
-  `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
+  the field's own `MoveUp`/`MoveDown`/`Escape` actions, the pattern the composer uses; (6)
+  the top bar ends with a "⋯" button (a11y "Commands") that opens it, since a phone without a
+  hardware keyboard has no ⌘⇧P and the bar had no room for one button per action; on a
+  phone-wide bar "+ window" yields its place to it (the palette lists "Add a window or
+  display"), since with both the last button sat at x = 405 on a 402-pt screen — the iOS
+  self-test taps it, types into the field through the soft keyboard and runs "New note".
+  Tests: `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
   nothing run, `note` + ↩ leaving one note), and the app self-test's notes scenario, which now

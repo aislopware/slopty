@@ -377,9 +377,10 @@ the source of truth for what is being streamed. The command palette (⌘⇧P, `s
 lists every action by name with its keys read from the binding tables (`canvas::palette_items`
 for the canvas's and the terminal's, the app's own appended with `extend_palette`): typing
 keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
-closes. The palette remembers where the keyboard was (`window.focused`), puts it back when it
-closes and dispatches the choice on the next frame from there, so a terminal's own actions
-(find, the prompts) reach the terminal that had the focus.
+closes; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
+to every action. The palette remembers where the keyboard was (`window.focused`), puts it
+back when it closes and dispatches the choice on the next frame from there, so a terminal's
+own actions (find, the prompts) reach the terminal that had the focus.
 
 ## 5. Agents
 
@@ -619,7 +620,8 @@ asked of the host once per query (`ClientMsg::ListFiles { session, query }` →
 walks the agent's working directory with the `ignore` crate — hidden and `.gitignore`d
 entries skipped, depth 8, 20 000 entries at most — and answers at most 8 paths, a name
 starting with the query first, a directory ending in `/`); the answer whose query is still
-the word lists as `@path` completions in the same box and Tab replaces the word alone.
+the word lists as `@path` completions in the same box and Tab replaces the word alone (a
+directory gets no space after it, so typing on descends and the host is asked again).
 Those keys are caught in the capture phase (`completion_key`,
 and `capture_action` for the input's own `MoveUp` / `MoveDown` / `Escape` / `IndentInline`,
 which GPUI dispatches before any key event) so the composer never moves its caret or

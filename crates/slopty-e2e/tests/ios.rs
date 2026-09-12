@@ -103,7 +103,31 @@ mod tests {
         let dump = drv.wait_for("a second shell", STEP, |d| d.items.len() == 2).await.unwrap();
         assert!(dump.items.iter().any(|i| i.id != term.id && i.active), "{dump:#?}");
         drv.keys("cmd-w").await.unwrap();
-        drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+        let dump =
+            drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+
+        // Without a hardware keyboard the top bar's "⋯" is the way to every action: a tap
+        // opens the command palette, the soft keyboard types into its field, ↩ runs the line.
+        let commands = dump
+            .a11y_node("Button", Some("Commands"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let [x, y, w, h] = commands.bounds;
+        drv.ui_tap(x + w / 2.0, y + h / 2.0).await.unwrap();
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
+        drv.ui_insert_text("new note").await.unwrap();
+        drv.wait_for("one line", STEP, |d| {
+            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("a note from the palette", STEP, |d| {
+            d.item("note").is_some() && d.a11y_node("Dialog", Some("Commands")).is_none()
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 
