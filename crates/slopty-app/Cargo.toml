@@ -24,8 +24,7 @@ e2e = [
 
 [package.metadata.cargo-shear]
 # Only named so the `e2e` feature can reach its `test-support`; the code goes through gpui-kit.
-# `gpui_ios` is the UIKit-boundary injection of the test socket, iOS only.
-ignored = [ "gpui_platform", "gpui_ios" ]
+ignored = [ "gpui_platform" ]
 
 [dependencies]
 anyhow.workspace = true

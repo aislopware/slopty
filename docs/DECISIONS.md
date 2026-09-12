@@ -50,6 +50,17 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   heading/list layout, #3038; descender clipping, #3023), so the golden was re-accepted;
   every structural assertion in that scenario passed. Also in this gpui-kit range: headless UI
   testing (#3005) and a mobile-application layer (#3045), both worth reading for the iOS app.
+  2026-09-12: rebased onto zed main `a9cdfc9936` (2026-09-11, 6 commits; gpui-kit and
+  libghostty-rs already at upstream head, `vendor/ghostty` at ghostty main). One conflict:
+  upstream #64099 wrapped the headless Metal render paths in `objc2::rc::autoreleasepool`
+  (temporary command buffers and pass descriptors accumulated across a long headless run),
+  and our iOS commit picks `MTLStorageMode::Shared` for the offscreen target on unified memory
+  (iOS has no `Managed`). Resolution: our storage-mode choice inside their pool (fork head
+  `8ffbc6e145`). Second sync gotcha fixed in `xtask`: a conflict resolved by hand rewrites the
+  patch, so `git cherry` could not vouch for it either and the re-run still said "diverged";
+  the check now also accepts a local branch that sits on the new upstream and replays the
+  fork's patches by subject, in order. Stable 1.98.1, every tool floor and the objc2 family
+  were already at their latest; nightly rustfmt moved to 2026-09-11.
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
   per fork, the upstream and fork URLs, branches, the checkout under the main clone's
@@ -656,11 +667,15 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   (`GHOSTTY_SOURCE_DIR` comes from our `.cargo/config.toml`, so the checkout under `.research/`
   builds against `vendor/ghostty`). A ghostty bump is therefore: move the submodule, re-pin +
   regenerate in the binding fork, push, `cargo update -p libghostty-vt`, gate.
-  New C API worth adopting, 🔬 until measured: native search (`ghostty_search_new/set/tick/get`,
-  whole-terminal, incremental, plain text with smart case only — no regex) against our
-  text-formatting search, which after 2026-09-12's fix costs 16 ms for 50 000 lines of which
-  the formatter is 10 ms (MEASUREMENTS "search over a full history"); adopt it for plain
-  needles only if a scrollback that large is common; `row_iterator_next_dirty`
+  New C API worth adopting: native search (`ghostty_search_new/set/tick/get`, whole-terminal,
+  incremental) — ⏸ after reading `search.h` at `44f2a44d` (2026-09-12): its matching is
+  "byte-exact except ASCII letters", so a plain needle would fold case only for ASCII where
+  ours folds Unicode, and regex needles would still take our path, which leaves two searches
+  with two answers for one needle; the prize is the formatter's 10 ms of a 16 ms search over
+  50 000 lines (MEASUREMENTS "search over a full history"), paid only while typing a needle
+  into a history that size. Revisit if ghostty adds Unicode folding or the search bar becomes
+  a live follow of a streaming scrollback (the incremental feed/tick split is built for that);
+  `row_iterator_next_dirty`
   for the apply path; `ghostty_terminal_paste` with its Kitty clipboard/paste safety checks
   (`GHOSTTY_REJECTED`); semantic prompt state read straight from the C API; Kitty clipboard
   protocol reads (`clipboard_read` effect) behind a permission prompt.
@@ -854,7 +869,13 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
   host whose mesh IP changes needs re-pairing. Observed 2026-09-04: when the host process is
   killed, the client's lone direct path times out at 15 s, noq logs `failed closing path
   err=LastOpenPath` and keeps it, and the connection only drops at the 45 s idle timeout
-  (`IDLE_TIMEOUT`); the top bar showed a stale RTT until then. ✅ Liveness now comes from
+  (`IDLE_TIMEOUT`); the top bar showed a stale RTT until then. Seen once (2026-09-12, the
+  first gate after the zed sync, cold build then 516 tests at once): the loopback test
+  `pair_then_reconnect_then_reject_stranger` failed with the stranger's *dial* timing out at
+  45 s (`Connect("timed out")`, the idle timeout again) instead of the host's `NotPaired`;
+  alone it takes 0.24 s and the whole suite passed on the next run in 12.7 s. Not acted on:
+  one occurrence, and a retry policy would only hide the rate. If it recurs, the number to
+  read first is whether the host's accept loop ever saw the stranger. ✅ Liveness now comes from
   QUIC itself, no protocol message: the app samples `ConnectionStats.udp_rx.datagrams` once a
   second (`HostLink::received_datagrams`); keep-alive pings make a live host send something
   every 5 s, so a counter that stands still for `SILENCE_WARN` = 8 s turns the RTT readout into

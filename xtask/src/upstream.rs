@@ -5,8 +5,8 @@
 //! each fork branch sits (`base`, the upstream commit it was last rebased onto, and its date).
 //! `check` fetches both upstreams and reports the drift; `sync` rebases each fork onto the
 //! newest upstream, build-checks it, pushes it, moves this workspace's `Cargo.lock` pins and
-//! rewrites the base lines. The gate prints a warning when a base is older than
-//! [`STALE_AFTER_DAYS`] days.
+//! rewrites the base lines (plus `checked`, the day it confirmed the fork current). The gate
+//! prints a warning when a fork was last known current more than [`STALE_AFTER_DAYS`] days ago.
 //!
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
@@ -70,6 +70,20 @@ struct Fork {
     base: String,
     /// Its commit date (`YYYY-MM-DD`).
     base_date: String,
+    /// The day `sync` last confirmed the fork sits on the upstream head (`YYYY-MM-DD`); a quiet
+    /// upstream keeps an old `base_date`, and this is what keeps the gate from calling it stale.
+    #[serde(default)]
+    checked: String,
+}
+
+impl Fork {
+    /// Days since the fork was last known current: the later of the base commit and the last
+    /// confirming `sync`.
+    fn days_since_current(&self, today: i64) -> Result<i64> {
+        let base = days_from_civil(&self.base_date)?;
+        let checked = if self.checked.is_empty() { base } else { days_from_civil(&self.checked)? };
+        Ok(today.saturating_sub(base.max(checked)).max(0))
+    }
 }
 
 /// The whole file, in [`ORDER`].
@@ -120,8 +134,9 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
             }
             let _dir = sh.push_dir(&root);
             step("cargo update", &cmd!(sh, "cargo update -p gpui -p gpui-kit -p libghostty-vt"))?;
+            let today = civil_from_days(today_days()?);
             for (name, base) in &synced {
-                write_base(&root, name, base)?;
+                write_base(&root, name, base, &today)?;
             }
             println!(
                 "✔ forks pushed and pins moved; now `cargo xtask gate`, then `cargo xtask e2e app` \
@@ -141,9 +156,13 @@ pub fn warn_if_stale() {
         let today = today_days()?;
         let mut stale = Vec::new();
         for (name, fork) in config.forks() {
-            let age = today.saturating_sub(days_from_civil(&fork.base_date)?);
+            let age = fork.days_since_current(today)?;
             if age > STALE_AFTER_DAYS {
-                stale.push(format!("{name} base is {age} days old ({})", fork.base_date));
+                stale.push(format!(
+                    "{name} was last known current {age} days ago (base {}, checked {})",
+                    fork.base_date,
+                    if fork.checked.is_empty() { "never" } else { &fork.checked }
+                ));
             }
         }
         Ok(stale)
@@ -173,9 +192,10 @@ fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) 
     let range = format!("{}..{}", fork.base, upstream.sha);
     let behind = cmd!(sh, "git rev-list --count {range}").read()?;
     let tags = tags_since(sh, &fork.base, &upstream.sha)?;
-    let age = today_days()?.saturating_sub(days_from_civil(&fork.base_date)?).max(0);
+    let age = fork.days_since_current(today_days()?)?;
     println!(
-        "{name}: base {} ({}, {age} days old); upstream {} at {} ({}): {behind} commits ahead",
+        "{name}: base {} ({}, current {age} days ago); upstream {} at {} ({}): {behind} commits \
+         ahead",
         short(&fork.base),
         fork.base_date,
         fork.upstream_branch,
@@ -276,8 +296,31 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
                     .read()
                     .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
             };
+            // A conflict resolved by hand rewrites the patch, so `git cherry` cannot vouch for
+            // it either: then accept the branch when it already sits on the new upstream and
+            // replays the fork's patches by subject, in order.
+            let upstream_sha = &upstream.sha;
+            let replays_every_patch = || {
+                let subjects = |range: &str| {
+                    cmd!(sh, "git log --format=%s --reverse {range}").quiet().read().ok()
+                };
+                let fork_base = cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")
+                    .quiet()
+                    .read()
+                    .ok()
+                    .map(|sha| sha.trim().to_owned());
+                let on_upstream = cmd!(sh, "git merge-base --is-ancestor {upstream_sha} {local}")
+                    .quiet()
+                    .run()
+                    .is_ok();
+                on_upstream
+                    && fork_base.is_some_and(|fork_base| {
+                        subjects(&format!("{upstream_sha}..{local}"))
+                            == subjects(&format!("{fork_base}..{fork_sha}"))
+                    })
+            };
             ensure!(
-                fork_is_ancestor || carries_every_patch(),
+                fork_is_ancestor || carries_every_patch() || replays_every_patch(),
                 "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
                 dir,
                 fork.local_branch,
@@ -464,27 +507,42 @@ fn lock_pin(root: &Utf8Path, fork: &Fork) -> Result<String> {
         .with_context(|| format!("Cargo.lock has no entry for {} branch {}", fork.url, fork.branch))
 }
 
-/// Rewrite the `base` and `base_date` lines of one `[section]` in place, keeping comments.
-fn write_base(root: &Utf8Path, name: &str, head: &Head) -> Result<()> {
+/// Rewrite the `base`, `base_date` and `checked` lines of one `[section]` in place, keeping
+/// comments; `checked` becomes `today` and is added after `base_date` when the section has none.
+fn write_base(root: &Utf8Path, name: &str, head: &Head, today: &str) -> Result<()> {
     use std::fmt::Write as _;
 
     let path = root.join(CONFIG);
     let text = std::fs::read_to_string(&path)?;
     let header = format!("[{name}]");
     let mut inside = false;
+    let mut checked_written = false;
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         if line.starts_with('[') {
+            if inside && !checked_written {
+                let _written = writeln!(out, "checked = \"{today}\"");
+            }
             inside = line.trim() == header;
+            checked_written = false;
         }
         if inside && line.starts_with("base = ") {
             let _written = write!(out, "base = \"{}\"", head.sha);
         } else if inside && line.starts_with("base_date = ") {
             let _written = write!(out, "base_date = \"{}\"", head.date);
+        } else if inside && line.starts_with("checked = ") {
+            let _written = write!(out, "checked = \"{today}\"");
+            checked_written = true;
+        } else if inside && line.is_empty() && !checked_written {
+            let _written = writeln!(out, "checked = \"{today}\"");
+            checked_written = true;
         } else {
             out.push_str(line);
         }
         out.push('\n');
+    }
+    if inside && !checked_written {
+        let _written = writeln!(out, "checked = \"{today}\"");
     }
     std::fs::write(&path, out).with_context(|| format!("writing {path}"))
 }
@@ -507,6 +565,24 @@ fn short(sha: &str) -> &str {
 fn today_days() -> Result<i64> {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     i64::try_from(secs.checked_div(86_400).unwrap_or(0)).map_err(Into::into)
+}
+
+/// `YYYY-MM-DD` for a count of days since the Unix epoch (Howard Hinnant's `civil_from_days`).
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the days-to-civil formula cannot overflow an i64 for any day count from the epoch"
+)]
+fn civil_from_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Days since the Unix epoch for a `YYYY-MM-DD` date (Howard Hinnant's `days_from_civil`).
@@ -552,15 +628,55 @@ mod tests {
             "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"b\"\nbase_date = \"2020-01-02\"\n",
         )
         .expect("write");
-        write_base(&root, "gpui-kit", &Head { sha: "c".to_owned(), date: "2026-09-05".to_owned() })
-            .expect("rewrite");
+        let head = Head { sha: "c".to_owned(), date: "2026-09-05".to_owned() };
+        write_base(&root, "gpui-kit", &head, "2026-09-12").expect("rewrite");
+        let text = std::fs::read_to_string(root.join(CONFIG)).expect("read");
+        assert_eq!(
+            text,
+            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"c\"\nbase_date = \"2026-09-05\"\nchecked = \"2026-09-12\"\n",
+            "only the gpui-kit section changes, and it gains a checked line"
+        );
+        // A second sync rewrites the checked line in place; a blank line after the section
+        // stays a separator.
+        std::fs::write(root.join(CONFIG), format!("{text}\n[other]\nbase = \"x\"\n"))
+            .expect("write");
+        write_base(&root, "gpui-kit", &head, "2026-09-20").expect("rewrite");
         let text = std::fs::read_to_string(root.join(CONFIG)).expect("read");
         std::fs::remove_dir_all(&dir).expect("cleanup");
         assert_eq!(
             text,
-            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"c\"\nbase_date = \"2026-09-05\"\n",
-            "only the gpui-kit section changes"
+            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"c\"\nbase_date = \"2026-09-05\"\nchecked = \"2026-09-20\"\n\n[other]\nbase = \"x\"\n",
+            "checked is rewritten, not duplicated"
         );
+    }
+
+    #[test]
+    fn civil_dates_round_trip() {
+        for date in ["1970-01-01", "2000-02-29", "2026-09-12", "2100-12-31"] {
+            let days = days_from_civil(date).expect("valid date");
+            assert_eq!(civil_from_days(days), date);
+        }
+    }
+
+    #[test]
+    fn a_quiet_upstream_is_current_from_its_last_check() {
+        let mut fork = Fork {
+            upstream: String::new(),
+            upstream_branch: String::new(),
+            url: String::new(),
+            branch: String::new(),
+            checkout: Utf8PathBuf::new(),
+            local_branch: String::new(),
+            base: String::new(),
+            base_date: "2026-09-01".to_owned(),
+            checked: String::new(),
+        };
+        let today = days_from_civil("2026-09-12").expect("date");
+        assert_eq!(fork.days_since_current(today).ok(), Some(11), "no check: the base counts");
+        fork.checked = "2026-09-12".to_owned();
+        assert_eq!(fork.days_since_current(today).ok(), Some(0), "checked today");
+        fork.checked = "2026-08-01".to_owned();
+        assert_eq!(fork.days_since_current(today).ok(), Some(11), "the later date wins");
     }
 
     #[test]
@@ -582,6 +698,7 @@ mod tests {
             local_branch: String::new(),
             base: String::new(),
             base_date: String::new(),
+            checked: String::new(),
         };
         let pin = lock_pin(&root, &fork);
         std::fs::remove_dir_all(&dir).expect("cleanup");

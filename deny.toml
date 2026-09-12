@@ -40,7 +40,6 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "0BSD",
-    "OpenSSL",
     "BSL-1.0",
     "Unlicense",
 ]
@@ -49,7 +48,6 @@ exceptions = [
     # Mozilla's CA bundle as data; permissive, data-only licence.
     { allow = [ "CDLA-Permissive-2.0" ], crate = "webpki-roots" },
     # BSD-style; pulled by gpui's http_client through async-compression.
-    { allow = [ "bzip2-1.0.6" ], crate = "bzip2" },
     { allow = [ "bzip2-1.0.6" ], crate = "libbz2-rs-sys" },
 ]
 
@@ -86,14 +84,12 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
 allow-git = [
-    "https://github.com/Uzaaft/libghostty-rs",
     "https://github.com/aislopware/zed",
     "https://github.com/aislopware/gpui-kit",
-    "https://github.com/zed-industries/zed",
     "https://github.com/zed-industries/font-kit",
     # gpui's `test-support` (dev-dependency of slopty-ui) pins proptest to a git revision.
     "https://github.com/proptest-rs/proptest",
 ]
 
 [sources.allow-org]
-github = [ "aislopware", "zed-industries" ]
+github = [ "aislopware" ]
