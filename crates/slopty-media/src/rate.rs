@@ -441,6 +441,66 @@ mod tests {
         assert_eq!(d.verdict, RateVerdict::Cut, "real loss right after a stall");
     }
 
+    /// The window's folds: the hold keeps its maximum, the path keeps the wider sample and
+    /// ignores an equal or empty one, and a sample with no time or no window is no throughput.
+    #[test]
+    fn a_window_keeps_the_longest_hold_and_the_widest_path() {
+        assert_eq!(PathSample { rtt: Duration::ZERO, cwnd: 10 }.window_bps(), None);
+        assert_eq!(PathSample { rtt: Duration::from_millis(1), cwnd: 0 }.window_bps(), None);
+        let mut w = Window::default();
+        w.add(&ReceiverReport { hold_p95: Duration::from_millis(30), ..CLEAN }, 10, false);
+        w.add(&ReceiverReport { hold_p95: Duration::from_millis(20), ..CLEAN }, 10, false);
+        assert_eq!((w.hold_max, w.sent), (Duration::from_millis(30), 20));
+        let first = PathSample { rtt: Duration::from_millis(10), cwnd: 100_000 };
+        let equal = PathSample { rtt: Duration::from_millis(20), cwnd: 200_000 };
+        let wider = PathSample { rtt: Duration::from_millis(10), cwnd: 200_000 };
+        w.add_path(Some(first));
+        w.add_path(Some(equal));
+        assert_eq!(w.path, Some(first), "an equal window does not replace the first");
+        w.add_path(Some(wider));
+        w.add_path(None);
+        assert_eq!(w.path, Some(wider));
+    }
+
+    /// The overuse lines are exclusive: loss or a hold of exactly the figure is not yet a cut.
+    #[test]
+    fn the_overuse_lines_are_exclusive() {
+        let at = |lost: u32, hold_ms: u64| Window {
+            lost,
+            sent: 1000,
+            hold_max: Duration::from_millis(hold_ms),
+            ..Window::default()
+        };
+        assert_ne!(judge(&at(OVERUSE_LOSS_PERMILLE, 0), false), RateVerdict::Cut);
+        assert_eq!(judge(&at(OVERUSE_LOSS_PERMILLE + 1, 0), false), RateVerdict::Cut);
+        assert_ne!(judge(&at(0, OVERUSE_HOLD_MS), false), RateVerdict::Cut);
+        assert_eq!(judge(&at(0, OVERUSE_HOLD_MS + 1), false), RateVerdict::Cut);
+    }
+
+    /// Either stall figure alone starts the settling, and a report with neither never does:
+    /// the burst after a clean run is judged.
+    #[test]
+    fn either_stall_figure_alone_settles_the_next_reports() {
+        let only_count = ReceiverReport { stalls: 1, ..CLEAN };
+        let only_time = ReceiverReport { stalled_ms: 50, ..CLEAN };
+        for stall in [only_count, only_time] {
+            let mut c = RateController::new(30_000_000);
+            for _ in 0..8 {
+                assert_eq!(c.on_report(&CLEAN, 300, None), None);
+            }
+            assert_eq!(c.on_report(&stall, 300, None), None);
+            let d = c.on_report(&BURST, 300, None).expect("decision");
+            assert_eq!(d.verdict, RateVerdict::Stall, "{stall:?}");
+            assert_eq!(d.window.queue_max, 0, "the burst was not counted after {stall:?}");
+        }
+        let mut c = RateController::new(30_000_000);
+        for _ in 0..9 {
+            assert_eq!(c.on_report(&CLEAN, 300, None), None);
+        }
+        let d = c.on_report(&BURST, 300, None).expect("decision");
+        assert_eq!((d.verdict, d.window.queue_max), (RateVerdict::Cut, 4), "nothing to settle");
+    }
+
     #[test]
     fn grows_into_the_ceiling_on_a_clean_path() {
         let mut c = RateController::new(30_000_000);

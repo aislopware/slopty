@@ -449,8 +449,8 @@ mod tests {
         assert!(p.retransmit(0, &[0]).is_empty(), "evicted from history");
         let all = p.retransmit(u32::try_from(HISTORY_FRAMES).unwrap(), &[]);
         assert_eq!(all.len(), 3, "all data fragments, no parity");
-        let some = p.retransmit(u32::try_from(HISTORY_FRAMES + 1).unwrap(), &[2, 0, 9]);
-        assert_eq!(some.len(), 2, "out-of-range indexes are dropped");
+        let some = p.retransmit(u32::try_from(HISTORY_FRAMES + 1).unwrap(), &[2, 0, 3, 9]);
+        assert_eq!(some.len(), 2, "out-of-range and parity indexes are dropped");
         let (h, _) = MediaHeader::parse(&some[0]).unwrap();
         assert_eq!(h.index.get(), 2);
         assert_eq!(h.flags & flags::RETRANSMIT, flags::RETRANSMIT);
@@ -462,6 +462,57 @@ mod tests {
         let (h, payload) = MediaHeader::parse(&dg).unwrap();
         assert_eq!(h.kind(), Some(Kind::Audio));
         assert_eq!(payload.len(), 120);
+        assert!(audio_datagram(StreamId(1), 5, 0, &[9; MAX_PAYLOAD]).is_some(), "a full one fits");
         assert!(audio_datagram(StreamId(1), 5, 0, &[9; MAX_PAYLOAD + 1]).is_none());
+    }
+
+    /// The fragment cap is inclusive; the ratio clamps at one and is read back as set; the
+    /// payload cap is even and bounded on both sides; the counters and the wire size are exact.
+    #[test]
+    fn the_caps_and_counters_read_back_exactly() {
+        let full = MAX_DATA_FRAGMENTS * MAX_PAYLOAD - FRAME_PREFIX_BYTES;
+        assert_eq!(
+            usize::from(layout(full, 0, MAX_PAYLOAD).unwrap().data_count),
+            MAX_DATA_FRAGMENTS
+        );
+        assert!(matches!(layout(full + 1, 0, MAX_PAYLOAD), Err(MediaError::FrameTooLarge { .. })));
+
+        let mut p = Packetizer::new(StreamId(1));
+        assert_eq!(p.next_frame(), 0);
+        assert!(format!("{p:?}").contains("Packetizer"));
+        p.set_parity_permille(1500);
+        assert_eq!(p.parity_permille(), 1000, "clamped to one");
+        p.set_parity_permille(1000);
+        assert_eq!(p.parity_permille(), 1000);
+        p.set_parity_permille(300);
+        assert_eq!(p.parity_permille(), 300);
+
+        let data = vec![7_u8; 3000];
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe: true,
+            ltr_token: None,
+            ltr_refresh: false,
+            capture_ts_us: 0,
+        };
+        let sent = p.packetize(&frame, 0).unwrap();
+        let wire = sent.bytes();
+        assert_eq!(wire, sent.datagrams.iter().map(Bytes::len).sum::<usize>());
+        assert_eq!(wire, sent.datagrams.len() * (sent.layout.shard_bytes + HEADER_BYTES));
+        assert!(sent.layout.parity_count > 0);
+        assert_eq!(p.next_frame(), 1);
+
+        p.set_parity_permille(0);
+        let sent = p.packetize(&frame, 0).unwrap();
+        assert_eq!(sent.layout.parity_count, 0);
+        assert_eq!(sent.datagrams.len(), usize::from(sent.layout.data_count), "no parity work");
+        assert_eq!(p.next_frame(), 2);
+
+        p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES - 1);
+        assert_eq!(p.max_payload(), MIN_PAYLOAD, "never under the floor");
+        p.set_max_datagram(MAX_PAYLOAD + HEADER_BYTES + 1);
+        assert_eq!(p.max_payload(), MAX_PAYLOAD, "never over the ceiling");
+        p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES + 3);
+        assert_eq!(p.max_payload(), MIN_PAYLOAD + 2, "rounded down to even");
     }
 }

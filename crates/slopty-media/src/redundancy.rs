@@ -247,6 +247,7 @@ mod tests {
         let before = r.permille();
         let after = r.on_report(&report(6, 2), 300);
         assert!(after > before, "{before} → {after}");
+        assert_eq!(after, before * 3 / 2, "one and a half times the ratio in force");
         assert!(after <= Redundancy::MAX);
     }
 

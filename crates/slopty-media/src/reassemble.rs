@@ -666,9 +666,9 @@ impl Reassembler {
     }
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
-        // A picture proves the source is drawing — unless the host has since said it is not, in
-        // which case this one was captured before it stopped and proves nothing about now.
-        self.source_live |= !self.hinted_idle;
+        // A picture never changes what the host said about its source: one that arrives after
+        // the source was called idle was captured before it stopped and proves nothing about
+        // now, and only the host's word makes it live again (`set_source_live`).
         self.any_arrived = true;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());

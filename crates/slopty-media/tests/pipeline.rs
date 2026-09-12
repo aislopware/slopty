@@ -245,6 +245,7 @@ mod tests {
         h.drain();
         h.deliver(&s2.datagrams);
         assert!(h.drain().is_empty(), "frame 2 waits for the missing frame 1");
+        assert!(h.tick().is_empty(), "inside the NACK delay");
 
         h.advance(nack_delay());
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }]);
@@ -253,19 +254,23 @@ mod tests {
         let s3 = h.send(&frame_bytes(4, 2_000), false, false);
         h.deliver(&s3.datagrams);
         assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }], "second try");
-        h.advance(RTT + nack_delay() + cfg().grace);
+        h.advance(RTT + nack_delay());
+        let s4 = h.send(&frame_bytes(5, 2_000), false, false);
+        h.deliver(&s4.datagrams);
+        assert!(h.tick().is_empty(), "two tries only");
+        h.advance(cfg().grace);
         let actions = h.tick();
         assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0 }]);
         assert!(h.rx.awaiting_refresh());
-        assert!(h.drain().is_empty(), "frames 2 and 3 are dropped: they depended on frame 1");
+        assert!(h.drain().is_empty(), "frames 2 to 4 are dropped: they depended on frame 1");
         // The host answers with an LTR refresh; everything after it flows again.
-        let refresh = frame_bytes(5, 4_000);
-        let s4 = h.send(&refresh, false, true);
-        let s5 = h.send(&frame_bytes(6, 1_000), false, false);
-        h.deliver(&s4.datagrams);
+        let refresh = frame_bytes(6, 4_000);
+        let s5 = h.send(&refresh, false, true);
+        let s6 = h.send(&frame_bytes(7, 1_000), false, false);
         h.deliver(&s5.datagrams);
+        h.deliver(&s6.datagrams);
         let out = h.drain();
-        assert_eq!(out.iter().map(|f| f.info.frame).collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(out.iter().map(|f| f.info.frame).collect::<Vec<_>>(), vec![5, 6]);
         assert!(out[0].info.ltr_refresh);
         assert_eq!(out[0].data, refresh);
         assert!(!h.rx.awaiting_refresh());
@@ -931,6 +936,242 @@ mod tests {
         assert_eq!((report.stalled_ms, report.stalls), (0, 0), "4 ms of silence is not a stall");
         let empty = h.rx.take_report(h.now, 0);
         assert_eq!((empty.frames_ok, empty.acked_ltr_len), (0, 0));
+    }
+
+    /// A missing fragment is asked for twice, and only once a datagram has arrived since the
+    /// last ask; after the second the frame is given up at its deadline, not asked for again.
+    #[test]
+    fn a_partial_frame_is_asked_for_twice_then_given_up() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 6_000), false, false);
+        h.deliver_except(&s1, &[0, 1, 2, 6, 7]);
+        assert!(h.tick().is_empty(), "inside the NACK delay");
+        h.advance(nack_delay());
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![0, 1, 2] }]);
+        // A retry gap later nothing new has arrived since the ask: the answer may be in flight.
+        h.advance(RTT + nack_delay());
+        assert!(h.tick().is_empty(), "no arrival since the ask");
+        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
+        h.deliver(&s3.datagrams);
+        let second = h.tick();
+        assert_eq!(second, vec![Action::Nack { frame: 1, fragments: vec![0, 1, 2] }], "second");
+        h.advance(RTT + nack_delay());
+        let s4 = h.send(&frame_bytes(5, 2_000), false, false);
+        h.deliver(&s4.datagrams);
+        assert!(h.tick().is_empty(), "two tries only");
+        h.advance(cfg().grace);
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
+        assert_eq!((h.rx.stats().frames_lost, h.rx.stats().nacks), (1, 2));
+    }
+
+    /// Deadlines restart when the link moves for frames never asked for too: one still inside
+    /// its NACK delay when everything went quiet is asked for as soon as something arrives,
+    /// not a retry gap later as if it had been asked already.
+    #[test]
+    fn a_frame_never_asked_for_before_a_silence_is_asked_for_when_the_link_moves() {
+        // Half a frame.
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 6_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver_except(&s1, &[0, 1, 2, 6, 7]);
+        h.advance(Duration::from_millis(120));
+        h.deliver(&s2.datagrams);
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![0, 1, 2] }]);
+        // A whole frame.
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let _s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        let s3 = h.send(&frame_bytes(4, 2_000), false, false);
+        h.deliver(&s2.datagrams);
+        h.advance(Duration::from_millis(120));
+        h.deliver(&s3.datagrams);
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 1, fragments: vec![] }]);
+    }
+
+    /// The pending set is bounded: past `max_pending` frames the oldest is given up; a frame
+    /// number exactly `max_pending` ahead is still tracked frame by frame, one further is a
+    /// jump that writes off everything before it, the half-built included.
+    #[test]
+    fn the_pending_set_is_bounded_and_a_jump_past_it_writes_off_the_rest() {
+        let max = cfg().max_pending;
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        for i in 0..max {
+            let s = h.send(&frame_bytes(2, 2_000), false, false);
+            h.deliver_except(&s, &[0, 1]);
+            assert_eq!(h.rx.queue_depth(), i + 1);
+        }
+        assert_eq!(h.rx.stats().frames_lost, 0, "full, nothing given up yet");
+        let s = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver_except(&s, &[0, 1]);
+        assert_eq!((h.rx.stats().frames_lost, h.rx.queue_depth()), (1, max), "the oldest went");
+
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        for _ in 0..max {
+            let _never_arrives = h.send(&frame_bytes(2, 2_000), false, false);
+        }
+        let s = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s.datagrams);
+        assert_eq!((h.rx.stats().frames_lost, h.rx.queue_depth()), (1, max), "tracked");
+
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver_except(&s1, &[0, 1]);
+        for _ in 0..max {
+            let _never_arrives = h.send(&frame_bytes(2, 2_000), false, false);
+        }
+        let s = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s.datagrams);
+        let written_off = u64::try_from(max + 1).unwrap();
+        assert_eq!((h.rx.stats().frames_lost, h.rx.queue_depth()), (written_off, 1), "a jump");
+        assert!(h.rx.awaiting_refresh());
+    }
+
+    /// A fragment whose header disagrees with its frame's first fragment on any one count is
+    /// malformed, whichever count it is.
+    #[test]
+    fn a_fragment_that_contradicts_its_frame_on_one_count_is_malformed() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams[..1]);
+        let mut wrong_count = s0.datagrams[1].to_vec();
+        // `data_count` is the little-endian u16 at byte 10 of the header: 2 → 3.
+        wrong_count[10] = wrong_count[10].wrapping_add(1);
+        let (header, _) = MediaHeader::parse(&wrong_count).unwrap();
+        assert_eq!(header.data_count.get(), 3);
+        assert_eq!(
+            h.rx.ingest(&Bytes::from(wrong_count), h.now),
+            Ingest::Ignored(Ignored::Malformed)
+        );
+        h.deliver(&s0.datagrams[1..]);
+        assert_eq!(h.drain().len(), 1, "the frame itself is fine");
+    }
+
+    /// A frame completed by retransmissions alone is counted as retransmitted, not as an FEC
+    /// recovery, though the window still reports it recovered.
+    #[test]
+    fn a_retransmission_alone_is_not_an_fec_recovery() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        // 2 data + 1 parity; the first data fragment and the parity are lost.
+        h.deliver_except(&s0, &[0, 2]);
+        h.advance(nack_delay());
+        assert_eq!(h.tick(), vec![Action::Nack { frame: 0, fragments: vec![0] }]);
+        let resent = h.tx.retransmit(0, &[0]);
+        h.advance(RTT);
+        h.deliver(&resent);
+        let out = h.drain();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].info.recovered);
+        let stats = h.rx.stats();
+        assert_eq!((stats.frames_fec, stats.frames_retransmit), (0, 1));
+        assert_eq!(h.rx.take_report(h.now, 0).frames_fec, 1);
+    }
+
+    /// The report ranks the window's holds for its percentiles and smooths the interarrival
+    /// jitter on the host's capture clock.
+    #[test]
+    fn the_report_ranks_holds_and_smooths_jitter() {
+        let mut h = Harness::new();
+        // The harness stamps every frame with the same capture time, so every millisecond
+        // between deliveries is jitter: 26 ms, then 26 ms again.
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.advance(Duration::from_millis(16));
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.deliver(&s1.datagrams[..1]);
+        h.advance(Duration::from_millis(10));
+        h.deliver(&s1.datagrams[1..]);
+        h.advance(Duration::from_millis(6));
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver(&s2.datagrams[..1]);
+        h.advance(Duration::from_millis(20));
+        h.deliver(&s2.datagrams[1..]);
+        let out = h.drain();
+        assert_eq!(out.iter().map(|f| f.hold.as_millis()).collect::<Vec<_>>(), vec![0, 10, 20]);
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.hold_p50.as_millis(), report.hold_p95.as_millis()), (10, 20));
+        // 26 000 / 16, then + (26 000 − 1 625) / 16.
+        assert_eq!(report.owd_jitter.as_micros(), 3_148);
+    }
+
+    /// Where a silence is filed: one that began with nothing pending is idle time, one ended
+    /// by a picture says so, and what the host's stamps or the receiver's sleep leave to the
+    /// link is charged from the threshold exactly.
+    #[test]
+    fn a_silence_is_filed_by_what_was_pending_what_ended_it_and_what_was_left() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        h.awake(Duration::from_millis(100));
+        h.deliver(&s1.datagrams);
+        let silences = h.rx.stats().silences;
+        assert_eq!((silences.while_idle, silences.ended_video, silences.ended_other), (1, 1, 0));
+
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+        let s2 = h.send(&frame_bytes(3, 2_000), false, false);
+        h.deliver_except(&s1, &[0, 1]);
+        h.awake(Duration::from_millis(100));
+        h.deliver(&s2.datagrams);
+        assert_eq!(h.rx.stats().silences.while_idle, 0, "half a frame was pending");
+
+        // The host's stamps account for 20 ms of a 70 ms silence: the 50 ms left is the
+        // threshold exactly, and that is the link's.
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        h.awake(Duration::from_millis(70));
+        assert_eq!(h.rx.ingest(&heartbeat_datagram(STREAM, 1, 20), h.now), Ingest::Heartbeat);
+        let silences = h.rx.stats().silences;
+        assert_eq!((silences.in_flight, silences.host_quiet, silences.receiver_dozed), (1, 0, 0));
+        assert_eq!(h.rx.take_report(h.now, 0).stalled_ms, 50);
+    }
+
+    /// The queue depth is the frames waiting to be taken plus the ones still assembling, and
+    /// every acknowledged token waits for the next report, the oldest first.
+    #[test]
+    fn the_queue_depth_and_the_acks_count_everything_pending() {
+        let mut h = Harness::new();
+        assert!(format!("{:?}", h.rx).contains("Reassembler"));
+        assert_eq!(h.rx.queue_depth(), 0);
+        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s0.datagrams);
+        let s1 = h.send(&frame_bytes(2, 30_000), false, false);
+        h.deliver_except(&s1, &[2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(h.rx.queue_depth(), 2, "one ready, one partial");
+        assert_eq!(h.drain().len(), 1);
+        assert_eq!(h.rx.queue_depth(), 1, "the partial");
+        for token in [1, 2, 3] {
+            h.rx.ack_ltr(token);
+        }
+        let report = h.rx.take_report(h.now, 1);
+        assert_eq!((report.acked_ltr_len, &report.acked_ltr[..3]), (3, &[1, 2, 3][..]));
     }
 
     proptest! {
