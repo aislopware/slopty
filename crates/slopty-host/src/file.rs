@@ -122,7 +122,11 @@ mod tests {
         let latin = dir.path().join("latin.txt");
         std::fs::write(&latin, b"na\xefve\n").unwrap();
         assert_eq!(read(&latin), FileRead::Binary { size: 6 });
-        assert!(matches!(read(&dir.path().join("gone")), FileRead::Missing { .. }));
+        assert_eq!(
+            read(&dir.path().join("gone")),
+            FileRead::Missing { error: "No such file or directory".to_owned() },
+            "the os word without its number"
+        );
         assert_eq!(read(dir.path()), FileRead::Missing { error: "Is a directory".to_owned() });
         let long = dir.path().join("long.txt");
         let body: String =
@@ -144,6 +148,33 @@ mod tests {
                 assert_eq!(size, 600 * 1024);
                 assert_eq!(text.lines().count(), 511, "512 KiB less the cut last line");
                 assert_eq!(more_lines, 1, "the rest is counted as one: the host did not read it");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A file of exactly the byte cap is whole; one past it that the cap splits inside a
+    /// character keeps what decodes and counts the cut line.
+    #[test]
+    fn the_byte_cap_is_inclusive_and_a_split_character_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "x".repeat(1023));
+        let cap = usize::try_from(FILE_BYTES).unwrap();
+        let exact = dir.path().join("exact.txt");
+        std::fs::write(&exact, line.repeat(cap / 1024)).unwrap();
+        match read(&exact) {
+            FileRead::Text { text, more_lines, size, .. } => {
+                assert_eq!((text.lines().count(), more_lines, size), (cap / 1024, 0, FILE_BYTES));
+            }
+            other => panic!("{other:?}"),
+        }
+        let split = dir.path().join("split.txt");
+        let body = format!("first\n{}\u{e9}\ntail\n", "a".repeat(cap - 7));
+        std::fs::write(&split, &body).unwrap();
+        match read(&split) {
+            FileRead::Text { text, more_lines, size, .. } => {
+                assert_eq!((text.as_str(), more_lines), ("first", 1));
+                assert_eq!(size, u64::try_from(body.len()).unwrap());
             }
             other => panic!("{other:?}"),
         }

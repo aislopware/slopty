@@ -366,4 +366,111 @@ mod tests {
             "{rect:?}"
         );
     }
+
+    /// A store is unreadable when its path is a directory and refused when its document
+    /// does not parse; only a missing file starts empty.
+    #[test]
+    fn an_unreadable_path_and_a_bad_document_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = CanvasStore::open(dir.path()).unwrap_err();
+        assert!(matches!(&err, HostError::Canvas(m) if m.starts_with("read ")), "{err:?}");
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, b"{ not json").unwrap();
+        let err = CanvasStore::open(&bad).unwrap_err();
+        assert!(matches!(&err, HostError::Canvas(m) if m.starts_with("parse ")), "{err:?}");
+        let fresh = CanvasStore::open(&dir.path().join("none.json")).unwrap();
+        assert_eq!(fresh.version(), 0);
+    }
+
+    /// Without a runtime every change is on disk before the call returns, a removal too.
+    #[test]
+    fn every_change_is_on_disk_before_it_returns() {
+        let (dir, store) = store();
+        let path = dir.path().join("canvas.json");
+        let by = ClientId::new();
+        let session = SessionId::new();
+        let _delta = store.ensure_terminal(session, by).unwrap();
+        let CanvasSync::Snapshot { version, items } = CanvasStore::open(&path).unwrap().snapshot()
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!((version, items.len()), (1, 1));
+        assert_eq!(store.remove_session(session, by).len(), 1);
+        assert!(store.remove_session(session, by).is_empty(), "nothing left to remove");
+        let CanvasSync::Snapshot { version, items } = CanvasStore::open(&path).unwrap().snapshot()
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!((version, items.len()), (2, 0));
+    }
+
+    /// A new terminal goes right of the item whose right edge is furthest, on that item's
+    /// row, both snapped to the grid; the widest item wins over the one placed furthest.
+    #[test]
+    fn a_new_terminal_sits_right_of_the_furthest_right_edge() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let id = |delta: CanvasSync| match delta {
+            CanvasSync::Delta { op: CanvasOp::Upsert(i), .. } => i,
+            _ => panic!("an upsert"),
+        };
+        let wide = id(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let moved = Rect { x: 10.0, y: 100.0, w: wide.rect.w, h: wide.rect.h };
+        store.apply(CanvasOp::Place { id: wide.id, rect: moved }, by).unwrap();
+        let far = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "far but narrow".to_owned() },
+            rect: Rect { x: 400.0, y: 900.0, w: MIN_SIZE, h: MIN_SIZE },
+            z: 0,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        store.apply(CanvasOp::Upsert(far), by).unwrap();
+        let next = id(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let x = snap(10.0 + wide.rect.w + GAP);
+        assert!((x - 752.0).abs() < f32::EPSILON, "{x}");
+        assert!((next.rect.x - x).abs() < f32::EPSILON, "{next:?}");
+        assert!((next.rect.y - 96.0).abs() < f32::EPSILON, "{next:?}");
+    }
+
+    /// Geometry is clamped on both sides; a note and a file path have their byte limits.
+    #[test]
+    fn negatives_clamp_too_and_notes_and_paths_are_bounded() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let item = |kind: ItemKind, rect: Rect| CanvasItem {
+            id: ItemId::new(),
+            kind,
+            rect,
+            z: 0,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let rect_of = |delta: CanvasSync| match delta {
+            CanvasSync::Delta { op: CanvasOp::Upsert(i), .. } => i.rect,
+            _ => panic!("an upsert"),
+        };
+        let note = |text: String| {
+            item(ItemKind::Note { text }, Rect { x: -100.5, y: -2.0e6, w: 1.0, h: 1.0e9 })
+        };
+        let rect = rect_of(store.apply(CanvasOp::Upsert(note("n".repeat(64 * 1024))), by).unwrap());
+        assert!((rect.x + 100.5).abs() < f32::EPSILON, "{rect:?}");
+        assert!((rect.y + MAX_OFFSET).abs() < f32::EPSILON, "{rect:?}");
+        assert!(
+            (rect.w - MIN_SIZE).abs() < f32::EPSILON && (rect.h - MAX_SIZE).abs() < f32::EPSILON,
+            "{rect:?}"
+        );
+        let err = store.apply(CanvasOp::Upsert(note("n".repeat(64 * 1024 + 1))), by).unwrap_err();
+        assert!(matches!(&err, HostError::Canvas(m) if m == "note too long"), "{err:?}");
+        let file = |path: String| {
+            item(ItemKind::File { path }, Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 })
+        };
+        store.apply(CanvasOp::Upsert(file("/".repeat(4096))), by).unwrap();
+        for path in [String::new(), "/".repeat(4097)] {
+            let err = store.apply(CanvasOp::Upsert(file(path)), by).unwrap_err();
+            assert!(matches!(&err, HostError::Canvas(m) if m == "bad file path"), "{err:?}");
+        }
+    }
 }

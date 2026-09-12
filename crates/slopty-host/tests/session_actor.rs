@@ -388,6 +388,14 @@ mod actor {
         // The old connection goes away: scoped to its own sink, nothing changes.
         session.detach_sink(a, &old_tx).unwrap();
         assert_eq!(session.snapshot().await.unwrap().viewers, 1);
+        // A live connection's own sink does detach its client.
+        let b = ClientId::new();
+        let (b_tx, mut b_rx) = mpsc::channel(64);
+        session.attach(b, size(40, 6), b_tx.clone()).unwrap();
+        wait_for(&mut b_rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        assert_eq!(session.snapshot().await.unwrap().viewers, 2);
+        session.detach_sink(b, &b_tx).unwrap();
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1);
         session.request(a, TermRequest::Raw(b"x".to_vec())).unwrap();
         let (_, screen) = wait_for(&mut new_rx, |_, screen| text(screen).contains('x')).await;
         assert!(text(&screen).contains('x'));
@@ -398,5 +406,69 @@ mod actor {
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
         child.wait().await.unwrap();
         session.close();
+    }
+
+    /// Closing the session drops the PTY master, so the child sees a hangup and exits.
+    #[tokio::test]
+    async fn closing_the_session_hangs_up_the_child() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "cat"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        session.close();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the child exits once the master is closed")
+            .unwrap();
+        assert!(!status.success() || status.code() == Some(0), "{status:?}");
+        assert!(matches!(session.snapshot().await, Err(slopty_host::HostError::SessionClosed)));
+    }
+
+    /// A quiet spell inside an escape sequence does not checkpoint: the state would replace
+    /// the sequence's head and its tail would print as text after a restart.
+    #[tokio::test]
+    async fn a_checkpoint_waits_for_the_end_of_an_escape_sequence() {
+        let (session, mut child, mut taps) = start_tapped(
+            &["/bin/sh", "-c", "printf '\\033]0;half'; sleep 2; printf 'done\\033\\\\'; sleep 30"],
+            Vec::new(),
+        );
+        let (tx, _rx) = mpsc::channel(64);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        let mut output = Vec::new();
+        let mut checkpoints_while_open = 0;
+        loop {
+            match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
+                Tap::Output { bytes, .. } => {
+                    output.extend_from_slice(&bytes);
+                    if output.windows(4).any(|w| w == b"done") {
+                        break;
+                    }
+                }
+                // The actor checkpoints once at start, before any output; only one
+                // after the head of the sequence would be inside it.
+                Tap::Checkpoint { .. } if !output.is_empty() => checkpoints_while_open += 1,
+                Tap::Checkpoint { .. } => {}
+            }
+        }
+        assert!(output.starts_with(b"\x1b]0;half"), "{output:?}");
+        assert_eq!(checkpoints_while_open, 0, "no checkpoint inside the OSC");
+        let state = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Tap::Checkpoint { state, .. } = taps.recv().await.unwrap() {
+                    break state;
+                }
+            }
+        })
+        .await
+        .expect("a checkpoint once the sequence ended");
+        assert!(
+            state.windows(8).any(|w| w == b"halfdone"),
+            "{:?}",
+            String::from_utf8_lossy(&state)
+        );
+        session.close();
+        let _killed = child.kill().await;
     }
 }
