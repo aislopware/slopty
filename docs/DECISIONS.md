@@ -2549,7 +2549,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   moved: the remaining note draws as the active item, as it should); (10) a resumed card is
   seeded with the transcript's last entries before the agent speaks — Claude Code's
   `--resume` replays nothing over stream-json, and a card that opens empty on "Resume" is
-  worse than no resume at all. The self-test's private
+  worse than no resume at all; (11) while the agent works the composer's Send is a Stop
+  (`composer-stop`, `AgentInterrupt`), because on the phone a runaway turn had only the key
+  bar's Esc, and the fake's `linger` turn is now ended by a click on it. The self-test's private
   `HOME` (also given to the driven launch now, the way the fake-claude launch already did)
   keeps the fake's transcripts out of the developer's `~/.claude`.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**

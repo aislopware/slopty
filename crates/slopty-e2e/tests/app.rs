@@ -463,17 +463,23 @@ mod tests {
         .unwrap();
 
         // A turn that streams and stops: the partial shows under the list while the agent is
-        // working; Esc interrupts it, and the turn ends with the interrupted record.
+        // working, Send has become Stop; a click on it interrupts, and the turn ends with the
+        // interrupted record.
         drv.type_text("linger").await.unwrap();
         drv.keys("enter").await.unwrap();
-        drv.wait_for("the streamed text", STEP, |d| {
-            chat(d).is_some_and(|(agent, conv)| {
-                agent.as_deref() == Some("working") && conv.partial == "Hello from the fake"
+        let dump = drv
+            .wait_for("the streamed text", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("working") && conv.partial == "Hello from the fake"
+                })
             })
-        })
-        .await
-        .unwrap();
-        drv.keys("escape").await.unwrap();
+            .await
+            .unwrap();
+        assert!(dump.a11y_node("Button", Some("Send")).is_none(), "{:#?}", dump.a11y);
+        let stop =
+            dump.a11y_node("Button", Some("Stop")).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (sx, sy) = a11y_center(stop);
+        drv.click(sx, sy).await.unwrap();
         drv.wait_for("the interrupted turn", STEP, |d| {
             chat(d).is_some_and(|(_, conv)| {
                 conv.partial.is_empty()

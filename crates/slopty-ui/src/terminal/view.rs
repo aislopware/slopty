@@ -1800,8 +1800,17 @@ impl Render for TerminalView {
         let attention = self.attention();
         let composer_focused = self.composer_focused(window, cx);
         let info = self.driven.then_some(&self.info);
+        let working = self.driven && matches!(self.agent_status(), Some(AgentStatus::Working));
         let conversation = self.conversation.as_ref().map(|c| {
-            c.render(info, attention.as_ref(), &self.partial, composer_focused, &self.theme, cx)
+            c.render(
+                info,
+                attention.as_ref(),
+                &self.partial,
+                composer_focused,
+                working,
+                &self.theme,
+                cx,
+            )
         });
         let search_focused = self
             .search
@@ -2952,6 +2961,17 @@ mod tests {
         cx.simulate_keystrokes("ctrl-c");
         assert_eq!(drain_words(&mut rx), ["interrupt"], "so does ⌃C");
         assert!(composer_focused(&view, cx), "and the caret stays");
+        // While the agent works the button next to the field is Stop, one tap to interrupt;
+        // once it is idle again it is Send.
+        assert!(cx.debug_bounds("composer-send").is_none(), "no Send while working");
+        let stop = cx.debug_bounds("composer-stop").expect("Stop is drawn while working");
+        cx.simulate_click(stop.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["interrupt"], "Stop interrupts the turn");
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Idle), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-stop").is_none(), "no Stop when idle");
+        assert!(cx.debug_bounds("composer-send").is_some(), "Send is back");
 
         cx.simulate_keystrokes("cmd-shift-l");
         cx.run_until_parked();

@@ -504,7 +504,9 @@ chip (`conversation-model`, "Model: …") whose click opens a row of the four al
 (`conversation-models`, `MODELS`: fable, opus, sonnet, haiku) — picking one sends
 `ClientMsg::AgentSet { session, model }`; the permission mode as a chip
 (`conversation-mode`, "Permission mode: …") that cycles `default → acceptEdits → plan`
-through `AgentSet { permission_mode }`; then the turn count and the cost. The host turns an
+through `AgentSet { permission_mode }`; then the turn count and the cost. While the agent
+works the composer's Send (`composer-send`) is a Stop (`composer-stop`, one tap =
+`AgentInterrupt`, the same as Esc / ⌃C), the finger's way to end a turn. The host turns an
 `AgentSet` into Claude Code's `set_model` / `set_permission_mode` control requests (probed on
 2.1.269: both acknowledged in place, no restart; `supported_models` / `supported_commands` are
 not, so the model list is fixed and the slash commands come from `init`), records the model

@@ -325,6 +325,7 @@ impl Conversation {
         attention: Option<&Attention>,
         partial: &str,
         composer_focused: bool,
+        working: bool,
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
@@ -410,7 +411,7 @@ impl Conversation {
             .when(!completions.is_empty(), |el| {
                 el.child(self.completions_row(&completions, &theme, cx))
             })
-            .child(self.composer_row(composer_focused, &theme, cx))
+            .child(self.composer_row(composer_focused, working, &theme, cx))
             .into_any_element()
     }
 
@@ -600,7 +601,15 @@ impl Conversation {
 
     /// The composer: the growing text field (accent ring while it has the caret) and the send
     /// button, the one primary action on this surface.
-    fn composer_row(&self, focused: bool, theme: &Theme, cx: &Context<TerminalView>) -> AnyElement {
+    /// The field and, next to it, Send — or Stop while the driven agent is working, since
+    /// a finger has no Esc and a turn that runs away wants one tap.
+    fn composer_row(
+        &self,
+        focused: bool,
+        working: bool,
+        theme: &Theme,
+        cx: &Context<TerminalView>,
+    ) -> AnyElement {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let send = theme.typography.ui_size + spacing.md;
@@ -639,11 +648,16 @@ impl Conversation {
                     ),
             )
             .child({
-                let send = div()
-                    .id("composer-send")
-                    .debug_selector(|| "composer-send".to_owned())
+                let (id, label, glyph, color) = if working {
+                    ("composer-stop", "Stop", "■", s.warn)
+                } else {
+                    ("composer-send", "Send", "↑", s.accent)
+                };
+                let button = div()
+                    .id(id)
+                    .debug_selector(move || id.to_owned())
                     .role(Role::Button)
-                    .aria_label("Send")
+                    .aria_label(label)
                     .flex_none()
                     .w(px(send))
                     .h(px(send))
@@ -651,12 +665,17 @@ impl Conversation {
                     .items_center()
                     .justify_center()
                     .rounded(px(theme.radii.sm))
-                    .bg(hsla(s.accent))
+                    .bg(hsla(color))
                     .text_color(hsla(s.accent_fg))
                     .cursor_pointer()
-                    .child("↑");
-                tab_stop(send, s.accent)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.submit_composer(window, cx)))
+                    .child(glyph);
+                tab_stop(button, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
+                    if working {
+                        this.interrupt_agent();
+                    } else {
+                        this.submit_composer(window, cx);
+                    }
+                }))
             })
             .into_any_element()
     }
