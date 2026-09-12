@@ -843,6 +843,17 @@ mod tests {
     }
 
     #[test]
+    fn the_state_counts_its_frames_and_reads_back_the_epoch_and_the_ack() {
+        let mut s = TermState::new(size());
+        assert!(!s.driving(), "a client drives only when the host says so");
+        assert_eq!((s.epoch(), s.input_ack(), s.frames()), (None, 0, 0));
+        s.apply(TermEvent::Frame(frame(7, true, 3, 0, 1, &[(0, "a")])));
+        assert_eq!((s.epoch(), s.input_ack(), s.frames()), (Some(3), 7, 1));
+        s.apply(TermEvent::Frame(frame(9, false, 3, 0, 1, &[(0, "b")])));
+        assert_eq!((s.epoch(), s.input_ack(), s.frames()), (Some(3), 9, 2));
+    }
+
+    #[test]
     fn frames_fill_screen_and_cache_history() {
         let mut s = TermState::new(size());
         assert!(
