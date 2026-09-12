@@ -1414,16 +1414,26 @@ fn entry(
             .items_end()
             .gap(px(spacing.sm))
             .child(
-                div().flex_1().min_w(px(0.0)).line_height(prose).child(
-                    TextView::markdown(
-                        ElementId::NamedInteger(
-                            "conversation-md".into(),
-                            u64::try_from(ix).unwrap_or(0),
-                        ),
-                        SharedString::from(markdown.clone()),
-                    )
-                    .style(markdown_style(theme, &mono)),
-                ),
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .line_height(prose)
+                    .flex()
+                    .flex_col()
+                    .gap(px(spacing.xs))
+                    .children(segments(markdown).into_iter().enumerate().map(|(si, segment)| {
+                        match segment {
+                            Segment::Prose(text) => TextView::markdown(
+                                ElementId::Name(format!("conversation-md-{ix}-{si}").into()),
+                                SharedString::from(text),
+                            )
+                            .style(markdown_style(theme, &mono))
+                            .into_any_element(),
+                            Segment::Code { lang, body } => {
+                                code_segment(ix, si, &lang, &body, &mono, theme)
+                            }
+                        }
+                    })),
             )
             .children(time)
             .into_any_element(),
@@ -1611,6 +1621,115 @@ pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String 
             format!("{kind}: {}", first(text))
         }
     }
+}
+
+/// A piece of an assistant turn: the prose between the fences, or one fenced code block.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Segment {
+    /// Markdown between the fences.
+    Prose(String),
+    /// One fenced block: the language after the opening fence (may be empty) and the lines
+    /// inside, without a trailing newline.
+    Code {
+        /// What followed the opening fence.
+        lang: String,
+        /// The lines inside.
+        body: String,
+    },
+}
+
+/// `markdown` split at its fences.
+///
+/// A line starting with three backticks opens a block (the rest of the line is its
+/// language), the next such line closes it, an unclosed block runs to the end. Blank prose
+/// between blocks is dropped.
+#[must_use]
+pub fn segments(markdown: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
+    let mut code: Option<(String, Vec<&str>)> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        match code.take() {
+            Some((lang, body)) if trimmed.starts_with("```") => {
+                out.push(Segment::Code { lang, body: body.join("\n") });
+            }
+            Some((lang, mut body)) => {
+                body.push(line);
+                code = Some((lang, body));
+            }
+            None if trimmed.starts_with("```") => {
+                if prose.iter().any(|l| !l.trim().is_empty()) {
+                    out.push(Segment::Prose(prose.join("\n")));
+                }
+                prose.clear();
+                code = Some((trimmed.trim_start_matches('`').trim().to_owned(), Vec::new()));
+            }
+            None => prose.push(line),
+        }
+    }
+    if let Some((lang, body)) = code {
+        out.push(Segment::Code { lang, body: body.join("\n") });
+    }
+    if prose.iter().any(|l| !l.trim().is_empty()) {
+        out.push(Segment::Prose(prose.join("\n")));
+    }
+    out
+}
+
+/// A fenced block of an assistant turn: its language and a "copy" button over the code in
+/// the mono face on the raised surface.
+fn code_segment(
+    ix: usize,
+    si: usize,
+    lang: &str,
+    body: &str,
+    mono: &str,
+    theme: &Theme,
+) -> AnyElement {
+    let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    let text = body.to_owned();
+    let copy_id = format!("conversation-code-copy-{ix}-{si}");
+    let copy = div()
+        .id(ElementId::Name(copy_id.clone().into()))
+        .debug_selector(move || copy_id)
+        .role(Role::Button)
+        .aria_label("Copy code")
+        .px(px(spacing.xs))
+        .rounded(px(theme.radii.xs))
+        .cursor_pointer()
+        .text_color(hsla(s.text_muted))
+        .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+        .on_click(move |_ev, _window, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        })
+        .child("copy");
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(theme.radii.xs))
+        .bg(hsla(s.raised))
+        .px(px(spacing.sm))
+        .py(px(spacing.xs))
+        .font_family(mono.to_owned())
+        .text_size(px(theme.typography.small()))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(lang.to_owned()))
+                .child(copy),
+        )
+        .child(
+            div()
+                .whitespace_normal()
+                .text_color(hsla(s.text))
+                .child(SharedString::from(body.to_owned())),
+        )
+        .into_any_element()
 }
 
 /// Markdown in an assistant turn: paragraphs one base unit apart, headings stepping down

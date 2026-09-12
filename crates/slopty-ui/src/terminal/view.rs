@@ -2883,7 +2883,10 @@ mod tests {
         let snapshot = TranscriptUpdate {
             session,
             reset: true,
-            entries: vec![user("fix it"), assistant("On it.")],
+            entries: vec![
+                user("fix it"),
+                assistant("On it.\n\n```sh\ncargo test\n```\n\nthen look."),
+            ],
         };
         view.update(cx, |v, cx| v.transcript_update(snapshot, cx));
         let more = TranscriptUpdate { session, reset: false, entries: vec![tool("cargo test")] };
@@ -2892,6 +2895,35 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.conversation().map(|c| c.entries().len())), Some(3));
         let bounds = cx.debug_bounds("conversation").expect("drawn");
         assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+
+        // The fenced block in the answer is its own element with a copy button: a click puts
+        // the code alone on the clipboard.
+        let copy = cx.debug_bounds("conversation-code-copy-1-1").expect("the block's copy button");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Copy code"))), "{tree:#?}");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("cargo test"));
+        assert_eq!(
+            conversation::segments("a\n```sh\nx\n```\nb"),
+            [
+                conversation::Segment::Prose("a".to_owned()),
+                conversation::Segment::Code { lang: "sh".to_owned(), body: "x".to_owned() },
+                conversation::Segment::Prose("b".to_owned()),
+            ]
+        );
+        assert_eq!(
+            conversation::segments("```\nopen"),
+            [conversation::Segment::Code { lang: String::new(), body: "open".to_owned() }],
+            "an unclosed fence runs to the end"
+        );
+        assert_eq!(
+            conversation::segments("just prose"),
+            [conversation::Segment::Prose("just prose".to_owned())]
+        );
 
         cx.simulate_keystrokes("cmd-shift-l");
         assert!(matches!(

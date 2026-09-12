@@ -940,6 +940,24 @@ mod tests {
             card.conversation
         );
 
+        // A fenced command in an answer gets its own block with a copy button.
+        drv.type_text("snippet").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the snippet", STEP, |d| {
+                // The card is the resumed one by now, not the session `chat` was built on.
+                d.terminals.iter().any(|t| {
+                    t.kind == "agent"
+                        && t.agent.as_deref() == Some("done")
+                        && t.conversation.as_ref().is_some_and(|c| {
+                            c.entries.last().map(String::as_str) == Some("assistant: Run this:")
+                        })
+                })
+            })
+            .await
+            .unwrap();
+        assert!(dump.a11y_node("Button", Some("Copy code")).is_some(), "{:#?}", dump.a11y);
+
         // The agent dies on its own: the card goes, and the top bar says why (its status and
         // its last word on stderr) rather than leaving a vanished conversation unexplained.
         drv.type_text("die").await.unwrap();

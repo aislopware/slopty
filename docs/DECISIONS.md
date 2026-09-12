@@ -3005,6 +3005,24 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   nothing run, `note` + ↩ leaving one note, "Go to shell" first once a shell is on the canvas
   and revealing it with the keyboard in its terminal), and the app self-test's notes scenario,
   which now makes its note through the palette.
+- ✅ **A fenced block in an answer is its own element, with a copy button** (2026-09-12). An
+  agent's answer is often "run this:" followed by a command, and the only way to get it into
+  a shell was to select it by hand out of gpui-kit's markdown view — on a phone, not at all.
+  Rulings: (1) an assistant turn is split at its ``` fences before rendering
+  (`conversation::segments`: a line starting with ``` opens a block whose language is the
+  rest of the line, the next such line closes it, an unclosed one runs to the end, blank
+  prose between blocks is dropped); the prose segments still go through `TextView::markdown`,
+  the code segments are drawn by Slopty — the same raised surface, mono face and `small()`
+  size the markdown style gave a code block, so nothing moves — with the language and a
+  "copy" button (a11y "Copy code") in a header row; (2) copy takes the lines inside the
+  fences alone, no trailing newline, so it pastes as one command; (3) gpui-kit's markdown
+  view was not forked for a per-block button — the split is thirty lines and leaves the fork
+  in sync with upstream. Not done: "run in the shell", which needs a shell to name (the
+  active one? a new one?) — a ruling for when a use case asks. Tests: `segments` cases and
+  the button's click reading back from the headless clipboard
+  (`the_conversation_view_lists_the_transcript_and_toggles_back`), and the app self-test's
+  driven scenario (`snippet`: the fake answers with a fence, the dump's a11y carries "Copy
+  code").
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

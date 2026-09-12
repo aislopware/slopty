@@ -544,6 +544,12 @@ fn run() -> std::io::Result<ExitCode> {
                         "session_id": fake.session}),
             )?;
             waiting = Some(Wait::Interrupt);
+        } else if text.starts_with("snippet") {
+            // An answer with a fenced command in it.
+            let reply = "Run this:\n\n```sh\necho hi\n```\n\nthen look.";
+            fake.note_reply(reply);
+            emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": reply}])))?;
+            emit(&mut out, &fake.result("success", reply))?;
         } else if text.starts_with("die") {
             // The agent falls over: a last word on stderr and a non-zero status, the way a
             // lost login or a crash ends a real one.
