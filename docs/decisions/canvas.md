@@ -274,7 +274,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `arrow_keys_reach_a_focused_shell_beside_a_file_card` keeps it caught) — and do nothing
   under the palette or the picker. A click or a tap on a row (`file-line-<item>-<row>`) makes it the reading line
   too, and "ask" names it — `@path line N ` — when there is one, since the tinted line is
-  what the question is about. The palette line reads "Find in terminal or file". Tests:
+  what the question is about. The palette line reads "Find in terminal, conversation or file". Tests:
   `arrow_keys_move_a_file_cards_reading_line` (headless: first key → top, steps, a page,
   clamps at both ends, `reading_line` follows, a click on the sixth row); the iOS self-test's
   driven scenario writes the file, taps "reload" (two lines), taps "find", types `there`

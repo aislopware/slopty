@@ -419,6 +419,29 @@ mod tests {
         assert_eq!(conv.context.as_deref(), Some("ctx 20%"), "{conv:?}");
         assert!(dump.a11y_node("Button", Some("Model: fake-model")).is_some(), "{:#?}", dump.a11y);
 
+        // ⌘F with the caret in the composer opens the card's own find bar (not the input's
+        // search), the needle counts the entries holding it, Esc closes it and the caret is
+        // back in the composer (the slash completion typed next proves that).
+        drv.keys("cmd-f").await.unwrap();
+        drv.wait_for("the find bar", STEP, |d| d.a11y_node("Group", Some("Find")).is_some())
+            .await
+            .unwrap();
+        drv.type_text("fake").await.unwrap();
+        drv.wait_for("one entry found", STEP, |d| {
+            d.a11y_node("Label", Some("Matches")).is_some_and(|n| n.value.as_deref() == Some("1/1"))
+        })
+        .await
+        .unwrap();
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the find bar closed", STEP, |d| d.a11y_node("Group", Some("Find")).is_none())
+            .await
+            .unwrap();
+        assert_eq!(
+            chat(&drv.dump().await.unwrap()).unwrap().0.as_deref(),
+            Some("done"),
+            "no interrupt"
+        );
+
         // The model chip opens the menu; picking Opus retunes the agent in place (no
         // restart: the same session id) and the chip follows the agent's word.
         let chip = dump.a11y_node("Button", Some("Model: fake-model")).unwrap();

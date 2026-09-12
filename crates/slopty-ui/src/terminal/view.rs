@@ -950,6 +950,14 @@ impl TerminalView {
     pub fn transcript_update(&mut self, update: TranscriptUpdate, cx: &mut Context<Self>) {
         if let Some(conversation) = &mut self.conversation {
             conversation.apply(update);
+            // An open find bar keeps its hits true to the transcript, staying on its entry.
+            let keep = self
+                .search
+                .as_ref()
+                .and_then(|s| s.current.and_then(|c| conversation.hits().0.get(c).copied()));
+            if self.search.is_some() {
+                self.search_conversation(Some(keep.unwrap_or(usize::MAX)), cx);
+            }
             cx.notify();
         }
     }
@@ -1013,7 +1021,13 @@ impl TerminalView {
     /// Esc in the search field: close it and give the keys back to the program.
     pub fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.take().is_some() {
-            self.focus.focus(window, cx);
+            match &mut self.conversation {
+                Some(conversation) => {
+                    conversation.set_hits(Vec::new(), None);
+                    conversation.focus_composer(window, cx);
+                }
+                None => self.focus.focus(window, cx),
+            }
             cx.notify();
         }
     }
@@ -1048,7 +1062,40 @@ impl TerminalView {
         search.current = None;
         search.invalid = None;
         search.reveal = true;
-        self.send_search(cx);
+        if self.conversation.is_some() {
+            self.search_conversation(None, cx);
+        } else {
+            self.send_search(cx);
+        }
+    }
+
+    /// Find the needle in the conversation's entries here, no host involved: the hits land
+    /// on the newest (`keep`: the entry to stay on when it is still a hit, once the
+    /// transcript grew under an open bar), and the list scrolls to it.
+    fn search_conversation(&mut self, keep: Option<usize>, cx: &mut Context<Self>) {
+        let (Some(search), Some(conversation)) = (&mut self.search, &mut self.conversation) else {
+            return;
+        };
+        match conversation::entry_hits(conversation.entries(), &search.needle, search.regex) {
+            Ok(hits) => {
+                search.total = u32::try_from(hits.len()).unwrap_or(u32::MAX);
+                search.current = keep
+                    .and_then(|entry| hits.iter().position(|&h| h == entry))
+                    .or_else(|| hits.len().checked_sub(1));
+                search.invalid = None;
+                conversation.set_hits(hits, search.current);
+            }
+            Err(message) => {
+                search.total = 0;
+                search.current = None;
+                search.invalid = Some(message);
+                conversation.set_hits(Vec::new(), None);
+            }
+        }
+        if keep.is_none() {
+            self.reveal_current(cx);
+        }
+        cx.notify();
     }
 
     /// Flip the search between plain text and regex; remembered for the next search bar.
@@ -1087,10 +1134,10 @@ impl TerminalView {
     /// Move `by` hits (wrapping) and scroll the new one into view.
     fn step_match(&mut self, by: i64, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        if search.matches.is_empty() {
+        let n = self.conversation.as_ref().map_or(search.matches.len(), |c| c.hits().0.len());
+        if n == 0 {
             return;
         }
-        let n = search.matches.len();
         let at = search.current.map_or_else(
             || if by > 0 { 0 } else { n.saturating_sub(1) },
             |c| {
@@ -1105,6 +1152,15 @@ impl TerminalView {
 
     /// Scroll so the current hit sits in the viewport (centred when it was off screen).
     fn reveal_current(&mut self, cx: &mut Context<Self>) {
+        if let (Some(search), Some(conversation)) = (&self.search, &mut self.conversation) {
+            let hit = search.current.and_then(|c| conversation.hits().0.get(c).copied());
+            conversation.set_hits(conversation.hits().0.to_vec(), search.current);
+            if let Some(ix) = hit {
+                conversation.reveal_entry(ix);
+            }
+            cx.notify();
+            return;
+        }
         let Some(hit) =
             self.search.as_ref().and_then(|s| s.current.and_then(|c| s.matches.get(c))).copied()
         else {
@@ -2359,6 +2415,7 @@ impl TerminalView {
         &self,
         search: &Search,
         focused: bool,
+        floating: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -2368,6 +2425,7 @@ impl TerminalView {
         let bare = move |id: &'static str| {
             div()
                 .id(id)
+                .debug_selector(move || id.to_owned())
                 .px(px(spacing.xs))
                 .rounded(px(radii.xs))
                 .cursor_pointer()
@@ -2378,7 +2436,7 @@ impl TerminalView {
             SharedString::default()
         } else if search.invalid.is_some() {
             "bad regex".into()
-        } else if search.matches.is_empty() {
+        } else if search.total == 0 {
             "none".into()
         } else {
             let at = search.current.map_or(0, |c| c.saturating_add(1));
@@ -2387,13 +2445,18 @@ impl TerminalView {
         };
         div()
             .id("terminal-search")
+            .debug_selector(|| "terminal-search".to_owned())
             .key_context("TerminalSearch")
-            .absolute()
-            .top(px(spacing.sm))
-            // A phone-wide terminal can be wider than the screen; its left edge is the part
-            // that is on screen (the "take" pill sits there for the same reason).
-            .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
-            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
+            .when(floating, |bar| {
+                bar.absolute()
+                    .top(px(spacing.sm))
+                    // A phone-wide terminal can be wider than the screen; its left edge is
+                    // the part that is on screen (the "take" pill sits there for the same
+                    // reason).
+                    .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
+                    .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
+            })
+            .when(!floating, |bar| bar.flex_none().mx(px(spacing.sm)).mt(px(spacing.xs)))
             .flex()
             .items_center()
             .gap(px(spacing.sm))
@@ -2421,7 +2484,16 @@ impl TerminalView {
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
             )
-            .child(div().min_w(px(40.0)).text_color(hsla(s.text_secondary)).child(count))
+            .child(
+                div()
+                    .id("terminal-search-count")
+                    .min_w(px(40.0))
+                    .text_color(hsla(s.text_secondary))
+                    .role(gpui::accesskit::Role::Label)
+                    .aria_label("Matches")
+                    .aria_value(count.clone())
+                    .child(count),
+            )
             .child(
                 bare("terminal-search-prev")
                     .role(gpui::accesskit::Role::Button)
@@ -2499,6 +2571,15 @@ impl Render for TerminalView {
         let composer_focused = self.composer_focused(window, cx);
         let info = self.driven.then_some(&self.info);
         let working = self.driven && matches!(self.agent_status(), Some(AgentStatus::Working));
+        let search_focused = self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
+        // Over the grid the bar floats in a corner; in a conversation it is a row under the
+        // header, so it covers no chip and no line of the chat.
+        let floating = self.conversation.is_none();
+        let mut search =
+            self.search.as_ref().map(|s| self.render_search(s, search_focused, floating, cx));
         let conversation = self.conversation.as_ref().map(|c| {
             c.render(
                 info,
@@ -2511,15 +2592,11 @@ impl Render for TerminalView {
                 working,
                 self.files.as_ref(),
                 self.can_run_in_shell,
+                search.take(),
                 &self.theme,
                 cx,
             )
         });
-        let search_focused = self
-            .search
-            .as_ref()
-            .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
-        let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
         let header = self
             .conversation
             .is_none()
@@ -2570,6 +2647,16 @@ impl Render for TerminalView {
             .capture_action(cx.listener(
                 |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
                     this.composer_action("tab", window, cx);
+                },
+            ))
+            // ⌘F with the caret in the composer: the input's own search action would take
+            // it; the card's find bar is what a reader means.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Search, window, cx| {
+                    if this.conversation.is_some() {
+                        this.find(&Find, window, cx);
+                        cx.stop_propagation();
+                    }
                 },
             ))
             .capture_action(cx.listener(Self::composer_paste))
@@ -4312,6 +4399,100 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
         assert!(drain_words(&mut rx).is_empty());
+    }
+
+    /// ⌘F in a driven card searches the conversation itself, no host round trip: the bar sits
+    /// under the header, the hits are the entries holding the needle (newest first on
+    /// show), ⌘G / ↩ / ⇧↩ step and wrap, `.*` makes the needle a regex (a bad one says so),
+    /// new entries keep the hits true, and Esc closes the bar with the caret back in the
+    /// composer.
+    #[gpui::test]
+    fn a_driven_view_finds_in_its_conversation(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let session = view.read_with(cx, |v, _| v.session);
+        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
+            session,
+            reset,
+            entries,
+        };
+        view.update(cx, |v, cx| {
+            v.transcript_update(
+                update(
+                    true,
+                    vec![
+                        user("where is the alpha path read?"),
+                        assistant("In `beta.rs`, by `read_alpha`."),
+                        tool("rg alpha"),
+                        assistant("Done."),
+                    ],
+                ),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let hits = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.conversation().map(|c| (c.hits().0.to_vec(), c.hits().1)))
+        };
+
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        let bar = cx.debug_bounds("terminal-search").expect("the bar is up");
+        let header = cx.debug_bounds("conversation").expect("the conversation");
+        assert!(bar.origin.y > header.origin.y, "the bar is a row in the card, not over it");
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(2))), "three entries, on the newest");
+        assert!(drain_words(&mut rx).is_empty(), "nothing asked of the host");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let matches = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            tree.iter().find(|n| n.is("Label", Some("Matches"))).and_then(|n| n.value.clone())
+        };
+        assert_eq!(matches(cx).as_deref(), Some("3/3"), "the count reads the entries found");
+
+        cx.simulate_keystrokes("cmd-g");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(0))), "⌘G wraps to the oldest");
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(2))), "⇧↩ back around");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(0))));
+
+        // The transcript grows under the open bar: the hits follow, the reader stays put.
+        view.update(cx, |v, cx| v.transcript_update(update(false, vec![user("alpha again")]), cx));
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2, 4], Some(0))));
+
+        // `.*`: the needle is a regex; one that does not compile finds nothing and says so.
+        let regex = cx.debug_bounds("terminal-search-regex").expect("the regex toggle");
+        cx.simulate_click(regex.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![0, 1, 2, 4], Some(3))), "the same hits, newest first");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("r e a d _ a l . h a");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![1], Some(0))));
+        cx.simulate_keystrokes("(");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![], None)));
+        assert!(view.read_with(cx, |v, _| v.search.as_ref().unwrap().invalid.is_some()));
+        assert_eq!(matches(cx).as_deref(), Some("bad regex"));
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("z z z");
+        cx.run_until_parked();
+        assert_eq!(matches(cx).as_deref(), Some("none"), "a needle nothing holds");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-search").is_none(), "closed");
+        assert_eq!(hits(cx), Some((vec![], None)), "no tint left behind");
+        assert!(composer_focused(&view, cx), "the caret is back in the composer");
     }
 
     /// ⌘V with a picture on the clipboard attaches it to the next prompt: a chip above the

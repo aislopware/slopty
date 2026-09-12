@@ -530,7 +530,10 @@ The **agent card** is the same `TerminalView` in *driven* mode (`set_driven`, fr
 `SessionSummary.kind`): the conversation opens on its first frame with the caret in the
 composer and cannot be hidden, there is no grid behind it, ↩ in the composer sends
 `AgentSay`, Esc and ⌃C send `AgentInterrupt`, the streamed text shows under the list
-(`conversation-partial`) until it becomes an entry, and the attention row names the tool
+(`conversation-partial`) until it becomes an entry, ⌘F opens the terminal's find bar as a
+row under the header and searches the entries in the client (`conversation::entry_hits`,
+plain or regex; hits are washed entries, the newest first on show, ⌘G / ↩ / ⇧↩ step, the
+reveal pauses tail-following), and the attention row names the tool
 *and what it would do* (`Attention::Permission.detail` from the `PermissionRequest`), with
 Allow / Deny raising `TerminalViewEvent::AgentAnswered { request, allowed }` so the canvas
 sends `AgentAnswer` by request id (`answer_driven`) — the title-bar badge and the

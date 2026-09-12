@@ -216,7 +216,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Next attention", Box::new(NextAttention)),
         c("Mute or unmute window", Box::new(ToggleMute)),
         c("Stream stats", Box::new(ToggleStats)),
-        t("Find in terminal or file", Box::new(Find)),
+        t("Find in terminal, conversation or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
         t("Copy last output", Box::new(CopyLastOutput)),
@@ -5176,7 +5176,10 @@ mod tests {
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Dialog", Some("Commands"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Find in terminal or file ⌘F"))));
+        assert!(
+            tree.iter()
+                .any(|n| n.is("ListBoxOption", Some("Find in terminal, conversation or file ⌘F")))
+        );
         let field_focused = cx.update(|window, cx| {
             view.read(cx)
                 .palette

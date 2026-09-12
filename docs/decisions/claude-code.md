@@ -712,6 +712,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_launch_line_quotes_only_what_a_shell_would_read`, the ⌘⌥⇧T step of
   `cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it`, the chip in the header test,
   goldens `client_open_agent` and `host_agent_info`.
+- ✅ **⌘F in a conversation card finds entries, no wire change** (2026-09-12). A driven
+  card's transcript grows past a screen within minutes and the terminal's ⌘F already existed
+  for the grid; a reader expects the same chord to work here. Rulings: (1) the search runs in
+  the client over the entries it already holds (`conversation::entry_hits` over
+  `entry_text`: the prompt, the answer, the thinking, a call's name and summary, a result, a
+  notice — not the card's chrome), so no `TermRequest::Search` is sent and nothing is asked of
+  the host; (2) the bar is the terminal's own (`Search`, `render_search`) so the ids
+  (`terminal-search*`), the a11y labels, the `.*` regex toggle and the `TerminalSearch` Esc
+  context are one thing everywhere, but in a conversation it is a row under the header
+  (`floating = false`) rather than a corner overlay, so it covers no chip and no line; (3) a
+  hit is an entry, washed in the warn tone with the current one stronger (as the grid's), the
+  newest hit is the first on show (as the grid reveals its newest), ⌘G / ↩ / ⇧↩ step and wrap,
+  and revealing pauses tail-following (`ListState::pause_following_tail`) so the agent's next
+  line does not pull the reader off the hit — the list follows again once it is back at the
+  bottom; (4) entries arriving under an open bar recount the hits and keep the reader on the
+  entry they were on (`search_conversation(keep)`); (5) ⌘F with the caret in the composer is
+  gpui-kit's own `input::Search` action first — captured on the card (`capture_action`) so
+  the card's bar opens; Esc closes it and the caret goes back to the composer. Test:
+  `a_driven_view_finds_in_its_conversation`.
+
 - ✅ **Parity tracks loss asymmetrically, with a deadband** (2026-09-05). The ratio is
   `2 × smoothed loss + 5 %`, clamped to 5…50 %, and a report with `frames_lost > 0` raises it to
   1.5× the current ratio at once (parity was demonstrably not enough for a frame that then cost

@@ -317,6 +317,10 @@ pub struct Conversation {
     completion: usize,
     /// Esc hid the completions for the text as it is now; typing shows them again.
     completions_hidden: bool,
+    /// Entries holding the find bar's needle, in order; shared with the render closure.
+    hits: Rc<[usize]>,
+    /// Index into `hits` of the one the reader is on.
+    hit: Option<usize>,
 }
 
 impl std::fmt::Debug for Conversation {
@@ -354,7 +358,29 @@ impl Conversation {
             model_menu: false,
             completion: 0,
             completions_hidden: false,
+            hits: Rc::from([]),
+            hit: None,
         }
+    }
+
+    /// The find bar's hits (entry indices) and which one the reader is on; empty and none
+    /// while nothing is sought.
+    #[must_use]
+    pub fn hits(&self) -> (&[usize], Option<usize>) {
+        (&self.hits, self.hit)
+    }
+
+    /// The find bar's hits changed: `current` is drawn stronger than the rest.
+    pub fn set_hits(&mut self, hits: Vec<usize>, current: Option<usize>) {
+        self.hits = Rc::from(hits);
+        self.hit = current;
+    }
+
+    /// Scroll entry `ix` into view and stop following the tail, so the agent's next line
+    /// does not pull the reader off it (the list follows again from the bottom).
+    pub fn reveal_entry(&self, ix: usize) {
+        self.list.scroll_to_reveal_item(ix);
+        self.list.pause_following_tail();
     }
 
     /// What completes the composer's text, unless Esc hid the list: the slash commands a
@@ -572,6 +598,7 @@ impl Conversation {
         working: bool,
         files: Option<&(String, Vec<String>)>,
         can_run: bool,
+        find: Option<AnyElement>,
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
@@ -580,6 +607,8 @@ impl Conversation {
         let entries = Rc::clone(&self.entries);
         let open = Rc::clone(&self.open);
         let tasks = Rc::clone(&self.tasks);
+        let hits = Rc::clone(&self.hits);
+        let current = self.hit.and_then(|c| hits.get(c).copied());
         let theme = theme.clone();
         let empty = entries.is_empty();
         let view = cx.entity();
@@ -598,6 +627,7 @@ impl Conversation {
             .text_color(hsla(s.text))
             .font_family(theme.typography.ui_family.clone())
             .when_some(info, |el, info| el.child(self.header_row(info, &theme, cx)))
+            .children(find)
             .child(
                 div()
                     .relative()
@@ -627,12 +657,17 @@ impl Conversation {
                                                 _ => None,
                                             };
                                             let run = can_run.then_some(&view);
+                                            let hit = hits
+                                                .binary_search(&ix)
+                                                .is_ok()
+                                                .then_some(current == Some(ix));
                                             entry(
                                                 ix,
                                                 e,
                                                 open.contains(&ix),
                                                 task,
                                                 run,
+                                                hit,
                                                 &view,
                                                 &theme,
                                             )
@@ -1413,6 +1448,7 @@ fn entry(
     open: bool,
     task: Option<&AgentTask>,
     run: Option<&Entity<TerminalView>>,
+    hit: Option<bool>,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -1429,7 +1465,11 @@ fn entry(
         .aria_label(SharedString::from(entry_label(entry, task)))
         .w_full()
         .px(px(spacing.md))
-        .py(px(spacing.xs));
+        .py(px(spacing.xs))
+        // A find hit is washed in the warn colour, the current one stronger, as the grid's.
+        .when_some(hit, |el, current| {
+            el.bg(hsla_alpha(s.warn, if current { alpha::TINT_STRONG } else { alpha::TINT }))
+        });
     let time = clock(entry.at).map(|t| {
         div()
             .flex_none()
@@ -1742,6 +1782,56 @@ pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String 
             format!("{kind}: {}", first(text))
         }
     }
+}
+
+/// What the find bar searches in an entry.
+///
+/// The words a reader would look for (the prompt, the answer, the thinking, a call's name and
+/// summary, a result, a notice), without the chrome the card adds around them.
+#[must_use]
+pub fn entry_text(entry: &TranscriptEntry) -> String {
+    match &entry.body {
+        TranscriptBody::User { text, .. } | TranscriptBody::Notice { text, .. } => text.clone(),
+        TranscriptBody::Assistant { markdown } => markdown.clone(),
+        TranscriptBody::Thinking { text } => text.text.clone(),
+        TranscriptBody::ToolUse { name, summary, .. } => format!("{name} {summary}"),
+        TranscriptBody::ToolResult { output, .. } => output.text.clone(),
+        TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
+            compacted_label(trigger, *pre_tokens, *post_tokens)
+        }
+    }
+}
+
+/// The entries holding `needle` (case-insensitive; a regular expression when `regex`), in
+/// order; none for an empty needle. `Err` is the regex's complaint.
+///
+/// # Errors
+///
+/// When `regex` is set and `needle` does not compile.
+pub fn entry_hits(
+    entries: &[TranscriptEntry],
+    needle: &str,
+    regex: bool,
+) -> Result<Vec<usize>, String> {
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let matcher: Box<dyn Fn(&str) -> bool> = if regex {
+        let re = regex::RegexBuilder::new(needle)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Box::new(move |text| re.is_match(text))
+    } else {
+        let needle = needle.to_lowercase();
+        Box::new(move |text| text.to_lowercase().contains(&needle))
+    };
+    Ok(entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matcher(&entry_text(entry)))
+        .map(|(ix, _)| ix)
+        .collect())
 }
 
 /// A piece of an assistant turn: the prose between the fences, or one fenced code block.
