@@ -312,16 +312,40 @@ pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEn
         return Vec::new();
     }
     let kind = record.get("type").and_then(Value::as_str);
+    let at = record.get("timestamp").and_then(Value::as_str).and_then(timestamp_millis);
+    if kind == Some("system") {
+        return compacted(record).map(|body| TranscriptEntry { at, body }).into_iter().collect();
+    }
+    // The summary a compaction leaves is a user record to the agent, not to the human.
+    if record.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
     let Some(content) = record.get("message").and_then(|m| m.get("content")) else {
         return Vec::new();
     };
-    let at = record.get("timestamp").and_then(Value::as_str).and_then(timestamp_millis);
     let bodies = match kind {
         Some("user") => user_bodies(tools, content),
         Some("assistant") => assistant_bodies(tools, content),
         _ => Vec::new(),
     };
     bodies.into_iter().map(|body| TranscriptEntry { at, body }).collect()
+}
+
+/// A `system/compact_boundary` record: the stream spells its metadata `compact_metadata`
+/// with snake keys, the transcript file `compactMetadata` with camel ones.
+pub fn compacted(record: &Value) -> Option<TranscriptBody> {
+    if record.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
+        return None;
+    }
+    let meta = record.get("compact_metadata").or_else(|| record.get("compactMetadata"))?;
+    let count = |snake: &str, camel: &str| {
+        meta.get(snake).or_else(|| meta.get(camel)).and_then(Value::as_u64)
+    };
+    Some(TranscriptBody::Compacted {
+        trigger: meta.get("trigger").and_then(Value::as_str).unwrap_or("auto").to_owned(),
+        pre_tokens: count("pre_tokens", "preTokens").unwrap_or(0),
+        post_tokens: count("post_tokens", "postTokens"),
+    })
 }
 
 /// An RFC 3339 record timestamp as milliseconds since the Unix epoch.
@@ -727,6 +751,10 @@ mod tests {
             "\n",
             r#"{"type":"summary","summary":"s"}"#,
             "\n",
+            r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":167000,"postTokens":12000}}"#,
+            "\n",
+            r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}"#,
+            "\n",
             // Pictures ride on the prompt they went with; alone they are an entry of their own.
             r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"what colour?"}]}}"#,
             "\n",
@@ -775,6 +803,12 @@ mod tests {
                     is_error: false,
                 },
                 TranscriptBody::User { text: "and then?".to_owned(), images: 0 },
+                // The boundary is an entry; the summary the agent reads is not.
+                TranscriptBody::Compacted {
+                    trigger: "auto".to_owned(),
+                    pre_tokens: 167_000,
+                    post_tokens: Some(12_000),
+                },
                 TranscriptBody::User { text: "what colour?".to_owned(), images: 1 },
                 TranscriptBody::User { text: String::new(), images: 2 },
             ],

@@ -2802,6 +2802,27 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   headless `a_driven_view_shows_the_agent_and_retunes_it` (the chip in the tree, the labels),
   the app self-test (the fake's records carry 40 000 tokens against a 200 000 window: "ctx
   20%" in the dump's `context`).
+- ✅ **A compaction is a divider in the card, not a prompt the human never typed, protocol
+  25** (2026-09-12). When Claude Code compacts (auto, or `/compact`) it writes a
+  `system/compact_boundary` record — on stdout with `compact_metadata { trigger, pre_tokens,
+  post_tokens }`, in the transcript file with `compactMetadata { trigger, preTokens,
+  postTokens }` — followed by a user record flagged `isCompactSummary: true` whose content
+  is the summary ("This session is being continued…"). Until now the boundary was dropped
+  (no `message`) and the summary drew as a You bubble of several screens. Rulings: (1)
+  `TranscriptBody::Compacted { trigger, pre_tokens, post_tokens }` is an entry, drawn as a
+  ruled divider "compacted (auto): 167k → 12k" (label "Compacted (auto): …"), so the card
+  shows where the agent's memory of the conversation became a summary; (2) the flagged
+  summary record yields no entry — it is the agent's reading, not the human's words — and
+  nothing else about it is special-cased (no text-prefix sniffing); (3) the boundary's
+  `post_tokens` lowers the context chip at once rather than waiting for the next assistant
+  record. Both key spellings are read since the fold sees the stream live and the file on
+  resume. Wire: `TranscriptBody::Compacted`; goldens `host_transcript` / `client_hello`
+  re-accepted, PROTOCOL_VERSION 24 → 25. Tests:
+  `tool_results_are_named_after_their_call_and_injected_texts_are_not_entries` (`transcript`:
+  the file spelling, the summary hidden),
+  `the_context_fill_follows_the_usage_and_the_result_names_the_window` (`stream`: the stream
+  spelling, the chip lowered, the entry stamped), the app self-test's `/compact` turn (the
+  divider last, "ctx 3%", no "continued from" entry, and the divider in the resumed past).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

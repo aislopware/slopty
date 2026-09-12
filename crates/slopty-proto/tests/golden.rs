@@ -463,6 +463,14 @@ mod golden {
                             markdown: "Done: **2** tests.".to_owned(),
                         },
                     },
+                    TranscriptEntry {
+                        at: Some(1_789_180_800_000),
+                        body: TranscriptBody::Compacted {
+                            trigger: "auto".to_owned(),
+                            pre_tokens: 167_000,
+                            post_tokens: Some(12_000),
+                        },
+                    },
                 ],
             }),
         );

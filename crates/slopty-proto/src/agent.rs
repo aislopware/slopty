@@ -302,6 +302,15 @@ pub enum TranscriptBody {
         /// The tool failed.
         is_error: bool,
     },
+    /// The conversation was compacted here: what came before is a summary to the agent now.
+    Compacted {
+        /// `auto` or `manual`.
+        trigger: String,
+        /// Context tokens before.
+        pre_tokens: u64,
+        /// Context tokens after, when the agent said.
+        post_tokens: Option<u64>,
+    },
 }
 
 /// Text cut on the host to a readable size, with a count of what was dropped.

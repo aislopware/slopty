@@ -148,6 +148,18 @@ fn tokens_label(tokens: u64) -> String {
     }
 }
 
+/// The compaction divider: "compacted (auto): 167k → 12k", or just the before when the agent
+/// did not say the after.
+#[must_use]
+pub fn compacted_label(trigger: &str, pre_tokens: u64, post_tokens: Option<u64>) -> String {
+    match post_tokens {
+        Some(post) => {
+            format!("compacted ({trigger}): {} → {}", tokens_label(pre_tokens), tokens_label(post))
+        }
+        None => format!("compacted ({trigger}): {}", tokens_label(pre_tokens)),
+    }
+}
+
 /// Whether the context chip should warn: four fifths of the window spent.
 #[must_use]
 pub fn context_is_tight(context: &slopty_proto::agent::Context) -> bool {
@@ -1337,6 +1349,16 @@ fn entry(
             .children(task.map(|t| task_line(t, theme)))
             .children(tool_body(detail, open, &mono, theme))
             .into_any_element(),
+        TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => row
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .text_size(px(theme.typography.caption()))
+            .text_color(hsla(s.text_muted))
+            .child(div().flex_1().h(px(1.0)).bg(hsla(s.border)))
+            .child(SharedString::from(compacted_label(trigger, *pre_tokens, *post_tokens)))
+            .child(div().flex_1().h(px(1.0)).bg(hsla(s.border)))
+            .into_any_element(),
         TranscriptBody::ToolResult { tool, output, is_error } => {
             let (shown, hidden) = preview(output, open);
             let color = if *is_error { s.error } else { s.text_muted };
@@ -1441,6 +1463,13 @@ pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String 
             if *is_error { " failed" } else { "" },
             first(&output.text)
         ),
+        TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
+            let mut label = compacted_label(trigger, *pre_tokens, *post_tokens);
+            if let Some(rest) = label.strip_prefix("compacted") {
+                label = format!("Compacted{rest}");
+            }
+            label
+        }
     }
 }
 

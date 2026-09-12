@@ -13,7 +13,9 @@
 //! * a prompt starting with `write` — a `Write` tool call and a `can_use_tool` control request; an
 //!   `allow` answer produces a tool result and a closing message, a `deny` a failed tool result
 //!   with the host's message and a closing message that says so;
-//! * `/cost` — one line naming the cost, the way a slash command answers.
+//! * `/cost` — one line naming the cost, the way a slash command answers;
+//! * `/compact` — a `compact_boundary` system record (40 000 → 5 000 tokens) and the summary user
+//!   record flagged `isCompactSummary`, both also written to the transcript file.
 //!
 //! It also does what a retune asks: `set_model` is acknowledged and the assistant records
 //! that follow name the new model; `set_permission_mode` is acknowledged and followed by the
@@ -528,6 +530,26 @@ fn run() -> std::io::Result<()> {
                         "session_id": fake.session}),
             )?;
             waiting = Some(Wait::Interrupt);
+        } else if text.trim() == "/compact" {
+            // The boundary goes to stdout with snake keys and to the file with camel ones,
+            // as Claude Code writes each; the summary is a user record only the agent reads.
+            let boundary = json!({"type": "system", "subtype": "compact_boundary",
+                "compact_metadata": {"trigger": "manual", "pre_tokens": 40_000, "post_tokens": 5_000},
+                "session_id": fake.session, "uuid": "c"});
+            emit(&mut out, &boundary)?;
+            fake.note(&json!({"type": "system", "subtype": "compact_boundary",
+                "compactMetadata": {"trigger": "manual", "preTokens": 40_000, "postTokens": 5_000},
+                "sessionId": fake.session, "timestamp": "2026-09-12T00:00:00.000Z"}));
+            let summary = json!({"role": "user",
+                "content": "This session is being continued from a previous conversation."});
+            let mut record = fake.record("user", &summary);
+            if let Some(fields) = record.as_object_mut() {
+                fields.insert("isCompactSummary".to_owned(), Value::Bool(true));
+            }
+            emit(&mut out, &record)?;
+            fake.note(&json!({"type": "user", "isCompactSummary": true, "cwd": fake.cwd,
+                "sessionId": fake.session, "message": summary}));
+            emit(&mut out, &fake.result("success", ""))?;
         } else if text.trim() == "/cost" {
             let line = format!("Total cost: ${:.2}", 0.01 * f64::from(fake.turns));
             fake.note_reply(&line);

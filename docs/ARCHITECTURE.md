@@ -527,7 +527,10 @@ the context chip (`conversation-context`, protocol 24): every assistant record's
 `message.usage` (input + cache writes + cache reads = the context the request carried) and
 the turn result's widest `modelUsage.*.contextWindow` fold into `AgentInfo.context:
 Option<Context { tokens, window }>`, drawn as "ctx 16%" (or "ctx 31k" before a result names
-the window), in the warn tone from 80%. A
+the window), in the warn tone from 80%. A compaction (`system/compact_boundary`, protocol 25)
+is a `TranscriptBody::Compacted` entry drawn as a ruled divider ("compacted (auto): 167k →
+12k"); the summary record flagged `isCompactSummary` is not an entry, and the boundary's
+`post_tokens` lowers the chip at once. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
 nothing yet to draw; it never displaces a permission or a question. So does a streamed

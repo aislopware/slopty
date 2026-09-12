@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use slopty_proto::agent::{
     AgentStatus, AgentTask, BlockReason, Context, PermissionRequest, QuestionAnswer, ToolDetail,
-    TranscriptEntry, Usage, UsageWindow,
+    TranscriptBody, TranscriptEntry, Usage, UsageWindow,
 };
 
 use crate::transcript::{self, ToolNames};
@@ -205,7 +205,7 @@ pub fn parse(line: &str) -> Option<Event> {
                 .unwrap_or_default()
                 .to_owned(),
         },
-        ("assistant" | "user", _) => Event::Record(record),
+        ("assistant" | "user", _) | ("system", Some("compact_boundary")) => Event::Record(record),
         ("stream_event", _) => stream_event(record.get("event")),
         ("control_request", _) => control_request(&record).unwrap_or(Event::Other),
         ("control_response", _) => {
@@ -787,6 +787,16 @@ impl Fold {
             .into_iter()
             .map(|entry| TranscriptEntry { at: entry.at.or(Some(now)), body: entry.body })
             .collect();
+        // A compaction says what the context shrank to; the chip need not wait for the next
+        // assistant record.
+        if let Some(TranscriptBody::Compacted { post_tokens: Some(tokens), .. }) =
+            entries.first().map(|e| &e.body)
+            && self.context.is_some_and(|c| c.tokens != *tokens)
+        {
+            let context = Context { tokens: *tokens, window: self.context.and_then(|c| c.window) };
+            self.context = Some(context);
+            out.push(Update::Context(context));
+        }
         if !entries.is_empty() {
             out.push(Update::Entries(entries));
         }
@@ -813,8 +823,6 @@ impl Fold {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::agent::TranscriptBody;
-
     use super::*;
 
     const ONE_TURN: &str = include_str!("../tests/fixtures/stream_one_turn.jsonl");
@@ -1207,6 +1215,26 @@ mod tests {
             panic!("parses")
         };
         assert_eq!(context(&fold.apply(no_usage, 0)), None, "a record without usage says nothing");
+        // A compaction boundary is an entry and lowers the chip at once.
+        let Some(boundary) = parse(
+            r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":5000,"post_tokens":700}}"#,
+        ) else {
+            panic!("parses")
+        };
+        let updates = fold.apply(boundary, 9);
+        assert_eq!(context(&updates), Some(Context { tokens: 700, window: Some(1_000_000) }));
+        assert!(
+            matches!(
+                updates.last(),
+                Some(Update::Entries(e)) if e.len() == 1 && e[0].at == Some(9) && e[0].body
+                    == TranscriptBody::Compacted {
+                        trigger: "manual".to_owned(),
+                        pre_tokens: 5000,
+                        post_tokens: Some(700)
+                    }
+            ),
+            "{updates:?}"
+        );
     }
 
     #[test]

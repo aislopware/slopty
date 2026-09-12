@@ -464,6 +464,22 @@ mod tests {
         .await
         .unwrap();
 
+        // `/compact`: a divider says what the context shrank to, the chip drops at once, and
+        // the summary the agent reads is not shown as if the human had typed it.
+        drv.type_text("/compact").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the compaction divider", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("done")
+                    && conv.entries.last().map(String::as_str)
+                        == Some("compacted (manual): 40k → 5k")
+                    && conv.context.as_deref() == Some("ctx 3%")
+                    && !conv.entries.iter().any(|e| e.contains("continued from"))
+            })
+        })
+        .await
+        .unwrap();
+
         // While the model thinks, before any text, the badge says so; Stop interrupts it.
         drv.type_text("ponder").await.unwrap();
         drv.keys("enter").await.unwrap();
@@ -802,7 +818,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 16))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 18))
             })
             .await
             .unwrap();
@@ -815,6 +831,8 @@ mod tests {
                 "assistant: Hello from the fake".to_owned(),
                 "user: /cost".to_owned(),
                 "assistant: Total cost: $0.02".to_owned(),
+                "user: /compact".to_owned(),
+                "compacted (manual): 40k → 5k".to_owned(),
                 "user: ponder".to_owned(),
                 "user: linger".to_owned(),
                 "user: write the note".to_owned(),

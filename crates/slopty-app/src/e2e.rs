@@ -717,6 +717,9 @@ fn entry_line(entry: &TranscriptEntry) -> String {
             if *is_error { " failed" } else { "" },
             first(&output.text)
         ),
+        TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
+            slopty_ui::terminal::conversation::compacted_label(trigger, *pre_tokens, *post_tokens)
+        }
     }
 }
 
