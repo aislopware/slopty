@@ -13,6 +13,7 @@ use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
+use slopty_proto::canvas::CanvasSync;
 use slopty_proto::handshake::{Caps, ClientKind, HelloAck};
 use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
@@ -513,6 +514,13 @@ impl Peer<'_> {
                 if let Some(presence) = told {
                     let _sent = self.daemon.events.send(HostMsg::Canvas(presence));
                 }
+            }
+            ClientMsg::Point { item } => {
+                // Ephemeral like presence: relayed as is, never in the document. A card the
+                // host no longer has is for each client to ignore.
+                let pointed =
+                    CanvasSync::Pointed { client: self.client, name: self.name.clone(), item };
+                let _sent = self.daemon.events.send(HostMsg::Canvas(pointed));
             }
             ClientMsg::Canvas(op) => match self.daemon.canvas.apply(op, self.client) {
                 Ok(delta) => {

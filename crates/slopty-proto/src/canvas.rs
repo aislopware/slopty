@@ -128,4 +128,14 @@ pub enum CanvasSync {
         /// Its viewport in canvas units; `None` when it left or looked away.
         view: Option<Rect>,
     },
+    /// One client pointed the others at a card (`ClientMsg::Point`): ephemeral, not part of
+    /// the document. Every connected client hears it, the pointer included.
+    Pointed {
+        /// Who.
+        client: ClientId,
+        /// Its name from `Hello`.
+        name: String,
+        /// The card.
+        item: ItemId,
+    },
 }

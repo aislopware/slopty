@@ -112,6 +112,9 @@ pub mod actions {
             /// Name the active card: a field in its title bar, ↩ keeps the name (blank
             /// clears it), Esc leaves it as it was.
             RenameItem,
+            /// Point the other clients at the active card: each of them is offered a jump
+            /// to it.
+            PointOthers,
             /// Move the active file card's reading line up one line.
             LineUp,
             /// Move the active file card's reading line down one line.
@@ -130,8 +133,8 @@ pub mod actions {
 pub use actions::{
     AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
     LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote, NewTerminal,
-    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, RenameItem, ResumeAgent,
-    ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, PointOthers, RenameItem,
+    ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -174,6 +177,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
         KeyBinding::new("cmd-e", RenameItem, CTX),
+        KeyBinding::new("cmd-shift-o", PointOthers, CTX),
         // The active file card's reading line. Only while a file card is active (the canvas
         // sets `file_card` on its context then): a binding matches before a focused terminal's
         // key handler runs, so an unscoped `up` would take the arrows from the shell.
@@ -223,6 +227,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Mute or unmute window", Box::new(ToggleMute)),
         c("Stream stats", Box::new(ToggleStats)),
         c("Name this card", Box::new(RenameItem)),
+        c("Point the others at this card", Box::new(PointOthers)),
         t("Find in terminal, conversation or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
@@ -261,6 +266,8 @@ const SETTLE: Duration = Duration::from_millis(80);
 /// How long a moved viewport waits before the host is told where this client looks: a pan
 /// reports every frame, and the other clients only need the places the camera rests.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
+/// How long another client's pointing stays on offer before it goes by itself.
+const POINT_FOR: Duration = Duration::from_secs(8);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
@@ -300,6 +307,16 @@ pub enum CanvasEvent {
 }
 
 /// The field naming a card, open in its title bar (see [`CanvasView::rename_item`]).
+/// Another client's pointing (`CanvasSync::Pointed`), as the toast shows it.
+struct Pointing {
+    /// Tells a stale dismiss timer from the current toast's.
+    seq: u64,
+    /// Who pointed, as they are named.
+    name: String,
+    /// At what.
+    item: ItemId,
+}
+
 struct Rename {
     id: ItemId,
     input: Entity<InputState>,
@@ -534,6 +551,8 @@ pub struct CanvasView {
     /// The client whose viewport the camera keeps up with: every move they report is flown
     /// to, until this client moves the camera itself or they leave.
     following: Option<ClientId>,
+    /// The latest card another client pointed at, on offer until a click or [`POINT_FOR`].
+    pointed: Option<Pointing>,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
     /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
@@ -649,6 +668,7 @@ impl CanvasView {
             fit_pending: false,
             looked: None,
             following: None,
+            pointed: None,
             look_pending: false,
             flight: None,
             zoom_drawn: None,
@@ -744,6 +764,14 @@ impl CanvasView {
             }
             _ => None,
         };
+        // A pointing carries the pointer's name only on the wire: taken before the document
+        // reduces it to the item. One at a card this canvas does not have is nothing to offer.
+        if let CanvasSync::Pointed { client, name, item } = &sync
+            && *client != self.me
+            && self.doc.get(*item).is_some()
+        {
+            self.show_pointing(name.clone(), *item, cx);
+        }
         let change = self.doc.apply_sync(sync, self.me);
         tracing::debug!(?change, version = self.doc.version(), "canvas sync");
         if let CanvasChange::Presence(client) = change
@@ -2718,6 +2746,77 @@ impl CanvasView {
         self.following = Some(client);
     }
 
+    /// Offer `item`, which `name` pointed at, for [`POINT_FOR`]: a newer pointing replaces
+    /// the toast and restarts the clock.
+    fn show_pointing(&mut self, name: String, item: ItemId, cx: &mut Context<Self>) {
+        let seq = self.pointed.as_ref().map_or(0, |p| p.seq).wrapping_add(1);
+        self.pointed = Some(Pointing { seq, name, item });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(POINT_FOR).await;
+            let _gone = this.update(cx, |this, cx| {
+                if this.pointed.as_ref().is_some_and(|p| p.seq == seq) {
+                    this.pointed = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// ⌘⇧O: point the other clients at the active card. Nothing active is nothing to point
+    /// at; the host relays it and this client hears its own echo as nothing.
+    pub fn point_others(&mut self, _: &PointOthers, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = self.active {
+            self.send(ClientMsg::Point { item });
+            cx.notify();
+        }
+    }
+
+    /// The toast for the latest pointing: `name points at title` at the top, a button
+    /// that goes to the card (active, revealed) and takes the toast with it. A card that has
+    /// gone since takes the toast with it too.
+    fn render_pointed(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let pointing = self.pointed.as_ref()?;
+        let item = self.doc.get(pointing.item)?;
+        let id = item.id;
+        let title = self.card_title(item, cx);
+        let theme = &self.theme;
+        let toast = div()
+            .id("pointed")
+            .debug_selector(|| "pointed".to_owned())
+            .role(Role::Button)
+            .aria_label(format!("{} points at {title}, go there", pointing.name))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.xs))
+            .rounded(px(theme.radii.md))
+            .bg(hsla(theme.surfaces.accent))
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(theme.surfaces.accent_fg))
+            .font_family(theme.typography.ui_family.clone())
+            .cursor_pointer()
+            .child(SharedString::from(format!("{} points at {title}", pointing.name)))
+            .child(div().opacity(0.8).child("· go"));
+        let row = div()
+            .absolute()
+            .top(px(MINIMAP_MARGIN))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(tab_stop(toast, theme.surfaces.accent_fg).on_click(cx.listener(
+                move |this, _ev, _w, cx| {
+                    this.pointed = None;
+                    this.activate(id, cx);
+                    this.reveal_pending = Some(id);
+                },
+            )));
+        Some(row.into_any_element())
+    }
+
     /// Move the camera to `target` on this client's own account: it stops following anyone.
     fn fly_to(&mut self, target: Camera, cx: &mut Context<Self>) {
         self.following = None;
@@ -3626,6 +3725,7 @@ impl Render for CanvasView {
             .collect();
         let lookers = self.render_lookers(cx);
         let here = self.render_here(cx);
+        let pointed = self.render_pointed(cx);
         self.note_view(cx);
         let minimap = (!empty).then(|| self.render_minimap(cx));
         let file_card_active = self
@@ -3688,6 +3788,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::rename_item))
+            .on_action(cx.listener(Self::point_others))
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the canvas has the keyboard.
             .capture_action(cx.listener(
@@ -3711,6 +3812,7 @@ impl Render for CanvasView {
             .children(rendered)
             .children(lookers)
             .children(here)
+            .children(pointed)
             .children(minimap)
             .children(picker)
             .children(palette)
@@ -4798,6 +4900,105 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("here-pad").is_none());
         assert!(cx.debug_bounds("here-phone").is_some());
+    }
+
+    /// Another client's pointing is a toast naming them and the card; its click goes to the
+    /// card and takes the toast; an unclicked toast goes by itself; a pointing at a card this
+    /// canvas does not have, or this client's own echo, is no toast at all.
+    #[gpui::test]
+    fn a_pointing_offers_the_card_until_a_click_or_the_clock(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let far = Rect { x: 5_000.0, y: 3_000.0, w: 400.0, h: 300.0 };
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "Ship it\nby friday".to_owned() },
+            rect: far,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let id = item.id;
+        let pad = ClientId::new();
+        let pointed = |client: ClientId, item: ItemId| CanvasSync::Pointed {
+            client,
+            name: "pad".to_owned(),
+            item,
+        };
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+            c.apply_sync(pointed(me, id), cx);
+            c.apply_sync(pointed(pad, ItemId::new()), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pointed").is_none(), "my echo and an unknown card: nothing");
+        assert!(!view.read_with(cx, |c, _| c.on_screen(far)), "the note starts off screen");
+
+        view.update(cx, |c, cx| c.apply_sync(pointed(pad, id), cx));
+        cx.run_until_parked();
+        let toast = cx.debug_bounds("pointed").expect("the toast");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.role == "Button"
+                && n.label.as_deref() == Some("pad points at Ship it, go there")),
+            "{tree:#?}"
+        );
+        cx.simulate_click(toast.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pointed").is_none(), "the click takes the toast");
+        assert_eq!(view.read_with(cx, |c, _| c.active), Some(id));
+        assert!(view.read_with(cx, |c, _| c.on_screen(far)), "and goes to the card");
+
+        view.update(cx, |c, cx| c.apply_sync(pointed(pad, id), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pointed").is_some());
+        cx.executor().advance_clock(POINT_FOR);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pointed").is_none(), "gone by itself");
+    }
+
+    /// ⌘⇧O (and the palette's line) tells the host which card is active; nothing active
+    /// says nothing.
+    #[gpui::test]
+    fn pointing_the_others_names_the_active_card(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let points = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            drain(rx)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Point { item } => Some(item),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        cx.simulate_keystrokes("cmd-shift-o");
+        cx.run_until_parked();
+        assert!(points(&mut rx).is_empty(), "nothing active");
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "here".to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let id = item.id;
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+            c.active = Some(id);
+        });
+        cx.simulate_keystrokes("cmd-shift-o");
+        cx.run_until_parked();
+        assert_eq!(points(&mut rx), vec![id]);
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("p o i n t space t h e");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(points(&mut rx), vec![id], "the palette's line does the same");
     }
 
     /// and ↩ follows: the camera goes to their viewport wherever it is.

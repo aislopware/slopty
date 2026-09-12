@@ -443,7 +443,9 @@ every other client as an outline in its colour with its name at the corner, so t
 one canvas can see what the other sees; the name is a button that follows that client's
 viewport until the camera is moved by hand. The minimap outlines every viewport too, and a
 "here" row at the top right names every other client, on screen or not, each pill following
-on a click (`docs/decisions/multi-client.md`, 2026-09-13).
+on a click. ⌘⇧O points the others at the active card (`ClientMsg::Point`, relayed as
+`CanvasSync::Pointed`): they get a toast naming the pointer and the card that goes there on a
+click and leaves by itself after 8 s (`docs/decisions/multi-client.md`, 2026-09-13).
 
 ## 5. Agents
 

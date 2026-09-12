@@ -66,6 +66,20 @@ mod golden {
     }
 
     #[test]
+    fn point_and_pointed() {
+        let item = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77));
+        snap("client_point", &ClientMsg::Point { item });
+        snap(
+            "host_pointed",
+            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Pointed {
+                client: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                name: "iPhone".to_owned(),
+                item,
+            }),
+        );
+    }
+
+    #[test]
     fn key_press() {
         snap(
             "client_key",

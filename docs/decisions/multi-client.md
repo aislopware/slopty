@@ -92,3 +92,22 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   fit; the here row's pills and their follow), and two clients on a live hostd (`where_a_client_looks_reaches_the_others`). Not done on purpose: cursors
   (a viewport is what the other person can see, which is what matters for "look at this";
   a pointer at 20 Hz is a stream), and presence across hosts (a canvas is per host).
+
+- ✅ **"Look here": one client points the others at a card, protocol 39** (2026-09-13).
+  Presence says where each person is, not what they want the other to see: "look at this
+  shell" still meant reading out a title. `ClientMsg::Point { item }` (⌘⇧O or the palette's
+  "Point the others at this card", for the active card) is relayed by the host as
+  `CanvasSync::Pointed { client, name, item }` to every connection, unchecked and unkept —
+  ephemeral like presence, never in the document, and a card the host or a client no longer
+  has is that client's to ignore. Each other client shows a toast at the top ("<name> points
+  at <title>", a button) that goes to the card on a click (active, revealed) and otherwise
+  leaves by itself after `POINT_FOR` (8 s); a newer pointing replaces it. A toast rather
+  than a jump: moving someone's camera without asking would take the canvas from under a
+  drag or a read, and a follow already exists for those who want to be moved. Tested at
+  every layer: the document (a pointing is `CanvasChange::Pointed`, an own echo nothing,
+  the version untouched), the headless canvas (the toast's a11y node, its click, its clock,
+  no toast for an unknown card or an echo; the key and the palette line send the active
+  card, nothing active sends nothing), and two clients on a live hostd
+  (`where_a_client_looks_reaches_the_others`). Not done: pointing at a region or a line —
+  a card is the unit the canvas names, and a line in a file is the file card's reading
+  line, which a name could carry later.

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 38;
+pub const PROTOCOL_VERSION: u16 = 39;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -128,6 +128,13 @@ pub enum ClientMsg {
         /// The viewport, or nothing.
         view: Option<canvas::Rect>,
     },
+    /// Point the other clients at one card: the host fans it out as `CanvasSync::Pointed`
+    /// and each of them offers a jump to it. Nothing is said about the item itself; a
+    /// client that does not know it ignores the pointing.
+    Point {
+        /// The card.
+        item: slopty_core::ItemId,
+    },
 }
 
 impl ClientMsg {
@@ -151,6 +158,7 @@ impl ClientMsg {
             Self::ListAgentSessions { .. } => "ListAgentSessions",
             Self::ListFiles { .. } => "ListFiles",
             Self::Look { .. } => "Look",
+            Self::Point { .. } => "Point",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
         }

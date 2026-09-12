@@ -367,6 +367,13 @@ mod tests {
             matches!(heard, CanvasSync::Presence { client, view: Some(v), .. } if client == a_client && v == moved)
         );
 
+        // A points at a card: B hears who and at what, in A's name, as is (the host
+        // keeps nothing and checks nothing: a card B lacks is B's to ignore).
+        let item = slopty_core::ItemId::new();
+        a.tx.send(&ClientMsg::Point { item }).await.unwrap();
+        let heard = next_canvas(&mut b, |s| matches!(s, CanvasSync::Pointed { .. })).await;
+        assert_eq!(heard, CanvasSync::Pointed { client: a_client, name: "e2e".to_owned(), item });
+
         // A goes away: B is told.
         drop(a);
         let heard = next_presence(&mut b).await;
@@ -379,11 +386,17 @@ mod tests {
 
     /// The next presence sync on `host`'s control stream, skipping everything else.
     async fn next_presence(host: &mut HostConn) -> slopty_proto::canvas::CanvasSync {
+        next_canvas(host, |s| matches!(s, slopty_proto::canvas::CanvasSync::Presence { .. })).await
+    }
+
+    /// The next canvas sync `wanted` on `host`'s control stream, skipping everything else.
+    async fn next_canvas(
+        host: &mut HostConn,
+        wanted: impl Fn(&slopty_proto::canvas::CanvasSync) -> bool,
+    ) -> slopty_proto::canvas::CanvasSync {
         loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
-                HostMsg::Canvas(sync @ slopty_proto::canvas::CanvasSync::Presence { .. }) => {
-                    break sync;
-                }
+                HostMsg::Canvas(sync) if wanted(&sync) => break sync,
                 _other => {}
             }
         }

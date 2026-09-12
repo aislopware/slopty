@@ -58,6 +58,9 @@ pub enum CanvasChange {
     Echo,
     /// Another client moved its viewport, or left.
     Presence(ClientId),
+    /// Another client pointed at this item. Ephemeral: nothing in the document changed, and
+    /// the item may be one this document does not have.
+    Pointed(ItemId),
 }
 
 impl CanvasDoc {
@@ -134,6 +137,8 @@ impl CanvasDoc {
                 }
                 CanvasChange::Presence(client)
             }
+            CanvasSync::Pointed { client, .. } if client == me => CanvasChange::Echo,
+            CanvasSync::Pointed { item, .. } => CanvasChange::Pointed(item),
         }
     }
 
@@ -461,6 +466,20 @@ mod tests {
         assert_eq!(doc.apply_sync(gone, me), CanvasChange::Presence(other));
         assert_eq!(doc.lookers().count(), 0);
         assert_eq!(doc.version(), 0, "presence never touches the document version");
+    }
+
+    #[test]
+    fn a_pointing_names_its_item_and_my_own_is_an_echo() {
+        let me = ClientId::new();
+        let other = ClientId::new();
+        let mut doc = CanvasDoc::default();
+        let item = ItemId::new();
+        let mine = CanvasSync::Pointed { client: me, name: "me".to_owned(), item };
+        assert_eq!(doc.apply_sync(mine, me), CanvasChange::Echo);
+        let theirs = CanvasSync::Pointed { client: other, name: "phone".to_owned(), item };
+        assert_eq!(doc.apply_sync(theirs, me), CanvasChange::Pointed(item), "even unknown");
+        assert_eq!(doc.version(), 0, "a pointing never touches the document version");
+        assert_eq!(doc.items().count(), 0);
     }
 
     fn term(x: f32, z: u32) -> CanvasItem {
