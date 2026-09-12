@@ -70,6 +70,8 @@ pub mod actions {
             /// Open a driven Claude Code agent in a fresh git worktree of the active shell's
             /// repository, so its edits stay off the human's branch.
             NewWorktreeAgent,
+            /// Attach the active window's (or display's) picture to the agent's next prompt.
+            AskAgentAboutWindow,
             /// Pick a past Claude Code conversation on the host to resume as a driven agent.
             ResumeAgent,
             /// Put an empty note on the canvas.
@@ -107,9 +109,9 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, ArrangeByRepo, CloseItem, FitAll, FocusNext, FocusPrev, NewAgent, NewDrivenAgent,
-    NewNote, NewTerminal, NewWorktreeAgent, NextAttention, OpenPalette, ResumeAgent, ToggleMute,
-    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
+    NewAgent, NewDrivenAgent, NewNote, NewTerminal, NewWorktreeAgent, NextAttention, OpenPalette,
+    ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -168,6 +170,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("New agent", Box::new(NewAgent)),
         c("New conversation (driven agent)", Box::new(NewDrivenAgent)),
         c("New conversation in a fresh worktree", Box::new(NewWorktreeAgent)),
+        c("Ask the agent about this window", Box::new(AskAgentAboutWindow)),
         c("Resume a conversation", Box::new(ResumeAgent)),
         c("New note", Box::new(NewNote)),
         c("Add a window or display", Box::new(AddWindow)),
@@ -262,6 +265,15 @@ pub fn note_title(text: &str) -> String {
 
 /// How much of a note's first line the title bar shows.
 pub const NOTE_TITLE_CHARS: usize = 40;
+
+/// What goes into an agent's composer once its card exists: words, or a window's picture.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Ask {
+    /// Text appended to the composer.
+    Text(String),
+    /// A host window or display whose picture the host attaches, and its title for the chip.
+    Picture(CaptureTarget, String),
+}
 
 /// A shell command that finished while nobody was looking: what the title-bar badge says.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -461,9 +473,9 @@ pub struct CanvasView {
     /// A terminal to focus on the next frame (one we just opened).
     pending_focus: Option<SessionId>,
     /// A block waiting for the agent card that "Ask the agent" is opening.
-    pending_ask: Option<String>,
+    pending_ask: Option<Ask>,
     /// A block waiting for its card's view (the session is known, the item not placed yet).
-    pending_compose: Option<(SessionId, String)>,
+    pending_compose: Option<(SessionId, Ask)>,
     /// A note to put the caret in on the next frame (one we just created).
     pending_focus_note: Option<ItemId>,
     /// Focus the picker on the next frame.
@@ -708,8 +720,8 @@ impl CanvasView {
         let id = summary.id;
         self.sessions.insert(id, summary);
         self.reconcile(cx);
-        if let Some(text) = asked {
-            self.compose_in(id, text, cx);
+        if let Some(ask) = asked {
+            self.compose_in(id, ask, cx);
         }
         cx.notify();
     }
@@ -718,6 +730,50 @@ impl CanvasView {
     /// the human is on, else the topmost one, else a new one opened in the active shell's
     /// directory (the block waits for it).
     pub fn ask_agent(&mut self, text: String, cx: &mut Context<Self>) {
+        self.ask(Ask::Text(text), cx);
+    }
+
+    /// Attach a host window's picture to the agent's next prompt: the agent card the human
+    /// is on, else the topmost, else a new one in the active shell's directory.
+    pub fn ask_agent_about(
+        &mut self,
+        target: CaptureTarget,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.ask(Ask::Picture(target, title), cx);
+    }
+
+    /// The palette's "Ask the agent about this window": the active item, when it is a window
+    /// or a display.
+    pub fn ask_agent_about_window(
+        &mut self,
+        _: &AskAgentAboutWindow,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.active {
+            self.ask_about_item(id, cx);
+        }
+    }
+
+    /// The "ask" pill of a window or display item.
+    fn ask_about_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        let Some(item) = self.doc.get(id) else { return };
+        let (target, title) = match item.kind {
+            ItemKind::Window { window } => (
+                CaptureTarget::Window(window),
+                self.titles.get(&id).cloned().unwrap_or_else(|| format!("window {}", window.0)),
+            ),
+            ItemKind::Display { display } => {
+                (CaptureTarget::Display(display), format!("display {display}"))
+            }
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } => return,
+        };
+        self.ask_agent_about(target, title, cx);
+    }
+
+    fn ask(&mut self, ask: Ask, cx: &mut Context<Self>) {
         let is_agent = |item: &CanvasItem| match &item.kind {
             ItemKind::Terminal { session } => self.is_driven(*session).then_some(*session),
             _ => None,
@@ -729,20 +785,23 @@ impl CanvasView {
             .or_else(|| self.doc.by_z().into_iter().rev().find_map(is_agent));
         if let Some(session) = target {
             self.reveal_session(session, cx);
-            self.compose_in(session, text, cx);
+            self.compose_in(session, ask, cx);
         } else {
-            self.pending_ask = Some(text);
+            self.pending_ask = Some(ask);
             self.open_agent(self.active_cwd(), cx);
         }
     }
 
-    /// Put `text` into a driven session's composer, as soon as the session has a view (the
+    /// Put `ask` into a driven session's composer, as soon as the session has a view (the
     /// host says a session opened before it places the item that draws it).
-    fn compose_in(&mut self, session: SessionId, text: String, cx: &mut Context<Self>) {
+    fn compose_in(&mut self, session: SessionId, ask: Ask, cx: &mut Context<Self>) {
         if let Some(view) = self.terminals.get(&session) {
-            view.update(cx, |v, cx| v.compose(text, cx));
+            view.update(cx, |v, cx| match ask {
+                Ask::Text(text) => v.compose(text, cx),
+                Ask::Picture(target, title) => v.attach_snapshot(target, title, cx),
+            });
         } else {
-            self.pending_compose = Some((session, text));
+            self.pending_compose = Some((session, ask));
         }
     }
 
@@ -1677,8 +1736,8 @@ impl CanvasView {
         }
         self.prune_headings();
         self.update_run_targets(cx);
-        if let Some((session, text)) = self.pending_compose.take() {
-            self.compose_in(session, text, cx);
+        if let Some((session, ask)) = self.pending_compose.take() {
+            self.compose_in(session, ask, cx);
         }
     }
 
@@ -2439,6 +2498,13 @@ impl CanvasView {
             let on = view.read(cx).conversation().is_some();
             Some(chat_button(id, view.clone(), on, theme, chrome, cx))
         });
+        // A window or display: its picture for the agent's next prompt.
+        let ask = match item.kind {
+            ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                Some(ask_button(id, theme, chrome, cx))
+            }
+            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+        };
         // An agent the host had to guess at: offer the hooks that would make it precise.
         let hooks = agent
             .filter(|(_session, a)| a.source != AgentSource::Hook && !self.hooks_offered)
@@ -2512,6 +2578,7 @@ impl CanvasView {
                     .overflow_hidden()
                     .child(ChromeText::new(title, px(ui_base), k).fill().zooming(chrome.zooming)),
             )
+            .when_some(ask, gpui::ParentElement::child)
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(chat, gpui::ParentElement::child)
             .when_some(finished, gpui::ParentElement::child)
@@ -2885,6 +2952,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_driven_agent))
             .on_action(cx.listener(Self::new_worktree_agent))
+            .on_action(cx.listener(Self::ask_agent_about_window))
             .on_action(cx.listener(Self::resume_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
@@ -2972,6 +3040,21 @@ fn take_button(
         .aria_label("take over");
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| this.take_over(id, cx)))
+        .into_any_element()
+}
+
+/// The "ask" pill in a window's or display's title bar: its picture goes to the agent.
+fn ask_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("ask", id, "ask", theme.surfaces.text_secondary, theme, chrome)
+        .role(Role::Button)
+        .aria_label("Ask the agent about this window");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.ask_about_item(id, cx)))
         .into_any_element()
 }
 
@@ -4961,6 +5044,77 @@ mod tests {
             c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
         });
         assert_eq!(text.as_deref(), Some("```\n$ false\n```\n\n"), "the block waited for the card");
+    }
+
+    /// The "ask" pill of a window card puts the window into the agent's next prompt: a chip
+    /// in the composer names it, ↩ sends the prompt with the window for the host to picture,
+    /// and the chip goes with it.
+    #[gpui::test]
+    fn a_window_is_asked_of_the_agent_as_a_snapshot(cx: &mut TestAppContext) {
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            view.set_animation(false);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+        let window = slopty_core::WindowId(7);
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Window { window },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+        };
+        view.update_in(cx, |c, _window, cx| {
+            let op = CanvasOp::Upsert(item.clone());
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op }, cx);
+        });
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, Rect { x: 800.0, ..SHELL }, 2);
+        cx.run_until_parked();
+        drain(&mut rx);
+
+        let pill = cx.debug_bounds(selector("ask", item.id)).expect("the ask pill");
+        cx.simulate_click(pill.center(), Modifiers::default());
+        cx.run_until_parked();
+        let snapshots =
+            view.read_with(cx, |c, cx| c.terminal(agent).map(|v| v.read(cx).snapshots().to_vec()));
+        assert_eq!(snapshots, Some(vec![(CaptureTarget::Window(window), "window 7".to_owned())]));
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Remove window window 7"))), "{tree:#?}");
+        // A second tap on the same window adds nothing.
+        cx.simulate_click(pill.center(), Modifiers::default());
+        cx.run_until_parked();
+        let count =
+            view.read_with(cx, |c, cx| c.terminal(agent).map(|v| v.read(cx).snapshots().len()));
+        assert_eq!(count, Some(1));
+
+        view.update_in(cx, |c, window, cx| {
+            let card = c.terminal(agent).expect("the agent card");
+            card.update(cx, |v, cx| v.submit_composer(window, cx));
+        });
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientMsg::AgentSay { snapshots, images, .. }]
+                    if snapshots == &[CaptureTarget::Window(window)] && images.is_empty()
+            ),
+            "{sent:?}"
+        );
+        let count =
+            view.read_with(cx, |c, cx| c.terminal(agent).map(|v| v.read(cx).snapshots().len()));
+        assert_eq!(count, Some(0), "the chip went with the prompt");
     }
 
     /// A note reads as Markdown until someone edits it: unfocused it is the rendered

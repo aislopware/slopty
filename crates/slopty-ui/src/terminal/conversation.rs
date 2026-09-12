@@ -566,6 +566,7 @@ impl Conversation {
         attention: Option<&Attention>,
         partial: &str,
         attachments: &[slopty_proto::agent::Image],
+        snapshots: &[(slopty_proto::screen::CaptureTarget, String)],
         preparing: usize,
         composer_focused: bool,
         working: bool,
@@ -675,8 +676,8 @@ impl Conversation {
             .when(!completions.is_empty(), |el| {
                 el.child(self.completions_row(&completions, &theme, cx))
             })
-            .when(!attachments.is_empty() || preparing > 0, |el| {
-                el.child(attachments_row(attachments, preparing, &theme, cx))
+            .when(!attachments.is_empty() || !snapshots.is_empty() || preparing > 0, |el| {
+                el.child(attachments_row(attachments, snapshots, preparing, &theme, cx))
             })
             .child(self.composer_row(composer_focused, working, &theme, cx))
             .into_any_element()
@@ -1049,10 +1050,12 @@ fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
 /// What the agent waits for, with the one-tap answers, above the composer: the warn tone,
 /// faint, since the agent is blocked on the human.
 /// The pictures waiting to go with the next prompt, one chip each (`composer-attachment-<i>`,
-/// a button that drops it), and a muted chip for those still being made fit
+/// a button that drops it), the windows whose picture the host will take
+/// (`composer-snapshot-<i>`, likewise), and a muted chip for pictures still being made fit
 /// (`composer-attachment-preparing`).
 fn attachments_row(
     attachments: &[slopty_proto::agent::Image],
+    snapshots: &[(slopty_proto::screen::CaptureTarget, String)],
     preparing: usize,
     theme: &Theme,
     cx: &Context<TerminalView>,
@@ -1096,6 +1099,26 @@ fn attachments_row(
                 .child(SharedString::from(format!("🖼 {label} ×")));
             tab_stop(chip, s.accent).on_click(cx.listener(move |view, _ev, _window, cx| {
                 view.remove_attachment(i, cx);
+            }))
+        }))
+        .children(snapshots.iter().enumerate().map(|(i, (_target, title))| {
+            let chip = div()
+                .id(("composer-snapshot", i))
+                .debug_selector(move || format!("composer-snapshot-{i}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Remove window {title}")))
+                .px(px(spacing.sm))
+                .py(px(spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .border_1()
+                .border_color(hsla(s.border))
+                .bg(hsla(s.raised))
+                .text_size(px(theme.typography.ui_size))
+                .text_color(hsla(s.text))
+                .cursor_pointer()
+                .child(SharedString::from(format!("🖥 {title} ×")));
+            tab_stop(chip, s.accent).on_click(cx.listener(move |view, _ev, _window, cx| {
+                view.remove_snapshot(i, cx);
             }))
         }))
         .when(preparing > 0, |el| {

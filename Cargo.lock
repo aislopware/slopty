@@ -8184,6 +8184,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "image",
  "libc",
  "objc2-application-services",
  "objc2-core-foundation",

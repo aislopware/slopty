@@ -170,6 +170,11 @@ impl std::fmt::Debug for Target {
 }
 
 impl Target {
+    /// The content filter ScreenCaptureKit reads the target through.
+    pub(crate) fn filter(&self) -> &SCContentFilter {
+        &self.filter
+    }
+
     /// Resolve a target against a content snapshot.
     pub fn resolve(content: &Shareable, kind: CaptureTarget) -> Result<Self, CaptureError> {
         crate::ensure_core_graphics();

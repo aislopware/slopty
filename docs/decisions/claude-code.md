@@ -442,6 +442,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   JPEG, the TIFF's and the fifth's notices), the app and simulator scenarios on the real
   PNG.
 
+- ✅ **A host window's picture goes to the agent without touching the client, protocol 33**
+  (2026-09-12). "What is wrong with this dialog?" wants the window as the human sees it; the
+  client only has the stream's decoded frame, at stream size, in a pixel buffer. Rulings: (1)
+  `AgentSay::snapshots` names windows or displays (`CaptureTarget`), and the host takes each
+  picture as it sends the prompt: `Target::snapshot` asks `SCScreenshotManager` for one image
+  through the same content filter a stream would use, at native pixel size, cursor off,
+  BGRA (`slopty_capture::Picture`); hostd's `snapshot::encode` turns it into RGBA, scales it
+  to the model's 1568 px longest side, and writes PNG (JPEG at 85 only when the PNG would not
+  fit `IMAGE_BYTES_MAX`), then the images join the prompt's own; a target that fails is
+  logged and skipped, the prompt still goes. Nothing crosses the wire but the target id, and
+  the phone gets the same feature for free; (2) the pictures are counted with the composer's
+  own against `IMAGES_MAX`, one per target; (3) the "ask" pill on a window or display card
+  (`ask-<uuid>`, "Ask the agent about this window"), and the palette line of that name for
+  the active item, attach it to the agent card the human is on, else the topmost, else one the
+  canvas opens (`CanvasView::ask_agent_about`, the same route as a command block's "Ask the
+  agent", now an `Ask` of words or a picture); the composer shows a `🖥 <title> ×` chip
+  (`composer-snapshot-<i>`, "Remove window <title>") until ↩ sends it. Tests:
+  `a_window_is_asked_of_the_agent_as_a_snapshot` (canvas, headless),
+  `a_wide_bgra_picture_is_scaled_and_recoloured` (hostd, the encoder), golden
+  `client_agent_say`. Not tested: the screenshot call itself (needs Screen Recording; the
+  live `cargo xtask e2e screen` suite is where a check would go).
 - ✅ **The badge says what the agent is doing between records: thinking, or which tool it is
   composing** (2026-09-12). With `--include-partial-messages` Claude Code streams every
   content block's opening (`content_block_start` with `content_block.type` `thinking`,

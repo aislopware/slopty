@@ -10,6 +10,7 @@
 mod ax;
 mod content;
 mod geometry;
+mod snapshot;
 mod stream;
 
 pub use ax::{AxError, HideWatch, TargetWindow, Went};
@@ -19,6 +20,7 @@ pub use geometry::{
     display_enclosing, occluded, occluders, pointer_location, target_bounds, window_bounds,
     window_on_screen, window_owner_pid, window_title,
 };
+pub use snapshot::{Picture, PixelOrder};
 pub use stream::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, Capture, CaptureConfig, CapturedAudio, CapturedFrame,
     PixelFormat, SckDefaults, Target, host_now_us, sck_defaults,

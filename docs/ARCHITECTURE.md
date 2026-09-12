@@ -576,8 +576,13 @@ why in the top bar (`TerminalViewEvent::Notice` → `CanvasEvent::Notice` →
 picture base64 with its media type before the text (`stream::user_message`), refusing a
 prompt over the caps whole. The transcript reader counts image blocks into
 `TranscriptBody::User.images`, so the bubble says "1 picture" whether the prompt came from
-this client, another, or the file; the bytes never come back over the wire. On the phone the
-key bar's "paste" is the way in: `paste_clipboard` on a driven card attaches the clipboard's
+this client, another, or the file; the bytes never come back over the wire. A host window's
+picture never goes over it at all (protocol 33): the "ask" pill on a window or display card
+(or the palette's "Ask the agent about this window") puts a `🖥 <title> ×` chip in the agent's
+composer (`composer-snapshot-<i>`), ↩ sends the target in `AgentSay::snapshots`, and hostd
+takes the picture as it sends — `Target::snapshot` through `SCScreenshotManager`, then
+`snapshot::encode` to a PNG at the model's size — and adds it to the prompt's images. On the
+phone the key bar's "paste" is the way in: `paste_clipboard` on a driven card attaches the clipboard's
 pictures and puts its text into the composer (no session to paste into), and the fork's
 `gpui_ios` reads a picture off `UIPasteboard` under its uniform type (PNG first, as a
 screenshot is) and writes one the same way (fork `f629234166`). The e2e socket's `attach`

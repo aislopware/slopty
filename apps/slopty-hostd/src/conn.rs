@@ -527,9 +527,23 @@ impl Peer<'_> {
                         self.out.send(HostMsg::Term { session: SessionId::nil(), event }).await;
                 }
             },
-            ClientMsg::AgentSay { session, text, images } => {
-                if let Err(e) = self.daemon.driven.say(session, text, images) {
-                    tracing::debug!(client = %self.client, %session, error = %e, "agent say");
+            ClientMsg::AgentSay { session, text, images, snapshots } => {
+                if snapshots.is_empty() {
+                    if let Err(e) = self.daemon.driven.say(session, text, images) {
+                        tracing::debug!(client = %self.client, %session, error = %e, "agent say");
+                    }
+                } else {
+                    // The pictures take a screenshot each (tens of milliseconds): off the
+                    // connection's loop, then the prompt goes as one.
+                    let driven = self.daemon.driven.clone();
+                    let client = self.client;
+                    tokio::spawn(async move {
+                        let mut images = images;
+                        images.extend(crate::snapshot::pictures(&snapshots).await);
+                        if let Err(e) = driven.say(session, text, images) {
+                            tracing::debug!(%client, %session, error = %e, "agent say");
+                        }
+                    });
                 }
             }
             ClientMsg::AgentAnswer(answer) => {

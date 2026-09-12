@@ -9,7 +9,9 @@ mod golden {
     };
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::screen::{Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest};
+    use slopty_proto::screen::{
+        CaptureTarget, Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest,
+    };
     use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -226,6 +228,7 @@ mod golden {
                     media_type: "image/png".to_owned(),
                     data: vec![0x89, b'P', b'N', b'G'],
                 }],
+                snapshots: vec![CaptureTarget::Display(1)],
             },
         );
         snap(

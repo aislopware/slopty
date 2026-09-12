@@ -282,12 +282,17 @@ pub struct TerminalView {
     /// Text for the composer once the conversation exists (a driven view opens it on its
     /// first frame, so a block asked of a card that was just opened has to wait).
     pending_compose: Option<String>,
+    /// A window whose picture waits for the conversation to exist before it is attached.
+    pending_snapshot: Option<(slopty_proto::screen::CaptureTarget, String)>,
     /// The permission the driven agent waits on, with the input it would run with.
     permission: Option<PermissionRequest>,
     /// The labels picked so far for each question of a pending `AskUserQuestion`.
     chosen: Vec<Vec<String>>,
     /// Pictures pasted into the composer, going with the next prompt.
     attachments: Vec<slopty_proto::agent::Image>,
+    /// Host windows or displays whose picture the host attaches as the next prompt goes,
+    /// with their titles for the chips.
+    snapshots: Vec<(slopty_proto::screen::CaptureTarget, String)>,
     /// Pictures being made fit off the UI thread, not yet in `attachments`.
     preparing: usize,
     /// The text the driven agent is writing now, ahead of its next entry.
@@ -369,9 +374,11 @@ impl TerminalView {
             driven: false,
             chosen: Vec::new(),
             attachments: Vec::new(),
+            snapshots: Vec::new(),
             preparing: 0,
             open_conversation: false,
             pending_compose: None,
+            pending_snapshot: None,
             permission: None,
             partial: String::new(),
             info: AgentInfo::default(),
@@ -773,14 +780,16 @@ impl TerminalView {
         let Some(conversation) = &self.conversation else { return };
         let text = conversation.take_composer_text(window, cx);
         if self.driven {
-            if text.trim().is_empty() && self.attachments.is_empty() {
+            if text.trim().is_empty() && self.attachments.is_empty() && self.snapshots.is_empty() {
                 return;
             }
             // While the agent asks a question, the typed text is its answer ("Other"), not
             // a new prompt; the pictures wait for the next prompt.
             if text.trim().is_empty() || !self.answer_question_with(text.clone(), cx) {
                 let images = std::mem::take(&mut self.attachments);
-                self.say(ClientMsg::AgentSay { session: self.session, text, images });
+                let snapshots =
+                    std::mem::take(&mut self.snapshots).into_iter().map(|(t, _)| t).collect();
+                self.say(ClientMsg::AgentSay { session: self.session, text, images, snapshots });
                 cx.notify();
             }
             return;
@@ -1578,6 +1587,47 @@ impl TerminalView {
     #[must_use]
     pub const fn preparing(&self) -> usize {
         self.preparing
+    }
+
+    /// Attach a host window's (or display's) picture to the next prompt: the host takes it as
+    /// the prompt is sent, so nothing is copied here; `title` names it on the chip. Waits for
+    /// the conversation when the card has none yet.
+    pub fn attach_snapshot(
+        &mut self,
+        target: slopty_proto::screen::CaptureTarget,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        use slopty_proto::agent::IMAGES_MAX;
+        let pictures = self.attachments.len().saturating_add(self.preparing);
+        if pictures.saturating_add(self.snapshots.len()) >= IMAGES_MAX {
+            cx.emit(TerminalViewEvent::Notice(format!("At most {IMAGES_MAX} pictures per prompt")));
+            return;
+        }
+        if self.snapshots.iter().any(|(t, _)| *t == target) {
+            return;
+        }
+        if self.conversation.is_some() {
+            self.snapshots.push((target, title));
+            self.focus_composer = true;
+        } else {
+            self.pending_snapshot = Some((target, title));
+        }
+        cx.notify();
+    }
+
+    /// Drop the `i`th window attachment (its chip was tapped).
+    pub fn remove_snapshot(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.snapshots.len() {
+            self.snapshots.remove(i);
+            cx.notify();
+        }
+    }
+
+    /// The windows whose pictures go with the next prompt, with their titles.
+    #[must_use]
+    pub fn snapshots(&self) -> &[(slopty_proto::screen::CaptureTarget, String)] {
+        &self.snapshots
     }
 
     /// Drop the `i`th attachment (its chip was tapped).
@@ -2380,6 +2430,13 @@ impl Render for TerminalView {
             conversation.append_composer_text(&text, window, cx);
             self.focus_composer = true;
         }
+        if self.conversation.is_some()
+            && let Some(snapshot) = self.pending_snapshot.take()
+        {
+            self.snapshots.push(snapshot);
+            self.focus_composer = true;
+            cx.notify();
+        }
         if self.driven && focused && self.conversation.is_some() {
             // The canvas gives the view the keyboard; in a driven view that is the composer.
             self.focus_composer = true;
@@ -2402,6 +2459,7 @@ impl Render for TerminalView {
                 attention.as_ref(),
                 &self.partial,
                 &self.attachments,
+                &self.snapshots,
                 self.preparing,
                 composer_focused,
                 working,

@@ -186,6 +186,7 @@ objc2-video-toolbox = { version = "=0.3.2", default-features = false, features =
 objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "SCStream",
+    "SCScreenshotManager",
     "SCShareableContent",
     "SCError",
     "block2",
@@ -198,6 +199,8 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "std",
     "CGBase",
     "CGGeometry",
+    "CGImage",
+    "CGDataProvider",
     "CGDirectDisplay",
     "CGWindow",
     "CGWindowLevel",

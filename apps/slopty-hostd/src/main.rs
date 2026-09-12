@@ -10,6 +10,7 @@ mod conn;
 mod ctl;
 pub mod driven;
 mod paths;
+mod snapshot;
 
 use std::path::PathBuf;
 use std::sync::Arc;
