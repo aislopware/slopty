@@ -1145,7 +1145,25 @@ impl TerminalView {
         let (col, row) = self.hover?;
         let index = self.state.index_at_row(row);
         let line = self.state.line(index)?;
-        url::link_at_col(line, col).map(|span| (index, span.start, span.end))
+        url::link_at_col(line, col)
+            .map(|span| (index, span.start, span.end))
+            .or_else(|| url::path_at_col(line, col).map(|span| (index, span.start, span.end)))
+    }
+
+    /// ⌘-click on a file path: open it in the shell's editor (`$EDITOR`, else `vi`, at the
+    /// line the text named) by typing the command at the prompt. While a command runs the
+    /// prompt is not there to type at, so the path goes to the clipboard instead.
+    fn open_path(&mut self, span: &url::PathSpan, cx: &mut Context<Self>) {
+        if self.state.command_running() {
+            tracing::info!(path = %span.path, "path copied: a command is running");
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(span.path.clone()));
+            cx.emit(TerminalViewEvent::Notice(format!("Copied {}", span.path)));
+            return;
+        }
+        let at = span.line.map(|l| format!("+{l} ")).unwrap_or_default();
+        let command = format!("${{EDITOR:-vi}} {at}{}", url::shell_word(&span.path));
+        tracing::info!(path = %span.path, line = ?span.line, "open path");
+        self.run_text(command, cx);
     }
 
     /// Pointer position and ⌘ state changed; repaint only when the underline moves.
@@ -2095,6 +2113,10 @@ impl TerminalView {
             {
                 tracing::info!(url = %span.url, "open link");
                 cx.open_url(&span.url);
+            } else if let Some(span) =
+                self.state.line(index).and_then(|line| url::path_at_col(line, col))
+            {
+                self.open_path(&span, cx);
             }
             return;
         }
@@ -3733,6 +3755,61 @@ mod tests {
         cx.simulate_event(gpui::KeyUpEvent { keystroke: Keystroke::parse("enter").unwrap() });
         cx.run_until_parked();
         assert_eq!(*answers.borrow(), [false]);
+    }
+
+    /// ⌘-click on a path a compiler printed types the editor command at the prompt, with the
+    /// line; a plain word nearby does nothing.
+    #[gpui::test]
+    fn cmd_click_on_a_path_opens_it_in_the_shells_editor(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![RowUpdate {
+                        row: 0,
+                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
+                    }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = |col: u16| {
+            metrics.origin
+                + point(metrics.cell_width * (f32::from(col) + 0.5), metrics.line_height * 0.5)
+        };
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        cx.simulate_click(cell(2), cmd);
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "a word is not a path");
+        cx.simulate_click(cell(10), cmd);
+        cx.run_until_parked();
+        let mut pastes = Vec::new();
+        let mut keys = 0_u32;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ClientMsg::Term { req: TermRequest::Paste(text), .. } => pastes.push(text),
+                ClientMsg::Term { req: TermRequest::Key(_), .. } => {
+                    keys = keys.saturating_add(1_u32);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(pastes, ["${EDITOR:-vi} +12 'src/main.rs'"]);
+        assert_eq!(keys, 1, "then ↩");
     }
 
     /// The key bar's ⌘ arms exactly one tap: the next left press opens the link under it and

@@ -59,7 +59,9 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, double/triple click,
   or long-press on touch); nothing reaches the host. ⌘-click opens the link under the pointer:
 the OSC 8 run the host put on the row, else the URL found in the cached row text
-(`slopty-ui::terminal::url`); ⌘-hover underlines it.
+(`slopty-ui::terminal::url`); ⌘-hover underlines it. A file path under the pointer
+(`src/main.rs:12:5`, `url::path_at_col`) opens the same way: ⌘-click types
+`${EDITOR:-vi} +12 'src/main.rs'` at the prompt, or copies the path while a command runs.
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
   gated on measured RTT, reconciled against the next authoritative diff (see `slopty-predict`).
 - Terminal size is owned by one **driver** client (the one that opened the session, else the

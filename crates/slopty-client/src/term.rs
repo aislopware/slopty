@@ -413,6 +413,13 @@ impl TermState {
             .collect()
     }
 
+    /// Whether a command is running now: it left its prompt and no newer prompt has started
+    /// (shell integration marks decide; without marks nothing is ever running).
+    #[must_use]
+    pub const fn command_running(&self) -> bool {
+        self.running.is_some()
+    }
+
     /// The last finished command: what was typed at the block before the newest prompt
     /// (shell integration marks it); `None` when no command has run.
     #[must_use]

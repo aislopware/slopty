@@ -38,9 +38,43 @@ const SCHEMES: &[&str] =
 /// The plain-text URL covering column `col` of `line`, if any, with the columns it spans.
 #[must_use]
 pub fn text_link_at_col(line: &Line, col: u16) -> Option<LinkSpan> {
+    let (text, starts, offset) = joined(line, col);
+    let range = url_range_at(&text, offset?)?;
+    let url = text.get(range.clone())?.to_owned();
+    let (start, end) = columns_of(&starts, &range)?;
+    Some(LinkSpan { start, end, url })
+}
+
+/// A file path under a cell, as compilers, linters and greps print them.
+///
+/// `src/main.rs:12:5`, `./notes.md`, `~/.zshrc`: the columns it covers, the path without its
+/// position, and the line number when one followed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathSpan {
+    /// First column.
+    pub start: u16,
+    /// One past the last column.
+    pub end: u16,
+    /// The path as printed, without a trailing `:line[:col]`.
+    pub path: String,
+    /// The line number that followed the path, if any.
+    pub line: Option<u32>,
+}
+
+/// The file path covering column `col` of `line`, if the text there reads as one.
+#[must_use]
+pub fn path_at_col(line: &Line, col: u16) -> Option<PathSpan> {
+    let (text, starts, offset) = joined(line, col);
+    let (range, path, line_no) = path_range_at(&text, offset?)?;
+    let (start, end) = columns_of(&starts, &range)?;
+    Some(PathSpan { start, end, path, line: line_no })
+}
+
+/// The row's text joined column by column, where each text-drawing column starts in it
+/// (`(column, columns spanned, byte offset)`), and the byte offset of `col`.
+fn joined(line: &Line, col: u16) -> (String, Vec<(u16, u16, usize)>, Option<usize>) {
     let mut text = String::new();
     let mut offset = None;
-    // Byte offset where each text-drawing column starts, with its column span.
     let mut starts: Vec<(u16, u16, usize)> = Vec::with_capacity(line.cells.len());
     for (i, cell) in line.cells.iter().enumerate() {
         let i = u16::try_from(i).unwrap_or(u16::MAX);
@@ -52,12 +86,78 @@ pub fn text_link_at_col(line: &Line, col: u16) -> Option<LinkSpan> {
             text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
         }
     }
-    let range = url_range_at(&text, offset?)?;
-    let url = text.get(range.clone())?.to_owned();
+    (text, starts, offset)
+}
+
+/// The first column and one past the last of the cells whose text lies in `range`.
+fn columns_of(starts: &[(u16, u16, usize)], range: &Range<usize>) -> Option<(u16, u16)> {
     let mut covered = starts.iter().filter(|&&(_, _, at)| range.contains(&at));
     let (start, span, _) = *covered.next()?;
     let (last, last_span, _) = covered.next_back().copied().unwrap_or((start, span, 0));
-    Some(LinkSpan { start, end: last.saturating_add(last_span), url })
+    Some((start, last.saturating_add(last_span)))
+}
+
+/// Extensions a bare `name.ext` is taken for a file by; a token with a `/` needs none.
+const SOURCE_EXTENSIONS: &[&str] = &[
+    "rs", "toml", "lock", "md", "txt", "json", "yaml", "yml", "ts", "tsx", "js", "jsx", "mjs",
+    "py", "go", "java", "kt", "swift", "m", "mm", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "sh",
+    "zsh", "fish", "zig", "sql", "proto", "html", "css", "scss", "xml", "plist", "env",
+];
+
+/// Byte range of the path in `text` that covers byte `offset`, the path itself and the line
+/// number after it. A run of non-delimiter bytes is a path when it has a `/` or a known
+/// extension and no URL scheme; a trailing `:line` or `:line:col` is read off, as is the
+/// punctuation prose leaves after it.
+fn path_range_at(text: &str, offset: usize) -> Option<(Range<usize>, String, Option<u32>)> {
+    if offset >= text.len() {
+        return None;
+    }
+    let is_delim = |c: char| {
+        c.is_whitespace()
+            || matches!(c, '"' | '\'' | '<' | '>' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',')
+    };
+    let start = text
+        .get(..offset)?
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| is_delim(c))
+        .map_or(0, |(i, c)| i.saturating_add(c.len_utf8()));
+    let end = text
+        .get(offset..)?
+        .char_indices()
+        .find(|&(_, c)| is_delim(c))
+        .map_or(text.len(), |(i, _)| offset.saturating_add(i));
+    let run = trim_trailing(text.get(start..end)?);
+    if run.contains("://") {
+        return None;
+    }
+    // `path:12:5` → `path`, 12; `path:12` → `path`, 12; a lone `path` → no line.
+    let mut path = run;
+    let mut line = None;
+    for _ in 0..2 {
+        let Some((head, tail)) = path.rsplit_once(':') else { break };
+        if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+            break;
+        }
+        line = tail.parse::<u32>().ok();
+        path = head;
+    }
+    let path = path.trim_end_matches(':');
+    let extension = path.rsplit_once('.').map(|(name, ext)| (name, ext.to_ascii_lowercase()));
+    let looks_like_file = path.contains('/')
+        || extension.is_some_and(|(name, ext)| {
+            !name.is_empty() && !name.ends_with('/') && SOURCE_EXTENSIONS.contains(&ext.as_str())
+        });
+    if path.is_empty() || !looks_like_file || path.chars().all(|c| c == '/' || c == '.') {
+        return None;
+    }
+    Some((start..start.saturating_add(run.len()), path.to_owned(), line))
+}
+
+/// `s` as one word for a POSIX or fish shell: single-quoted, a quote inside spelled out.
+#[must_use]
+pub fn shell_word(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// The URL in `text` that covers byte `offset`.
@@ -137,6 +237,30 @@ mod tests {
         assert_eq!((span.start, span.end), (3, 18), "the wide cell's spacer is inside the span");
         assert_eq!(text_link_at_col(&line, 2), None);
         assert_eq!(text_link_at_col(&line, 19), None);
+    }
+
+    #[test]
+    fn paths_are_found_with_their_line_and_nothing_else_is() {
+        let at = path_range_at;
+        assert_eq!(
+            at("error: src/main.rs:12:5 bad", 9),
+            Some((7..23, "src/main.rs".to_owned(), Some(12)))
+        );
+        assert_eq!(at("at ./notes.md.", 4), Some((3..13, "./notes.md".to_owned(), None)));
+        assert_eq!(at("open (~/.zshrc)", 8), Some((6..14, "~/.zshrc".to_owned(), None)));
+        assert_eq!(at("see Cargo.toml:3", 6), Some((4..16, "Cargo.toml".to_owned(), Some(3))));
+        assert_eq!(at("e.g. this", 1), None, "prose is not a file");
+        assert_eq!(at("https://x.y/a.rs", 12), None, "a URL is a link, not a path");
+        assert_eq!(at("12:30 now", 1), None);
+        assert_eq!(at("   ", 1), None);
+        let line = Line::from_text("in src/lib.rs:7", 20, Style::DEFAULT);
+        let span = path_at_col(&line, 6).unwrap();
+        assert_eq!(
+            (span.start, span.end, span.path.as_str(), span.line),
+            (3, 15, "src/lib.rs", Some(7))
+        );
+        assert_eq!(path_at_col(&line, 1), None);
+        assert_eq!(shell_word("it's a b"), "'it'\\''s a b'");
     }
 
     #[test]

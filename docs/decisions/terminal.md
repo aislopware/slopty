@@ -164,6 +164,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `xterm-256color`. On macOS `tic` warns about the description field and still exits 0, so only
   a non-zero status is an error.
 
+- ✅ **⌘-click on a file path opens it in the shell's editor** (2026-09-12). A compiler, a
+  linter or a grep prints `src/main.rs:12:5`; every Mac terminal lets the human go there
+  with ⌘. Rulings: (1) `url::path_at_col` reads the run under the cell as a path when it has
+  a `/` or a known source extension and no URL scheme (`SOURCE_EXTENSIONS`, so prose like
+  "e.g." is left alone), takes a trailing `:line[:col]` off it and drops prose punctuation
+  after it; a URL under the cell still wins; (2) the click types `${EDITOR:-vi} +12
+  'src/main.rs'` at the prompt and ↩ — the editor is the host's, the path is relative to the
+  shell, and single quotes keep any name whole (`url::shell_word`) — rather than asking the
+  host for the file: what opens is the human's editor in the human's shell, on the phone too;
+  (3) while a command is running there is no prompt to type at (`TermState::command_running`,
+  from the shell integration marks), so the path goes to the clipboard and the top bar says
+  so; (4) ⌘-hover underlines a path as it does a link (`link_highlight`). Tests:
+  `paths_are_found_with_their_line_and_nothing_else_is` (the reader),
+  `cmd_click_on_a_path_opens_it_in_the_shells_editor` (the click, headless).
 - ✅ **Links: OSC 8 first, text scan second** (2026-09-05). The engine reads the URI of every
   linked cell with `ghostty_grid_ref_hyperlink_uri`, gated on the row's `has_hyperlink` page
   flag (a false positive costs one extra check per cell, a clean row costs nothing) and on the
