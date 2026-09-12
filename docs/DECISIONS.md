@@ -2918,7 +2918,11 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   non-empty command) — on any prompt row the prompt itself is visible and the header would
   duplicate it; (3) it is a Button whose click scrolls the prompt to the top (`jump_to`, the
   same path as ⌘↑), so a reader lost in output has a one-click way back to what produced it;
-  (4) the conversation view (⌘⇧L) never shows it — its transcript has no rows. No wire change.
+  (4) the conversation view (⌘⇧L) never shows it — its transcript has no rows; (5) it reads
+  `TermState::block_head` (the prompt's rows alone: prompt, exit, command, where the body
+  starts), not `command_block`, which joins the block's whole output into a `String` — read
+  every frame under a streaming `cat`, that was a 50 000-row copy per frame for one label.
+  No wire change.
   Test: `a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header` reads the
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the

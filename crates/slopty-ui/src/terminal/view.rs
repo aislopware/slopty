@@ -12,7 +12,7 @@ use gpui::{
     TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px, size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use slopty_client::term::CommandBlock;
+use slopty_client::term::{BlockHead, CommandBlock};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
@@ -1272,16 +1272,17 @@ impl TerminalView {
     /// The block menu, drawn late and anchored where the right click landed.
     /// The command whose block the viewport's top row is inside while every row of its
     /// prompt has scrolled above: what the sticky header shows. `None` on a prompt row, off
-    /// a block, or for a block without a typed command.
+    /// a block, or for a block without a typed command. Read every frame, so only the block's
+    /// head (its prompt rows), never its output.
     #[must_use]
-    pub fn block_header(&self) -> Option<CommandBlock> {
+    pub fn block_header(&self) -> Option<BlockHead> {
         let top = self.state.index_at_row(0);
         if self.state.line(top).is_none_or(|line| line.mark.is_prompt()) {
             return None;
         }
-        let block = self.state.command_block(top)?;
-        (block.prompt < top && block.command.as_deref().is_some_and(|c| !c.is_empty()))
-            .then_some(block)
+        let head = self.state.block_head(top)?;
+        (head.prompt < top && head.command.as_deref().is_some_and(|c| !c.is_empty()))
+            .then_some(head)
     }
 
     /// One row over the grid's top naming the command whose output the viewport is inside,
@@ -1289,7 +1290,7 @@ impl TerminalView {
     /// hairline under it is the block's separator colour, red after a failure.
     fn render_block_header(
         &self,
-        block: &CommandBlock,
+        block: &BlockHead,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let metrics = self.metrics?;

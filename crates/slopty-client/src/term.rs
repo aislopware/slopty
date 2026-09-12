@@ -76,6 +76,22 @@ pub struct TermState {
     frames: u64,
 }
 
+/// The head of a command block, as [`TermState::block_head`] reads it from the marks.
+///
+/// The prompt and what was typed at it, without the output: what a per-frame reader (the
+/// sticky header) needs, at the cost of the prompt's rows alone.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BlockHead {
+    /// The row the prompt starts on.
+    pub prompt: LineIndex,
+    /// The status of the command that ran before this prompt, when the shell said.
+    pub exit: Option<u8>,
+    /// What was typed at the prompt, rows joined with newlines; `None` when nothing was.
+    pub command: Option<String>,
+    /// The first row after the prompt's and the command's rows: where the output starts.
+    pub body: LineIndex,
+}
+
 /// One shell command block, as [`TermState::command_block`] reads it from the marks.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommandBlock {
@@ -374,36 +390,63 @@ impl TermState {
         None
     }
 
-    /// The command block a line belongs to: its prompt row, the typed command (from the
-    /// prompt row's input column through any further `Input` rows) and its output, among the
-    /// lines held here. `None` off a block (before the first prompt, or no shell integration).
+    /// The head of the command block a line belongs to: its prompt row and the typed command
+    /// (from the prompt row's input column through any further `Input` rows), read from the
+    /// prompt's rows alone. `None` off a block (before the first prompt, or no shell
+    /// integration).
     #[must_use]
-    pub fn command_block(&self, index: LineIndex) -> Option<CommandBlock> {
+    pub fn block_head(&self, index: LineIndex) -> Option<BlockHead> {
         let prompt = if self.line(index).is_some_and(|l| l.mark.starts_prompt()) {
             index
         } else {
             self.prompt_before(index)?
         };
-        let end = self
-            .prompt_after(prompt)
-            .unwrap_or_else(|| LineIndex(self.newest().0.saturating_add(1)));
         let first = self.line(prompt)?;
+        let exit = first.mark.exit();
         // The prompt's rows (a start, then continuations) up to the one the command was typed
         // on, from its input column; further `Input` rows continue a multi-line command.
         let mut command: Vec<String> = Vec::new();
-        let mut output: Vec<String> = Vec::new();
         let mut i = prompt.0;
-        while i < end.0 {
+        let newest = self.newest().0;
+        while i <= newest {
             match self.line(LineIndex(i)) {
-                Some(line) if line.mark.is_prompt() && output.is_empty() => {
+                Some(line)
+                    if line.mark.is_prompt() && (i == prompt.0 || !line.mark.starts_prompt()) =>
+                {
                     if let Some(col) = line.mark.input_col() {
                         let typed: String = line.text().chars().skip(usize::from(col)).collect();
                         command.push(typed.trim_end().to_owned());
                     }
                 }
-                Some(line) if line.mark == SemanticMark::Input && output.is_empty() => {
+                Some(line) if line.mark == SemanticMark::Input => {
                     command.push(line.text().trim_end().to_owned());
                 }
+                _ => break,
+            }
+            i = i.saturating_add(1);
+        }
+        let command = command.join("\n");
+        Some(BlockHead {
+            prompt,
+            exit,
+            command: (!command.trim().is_empty()).then_some(command),
+            body: LineIndex(i),
+        })
+    }
+
+    /// The command block a line belongs to: its head ([`Self::block_head`]) and its output
+    /// (the rows from the command's end to the next prompt, trailing blank rows trimmed),
+    /// among the lines held here. Reads the whole block: not for every frame.
+    #[must_use]
+    pub fn command_block(&self, index: LineIndex) -> Option<CommandBlock> {
+        let head = self.block_head(index)?;
+        let end = self
+            .prompt_after(head.prompt)
+            .unwrap_or_else(|| LineIndex(self.newest().0.saturating_add(1)));
+        let mut output: Vec<String> = Vec::new();
+        let mut i = head.body.0;
+        while i < end.0 {
+            match self.line(LineIndex(i)) {
                 Some(line) => output.push(line.text()),
                 None => break,
             }
@@ -412,12 +455,11 @@ impl TermState {
         while output.last().is_some_and(String::is_empty) {
             output.pop();
         }
-        let command = command.join("\n");
         Some(CommandBlock {
-            prompt,
+            prompt: head.prompt,
             end,
-            exit: first.mark.exit(),
-            command: (!command.trim().is_empty()).then_some(command),
+            exit: head.exit,
+            command: head.command,
             output: output.join("\n"),
         })
     }
@@ -614,6 +656,11 @@ mod tests {
         let newest = state.command_block(LineIndex(8)).expect("the open prompt");
         assert_eq!((newest.prompt, newest.end), (LineIndex(8), LineIndex(9)));
         assert_eq!(newest.command, None, "nothing typed after the prompt");
+        // The head alone, read every frame by the sticky header: no output is gathered.
+        let head = state.block_head(LineIndex(6)).expect("the seq head");
+        assert_eq!((head.prompt, head.body, head.exit), (LineIndex(4), LineIndex(5), Some(1)));
+        assert_eq!(head.command.as_deref(), Some("seq 2"));
+        assert_eq!(state.block_head(LineIndex(8)).map(|h| h.body), Some(LineIndex(9)));
         let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
         assert_eq!(state.index_at_row(0), LineIndex(3));
         assert_eq!(state.view_offset(), 3);
