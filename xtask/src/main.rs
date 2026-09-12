@@ -53,6 +53,10 @@ enum Cmd {
         /// Only run the fast checks (fmt + clippy + unit tests on the host triple).
         #[arg(long)]
         quick: bool,
+        /// Check the working tree in place instead of its snapshot under `target/gate/tree`
+        /// (CI, or a tree nobody edits while the gate runs).
+        #[arg(long)]
+        in_place: bool,
     },
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
@@ -120,7 +124,9 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
-        Cmd::Gate { fix, quick } => gate::run(&sh, gate::Options { fix, quick }),
+        Cmd::Gate { fix, quick, in_place } => {
+            gate::run(&sh, gate::Options { fix, quick, in_place })
+        }
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),

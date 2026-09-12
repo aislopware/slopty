@@ -2576,3 +2576,31 @@ MEASURE (d) mac, SLOPTY_PREDICT=never: echo 13.8 / 21.6 / 27.8 ms (60 keys) · p
 MEASURE frames while typing: draw 1.4 / 5.8 / 10.9 / 11.0 ms · every 11.3 / 59.7 ms · 189 frames, 0 over 16.7 ms, 0 dropped
 MEASURE (d) mac, SLOPTY_PREDICT=always: echo 16.2 / 24.8 / 58.2 ms (60 keys) · predicted 2.6 / 6.6 / 11.2 ms (60 keys)
 ```
+
+## 2026-09-12 — gate wall time, third look: a snapshot and parallel lanes
+
+`cargo gate` before and after the rewrite in `xtask/src/gate.rs` (snapshot of the tree under
+`target/gate/tree`, lanes on `target/gate/{tools,clippy-host,clippy-ios,tests,rustdoc}`,
+`CARGO_BUILD_JOBS` 1/4/4/6/3, sccache warm). Mac Studio, ten cores, nothing else building.
+
+Old serial gate, warm (`cargo gate > /tmp/gate.log; grep -n '✓' /tmp/gate.log`), the last run
+before the rewrite: fmt 1 s, clippy host 23 s, clippy ios 8 s, nextest 129 s (build 7 s, then
+73 s between `Finished` and `Starting 563 tests`, run 48 s), doctests 9 s, rustdoc 12 s —
+**183 s** end to end, and the working tree locked for all of it.
+
+New gate:
+
+```
+cold (four empty target dirs, sccache warm)        725 s   clippy host 584 · ios 670 · nextest 673 · rustdoc 724
+incremental, slopty-proto changed (every crate
+  downstream rebuilds in all four lanes)            54 s   clippy host 17 · ios 18 · nextest 50 (build 16, run 13) · rustdoc 22 · tools 4
+```
+
+(from `/tmp/gate-new*.log`, the `✓ <lane> (<time>)` lines; a lane's time includes waiting
+for cargo's package-cache lock, which the four lanes take in turn for a few seconds each).
+
+What changed the number: the lanes overlap, so the wall time is the slowest lane (nextest)
+rather than the sum; the unexplained 29–73 s listing gap of the old gate did not reappear
+(the tests lane goes from `Finished` to `Starting` in about 20 s here, most of it the
+package-cache lock while the other lanes start). The cold run is paid once per target dir
+and again after a toolchain or dependency bump.
