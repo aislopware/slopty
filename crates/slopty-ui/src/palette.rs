@@ -23,6 +23,8 @@ pub enum PaletteRun {
     Action(Box<dyn Action>),
     /// Reveal and focus this session's terminal on the canvas.
     Session(SessionId),
+    /// Reveal this item (a file card, a note) on the canvas.
+    Item(slopty_core::ItemId),
 }
 
 impl Clone for PaletteRun {
@@ -30,6 +32,7 @@ impl Clone for PaletteRun {
         match self {
             Self::Action(action) => Self::Action(action.boxed_clone()),
             Self::Session(session) => Self::Session(*session),
+            Self::Item(item) => Self::Item(*item),
         }
     }
 }
@@ -39,6 +42,7 @@ impl std::fmt::Debug for PaletteRun {
         match self {
             Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
+            Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
         }
     }
 }
@@ -74,6 +78,12 @@ impl PaletteItem {
             keys: status.to_owned(),
             run: PaletteRun::Session(session),
         }
+    }
+
+    /// `Go to <title>` for an item on the canvas, `what` ("file") on the right.
+    #[must_use]
+    pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
+        Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
     }
 
     /// The line as a screen reader reads it: the label, then the keys.

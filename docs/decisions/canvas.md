@@ -163,12 +163,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   right, ordered as the picker orders them (waiting on the human first) and ahead of the
   actions, since on a wall of terminals the thing most often wanted is one of them; a
   session line reveals and focuses the terminal instead of returning the keyboard to where
-  it was (`PaletteRun::Session` beside `PaletteRun::Action`). Tests:
+  it was (`PaletteRun::Session` beside `PaletteRun::Action`); (8) file cards are lines after
+  the sessions — "Go to main.rs · src" with "file" on the right (`PaletteRun::Item`, which
+  activates and reveals the item; added 2026-09-12 with the cards), since a card put down
+  while reading an agent's edit is soon off-screen and the palette is how a phone gets back
+  to anything. Tests:
   `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
   nothing run, `note` + ↩ leaving one note, "Go to shell" first once a shell is on the canvas
-  and revealing it with the keyboard in its terminal), and the app self-test's notes scenario,
+  and revealing it with the keyboard in its terminal, a file card's line after it and `main` +
+  ↩ making the card active), and the app self-test's notes scenario,
   which now makes its note through the palette.
 
 - ✅ **A file the agent touched is a card on the canvas, protocol 34** (2026-09-12). "Open in

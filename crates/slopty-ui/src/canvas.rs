@@ -1355,7 +1355,8 @@ impl CanvasView {
     }
 
     /// Every line the palette offers: the canvas's sessions to go to (agents waiting on the
-    /// human first, as the picker orders them), then every action, then the app's own.
+    /// human first, as the picker orders them), its file cards, then every action, then the
+    /// app's own.
     #[must_use]
     pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = self
@@ -1365,6 +1366,10 @@ impl CanvasView {
                 PaletteItem::session(&row.title, &row.status.unwrap_or_default(), row.session)
             })
             .collect();
+        items.extend(self.doc.items().filter_map(|i| match &i.kind {
+            ItemKind::File { path } => Some(PaletteItem::item(&file_title(path), "file", i.id)),
+            _ => None,
+        }));
         items.extend(palette_items());
         items.extend(self.palette_extra.iter().cloned());
         items
@@ -1390,6 +1395,10 @@ impl CanvasView {
                     // The terminal takes the keyboard, not whoever had it before.
                     this.palette_return = None;
                     this.reveal_session(*session, cx);
+                }
+                PaletteEvent::Run(PaletteRun::Item(item)) => {
+                    this.activate(*item, cx);
+                    this.reveal_pending = Some(*item);
                 }
                 PaletteEvent::Dismiss => {}
             }
@@ -5019,6 +5028,31 @@ mod tests {
                 .is_some_and(|t| t.read(cx).focus_handle(cx).is_focused(window))
         });
         assert!(terminal_focused, "and its terminal has the keyboard");
+
+        // A file card is a line too, after the sessions: "Go to main.rs · src" reveals it.
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/src/main.rs", cx));
+        view.update_in(cx, |c, _window, cx| c.reveal_session(session, cx));
+        cx.run_until_parked();
+        let file = view
+            .read_with(cx, |v, _| {
+                v.items().iter().find(|i| matches!(i.kind, ItemKind::File { .. })).map(|i| i.id)
+            })
+            .expect("the card");
+        assert_ne!(view.read_with(cx, |v, _| v.active_item()), Some(file));
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let labels: Vec<String> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.clone())
+            .take(2)
+            .collect();
+        assert_eq!(labels, ["Go to shell", "Go to main.rs · src file"], "{tree:#?}");
+        cx.simulate_keystrokes("m a i n enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none());
+        assert_eq!(view.read_with(cx, |v, _| v.active_item()), Some(file), "the card revealed");
     }
 
     #[gpui::test]

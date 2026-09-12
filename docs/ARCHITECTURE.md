@@ -388,7 +388,8 @@ another call for the same path (one card per path: `canvas::open_file` reveals t
 one). Titled `name · parent` (`canvas::file_title`); its dump entry is `ItemInfo.file`
 (path, summary, lines). The way in is the agent card: "view" on an edit, a write or a read
 (`conversation-view-<entry>`, a11y "View <path> on the canvas"), a relative path made
-absolute against the agent's `cwd` (`TerminalView::view_file`). The picker (⌘O) lists the
+absolute against the agent's `cwd` (`TerminalView::view_file`); the palette lists every card
+as "Go to <title>" after the sessions (`PaletteRun::Item`). The picker (⌘O) lists the
 canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are
