@@ -21,10 +21,14 @@
 //! JSONL transcript [`discover`]ed from its working directory. [`Tracker::observe`] merges
 //! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
 //! said and hooks stay authoritative once they speak.
+//!
+//! An agent Slopty starts itself is not observed at all: it is driven over Claude Code's
+//! stream-json protocol ([`stream`]), which reports every record and permission directly.
 
 pub mod detect;
 pub mod discover;
 pub mod hooks;
+pub mod stream;
 pub mod title;
 pub mod transcript;
 

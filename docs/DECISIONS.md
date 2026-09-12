@@ -2462,8 +2462,43 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   editing the developer's `~/.claude`. The pill retires after one click, so a second *click* is
   not reachable through the UI; idempotence is asserted against the file the daemon actually
   wrote (`install_at` → `Unchanged`, bytes identical).
-- ⏸ ACP via `agent-client-protocol` 2.0.0 + `@agentclientprotocol/claude-agent-acp` for structured
-  driving — after the PTY path works.
+- ✅ **Structured driving is Claude Code's own stream-json protocol over stdio, not ACP**
+  (2026-09-12, replaces the ⏸ ACP plan). Verified against CLI 2.1.268 with live probes
+  (`claude -p --verbose --input-format stream-json --output-format stream-json
+  --permission-prompts host --permission-prompt-tool stdio --include-partial-messages
+  --replay-user-messages`, working directory the repo, no PTY): stdout is NDJSON of
+  `system/init` (session id, model, tools, permission mode, slash commands), `system/status`,
+  `system/thinking_tokens`, `system/permission_denied`, hook lifecycle records,
+  `rate_limit_event`, `stream_event` (the API's own `content_block_delta`s, so text streams
+  token by token), `assistant` and `user` records **in the same shape as the JSONL transcript**
+  (so `slopty_agent::transcript` maps them unchanged), `result` (`subtype` `success` |
+  `error_during_execution`, `is_error`, `num_turns`, `total_cost_usd`), and
+  `control_request {request_id, request: {subtype: "can_use_tool", tool_name, display_name,
+  input, description, permission_suggestions, tool_use_id}}` whenever a tool needs the human.
+  The host writes `{"type":"user","message":{"role":"user","content":…}}` to prompt,
+  `{"type":"control_response","response":{"subtype":"success","request_id",
+  "response":{"behavior":"allow","updatedInput":…}}}` or `{"behavior":"deny","message":…}` to
+  answer (a denial comes back as an error `tool_result` carrying the message), and
+  `{"type":"control_request","request_id","request":{"subtype":"interrupt"}}` for Esc (acked
+  with `control_response {still_queued: []}`, then a user "[Request interrupted by user]" and a
+  `result`). The process lives across turns until stdin closes; `--resume <session id>` reopens
+  a conversation. Prompts fire only for tools the user's settings do not already allow
+  (`--restricted` ignores settings; the probes needed it on this machine, whose settings allow
+  `Write`). Rejected: ACP (`@agentclientprotocol/claude-agent-acp` is a Node adapter around this
+  very protocol, so it would add a runtime and a translation for nothing), and the docs' inferred
+  `control_type` shape (wrong on the wire; the shapes above are what 2.1.268 emits).
+  **What this buys over observing the TUI:** the conversation streams live instead of a 400 ms
+  file tail; a permission arrives with the tool's full input and is answered in-protocol instead
+  of by typing into a menu; the composer sends a message instead of keystrokes; Esc is an
+  `interrupt`; the agent's session id and cost are known. What it costs: no Claude Code TUI in
+  that card (its slash commands still work as messages — `init` lists them). Both kinds
+  coexist: a `claude` typed into a shell stays the observed PTY agent it is today.
+  Plan, landing in commits: (1) `slopty_agent::stream` — the pure protocol layer (parse every
+  record into an `Event`, fold events into `TranscriptEntry`s, `AgentStatus` and
+  `PermissionRequest`s, build the outbound lines), fixtures from the probes; (2) hostd runs the
+  process per agent session and the wire carries `AgentRequest`/`AgentUpdate` (protocol bump), a
+  fake `claude` in `slopty-e2e` replays the fixtures for the self-test; (3) an agent card on the
+  canvas hosting the conversation view without a grid, on the Mac and the phone.
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

@@ -186,6 +186,13 @@ pub fn progress(jsonl: &str) -> Option<Progress> {
 /// The progress one record implies; `None` for bookkeeping, sidechains and empty turns.
 fn line_progress(line: &str) -> Option<Progress> {
     let record: Value = serde_json::from_str(line).ok()?;
+    record_progress(&record)
+}
+
+/// The progress one parsed record implies; `None` for bookkeeping, sidechains and empty
+/// turns. The records Claude Code streams over stdio have the same shape as the file's.
+#[must_use]
+pub fn record_progress(record: &Value) -> Option<Progress> {
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
         return None;
     }
@@ -282,6 +289,13 @@ fn entries_named(tools: &mut ToolNames, jsonl: &str) -> Vec<TranscriptEntry> {
 /// The entries one record contributes (none for bookkeeping and sidechains).
 fn line_entries(tools: &mut ToolNames, line: &str) -> Vec<TranscriptEntry> {
     let Ok(record) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+    record_entries(tools, &record)
+}
+
+/// The entries one parsed record contributes (none for bookkeeping and sidechains). `tools`
+/// remembers the calls so their results can be named; keep one per conversation.
+#[must_use]
+pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEntry> {
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
         return Vec::new();
     }
@@ -425,7 +439,8 @@ pub fn clip(text: &str) -> Clipped {
 
 /// One line saying what a tool call is about: the command, the file, the pattern, the URL,
 /// the subagent's brief; for anything else the first string in the input.
-fn tool_summary(name: &str, input: Option<&Value>) -> String {
+#[must_use]
+pub fn tool_summary(name: &str, input: Option<&Value>) -> String {
     let field = |key: &str| input?.get(key)?.as_str().map(str::to_owned);
     let text = match name {
         "Bash" => field("command"),

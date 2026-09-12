@@ -153,6 +153,22 @@ impl Clipped {
     }
 }
 
+/// A tool call waiting on the human, as a structured agent session reports it: Claude Code's
+/// `can_use_tool` control request, with the input the tool would run with.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    /// The request id the answer must carry.
+    pub id: String,
+    /// The tool call's own id (`tool_use_id`).
+    pub tool_use: String,
+    /// Tool name (`Bash`, `Write`, …).
+    pub tool: String,
+    /// One line about the call, the same line the transcript shows for it.
+    pub summary: String,
+    /// The whole input as pretty JSON, clipped.
+    pub input: Clipped,
+}
+
 /// Client → host: start or stop following a session's conversation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TranscriptFollow {
