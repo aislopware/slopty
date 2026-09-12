@@ -431,6 +431,16 @@ mod tests {
         })
         .await
         .unwrap();
+        let dump = drv.dump().await.unwrap();
+        assert!(
+            dump.a11y_node(
+                "ListBoxOption",
+                Some("/compact [instructions] — Clear history but keep a summary")
+            )
+            .is_some(),
+            "the list describes each command: {:#?}",
+            dump.a11y
+        );
         drv.keys("escape").await.unwrap();
         drv.wait_for("the list hidden", STEP, |d| {
             chat(d).is_some_and(|(agent, conv)| {

@@ -359,7 +359,7 @@ mod golden {
     #[test]
     fn driven_agent_info() {
         use slopty_proto::agent::{
-            AgentInfo, AgentSessionInfo, AgentSet, Context, Usage, UsageWindow,
+            AgentInfo, AgentSessionInfo, AgentSet, Context, SlashCommand, Usage, UsageWindow,
         };
         use slopty_proto::terminal::CloseReason;
         snap(
@@ -377,7 +377,14 @@ mod golden {
                     agent_session: Some("19146b4d-5a11-4503-9a3f-f29c994e7105".to_owned()),
                     model: Some("claude-fable-5-1".to_owned()),
                     permission_mode: Some("acceptEdits".to_owned()),
-                    slash_commands: vec!["/compact".to_owned(), "/clear".to_owned()],
+                    slash_commands: vec![
+                        SlashCommand {
+                            name: "/compact".to_owned(),
+                            description: "Summarise the conversation".to_owned(),
+                            hint: "[instructions]".to_owned(),
+                        },
+                        SlashCommand::named("clear"),
+                    ],
                     turns: 3,
                     cost_micro_usd: 12_500,
                     usage: Some(Usage {

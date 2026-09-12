@@ -862,7 +862,12 @@ impl Workspace {
                     model: view.info().model.clone(),
                     permission_mode: view.info().permission_mode.clone(),
                     agent_session: view.info().agent_session.clone(),
-                    slash_commands: view.info().slash_commands.clone(),
+                    slash_commands: view
+                        .info()
+                        .slash_commands
+                        .iter()
+                        .map(|c| c.name.clone())
+                        .collect(),
                     turns: view.info().turns,
                     completions: view.completions(cx),
                     model_menu: c.model_menu_open(),

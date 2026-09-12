@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use slopty_proto::agent::{
     AgentStatus, AgentTask, BlockReason, Context, NoticeLevel, PermissionRequest, QuestionAnswer,
-    ToolDetail, TranscriptBody, TranscriptEntry, Usage, UsageWindow,
+    SlashCommand, ToolDetail, TranscriptBody, TranscriptEntry, Usage, UsageWindow,
 };
 
 use crate::transcript::{self, ToolNames};
@@ -35,8 +35,9 @@ pub struct Init {
     pub permission_mode: String,
     /// Tools available to the agent.
     pub tools: Vec<String>,
-    /// Slash commands the agent accepts as messages (`/compact`, `/clear`, …).
-    pub slash_commands: Vec<String>,
+    /// Slash commands the agent accepts as messages (`/compact`, `/clear`, …); `init` names
+    /// them alone, `commands_changed` describes them.
+    pub slash_commands: Vec<SlashCommand>,
 }
 
 /// What a `result` record says about the turn that just ended.
@@ -121,7 +122,7 @@ pub enum Event {
         reason: String,
     },
     /// `system/commands_changed`: the whole slash-command list, replacing the init's.
-    Commands(Vec<String>),
+    Commands(Vec<SlashCommand>),
     /// `system/status`: the permission mode changed (the answer to `set_permission_mode`
     /// arrives this way too).
     Status {
@@ -150,7 +151,10 @@ pub fn parse(line: &str) -> Option<Event> {
             model: string(&record, "model"),
             permission_mode: string(&record, "permissionMode"),
             tools: strings(&record, "tools"),
-            slash_commands: strings(&record, "slash_commands"),
+            slash_commands: strings(&record, "slash_commands")
+                .iter()
+                .map(|name| SlashCommand::named(name))
+                .collect(),
         }),
         ("system", Some("status")) => Event::Status {
             permission_mode: record
@@ -233,8 +237,14 @@ pub fn parse(line: &str) -> Option<Event> {
                 .and_then(Value::as_array)
                 .map(|list| {
                     list.iter()
-                        .filter_map(|c| c.get("name").and_then(Value::as_str))
-                        .map(|name| format!("/{}", name.trim_start_matches('/')))
+                        .filter_map(|c| {
+                            let name = c.get("name").and_then(Value::as_str)?;
+                            Some(SlashCommand {
+                                description: string(c, "description"),
+                                hint: string(c, "argumentHint"),
+                                ..SlashCommand::named(name)
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -624,7 +634,7 @@ pub enum Update {
     /// The permission mode changed.
     PermissionMode(String),
     /// The slash-command list was replaced.
-    Commands(Vec<String>),
+    Commands(Vec<SlashCommand>),
 }
 
 /// Folds the event stream of one conversation into [`Update`]s.
@@ -921,7 +931,7 @@ mod tests {
         assert_eq!(init.model, "claude-haiku-4-5-20251001");
         assert_eq!(init.permission_mode, "default");
         assert!(init.tools.iter().any(|t| t == "Bash"));
-        assert!(init.slash_commands.iter().any(|c| c == "/compact"));
+        assert!(init.slash_commands.iter().any(|c| c.name == "/compact"));
         assert_eq!(init.session_id.len(), 36, "a uuid");
     }
 
@@ -940,7 +950,7 @@ mod tests {
                     Update::Turn(t) => turns.push(t),
                     Update::Init(init) => {
                         assert_eq!(init.model, "claude-haiku-4-5-20251001");
-                        assert!(init.slash_commands.iter().any(|c| c == "/compact"));
+                        assert!(init.slash_commands.iter().any(|c| c.name == "/compact"));
                         inits += 1;
                     }
                     Update::Partial(_)
@@ -1145,12 +1155,19 @@ mod tests {
             ),
             Some(Event::Other)
         );
-        // The slash-command list is replaced whole, names given a slash.
+        // The slash-command list is replaced whole, names given a slash, described.
         assert_eq!(
             parse(
-                r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"compact","description":"","argumentHint":""},{"name":"/deploy","description":"","argumentHint":"<env>"}]}"#
+                r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"compact","description":"","argumentHint":""},{"name":"/deploy","description":"Ship it","argumentHint":"<env>"}]}"#
             ),
-            Some(Event::Commands(vec!["/compact".to_owned(), "/deploy".to_owned()]))
+            Some(Event::Commands(vec![
+                SlashCommand::named("compact"),
+                SlashCommand {
+                    name: "/deploy".to_owned(),
+                    description: "Ship it".to_owned(),
+                    hint: "<env>".to_owned(),
+                },
+            ]))
         );
     }
 

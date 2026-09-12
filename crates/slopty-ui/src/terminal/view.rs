@@ -488,7 +488,7 @@ impl TerminalView {
         &self.info
     }
 
-    /// The slash commands completing the composer's text right now.
+    /// The names of the slash commands completing the composer's text right now.
     #[must_use]
     pub fn completions(&self, cx: &gpui::App) -> Vec<String> {
         if !self.driven {
@@ -498,6 +498,9 @@ impl TerminalView {
             .as_ref()
             .map(|c| c.completions(&self.info.slash_commands, cx))
             .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
     }
 
     /// The model chip: open or close the menu of models.
@@ -2393,7 +2396,7 @@ impl BlockMenuItem {
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Line, RowUpdate, SemanticMark, Style, TermModes};
-    use slopty_proto::agent::{Clipped, ToolDetail, TranscriptBody, TranscriptEntry};
+    use slopty_proto::agent::{Clipped, SlashCommand, ToolDetail, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
@@ -4041,7 +4044,19 @@ mod tests {
                     agent_session: Some("s1".to_owned()),
                     model: Some("claude-sonnet-5".to_owned()),
                     permission_mode: Some("default".to_owned()),
-                    slash_commands: ["/compact", "/clear", "/cost"].map(str::to_owned).to_vec(),
+                    slash_commands: vec![
+                        SlashCommand {
+                            name: "/compact".to_owned(),
+                            description: "Summarise the conversation".to_owned(),
+                            hint: "[instructions]".to_owned(),
+                        },
+                        SlashCommand::named("clear"),
+                        SlashCommand {
+                            name: "/cost".to_owned(),
+                            description: "Show the total cost".to_owned(),
+                            hint: String::new(),
+                        },
+                    ],
                     turns: 2,
                     cost_micro_usd: 12_500,
                     usage: Some(slopty_proto::agent::Usage {
@@ -4119,6 +4134,14 @@ mod tests {
             |cx: &mut VisualTestContext| view.read_with(cx, TerminalView::completions);
         assert_eq!(completions(cx), ["/compact", "/clear", "/cost"]);
         assert!(cx.debug_bounds("conversation-completions").is_some(), "listed above the composer");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        for label in [
+            "/compact [instructions] — Summarise the conversation",
+            "/clear",
+            "/cost — Show the total cost",
+        ] {
+            assert!(tree.iter().any(|n| n.is("ListBoxOption", Some(label))), "{label}: {tree:#?}");
+        }
         cx.simulate_keystrokes("down tab");
         cx.run_until_parked();
         let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
@@ -4144,13 +4167,24 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(drain_words(&mut rx), ["say:/cost"], "↩ sends the command as a prompt");
+        let named =
+            |names: &[&str]| names.iter().map(|n| SlashCommand::named(n)).collect::<Vec<_>>();
+        let names =
+            |matches: Vec<SlashCommand>| matches.into_iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(
-            conversation::slash_matches("/C", &["/compact".to_owned(), "/clear".to_owned()]),
+            names(conversation::slash_matches("/C", &named(&["/compact", "/clear"]))),
             ["/compact", "/clear"],
             "matching ignores case"
         );
-        assert!(conversation::slash_matches("/co x", &["/compact".to_owned()]).is_empty());
-        assert!(conversation::slash_matches("hello", &["/help".to_owned()]).is_empty());
+        assert!(conversation::slash_matches("/co x", &named(&["/compact"])).is_empty());
+        assert!(conversation::slash_matches("hello", &named(&["/help"])).is_empty());
+        let many: Vec<String> = (0..12).map(|i| format!("/cmd{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            conversation::slash_matches("/", &named(&many)).len(),
+            conversation::SLASH_MAX,
+            "the list is capped"
+        );
         assert_eq!(conversation::model_label("claude-fable-5-1"), "fable-5-1");
         assert_eq!(conversation::model_label("fable"), "Fable 5.1");
     }

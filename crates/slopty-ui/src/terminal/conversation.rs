@@ -29,8 +29,8 @@ use gpui::{
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{
-    AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, NoticeLevel, Question, Todo, TodoStatus,
-    ToolDetail, TranscriptBody, TranscriptEntry, TranscriptUpdate,
+    AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, NoticeLevel, Question, SlashCommand, Todo,
+    TodoStatus, ToolDetail, TranscriptBody, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_theme::{Theme, alpha};
 
@@ -53,21 +53,45 @@ pub const MODES: [&str; 3] = ["default", "acceptEdits", "plan"];
 
 /// The slash commands that complete `text`.
 ///
-/// Every command `text` is a prefix of, in the agent's order, when `text` is one word
-/// starting with `/`; nothing once `text` is exactly the only match (there is nothing left
-/// to complete).
+/// Every command `text` is a prefix of, in the agent's order and at most [`SLASH_MAX`] of
+/// them, when `text` is one word starting with `/`; nothing once `text` is exactly the only
+/// match (there is nothing left to complete).
 #[must_use]
-pub fn slash_matches(text: &str, commands: &[String]) -> Vec<String> {
+pub fn slash_matches(text: &str, commands: &[SlashCommand]) -> Vec<SlashCommand> {
     if !text.starts_with('/') || text.contains(char::is_whitespace) {
         return Vec::new();
     }
     let needle = text.to_ascii_lowercase();
-    let matches: Vec<String> =
-        commands.iter().filter(|c| c.to_ascii_lowercase().starts_with(&needle)).cloned().collect();
+    let matches: Vec<SlashCommand> = commands
+        .iter()
+        .filter(|c| c.name.to_ascii_lowercase().starts_with(&needle))
+        .take(SLASH_MAX)
+        .cloned()
+        .collect();
     match matches.as_slice() {
-        [only] if only.eq_ignore_ascii_case(text) => Vec::new(),
+        [only] if only.name.eq_ignore_ascii_case(text) => Vec::new(),
         _ => matches,
     }
+}
+
+/// How many completions the list shows at once: a prefix narrows it fast, and a longer list
+/// would push the transcript off the top.
+pub const SLASH_MAX: usize = 8;
+
+/// A completion as one line reads it (its a11y label): the name, the argument hint after
+/// it, the description after a dash — each only where the agent gave one.
+#[must_use]
+pub fn slash_label(command: &SlashCommand) -> String {
+    let mut label = command.name.clone();
+    if !command.hint.is_empty() {
+        label.push(' ');
+        label.push_str(&command.hint);
+    }
+    if !command.description.is_empty() {
+        label.push_str(" — ");
+        label.push_str(&command.description);
+    }
+    label
 }
 
 /// A model as the chip shows it: an alias by its name, a full name without the `claude-`.
@@ -289,7 +313,7 @@ impl Conversation {
 
     /// The slash commands completing the composer's text, unless Esc hid them.
     #[must_use]
-    pub fn completions(&self, commands: &[String], cx: &App) -> Vec<String> {
+    pub fn completions(&self, commands: &[SlashCommand], cx: &App) -> Vec<SlashCommand> {
         if self.completions_hidden {
             return Vec::new();
         }
@@ -722,17 +746,19 @@ impl Conversation {
             .into_any_element()
     }
 
-    /// The slash commands completing the composer, above it: the selected one highlighted,
-    /// a click takes any of them.
+    /// The slash commands completing the composer, above it, one per line: the name in the
+    /// mono face, its argument hint and description muted after it; the selected one is
+    /// highlighted and a click takes any of them.
     fn completions_row(
         &self,
-        completions: &[String],
+        completions: &[SlashCommand],
         theme: &Theme,
         cx: &Context<TerminalView>,
     ) -> AnyElement {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let selected = self.completion.min(completions.len().saturating_sub(1));
+        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         div()
             .id("conversation-completions")
             .debug_selector(|| "conversation-completions".to_owned())
@@ -741,18 +767,21 @@ impl Conversation {
             .w_full()
             .flex_none()
             .flex()
-            .flex_wrap()
-            .gap(px(spacing.xs))
+            .flex_col()
+            .gap(px(spacing.xxs))
             .px(px(spacing.md))
             .py(px(spacing.xs))
             .border_t_1()
             .border_color(hsla(s.border))
             .text_size(px(theme.typography.small()))
-            .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
+            .font_family(theme.typography.ui_family.clone())
             .children(completions.iter().enumerate().map(|(ix, command)| {
                 let chosen = ix == selected;
-                let command = command.clone();
-                let label = command.clone();
+                let name = command.name.clone();
+                let label = slash_label(command);
+                let hint = (!command.hint.is_empty()).then(|| command.hint.clone());
+                let description =
+                    (!command.description.is_empty()).then(|| command.description.clone());
                 div()
                     .id(ElementId::NamedInteger(
                         "conversation-completion".into(),
@@ -760,21 +789,45 @@ impl Conversation {
                     ))
                     .debug_selector(move || format!("conversation-completion-{ix}"))
                     .role(Role::ListBoxOption)
-                    .aria_label(SharedString::from(label.clone()))
+                    .aria_label(SharedString::from(label))
+                    .flex()
+                    .items_baseline()
+                    .gap(px(spacing.sm))
                     .px(px(spacing.sm))
                     .py(px(spacing.xxs))
                     .rounded(px(theme.radii.xs))
                     .bg(hsla_alpha(s.accent, if chosen { alpha::TINT_STRONG } else { alpha::TINT }))
                     .text_color(hsla(s.text))
                     .cursor_pointer()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
                         // The composer keeps the caret; the click must not blur it.
                         cx.stop_propagation();
                     })
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.complete_slash(&command, window, cx);
+                        this.complete_slash(&name, window, cx);
                     }))
-                    .child(SharedString::from(label))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(mono.clone())
+                            .child(SharedString::from(command.name.clone())),
+                    )
+                    .children(hint.map(|hint| {
+                        div()
+                            .flex_none()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(hint))
+                    }))
+                    .children(description.map(|text| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(text))
+                    }))
             }))
             .into_any_element()
     }

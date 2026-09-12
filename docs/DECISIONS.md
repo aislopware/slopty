@@ -2923,6 +2923,28 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+- ✅ **Slash completions say what a command does and takes, protocol 29** (2026-09-12).
+  The list was bare names in chips; Claude Code has forty-odd commands and skills, and a name
+  like `/compact` says nothing about its optional instructions. Read from the CLI (2.1.269):
+  `system/init` carries `slash_commands` as names alone, and `system/commands_changed` (sent
+  once skills are loaded and after any change) carries `{name, description, argumentHint,
+  aliases?}` for the whole list. Rulings: (1) `AgentInfo.slash_commands` is
+  `Vec<SlashCommand { name, description, hint }>` — the init fills names only and the next
+  `commands_changed` replaces the list whole, so a card may show bare names for a moment and
+  then the described ones; (2) the completion list is one line per command instead of
+  wrapped chips: the name in the mono face, the hint and the description muted after it, the
+  description ellipsised, and its a11y label is `slash_label` (`/compact [instructions] —
+  Clear history but keep a summary`) so the dump and a screen reader read the same line;
+  (3) `slash_matches` caps the list at `SLASH_MAX` = 8 — a prefix narrows it fast and a longer
+  list would push the transcript off the top; (4) completing still puts `/name ` in the
+  composer, the caret after the space, so a command with a hint is ready for its argument
+  and one without is ready for ↩; (5) aliases are not carried — the CLI lists each alias as
+  its own command already. Wire: `SlashCommand`; goldens `host_agent_info` / `client_hello`
+  re-accepted, PROTOCOL_VERSION 28 → 29. Tests: `parse` of a described `commands_changed`
+  (`agent`), the capped and case-insensitive `slash_matches` and the described
+  `ListBoxOption`s in `a_driven_view_shows_the_agent_and_retunes_it` (headless), and the
+  app self-test's driven scenario, where the fake describes its three commands after its
+  init and the dump's a11y carries the described line.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

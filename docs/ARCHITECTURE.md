@@ -534,7 +534,8 @@ is a `TranscriptBody::Compacted` entry drawn as a ruled divider ("compacted (aut
 `post_tokens` lowers the chip at once. Lines from the loop rather than the model
 (`system/informational` past the `info` level, `model_fallback`, `permission_retry`;
 protocol 26) are `TranscriptBody::Notice { level, text }` entries drawn as one plain line in
-the muted, accent or warn tone; `system/commands_changed` replaces the slash list and
+the muted, accent or warn tone; `system/commands_changed` replaces the slash list (each a
+`SlashCommand { name, description, hint }`, protocol 29; `init` names them alone) and
 `system/task_notification` ends a backgrounded task. An agent that exits unasked with a
 non-zero status closes its session with `CloseReason::Failed { status, detail }` (its last
 stderr line; protocol 27), which the app shows as a top-bar notice. A
@@ -601,7 +602,9 @@ not, so the model list is fixed and the slash commands come from `init`), record
 on the ack and the mode on the status record that follows, and the chip only changes when
 the agent has confirmed. The composer completes the announced slash commands
 (`conversation::slash_matches`): a one-word `/…` text lists its prefix matches above the
-field (`conversation-completions`, `ListBox` of `ListBoxOption`s), Tab takes the selected
+field (`conversation-completions`, `ListBox` of `ListBoxOption`s, at most `SLASH_MAX` = 8,
+one per line: the name in the mono face, the argument hint and the description muted after
+it, the a11y label `slash_label`: `/compact [instructions] — …`), Tab takes the selected
 one (`CompleteSlash`, bound to Tab in the "Terminal" context ahead of gpui-kit `Root`'s
 focus-ring Tab, and propagated when there is nothing to complete), ↑/↓ choose, Esc hides the
 list until the text changes — those keys are caught in the capture phase (`completion_key`,

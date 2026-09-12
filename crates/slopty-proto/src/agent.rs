@@ -94,7 +94,7 @@ pub struct AgentInfo {
     /// The permission mode in force (`default`, `acceptEdits`, `plan`, …).
     pub permission_mode: Option<String>,
     /// Slash commands the agent takes as prompts (`/compact`, `/clear`, …).
-    pub slash_commands: Vec<String>,
+    pub slash_commands: Vec<SlashCommand>,
     /// Turns the conversation has had.
     pub turns: u32,
     /// Claude Code's own cost estimate for the conversation, in millionths of a dollar.
@@ -105,6 +105,26 @@ pub struct AgentInfo {
     /// How full the model's context window is, from the last assistant record's `usage`
     /// (`None` before the first one).
     pub context: Option<Context>,
+}
+
+/// A slash command the agent takes as a prompt, as `init` (names alone) and
+/// `commands_changed` (with what each does and takes) describe it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// The name with its slash (`/compact`).
+    pub name: String,
+    /// What it does; empty when the agent only named it.
+    pub description: String,
+    /// What follows the name (`<file>`, `[instructions]`); empty when it takes nothing.
+    pub hint: String,
+}
+
+impl SlashCommand {
+    /// A command by name alone, given its slash.
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        Self { name: format!("/{}", name.trim_start_matches('/')), ..Self::default() }
+    }
 }
 
 /// The context window's fill: what the last request carried, against the model's window.

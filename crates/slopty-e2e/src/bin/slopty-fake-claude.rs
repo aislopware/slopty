@@ -257,6 +257,15 @@ fn run() -> std::io::Result<ExitCode> {
                 "session_id": fake.session, "tools": ["Bash", "Edit", "Read", "Write"], "model": fake.model,
                 "permissionMode": "default", "slash_commands": ["/compact", "/clear", "/cost"], "uuid": "i"}),
     )?;
+    // The CLI describes the commands once its skills are loaded; the init only names them.
+    emit(
+        &mut out,
+        &json!({"type": "system", "subtype": "commands_changed", "session_id": fake.session, "uuid": "c",
+                "commands": [
+                    {"name": "compact", "description": "Clear history but keep a summary", "argumentHint": "[instructions]"},
+                    {"name": "clear", "description": "Clear conversation history", "argumentHint": ""},
+                    {"name": "cost", "description": "Show the total cost", "argumentHint": ""}]}),
+    )?;
     emit(
         &mut out,
         &json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1_789_195_800,
