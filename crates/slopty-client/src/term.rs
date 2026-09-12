@@ -676,6 +676,51 @@ mod tests {
         line
     }
 
+    /// Every event that is not a frame is kept where the view reads it and re-emitted as its
+    /// effect: title, cwd with its repository, the bell, a clipboard write, the exit (which
+    /// also ends a running command), an error, matches and a refused pattern; a resize and
+    /// the driver flag change the state and emit nothing.
+    #[test]
+    fn events_are_kept_and_re_emitted_as_effects() {
+        let mut state = TermState::new(size());
+        assert_eq!(state.apply(TermEvent::Title("vim".into())), vec![Effect::Title("vim".into())]);
+        assert_eq!(state.title(), Some("vim"));
+        let cwd = TermEvent::Cwd { path: "/w/app".into(), repo: Some("/w".into()) };
+        assert_eq!(
+            state.apply(cwd),
+            vec![Effect::Cwd { path: "/w/app".into(), repo: Some("/w".into()) }]
+        );
+        assert_eq!((state.cwd(), state.repo()), (Some("/w/app"), Some("/w")));
+        assert_eq!(state.apply(TermEvent::Bell), vec![Effect::Bell]);
+        assert_eq!(
+            state.apply(TermEvent::ClipboardWrite { text: "copied".into() }),
+            vec![Effect::ClipboardWrite("copied".into())]
+        );
+        assert_eq!(
+            state.apply(TermEvent::Error("lost".into())),
+            vec![Effect::Error("lost".into())]
+        );
+        let hit = SearchMatch { line: LineIndex(4), col: 2, len: 3 };
+        assert_eq!(
+            state.apply(TermEvent::Matches { needle: "x".into(), total: 1, matches: vec![hit] }),
+            vec![Effect::Matches { needle: "x".into(), total: 1, matches: vec![hit] }]
+        );
+        assert_eq!(
+            state.apply(TermEvent::SearchInvalid { needle: "(".into(), message: "open".into() }),
+            vec![Effect::SearchInvalid { needle: "(".into(), message: "open".into() }]
+        );
+        assert!(state.apply(TermEvent::Resized { cols: 20, rows: 5 }).is_empty());
+        assert_eq!((state.size().cols, state.size().rows), (20, 5));
+        assert_eq!((state.screen().cols(), state.screen().rows()), (20, 5));
+        assert!(state.apply(TermEvent::Driver { you: true }).is_empty());
+        assert!(state.driving());
+        // A running command ends with the child.
+        state.running = Some((LineIndex(0), "sleep 9".into()));
+        assert_eq!(state.apply(TermEvent::Exited { status: 3 }), vec![Effect::Exited(3)]);
+        assert_eq!(state.exited(), Some(3));
+        assert!(state.running.is_none());
+    }
+
     #[test]
     fn a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts() {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
