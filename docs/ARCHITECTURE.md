@@ -629,7 +629,10 @@ partial takes over. The badge shows the Working detail when there is one. **Pict
 prompt (protocol 23): ⌘V in the composer with a picture on the clipboard (`composer_paste`
 captures the input's `Paste` before it reads text) attaches it — PNG, JPEG, GIF or WebP, the
 types the model reads, at most `IMAGES_MAX` of `IMAGE_BYTES_MAX` each — as a chip above the
-composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it). Before it lands the
+composer (`composer-attachment-<i>`, "PNG · 70 B", a tap drops it); a picture file dropped
+from the desktop onto a driven card (`drop_paths`, GPUI's `ExternalPaths`) is read off the UI
+thread and attached the same way, any other file refused by name, and a shell card takes no
+files since the path is the client's. Before it lands the
 picture is made fit off the UI thread (`terminal::attachment::fit`, a "preparing…" chip
 meanwhile): one over 1568 px on the long side or over the cap is decoded, shrunk and
 re-encoded — PNG when it has transparency, JPEG otherwise — so a 6 MB phone screenshot goes

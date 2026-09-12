@@ -43,3 +43,4 @@ e2e = [ "gpui/test-support" ]
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
 slopty-client = { workspace = true, features = [ "headless" ] }
+tempfile.workspace = true

@@ -1699,6 +1699,42 @@ impl TerminalView {
         .detach();
     }
 
+    /// Files dropped on the card from the desktop. On a driven card a picture is read off
+    /// the UI thread and attached to the next prompt like a pasted one; anything else is
+    /// refused by name in the top bar. A shell card takes no files: the paths are this
+    /// machine's and the shell runs on the host.
+    pub fn drop_paths(&self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        if !self.driven {
+            return;
+        }
+        for path in paths {
+            let name = path
+                .file_name()
+                .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            let Some(media_type) = picture_type(path) else {
+                cx.emit(TerminalViewEvent::Notice(format!(
+                    "{name}: not a picture (PNG, JPEG, GIF or WebP)"
+                )));
+                continue;
+            };
+            let reading = cx.background_spawn({
+                let path = path.clone();
+                async move { std::fs::read(&path) }
+            });
+            cx.spawn(async move |this, cx| {
+                let read = reading.await;
+                let _updated = this.update(cx, |view, cx| match read {
+                    Ok(data) => view.attach_image(
+                        slopty_proto::agent::Image { media_type: media_type.to_owned(), data },
+                        cx,
+                    ),
+                    Err(e) => cx.emit(TerminalViewEvent::Notice(format!("{name}: {e}"))),
+                });
+            })
+            .detach();
+        }
+    }
+
     /// Pictures being made fit right now, not yet attached.
     #[must_use]
     pub const fn preparing(&self) -> usize {
@@ -2803,6 +2839,9 @@ impl Render for TerminalView {
             .role(gpui::accesskit::Role::Group)
             .relative()
             .size_full()
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _window, cx| {
+                this.drop_paths(paths.paths(), cx);
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::find))
@@ -2938,6 +2977,20 @@ impl BlockMenuItem {
             Self::Ask => "Ask the agent",
             Self::SelectBlock => "Select block",
         }
+    }
+}
+
+/// The media type of a picture file the model reads, from its extension; `None` for any
+/// other file.
+#[must_use]
+pub fn picture_type(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
     }
 }
 
@@ -4971,6 +5024,73 @@ mod tests {
         assert!(cx.debug_bounds("terminal-search").is_none(), "closed");
         assert_eq!(hits(cx), Some((vec![], None)), "no tint left behind");
         assert!(composer_focused(&view, cx), "the caret is back in the composer");
+    }
+
+    /// A picture dropped from the desktop onto a driven card is attached like a pasted one,
+    /// read off the UI thread; a file that is not a picture is refused by name; a shell card
+    /// takes nothing, since the path is this machine's and the shell runs on the host.
+    #[gpui::test]
+    fn a_picture_dropped_on_a_driven_card_is_attached(cx: &mut TestAppContext) {
+        assert_eq!(picture_type(std::path::Path::new("a/Shot.PNG")), Some("image/png"));
+        assert_eq!(picture_type(std::path::Path::new("p.jpeg")), Some("image/jpeg"));
+        assert_eq!(picture_type(std::path::Path::new("p.jpg")), Some("image/jpeg"));
+        assert_eq!(picture_type(std::path::Path::new("p.gif")), Some("image/gif"));
+        assert_eq!(picture_type(std::path::Path::new("p.webp")), Some("image/webp"));
+        assert_eq!(picture_type(std::path::Path::new("p.tiff")), None);
+        assert_eq!(picture_type(std::path::Path::new("png")), None, "no extension");
+
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        let small = encoded(64, 48, image::ImageFormat::Png);
+        std::fs::write(&shot, &small).unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, "hue").unwrap();
+        let gone = dir.path().join("gone.png");
+
+        let (view, mut rx, cx) = terminal(cx);
+        let notices = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&notices);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::Notice(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        let drop = |cx: &mut VisualTestContext, paths: &[&std::path::Path]| {
+            let position = cx.debug_bounds("terminal").expect("the card").center();
+            let paths = gpui::ExternalPaths(paths.iter().map(|p| p.to_path_buf()).collect());
+            cx.simulate_event(gpui::FileDropEvent::Entered { position, paths });
+            cx.simulate_event(gpui::FileDropEvent::Pending { position });
+            cx.simulate_event(gpui::FileDropEvent::Submit { position });
+            cx.run_until_parked();
+        };
+
+        // A shell card: nothing happens, not even a notice.
+        drop(cx, &[&shot]);
+        assert_eq!(view.read_with(cx, |v, _| (v.preparing(), v.attachments().len())), (0, 0));
+        assert!(notices.borrow().is_empty(), "{notices:?}");
+
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["follow:true"]);
+        drop(cx, &[&shot, &notes, &gone]);
+        let attached = view.read_with(cx, |v, _| v.attachments().to_vec());
+        assert_eq!(attached.len(), 1, "{attached:?}");
+        assert_eq!((attached[0].media_type.as_str(), &attached[0].data), ("image/png", &small));
+        let noticed = notices.borrow().clone();
+        assert_eq!(noticed.len(), 2, "{noticed:?}");
+        assert_eq!(noticed[0], "notes.txt: not a picture (PNG, JPEG, GIF or WebP)");
+        assert!(noticed[1].starts_with("gone.png: No such file"), "{noticed:?}");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let label = attachment_label(&attached[0]);
+        assert!(
+            tree.iter().any(|n| n.is("Button", Some(&format!("Remove picture 1: {label}")))),
+            "the chip names the picture: {tree:#?}"
+        );
     }
 
     /// ⌘V with a picture on the clipboard attaches it to the next prompt: a chip above the

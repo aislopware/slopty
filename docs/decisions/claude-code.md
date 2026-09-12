@@ -463,6 +463,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   lands the card on index 1), `cmd_click_on_a_path_while_a_command_runs_views_it` (`:12`
   carried).
 
+- ✅ **A picture dropped from the desktop onto a driven card is attached** (2026-09-13). A
+  screenshot on the Mac's desktop went to the agent by opening it, copying it and ⌘V in the
+  composer; Finder to card is the gesture every Mac app takes. Rulings: (1) the card's root
+  takes GPUI's `ExternalPaths` drop (`drop_paths`): a driven card reads each picture file off
+  the UI thread and hands it to `attach_image`, so the fit, the cap of `IMAGES_MAX` and the
+  chip are the paste's; (2) the type is read from the extension (`picture_type`: png, jpg,
+  jpeg, gif, webp, any case) and any other file is refused by name in the top bar — the
+  model reads pictures, and a text file's place is `@path` on the host, not the client's
+  copy; a file that cannot be read says so with the OS's word; (3) a shell card takes no
+  files at all, not even a notice: the path is the client machine's and the shell runs on
+  the host, so typing it there would name nothing. Tests: headless
+  `a_picture_dropped_on_a_driven_card_is_attached` (the extension table; a PNG, a text file
+  and a missing file dropped together on a shell card, then a driven one: one attachment
+  with the file's bytes, two notices, the chip labelled).
+
 - ✅ **A host window's picture goes to the agent without touching the client, protocol 33**
   (2026-09-12). "What is wrong with this dialog?" wants the window as the human sees it; the
   client only has the stream's decoded frame, at stream size, in a pixel buffer. Rulings: (1)
