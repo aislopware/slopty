@@ -739,6 +739,7 @@ mod tests {
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ")]);
         f.updates[0].line.mark = prompt(None);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        assert!(!state.command_running());
         // Typed but not entered: the cursor is still on the prompt row.
         let mut f = frame(2, false, 0, 0, 3, &[(0, "$ sleep 9")]);
         f.updates[0].line.mark = prompt(None);
@@ -752,6 +753,7 @@ mod tests {
         // Still running: nothing new.
         let f = frame(4, false, 0, 0, 3, &[(1, "")]);
         assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
+        assert!(state.command_running());
         // The next prompt carries the status.
         let mut f = frame(5, false, 0, 0, 3, &[(2, "$ ")]);
         f.updates[0].line.mark = prompt(Some(1));
@@ -759,6 +761,7 @@ mod tests {
             commands(state.apply(TermEvent::Frame(at(f, 2)))),
             vec![Effect::CommandFinished { command: "sleep 9".to_owned(), exit: Some(1) }]
         );
+        assert!(!state.command_running());
         // ⌃L at the prompt: the shell erases the screen in place and redraws its prompt on the
         // first row, a lower index than the one it replaces. The command typed there is
         // finished by the prompt below it as usual.
@@ -870,6 +873,9 @@ mod tests {
         assert_eq!(s.view_offset(), 2);
         assert!(s.scroll(5).is_empty(), "clamped to history");
         assert_eq!(s.view_offset(), 2);
+        s.scroll_to_bottom();
+        assert_eq!(s.view_offset(), 0, "following output again");
+        assert_eq!(texts(&s), vec![Some("c".into()), Some("d".into()), Some("e".into())]);
     }
 
     #[test]
