@@ -1823,7 +1823,8 @@ fn code_segment(
 #[must_use]
 pub fn tool_path(detail: &ToolDetail) -> Option<(&str, Option<u32>)> {
     match detail {
-        ToolDetail::Diff { path, .. } | ToolDetail::Write { path, .. } => Some((path, None)),
+        ToolDetail::Diff { path, line, .. } => Some((path, *line)),
+        ToolDetail::Write { path, .. } => Some((path, None)),
         ToolDetail::Read { path, offset, .. } => Some((path, *offset)),
         _ => None,
     }
@@ -1837,7 +1838,7 @@ fn view_button(
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> Option<AnyElement> {
-    let (path, _line) = tool_path(detail)?;
+    let (path, line) = tool_path(detail)?;
     let path = path.to_owned();
     let s = &theme.surfaces;
     let view = view.clone();
@@ -1857,7 +1858,7 @@ fn view_button(
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(move |_ev, _window, cx| {
                 cx.stop_propagation();
-                view.update(cx, |v, cx| v.view_file(&path, cx));
+                view.update(cx, |v, cx| v.view_file(&path, line, cx));
             })
             .child("view")
             .into_any_element(),

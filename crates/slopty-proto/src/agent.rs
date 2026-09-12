@@ -412,6 +412,9 @@ pub enum ToolDetail {
     Diff {
         /// The file.
         path: String,
+        /// The first line of the replaced text in the file, 1-based, when the host found it
+        /// (the old text before the edit lands, the new text after).
+        line: Option<u32>,
         /// The change, clipped to the same size as any other long text.
         lines: Vec<DiffLine>,
         /// Diff lines dropped after `lines`; zero when nothing was cut.

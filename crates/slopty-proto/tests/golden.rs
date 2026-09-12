@@ -578,6 +578,7 @@ mod golden {
                         "src/a.rs",
                         ToolDetail::Diff {
                             path: "src/a.rs".to_owned(),
+                            line: Some(12),
                             lines: vec![
                                 line(DiffKind::Context, "fn a() {"),
                                 line(DiffKind::Removed, "    1"),

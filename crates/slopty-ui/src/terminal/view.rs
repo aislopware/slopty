@@ -217,8 +217,13 @@ pub enum TerminalViewEvent {
     AskAgent(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the canvas opens (or reveals) a file card for it, a relative path made absolute
-    /// against the session's directory.
-    ViewFile(String),
+    /// against the session's directory, landing on `line` (1-based) when one is known.
+    ViewFile {
+        /// The path as the tool or the text gave it.
+        path: String,
+        /// The line to land on.
+        line: Option<u32>,
+    },
 }
 
 /// One session's view.
@@ -573,7 +578,7 @@ impl TerminalView {
     /// "View" on a tool call: a file card for its path, made absolute against the agent's
     /// working directory when the agent gave it relative (Claude Code's tools take absolute
     /// paths, but a fake or a hook may not).
-    pub fn view_file(&self, path: &str, cx: &mut Context<Self>) {
+    pub fn view_file(&self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         let absolute = if path.starts_with('/') {
             path.to_owned()
         } else {
@@ -582,7 +587,7 @@ impl TerminalView {
                 None => path.to_owned(),
             }
         };
-        cx.emit(TerminalViewEvent::ViewFile(absolute));
+        cx.emit(TerminalViewEvent::ViewFile { path: absolute, line });
     }
 
     /// What the driven agent last said about itself.
@@ -1176,7 +1181,7 @@ impl TerminalView {
     fn open_path(&mut self, span: &url::PathSpan, cx: &mut Context<Self>) {
         if self.state.command_running() {
             tracing::info!(path = %span.path, "path viewed: a command is running");
-            cx.emit(TerminalViewEvent::ViewFile(span.path.clone()));
+            cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
             return;
         }
         let command = url::editor_command(&span.path, span.line);
@@ -3501,6 +3506,7 @@ mod tests {
                 summary: "src/a.rs".to_owned(),
                 detail: ToolDetail::Diff {
                     path: "src/a.rs".to_owned(),
+                    line: None,
                     lines,
                     more_lines: 0,
                     replace_all: false,
@@ -3839,8 +3845,8 @@ mod tests {
         let seen = std::rc::Rc::clone(&viewed);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::ViewFile(path) = event {
-                    seen.borrow_mut().push(path.clone());
+                if let TerminalViewEvent::ViewFile { path, line } = event {
+                    seen.borrow_mut().push((path.clone(), *line));
                 }
             })
             .detach();
@@ -3891,7 +3897,7 @@ mod tests {
         let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
         cx.simulate_click(cell, cmd);
         cx.run_until_parked();
-        assert_eq!(*viewed.borrow(), ["src/main.rs"]);
+        assert_eq!(*viewed.borrow(), [("src/main.rs".to_owned(), Some(12))]);
         assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "nothing typed into the build");
     }
 

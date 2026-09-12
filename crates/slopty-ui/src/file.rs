@@ -32,6 +32,8 @@ pub struct FileView {
     /// Lines (indices into `lines`) the last read changed against the one before it, in
     /// order; empty on a first read and when nothing moved.
     changed: Vec<usize>,
+    /// The line (index into `lines`) the card was opened at: an edit's place in the file.
+    focus: Option<usize>,
     zoom: f32,
     /// Inner padding at zoom 1 (the theme's base spacing).
     pad: f32,
@@ -62,6 +64,7 @@ impl FileView {
             read: None,
             lines: Vec::new(),
             changed: Vec::new(),
+            focus: None,
             zoom: 1.0,
             pad: 8.0,
             text_size: 12.0,
@@ -100,6 +103,25 @@ impl FileView {
         &self.changed
     }
 
+    /// The line the card was opened at, an index into what is drawn.
+    #[must_use]
+    pub const fn focus(&self) -> Option<usize> {
+        self.focus
+    }
+
+    /// Land on `line` (1-based, as a tool names it): tinted, and scrolled into view now if
+    /// the text is here, else when it arrives. `None` clears it.
+    pub fn focus_line(&mut self, line: Option<u32>, cx: &mut Context<Self>) {
+        self.focus = line.and_then(|l| usize::try_from(l).ok()).map(|l| l.saturating_sub(1));
+        if let Some(at) = self.focus
+            && !self.lines.is_empty()
+        {
+            self.scroll
+                .scroll_to_item(at.min(self.lines.len().saturating_sub(1)), ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
     /// The host answered (or answered again after an edit). A second text after a first one
     /// marks the lines that differ and scrolls to the first of them.
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
@@ -118,8 +140,14 @@ impl FileView {
         } else {
             Vec::new()
         };
-        if let Some(&first) = self.changed.first() {
-            self.scroll.scroll_to_item(first, ScrollStrategy::Center);
+        // A changed line is the reason for this read; the opening line is where a first text
+        // lands.
+        let land = self.changed.first().copied().or(if had_text { None } else { self.focus });
+        if let Some(at) = land
+            && !lines.is_empty()
+        {
+            self.scroll
+                .scroll_to_item(at.min(lines.len().saturating_sub(1)), ScrollStrategy::Center);
         }
         self.lines = lines;
         self.read = Some(read);
@@ -239,9 +267,11 @@ impl Render for FileView {
                 let gutter_ch = f32::from(u8::try_from(digits).unwrap_or(u8::MAX));
                 let lines = self.lines.clone();
                 let changed = self.changed.clone();
+                let focus = self.focus;
                 let muted = hsla(theme.surfaces.text_muted);
                 let fg = hsla(theme.surfaces.text);
                 let tint = hsla_alpha(theme.surfaces.success, alpha::TINT);
+                let mark = hsla_alpha(theme.surfaces.accent, alpha::TINT);
                 let list = uniform_list(
                     SharedString::from(format!("file-lines-{id}")),
                     count,
@@ -255,6 +285,7 @@ impl Render for FileView {
                                         .flex()
                                         .gap(px(pad))
                                         .whitespace_nowrap()
+                                        .when(focus == Some(ix), |el| el.bg(mark))
                                         .when(changed.binary_search(&ix).is_ok(), |el| el.bg(tint))
                                         .child(
                                             div()

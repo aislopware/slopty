@@ -442,6 +442,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   JPEG, the TIFF's and the fifth's notices), the app and simulator scenarios on the real
   PNG.
 
+- ✅ **An edit knows its line in the file, protocol 35** (2026-09-12). The card drew an
+  edit's diff but could not say *where* in the file it was: Claude Code's `Edit` names a file
+  and an `old_string`, never a line. Rulings: (1) the host looks it up — `transcript::locate`
+  reads the file (up to 4 MiB, text only) and takes the 1-based line where `old_string`
+  starts, else where `new_string` does, because a transcript read back from disk sees the
+  file *after* the edit landed while a live `tool_use` sees it before; neither found leaves
+  `line: None`; (2) a relative `file_path` resolves against the record's own `cwd`
+  (`record_entries`), or the fold's `init.cwd` for stream-json records that carry none
+  (`record_entries_in`), and stays unknown with neither; (3) the same lookup fills a
+  `can_use_tool` permission's detail, so the Allow / Deny row's "open" and "view" land right
+  too; (4) the client uses it twice — "open" types `${EDITOR:-vi} +N`, "view" lands the file
+  card on the line (`TerminalViewEvent::ViewFile { path, line }`, `CanvasView::open_file`,
+  `FileView::focus_line`: the row in the accent tint, scrolled to the centre once the text is
+  there, `canvas.file_focus` holding the line for a view not made yet) — and ⌘-click on
+  `src/main.rs:12` in a terminal while a command runs carries its own `:12` the same way.
+  Wire: `ToolDetail::Diff.line: Option<u32>`; golden `host_transcript_tools`. Tests:
+  `an_edits_line_is_found_in_the_file_before_and_after_it_lands` (old text, new text,
+  neither, relative + cwd, a whole record), the file-card headless test (a `Diff` with line 2
+  lands the card on index 1), `cmd_click_on_a_path_while_a_command_runs_views_it` (`:12`
+  carried).
+
 - ✅ **A host window's picture goes to the agent without touching the client, protocol 33**
   (2026-09-12). "What is wrong with this dialog?" wants the window as the human sees it; the
   client only has the stream's decoded frame, at stream size, in a pixel buffer. Rulings: (1)

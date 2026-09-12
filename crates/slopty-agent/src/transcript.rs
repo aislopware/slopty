@@ -304,10 +304,24 @@ fn line_entries(tools: &mut ToolNames, line: &str) -> Vec<TranscriptEntry> {
     record_entries(tools, &record)
 }
 
-/// The entries one parsed record contributes (none for bookkeeping and sidechains). `tools`
-/// remembers the calls so their results can be named; keep one per conversation.
+/// The entries one parsed record contributes (none for bookkeeping and sidechains).
+///
+/// `tools` remembers the calls so their results can be named; keep one per conversation. An
+/// edit's line is looked up against the record's own `cwd`.
 #[must_use]
 pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEntry> {
+    let cwd = record.get("cwd").and_then(Value::as_str);
+    record_entries_in(tools, record, cwd)
+}
+
+/// [`record_entries`] with the directory relative paths resolve against given by the
+/// caller (a driven agent's records carry none; the fold knows it from `init`).
+#[must_use]
+pub fn record_entries_in(
+    tools: &mut ToolNames,
+    record: &Value,
+    cwd: Option<&str>,
+) -> Vec<TranscriptEntry> {
     if is_subagent(record) {
         return Vec::new();
     }
@@ -325,7 +339,7 @@ pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEn
     };
     let bodies = match kind {
         Some("user") => user_bodies(tools, content),
-        Some("assistant") => assistant_bodies(tools, content),
+        Some("assistant") => assistant_bodies(tools, content, cwd),
         _ => Vec::new(),
     };
     bodies.into_iter().map(|body| TranscriptEntry { at, body }).collect()
@@ -466,7 +480,11 @@ fn block_text(content: Option<&Value>) -> String {
 }
 
 /// An assistant record: its thinking, text blocks and tool calls, in order.
-fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBody> {
+fn assistant_bodies(
+    tools: &mut ToolNames,
+    content: &Value,
+    cwd: Option<&str>,
+) -> Vec<TranscriptBody> {
     let blocks = match content {
         Value::String(s) => {
             return trimmed(s)
@@ -491,7 +509,8 @@ fn assistant_bodies(tools: &mut ToolNames, content: &Value) -> Vec<TranscriptBod
                 }
                 let input = block.get("input");
                 let summary = tool_summary(&name, input);
-                let detail = tool_detail(&name, input);
+                let mut detail = tool_detail(&name, input);
+                locate(&mut detail, input, cwd);
                 Some(TranscriptBody::ToolUse { call, name, summary, detail })
             }
             _ => None,
@@ -525,6 +544,7 @@ pub fn tool_detail(name: &str, input: Option<&Value>) -> ToolDetail {
                 let (lines, more_lines) = diff_lines(old, new);
                 ToolDetail::Diff {
                     path: path.to_owned(),
+                    line: None,
                     lines,
                     more_lines,
                     replace_all: input
@@ -616,6 +636,46 @@ fn todo(item: &Value) -> Option<Todo> {
         _ => TodoStatus::Pending,
     };
     Some(Todo { text: text.to_owned(), status })
+}
+
+/// Files larger than this are not searched for an edit's line.
+const LOCATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Fill an edit's `line` from the file it edits.
+///
+/// Where `old_string` starts in the file at `file_path` (made absolute against `cwd` when
+/// relative), else where `new_string` does once the edit has landed; anything else, or a
+/// file that cannot be read, leaves it `None`.
+pub fn locate(detail: &mut ToolDetail, input: Option<&Value>, cwd: Option<&str>) {
+    let ToolDetail::Diff { path, line, .. } = detail else { return };
+    let field = |key: &str| input?.get(key)?.as_str();
+    let (Some(old), Some(new)) = (field("old_string"), field("new_string")) else { return };
+    let file = if path.starts_with('/') {
+        std::path::PathBuf::from(&*path)
+    } else {
+        match cwd {
+            Some(cwd) => Path::new(cwd).join(&*path),
+            None => return,
+        }
+    };
+    *line = edit_line(&file, old, new);
+}
+
+/// The 1-based line where `old` starts in the file at `path`, else where `new` does; `None`
+/// when neither is there, the file is not text, or it is past [`LOCATE_BYTES`].
+#[must_use]
+pub fn edit_line(path: &Path, old: &str, new: &str) -> Option<u32> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > LOCATE_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let at = [old, new]
+        .into_iter()
+        .filter(|needle| !needle.is_empty())
+        .find_map(|needle| text.find(needle))?;
+    let line = text.get(..at)?.matches('\n').count().saturating_add(1);
+    u32::try_from(line).ok()
 }
 
 /// `old` against `new` line by line, cut the way [`clip`] cuts a text.
@@ -901,6 +961,45 @@ mod tests {
         assert!(got.iter().all(|e| e.at.is_none()), "no timestamps in these records");
     }
 
+    /// An edit's line is where its old text starts in the file, or its new text once the
+    /// edit has landed; a relative path resolves against the record's `cwd`, and a file that
+    /// is not there leaves the line unknown.
+    #[test]
+    fn an_edits_line_is_found_in_the_file_before_and_after_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "fn a() {\n    1\n}\nfn b() {\n    x\n}\n").unwrap();
+        assert_eq!(edit_line(&file, "fn b() {\n    x", "fn b() {\n    y"), Some(4));
+        assert_eq!(edit_line(&file, "gone", "    1"), Some(2), "the new text after the edit");
+        assert_eq!(edit_line(&file, "gone", "also gone"), None);
+        let input = serde_json::json!({
+            "file_path": "a.rs", "old_string": "    x", "new_string": "    y"
+        });
+        let mut detail = tool_detail("Edit", Some(&input));
+        locate(&mut detail, Some(&input), dir.path().to_str());
+        assert!(matches!(detail, ToolDetail::Diff { line: Some(5), .. }), "{detail:?}");
+        let mut relative_without_cwd = tool_detail("Edit", Some(&input));
+        locate(&mut relative_without_cwd, Some(&input), None);
+        assert!(matches!(relative_without_cwd, ToolDetail::Diff { line: None, .. }));
+        let record = serde_json::json!({
+            "type": "assistant", "cwd": dir.path(),
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t", "name": "Edit", "input": input}
+            ]}
+        });
+        let entries = record_entries(&mut ToolNames::default(), &record);
+        assert!(
+            matches!(
+                entries.first().map(|e| &e.body),
+                Some(TranscriptBody::ToolUse {
+                    detail: ToolDetail::Diff { line: Some(5), .. },
+                    ..
+                })
+            ),
+            "{entries:?}"
+        );
+    }
+
     #[test]
     fn an_edit_is_a_diff_a_todo_list_a_checklist_and_a_stranger_its_json() {
         let edit = serde_json::json!({
@@ -914,6 +1013,7 @@ mod tests {
             tool_detail("Edit", Some(&edit)),
             ToolDetail::Diff {
                 path: "src/a.rs".to_owned(),
+                line: None,
                 lines: vec![
                     line(DiffKind::Context, "fn a() {"),
                     line(DiffKind::Removed, "    1"),

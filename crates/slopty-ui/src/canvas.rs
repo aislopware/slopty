@@ -415,6 +415,8 @@ pub struct CanvasView {
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
     files: HashMap<ItemId, Entity<FileView>>,
+    /// The line a file card opened at, for a view not made yet.
+    file_focus: HashMap<ItemId, u32>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// A `List` is in flight to name restored window items.
@@ -540,6 +542,7 @@ impl CanvasView {
             screens: HashMap::new(),
             notes: HashMap::new(),
             files: HashMap::new(),
+            file_focus: HashMap::new(),
             pending_opens: HashMap::new(),
             titles_requested: false,
             titles: HashMap::new(),
@@ -1735,9 +1738,9 @@ impl CanvasView {
                     }
                     TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
                     TerminalViewEvent::AskAgent(text) => this.ask_agent(text.clone(), cx),
-                    TerminalViewEvent::ViewFile(path) => {
+                    TerminalViewEvent::ViewFile { path, line } => {
                         let path = this.absolute_in_session(sid, path);
-                        this.open_file(&path, cx);
+                        this.open_file(&path, *line, cx);
                     }
                 },
             ));
@@ -2034,8 +2037,9 @@ impl CanvasView {
 
     /// A file card for `path` on the host: an existing card for it is revealed, else a new
     /// one opens in the next free slot and asks the host for the text (the item goes into the
-    /// shared document; every client reads the file for itself).
-    pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
+    /// shared document; every client reads the file for itself). `line` (1-based) is where
+    /// the card lands: an edit's place in the file.
+    pub fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         let existing = self.doc.items().find_map(|i| match &i.kind {
             ItemKind::File { path: p } if p == path => Some(i.id),
             _ => None,
@@ -2054,10 +2058,19 @@ impl CanvasView {
                 group: None,
                 sleeping: false,
             };
-            tracing::info!(%id, %path, "open file card");
+            tracing::info!(%id, %path, ?line, "open file card");
             self.propose(CanvasOp::Upsert(item));
             id
         };
+        match self.files.get(&id) {
+            Some(view) => view.update(cx, |v, cx| v.focus_line(line, cx)),
+            // The view is made on the next frame; it lands there then.
+            None => {
+                if let Some(line) = line {
+                    self.file_focus.insert(id, line);
+                }
+            }
+        }
         self.active = Some(id);
         self.reveal_pending = Some(id);
         cx.notify();
@@ -2107,6 +2120,9 @@ impl CanvasView {
                 continue;
             }
             let view = cx.new(|_cx| FileView::new(*id, path, self.theme.clone()));
+            if let Some(line) = self.file_focus.remove(id) {
+                view.update(cx, |v, cx| v.focus_line(Some(line), cx));
+            }
             self.files.insert(*id, view);
             self.send(ClientMsg::ReadFile { path: path.clone() });
         }
@@ -5030,7 +5046,7 @@ mod tests {
         assert!(terminal_focused, "and its terminal has the keyboard");
 
         // A file card is a line too, after the sessions: "Go to main.rs · src" reveals it.
-        view.update_in(cx, |c, _window, cx| c.open_file("/w/src/main.rs", cx));
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/src/main.rs", None, cx));
         view.update_in(cx, |c, _window, cx| c.reveal_session(session, cx));
         cx.run_until_parked();
         let file = view
@@ -5255,6 +5271,7 @@ mod tests {
                             summary: "src/it's.rs".to_owned(),
                             detail: ToolDetail::Diff {
                                 path: "/tmp/work/src/it's.rs".to_owned(),
+                                line: None,
                                 lines: vec![DiffLine { kind: DiffKind::Added, text: "x".into() }],
                                 more_lines: 0,
                                 replace_all: false,
@@ -5342,6 +5359,7 @@ mod tests {
                             summary: "note.txt".to_owned(),
                             detail: ToolDetail::Diff {
                                 path: "note.txt".to_owned(),
+                                line: Some(2),
                                 lines: vec![DiffLine { kind: DiffKind::Added, text: "x".into() }],
                                 more_lines: 0,
                                 replace_all: false,
@@ -5412,6 +5430,11 @@ mod tests {
             .find(|n| n.is("Document", Some("File /tmp/work/note.txt")))
             .unwrap_or_else(|| panic!("{tree:#?}"));
         assert_eq!(doc.value.as_deref(), Some("2 lines"));
+        assert_eq!(
+            view.read_with(cx, |c, cx| c.file(file).unwrap().read(cx).focus()),
+            Some(1),
+            "the card landed on the edit's line"
+        );
         assert!(tree.iter().any(|n| n.is("Button", Some("Read the file again"))), "{tree:#?}");
         assert_eq!(view.read_with(cx, |c, cx| c.file(file).unwrap().read(cx).line_count()), 2);
 
@@ -5488,7 +5511,9 @@ mod tests {
         view.update_in(cx, |c, _window, cx| {
             c.session_moved(shell, "/tmp/work/sub".to_owned(), None);
             let terminal = c.terminals[&shell].clone();
-            terminal.update(cx, |_v, cx| cx.emit(TerminalViewEvent::ViewFile("a/b.rs".to_owned())));
+            terminal.update(cx, |_v, cx| {
+                cx.emit(TerminalViewEvent::ViewFile { path: "a/b.rs".to_owned(), line: None });
+            });
         });
         cx.run_until_parked();
         let paths: Vec<String> = view.read_with(cx, |c, _| {

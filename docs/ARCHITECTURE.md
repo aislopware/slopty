@@ -381,7 +381,10 @@ does not — each client asks `ClientMsg::ReadFile` when the card appears (`canv
 and draws the `HostMsg::File` answer (`slopty-host::file::read`: the first 512 KiB, then the
 first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
 `uniform_list`, or one line saying why not; a read that follows one tints the lines that
-differ (`file::changed_lines`, `similar` over the lines) and scrolls the first into view. The
+differ (`file::changed_lines`, `similar` over the lines) and scrolls the first into view; a
+card opened from an edit lands on the edit's line (`ToolDetail::Diff.line`, protocol 35: the
+host finds `old_string` in the file, or `new_string` once the edit landed,
+`transcript::locate`, tinted in the accent tone, `FileView::focus_line`). The
 card reads again when any agent's
 Edit/Write result arrives on the canvas, on its "reload" pill, and when "view" is pressed on
 another call for the same path (one card per path: `canvas::open_file` reveals the existing

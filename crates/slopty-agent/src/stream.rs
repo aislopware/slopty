@@ -671,6 +671,11 @@ impl Fold {
         self.init.as_ref()
     }
 
+    /// The directory the agent runs in, once `init` said.
+    fn cwd(&self) -> Option<&str> {
+        self.init.as_ref().map(|i| i.cwd.as_str()).filter(|c| !c.is_empty())
+    }
+
     /// The permissions waiting on the human, oldest first is not guaranteed.
     #[must_use]
     pub fn pending(&self) -> Vec<&str> {
@@ -750,7 +755,8 @@ impl Fold {
                 self.tasks.insert(task.call.clone(), task.clone());
                 vec![Update::Task(task)]
             }
-            Event::Permission { request, pending } => {
+            Event::Permission { mut request, pending } => {
+                transcript::locate(&mut request.detail, Some(&pending.input), self.cwd());
                 self.pending.insert(request.id.clone(), *pending);
                 // A question is a `can_use_tool` on the wire but not a permission to the
                 // human: it blocks as a question, the way the hook path reports one.
@@ -872,10 +878,13 @@ impl Fold {
             self.context = Some(context);
             out.push(Update::Context(context));
         }
-        let entries: Vec<TranscriptEntry> = transcript::record_entries(&mut self.tools, record)
-            .into_iter()
-            .map(|entry| TranscriptEntry { at: entry.at.or(Some(now)), body: entry.body })
-            .collect();
+        let fold_cwd = self.cwd().map(str::to_owned);
+        let cwd = record.get("cwd").and_then(Value::as_str).or(fold_cwd.as_deref());
+        let entries: Vec<TranscriptEntry> =
+            transcript::record_entries_in(&mut self.tools, record, cwd)
+                .into_iter()
+                .map(|entry| TranscriptEntry { at: entry.at.or(Some(now)), body: entry.body })
+                .collect();
         // A compaction says what the context shrank to; the chip need not wait for the next
         // assistant record.
         if let Some(TranscriptBody::Compacted { post_tokens: Some(tokens), .. }) =
