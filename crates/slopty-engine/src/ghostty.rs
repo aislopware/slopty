@@ -15,7 +15,7 @@ use slopty_grid::{
     Cell, CellText, CellWidth, Cursor, CursorShape, Hyperlink, Line, LineFlags, LineIndex,
     RowUpdate, SemanticMark, Style, TermModes,
 };
-use slopty_proto::input::{KeyEvent, MouseAction, MouseEvent};
+use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseEvent};
 use slopty_proto::terminal::{Frame, TermSize};
 
 use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
@@ -986,6 +986,31 @@ impl VtEngine for GhosttyEngine {
     }
 
     fn encode_mouse(&mut self, event: &MouseEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
+        if let MouseAction::Wheel { rows, .. } = event.action
+            && !self.term.is_mouse_tracking()?
+        {
+            // Alternate scroll (mode 1007, on by default): on the alternate screen a program
+            // that never asked for the mouse still gets the wheel as cursor keys, so `less`
+            // and a `vim` without mouse mode scroll. The primary screen is scrolled by the
+            // client's own cache, so there the wheel means nothing to the program.
+            if self.on_alt && self.term.mode(Mode::ALT_SCROLL)? {
+                let code = if rows > 0 { KeyCode::ArrowUp } else { KeyCode::ArrowDown };
+                let arrow = KeyEvent {
+                    seq: 0,
+                    action: KeyAction::Press,
+                    code,
+                    mods: Mods::empty(),
+                    consumed_mods: Mods::empty(),
+                    text: None,
+                    unshifted: None,
+                    composing: false,
+                };
+                for _ in 0..rows.unsigned_abs() {
+                    self.encode_key(&arrow, out)?;
+                }
+            }
+            return Ok(());
+        }
         let size = self.size;
         self.mouse_enc.set_options_from_terminal(&self.term);
         self.mouse_enc.set_size(mouse::EncoderSize {
@@ -1289,6 +1314,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, b"\x1b[<0;3;2M");
+    }
+
+    /// The wheel is cursor keys on the alternate screen (mode 1007, on by default; off when
+    /// reset), nothing on the primary screen (the client scrolls its own cache), and button
+    /// 4 / 5 presses for a program tracking the mouse, one per row.
+    #[test]
+    fn the_wheel_is_arrow_keys_on_the_alternate_screen_and_presses_when_tracked() {
+        let wheel = |rows: i16| MouseEvent {
+            action: MouseAction::Wheel { rows, cols: 0 },
+            button: None,
+            mods: Mods::empty(),
+            col: 1,
+            row: 1,
+            px: 12,
+            py: 20,
+        };
+        let mut e = engine(10, 3);
+        let mut out = Vec::new();
+        e.encode_mouse(&wheel(2), &mut out).unwrap();
+        assert!(out.is_empty(), "the primary screen: nothing");
+        e.write(b"\x1b[?1049h");
+        e.encode_mouse(&wheel(2), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[A\x1b[A");
+        out.clear();
+        e.encode_mouse(&wheel(-1), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[B");
+        out.clear();
+        e.write(b"\x1b[?1007l");
+        e.encode_mouse(&wheel(1), &mut out).unwrap();
+        assert!(out.is_empty(), "alternate scroll reset: nothing");
+        e.write(b"\x1b[?1000h\x1b[?1006h");
+        e.encode_mouse(&wheel(1), &mut out).expect("a tracked wheel encodes");
+        assert_eq!(out, b"\x1b[<64;2;2M", "tracked: button 4 at the cell");
+        out.clear();
+        e.encode_mouse(&wheel(-2), &mut out).unwrap();
+        assert_eq!(out, b"\x1b[<65;2;2M\x1b[<65;2;2M");
     }
 
     #[test]

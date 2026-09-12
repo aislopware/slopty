@@ -37,6 +37,10 @@ use crate::terminal::{latency, url};
 const SEARCH_MAX: u32 = 5_000;
 /// While the search bar is open, output refreshes the hits at most this often.
 const SEARCH_REFRESH: Duration = Duration::from_millis(300);
+/// How often a selection dragged past the grid's edge scrolls, and the most lines one tick
+/// moves (the pointer's distance past the edge picks the pace, one line per row of distance).
+const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
+const AUTOSCROLL_MAX: i64 = 8;
 
 mod actions {
     #![expect(
@@ -256,6 +260,16 @@ pub struct TerminalView {
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
     selecting: bool,
+    /// The selection is being dragged past the grid's top or bottom: lines to scroll each
+    /// tick (positive = up into history) and the column the pointer holds.
+    autoscroll: Option<(i64, u16)>,
+    /// The ticking loop behind `autoscroll`; dropped (cancelled) when a new drag starts one.
+    autoscroll_task: Option<gpui::Task<()>>,
+    /// The scrollbar's thumb is held: the pointer's offset from the thumb's top.
+    thumb_drag: Option<Pixels>,
+    /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
+    /// in fractions; they add up).
+    wheel_remainder: f32,
     /// The command-block menu a right click opened, and where.
     block_menu: Option<BlockMenu>,
     /// The host's answer to the composer's `@` word: the query asked and the paths found.
@@ -374,6 +388,10 @@ impl TerminalView {
             hover: None,
             cmd_held: false,
             touch_selecting: false,
+            autoscroll: None,
+            autoscroll_task: None,
+            thumb_drag: None,
+            wheel_remainder: 0.0,
             search: None,
             conversation: None,
             agent: None,
@@ -2154,19 +2172,64 @@ impl TerminalView {
                 f32::from(p.y) / line_height
             }
         };
+        // ⌘-wheel is the canvas's zoom, never the grid's.
+        if event.modifiers.platform {
+            self.wheel_remainder = 0.0;
+            return;
+        }
+        // A program that asked for the mouse gets the wheel (⇧ keeps it for scrolling, as
+        // in every terminal); so does anything on the alternate screen, which has no
+        // history here to scroll — the host turns it into cursor keys (alternate scroll).
+        let modes = self.state.modes();
+        let to_program = (modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
+            || modes.contains(TermModes::ALT_SCREEN);
+        // The grid takes the wheel while it can use it — a program wants it, or there is
+        // history that way — and otherwise lets it through, so the canvas pans under a grid
+        // at the end of its history rather than swallowing the gesture.
+        let usable = to_program
+            || if lines > 0.0 {
+                self.state.view_offset() < self.state.history_len()
+            } else {
+                self.state.view_offset() > 0
+            };
+        if !usable {
+            self.wheel_remainder = 0.0;
+            return;
+        }
+        cx.stop_propagation();
+        // A trackpad moves in fractions of a line: they add up to whole ones, and a new
+        // gesture starts the count over.
+        if event.touch_phase == TouchPhase::Started {
+            self.wheel_remainder = 0.0;
+        }
+        let total = self.wheel_remainder + lines;
         // Wheel up (positive y in GPUI) scrolls into history.
         #[expect(clippy::cast_possible_truncation, reason = "whole lines")]
-        let delta = lines.round() as i64;
+        let delta = total.trunc() as i64;
+        #[expect(clippy::cast_precision_loss, reason = "the truncated part of an f32")]
+        let remainder = total - delta as f32;
+        self.wheel_remainder = remainder;
         if delta == 0 {
             return;
         }
-        for effect in self.state.scroll(delta) {
-            if let Effect::Request(req) = effect {
-                self.send(req);
-            }
+        if to_program {
+            let Some(m) = self.metrics else { return };
+            let (col, row) = m.cell_at_clamped(event.position);
+            let (px, py) = m.pixel_at(event.position);
+            let rows =
+                i16::try_from(delta.clamp(i64::from(i16::MIN), i64::from(i16::MAX))).unwrap_or(0);
+            self.send(TermRequest::Mouse(MouseEvent {
+                action: MouseAction::Wheel { rows, cols: 0 },
+                button: None,
+                mods: keys::mods(event.modifiers),
+                col,
+                row,
+                px,
+                py,
+            }));
+            return;
         }
-        cx.stop_propagation();
-        cx.notify();
+        self.scroll_lines(delta, cx);
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2177,6 +2240,25 @@ impl TerminalView {
         self.focus.focus(window, cx);
         if self.block_menu.take().is_some() {
             cx.notify();
+        }
+        // The scrollbar, when it shows, takes the clicks over it: the thumb is dragged, the
+        // track beside it pages towards the click.
+        if event.button == MouseButton::Left
+            && let Some(thumb) = self.thumb()
+        {
+            if thumb.contains(&event.position) {
+                self.thumb_drag = Some(event.position.y - thumb.origin.y);
+                cx.notify();
+                return;
+            }
+            let track_x = event.position.x >= thumb.origin.x
+                && event.position.x < thumb.origin.x + thumb.size.width;
+            if track_x && let Some(m) = self.metrics {
+                let page = i64::from(m.rows).max(1);
+                let up = event.position.y < thumb.origin.y;
+                self.scroll_lines(if up { page } else { page.saturating_neg() }, cx);
+                return;
+            }
         }
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
@@ -2218,6 +2300,12 @@ impl TerminalView {
                 // Word, then line; the selection stands until the next click.
                 self.select_by_clicks(index, col, event.click_count);
                 self.selecting = false;
+            } else if event.modifiers.shift
+                && let Some(selection) = &mut self.selection
+            {
+                // ⇧-click moves the near end of the selection, as in every terminal.
+                selection.head = (index, col);
+                self.selecting = true;
             } else {
                 let at = (index, col);
                 self.selection = Some(Selection { anchor: at, head: at });
@@ -2245,22 +2333,56 @@ impl TerminalView {
         }));
     }
 
+    /// The pointer moved over the grid: the hover for the ⌘ underline, and the scrollbar
+    /// shows itself while the pointer is over the card (a drag is followed by
+    /// [`Self::drag_move`], which the element registers on the window so the drag can leave
+    /// the card).
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.conversation.is_some() {
             return;
         }
+        let shown = self.scrollbar_shown();
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers.platform, cx);
+        if shown != self.scrollbar_shown() {
+            cx.notify();
+        }
+    }
+
+    /// A drag with the left button, wherever the pointer is: the thumb held scrolls the
+    /// viewport with it; a selection follows the pointer, and past the grid's top or bottom
+    /// it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by how far past the pointer is.
+    pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.selecting = false;
+            self.thumb_drag = None;
+            self.autoscroll = None;
+            return;
+        }
+        let Some(m) = self.metrics else { return };
+        if let Some(grab) = self.thumb_drag {
+            let history = self.state.history_len();
+            let offset = super::element::offset_for_thumb(&m, history, event.position.y - grab);
+            if offset != self.state.view_offset() {
+                for effect in self.state.scroll_to(offset) {
+                    if let Effect::Request(req) = effect {
+                        self.send(req);
+                    }
+                }
+                cx.notify();
+            }
+            return;
+        }
         if !self.selecting {
             return;
         }
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.selecting = false;
-            return;
+        let (col, row) = m.cell_at_clamped(event.position);
+        let past = super::element::rows_past_edge(&m, event.position.y);
+        if past == 0 {
+            self.autoscroll = None;
+        } else {
+            self.start_autoscroll(past.clamp(-AUTOSCROLL_MAX, AUTOSCROLL_MAX), col, cx);
         }
-        let Some((col, row)) = self.metrics.map(|m| m.cell_at_clamped(event.position)) else {
-            return;
-        };
         let head = (self.state.index_at_row(row), col);
         if let Some(selection) = &mut self.selection
             && selection.head != head
@@ -2270,7 +2392,80 @@ impl TerminalView {
         }
     }
 
+    /// Keep scrolling `lines` a tick (positive = up) while the drag stays past the edge.
+    fn start_autoscroll(&mut self, lines: i64, col: u16, cx: &Context<Self>) {
+        let running = self.autoscroll.is_some();
+        self.autoscroll = Some((lines, col));
+        if running {
+            return;
+        }
+        self.autoscroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                let more = this.update(cx, Self::autoscroll_tick).unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// One tick of the drag past the edge: scroll, and put the selection's head on the row
+    /// that came into view. False ends the loop.
+    fn autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((lines, col)) = self.autoscroll else { return false };
+        if !self.selecting {
+            self.autoscroll = None;
+            return false;
+        }
+        self.scroll_lines(lines, cx);
+        let row = if lines > 0 { 0 } else { self.state.size().rows.saturating_sub(1) };
+        let head = (self.state.index_at_row(row), col);
+        if let Some(selection) = &mut self.selection {
+            selection.head = head;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Scroll the viewport by `lines` (positive = up into history), fetching what is not
+    /// cached.
+    fn scroll_lines(&mut self, lines: i64, cx: &mut Context<Self>) {
+        for effect in self.state.scroll(lines) {
+            if let Effect::Request(req) = effect {
+                self.send(req);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The scrollbar's thumb, when the bar shows.
+    fn thumb(&self) -> Option<Bounds<Pixels>> {
+        if !self.scrollbar_shown() {
+            return None;
+        }
+        let m = self.metrics?;
+        super::element::scrollbar_thumb(&m, self.state.history_len(), self.state.view_offset())
+    }
+
+    /// The thumb is held by the pointer (drawn stronger).
+    pub(super) const fn thumb_held(&self) -> bool {
+        self.thumb_drag.is_some()
+    }
+
+    /// Whether the scrollbar is drawn: there is history, and the viewport is in it, or the
+    /// pointer is over the grid, or the thumb is held.
+    pub(super) const fn scrollbar_shown(&self) -> bool {
+        self.state.history_len() > 0
+            && (self.state.view_offset() > 0 || self.hover.is_some() || self.thumb_drag.is_some())
+    }
+
     fn mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.autoscroll = None;
+        if self.thumb_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
         if !std::mem::take(&mut self.selecting) {
             return;
         }
@@ -3189,6 +3384,292 @@ mod tests {
             view.select_by_clicks(LineIndex(102), 0, 3);
             assert_eq!(view.selected_text().as_deref(), Some("third row"));
         });
+    }
+
+    /// A frame of `rows` on a screen whose first line is `first`, with `first` lines of
+    /// history before it (line 0 is the oldest kept).
+    fn history_frame(first: u64, rows: &[&str]) -> TermEvent {
+        TermEvent::Frame(Frame {
+            seq: 1,
+            full: true,
+            epoch: 0,
+            cols: 10,
+            rows: u16::try_from(rows.len()).unwrap_or(3),
+            cursor: Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(first),
+            total_lines: first.saturating_add(u64::try_from(rows.len()).unwrap_or(3)),
+            input_ack: 0,
+            updates: rows
+                .iter()
+                .enumerate()
+                .map(|(row, text)| RowUpdate {
+                    row: u16::try_from(row).unwrap_or(0),
+                    line: Line::from_text(text, 10, Style::DEFAULT),
+                })
+                .collect(),
+        })
+    }
+
+    /// The window point at the middle of cell (`col`, `row`).
+    fn cell_center(
+        view: &Entity<TerminalView>,
+        cx: &VisualTestContext,
+        col: f32,
+        row: f32,
+    ) -> gpui::Point<Pixels> {
+        view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * (col + 0.5), m.line_height * (row + 0.5))
+        })
+    }
+
+    /// A drag selects from press to release; ⇧-click afterwards moves the head, keeping the
+    /// anchor; a plain click drops it all and starts over.
+    #[gpui::test]
+    fn a_shift_click_extends_the_selection(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        let mods = gpui::Modifiers::default();
+        let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        cx.simulate_mouse_down(cell_center(&view, cx, 0.0, 0.0), MouseButton::Left, mods);
+        cx.simulate_mouse_move(cell_center(&view, cx, 4.0, 0.0), MouseButton::Left, mods);
+        cx.simulate_mouse_up(cell_center(&view, cx, 4.0, 0.0), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("hello"));
+
+        cx.simulate_mouse_down(cell_center(&view, cx, 2.0, 2.0), MouseButton::Left, shift);
+        cx.simulate_mouse_up(cell_center(&view, cx, 2.0, 2.0), MouseButton::Left, shift);
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.selected_text()).as_deref(),
+            Some("hello wor\nsecond\nthi"),
+            "the anchor stays, the head moves to the ⇧-click"
+        );
+        cx.simulate_mouse_down(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, shift);
+        cx.simulate_mouse_up(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, shift);
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.selected_text()).as_deref(),
+            Some("hello wor\nse"),
+            "⇧-click again moves the head back"
+        );
+        cx.simulate_click(cell_center(&view, cx, 1.0, 1.0), mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.selected_text()), None, "a click clears it");
+    }
+
+    /// Dragging a selection above the grid keeps scrolling into history a tick at a time,
+    /// the head riding the top row; back inside it stops; the release ends it.
+    #[gpui::test]
+    fn a_drag_past_the_top_scrolls_into_history(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(100, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let mods = gpui::Modifiers::default();
+        cx.simulate_mouse_down(cell_center(&view, cx, 3.0, 1.0), MouseButton::Left, mods);
+        // Two rows above the grid: two lines a tick.
+        let above = cell_center(&view, cx, 3.0, -2.0);
+        cx.simulate_mouse_move(above, MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.autoscroll), Some((2, 3)));
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 0, "nothing until a tick");
+        cx.executor().advance_clock(Duration::from_millis(55));
+        cx.run_until_parked();
+        let (offset, selection) =
+            view.read_with(cx, |v, _| (v.state.view_offset(), v.selection.map(Selection::ordered)));
+        assert_eq!(offset, 2, "one tick, two lines");
+        assert_eq!(
+            selection,
+            Some(((LineIndex(98), 3), (LineIndex(101), 3))),
+            "head on the top row"
+        );
+        let fetched = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| {
+                matches!(msg, ClientMsg::Term { req: TermRequest::FetchLines { .. }, .. })
+            })
+            .count();
+        assert!(fetched > 0, "the lines scrolled into view were asked for");
+        cx.executor().advance_clock(Duration::from_millis(55));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 4, "it keeps going");
+
+        // Back over the grid: the pace stops, the head follows the pointer.
+        cx.simulate_mouse_move(cell_center(&view, cx, 5.0, 2.0), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.autoscroll), None);
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 4, "no more scrolling");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.selection.map(|s| s.head)),
+            Some((LineIndex(98), 5)),
+            "row 2 of a viewport scrolled by 4 is line 98"
+        );
+        // Below the grid scrolls back down, and the release ends everything.
+        let below = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * 5.5, m.line_height * (f32::from(m.rows) + 0.5))
+        });
+        cx.simulate_mouse_move(below, MouseButton::Left, mods);
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(55));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3, "one line down");
+        cx.simulate_mouse_up(below, MouseButton::Left, mods);
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| (v.autoscroll, v.selecting)), (None, false));
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
+    }
+
+    /// A trackpad's fractions of a line add up to whole lines scrolled; a program tracking
+    /// the mouse gets the wheel as rows (⇧ keeps it local); so does the alternate screen.
+    #[gpui::test]
+    fn the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let frame = |modes| match history_frame(100, &["hello wor", "second", "third row"]) {
+            TermEvent::Frame(mut f) => {
+                f.modes = modes;
+                TermEvent::Frame(f)
+            }
+            other => other,
+        };
+        view.update_in(cx, |view, _window, cx| view.apply(frame(TermModes::empty()), cx));
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let at = cell_center(&view, cx, 2.0, 1.0);
+        let wheel = |cx: &mut VisualTestContext, lines: f32, modifiers, phase| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Lines(point(0.0, lines)),
+                modifiers,
+                touch_phase: phase,
+            });
+            cx.run_until_parked();
+        };
+        let mods = gpui::Modifiers::default();
+        let offset = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.state.view_offset());
+        wheel(cx, 0.4, mods, TouchPhase::Started);
+        wheel(cx, 0.4, mods, TouchPhase::Moved);
+        assert_eq!(offset(cx), 0, "0.8 of a line is not a line yet");
+        wheel(cx, 0.4, mods, TouchPhase::Moved);
+        assert_eq!(offset(cx), 1, "1.2: one line, 0.2 carried");
+        wheel(cx, 0.9, mods, TouchPhase::Moved);
+        assert_eq!(offset(cx), 2, "1.1: one more");
+        wheel(cx, 0.9, mods, TouchPhase::Started);
+        assert_eq!(offset(cx), 2, "a new gesture drops the 0.1 carried");
+        wheel(cx, -3.0, mods, TouchPhase::Started);
+        assert_eq!(offset(cx), 0, "and down again");
+        wheel(cx, -0.7, mods, TouchPhase::Started);
+        wheel(cx, -0.7, mods, TouchPhase::Moved);
+        assert_eq!(offset(cx), 0, "no history below: the wheel passes to the canvas");
+        assert!(
+            view.read_with(cx, |v, _| v.wheel_remainder).abs() < f32::EPSILON,
+            "and carries nothing"
+        );
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        wheel(cx, 3.0, cmd, TouchPhase::Started);
+        assert_eq!(offset(cx), 0, "⌘-wheel is the canvas's zoom");
+        let wheels = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Term {
+                        req:
+                            TermRequest::Mouse(MouseEvent {
+                                action: MouseAction::Wheel { rows, .. },
+                                ..
+                            }),
+                        ..
+                    } => Some(rows),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(wheels(&mut rx).is_empty(), "nothing went to the program");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(TermModes::MOUSE_TRACKING), cx));
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        wheel(cx, 2.0, mods, TouchPhase::Started);
+        assert_eq!(wheels(&mut rx), [2], "the program gets the rows");
+        assert_eq!(offset(cx), 0, "and the viewport stays");
+        let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        wheel(cx, 2.0, shift, TouchPhase::Started);
+        assert!(wheels(&mut rx).is_empty(), "⇧ keeps the wheel");
+        assert_eq!(offset(cx), 2);
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(TermModes::ALT_SCREEN), cx));
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        wheel(cx, -1.0, mods, TouchPhase::Started);
+        assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the host makes it a key");
+    }
+
+    /// The scrollbar shows over the right edge once there is history and the pointer is over
+    /// the grid or the viewport is scrolled; its thumb drags the viewport, a click on the
+    /// track beside it pages, and the text under the bar is not selected by those clicks.
+    #[gpui::test]
+    fn the_scrollbar_drags_and_pages_the_viewport(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        let mods = gpui::Modifiers::default();
+        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), None, mods);
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.scrollbar_shown()), "no history, no bar");
+
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(30, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.scrollbar_shown()), "history and a pointer over it");
+        let thumb = view.read_with(cx, |v, _| v.thumb()).expect("a thumb");
+        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let rows = m.rows;
+        let track_bottom = m.origin.y + m.line_height * f32::from(rows);
+        assert!(
+            thumb.origin.y + thumb.size.height <= track_bottom + px(0.01),
+            "at the bottom of the history the thumb sits at the track's end: {thumb:?}"
+        );
+        assert!(
+            thumb.origin.x + thumb.size.width
+                <= m.origin.x + m.cell_width * f32::from(m.cols) + px(0.01)
+        );
+
+        // Clicking the track above the thumb pages up one screen.
+        let track_above = point(thumb.center().x, m.origin.y + px(1.0));
+        cx.simulate_mouse_down(track_above, MouseButton::Left, mods);
+        cx.simulate_mouse_up(track_above, MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), u64::from(rows));
+        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the track does not select");
+
+        // Dragging the thumb to the top of the track shows the oldest lines.
+        let thumb = view.read_with(cx, |v, _| v.thumb()).expect("a thumb");
+        let grab = thumb.center();
+        cx.simulate_mouse_down(grab, MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.thumb_held()));
+        cx.simulate_mouse_move(point(grab.x, m.origin.y - px(50.0)), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 30, "the whole history");
+        cx.simulate_mouse_move(point(grab.x, track_bottom + px(50.0)), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 0, "and back to the bottom");
+        cx.simulate_mouse_up(point(grab.x, track_bottom + px(50.0)), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.thumb_held()));
+        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the thumb does not select");
     }
 
     /// ⌘⇧L swaps the grid for the conversation and asks the host to follow the transcript;

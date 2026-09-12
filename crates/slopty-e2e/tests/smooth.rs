@@ -139,11 +139,37 @@ mod tests {
         clock
     }
 
+    /// A window point over no card (a card takes the wheel while it has history to scroll),
+    /// scanning a coarse grid from the centre outwards; the centre when every point is
+    /// covered.
+    fn background_point(dump: &Dump) -> (f32, f32) {
+        let (width, height) = (dump.window.width, dump.window.height);
+        let covered = |point_x: f32, point_y: f32| {
+            dump.items.iter().any(|item| {
+                let [left, top, item_w, item_h] = item.bounds;
+                point_x >= left
+                    && point_x < left + item_w
+                    && point_y >= top
+                    && point_y < top + item_h
+            })
+        };
+        let steps = [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.1, 0.9];
+        for step_y in steps {
+            for step_x in steps {
+                let (point_x, point_y) = (width * step_x, height * step_y);
+                if point_y > 60.0 && !covered(point_x, point_y) {
+                    return (point_x, point_y);
+                }
+            }
+        }
+        (width / 2.0, height / 2.0)
+    }
+
     /// Pan at a steady velocity (half a line per report, diagonally) for `run`, one scroll
     /// per trackpad report.
     async fn pan(drv: &mut Driver, run: Duration) -> FrameInfo {
         let d = drv.dump().await.unwrap();
-        let (cx, cy) = (d.window.width / 2.0, d.window.height / 2.0);
+        let (cx, cy) = background_point(&d);
         drv.frames_reset().await.unwrap();
         let mut clock = input_clock();
         let start = Instant::now();

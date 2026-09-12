@@ -438,6 +438,59 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   badge appears from the real zsh marks through ptyd, the engine and the wire, and the click
   back on the first card clears it).
 
+- ✅ **A selection drags past the edge and ⇧-click moves its end; a scrollbar over the
+  grid** (2026-09-13). Selecting more than a screen of output was impossible: GPUI's
+  `on_mouse_move` on a div fires only while its hitbox is hovered, so the head froze at the
+  edge, and nothing scrolled. Rulings: (1) the element registers a window-level
+  `MouseMoveEvent` listener from `paint` (as the long press already does) that forwards to
+  `TerminalView::drag_move` whenever a button is down, so a drag is followed anywhere; the
+  div's own listener keeps the hover work; (2) past the top or bottom the drag scrolls
+  `AUTOSCROLL_TICK` (50 ms) at one line per row of distance, at most `AUTOSCROLL_MAX` (8) —
+  the pace every Mac terminal uses — and the head rides the row that came into view, so the
+  selection grows with the scroll; the loop is a `cx.spawn` on the background timer, ended
+  by the release or the pointer coming back inside (`autoscroll` is the flag; a new drag
+  drops the old task); (3) ⇧-click moves the head of an existing selection (iTerm, ghostty,
+  Terminal.app all do), the anchor kept, and a drag from there continues it; with no
+  selection ⇧-click starts one as before (⇧ also bypasses mouse tracking, unchanged); (4)
+  the scrollbar is a thumb drawn by the element over the grid's right edge
+  (`scrollbar_thumb`: the screen's share of screen-plus-history, at least a row and a half,
+  its top where the viewport is), shown while there is history and the pointer is over the
+  grid, the viewport is in the history, or the thumb is held — never on a card the pointer
+  is not over, since the grid is the content; the thumb drags (`offset_for_thumb`, the
+  inverse), the track pages a screen towards the click, and both take the click before any
+  selection so the text under the bar stays selectable by a click beside it. Tests: element
+  `the_scrollbar_thumb_tracks_the_viewport_and_maps_back`, headless
+  `a_shift_click_extends_the_selection`, `a_drag_past_the_top_scrolls_into_history`
+  (ticks on the test clock, fetches for the lines scrolled in),
+  `the_scrollbar_drags_and_pages_the_viewport`.
+
+- ✅ **The wheel adds up, and reaches the program that wants it** (2026-09-13). Two faults
+  in one handler: a trackpad's fractional lines were rounded per event, so a slow scroll
+  moved nothing and — the event not consumed when it rounded to zero — panned the canvas
+  under the pointer instead; and the wheel never left the client, though the wire
+  (`MouseAction::Wheel`) and the engine (button 4/5 presses) were ready, so `vim` with mouse
+  mode, `less`, `tmux` and every full-screen program saw no wheel at all. Rulings: (1) the
+  fraction short of a line is carried (`wheel_remainder`) and a new gesture (`Started`)
+  drops it, so 0.4 + 0.4 + 0.4 is one line and the 0.2 rides on; (2) the grid consumes a
+  wheel event, whole line or not, while it can use it — a program wants it, or there is
+  history in that direction — and lets it through otherwise, so a scroll over a grid at the
+  end of its history pans the canvas instead of dying, and ⌘-wheel is always the canvas's
+  zoom (the smooth probe pans from a point off every card since this, `background_point`:
+  before, its sub-line wheels over a shell passed through by the rounding accident); (3) the rows go to the host when the program tracks the mouse (⇧ keeps them for
+  the cache, as in every terminal) or the screen is the alternate one, which has no history
+  on this side to scroll; (4) the host encodes button presses for a tracking program as
+  before, and on the alternate screen without tracking turns the rows into cursor keys
+  while mode 1007 (alternate scroll, on by default in ghostty) is set — the engine's
+  business, since the mode lives in the terminal; the encoder has no such option
+  (`mouse.rs`, checked at `44f2a44d`), so it is done through `encode_key`; on the primary
+  screen an un-tracked wheel encodes nothing. Tests: engine
+  `the_wheel_is_arrow_keys_on_the_alternate_screen_and_presses_when_tracked`, headless
+  `the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it`.
+  Found on the way: the binding's `Encoder::encode_to_vec` (key and mouse alike) reserved
+  `required - remaining` on a vector with too little spare room, then handed the encoder the
+  old capacity, so an encode into a reused buffer failed with `OutOfSpace`; fixed in the fork
+  (`aislopware/libghostty-rs` `2c9c61e`: `reserve(required)`, a test in `mouse.rs`) and pinned.
+
 - ✅ **The cache indexes its prompts** (2026-09-13). The sticky block header asks for the
   prompt above the top row on every render, and `TermState::prompt_before` walked the cache
   a line at a time: in a flooding shell whose prompt had scrolled out of the 20 000-line

@@ -13,10 +13,11 @@ use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
 use gpui::{
-    App, BorrowAppContext as _, Bounds, DispatchPhase, Element, ElementId, ElementInputHandler,
-    Entity, Focusable as _, Font, FontId, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, LongPressEvent, Pixels, Point, ShapedLine, SharedString, Size, Style, TextAlign,
-    TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
+    App, BorderStyle, BorrowAppContext as _, Bounds, DispatchPhase, Edges, Element, ElementId,
+    ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, Pixels, Point,
+    ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point,
+    px, quad, relative, size,
 };
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
@@ -113,6 +114,8 @@ pub struct Prepared {
     background: Hsla,
     /// Colour of the ⌘-hover link underline.
     link: Hsla,
+    /// The scrollbar's thumb over the grid's right edge, while the bar shows.
+    scrollbar: Option<(Bounds<Pixels>, Hsla)>,
     /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
@@ -755,6 +758,11 @@ impl Element for TerminalElement {
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
             let link = view.link_highlight();
+            let scrollbar = view.scrollbar_shown().then(|| {
+                let held = view.thumb_held();
+                let alpha = if held { alpha::TINT_PRESSED } else { alpha::TINT_STRONG };
+                (hsla_alpha(palette.fg, alpha), state.history_len(), view_offset)
+            });
 
             cache.sweep(crate::frames::index(cx));
             let base = hash_base(focused, base_size, &family, palette);
@@ -960,6 +968,9 @@ impl Element for TerminalElement {
                 cursor: cursor_prepared,
                 background: hsla(palette.bg),
                 link: hsla(palette.fg),
+                scrollbar: scrollbar.and_then(|(color, history, offset)| {
+                    scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
+                }),
                 overlay,
                 shown: predicted.iter().map(|p| p.seq).collect(),
             }
@@ -998,6 +1009,14 @@ impl Element for TerminalElement {
                 cx.stop_propagation();
             }
         });
+        // A drag is followed wherever the pointer goes (the div's own move listener stops at
+        // its edge): the selection keeps growing and scrolls past the top or bottom.
+        let view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+            if phase == DispatchPhase::Bubble && event.pressed_button.is_some() {
+                view.update(cx, |view, cx| view.drag_move(event, cx));
+            }
+        });
         window.paint_quad(fill(bounds, prepared.background));
         for row in &prepared.rows {
             if let Some(color) = row.separator {
@@ -1031,9 +1050,7 @@ impl Element for TerminalElement {
                     ),
                     color,
                 ),
-                CursorShape::BlockHollow => {
-                    gpui::outline(cursor_bounds, color, gpui::BorderStyle::Solid)
-                }
+                CursorShape::BlockHollow => gpui::outline(cursor_bounds, color, BorderStyle::Solid),
             };
             window.paint_quad(quad);
         }
@@ -1110,8 +1127,87 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint prediction");
             }
         }
+        if let Some((thumb, color)) = prepared.scrollbar {
+            let radius = thumb.size.width / 2.0;
+            window.paint_quad(quad(
+                thumb,
+                radius,
+                color,
+                Edges::default(),
+                Hsla::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
         let shown = std::mem::take(&mut prepared.shown);
         self.view.update(cx, |view, _cx| view.painted(&shown));
+    }
+}
+
+/// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
+const THUMB_CELLS: f32 = 0.6;
+const THUMB_MIN_ROWS: f32 = 1.5;
+
+/// The scrollbar's thumb over the grid's right edge: none without history. The track is the
+/// grid's height; the thumb's share of it is the screen's share of the whole (screen plus
+/// history), at least `THUMB_MIN_ROWS` tall; its top sits where the viewport is in the whole.
+#[must_use]
+pub fn scrollbar_thumb(m: &CellMetrics, history: u64, offset: u64) -> Option<Bounds<Pixels>> {
+    if history == 0 || m.rows == 0 {
+        return None;
+    }
+    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
+    let (rows, history_f) = (f64::from(m.rows), history as f64);
+    let line = f64::from(f32::from(m.line_height));
+    let track = line * rows;
+    let height =
+        (track * rows / (rows + history_f)).max(line * f64::from(THUMB_MIN_ROWS)).min(track);
+    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
+    let above = (history.saturating_sub(offset)) as f64;
+    let top = (track - height) * above / history_f;
+    let width = m.cell_width * THUMB_CELLS;
+    let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
+    #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
+    let (y, h) = (px(top as f32), px(height as f32));
+    Some(Bounds::new(point(x, m.origin.y + y), size(width, h)))
+}
+
+/// The viewport offset (lines from the bottom) that puts the thumb's top at `y`: the inverse
+/// of [`scrollbar_thumb`], clamped to the track.
+#[must_use]
+pub fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 {
+    let Some(thumb) = scrollbar_thumb(m, history, 0) else { return 0 };
+    let travel = f64::from(f32::from(m.line_height))
+        .mul_add(f64::from(m.rows), -f64::from(f32::from(thumb.size.height)));
+    if travel <= 0.0 {
+        return 0;
+    }
+    let along = f64::from(f32::from(y - m.origin.y)).clamp(0.0, travel) / travel;
+    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
+    let above = (along * history as f64).round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "0 ≤ above ≤ history"
+    )]
+    let above = above as u64;
+    history.saturating_sub(above)
+}
+
+/// How many rows past the grid's top (positive) or bottom (negative) a pointer at `y` is;
+/// zero inside the grid.
+#[must_use]
+pub fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
+    let line = f32::from(m.line_height).max(1.0);
+    let top = f32::from(m.origin.y);
+    let bottom = top + line * f32::from(m.rows);
+    let y = f32::from(y);
+    #[expect(clippy::cast_possible_truncation, reason = "a ceiling of a small quotient")]
+    if y < top {
+        ((top - y) / line).ceil() as i64
+    } else if y >= bottom {
+        (((y - bottom) / line).floor() as i64).saturating_add(1).saturating_neg()
+    } else {
+        0
     }
 }
 
@@ -1152,6 +1248,41 @@ mod tests {
             face: metrics::Face::default(),
             face_size: 13.0 * scale,
         }
+    }
+
+    /// The thumb is the screen's share of the whole, never thinner than a row and a half,
+    /// riding the track from the oldest line (top) to the newest (bottom); the drag maps back
+    /// to the offset that put it there, clamped to the track; a pointer past the grid's edge
+    /// counts rows past it.
+    #[test]
+    fn the_scrollbar_thumb_tracks_the_viewport_and_maps_back() {
+        let m = metrics(1.0, 1.0);
+        assert_eq!(scrollbar_thumb(&m, 0, 0), None, "no history, no thumb");
+        let track = f32::from(m.line_height) * 24.0;
+        // 24 rows over 24 + 24: half the track, at its end while following output.
+        let thumb = scrollbar_thumb(&m, 24, 0).expect("a thumb");
+        assert!((f32::from(thumb.size.height) - track / 2.0).abs() < 0.01);
+        assert!((f32::from(thumb.origin.y - m.origin.y) - track / 2.0).abs() < 0.01);
+        assert!((f32::from(thumb.origin.x + thumb.size.width - m.origin.x) - 640.0).abs() < 0.01);
+        // Scrolled all the way up: at the top.
+        let top = scrollbar_thumb(&m, 24, 24).expect("a thumb");
+        assert_eq!(top.origin.y, m.origin.y);
+        // A huge history: the least height, and the round trip holds within a line.
+        let tiny = scrollbar_thumb(&m, 100_000, 40_000).expect("a thumb");
+        assert!(
+            (f32::from(tiny.size.height) - f32::from(m.line_height) * THUMB_MIN_ROWS).abs() < 0.01
+        );
+        let back = offset_for_thumb(&m, 100_000, tiny.origin.y);
+        assert!(back.abs_diff(40_000) <= 100_000 / 400, "{back}");
+        assert_eq!(offset_for_thumb(&m, 24, m.origin.y - px(500.0)), 24, "above the track: oldest");
+        assert_eq!(offset_for_thumb(&m, 24, m.origin.y + px(9_000.0)), 0, "below: newest");
+        assert_eq!(offset_for_thumb(&m, 0, m.origin.y), 0, "no history: nowhere to go");
+
+        assert_eq!(rows_past_edge(&m, m.origin.y + px(5.0)), 0);
+        assert_eq!(rows_past_edge(&m, m.origin.y - px(1.0)), 1);
+        assert_eq!(rows_past_edge(&m, m.origin.y - px(17.5)), 2);
+        assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 24.0)), -1, "the first row below");
+        assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 25.5)), -2);
     }
 
     /// A pixel mouse report is in the units the host measures in: device pixels of the *fitted*
