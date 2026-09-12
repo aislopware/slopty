@@ -362,6 +362,24 @@ pub fn system_body(record: &Value) -> Option<TranscriptBody> {
             level: NoticeLevel::Notice,
             text: text("content")?.to_owned(),
         }),
+        // A Stop hook that failed to run (its feedback, when it ran, came as `informational`).
+        "stop_hook_summary" => {
+            let errors: Vec<&str> = record
+                .get("hook_errors")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|e| !e.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (!errors.is_empty()).then(|| TranscriptBody::Notice {
+                level: NoticeLevel::Warning,
+                text: format!("Stop hook failed: {}", errors.join("; ")),
+            })
+        }
         _ => None,
     }
 }
@@ -799,6 +817,10 @@ mod tests {
             "\n",
             r#"{"type":"system","subtype":"permission_retry","content":"Allowed cargo test","commands":["cargo test"]}"#,
             "\n",
+            r#"{"type":"system","subtype":"stop_hook_summary","hook_count":2,"hook_infos":[],"hook_errors":[],"prevented_continuation":false,"has_output":true,"level":"info"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"stop_hook_summary","hook_count":1,"hook_infos":[],"hook_errors":["goal: exit 1"],"prevented_continuation":false,"has_output":false,"level":"warning"}"#,
+            "\n",
             // Pictures ride on the prompt they went with; alone they are an entry of their own.
             r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"what colour?"}]}}"#,
             "\n",
@@ -865,6 +887,11 @@ mod tests {
                 TranscriptBody::Notice {
                     level: NoticeLevel::Notice,
                     text: "Allowed cargo test".to_owned(),
+                },
+                // A Stop hook summary is an entry only when a hook failed to run.
+                TranscriptBody::Notice {
+                    level: NoticeLevel::Warning,
+                    text: "Stop hook failed: goal: exit 1".to_owned(),
                 },
                 TranscriptBody::User { text: "what colour?".to_owned(), images: 1 },
                 TranscriptBody::User { text: String::new(), images: 2 },

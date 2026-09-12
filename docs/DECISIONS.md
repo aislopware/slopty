@@ -2852,6 +2852,16 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `a_subagent_is_followed_by_its_task_records_and_its_own_are_hidden` (`stream`: the
   notification ends the task, one without a call is nothing, the command list), the app
   self-test's `hooked` turn (the warning line between the prompt and the answer).
+  Two more warning lines, no wire change: a `system/status` with `compact_result: failed`
+  reads "Compaction failed: <compact_error>" (the `compacting` detail alone would have left
+  the card looking as if it had worked), and a `system/stop_hook_summary` whose
+  `hook_errors` is non-empty reads "Stop hook failed: …" — the summary is otherwise not an
+  entry, since a hook that ran already spoke through `informational`.
+  Read but not acted on: `control_request/request_user_dialog` (plan approval, MCP
+  elicitation links, fallback-model retry dialogs) is sent only to a client that declared
+  `supportedDialogKinds` in `initialize`, which Slopty does not, so it cannot leave the
+  agent hanging on an unanswered dialog; `get_context_usage`, `rewind_files` and
+  `rewind_conversation` need an SDK-host callback and are not answered over stdio.
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

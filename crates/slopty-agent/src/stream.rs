@@ -18,8 +18,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use slopty_proto::agent::{
-    AgentStatus, AgentTask, BlockReason, Context, PermissionRequest, QuestionAnswer, ToolDetail,
-    TranscriptBody, TranscriptEntry, Usage, UsageWindow,
+    AgentStatus, AgentTask, BlockReason, Context, NoticeLevel, PermissionRequest, QuestionAnswer,
+    ToolDetail, TranscriptBody, TranscriptEntry, Usage, UsageWindow,
 };
 
 use crate::transcript::{self, ToolNames};
@@ -129,6 +129,8 @@ pub enum Event {
         permission_mode: Option<String>,
         /// What the agent is doing, when the record says (`requesting`, `compacting`).
         doing: Option<String>,
+        /// Why a compaction failed (`compact_result: failed`, `compact_error`).
+        compact_error: Option<String>,
     },
     /// `rate_limit_event`: the subscription's usage windows.
     RateLimit(Usage),
@@ -161,6 +163,15 @@ pub fn parse(line: &str) -> Option<Event> {
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
                 .map(str::to_owned),
+            compact_error: (record.get("compact_result").and_then(Value::as_str) == Some("failed"))
+                .then(|| {
+                    record
+                        .get("compact_error")
+                        .and_then(Value::as_str)
+                        .filter(|e| !e.trim().is_empty())
+                        .unwrap_or("compaction failed")
+                        .to_owned()
+                }),
         },
         ("rate_limit_event", _) => record.get("rate_limit_info").map_or(Event::Other, |info| {
             let window = |name: &str| {
@@ -210,7 +221,10 @@ pub fn parse(line: &str) -> Option<Event> {
         ("assistant" | "user", _)
         | (
             "system",
-            Some("compact_boundary" | "informational" | "model_fallback" | "permission_retry"),
+            Some(
+                "compact_boundary" | "informational" | "model_fallback" | "permission_retry"
+                | "stop_hook_summary",
+            ),
         ) => Event::Record(record),
         // The slash-command list changed mid-session (skills found as the agent moved).
         ("system", Some("commands_changed")) => Event::Commands(
@@ -655,9 +669,18 @@ impl Fold {
                 out.extend(self.status(AgentStatus::Idle, None));
                 out
             }
-            Event::Status { permission_mode, doing } => {
+            Event::Status { permission_mode, doing, compact_error } => {
                 let mut out: Vec<Update> =
                     permission_mode.map(Update::PermissionMode).into_iter().collect();
+                if let Some(error) = compact_error {
+                    out.push(Update::Entries(vec![TranscriptEntry {
+                        at: Some(now),
+                        body: TranscriptBody::Notice {
+                            level: NoticeLevel::Warning,
+                            text: format!("Compaction failed: {error}"),
+                        },
+                    }]));
+                }
                 // "requesting" is the agent waiting on the model, "compacting" its own
                 // housekeeping: both are the turn alive with nothing yet to show.
                 let detail = match doing.as_deref() {
@@ -1371,13 +1394,21 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"type":"system","subtype":"status","status":"requesting"}"#),
-            Some(Event::Status { permission_mode: None, doing: Some("requesting".into()) })
+            Some(Event::Status {
+                permission_mode: None,
+                doing: Some("requesting".into()),
+                compact_error: None
+            })
         );
         assert_eq!(
             parse(
                 r#"{"type":"system","subtype":"status","status":null,"permissionMode":"acceptEdits"}"#
             ),
-            Some(Event::Status { permission_mode: Some("acceptEdits".into()), doing: None })
+            Some(Event::Status {
+                permission_mode: Some("acceptEdits".into()),
+                doing: None,
+                compact_error: None
+            })
         );
         assert_eq!(parse(r#"{"type":"rate_limit_event"}"#), Some(Event::Other));
         // Probed on CLI 2.1.269: the windows ride in `unifiedWindows`, spent as a fraction.
@@ -1420,6 +1451,22 @@ mod tests {
             panic!()
         };
         assert!(fold.apply(event, 0).is_empty(), "a blocked agent keeps its reason");
+        // A failed compaction is a warning line, and never a status change.
+        let Some(event) = parse(
+            r#"{"type":"system","subtype":"status","status":"compacting","compact_result":"failed","compact_error":"context too large to summarize"}"#,
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            fold.apply(event, 3),
+            [Update::Entries(vec![TranscriptEntry {
+                at: Some(3),
+                body: TranscriptBody::Notice {
+                    level: NoticeLevel::Warning,
+                    text: "Compaction failed: context too large to summarize".to_owned()
+                }
+            }])]
+        );
         let Some(event) = parse(
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Write","input":{}}}}"#,
         ) else {
