@@ -104,7 +104,9 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   leaves by itself after `POINT_FOR` (8 s); a newer pointing replaces it. The pointer gets
   the same toast as a status line — "pointed <name> at <title>", "pointed N others at …" —
   and with nobody else on the canvas nothing is sent and the toast says "nobody else is
-  here", so ⌘⇧O never does nothing in silence. A toast rather
+  here", so ⌘⇧O never does nothing in silence. While somebody else is on the canvas the
+  active card's title bar carries a "point" pill that does the same, for a phone without
+  ⌘⇧O; alone, there is no pill. A toast rather
   than a jump: moving someone's camera without asking would take the canvas from under a
   drag or a read, and a follow already exists for those who want to be moved. Tested at
   every layer: the document (a pointing is `CanvasChange::Pointed`, an own echo nothing,

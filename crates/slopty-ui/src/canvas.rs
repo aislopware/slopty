@@ -2786,7 +2786,13 @@ impl CanvasView {
     /// nobody else is here, in which case nothing is sent. Nothing active is nothing to
     /// point at. The host relays it and this client hears its own echo as nothing.
     pub fn point_others(&mut self, _: &PointOthers, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.active else { return };
+        if let Some(item) = self.active {
+            self.point_at(item, cx);
+        }
+    }
+
+    /// Point the other clients at `item` (⌘⇧O, or the active card's "point" pill).
+    fn point_at(&mut self, item: ItemId, cx: &mut Context<Self>) {
         let Some(title) = self.doc.get(item).map(|i| self.card_title(i, cx)) else { return };
         let mut names = self.doc.lookers().map(|l| l.name.as_str());
         let said = match (names.next(), names.count()) {
@@ -3301,6 +3307,10 @@ impl CanvasView {
             ItemKind::File { .. } => Some(ask_button(id, "file", theme, chrome, cx)),
             ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
         };
+        // Somebody else is on the canvas: the active card offers to point them at it, so a
+        // phone without ⌘⇧O can too.
+        let point = (active && self.doc.lookers().next().is_some())
+            .then(|| point_button(id, theme, chrome, cx));
         // A file card: read it again (the human edited it in a shell; an agent's edit reloads
         // it unasked).
         let reload = match item.kind {
@@ -3414,6 +3424,7 @@ impl CanvasView {
                     .into_any_element(),
             })
             .when_some(ask, gpui::ParentElement::child)
+            .when_some(point, gpui::ParentElement::child)
             .when_some(find, gpui::ParentElement::child)
             .when_some(edit, gpui::ParentElement::child)
             .when_some(reload, gpui::ParentElement::child)
@@ -4039,6 +4050,22 @@ fn take_button(
         .aria_label("take over");
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| this.take_over(id, cx)))
+        .into_any_element()
+}
+
+/// The "point" pill on the active card while somebody else is on the canvas: point them at
+/// it (see [`CanvasView::point_at`]).
+fn point_button(
+    id: ItemId,
+    theme: &Theme,
+    chrome: Chrome,
+    cx: &Context<CanvasView>,
+) -> gpui::AnyElement {
+    let pill = pill("point", id, "point", theme.surfaces.text_secondary, theme, chrome)
+        .role(Role::Button)
+        .aria_label("Point the others at this card");
+    tab_stop(pill, theme.surfaces.accent)
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.point_at(id, cx)))
         .into_any_element()
 }
 
@@ -5095,6 +5122,8 @@ mod tests {
         cx.run_until_parked();
         assert!(points(&mut rx).is_empty(), "nobody to point");
         assert_eq!(status(cx).as_deref(), Some("nobody else is here"));
+        let pill = selector("point", id);
+        assert!(cx.debug_bounds(pill).is_none(), "alone: no pill either");
         let pad = ClientId::new();
         view.update(cx, |c, cx| {
             c.apply_sync(
@@ -5107,10 +5136,15 @@ mod tests {
                 cx,
             );
         });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds(pill).expect("somebody here: the active card's pill");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(points(&mut rx), vec![id], "the pill points");
+        assert_eq!(status(cx).as_deref(), Some("pointed pad at here"));
         cx.simulate_keystrokes("cmd-shift-o");
         cx.run_until_parked();
-        assert_eq!(points(&mut rx), vec![id]);
-        assert_eq!(status(cx).as_deref(), Some("pointed pad at here"));
+        assert_eq!(points(&mut rx), vec![id], "so does the key");
         view.update(cx, |c, cx| {
             c.apply_sync(
                 CanvasSync::Presence {
