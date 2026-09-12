@@ -8383,6 +8383,7 @@ dependencies = [
  "gpui",
  "gpui-kit",
  "image",
+ "similar 3.2.0",
  "slopty-client",
  "slopty-core",
  "slopty-grid",

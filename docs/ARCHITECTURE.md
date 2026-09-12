@@ -380,7 +380,9 @@ host read-only: the item names the absolute path and lives in the shared documen
 does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`)
 and draws the `HostMsg::File` answer (`slopty-host::file::read`: the first 512 KiB, then the
 first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
-`uniform_list`, or one line saying why not. The card reads again when any agent's
+`uniform_list`, or one line saying why not; a read that follows one tints the lines that
+differ (`file::changed_lines`, `similar` over the lines) and scrolls the first into view. The
+card reads again when any agent's
 Edit/Write result arrives on the canvas, on its "reload" pill, and when "view" is pressed on
 another call for the same path (one card per path: `canvas::open_file` reveals the existing
 one). Titled `name · parent` (`canvas::file_title`); its dump entry is `ItemInfo.file`

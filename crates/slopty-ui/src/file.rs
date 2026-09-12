@@ -4,20 +4,22 @@
 //! asks the host for it (`ClientMsg::ReadFile`) when the card appears and again when an agent's
 //! edit or write lands, and draws what came back: line-numbered mono rows in a `uniform_list`
 //! (a 2 000-line file lays out only the rows on screen), or one line saying why there is
-//! nothing to draw.
+//! nothing to draw. A read that follows one (an agent's edit landed, "reload" pressed) tints
+//! the lines that changed and scrolls the first of them into view, so the card shows what the
+//! agent just did without the human hunting for it.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, UniformListScrollHandle, Window,
-    div, px, uniform_list,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use slopty_core::ItemId;
 use slopty_proto::file::FileRead;
-use slopty_theme::Theme;
+use slopty_theme::{Theme, alpha};
 
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 
 /// The view of one file item.
 pub struct FileView {
@@ -27,6 +29,9 @@ pub struct FileView {
     read: Option<FileRead>,
     /// The text's lines, split once when it arrives.
     lines: Vec<SharedString>,
+    /// Lines (indices into `lines`) the last read changed against the one before it, in
+    /// order; empty on a first read and when nothing moved.
+    changed: Vec<usize>,
     zoom: f32,
     /// Inner padding at zoom 1 (the theme's base spacing).
     pad: f32,
@@ -56,6 +61,7 @@ impl FileView {
             path: path.to_owned(),
             read: None,
             lines: Vec::new(),
+            changed: Vec::new(),
             zoom: 1.0,
             pad: 8.0,
             text_size: 12.0,
@@ -88,17 +94,34 @@ impl FileView {
         self.lines.len()
     }
 
-    /// The host answered (or answered again after an edit).
+    /// The lines the last read changed, indices into what is drawn.
+    #[must_use]
+    pub fn changed(&self) -> &[usize] {
+        &self.changed
+    }
+
+    /// The host answered (or answered again after an edit). A second text after a first one
+    /// marks the lines that differ and scrolls to the first of them.
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
         if self.read.as_ref() == Some(&read) {
             return;
         }
-        self.lines = match &read {
+        let lines: Vec<SharedString> = match &read {
             FileRead::Text { text, .. } => {
                 text.split('\n').map(|l| SharedString::from(l.to_owned())).collect()
             }
             FileRead::Binary { .. } | FileRead::Missing { .. } => Vec::new(),
         };
+        let had_text = matches!(self.read, Some(FileRead::Text { .. }));
+        self.changed = if had_text && !lines.is_empty() {
+            changed_lines(&self.lines, &lines)
+        } else {
+            Vec::new()
+        };
+        if let Some(&first) = self.changed.first() {
+            self.scroll.scroll_to_item(first, ScrollStrategy::Center);
+        }
+        self.lines = lines;
         self.read = Some(read);
         cx.notify();
     }
@@ -128,7 +151,13 @@ impl FileView {
             Some(FileRead::Text { more_lines, .. }) => {
                 let n = self.lines.len();
                 let lines = if n == 1 { "1 line".to_owned() } else { format!("{n} lines") };
-                if *more_lines > 0 { format!("{lines}, {more_lines} more") } else { lines }
+                let more =
+                    if *more_lines > 0 { format!(", {more_lines} more") } else { String::new() };
+                let changed = match self.changed.len() {
+                    0 => String::new(),
+                    c => format!(", {c} changed"),
+                };
+                format!("{lines}{more}{changed}")
             }
             Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
             Some(FileRead::Missing { error }) => format!("missing: {error}"),
@@ -147,6 +176,34 @@ impl FileView {
             .child(SharedString::from(text))
             .into_any_element()
     }
+}
+
+/// Indices into `new` of the lines that differ from `old`.
+///
+/// Every inserted or replaced line, and for a pure deletion the line now standing where the
+/// deleted ones were (clamped to the last line), so a deletion is still pointed at.
+#[must_use]
+pub fn changed_lines(old: &[SharedString], new: &[SharedString]) -> Vec<usize> {
+    let old: Vec<&str> = old.iter().map(SharedString::as_ref).collect();
+    let new: Vec<&str> = new.iter().map(SharedString::as_ref).collect();
+    let diff = similar::TextDiff::from_slices(&old, &new);
+    let mut changed = Vec::new();
+    for op in diff.ops() {
+        match *op {
+            similar::DiffOp::Equal { .. } => {}
+            similar::DiffOp::Insert { new_index, new_len, .. }
+            | similar::DiffOp::Replace { new_index, new_len, .. } => {
+                changed.extend(new_index..new_index.saturating_add(new_len));
+            }
+            similar::DiffOp::Delete { new_index, .. } => {
+                if !new.is_empty() {
+                    changed.push(new_index.min(new.len().saturating_sub(1)));
+                }
+            }
+        }
+    }
+    changed.dedup();
+    changed
 }
 
 /// A byte count as a human reads it.
@@ -181,8 +238,10 @@ impl Render for FileView {
                 // The gutter is as wide as the last line number, in the mono face.
                 let gutter_ch = f32::from(u8::try_from(digits).unwrap_or(u8::MAX));
                 let lines = self.lines.clone();
+                let changed = self.changed.clone();
                 let muted = hsla(theme.surfaces.text_muted);
                 let fg = hsla(theme.surfaces.text);
+                let tint = hsla_alpha(theme.surfaces.success, alpha::TINT);
                 let list = uniform_list(
                     SharedString::from(format!("file-lines-{id}")),
                     count,
@@ -196,6 +255,7 @@ impl Render for FileView {
                                         .flex()
                                         .gap(px(pad))
                                         .whitespace_nowrap()
+                                        .when(changed.binary_search(&ix).is_ok(), |el| el.bg(tint))
                                         .child(
                                             div()
                                                 .flex_none()
@@ -250,6 +310,21 @@ impl Render for FileView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_lines_point_at_inserts_replacements_and_deletions() {
+        let l =
+            |v: &[&str]| v.iter().map(|s| SharedString::from((*s).to_owned())).collect::<Vec<_>>();
+        assert_eq!(changed_lines(&l(&["a", "b", "c"]), &l(&["a", "B", "c"])), [1]);
+        assert_eq!(changed_lines(&l(&["a", "c"]), &l(&["a", "b", "b2", "c"])), [1, 2]);
+        assert_eq!(changed_lines(&l(&["a", "b", "c"]), &l(&["a", "c"])), [1]);
+        assert_eq!(
+            changed_lines(&l(&["a", "b"]), &l(&["a"])),
+            [0],
+            "a deleted tail points at the last line"
+        );
+        assert_eq!(changed_lines(&l(&["a"]), &l(&["a"])), Vec::<usize>::new());
+    }
 
     #[test]
     fn sizes_read_as_a_human_would() {

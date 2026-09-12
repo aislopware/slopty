@@ -5401,6 +5401,24 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(reads(&drain(&mut rx)), 1, "the edit's result reads the file again");
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/tmp/work/note.txt",
+                &FileRead::Text {
+                    text: "hello\nworld".to_owned(),
+                    more_lines: 0,
+                    size: 12,
+                    modified_ms: 2,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |c, cx| {
+            let file = c.file(file).unwrap().read(cx);
+            assert_eq!(file.changed(), [1], "the line the edit replaced");
+            assert_eq!(file.summary(), "2 lines, 1 changed");
+        });
 
         // A second "view" of the same path reveals the card instead of adding another.
         view.update_in(cx, |c, _window, cx| c.reveal_session(agent, cx));
