@@ -262,7 +262,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`run_in_shell`, as the agent card's "open" does), the line being the current find hit,
   else the line the card opened at (`FileView::reading_line`) — the card is for reading, the
   editor for changing, and the pill is the step between; drawn only while a shell exists to
-  take it. The palette line reads "Find in terminal or file". Tests:
+  take it; (7) the tinted line is a **reading line** (same day): with the card active and the
+  canvas focused, ↑/↓ move it a line, ⇞/⇟ a page of the rows shown, Home/End (⌘↑/⌘↓) to the
+  ends, kept in view with `ScrollStrategy::Nearest` (`FileView::move_line`, `LineMove`; the
+  first key from no line lands on the top row shown), so a hardware keyboard on an iPad
+  reads a 2 000-line card without a wheel and "edit" opens where the reading stopped. The
+  bindings sit in the Canvas context (`LineUp`… in `canvas::actions`), which a focused
+  terminal or remote window never lets them reach, and do nothing under the palette or the
+  picker. The palette line reads "Find in terminal or file". Tests:
+  `arrow_keys_move_a_file_cards_reading_line` (headless: first key → top, steps, a page,
+  clamps at both ends, `reading_line` follows),
   `a_file_cards_edit_pill_opens_the_editor_at_the_line_read` (headless: no pill without a
   shell, `+2` from the opening line, `+3` from the second hit),
   `hits_are_the_lines_holding_the_needle_in_any_case` (unit),

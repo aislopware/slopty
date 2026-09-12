@@ -24,6 +24,19 @@ use slopty_theme::{Theme, alpha};
 use crate::colors::{hsla, hsla_alpha};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 
+/// How the reading line moves on a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineMove {
+    /// By this many lines (negative up).
+    Lines(i64),
+    /// By this many pages of visible rows (negative up).
+    Pages(i64),
+    /// To the first line.
+    First,
+    /// To the last line.
+    Last,
+}
+
 /// What a file card tells the canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileViewEvent {
@@ -113,6 +126,53 @@ impl FileView {
             scroll: UniformListScrollHandle::new(),
             search: None,
         }
+    }
+
+    /// ↑/↓, ⇞/⇟, Home/End with the card active: move the reading line (the tinted one an
+    /// edit opened the card at, which "edit" opens the editor on) and keep it in view. From
+    /// no line, the first key lands on the top of what is shown.
+    pub fn move_line(&mut self, mv: LineMove, cx: &mut Context<Self>) {
+        let count = self.lines.len();
+        if count == 0 {
+            return;
+        }
+        let last = count.saturating_sub(1);
+        let at = i64::try_from(self.focus.unwrap_or_else(|| self.top_line())).unwrap_or(0);
+        let to = match (mv, self.focus) {
+            (LineMove::Lines(_) | LineMove::Pages(_), None) => at,
+            (LineMove::Lines(n), Some(_)) => at.saturating_add(n),
+            (LineMove::Pages(n), Some(_)) => at.saturating_add(n.saturating_mul(self.page_lines())),
+            (LineMove::First, _) => 0,
+            (LineMove::Last, _) => i64::try_from(last).unwrap_or(i64::MAX),
+        };
+        let to = usize::try_from(to.max(0)).unwrap_or(0).min(last);
+        self.focus = Some(to);
+        self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// The topmost row shown, from the list's last layout (a pending scroll counts).
+    fn top_line(&self) -> usize {
+        let state = self.scroll.0.borrow();
+        state
+            .deferred_scroll_to_item
+            .as_ref()
+            .map_or_else(|| state.base_handle.logical_scroll_top().0, |d| d.item_index)
+    }
+
+    /// Rows the list shows at once, from its last layout; one before any.
+    fn page_lines(&self) -> i64 {
+        let state = self.scroll.0.borrow();
+        let rows = state.last_item_size.map_or(1.0, |size| {
+            let row = f32::from(size.item.height).max(1.0);
+            (f32::from(state.base_handle.bounds().size.height) / row).floor()
+        });
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a floored row count clamped to [1, 10 000] fits an i64 exactly"
+        )]
+        let rows = rows.clamp(1.0, 10_000.0) as i64;
+        rows
     }
 
     /// ⌘F: open the find bar, or put the caret back in it with the text selected.

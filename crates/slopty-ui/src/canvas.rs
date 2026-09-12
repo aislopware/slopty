@@ -45,7 +45,7 @@ use tokio::sync::mpsc;
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
-use crate::file::{FileView, FileViewEvent};
+use crate::file::{FileView, FileViewEvent, LineMove};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -107,13 +107,26 @@ pub mod actions {
             FocusPrev,
             /// Open the command palette: every action by name, run by ↩.
             OpenPalette,
+            /// Move the active file card's reading line up one line.
+            LineUp,
+            /// Move the active file card's reading line down one line.
+            LineDown,
+            /// Move the active file card's reading line up one page.
+            PageUp,
+            /// Move the active file card's reading line down one page.
+            PageDown,
+            /// Move the active file card's reading line to the first line.
+            LineFirst,
+            /// Move the active file card's reading line to the last line.
+            LineLast,
         ]
     );
 }
 pub use actions::{
     AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
-    NewAgent, NewDrivenAgent, NewNote, NewTerminal, NewWorktreeAgent, NextAttention, OpenPalette,
-    ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote, NewTerminal,
+    NewWorktreeAgent, NextAttention, OpenPalette, PageDown, PageUp, ResumeAgent, ToggleMute,
+    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -154,6 +167,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", FocusNext, CTX),
         KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
+        // The active file card's reading line, with the canvas itself focused (a terminal or
+        // a remote window takes these keys first).
+        KeyBinding::new("up", LineUp, CTX),
+        KeyBinding::new("down", LineDown, CTX),
+        KeyBinding::new("pageup", PageUp, CTX),
+        KeyBinding::new("pagedown", PageDown, CTX),
+        KeyBinding::new("home", LineFirst, CTX),
+        KeyBinding::new("end", LineLast, CTX),
+        KeyBinding::new("cmd-up", LineFirst, CTX),
+        KeyBinding::new("cmd-down", LineLast, CTX),
         // A file card's find bar: the terminal's find keys, in the bar's own context (no
         // terminal around it).
         KeyBinding::new("escape", crate::terminal::CloseFind, Some("FileSearch")),
@@ -2138,6 +2161,17 @@ impl CanvasView {
         }
     }
 
+    /// ↑/↓/⇞/⇟/Home/End with a file card active: its reading line moves. Nothing while an
+    /// overlay (the palette, the picker) has the keys.
+    fn move_file_line(&self, mv: LineMove, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.picker.is_some() {
+            return;
+        }
+        if let Some(view) = self.active.and_then(|id| self.files.get(&id)).cloned() {
+            view.update(cx, |v, cx| v.move_line(mv, cx));
+        }
+    }
+
     /// The card's "edit" pill: the file in `$EDITOR` in the shell the human was last in, at
     /// the line being read (the current find hit, else the line the card opened at).
     fn edit_file(&mut self, id: ItemId, cx: &mut Context<Self>) {
@@ -3209,6 +3243,24 @@ impl Render for CanvasView {
             .overflow_hidden()
             .bg(hsla(self.theme.surfaces.canvas))
             .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(|this, _: &LineUp, _w, cx| {
+                this.move_file_line(LineMove::Lines(-1), cx);
+            }))
+            .on_action(cx.listener(|this, _: &LineDown, _w, cx| {
+                this.move_file_line(LineMove::Lines(1), cx);
+            }))
+            .on_action(cx.listener(|this, _: &PageUp, _w, cx| {
+                this.move_file_line(LineMove::Pages(-1), cx);
+            }))
+            .on_action(cx.listener(|this, _: &PageDown, _w, cx| {
+                this.move_file_line(LineMove::Pages(1), cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &LineFirst, _w, cx| this.move_file_line(LineMove::First, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &LineLast, _w, cx| this.move_file_line(LineMove::Last, cx)),
+            )
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_driven_agent))
             .on_action(cx.listener(Self::new_worktree_agent))
@@ -5858,6 +5910,52 @@ mod tests {
         assert!(cx.debug_bounds("file-search").is_some(), "the pill opens the bar");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Button", Some("Find in the file"))), "{tree:#?}");
+    }
+
+    #[gpui::test]
+    fn arrow_keys_move_a_file_cards_reading_line(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        view.update_in(cx, |c, _window, cx| c.open_file("/w/a.txt", None, cx));
+        cx.run_until_parked();
+        let id = view.read_with(cx, |c, _| c.active_item().expect("the card"));
+        let lines = (1..=200).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/w/a.txt",
+                &FileRead::Text { text: lines, more_lines: 0, size: 1, modified_ms: 1 },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let focus = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, cx| c.file(id).unwrap().read(cx).focus())
+        };
+        assert_eq!(focus(cx), None, "no reading line until a key");
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(0), "the first key lands on the top line shown");
+        cx.simulate_keystrokes("down down up");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(1));
+        cx.simulate_keystrokes("pagedown");
+        cx.run_until_parked();
+        let page = focus(cx).unwrap();
+        assert!(page > 1, "a page is more than a line: {page}");
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(199));
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(199), "clamped at the end");
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(0));
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), Some(0), "clamped at the start");
+        // The reading line is what "edit" opens on.
+        let line = view.read_with(cx, |c, cx| c.file(id).unwrap().read(cx).reading_line());
+        assert_eq!(line, Some(1));
     }
 
     #[gpui::test]
