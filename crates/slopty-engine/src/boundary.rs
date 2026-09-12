@@ -159,6 +159,7 @@ mod tests {
         // An escape that cuts a string short is followed, not dropped.
         assert!(!ground_after(b"\x1b]0;half\x1b["));
         assert!(!ground_after(b"\x1bP+q\x1b["));
+        assert!(!ground_after(b"\x1b[3\x1bP"), "an escape inside a CSI starts a string");
     }
 
     #[test]

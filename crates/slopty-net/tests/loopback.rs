@@ -84,6 +84,27 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
     }
 
+    /// A host asked for a port listens on it (0 is any); the ticket says so.
+    #[tokio::test]
+    async fn a_host_binds_the_port_it_is_given() {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrustStore::open(&dir.path().join("trust.json")).unwrap();
+        let listener = HostListener::bind_on(store, Reach::DirectOnly, port).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), listener.online()).await.unwrap();
+        let ticket = listener.pair_ticket().await;
+        let ports: Vec<u16> = ticket
+            .addr
+            .addrs
+            .iter()
+            .filter_map(|a| match a {
+                iroh::TransportAddr::Ip(sock) => Some(sock.port()),
+                _ => None,
+            })
+            .collect();
+        assert!(!ports.is_empty() && ports.iter().all(|p| *p == port), "{ports:?} vs {port}");
+    }
+
     #[tokio::test]
     async fn pair_then_reconnect_then_reject_stranger() {
         let (listener, _dir) = host(Reach::Anywhere).await;
