@@ -22,8 +22,8 @@ use slopty_agent::stream::{self, Fold, Update};
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::HostMsg;
 use slopty_proto::agent::{
-    AgentEvent, AgentInfo, AgentKind, AgentSessionInfo, AgentSource, AgentStatus, BlockReason,
-    OpenAgent, PermissionRequest, QuestionAnswer, TranscriptEntry, TranscriptUpdate,
+    AgentAnswer, AgentEvent, AgentInfo, AgentKind, AgentSessionInfo, AgentSource, AgentStatus,
+    BlockReason, OpenAgent, PermissionRequest, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_proto::terminal::{CloseReason, SessionKind, SessionState, SessionSummary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -48,7 +48,7 @@ const SESSIONS_LISTED: usize = 30;
 #[derive(Debug)]
 enum Cmd {
     Say(String),
-    Answer { request: String, allowed: bool, message: Option<String>, answers: Vec<QuestionAnswer> },
+    Answer(AgentAnswer),
     Interrupt,
     Set { model: Option<String>, permission_mode: Option<String> },
     Close,
@@ -237,15 +237,8 @@ impl Driven {
     /// # Errors
     ///
     /// When `session` is not a driven agent.
-    pub fn answer(
-        &self,
-        session: SessionId,
-        request: String,
-        allowed: bool,
-        message: Option<String>,
-        answers: Vec<QuestionAnswer>,
-    ) -> Result<(), DrivenError> {
-        self.send(session, Cmd::Answer { request, allowed, message, answers })
+    pub fn answer(&self, answer: AgentAnswer) -> Result<(), DrivenError> {
+        self.send(answer.session, Cmd::Answer(answer))
     }
 
     /// Stop the running turn.
@@ -387,11 +380,16 @@ impl Pump {
                             self.said(&text);
                             Some(stream::user_message(&text))
                         }
-                        Cmd::Answer { request, allowed, message, answers } => {
-                            let line =
-                                fold.answer(&request, allowed, message.as_deref(), &answers);
+                        Cmd::Answer(answer) => {
+                            let line = fold.answer(
+                                &answer.request,
+                                answer.allowed,
+                                answer.message.as_deref(),
+                                &answer.answers,
+                                answer.always,
+                            );
                             if line.is_some() {
-                                self.answered(&request);
+                                self.answered(&answer.request);
                             }
                             line
                         }

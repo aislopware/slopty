@@ -197,8 +197,8 @@ mod golden {
     #[test]
     fn driven_agent() {
         use slopty_proto::agent::{
-            AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Choice, Clipped,
-            OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
+            AgentAnswer, AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, Choice,
+            Clipped, OpenAgent, PermissionRequest, Question, QuestionAnswer, ToolDetail,
         };
         use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
         snap(
@@ -216,17 +216,29 @@ mod golden {
         );
         snap(
             "client_agent_answer",
-            &ClientMsg::AgentAnswer {
+            &ClientMsg::AgentAnswer(AgentAnswer {
                 session: session(),
                 request: "e2f45975-aa92-4c0c-ad9b-05cd456d9b00".to_owned(),
                 allowed: false,
                 message: Some("not that file".to_owned()),
                 answers: Vec::new(),
-            },
+                always: false,
+            }),
+        );
+        snap(
+            "client_agent_answer_always",
+            &ClientMsg::AgentAnswer(AgentAnswer {
+                session: session(),
+                request: "e2f45975-aa92-4c0c-ad9b-05cd456d9b00".to_owned(),
+                allowed: true,
+                message: None,
+                answers: Vec::new(),
+                always: true,
+            }),
         );
         snap(
             "client_agent_answer_question",
-            &ClientMsg::AgentAnswer {
+            &ClientMsg::AgentAnswer(AgentAnswer {
                 session: session(),
                 request: "07dd1978-3d77-4b8d-8f39-d1ed20e653ba".to_owned(),
                 allowed: true,
@@ -235,7 +247,8 @@ mod golden {
                     question: "Which colour do you prefer?".to_owned(),
                     answer: "Blue".to_owned(),
                 }],
-            },
+                always: false,
+            }),
         );
         snap(
             "host_agent_question",
@@ -263,6 +276,7 @@ mod golden {
                             ],
                         }],
                     },
+                    always: None,
                 },
             },
         );
@@ -299,6 +313,7 @@ mod golden {
                         path: "src/main.rs".to_owned(),
                         content: Clipped::whole("hi".to_owned()),
                     },
+                    always: Some("accept edits for this session".to_owned()),
                 },
             },
         );

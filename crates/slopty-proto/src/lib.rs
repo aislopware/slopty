@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 18;
+pub const PROTOCOL_VERSION: u16 = 19;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -77,19 +77,7 @@ pub enum ClientMsg {
         text: String,
     },
     /// Answer a driven agent's permission request.
-    AgentAnswer {
-        /// The agent session.
-        session: SessionId,
-        /// `PermissionRequest::id`.
-        request: String,
-        /// Allow or deny.
-        allowed: bool,
-        /// What a denial tells the agent; the host's default wording when `None`.
-        message: Option<String>,
-        /// The human's answers when the request was an `AskUserQuestion`: one per question,
-        /// in the agent's order; empty for any other tool.
-        answers: Vec<agent::QuestionAnswer>,
-    },
+    AgentAnswer(agent::AgentAnswer),
     /// Stop a driven agent's running turn (Esc).
     AgentInterrupt {
         /// The agent session.
@@ -120,7 +108,7 @@ impl ClientMsg {
             Self::InstallHooks => "InstallHooks",
             Self::OpenAgent(_) => "OpenAgent",
             Self::AgentSay { .. } => "AgentSay",
-            Self::AgentAnswer { .. } => "AgentAnswer",
+            Self::AgentAnswer(_) => "AgentAnswer",
             Self::AgentInterrupt { .. } => "AgentInterrupt",
             Self::AgentSet(_) => "AgentSet",
             Self::ListAgentSessions { .. } => "ListAgentSessions",

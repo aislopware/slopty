@@ -122,6 +122,8 @@ pub enum Attention {
         /// One line about the call (the command, the file), when the host knows it: a driven
         /// agent says what the tool would do; a watched one only names the tool.
         detail: Option<String>,
+        /// What "Always" would do, when the driven agent suggested a way not to ask again.
+        always: Option<String>,
     },
     /// A driven agent asks with options: the card answers in place.
     Question {
@@ -730,10 +732,10 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
     let s = &theme.surfaces;
     let spacing = theme.spacing;
     let status = match attention {
-        Attention::Permission { tool, answered: None, detail: None } => {
+        Attention::Permission { tool, answered: None, detail: None, .. } => {
             format!("Claude wants to use {tool}")
         }
-        Attention::Permission { tool, answered: None, detail: Some(detail) } => {
+        Attention::Permission { tool, answered: None, detail: Some(detail), .. } => {
             format!("Claude wants to use {tool}: {detail}")
         }
         Attention::Permission { tool, answered: Some(true), .. } => format!("{tool}: allowed"),
@@ -773,6 +775,7 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
             .debug_selector(move || id.to_owned())
             .role(Role::Button)
             .aria_label(label)
+            .flex_none()
             .px(px(spacing.sm))
             .py(px(spacing.xs))
             .rounded(px(theme.radii.xs))
@@ -784,7 +787,7 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
         tab_stop(pill, s.accent)
     };
     match attention {
-        Attention::Permission { tool, answered: None, detail } => row
+        Attention::Permission { tool, answered: None, detail, always } => row
             .child(
                 div()
                     .flex_1()
@@ -815,6 +818,38 @@ fn attention_row(attention: &Attention, theme: &Theme, cx: &Context<TerminalView
                 button("conversation-allow", "Allow", true)
                     .on_click(cx.listener(|this, _ev, _window, cx| this.answer(true, cx))),
             )
+            .when_some(always.as_ref(), |el, what| {
+                // Always: the agent's own way of not asking again, named so the tap is
+                // informed ("accept edits for this session"); a screen reader hears both.
+                let label: SharedString = format!("Always: {what}").into();
+                let pill = div()
+                    .id("conversation-always")
+                    .debug_selector(|| "conversation-always".to_owned())
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .px(px(spacing.sm))
+                    .py(px(spacing.xs))
+                    .rounded(px(theme.radii.xs))
+                    .bg(hsla_alpha(s.accent, alpha::TINT))
+                    .text_color(hsla(s.text))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(hsla_alpha(s.accent, alpha::TINT_STRONG)))
+                    .child("Always")
+                    .child(
+                        div()
+                            .text_size(px(theme.typography.caption()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(what.clone())),
+                    );
+                el.child(
+                    tab_stop(pill, s.accent)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.answer_always(cx))),
+                )
+            })
             .child(
                 button("conversation-deny", "Deny", false)
                     .on_click(cx.listener(|this, _ev, _window, cx| this.answer(false, cx))),

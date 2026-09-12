@@ -782,6 +782,7 @@ impl Workspace {
                     pinned: c.pinned(),
                     partial: view.partial().to_owned(),
                     permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
+                    always: view.permission().and_then(|p| p.always.clone()),
                     model: view.info().model.clone(),
                     permission_mode: view.info().permission_mode.clone(),
                     agent_session: view.info().agent_session.clone(),

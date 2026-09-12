@@ -70,8 +70,8 @@ pub enum Event {
     Permission {
         /// What the client is shown.
         request: PermissionRequest,
-        /// The tool input, as sent, for the allow reply.
-        input: Value,
+        /// What the allow reply echoes, boxed to keep the event small.
+        pending: Box<Pending>,
     },
     /// Claude Code answered a control request the host sent (an interrupt).
     ControlAck {
@@ -212,6 +212,7 @@ fn control_request(record: &Value) -> Option<Event> {
         if line.is_empty() { string(request, "description") } else { line }
     };
     let detail = transcript::tool_detail(&tool, Some(&input));
+    let suggestions = request.get("permission_suggestions").cloned().unwrap_or(Value::Null);
     Some(Event::Permission {
         request: PermissionRequest {
             id: string(record, "request_id"),
@@ -219,9 +220,74 @@ fn control_request(record: &Value) -> Option<Event> {
             tool,
             summary,
             detail,
+            always: always_label(&suggestions),
         },
-        input,
+        pending: Box::new(Pending { input, suggestions }),
     })
+}
+
+/// What a `can_use_tool` is answered with: the input echoed on an allow, and the agent's
+/// `permission_suggestions` echoed as `updatedPermissions` on an "always" allow.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Pending {
+    /// The tool input, as sent.
+    pub input: Value,
+    /// The suggestions, as sent; `Null` when the agent made none.
+    pub suggestions: Value,
+}
+
+/// What taking the agent's `permission_suggestions` would do, in the human's words.
+///
+/// `None` when there are none. Probed on CLI 2.1.269: a `Write` suggests
+/// `[{type: "setMode", mode: "acceptEdits", destination: "session"}]`; a rule suggestion is
+/// `{type: "addRules", rules: [{toolName, ruleContent}], behavior, destination}`.
+#[must_use]
+pub fn always_label(suggestions: &Value) -> Option<String> {
+    let list = suggestions.as_array().filter(|l| !l.is_empty())?;
+    let where_ = |s: &Value| match s.get("destination").and_then(Value::as_str) {
+        Some("session") => " for this session",
+        Some("localSettings" | "projectSettings") => " in this project",
+        Some("userSettings") => " for you",
+        _ => "",
+    };
+    let parts: Vec<String> = list
+        .iter()
+        .filter_map(|s| match s.get("type").and_then(Value::as_str)? {
+            "setMode" => {
+                let mode = match s.get("mode").and_then(Value::as_str)? {
+                    "acceptEdits" => "accept edits",
+                    "plan" => "plan",
+                    "bypassPermissions" => "bypass permissions",
+                    "default" => "ask",
+                    other => other,
+                };
+                Some(format!("{mode}{}", where_(s)))
+            }
+            "addRules" => {
+                let rules: Vec<String> = s
+                    .get("rules")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|r| {
+                        let tool = r.get("toolName")?.as_str()?;
+                        Some(match r.get("ruleContent").and_then(Value::as_str) {
+                            Some(content) => format!("{tool}({content})"),
+                            None => tool.to_owned(),
+                        })
+                    })
+                    .collect();
+                let what = if rules.is_empty() { "this".to_owned() } else { rules.join(", ") };
+                let verb = if s.get("behavior").and_then(Value::as_str) == Some("deny") {
+                    "always deny"
+                } else {
+                    "always allow"
+                };
+                Some(format!("{verb} {what}{}", where_(s)))
+            }
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() { Some("remember this".to_owned()) } else { Some(parts.join("; ")) }
 }
 
 /// The arguments that put Claude Code into the protocol this module speaks. `resume` reopens
@@ -317,13 +383,19 @@ pub fn set_permission_mode(request_id: &str, mode: &str) -> String {
     .to_string()
 }
 
-fn allow_line(request_id: &str, input: &Value) -> String {
+/// The allow; with `permissions` (the agent's own suggestions, echoed) it also stops the
+/// agent asking again, the way the TUI's "always allow" does.
+fn allow_line(request_id: &str, input: &Value, permissions: Option<&Value>) -> String {
+    let mut response = json!({"behavior": "allow", "updatedInput": input});
+    if let (Some(permissions), Value::Object(map)) = (permissions, &mut response) {
+        map.insert("updatedPermissions".to_owned(), permissions.clone());
+    }
     json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
             "request_id": request_id,
-            "response": {"behavior": "allow", "updatedInput": input},
+            "response": response,
         },
     })
     .to_string()
@@ -380,7 +452,7 @@ pub enum Update {
 #[derive(Debug, Default)]
 pub struct Fold {
     tools: ToolNames,
-    pending: HashMap<String, Value>,
+    pending: HashMap<String, Pending>,
     partial: String,
     status: Option<(AgentStatus, Option<String>)>,
     init: Option<Init>,
@@ -419,8 +491,8 @@ impl Fold {
                 self.partial.push_str(&text);
                 vec![Update::Partial(self.partial.clone())]
             }
-            Event::Permission { request, input } => {
-                self.pending.insert(request.id.clone(), input);
+            Event::Permission { request, pending } => {
+                self.pending.insert(request.id.clone(), *pending);
                 // A question is a `can_use_tool` on the wire but not a permission to the
                 // human: it blocks as a question, the way the hook path reports one.
                 let reason = if matches!(request.detail, ToolDetail::Question { .. }) {
@@ -464,8 +536,9 @@ impl Fold {
         allowed: bool,
         message: Option<&str>,
         answers: &[QuestionAnswer],
+        always: bool,
     ) -> Option<String> {
-        let mut input = self.pending.remove(request_id)?;
+        let Pending { mut input, suggestions } = self.pending.remove(request_id)?;
         self.status = Some((AgentStatus::Working, None));
         if allowed && !answers.is_empty() {
             // `AskUserQuestion` is allowed with the answers filed into its input, keyed by
@@ -478,8 +551,9 @@ impl Fold {
                 map.insert("answers".to_owned(), Value::Object(filed));
             }
         }
+        let permissions = (allowed && always && !suggestions.is_null()).then_some(suggestions);
         Some(if allowed {
-            allow_line(request_id, &input)
+            allow_line(request_id, &input, permissions.as_ref())
         } else {
             deny_line(request_id, message.unwrap_or(DENIED))
         })
@@ -648,7 +722,7 @@ mod tests {
             question: "Which colour do you prefer?".to_owned(),
             answer: "Blue".to_owned(),
         }];
-        let line = fold.answer(&request.id, true, None, &answers).expect("open");
+        let line = fold.answer(&request.id, true, None, &answers, false).expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(
             sent["response"]["response"]["updatedInput"]["answers"],
@@ -656,6 +730,55 @@ mod tests {
         );
         assert_eq!(sent["response"]["response"]["behavior"], "allow");
         assert!(sent["response"]["response"]["updatedInput"]["questions"].is_array());
+    }
+
+    /// Probed on CLI 2.1.269: a `Write` suggests `setMode acceptEdits` for the session, an
+    /// allow with `updatedPermissions` echoing it stops the next `Write` from asking, and a
+    /// `system/status` naming the mode follows.
+    #[test]
+    fn an_always_allow_echoes_the_agents_suggestion_and_a_plain_one_does_not() {
+        let mut fold = Fold::default();
+        let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
+        let updates = fold.apply(event, 0);
+        let Some(Update::Permission(request)) = updates.get(1) else { panic!("the request") };
+        assert_eq!(request.always.as_deref(), Some("accept edits for this session"));
+        let line = fold.answer(&request.id, true, None, &[], true).expect("open");
+        let sent: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(
+            sent["response"]["response"]["updatedPermissions"],
+            json!([{"type":"setMode","mode":"acceptEdits","destination":"session"}])
+        );
+        assert_eq!(sent["response"]["response"]["behavior"], "allow");
+
+        let mut fold = Fold::default();
+        let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
+        let updates = fold.apply(event, 0);
+        let Some(Update::Permission(request)) = updates.get(1) else { panic!("the request") };
+        let line = fold.answer(&request.id, true, None, &[], false).expect("open");
+        let sent: Value = serde_json::from_str(&line).expect("json");
+        assert!(sent["response"]["response"].get("updatedPermissions").is_none(), "{sent}");
+
+        // A request without suggestions has no "always", and asking for it changes nothing.
+        let bare = CAN_USE_TOOL.replace(
+            r#""permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"#,
+            "",
+        );
+        let mut fold = Fold::default();
+        let Some(event) = parse(&bare) else { panic!("parses") };
+        let updates = fold.apply(event, 0);
+        let Some(Update::Permission(request)) = updates.get(1) else { panic!("the request") };
+        assert_eq!(request.always, None);
+        let line = fold.answer(&request.id, true, None, &[], true).expect("open");
+        assert!(!line.contains("updatedPermissions"), "{line}");
+
+        // Rules read as what they allow, and where.
+        let rules = json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"cargo test:*"}],"behavior":"allow","destination":"localSettings"}]);
+        assert_eq!(
+            always_label(&rules).as_deref(),
+            Some("always allow Bash(cargo test:*) in this project")
+        );
+        assert_eq!(always_label(&json!([])), None);
+        assert_eq!(always_label(&json!([{"type":"mystery"}])).as_deref(), Some("remember this"));
     }
 
     #[test]
@@ -681,14 +804,14 @@ mod tests {
         );
         assert_eq!(fold.pending(), [request.id.as_str()]);
 
-        let line = fold.answer(&request.id, true, None, &[]).expect("open");
+        let line = fold.answer(&request.id, true, None, &[], false).expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(
             sent,
             json!({"type":"control_response","response":{"subtype":"success","request_id":"e2f45975-aa92-4c0c-ad9b-05cd456d9b00","response":{"behavior":"allow","updatedInput":{"file_path":"/private/tmp/sj-probe/probe4.txt","content":"hi"}}}})
         );
         assert!(fold.pending().is_empty());
-        assert!(fold.answer(&request.id, true, None, &[]).is_none(), "answered once");
+        assert!(fold.answer(&request.id, true, None, &[], false).is_none(), "answered once");
     }
 
     #[test]
@@ -696,8 +819,9 @@ mod tests {
         let mut fold = Fold::default();
         let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
         let _updates = fold.apply(event, 0);
-        let line =
-            fold.answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, None, &[]).expect("open");
+        let line = fold
+            .answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, None, &[], false)
+            .expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(sent["response"]["response"]["behavior"], "deny");
         assert_eq!(sent["response"]["response"]["message"], DENIED);
@@ -705,7 +829,13 @@ mod tests {
         let Some(event) = parse(CAN_USE_TOOL) else { panic!("parses") };
         let _updates = fold.apply(event, 0);
         let line = fold
-            .answer("e2f45975-aa92-4c0c-ad9b-05cd456d9b00", false, Some("not that file"), &[])
+            .answer(
+                "e2f45975-aa92-4c0c-ad9b-05cd456d9b00",
+                false,
+                Some("not that file"),
+                &[],
+                false,
+            )
             .expect("open");
         let sent: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(sent["response"]["response"]["message"], "not that file");

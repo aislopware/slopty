@@ -27,8 +27,8 @@ use slopty_client::canvas::{
 use slopty_core::{ClientId, ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{
-    AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, BlockReason, OpenAgent,
-    PermissionRequest, QuestionAnswer, TranscriptUpdate,
+    AgentAnswer, AgentEvent, AgentInfo, AgentSessionInfo, AgentSource, AgentStatus, BlockReason,
+    OpenAgent, PermissionRequest, TranscriptUpdate,
 };
 use slopty_proto::canvas::{CanvasItem, CanvasOp, CanvasSync, ItemKind, Rect};
 use slopty_proto::screen::{
@@ -870,15 +870,9 @@ impl CanvasView {
 
     /// The driven view's Allow / Deny, by request id: the host answers Claude Code, and the
     /// badge clears as for a typed answer.
-    fn answer_driven(
-        &mut self,
-        session: SessionId,
-        request: String,
-        allowed: bool,
-        answers: Vec<QuestionAnswer>,
-        cx: &mut Context<Self>,
-    ) {
-        self.send(ClientMsg::AgentAnswer { session, request, allowed, message: None, answers });
+    fn answer_driven(&mut self, answer: AgentAnswer, cx: &mut Context<Self>) {
+        let (session, allowed) = (answer.session, answer.allowed);
+        self.send(ClientMsg::AgentAnswer(answer));
         let answer = if allowed { Answer::Allowed } else { Answer::Denied };
         self.answered.insert(session, answer);
         cx.dismiss_system_notification(&session.to_string());
@@ -1283,8 +1277,18 @@ impl CanvasView {
                     }
                     TerminalViewEvent::Answered { allowed: true } => this.allow_agent(sid, cx),
                     TerminalViewEvent::Answered { allowed: false } => this.deny_agent(sid, cx),
-                    TerminalViewEvent::AgentAnswered { request, allowed, answers } => {
-                        this.answer_driven(sid, request.clone(), *allowed, answers.clone(), cx);
+                    TerminalViewEvent::AgentAnswered { request, allowed, answers, always } => {
+                        this.answer_driven(
+                            AgentAnswer {
+                                session: sid,
+                                request: request.clone(),
+                                allowed: *allowed,
+                                message: None,
+                                answers: answers.clone(),
+                                always: *always,
+                            },
+                            cx,
+                        );
                     }
                 },
             ));

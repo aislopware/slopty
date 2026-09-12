@@ -532,10 +532,9 @@ impl Peer<'_> {
                     tracing::debug!(client = %self.client, %session, error = %e, "agent say");
                 }
             }
-            ClientMsg::AgentAnswer { session, request, allowed, message, answers } => {
-                if let Err(e) =
-                    self.daemon.driven.answer(session, request, allowed, message, answers)
-                {
+            ClientMsg::AgentAnswer(answer) => {
+                let session = answer.session;
+                if let Err(e) = self.daemon.driven.answer(answer) {
                     tracing::debug!(client = %self.client, %session, error = %e, "agent answer");
                 }
             }

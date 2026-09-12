@@ -772,6 +772,9 @@ pub struct ConversationInfo {
     /// The option labels of a pending question, every question's in order.
     #[serde(default)]
     pub question_options: Vec<String>,
+    /// What the pending permission's "Always" would do, when the agent suggested one.
+    #[serde(default)]
+    pub always: Option<String>,
 }
 
 impl Dump {

@@ -497,15 +497,27 @@ is the "Other" answer to the first question without one, not a prompt (`choose`,
 host files it into the request's input as `updatedInput.answers = { question: answer }`
 (labels of a multi-select joined with ", "), which Claude Code turns into the tool's
 "Your questions have been answered" result. The badge and the notification treat it as the
-question it is (an "answer" pill that reveals the card, no Allow / Deny). Both kinds coexist: ⌘⇧T
+question it is (an "answer" pill that reveals the card, no Allow / Deny). A permission row
+has a third button when the agent offered a way not to ask again (protocol 19): the
+`can_use_tool`'s `permission_suggestions` (a `Write` suggests `setMode acceptEdits` for the
+session; a command suggests `addRules`) are kept on the host with the input, worded for the
+human as `PermissionRequest::always` (`stream::always_label`: "accept edits for this
+session", "always allow Bash(cargo test:*) in this project") and drawn as Always
+(`conversation-always`, labelled "Always: …") between Allow and Deny; a tap sends
+`AgentAnswer { allowed: true, always: true }` and the host answers with the suggestions
+echoed as `updatedPermissions`, after which Claude Code stops asking for that case and, for
+a mode change, sends the `system/status` record that moves the mode chip. `AgentAnswer` is
+one struct (`session, request, allowed, message, answers, always`) for both rows. Both kinds coexist: ⌘⇧T
 still opens a PTY `claude` with the TUI. Tests: `slopty_agent::stream` on the probe fixtures
 (`tests/fixtures/stream_one_turn.jsonl`), the wire shapes in the proto goldens
 (`driven_agent`), headless `a_driven_view_speaks_to_the_agent` and `a_driven_view_answers_a_question_in_place`, and the app self-test
 `a_driven_agent_talks_over_stream_json`, which runs the host against `slopty-fake-claude`
 (`crates/slopty-e2e/src/bin`, a scripted stream-json agent: it streams, lingers for an
 interrupt, asks a `Write` permission that the test allows and then denies through the
-Allow / Deny buttons in the accessibility tree, edits with a todo list, and asks a question
-the test answers by tapping "Blue"; goldens `conversation-tools`, `conversation-question`) and reads the card through the dump
+Allow / Deny buttons in the accessibility tree, edits with a todo list, asks a question
+the test answers by tapping "Blue", and suggests accept-edits with its `Write` permission,
+which the test takes with Always and then writes again unasked; goldens
+`conversation-tools`, `conversation-question`) and reads the card through the dump
 (`TerminalInfo.kind`, `ConversationInfo.partial`, `ConversationInfo.permission`).
 
 **What the agent says about itself, and retuning it (protocol 16).** The pump folds

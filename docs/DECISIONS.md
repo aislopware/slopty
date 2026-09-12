@@ -2616,6 +2616,34 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   and Answer; typed text), the app self-test's `ask me` turn against the fake (the options
   in the accessibility tree, no Allow, the tap on "Blue", the result's wording, golden
   `conversation-question`).
+- ✅ **"Always" is the agent's own suggestion echoed back, protocol 19** (2026-09-12).
+  Probed on CLI 2.1.269: a `can_use_tool` for `Write` carries
+  `permission_suggestions: [{type: "setMode", mode: "acceptEdits", destination: "session"}]`;
+  an allow whose response adds `updatedPermissions: <those suggestions>` made the next
+  `Write` of the same turn run without asking, and a `system/status` record naming
+  `acceptEdits` followed (the mode chip moves through the path protocol 16 built). The TUI
+  offers exactly this as its "Yes, and don't ask again" line; a card that can only say yes
+  once makes the human answer every edit of a long turn from the phone. Rulings: (1) the
+  host never invents a rule — it echoes the agent's suggestions verbatim, so what "Always"
+  does is what the TUI would have done and nothing wider; (2) the suggestions stay on the
+  host beside the input (`stream::Pending`) and the wire carries only their meaning in the
+  human's words (`PermissionRequest::always`, `always_label`: mode + destination, or the
+  rules as `Tool(content)` + destination), so the client draws a sentence and the phone
+  never parses a permission schema; (3) no suggestion, no button — `always: None` — and an
+  `always: true` on such a request is a plain allow, never an error; (4) the button names
+  its effect under the word ("Always" / "accept edits for this session") and a screen
+  reader hears both, because a permission taken for the whole session is the one answer
+  worth a second's reading; (5) `AgentAnswer` became a struct (`session, request, allowed,
+  message, answers, always`), the way `AgentSet` already was, once it reached six fields.
+  Wire: `PermissionRequest.always`, `AgentAnswer.always`, `ClientMsg::AgentAnswer(AgentAnswer)`,
+  goldens `client_agent_answer` / `client_agent_answer_question` / `client_hello` /
+  `host_agent_permission` / `host_agent_question` re-accepted, `client_agent_answer_always`
+  added, PROTOCOL_VERSION 18 → 19. Tests:
+  `an_always_allow_echoes_the_agents_suggestion_and_a_plain_one_does_not` (the probe's
+  line, the bare line, the rule wording), headless `a_driven_view_speaks_to_the_agent`
+  (Always between Allow and Deny in the tree, one tap answers for good), the app self-test
+  (`write once more` taken with Always: the chip reads Accept edits; `write yet again`
+  asks nothing).
 - ✅ **The host says when its capture target is idle; the receiver stops asking, protocol 13**
   (2026-09-05). A stream whose target has never drawn (a hidden window) left the client in "need
   refresh", re-sending `RequestRefresh` on a doubling backoff for as long as it stayed hidden —

@@ -115,6 +115,25 @@ pub struct AgentSet {
     pub permission_mode: Option<String>,
 }
 
+/// Client → host: the human's answer to a driven agent's `PermissionRequest`, by id.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AgentAnswer {
+    /// The agent session.
+    pub session: SessionId,
+    /// `PermissionRequest::id`.
+    pub request: String,
+    /// Allow or deny.
+    pub allowed: bool,
+    /// What a denial tells the agent; the host's default wording when `None`.
+    pub message: Option<String>,
+    /// The human's answers when the request was an `AskUserQuestion`: one per question,
+    /// in the agent's order; empty for any other tool.
+    pub answers: Vec<QuestionAnswer>,
+    /// Allow and also take the agent's own suggestion for not asking again
+    /// (`PermissionRequest::always`); ignored on a denial or when there was none.
+    pub always: bool,
+}
+
 /// One past Claude Code conversation the host found on disk, for resuming.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct AgentSessionInfo {
@@ -230,6 +249,10 @@ pub struct PermissionRequest {
     pub summary: String,
     /// What the call would do, the same shape the transcript entry carries.
     pub detail: ToolDetail,
+    /// What "Always" would do, when the agent suggested a way not to ask again ("accept
+    /// edits for this session", "always allow `cargo test:*` in this project"); `None`
+    /// when it suggested nothing and the answer can only be this once.
+    pub always: Option<String>,
 }
 
 /// What a tool call would do, in the shape the client draws.

@@ -38,6 +38,8 @@ struct Fake {
     turns: u32,
     cwd: String,
     transcript: Option<std::path::PathBuf>,
+    /// An "always" allow took the `setMode acceptEdits` suggestion: writes no longer ask.
+    accept_edits: bool,
 }
 
 impl Fake {
@@ -65,6 +67,7 @@ impl Fake {
             turns: 0,
             cwd,
             transcript,
+            accept_edits: false,
         }
     }
 
@@ -147,9 +150,12 @@ fn text_of(line: &Value) -> Option<String> {
 
 /// The answer to a `can_use_tool`: allow or deny with the message, and the `answers` the
 /// allow filed into the input (an `AskUserQuestion`), as `"question"="answer"` pairs.
-fn answer_of(line: &Value) -> Option<(bool, String, Vec<String>)> {
+fn answer_of(line: &Value) -> Option<(bool, String, Vec<String>, bool)> {
     let response = line.get("response")?.get("response")?;
     let allow = response.get("behavior").and_then(Value::as_str)? == "allow";
+    let always = response.get("updatedPermissions").and_then(Value::as_array).is_some_and(|p| {
+        p.iter().any(|s| s.get("mode").and_then(Value::as_str) == Some("acceptEdits"))
+    });
     let message = response.get("message").and_then(Value::as_str).unwrap_or("").to_owned();
     let answers = response
         .get("updatedInput")
@@ -159,7 +165,7 @@ fn answer_of(line: &Value) -> Option<(bool, String, Vec<String>)> {
             map.iter().map(|(q, a)| format!("\"{q}\"=\"{}\"", a.as_str().unwrap_or(""))).collect()
         })
         .unwrap_or_default();
-    Some((allow, message, answers))
+    Some((allow, message, answers, always))
 }
 
 /// A control request's subtype and id, when the line is one.
@@ -263,8 +269,17 @@ fn run() -> std::io::Result<()> {
             }
             continue;
         }
-        if let Some((allow, message, answers)) = answer_of(&value) {
+        if let Some((allow, message, answers, always)) = answer_of(&value) {
             let Some(Wait::Permission { tool_use }) = waiting.take() else { continue };
+            if always {
+                // The suggestion taken: the mode changes, and the agent says so.
+                fake.accept_edits = true;
+                emit(
+                    &mut out,
+                    &json!({"type": "system", "subtype": "status", "status": null,
+                            "permissionMode": "acceptEdits", "session_id": fake.session, "uuid": "s"}),
+                )?;
+            }
             // A question's answer comes back the way Claude Code words it, and the closing
             // line is the choice itself.
             let filed = format!(
@@ -316,11 +331,28 @@ fn run() -> std::io::Result<()> {
                     &json!([{"type": "tool_use", "id": tool_use, "name": "Write", "input": input}]),
                 ),
             )?;
+            if fake.accept_edits {
+                // Accept-edits mode: no question asked, the write just happens.
+                emit(
+                    &mut out,
+                    &fake.record(
+                        "user",
+                        &json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use,
+                               "content": "wrote note.txt"}]}),
+                    ),
+                )?;
+                let closing = "Done: the note is written.";
+                fake.note_reply(closing);
+                emit(&mut out, &fake.assistant(&json!([{"type": "text", "text": closing}])))?;
+                emit(&mut out, &fake.result("success", closing))?;
+                continue;
+            }
             emit(
                 &mut out,
                 &json!({"type": "control_request", "request_id": format!("req_{requests}"),
                         "request": {"subtype": "can_use_tool", "tool_name": "Write", "display_name": "Write",
-                                    "input": input, "description": "Write note.txt", "tool_use_id": tool_use}}),
+                                    "input": input, "description": "Write note.txt", "tool_use_id": tool_use,
+                                    "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}}),
             )?;
             waiting = Some(Wait::Permission { tool_use });
         } else if text.starts_with("edit") {

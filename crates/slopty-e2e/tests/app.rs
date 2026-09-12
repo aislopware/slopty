@@ -623,6 +623,53 @@ mod tests {
         let (_, conv) = chat(&dump).unwrap();
         assert!(conv.entries.iter().any(|e| e.starts_with("result Write failed: ")), "{conv:?}");
 
+        // Always: the row names what the agent suggested; taking it allows this call, the
+        // mode chip follows the agent's status record, and the next write does not ask.
+        drv.type_text("write once more").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the third permission row", STEP, |d| {
+                chat(d)
+                    .is_some_and(|(_, conv)| conv.attention.as_deref() == Some("permission:Write"))
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert_eq!(conv.always.as_deref(), Some("accept edits for this session"), "{conv:?}");
+        let always = dump
+            .a11y_node("Button", Some("Always: accept edits for this session"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let (ax, ay) = a11y_center(always);
+        drv.click(ax, ay).await.unwrap();
+        drv.wait_for("the mode switched and the call done", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("done")
+                    && conv.permission_mode.as_deref() == Some("acceptEdits")
+                    && conv.entries.last().map(String::as_str)
+                        == Some("assistant: Done: the note is written.")
+            })
+        })
+        .await
+        .unwrap();
+        drv.type_text("write yet again").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("a write with no question asked", STEP, |d| {
+                chat(d).is_some_and(|(agent, conv)| {
+                    agent.as_deref() == Some("done")
+                        && conv
+                            .entries
+                            .iter()
+                            .filter(|e| e == &"result Write: wrote note.txt")
+                            .count()
+                            == 3
+                })
+            })
+            .await
+            .unwrap();
+        let (_, conv) = chat(&dump).unwrap();
+        assert!(conv.attention.is_none() && conv.permission.is_none(), "{conv:?}");
+
         // ⌘W: the agent ends, its session closes, the card goes.
         drv.keys("cmd-w").await.unwrap();
         drv.wait_for("the card gone", STEP, |d| {
@@ -680,7 +727,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 10))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 13))
             })
             .await
             .unwrap();
@@ -699,6 +746,9 @@ mod tests {
                 "assistant: Edited: hi is now hello.".to_owned(),
                 "user: ask me".to_owned(),
                 "user: write it again".to_owned(),
+                "user: write once more".to_owned(),
+                "user: write yet again".to_owned(),
+                "assistant: Done: the note is written.".to_owned(),
             ],
             "the whole past, oldest first (the fake logs text replies only)"
         );

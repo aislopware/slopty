@@ -184,6 +184,8 @@ pub enum TerminalViewEvent {
         allowed: bool,
         /// The answers when the request was a question; empty otherwise.
         answers: Vec<QuestionAnswer>,
+        /// Allow and take the agent's suggestion for not asking again.
+        always: bool,
     },
 }
 
@@ -419,7 +421,12 @@ impl TerminalView {
             .collect();
         let request = request.id.clone();
         self.answered = Some(true);
-        cx.emit(TerminalViewEvent::AgentAnswered { request, allowed: true, answers });
+        cx.emit(TerminalViewEvent::AgentAnswered {
+            request,
+            allowed: true,
+            answers,
+            always: false,
+        });
         cx.notify();
     }
 
@@ -667,12 +674,37 @@ impl TerminalView {
         if self.driven {
             let Some(request) = self.permission.as_ref().map(|p| p.id.clone()) else { return };
             self.answered = Some(allowed);
-            cx.emit(TerminalViewEvent::AgentAnswered { request, allowed, answers: Vec::new() });
+            cx.emit(TerminalViewEvent::AgentAnswered {
+                request,
+                allowed,
+                answers: Vec::new(),
+                always: false,
+            });
             cx.notify();
             return;
         }
         self.answered = Some(allowed);
         cx.emit(TerminalViewEvent::Answered { allowed });
+        cx.notify();
+    }
+
+    /// The conversation's Always: allow, and take the agent's suggestion for not asking
+    /// again (`PermissionRequest::always`). Only a driven view has one.
+    pub fn answer_always(&mut self, cx: &mut Context<Self>) {
+        if self.answered.is_some() || !self.driven {
+            return;
+        }
+        let Some(request) = self.permission.as_ref().filter(|p| p.always.is_some()) else {
+            return;
+        };
+        let request = request.id.clone();
+        self.answered = Some(true);
+        cx.emit(TerminalViewEvent::AgentAnswered {
+            request,
+            allowed: true,
+            answers: Vec::new(),
+            always: true,
+        });
         cx.notify();
     }
 
@@ -714,6 +746,7 @@ impl TerminalView {
                 tool: tool.clone(),
                 answered: self.answered,
                 detail: self.permission.as_ref().map(|p| p.summary.clone()),
+                always: self.permission.as_ref().and_then(|p| p.always.clone()),
             }),
             AgentStatus::Blocked(BlockReason::Question) => match &self.permission {
                 Some(PermissionRequest { detail: ToolDetail::Question { questions }, .. }) => {
@@ -2497,7 +2530,8 @@ mod tests {
             Some(Attention::Permission {
                 tool: "Bash".to_owned(),
                 answered: Some(true),
-                detail: None
+                detail: None,
+                always: None,
             })
         );
 
@@ -3053,10 +3087,14 @@ mod tests {
                     format!("follow:{follow}")
                 }
                 ClientMsg::AgentSay { text, .. } => format!("say:{text}"),
-                ClientMsg::AgentAnswer { request, allowed, answers, .. } => {
-                    let filed: Vec<String> =
-                        answers.iter().map(|a| format!(":{}={}", a.question, a.answer)).collect();
-                    format!("answer:{request}:{allowed}{}", filed.concat())
+                ClientMsg::AgentAnswer(answer) => {
+                    let filed: Vec<String> = answer
+                        .answers
+                        .iter()
+                        .map(|a| format!(":{}={}", a.question, a.answer))
+                        .collect();
+                    let tail = if answer.always { ":always" } else { "" };
+                    format!("answer:{}:{}{}{tail}", answer.request, answer.allowed, filed.concat())
                 }
                 ClientMsg::AgentInterrupt { .. } => "interrupt".to_owned(),
                 ClientMsg::AgentSet(AgentSet { model, permission_mode, .. }) => format!(
@@ -3086,8 +3124,9 @@ mod tests {
         let seen = std::rc::Rc::clone(&answers);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AgentAnswered { request, allowed, .. } = event {
-                    seen.borrow_mut().push(format!("{request}:{allowed}"));
+                if let TerminalViewEvent::AgentAnswered { request, allowed, always, .. } = event {
+                    let tail = if *always { ":always" } else { "" };
+                    seen.borrow_mut().push(format!("{request}:{allowed}{tail}"));
                 }
             })
             .detach();
@@ -3119,6 +3158,7 @@ mod tests {
             tool: "Write".to_owned(),
             summary: "note.txt".to_owned(),
             detail: ToolDetail::Json { input: Clipped::whole("{}".to_owned()) },
+            always: Some("accept edits for this session".to_owned()),
         };
         view.update(cx, |v, cx| {
             v.agent_permission(request, cx);
@@ -3132,15 +3172,29 @@ mod tests {
             Some(Attention::Permission {
                 tool: "Write".to_owned(),
                 answered: None,
-                detail: Some("note.txt".to_owned())
+                detail: Some("note.txt".to_owned()),
+                always: Some("accept edits for this session".to_owned()),
             })
         );
-        let allow = cx.debug_bounds("conversation-allow").expect("Allow is drawn");
-        cx.simulate_click(allow.center(), gpui::Modifiers::default());
+        // Always sits between Allow and Deny and says what it would do; a tap on it allows
+        // with the agent's suggestion taken.
+        cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        assert_eq!(*answers.borrow(), ["req_1:true"], "answered by request id");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let at = |role: &str, label: &str| {
+            tree.iter()
+                .position(|n| n.is(role, Some(label)))
+                .unwrap_or_else(|| panic!("{role} {label:?} in {tree:#?}"))
+        };
+        assert!(at("Button", "Allow") < at("Button", "Always: accept edits for this session"));
+        assert!(at("Button", "Always: accept edits for this session") < at("Button", "Deny"));
+        let always = cx.debug_bounds("conversation-always").expect("Always is drawn");
+        cx.simulate_click(always.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*answers.borrow(), ["req_1:true:always"], "answered by request id, for good");
         assert!(drain_words(&mut rx).is_empty(), "no key was typed");
         assert!(cx.debug_bounds("conversation-allow").is_none(), "one tap, one answer");
+        assert!(cx.debug_bounds("conversation-always").is_none());
 
         view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
         cx.run_until_parked();
@@ -3180,7 +3234,7 @@ mod tests {
         let seen = std::rc::Rc::clone(&answers);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AgentAnswered { request, allowed, answers } = event {
+                if let TerminalViewEvent::AgentAnswered { request, allowed, answers, .. } = event {
                     let filed: Vec<String> =
                         answers.iter().map(|a| format!("{}={}", a.question, a.answer)).collect();
                     seen.borrow_mut().push(format!("{request}:{allowed}:{}", filed.join(";")));
@@ -3207,6 +3261,7 @@ mod tests {
             tool: "AskUserQuestion".to_owned(),
             summary: "Which colour?".to_owned(),
             detail: ToolDetail::Question { questions },
+            always: None,
         };
         let blocked = || AgentStatus::Blocked(BlockReason::Question);
         view.update(cx, |v, cx| {
