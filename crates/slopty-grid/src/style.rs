@@ -111,6 +111,18 @@ mod tests {
     }
 
     #[test]
+    fn only_bold_and_italic_need_a_face_variant() {
+        assert!(!Style::DEFAULT.needs_face_variant());
+        let mut s = Style::DEFAULT;
+        s.flags = StyleFlags::FAINT;
+        assert!(!s.needs_face_variant(), "faint is a colour, not a face");
+        s.flags = StyleFlags::BOLD;
+        assert!(s.needs_face_variant());
+        s.flags = StyleFlags::ITALIC;
+        assert!(s.needs_face_variant());
+    }
+
+    #[test]
     fn flags_round_trip_through_serde() {
         // Human-readable formats get names (bitflags' serde impl); postcard on the wire gets the
         // raw bits, pinned by slopty-proto's golden snapshots.

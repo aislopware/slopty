@@ -244,6 +244,52 @@ mod tests {
     }
 
     #[test]
+    fn marks_answer_prompt_start_exit_and_input_per_variant() {
+        let start = SemanticMark::Prompt { exit: Some(2), input: Some(3) };
+        let bare = SemanticMark::Prompt { exit: None, input: None };
+        let cont = SemanticMark::PromptContinuation { input: Some(4) };
+        for m in [start, bare, cont] {
+            assert!(m.is_prompt(), "{m:?} is a prompt row");
+        }
+        for m in [SemanticMark::Unknown, SemanticMark::Input, SemanticMark::Output] {
+            assert!(!m.is_prompt(), "{m:?} is not a prompt row");
+            assert!(!m.starts_prompt());
+            assert_eq!(m.exit(), None);
+            assert_eq!(m.input_col(), None);
+        }
+        assert!(start.starts_prompt());
+        assert!(!cont.starts_prompt(), "a continuation does not start a block");
+        assert_eq!(start.exit(), Some(2));
+        assert_eq!(bare.exit(), None);
+        assert_eq!(cont.exit(), None, "a continuation carries no status");
+        assert_eq!(start.input_col(), Some(3));
+        assert_eq!(bare.input_col(), None);
+        assert_eq!(cont.input_col(), Some(4));
+    }
+
+    #[test]
+    fn resize_to_the_same_width_keeps_a_trailing_wide_head() {
+        let mut line = Line::from_text("ab", 4, Style::DEFAULT);
+        line.cells[2] = Cell::wide("字", Style::DEFAULT);
+        line.cells[3] = Cell::spacer_tail(Style::DEFAULT);
+        let before = line.clone();
+        line.resize(4);
+        assert_eq!(line, before, "an equal width is not a truncation");
+        line.resize(6);
+        assert_eq!(line.cells.len(), 6);
+        assert_eq!(line.text(), "ab字");
+    }
+
+    #[test]
+    fn is_blank_sees_text_anywhere() {
+        assert!(Line::blank(3).is_blank());
+        assert!(!Line::from_text("  x", 3, Style::DEFAULT).is_blank());
+        let mut line = Line::blank(3);
+        line.cells[2] = Cell::spacer_tail(Style::DEFAULT);
+        assert!(!line.is_blank(), "a spacer is content");
+    }
+
+    #[test]
     fn interior_spaces_are_kept() {
         let line = Line::from_text("a b", 5, Style::DEFAULT);
         assert_eq!(line.text(), "a b");

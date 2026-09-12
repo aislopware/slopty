@@ -230,6 +230,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_text_converts_debugs_and_rejects_a_non_string() {
+        assert_eq!(CellText::from('a'), CellText::from_char('a'));
+        assert_eq!(CellText::from("é"), CellText::from_cluster("é"));
+        assert_eq!(CellText::from("é").as_str(), "é");
+        assert_eq!(format!("{:?}", CellText::from("é")), "\"é\"");
+        assert_eq!(CellText::from("é").as_ascii(), None, "a two-byte cluster is not ascii");
+        let err = serde_json::from_str::<CellText>("5").unwrap_err().to_string();
+        assert!(err.contains("a grapheme cluster string"), "{err}");
+    }
+
+    #[test]
+    fn a_width_spans_its_columns() {
+        assert_eq!(CellWidth::Narrow.columns(), 1);
+        assert_eq!(CellWidth::SpacerHead.columns(), 1);
+        assert_eq!(CellWidth::SpacerTail.columns(), 1);
+        assert_eq!(CellWidth::Wide.columns(), 2);
+    }
+
+    #[test]
     fn long_clusters_spill_without_corruption() {
         let family = "👨‍👩‍👧‍👦"; // 25 bytes, past the inline budget
         let t = CellText::from_cluster(family);

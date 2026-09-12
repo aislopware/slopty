@@ -268,6 +268,50 @@ mod tests {
     }
 
     #[test]
+    fn geometry_modes_and_full_replacement_are_read_back() {
+        let mut s = Screen::new(7, 2);
+        assert_eq!((s.cols(), s.rows()), (7, 2));
+        s.set_modes(TermModes::ALT_SCREEN | TermModes::BRACKETED_PASTE);
+        assert_eq!(s.modes(), TermModes::ALT_SCREEN | TermModes::BRACKETED_PASTE);
+
+        let row = Arc::new(Line::from_text("shared", 7, Style::DEFAULT));
+        s.apply_shared(1, Arc::clone(&row)).unwrap();
+        assert!(Arc::ptr_eq(&s.lines()[1], &row), "the same allocation is kept");
+        assert_eq!(
+            s.apply_shared(0, Arc::new(Line::blank(6))).unwrap_err(),
+            ScreenError::WidthMismatch { got: 6, cols: 7 }
+        );
+        assert_eq!(
+            s.apply_shared(2, Arc::new(Line::blank(7))).unwrap_err(),
+            ScreenError::RowOutOfRange { row: 2, rows: 2 }
+        );
+
+        assert_eq!(
+            s.replace_all(vec![Line::blank(7)]).unwrap_err(),
+            ScreenError::RowOutOfRange { row: 1, rows: 2 }
+        );
+        assert_eq!(
+            s.replace_all(vec![Line::blank(7), Line::blank(8)]).unwrap_err(),
+            ScreenError::WidthMismatch { got: 8, cols: 7 }
+        );
+        assert_eq!(s.line(1).unwrap().text(), "shared", "a rejected frame changes nothing");
+        s.replace_all(vec![
+            Line::from_text("top", 7, Style::DEFAULT),
+            Line::from_text("bottom", 7, Style::DEFAULT),
+        ])
+        .unwrap();
+        assert_eq!(s.line(0).unwrap().text(), "top");
+        assert_eq!(s.line(1).unwrap().text(), "bottom");
+    }
+
+    #[test]
+    fn a_height_mismatch_alone_reports_every_row() {
+        let a = Screen::new(5, 3);
+        let b = Screen::new(5, 2);
+        assert_eq!(a.changed_rows(&b), vec![0, 1, 2]);
+    }
+
+    #[test]
     fn resize_clamps_cursor() {
         let mut s = Screen::new(80, 24);
         *s.cursor_mut() = Cursor { row: 23, col: 79, ..Cursor::default() };
