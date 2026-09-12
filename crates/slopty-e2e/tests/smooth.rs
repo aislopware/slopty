@@ -259,6 +259,47 @@ mod tests {
         );
     }
 
+    /// A file card holding the most a card carries (2 000 lines) beside five streaming
+    /// shells: the card's rows are a `uniform_list`, so panning should cost what the rows on
+    /// screen cost, not the file.
+    #[tokio::test]
+    async fn a_full_file_card_beside_five_shells_pans_on_the_mac() {
+        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-smooth-file").await.unwrap();
+        let file = stack.dir.path().join("big.rs");
+        let body: String = (0..2_000)
+            .map(|i| {
+                format!(
+                    "fn line_{i}() -> u32 {{ {i} * 2 + 1 }} // padding to a source-like width\n"
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        std::fs::write(&file, body).unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        load(drv, SHELLS_WITH_DISPLAY).await;
+        drv.open_file(file.to_str().unwrap(), Some(1_000)).await.unwrap();
+        drv.wait_for("the file card full", STEP, |d| {
+            d.item("file").is_some_and(|i| i.file.as_ref().is_some_and(|f| f.lines == 2_000))
+        })
+        .await
+        .unwrap();
+        focus_first_shell(drv).await;
+        let panned = pan(drv, RUN).await;
+        measure("(e) mac: 1 file card of 2 000 lines + 5 streaming shells, pan at zoom 1", &panned);
+        let zoomed = zoom_cycle(drv, RUN).await;
+        measure(
+            "(f) mac: 1 file card of 2 000 lines + 5 streaming shells, zoom fit → 200 % → fit",
+            &zoomed,
+        );
+        stack.shutdown().await;
+        assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
+    }
+
     #[tokio::test]
     async fn a_display_stream_beside_five_shells_pans_on_the_mac() {
         if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {

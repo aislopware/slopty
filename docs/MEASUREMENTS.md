@@ -1046,7 +1046,8 @@ reads them back (`dump.frames`). Scenarios in `crates/slopty-e2e/tests/smooth.rs
 `while :; do printf '%06d the quick brown fox … %06x\n' …; done` (every row new every frame,
 the worst case for a content-keyed cache): **(a)** pan at zoom 1, 120 scroll events/s;
 **(b)** ⌘-scroll zoom fit → 200 % → fit, 120 steps/s; **(c)** the first display streaming
-beside 5 shells, pan; **(d)** 60 letters typed at 15/s into the focused shell.
+beside 5 shells, pan; **(d)** 60 letters typed at 15/s into the focused shell; **(e)**/**(f)**
+(2026-09-12) a file card holding the 2 000-line cap beside 5 shells, pan and zoom cycle.
 
 How to read the harness: the `e2e` feature is GPUI `test-support`, under which a dirty window
 is drawn synchronously in `flush_effects` — a "frame" is an update, not a vsync, so `every`
@@ -2576,6 +2577,30 @@ MEASURE (d) mac, SLOPTY_PREDICT=never: echo 13.8 / 21.6 / 27.8 ms (60 keys) · p
 MEASURE frames while typing: draw 1.4 / 5.8 / 10.9 / 11.0 ms · every 11.3 / 59.7 ms · 189 frames, 0 over 16.7 ms, 0 dropped
 MEASURE (d) mac, SLOPTY_PREDICT=always: echo 16.2 / 24.8 / 58.2 ms (60 keys) · predicted 2.6 / 6.6 / 11.2 ms (60 keys)
 ```
+
+## 2026-09-12 — a full file card in the smooth probe (main `72e7754`)
+
+`SLOPTY_SMOOTH_E2E=1 cargo xtask e2e smooth` on an idle Mac Studio, the new scenarios **(e)**
+and **(f)**: one file card holding the 2 000-line cap (`FILE_LINES`, a source-like 70-column
+body, landed on line 1 000) beside five flooding shells, panned and zoom-cycled at the same
+rates as (a)/(b). The card's rows are a `uniform_list`, so the question was whether the file's
+size or the rows on screen set the frame cost.
+
+```
+MEASURE (e) mac: 1 file card of 2 000 lines + 5 streaming shells, pan at zoom 1: draw 2.5 / 3.9 / 4.2 / 4.7 ms · every 4.2 / 12.2 ms · 878 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (f) mac: 1 file card of 2 000 lines + 5 streaming shells, zoom fit → 200 % → fit: draw 3.7 / 9.4 / 11.4 / 12.0 ms · every 6.3 / 13.2 ms · 794 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (a) mac: 20 streaming shells, pan at zoom 1: draw 1.7 / 3.0 / 8.9 / 53.3 ms · every 3.1 / 15.5 ms · 733 frames, 4 over 16.7 ms, 6 dropped
+MEASURE (b) mac: 20 streaming shells, zoom fit → 200 % → fit: draw 1.4 / 6.0 / 29.7 / 60.7 ms · every 4.4 / 29.0 ms · 611 frames, 16 over 16.7 ms, 26 dropped
+```
+
+Reading: the rows on screen set the cost. A pan with the card draws in 4 ms flat (p50 3.9,
+max 4.7 — the flattest profile of any scenario, the 5 shells beside it being the whole
+variance), nothing over budget; the zoom cycle peaks at 12 ms where the card at 200 % shows
+its widest rows at the largest text, still under 16.7 ms with no drop. (a)/(b) in this run were
+noisier than the same-day run above (max 53/61 ms against 12/25 ms) — the 20-shell scenario
+ran right after the file scenario's daemons shut down in the same `cargo test` process, and its
+tail is the known content-keyed-cache worst case, not a regression the file card introduced
+(the card is not on that canvas). No optimisation follows from this: nothing to fix.
 
 ## 2026-09-12 — gate wall time, third look: a snapshot and parallel lanes
 

@@ -131,7 +131,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   smooth`, gate `SLOPTY_SMOOTH_E2E`; `smooth-ios` in the simulator) opens N flooding shells
   (`open` with a command and a count), pans at 120 scroll events a second (a trackpad's report
   rate) for 5 s, pinch-zooms fit → 200 % → fit with ⌘-scroll, streams the first display beside
-  five shells (`add_display`, needs `SLOPTY_SCREEN_E2E`), and types 60 letters at 15 a second
+  five shells (`add_display`, needs `SLOPTY_SCREEN_E2E`), pans and zooms with a 2 000-line
+file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 15 a second
   with `SLOPTY_PREDICT=never` and `always`, reading `dump.frames` and the terminal's key
   latency back. Two things about the harness to keep in mind when reading its numbers: the
   `e2e` feature is GPUI `test-support`, under which a dirty window is drawn synchronously

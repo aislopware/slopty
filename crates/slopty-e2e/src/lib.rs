@@ -141,6 +141,15 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
+    /// Open a file card for `path` on the host, as "view" on a tool call does, landing on
+    /// `line` when given.
+    OpenFile {
+        /// Absolute path on the host.
+        path: String,
+        /// 1-based line to land on.
+        #[serde(default)]
+        line: Option<u32>,
+    },
     /// Open a Claude Code agent the host drives over its structured protocol (a conversation
     /// card, `kind: agent`), as ⌘⌥T does, in `cwd` or the host's default.
     OpenAgent {

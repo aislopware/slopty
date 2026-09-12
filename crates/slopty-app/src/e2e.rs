@@ -478,6 +478,13 @@ fn apply(
             });
             Reply::Ok
         }
+        Command::OpenFile { path, line } => {
+            let Some(canvas) = workspace.read(cx).active_canvas() else {
+                return Reply::Error { message: "no active canvas".into() };
+            };
+            canvas.update(cx, |canvas, cx| canvas.open_file(&path, line, cx));
+            Reply::Ok
+        }
         Command::OpenAgent { cwd, resume } => {
             let Some(canvas) = workspace.read(cx).active_canvas() else {
                 return Reply::Error { message: "no active canvas".into() };

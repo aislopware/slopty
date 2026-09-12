@@ -254,6 +254,11 @@ impl Driver {
         self.ok(&Command::Open { command, count }).await
     }
 
+    /// Open a file card for `path` on the host.
+    pub async fn open_file(&mut self, path: &str, line: Option<u32>) -> Result<()> {
+        self.ok(&Command::OpenFile { path: path.to_owned(), line }).await
+    }
+
     /// Open a driven Claude Code agent (a conversation card) in `cwd`.
     ///
     /// # Errors
