@@ -2823,6 +2823,35 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `the_context_fill_follows_the_usage_and_the_result_names_the_window` (`stream`: the stream
   spelling, the chip lowered, the entry stamped), the app self-test's `/compact` turn (the
   divider last, "ctx 3%", no "continued from" entry, and the divider in the resumed past).
+- ✅ **What the loop says, not the model, is a notice line in the card; the slash list and a
+  backgrounded task follow their records, protocol 26** (2026-09-12). Read from the CLI
+  2.1.269 bundle's own schemas (`strings` on the binary, the zod descriptions): a hook's
+  feedback, a slash command's output and non-error status lines arrive as
+  `system/informational { content, level: info|notice|suggestion|warning, tool_use_id?,
+  prevent_continuation? }` ("Hosts render `content` as plaintext at the given level"; hook
+  feedback is spelled "<Hook> says: …"); a turn moved to the fallback model as
+  `system/model_fallback { trigger, original_model, fallback_model, content }`; a retry after
+  a mode change allowed denied commands as `system/permission_retry { content, commands }`;
+  a mid-session change of the slash list as `system/commands_changed { commands: [{name,
+  description, argumentHint}] }` ("clients should REPLACE their cached command list"); a
+  backgrounded task's end as `system/task_notification { tool_use_id?, status, summary,
+  usage }`. All were dropped before, so a Stop hook's reason or "Allowed cargo test" never
+  reached the card and a background subagent stayed "running" forever. Rulings: (1)
+  `TranscriptBody::Notice { level: NoticeLevel::{Notice, Suggestion, Warning}, text }` is an
+  entry drawn as one plain line in the muted, accent or warn tone; `info` lines are not
+  entries (Claude Code shows them only in its transcript mode) nor are lines keyed to a
+  `tool_use_id` (progress that would repeat); (2) a fallback reads "Switched to <model> for
+  this turn: <why>" as a warning, a retry as a notice; (3) `commands_changed` replaces
+  `AgentInfo.slash_commands` whole, names given their slash; (4) `task_notification` marks
+  the task done and keeps the brief and kind already known — one without a `tool_use_id`
+  cannot be joined and is ignored; the fold now ORs `done` so a late progress record never
+  un-finishes a task. Wire: `TranscriptBody::Notice`, `NoticeLevel`; goldens
+  `host_transcript` / `client_hello` re-accepted, PROTOCOL_VERSION 25 → 26. Tests:
+  `tool_results_are_named_after_their_call_and_injected_texts_are_not_entries`
+  (`transcript`: the hook line, the `info` and keyed lines skipped, the fallback, the retry),
+  `a_subagent_is_followed_by_its_task_records_and_its_own_are_hidden` (`stream`: the
+  notification ends the task, one without a call is nothing, the command list), the app
+  self-test's `hooked` turn (the warning line between the prompt and the answer).
 - ✅ **A conversation is resumed from any directory on the host, protocol 22** (2026-09-12).
   ⌘⌥R listed the active terminal's directory, and the daemon's default without one: on the
   phone, where there is no terminal to stand in, that meant one directory forever, and on the

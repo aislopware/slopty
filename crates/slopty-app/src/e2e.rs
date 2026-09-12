@@ -31,8 +31,8 @@ use slopty_e2e::{
     Reply, ScreenInfo, TerminalInfo, WindowInfo,
 };
 use slopty_proto::agent::{
-    AgentSource, AgentStatus, BlockReason, DiffKind, TodoStatus, ToolDetail, TranscriptBody,
-    TranscriptEntry,
+    AgentSource, AgentStatus, BlockReason, DiffKind, NoticeLevel, TodoStatus, ToolDetail,
+    TranscriptBody, TranscriptEntry,
 };
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
@@ -719,6 +719,14 @@ fn entry_line(entry: &TranscriptEntry) -> String {
         ),
         TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
             slopty_ui::terminal::conversation::compacted_label(trigger, *pre_tokens, *post_tokens)
+        }
+        TranscriptBody::Notice { level, text } => {
+            let level = match level {
+                NoticeLevel::Notice => "notice",
+                NoticeLevel::Suggestion => "suggestion",
+                NoticeLevel::Warning => "warning",
+            };
+            format!("{level}: {}", first(text))
         }
     }
 }

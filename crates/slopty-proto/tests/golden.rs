@@ -410,7 +410,7 @@ mod golden {
     #[test]
     fn transcript() {
         use slopty_proto::agent::{
-            Clipped, DiffKind, DiffLine, Todo, TodoStatus, ToolDetail, TranscriptBody,
+            Clipped, DiffKind, DiffLine, NoticeLevel, Todo, TodoStatus, ToolDetail, TranscriptBody,
             TranscriptEntry, TranscriptFollow, TranscriptUpdate,
         };
         snap(
@@ -469,6 +469,13 @@ mod golden {
                             trigger: "auto".to_owned(),
                             pre_tokens: 167_000,
                             post_tokens: Some(12_000),
+                        },
+                    },
+                    TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::Notice {
+                            level: NoticeLevel::Warning,
+                            text: "Stop says: the tests are red".to_owned(),
                         },
                     },
                 ],

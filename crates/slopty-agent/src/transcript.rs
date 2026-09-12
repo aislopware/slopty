@@ -17,8 +17,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use slopty_proto::agent::{
-    AgentStatus, Choice, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail,
-    TranscriptBody, TranscriptEntry,
+    AgentStatus, Choice, Clipped, DiffKind, DiffLine, NoticeLevel, Question, Todo, TodoStatus,
+    ToolDetail, TranscriptBody, TranscriptEntry,
 };
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
@@ -314,7 +314,7 @@ pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEn
     let kind = record.get("type").and_then(Value::as_str);
     let at = record.get("timestamp").and_then(Value::as_str).and_then(timestamp_millis);
     if kind == Some("system") {
-        return compacted(record).map(|body| TranscriptEntry { at, body }).into_iter().collect();
+        return system_body(record).map(|body| TranscriptEntry { at, body }).into_iter().collect();
     }
     // The summary a compaction leaves is a user record to the agent, not to the human.
     if record.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
@@ -331,12 +331,44 @@ pub fn record_entries(tools: &mut ToolNames, record: &Value) -> Vec<TranscriptEn
     bodies.into_iter().map(|body| TranscriptEntry { at, body }).collect()
 }
 
+/// The entry a `system` record makes, if any: a compaction boundary, or a line from the
+/// loop (`informational` past the `info` level, a model fallback, a permission retry).
+pub fn system_body(record: &Value) -> Option<TranscriptBody> {
+    let text = |key: &str| {
+        record.get(key).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty())
+    };
+    match record.get("subtype").and_then(Value::as_str)? {
+        "compact_boundary" => compacted(record),
+        // `info` lines show only in Claude Code's own transcript mode, and a line keyed to a
+        // tool use is a progress message that would repeat.
+        "informational" if record.get("tool_use_id").is_none() => {
+            let level = match record.get("level").and_then(Value::as_str)? {
+                "notice" => NoticeLevel::Notice,
+                "suggestion" => NoticeLevel::Suggestion,
+                "warning" => NoticeLevel::Warning,
+                _ => return None,
+            };
+            Some(TranscriptBody::Notice { level, text: text("content")?.to_owned() })
+        }
+        "model_fallback" => {
+            let fallback = text("fallback_model").unwrap_or("the fallback model");
+            let why = text("content").map(|c| format!(": {c}")).unwrap_or_default();
+            Some(TranscriptBody::Notice {
+                level: NoticeLevel::Warning,
+                text: format!("Switched to {fallback} for this turn{why}"),
+            })
+        }
+        "permission_retry" => Some(TranscriptBody::Notice {
+            level: NoticeLevel::Notice,
+            text: text("content")?.to_owned(),
+        }),
+        _ => None,
+    }
+}
+
 /// A `system/compact_boundary` record: the stream spells its metadata `compact_metadata`
 /// with snake keys, the transcript file `compactMetadata` with camel ones.
-pub fn compacted(record: &Value) -> Option<TranscriptBody> {
-    if record.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
-        return None;
-    }
+fn compacted(record: &Value) -> Option<TranscriptBody> {
     let meta = record.get("compact_metadata").or_else(|| record.get("compactMetadata"))?;
     let count = |snake: &str, camel: &str| {
         meta.get(snake).or_else(|| meta.get(camel)).and_then(Value::as_u64)
@@ -755,6 +787,18 @@ mod tests {
             "\n",
             r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}"#,
             "\n",
+            // Loop lines: a hook's word is a notice, an `info` line and a keyed progress line
+            // are not, a fallback names the model, a retry says what was allowed.
+            r#"{"type":"system","subtype":"informational","content":"Stop says: the tests are red","level":"warning","isMeta":false}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Tip: use /compact","level":"info"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Running for 3s","level":"notice","tool_use_id":"t2"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_fallback","trigger":"overloaded","original_model":"claude-fable-5-1","fallback_model":"claude-sonnet-5","content":"Fable 5.1 is overloaded"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"permission_retry","content":"Allowed cargo test","commands":["cargo test"]}"#,
+            "\n",
             // Pictures ride on the prompt they went with; alone they are an entry of their own.
             r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"what colour?"}]}}"#,
             "\n",
@@ -808,6 +852,19 @@ mod tests {
                     trigger: "auto".to_owned(),
                     pre_tokens: 167_000,
                     post_tokens: Some(12_000),
+                },
+                TranscriptBody::Notice {
+                    level: NoticeLevel::Warning,
+                    text: "Stop says: the tests are red".to_owned(),
+                },
+                TranscriptBody::Notice {
+                    level: NoticeLevel::Warning,
+                    text: "Switched to claude-sonnet-5 for this turn: Fable 5.1 is overloaded"
+                        .to_owned(),
+                },
+                TranscriptBody::Notice {
+                    level: NoticeLevel::Notice,
+                    text: "Allowed cargo test".to_owned(),
                 },
                 TranscriptBody::User { text: "what colour?".to_owned(), images: 1 },
                 TranscriptBody::User { text: String::new(), images: 2 },

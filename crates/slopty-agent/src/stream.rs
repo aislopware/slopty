@@ -120,6 +120,8 @@ pub enum Event {
         /// Why.
         reason: String,
     },
+    /// `system/commands_changed`: the whole slash-command list, replacing the init's.
+    Commands(Vec<String>),
     /// `system/status`: the permission mode changed (the answer to `set_permission_mode`
     /// arrives this way too).
     Status {
@@ -205,7 +207,46 @@ pub fn parse(line: &str) -> Option<Event> {
                 .unwrap_or_default()
                 .to_owned(),
         },
-        ("assistant" | "user", _) | ("system", Some("compact_boundary")) => Event::Record(record),
+        ("assistant" | "user", _)
+        | (
+            "system",
+            Some("compact_boundary" | "informational" | "model_fallback" | "permission_retry"),
+        ) => Event::Record(record),
+        // The slash-command list changed mid-session (skills found as the agent moved).
+        ("system", Some("commands_changed")) => Event::Commands(
+            record
+                .get("commands")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|c| c.get("name").and_then(Value::as_str))
+                        .map(|name| format!("/{}", name.trim_start_matches('/')))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        // A backgrounded task ended; only one that names its call can be marked.
+        ("system", Some("task_notification")) => match string(&record, "tool_use_id") {
+            call if call.is_empty() => Event::Other,
+            call => Event::Task(AgentTask {
+                call,
+                description: string(&record, "summary"),
+                kind: None,
+                tool_uses: record
+                    .get("usage")
+                    .and_then(|u| u.get("tool_uses"))
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(0),
+                duration_ms: record
+                    .get("usage")
+                    .and_then(|u| u.get("duration_ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                last_tool: None,
+                done: true,
+            }),
+        },
         ("stream_event", _) => stream_event(record.get("event")),
         ("control_request", _) => control_request(&record).unwrap_or(Event::Other),
         ("control_response", _) => {
@@ -568,6 +609,8 @@ pub enum Update {
     Model(String),
     /// The permission mode changed.
     PermissionMode(String),
+    /// The slash-command list was replaced.
+    Commands(Vec<String>),
 }
 
 /// Folds the event stream of one conversation into [`Update`]s.
@@ -630,6 +673,7 @@ impl Fold {
                 out
             }
             Event::RateLimit(usage) => vec![Update::Usage(usage)],
+            Event::Commands(commands) => vec![Update::Commands(commands)],
             Event::Record(record) => self.record(&record, now),
             Event::TextDelta(text) => {
                 self.partial.push_str(&text);
@@ -656,7 +700,10 @@ impl Fold {
                     if task.kind.is_none() {
                         task.kind.clone_from(&seen.kind);
                     }
-                    task.done = seen.done;
+                    if task.description.is_empty() {
+                        task.description.clone_from(&seen.description);
+                    }
+                    task.done = task.done || seen.done;
                 }
                 self.tasks.insert(task.call.clone(), task.clone());
                 vec![Update::Task(task)]
@@ -879,7 +926,8 @@ mod tests {
                     | Update::Usage(_)
                     | Update::Context(_)
                     | Update::Model(_)
-                    | Update::PermissionMode(_) => {}
+                    | Update::PermissionMode(_)
+                    | Update::Commands(_) => {}
                 }
             }
         }
@@ -1056,6 +1104,31 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Agent:toolu_p", "result:Agent"], "the subagent's Bash is not shown");
+        // A backgrounded task's end arrives as a notification: done, counts kept, the brief
+        // kept when the summary is empty; one without a call is nothing.
+        let Some(ended) = parse(
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","tool_use_id":"toolu_p","status":"completed","output_file":"/tmp/t.txt","summary":"","usage":{"total_tokens":12000,"tool_uses":3,"duration_ms":4000}}"#,
+        ) else {
+            panic!("parses")
+        };
+        let updates = fold.apply(ended, 0);
+        let Some(Update::Task(task)) = updates.first() else { panic!("{updates:?}") };
+        assert!(task.done && task.tool_uses == 3 && task.duration_ms == 4000, "{task:?}");
+        assert_eq!(task.description, "Running List files");
+        assert_eq!(task.kind.as_deref(), Some("Explore"));
+        assert_eq!(
+            parse(
+                r#"{"type":"system","subtype":"task_notification","task_id":"t","status":"failed","output_file":"","summary":"x"}"#
+            ),
+            Some(Event::Other)
+        );
+        // The slash-command list is replaced whole, names given a slash.
+        assert_eq!(
+            parse(
+                r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"compact","description":"","argumentHint":""},{"name":"/deploy","description":"","argumentHint":"<env>"}]}"#
+            ),
+            Some(Event::Commands(vec!["/compact".to_owned(), "/deploy".to_owned()]))
+        );
     }
 
     #[test]

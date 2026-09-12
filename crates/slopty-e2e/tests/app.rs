@@ -464,6 +464,24 @@ mod tests {
         .await
         .unwrap();
 
+        // A hook's word is a notice line in the card, before the answer it precedes.
+        drv.type_text("hooked").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the hook's notice", STEP, |d| {
+            chat(d).is_some_and(|(agent, conv)| {
+                agent.as_deref() == Some("done")
+                    && conv.entries.len() >= 3
+                    && conv.entries[conv.entries.len().saturating_sub(3)..]
+                        == [
+                            "user: hooked",
+                            "warning: UserPromptSubmit says: mind the tests",
+                            "assistant: Hello from the fake",
+                        ]
+            })
+        })
+        .await
+        .unwrap();
+
         // `/compact`: a divider says what the context shrank to, the chip drops at once, and
         // the summary the agent reads is not shown as if the human had typed it.
         drv.type_text("/compact").await.unwrap();
@@ -818,7 +836,7 @@ mod tests {
             .wait_for("the resumed past", STEP, |d| {
                 d.terminals
                     .iter()
-                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 18))
+                    .any(|t| t.conversation.as_ref().is_some_and(|c| c.entries.len() >= 20))
             })
             .await
             .unwrap();
@@ -831,6 +849,8 @@ mod tests {
                 "assistant: Hello from the fake".to_owned(),
                 "user: /cost".to_owned(),
                 "assistant: Total cost: $0.02".to_owned(),
+                "user: hooked".to_owned(),
+                "assistant: Hello from the fake".to_owned(),
                 "user: /compact".to_owned(),
                 "compacted (manual): 40k → 5k".to_owned(),
                 "user: ponder".to_owned(),

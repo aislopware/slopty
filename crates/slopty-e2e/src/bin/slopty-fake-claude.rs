@@ -15,7 +15,9 @@
 //!   with the host's message and a closing message that says so;
 //! * `/cost` — one line naming the cost, the way a slash command answers;
 //! * `/compact` — a `compact_boundary` system record (40 000 → 5 000 tokens) and the summary user
-//!   record flagged `isCompactSummary`, both also written to the transcript file.
+//!   record flagged `isCompactSummary`, both also written to the transcript file;
+//! * a prompt starting with `hooked` — a `system/informational` warning (a hook's word, "… says:
+//!   mind the tests") before the usual deltas and reply.
 //!
 //! It also does what a retune asks: `set_model` is acknowledged and the assistant records
 //! that follow name the new model; `set_permission_mode` is acknowledged and followed by the
@@ -530,6 +532,16 @@ fn run() -> std::io::Result<()> {
                         "session_id": fake.session}),
             )?;
             waiting = Some(Wait::Interrupt);
+        } else if text.starts_with("hooked") {
+            // A hook's word arrives as an informational line before the answer.
+            emit(
+                &mut out,
+                &json!({"type": "system", "subtype": "informational",
+                        "content": "UserPromptSubmit says: mind the tests", "level": "warning",
+                        "session_id": fake.session, "uuid": "n"}),
+            )?;
+            stream_deltas(&fake, &mut out)?;
+            finish_text(&fake, &mut out)?;
         } else if text.trim() == "/compact" {
             // The boundary goes to stdout with snake keys and to the file with camel ones,
             // as Claude Code writes each; the summary is a user record only the agent reads.

@@ -311,6 +311,25 @@ pub enum TranscriptBody {
         /// Context tokens after, when the agent said.
         post_tokens: Option<u64>,
     },
+    /// A line from the agent's loop rather than the model: hook feedback ("Stop says: …"),
+    /// a slash command's output, a model fallback, a permission retry.
+    Notice {
+        /// How prominently to draw it.
+        level: NoticeLevel,
+        /// The text, plain.
+        text: String,
+    },
+}
+
+/// How prominently a [`TranscriptBody::Notice`] is drawn (Claude Code's `level`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum NoticeLevel {
+    /// Inactive grey.
+    Notice,
+    /// Something to consider; the accent.
+    Suggestion,
+    /// Something went sideways; the warn tone.
+    Warning,
 }
 
 /// Text cut on the host to a readable size, with a count of what was dropped.

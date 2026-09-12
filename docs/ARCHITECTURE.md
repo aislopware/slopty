@@ -530,7 +530,11 @@ Option<Context { tokens, window }>`, drawn as "ctx 16%" (or "ctx 31k" before a r
 the window), in the warn tone from 80%. A compaction (`system/compact_boundary`, protocol 25)
 is a `TranscriptBody::Compacted` entry drawn as a ruled divider ("compacted (auto): 167k →
 12k"); the summary record flagged `isCompactSummary` is not an entry, and the boundary's
-`post_tokens` lowers the chip at once. A
+`post_tokens` lowers the chip at once. Lines from the loop rather than the model
+(`system/informational` past the `info` level, `model_fallback`, `permission_retry`;
+protocol 26) are `TranscriptBody::Notice { level, text }` entries drawn as one plain line in
+the muted, accent or warn tone; `system/commands_changed` replaces the slash list and
+`system/task_notification` ends a backgrounded task. A
 `system/status` whose `status` says `requesting` or `compacting` becomes the Working detail
 ("waiting for the model…", "compacting the conversation…") so the chip moves while there is
 nothing yet to draw; it never displaces a permission or a question. So does a streamed

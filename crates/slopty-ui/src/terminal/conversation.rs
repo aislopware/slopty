@@ -29,8 +29,8 @@ use gpui::{
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_proto::agent::{
-    AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, Question, Todo, TodoStatus, ToolDetail,
-    TranscriptBody, TranscriptEntry, TranscriptUpdate,
+    AgentInfo, AgentTask, Clipped, DiffKind, DiffLine, NoticeLevel, Question, Todo, TodoStatus,
+    ToolDetail, TranscriptBody, TranscriptEntry, TranscriptUpdate,
 };
 use slopty_theme::{Theme, alpha};
 
@@ -1359,6 +1359,17 @@ fn entry(
             .child(SharedString::from(compacted_label(trigger, *pre_tokens, *post_tokens)))
             .child(div().flex_1().h(px(1.0)).bg(hsla(s.border)))
             .into_any_element(),
+        TranscriptBody::Notice { level, text } => {
+            let color = match level {
+                NoticeLevel::Notice => s.text_muted,
+                NoticeLevel::Suggestion => s.accent,
+                NoticeLevel::Warning => s.warn,
+            };
+            row.text_size(px(small))
+                .text_color(hsla(color))
+                .child(SharedString::from(text.clone()))
+                .into_any_element()
+        }
         TranscriptBody::ToolResult { tool, output, is_error } => {
             let (shown, hidden) = preview(output, open);
             let color = if *is_error { s.error } else { s.text_muted };
@@ -1469,6 +1480,14 @@ pub fn entry_label(entry: &TranscriptEntry, task: Option<&AgentTask>) -> String 
                 label = format!("Compacted{rest}");
             }
             label
+        }
+        TranscriptBody::Notice { level, text } => {
+            let kind = match level {
+                NoticeLevel::Notice => "Notice",
+                NoticeLevel::Suggestion => "Suggestion",
+                NoticeLevel::Warning => "Warning",
+            };
+            format!("{kind}: {}", first(text))
         }
     }
 }

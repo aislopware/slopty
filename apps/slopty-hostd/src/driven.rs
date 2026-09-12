@@ -561,6 +561,9 @@ impl Pump {
             Update::PermissionMode(mode) => {
                 self.info(|info| info.permission_mode = Some(mode.clone()));
             }
+            Update::Commands(commands) => {
+                self.info(|info| info.slash_commands.clone_from(&commands));
+            }
         }
     }
 
