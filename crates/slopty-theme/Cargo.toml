@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 serde.workspace = true
 slopty-grid.workspace = true
+slopty-proto.workspace = true

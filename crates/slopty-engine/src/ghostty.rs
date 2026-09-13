@@ -10,7 +10,9 @@ use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
 use libghostty_vt::selection::Selection;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
-use libghostty_vt::terminal::{ClipboardLocation, Mode, Point, PointCoordinate, PointSpace};
+use libghostty_vt::terminal::{
+    ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
+};
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
 use slopty_grid::{
@@ -18,7 +20,7 @@ use slopty_grid::{
     RowUpdate, SemanticMark, Style, TermModes,
 };
 use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseEvent};
-use slopty_proto::terminal::{Frame, PixelRect, Placement, TermSize};
+use slopty_proto::terminal::{Frame, PixelRect, Placement, TermColors, TermSize};
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
@@ -51,6 +53,9 @@ pub struct GhosttyEngine {
     mouse_enc: mouse::Encoder<'static>,
     mouse_ev: mouse::Event<'static>,
     events: Events,
+    /// Whether the driver's background is light: what `CSI ? 996 n` is answered with, shared
+    /// with the callback.
+    light: Rc<std::cell::Cell<bool>>,
     size: TermSize,
     seq: u64,
     epoch: u32,
@@ -122,10 +127,12 @@ impl GhosttyEngine {
         // and the engine lives on its session's thread.
         term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
         kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
-        set_theme_colors(&mut term)?;
+        let dark = slopty_theme::TerminalPalette::DARK.wire();
+        set_colors(&mut term, &dark)?;
+        let light = Rc::new(std::cell::Cell::new(is_light(dark.bg)));
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
-        install_callbacks(&mut term, &events)?;
+        install_callbacks(&mut term, &events, &light)?;
 
         let mut engine = Self {
             anchor: None,
@@ -139,6 +146,7 @@ impl GhosttyEngine {
             mouse_enc: mouse::Encoder::new()?,
             mouse_ev: mouse::Event::new()?,
             events,
+            light,
             size: config.size,
             seq: 0,
             epoch: 0,
@@ -1060,7 +1068,10 @@ const fn check_size(size: TermSize) -> Result<(), EngineError> {
 fn install_callbacks(
     term: &mut Terminal<'static, 'static>,
     events: &Events,
+    light: &Rc<std::cell::Cell<bool>>,
 ) -> Result<(), EngineError> {
+    let for_scheme = Rc::clone(light);
+    term.on_color_scheme(move |_| Some(scheme(for_scheme.get())))?;
     let for_pty = Rc::clone(events);
     term.on_pty_write(move |_, data: &[u8]| {
         for_pty.borrow_mut().push(EngineEvent::PtyWrite(data.to_vec()));
@@ -1110,14 +1121,29 @@ fn install_callbacks(
 /// The colours a program asking with OSC 10/11/12 `?` or OSC 4 is told: the dark theme,
 /// the one every client starts in. Without defaults libghostty answers the first three with
 /// nothing, and a TUI that asks (neovim, helix, delta) waits its timeout or guesses.
-fn set_theme_colors(term: &mut Terminal<'_, '_>) -> Result<(), EngineError> {
-    let theme = slopty_theme::TerminalPalette::DARK;
-    let rgb = |c: slopty_theme::Rgb| RgbColor { r: c.r, g: c.g, b: c.b };
-    term.set_default_fg_color(Some(rgb(theme.fg)))?
-        .set_default_bg_color(Some(rgb(theme.bg)))?
-        .set_default_cursor_color(Some(rgb(theme.cursor)))?;
+/// Whether a background reads as light: the perceived luma of `[r, g, b]` over half.
+const fn is_light([r, g, b]: [u8; 3]) -> bool {
+    // ITU-R BT.601 weights, in thousandths (at most 255 000: no overflow).
+    let luma = (r as u32)
+        .wrapping_mul(299)
+        .wrapping_add((g as u32).wrapping_mul(587))
+        .wrapping_add((b as u32).wrapping_mul(114));
+    luma > 128 * 1000
+}
+
+/// The scheme a light or dark background is reported as.
+const fn scheme(light: bool) -> ColorScheme {
+    if light { ColorScheme::Light } else { ColorScheme::Dark }
+}
+
+/// Make `colors` libghostty's defaults: what OSC 10/11/12 `?` and OSC 4 queries answer.
+fn set_colors(term: &mut Terminal<'_, '_>, colors: &TermColors) -> Result<(), EngineError> {
+    let rgb = |[r, g, b]: [u8; 3]| RgbColor { r, g, b };
+    term.set_default_fg_color(Some(rgb(colors.fg)))?
+        .set_default_bg_color(Some(rgb(colors.bg)))?
+        .set_default_cursor_color(Some(rgb(colors.cursor)))?;
     let mut palette = term.default_color_palette()?;
-    for (index, &color) in (0_u8..).zip(theme.ansi.iter()) {
+    for (index, &color) in (0_u8..).zip(colors.ansi.iter()) {
         palette.set(PaletteIndex(index), rgb(color));
     }
     term.set_default_color_palette(Some(palette))?;
@@ -1343,6 +1369,19 @@ impl VtEngine for GhosttyEngine {
 
     fn drain_images(&mut self) -> Vec<ImageUpload> {
         std::mem::take(&mut self.uploads)
+    }
+
+    fn set_colors(&mut self, colors: &TermColors) -> Result<(), EngineError> {
+        set_colors(&mut self.term, colors)?;
+        let light = is_light(colors.bg);
+        // A program that asked to be told (mode 2031) hears a scheme change unprompted.
+        if self.light.replace(light) != light && self.term.mode(Mode::COLOR_SCHEME_REPORT)? {
+            let mut buf = [0_u8; 16];
+            let n = scheme(light).encode_report(&mut buf)?;
+            let report = buf.get(..n).unwrap_or_default().to_vec();
+            self.events.borrow_mut().push(EngineEvent::PtyWrite(report));
+        }
+        Ok(())
     }
 }
 
@@ -1755,6 +1794,59 @@ mod tests {
             red.r, red.g, red.b
         );
         assert!(joined.contains(&want), "{answers:?} lacks {want:?}");
+    }
+
+    /// The driver's own colours, once set, are what the queries answer.
+    /// `CSI ? 996 n` is answered from the driver's background; with mode 2031 on, a change
+    /// of scheme is reported unprompted, a same-scheme change is not.
+    #[test]
+    fn the_colour_scheme_follows_the_drivers_background() {
+        let mut e = engine(10, 3);
+        let replies = |e: &mut GhosttyEngine| -> String {
+            e.drain_events()
+                .into_iter()
+                .filter_map(|ev| match ev {
+                    EngineEvent::PtyWrite(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+        e.write(b"\x1b[?996n");
+        assert_eq!(replies(&mut e), "\x1b[?997;1n", "dark by default");
+        e.set_colors(&slopty_theme::TerminalPalette::LIGHT.wire()).unwrap();
+        assert_eq!(replies(&mut e), "", "nobody asked to be told");
+        e.write(b"\x1b[?996n");
+        assert_eq!(replies(&mut e), "\x1b[?997;2n");
+        e.write(b"\x1b[?2031h");
+        let mut lighter = slopty_theme::TerminalPalette::LIGHT.wire();
+        lighter.bg = [0xff; 3];
+        e.set_colors(&lighter).unwrap();
+        assert_eq!(replies(&mut e), "", "still light: nothing to report");
+        e.set_colors(&slopty_theme::TerminalPalette::DARK.wire()).unwrap();
+        assert_eq!(replies(&mut e), "\x1b[?997;1n", "told of the change");
+        assert!(is_light([0xff, 0xff, 0xff]) && !is_light([0x0e, 0x0f, 0x12]));
+    }
+
+    #[test]
+    fn colour_queries_answer_with_the_drivers_colours_once_set() {
+        let mut e = engine(10, 3);
+        e.set_colors(&slopty_theme::TerminalPalette::LIGHT.wire()).unwrap();
+        e.write(b"\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\");
+        let joined: String = e
+            .drain_events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                EngineEvent::PtyWrite(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                _ => None,
+            })
+            .collect();
+        let light = slopty_theme::TerminalPalette::LIGHT;
+        let hex = |c: slopty_theme::Rgb| {
+            format!("rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}", c.r, c.g, c.b)
+        };
+        assert!(joined.contains(&format!("\x1b]11;{}", hex(light.bg))), "{joined:?}");
+        let red = light.ansi.get(1).copied().expect("red");
+        assert!(joined.contains(&format!("\x1b]4;1;{}", hex(red))), "{joined:?}");
     }
 
     #[test]

@@ -746,7 +746,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   engine sets the dark theme's foreground, background, cursor and ANSI 0–15 as libghostty's
   defaults at start (`set_theme_colors`), and the answers say what a client in the default
   theme shows. Cells keep their symbolic colours on the wire, so a light-theme client still
-  paints its own palette — it just gets asked-about colours from the dark one; telling the
-  host the client's theme (an Attach field, one host answer per session while clients may
-  differ) is the follow-up if that ever matters. Test:
-  `colour_queries_are_answered_with_the_dark_theme`.
+  paints its own palette. Test: `colour_queries_are_answered_with_the_dark_theme`.
+
+- ✅ **The driver's colours answer the queries** (2026-09-15, protocol 44). A light-theme
+  phone asking neovim for its `background` got the dark answer above, so the editor chose a
+  dark look on a white card. Clients may differ while the host answers once per session, so
+  the rule follows the PTY size: the driver decides. Every client sends
+  `TermRequest::Colors(TermColors)` (fg, bg, cursor, ANSI 0–15 as RGB triples) right after
+  its `Attach` and whenever its theme changes; the session keeps each viewer's colours (a
+  re-attach keeps them) and applies the driver's — on its attach, when it claims the wheel,
+  when they change — through `VtEngine::set_colors`. A viewer's are recorded, never
+  applied; a driver that never said any leaves the dark defaults. Ruled out: an `Attach`
+  field (the resync attach comes from the client model, which knows no theme, and a theme
+  change would need a message anyway) and per-client answers (one PTY, one program, one
+  answer). Tests: proto golden `client_colors`; engine
+  `colour_queries_answer_with_the_drivers_colours_once_set`; session actor
+  `the_drivers_colours_answer_a_colour_query` (a raw-mode shell prints the OSC 11 reply
+  through `cat -v`); canvas
+  `cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it` (colours follow the
+  attach and a theme change).
+
+- ✅ **The colour scheme is the driver's background** (2026-09-15). neovim 0.10+, and the
+  editors following it, ask `CSI ? 996 n` for light or dark and set mode 2031 to be told of
+  a change, in preference to reading OSC 11. libghostty routes the query to the embedder
+  and encodes the report; the engine answers from the luma of the driver's background
+  (BT.601 weights, over half is light) and, when the mode is on and the scheme actually
+  flips on a `set_colors`, sends the report unprompted. Test:
+  `the_colour_scheme_follows_the_drivers_background`.

@@ -13,7 +13,7 @@ mod golden {
         CaptureTarget, Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest,
     };
     use slopty_proto::terminal::{
-        Frame, PixelRect, Placement, SearchMatch, TermEvent, TermRequest,
+        Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent, TermRequest,
     };
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -78,6 +78,26 @@ mod golden {
                 name: "iPhone".to_owned(),
                 item,
             }),
+        );
+    }
+
+    #[test]
+    fn colors() {
+        let mut ansi = [[0_u8; 3]; 16];
+        for (i, c) in (0_u8..).zip(ansi.iter_mut()) {
+            *c = [i, i.wrapping_mul(16), 255_u8.wrapping_sub(i)];
+        }
+        snap(
+            "client_colors",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::Colors(TermColors {
+                    fg: [0xe6, 0xe6, 0xe6],
+                    bg: [0x0e, 0x0f, 0x12],
+                    cursor: [0x8a, 0xb4, 0xf8],
+                    ansi,
+                }),
+            },
         );
     }
 

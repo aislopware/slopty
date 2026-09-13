@@ -177,6 +177,24 @@ pub enum TermRequest {
         /// `needle` is a regular expression (Rust `regex` syntax, no look-around).
         regex: bool,
     },
+    /// The colours this client draws the terminal with. The driver's become the terminal's
+    /// defaults, so a program asking OSC 10/11/12 `?` or OSC 4 hears the colours it is
+    /// actually shown in. Sent after `Attach` and whenever the theme changes.
+    Colors(TermColors),
+}
+
+/// A terminal palette on the wire: what a client paints default text, the background, the
+/// cursor and ANSI 0–15 with, as `[r, g, b]`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct TermColors {
+    /// Default text.
+    pub fg: [u8; 3],
+    /// Default background.
+    pub bg: [u8; 3],
+    /// Cursor.
+    pub cursor: [u8; 3],
+    /// ANSI 0–15.
+    pub ansi: [[u8; 3]; 16],
 }
 
 /// One search hit, in cells.

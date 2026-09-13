@@ -8,7 +8,7 @@ mod actor {
     use slopty_grid::LineIndex;
     use slopty_host::session::{self, SessionStart, Tap};
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, KeyEvent, Mods};
-    use slopty_proto::terminal::{Frame, TermEvent, TermRequest, TermSize};
+    use slopty_proto::terminal::{Frame, TermColors, TermEvent, TermRequest, TermSize};
     use slopty_pty::{Pty, SpawnSpec};
     use tokio::sync::mpsc;
 
@@ -59,7 +59,9 @@ mod actor {
         loop {
             let ev = tokio::time::timeout_at(deadline, rx.recv())
                 .await
-                .expect("timeout waiting for events")
+                .unwrap_or_else(|_| {
+                    panic!("timeout waiting for events; {seen:?}\nscreen:\n{}", text(&screen))
+                })
                 .expect("sink closed");
             if let TermEvent::Frame(f) = &ev {
                 apply(&mut screen, f);
@@ -334,6 +336,47 @@ mod actor {
         .await;
 
         session.request(b, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
+
+    /// A viewer's colours are kept, never applied; the driver's answer the program's colour
+    /// query. The shell (raw input: the reply has no newline for a cooked read to wait on)
+    /// asks OSC 11 `?` each time it is nudged and prints the reply through `cat -v` (the
+    /// ESCs as `^[`): 25 bytes, the `rgb:rrrr/gggg/bbbb` answer up to its terminator,
+    /// which the next nudge swallows.
+    #[tokio::test]
+    async fn the_drivers_colours_answer_a_colour_query() {
+        let (session, mut child) = start(&[
+            "/bin/sh",
+            "-c",
+            "stty -icanon -echo; for i in 1 2; do read x; printf '\\033]11;?\\033\\\\'; dd bs=1 count=25 2>/dev/null | cat -v; echo; done; exit 0",
+        ]);
+        let a = ClientId::new();
+        let b = ClientId::new();
+        let (tx_a, mut rx_a) = mpsc::channel(64);
+        let (tx_b, mut rx_b) = mpsc::channel(64);
+        session.attach(a, size(60, 6), tx_a).unwrap();
+        wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
+        })
+        .await;
+        session.attach(b, size(60, 6), tx_b).unwrap();
+        wait_for(&mut rx_b, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
+            .await;
+        let white = TermColors { fg: [0; 3], bg: [0xff; 3], cursor: [0; 3], ansi: [[0; 3]; 16] };
+        session.request(b, TermRequest::Colors(white)).unwrap();
+        // b only views: the answer is still the default dark background.
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:0e0e/0f0f/1212")).await;
+        // b drives: its white answers.
+        session.request(b, TermRequest::Drive { drive: true }).unwrap();
+        wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
+        })
+        .await;
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:ffff/ffff/ffff")).await;
         child.wait().await.unwrap();
         session.close();
     }

@@ -9,7 +9,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_engine::boundary::Boundary;
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine as _};
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
-use slopty_proto::terminal::{TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{TermColors, TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
 use tokio::sync::{mpsc, oneshot};
 
@@ -238,6 +238,8 @@ struct Viewer {
     client: ClientId,
     sink: ClientSink,
     size: TermSize,
+    /// The colours this client paints with, once it said (the driver's reach the engine).
+    colors: Option<TermColors>,
 }
 
 /// Where one keystroke is on its way through the actor, for the trace that takes the echo
@@ -614,6 +616,18 @@ impl Actor {
         }
     }
 
+    /// The colours `client` paints with become the terminal's defaults (what colour queries
+    /// answer), when it has said them; a driver that never did leaves the defaults alone.
+    fn apply_colors_of(&mut self, client: ClientId) {
+        let Some(colors) = self.viewers.iter().find(|v| v.client == client).and_then(|v| v.colors)
+        else {
+            return;
+        };
+        if let Err(e) = self.engine.set_colors(&colors) {
+            tracing::error!(session = %self.id, error = %e, "engine colours failed");
+        }
+    }
+
     fn apply_size(&mut self, size: TermSize) {
         if size == self.engine.size() {
             return;
@@ -660,16 +674,21 @@ impl Actor {
     async fn handle(&mut self, cmd: Cmd) -> bool {
         match cmd {
             Cmd::Attach { client, size, sink } => {
+                // A re-attach (resync, reconnect) keeps the colours the client already said.
+                let colors =
+                    self.viewers.iter().find(|v| v.client == client).and_then(|v| v.colors);
                 self.viewers.retain(|v| v.client != client);
-                self.viewers.push(Viewer { client, sink, size });
+                self.viewers.push(Viewer { client, sink, size, colors });
                 if self.driver.is_none() {
                     self.driver = Some(client);
                     self.send_to(client, TermEvent::Driver { you: true });
                     self.apply_size(size);
+                    self.apply_colors_of(client);
                 } else if self.driver == Some(client) {
                     // A reconnecting driver (relaunched app) learns it still drives.
                     self.send_to(client, TermEvent::Driver { you: true });
                     self.apply_size(size);
+                    self.apply_colors_of(client);
                 }
                 if let Some(t) = &self.title {
                     self.send_to(client, TermEvent::Title(t.clone()));
@@ -753,6 +772,15 @@ impl Actor {
                 }
                 Ok(())
             }
+            TermRequest::Colors(colors) => {
+                if let Some(v) = self.viewers.iter_mut().find(|v| v.client == client) {
+                    v.colors = Some(colors);
+                }
+                if self.driver == Some(client) {
+                    self.apply_colors_of(client);
+                }
+                Ok(())
+            }
             TermRequest::Drive { drive } => {
                 if drive {
                     if let Some(old) = self.driver.replace(client)
@@ -766,6 +794,7 @@ impl Actor {
                     {
                         self.apply_size(size);
                     }
+                    self.apply_colors_of(client);
                 } else if self.driver == Some(client) {
                     self.driver = None;
                     self.send_to(client, TermEvent::Driver { you: false });

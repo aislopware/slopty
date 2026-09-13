@@ -29,7 +29,7 @@ pub use ghostty::GhosttyEngine;
 pub use graphics::ImageUpload;
 use slopty_grid::{Line, LineIndex, TermModes};
 use slopty_proto::input::{KeyEvent, MouseEvent};
-use slopty_proto::terminal::{Frame, TermSize};
+use slopty_proto::terminal::{Frame, TermColors, TermSize};
 
 /// Engine failure. libghostty-vt reports out-of-memory and invalid arguments; both are bugs or
 /// resource exhaustion, never a consequence of PTY output, so the session is torn down.
@@ -129,4 +129,8 @@ pub trait VtEngine {
     /// Images the frames taken since the last drain place and the clients do not hold yet:
     /// sent ahead of those frames (see [`graphics::Ledger`]).
     fn drain_images(&mut self) -> Vec<ImageUpload>;
+
+    /// The colours the driver paints with: what colour queries (OSC 10/11/12 `?`, OSC 4)
+    /// answer from now on. The default is the dark theme's.
+    fn set_colors(&mut self, colors: &TermColors) -> Result<(), EngineError>;
 }

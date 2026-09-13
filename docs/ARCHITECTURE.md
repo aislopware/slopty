@@ -103,10 +103,15 @@ Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, cappe
 `MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
 for a read reply. Colour queries (OSC 10/11/12 `?`, OSC 4) are answered by libghostty from
-the defaults the engine sets at start: the dark theme's foreground, background, cursor and
-ANSI 0–15 (`ghostty::set_theme_colors`, from `slopty_theme::TerminalPalette::DARK`); cell
-colours still travel symbolically (`Color::Default`/`Palette`/`Rgb`), so the client's own
-theme paints them. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
+the defaults the engine sets: the dark theme's foreground, background, cursor and ANSI 0–15
+at start (`ghostty::set_colors`, from `slopty_theme::TerminalPalette::DARK.wire()`), then
+whatever the driver paints with — every client sends `TermRequest::Colors(TermColors)` after
+its attach and on a theme change, the session keeps each viewer's, and the driver's (on
+attach, on claiming the wheel, on a change) reach `VtEngine::set_colors`. The driver's
+background also decides the colour scheme: `CSI ? 996 n` is answered light or dark from its
+luma, and a program that set mode 2031 hears a change of scheme unprompted. Cell colours still
+travel symbolically (`Color::Default`/`Palette`/`Rgb`), so each client's own theme paints
+them. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints

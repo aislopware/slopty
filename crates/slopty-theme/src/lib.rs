@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use slopty_grid::Color;
+use slopty_proto::terminal::TermColors;
 
 /// An sRGB colour.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -111,6 +112,18 @@ impl TerminalPalette {
             Rgb::hex(0x8c959f),
         ],
     };
+
+    /// The palette as the host hears it: what colour queries answer while this client drives.
+    #[must_use]
+    pub fn wire(&self) -> TermColors {
+        let rgb = |c: Rgb| [c.r, c.g, c.b];
+        TermColors {
+            fg: rgb(self.fg),
+            bg: rgb(self.bg),
+            cursor: rgb(self.cursor),
+            ansi: self.ansi.map(rgb),
+        }
+    }
 
     /// Resolve a grid colour to RGB. `Default` uses `fg` or `bg` depending on `slot_is_bg`.
     #[must_use]

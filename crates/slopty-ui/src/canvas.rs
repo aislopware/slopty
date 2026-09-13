@@ -1534,6 +1534,13 @@ impl CanvasView {
         if let Some(picker) = &self.picker {
             picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
+        if self.theme.terminal != theme.terminal {
+            // Every shell hears the new colours; the host applies the driver's.
+            let colors = theme.terminal.wire();
+            for session in self.terminals.keys() {
+                self.send(ClientMsg::Term { session: *session, req: TermRequest::Colors(colors) });
+            }
+        }
         self.theme = theme;
         cx.notify();
     }
@@ -2374,6 +2381,11 @@ impl CanvasView {
                 view.update(cx, TerminalView::set_driven);
             }
             self.send(ClientMsg::Term { session: *session, req: TermRequest::Attach { size } });
+            // What this client paints with, so the driver's colours answer colour queries.
+            self.send(ClientMsg::Term {
+                session: *session,
+                req: TermRequest::Colors(self.theme.terminal.wire()),
+            });
             // A view born after the host reported the agent (a woken item) starts with its state.
             if let Some(agent) = self.agents.get(session) {
                 let status = agent.status.clone();
@@ -6223,6 +6235,27 @@ mod tests {
             )),
             "{sent:?}"
         );
+        // Its colours follow the attach, and again when the theme changes them.
+        let dark = Theme::default().terminal.wire();
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session: s, req: TermRequest::Colors(c) } if *s == session && *c == dark
+            )),
+            "{sent:?}"
+        );
+        view.update(cx, |c, cx| c.set_theme(Theme::new(slopty_theme::Variant::Light), cx));
+        let light = Theme::new(slopty_theme::Variant::Light).terminal.wire();
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session: s, req: TermRequest::Colors(c) } if *s == session && *c == light
+            )),
+            "{sent:?}"
+        );
+        view.update(cx, |c, cx| c.set_theme(Theme::default(), cx));
+        let _back = drain(&mut rx);
 
         // A shell beside a shell starts where that shell is (⌘⇧T's agent too).
         cx.simulate_keystrokes("cmd-n");
