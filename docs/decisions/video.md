@@ -692,6 +692,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   notifications are private API and out for that reason; and deciding a hide from the frames
   themselves (the crop going black) is a guess about content that a dark window would trip.
 
+- ✅ **The host's cursor picture rides on the control stream** (2026-09-14). The client drew
+  the host's pointer as one drawn arrow whatever the host showed: an I-beam over a text field,
+  a resize arrow on a window edge, a busy pointer — all arrows, and the wire type for the
+  picture (`ScreenEvent::Cursor`, `CursorShape`) had no sender and no reader. Rulings:
+  (1) the picture comes from `NSCursor.currentSystemCursor`, the one public reading of a
+  cursor another process set; Apple has deprecated it in favour of `showsCursor` on the
+  ScreenCaptureKit stream, which would bake the pointer into the video and tie its latency
+  to the pipeline the cursor channel exists to avoid, so the deprecated reading is used
+  (`#[expect(deprecated)]` with that reason) and a client keeps drawing its own arrow when it
+  answers nothing — the live test `the_system_cursor_reads_as_a_small_picture_with_its_hotspot_inside`
+  (`SLOPTY_SCREEN_E2E=1`) is the check that it still answers on the floor OS; (2) the
+  picture is read on its own task (`shape_loop`, 30 Hz while the position loop says the
+  pointer is over the target), never in the position loop: the first read in a process
+  takes 11 s (AppKit's connection to the window server; the second takes 200 µs), and hostd
+  pays it at start-up (`slopty_capture::warm_cursor`) beside the capture warm-up; (3) it is
+  sent only when it changed (`ShapeDedup`, a byte comparison — 18 KB for a 2× arrow, at
+  most every 33 ms, in practice on a cursor change), on the control stream because a
+  picture is bigger than a datagram and must arrive whole and in order, while the position
+  stays on the datagram channel; a read of `None` (hidden, or unsupported) sends nothing,
+  since the position channel already says whether to draw; (4) the representation read is
+  the smallest at or above the display's backing scale: a cursor image carries 1×, 2×, 5×
+  and 10× reps for the pointer-size setting, and the 10× one is 448 KB; (5) the client draws
+  the picture at its point size (pixels over the backing scale) with the hotspot on the
+  position, the same fixed size the arrow had, not scaled with the card — a pointer is not
+  part of the picture; (6) the pixel reader (`Layout`, `bgra_premultiplied`) takes every
+  32-bit CoreGraphics layout (both byte orders, alpha first or last, straight or
+  premultiplied, padding alpha) and turns it into the wire's premultiplied BGRA, and refuses
+  anything else rather than misread it. Tests: `slopty-capture::cursor::tests` (each layout,
+  straight alpha, padded rows, short data, rounding), the host's `shape_tests` (one send per
+  change, a blank read changes nothing), the proto golden `host_screen_cursor`, and headless
+  `the_hosts_cursor_picture_is_drawn_at_its_hotspot` (size and hotspot in points, short bytes
+  and `None` put the arrow back). Not done: hiding the client's own pointer over the card —
+  GPUI has no hidden cursor style; the two pointers sit a round trip apart.
+
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or
   closed and left up, stayed `Live` for the rest of the stream, and the receiver — which stops

@@ -197,7 +197,13 @@ P-frame from an acked LTR) → IDR only when no acked LTR exists. The NACK delay
 constant: it is a quarter of the transport's measured round trip, floored at 1 ms and capped at
 20 ms (`slopty_media::NackDelay`), so a loopback link repairs in a millisecond and a 40 ms one
 waits 10 ms rather than asking again for fragments still in flight. Cursor is a separate
-low-rate channel drawn client-side, so pointer latency is one RTT, not one video pipeline.
+low-rate channel drawn client-side, so pointer latency is one RTT, not one video pipeline:
+the position rides in `Cursor` datagrams (120 Hz, sent on change) and the picture on the
+control stream (`ScreenEvent::Cursor`, a `CursorShape` of premultiplied BGRA with its hotspot
+and backing scale), read by `slopty_capture::cursor_shape` from `NSCursor.currentSystemCursor`
+at 30 Hz while the host's pointer is over the target and sent only when it changed
+(`slopty_host::screen::ShapeDedup`); the client draws that picture with its hotspot on the
+position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives.
 
 **How much parity.** The host's `Redundancy` turns the receiver reports into the ratio the
 packetizer cuts each frame with: parity tracks twice the smoothed datagram loss over a 5 % floor,
@@ -334,7 +340,7 @@ control stream, so the host pastes what the client copied; the view remembers wh
 holds and skips the push when nothing changed. Writes the host makes for a client are not
 reported back by the poller.
 
-Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries),
+Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries, the cursor's picture),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
 retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `ReceiverReport`;
 `Redundancy` → parity ratio; `RateController` → encoder bitrate from the reports and the QUIC

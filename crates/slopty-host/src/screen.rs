@@ -34,7 +34,8 @@ use slopty_media::{
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
-    CaptureTarget, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState, VideoCodec,
+    CaptureTarget, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState,
+    VideoCodec,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -71,6 +72,18 @@ impl Queued {
 const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 /// Cursor ticks between re-reads of the target's bounds (10 Hz).
 const BOUNDS_EVERY: u64 = 12;
+/// How often the cursor's picture is read while the pointer is over the target (30 Hz). It
+/// goes to the client only when it changed.
+const SHAPE_PERIOD: Duration = Duration::from_millis(33);
+
+/// What a stream tells its owner outside the datagram path.
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// Capture ended (ScreenCaptureKit stopped it, or the cropped window closed).
+    Stopped(CaptureError),
+    /// The host's cursor picture changed while the pointer was over the target.
+    Cursor(CursorShape),
+}
 
 /// How long a window may not be served as a crop after the accessibility API says a window of
 /// its application went away, if the window list has not confirmed it by then.
@@ -759,6 +772,9 @@ struct Shared {
     /// window, and a swap to the window filter that the framework rejected leaves the crop
     /// running while this side believes otherwise. Set from the geometry tick.
     target_hidden: std::sync::atomic::AtomicBool,
+    /// The host's pointer is over the target, as the cursor loop last saw it; the shape loop
+    /// reads the cursor's picture only while it is.
+    pointer_over: std::sync::atomic::AtomicBool,
     /// `host_now_us()` until which frames are held on the accessibility API's word alone
     /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
@@ -1247,6 +1263,8 @@ pub struct ScreenStream {
     capture_config: CaptureConfig,
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
+    /// The task that reads the cursor's picture and reports a change.
+    shape: JoinHandle<()>,
     beat: JoinHandle<()>,
     /// The accessibility observer on the window's application, for a window target of a
     /// trusted host; `None` for a display, an untrusted process or an application that would
@@ -1291,17 +1309,21 @@ impl std::fmt::Debug for ScreenStream {
 
 impl ScreenStream {
     /// Resolve `target`, start capturing at `quality`, and return the `Opened` event to send.
-    /// Datagrams are queued on `out`; `on_stop` fires if ScreenCaptureKit ends the stream
-    /// (window closed, permission revoked).
+    /// Datagrams are queued on `out`; `on_event` hears [`StreamEvent::Stopped`] if ScreenCaptureKit
+    /// ends the stream (window closed, permission revoked).
     pub async fn open(
         id: StreamId,
         target: CaptureTarget,
         quality: Quality,
         out: mpsc::Sender<Queued>,
         budget: DatagramBudget,
-        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        on_event: impl Fn(StreamEvent) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
-        let on_stop: Arc<dyn Fn(CaptureError) + Send + Sync> = Arc::new(on_stop);
+        let on_event: Arc<dyn Fn(StreamEvent) + Send + Sync> = Arc::new(on_event);
+        let on_stop: Arc<dyn Fn(CaptureError) + Send + Sync> = {
+            let on_event = Arc::clone(&on_event);
+            Arc::new(move |e| on_event(StreamEvent::Stopped(e)))
+        };
         let t0 = Instant::now();
         let content = shareable().await?;
         let enumerated = t0.elapsed();
@@ -1322,6 +1344,7 @@ impl ScreenStream {
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
+            pointer_over: std::sync::atomic::AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
             filter_stalled: std::sync::atomic::AtomicBool::new(false),
             out,
@@ -1370,6 +1393,10 @@ impl ScreenStream {
         // round trips that have been measured at 90 ms, three beats' worth.
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), target, zoom, point_scale));
+        #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
+        #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
+        let backing = point_scale.round().clamp(1.0, 4.0) as u8;
+        let shape = tokio::spawn(shape_loop(Arc::clone(&shared), backing, Arc::clone(&on_event)));
         let hide_watch = hide_watch_for(id, target, &shared).await;
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
@@ -1392,6 +1419,7 @@ impl ScreenStream {
             capture_config,
             encoder_config,
             cursor,
+            shape,
             beat,
             hide_watch,
             injector,
@@ -1734,6 +1762,7 @@ impl ScreenStream {
     /// Stop capturing and tear down.
     pub async fn close(mut self) {
         self.cursor.abort();
+        self.shape.abort();
         self.beat.abort();
         drop(self.hide_watch.take());
         let (tx, rx) = oneshot::channel();
@@ -1862,6 +1891,7 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
             return;
         };
         let visible = rect.contains(px, py);
+        shared.pointer_over.store(visible, Ordering::Relaxed);
         let to_pixels = |v: f64| -> i32 {
             #[expect(clippy::cast_possible_truncation, reason = "clamped")]
             let p = (v * point_scale * zoom).round().clamp(-1.0e6, 1.0e6) as i32;
@@ -1882,6 +1912,76 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
             sample.2,
         );
         shared.push(datagram);
+    }
+}
+
+/// Read the cursor's picture at `SHAPE_PERIOD` while the pointer is over the target, and
+/// report each change through `on_event`. Its own task: the first read in a process takes
+/// seconds (`slopty_capture::warm_cursor` pays that at start-up), and a read must never
+/// hold the position loop.
+async fn shape_loop(
+    shared: Arc<Shared>,
+    backing: u8,
+    on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>,
+) {
+    let mut ticks = tokio::time::interval(SHAPE_PERIOD);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut sent = ShapeDedup::default();
+    while !shared.out.is_closed() {
+        ticks.tick().await;
+        if !shared.pointer_over.load(Ordering::Relaxed) {
+            continue;
+        }
+        let Ok(read) =
+            tokio::task::spawn_blocking(move || slopty_capture::cursor_shape(backing)).await
+        else {
+            return;
+        };
+        if let Some(shape) = sent.observe(read) {
+            on_event(StreamEvent::Cursor(shape));
+        }
+    }
+}
+
+/// Which cursor picture the client was last told, so one goes out only when it changed.
+///
+/// A read that says nothing (the cursor hidden, or the system not answering) changes
+/// nothing: the client keeps the last picture, and the position channel says whether to
+/// draw it.
+#[derive(Debug, Default)]
+pub struct ShapeDedup {
+    last: Option<CursorShape>,
+}
+
+impl ShapeDedup {
+    /// The picture to send for this reading, if any.
+    pub fn observe(&mut self, read: Option<CursorShape>) -> Option<CursorShape> {
+        let shape = read?;
+        if self.last.as_ref() == Some(&shape) {
+            return None;
+        }
+        self.last = Some(shape.clone());
+        Some(shape)
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    fn shape(px: u8) -> CursorShape {
+        CursorShape { w: 1, h: 1, hot_x: 0, hot_y: 0, bgra: vec![px, px, px, 255], scale: 2 }
+    }
+
+    #[test]
+    fn a_picture_goes_out_once_per_change_and_a_blank_read_changes_nothing() {
+        let mut dedup = ShapeDedup::default();
+        assert_eq!(dedup.observe(None), None, "nothing read yet, nothing to send");
+        assert_eq!(dedup.observe(Some(shape(1))), Some(shape(1)), "the first picture");
+        assert_eq!(dedup.observe(Some(shape(1))), None, "the same again is not news");
+        assert_eq!(dedup.observe(None), None, "a hidden or unreadable cursor keeps the last");
+        assert_eq!(dedup.observe(Some(shape(1))), None, "still the one the client has");
+        assert_eq!(dedup.observe(Some(shape(2))), Some(shape(2)), "a new picture");
     }
 }
 
@@ -1915,6 +2015,7 @@ mod tests {
             fps: std::sync::atomic::AtomicU16::new(60),
             cropped: std::sync::atomic::AtomicBool::new(true),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
+            pointer_over: std::sync::atomic::AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
             filter_stalled: std::sync::atomic::AtomicBool::new(false),
             out,

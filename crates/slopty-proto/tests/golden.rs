@@ -739,6 +739,20 @@ mod golden {
             }),
         );
         snap(
+            "host_screen_cursor",
+            &HostMsg::Screen(ScreenEvent::Cursor {
+                stream: StreamId(7),
+                shape: Some(slopty_proto::screen::CursorShape {
+                    w: 2,
+                    h: 1,
+                    hot_x: 1,
+                    hot_y: 0,
+                    bgra: vec![0, 0, 0, 255, 255, 255, 255, 128],
+                    scale: 2,
+                }),
+            }),
+        );
+        snap(
             "host_screen_rate",
             &HostMsg::Screen(ScreenEvent::Rate {
                 stream: StreamId(7),

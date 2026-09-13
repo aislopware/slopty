@@ -5,7 +5,7 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, listing};
+    use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, StreamEvent, listing};
     use slopty_proto::media::{Kind, MediaHeader, flags};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent};
     use tokio::sync::mpsc;
@@ -30,7 +30,11 @@ mod tests {
             quality,
             tx,
             DatagramBudget::new(),
-            |e| panic!("capture stopped: {e}"),
+            |e| {
+                if let StreamEvent::Stopped(e) = e {
+                    panic!("capture stopped: {e}");
+                }
+            },
         )
         .await
         .unwrap();
@@ -138,7 +142,9 @@ mod ghostty {
 mod crop_path {
     use std::time::Duration;
 
-    use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, WindowPath};
+    use slopty_host::screen::{
+        DATAGRAM_QUEUE, DatagramBudget, ScreenStream, StreamEvent, WindowPath,
+    };
     use slopty_proto::screen::{CaptureTarget, Quality};
     use tokio::sync::mpsc;
 
@@ -163,7 +169,9 @@ mod crop_path {
             tx,
             DatagramBudget::new(),
             move |e| {
-                let _receiver_gone = stopped_tx.try_send(e.to_string());
+                if let StreamEvent::Stopped(e) = e {
+                    let _receiver_gone = stopped_tx.try_send(e.to_string());
+                }
             },
         )
         .await

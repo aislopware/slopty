@@ -6,7 +6,7 @@ use slopty_agent::transcript::Tail;
 use slopty_core::{ClientId, SessionId, StreamId};
 use slopty_host::HostError;
 use slopty_host::screen::{
-    DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, listing,
+    DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, StreamEvent, listing,
 };
 use slopty_host::session::ClientSink;
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
@@ -781,9 +781,15 @@ impl Peer<'_> {
                 let id = StreamId(self.next_stream);
                 self.next_stream = self.next_stream.wrapping_add(1).max(1);
                 let out = self.out.clone();
-                let on_stop = move |e: slopty_capture::CaptureError| {
-                    let reason = e.to_string();
-                    let event = ScreenEvent::Closed { stream: id, reason };
+                let on_event = move |e: StreamEvent| {
+                    let event = match e {
+                        StreamEvent::Stopped(e) => {
+                            ScreenEvent::Closed { stream: id, reason: e.to_string() }
+                        }
+                        StreamEvent::Cursor(shape) => {
+                            ScreenEvent::Cursor { stream: id, shape: Some(shape) }
+                        }
+                    };
                     let _sent = out.try_send(HostMsg::Screen(event));
                 };
                 let opened = ScreenStream::open(
@@ -792,7 +798,7 @@ impl Peer<'_> {
                     quality,
                     self.datagrams.clone(),
                     self.budget.clone(),
-                    on_stop,
+                    on_event,
                 )
                 .await;
                 match opened {

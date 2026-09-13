@@ -1607,7 +1607,14 @@ impl CanvasView {
                     }
                 }
             }
-            ScreenEvent::Cursor { .. } | ScreenEvent::ListingChanged => {}
+            ScreenEvent::Cursor { stream, shape } => {
+                for view in self.screens.values() {
+                    if view.read(cx).stream() == stream {
+                        view.update(cx, |v, cx| v.set_cursor_shape(shape.clone(), cx));
+                    }
+                }
+            }
+            ScreenEvent::ListingChanged => {}
         }
         cx.notify();
     }

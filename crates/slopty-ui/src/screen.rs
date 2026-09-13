@@ -22,9 +22,10 @@ use gpui::{
     Autocapitalize, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
     Keystroke, LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextInputAction,
-    TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div, point, px, surface,
+    MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point, Render, RenderImage,
+    ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement as _, Styled as _, Task,
+    TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div,
+    point, px, size, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -32,8 +33,8 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput, ScreenRequest,
-    ScrollPhase, SourceState, VideoCodec,
+    CaptureTarget, CursorShape, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput,
+    ScreenRequest, ScrollPhase, SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
@@ -72,6 +73,48 @@ pub struct Opened {
     pub quality: Quality,
 }
 
+/// What is drawn at the host's pointer position: the client's own arrow until the host has
+/// said which cursor it shows, then that picture (`ScreenEvent::Cursor`).
+#[derive(Clone)]
+enum Pointer {
+    /// A drawn arrow, the same on every host.
+    Arrow,
+    /// The host's cursor picture, its size and hotspot in points.
+    Image {
+        /// Premultiplied BGRA, as GPUI keeps images.
+        image: Arc<RenderImage>,
+        /// Size in points (the picture's pixels over its backing scale).
+        size: Size<Pixels>,
+        /// The pixel that sits on the pointer position, in points from the top left.
+        hot: Point<Pixels>,
+    },
+}
+
+impl Pointer {
+    /// The host's cursor picture as a pointer, or the arrow when there is none or its bytes
+    /// do not fill its size.
+    fn from_shape(shape: Option<CursorShape>) -> Self {
+        let Some(shape) = shape else { return Self::Arrow };
+        let Some(buffer) =
+            image::RgbaImage::from_raw(u32::from(shape.w), u32::from(shape.h), shape.bgra)
+        else {
+            return Self::Arrow;
+        };
+        let scale = f32::from(shape.scale.max(1));
+        let image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
+        Self::Image {
+            image,
+            size: size(px(f32::from(shape.w) / scale), px(f32::from(shape.h) / scale)),
+            hot: point(px(f32::from(shape.hot_x) / scale), px(f32::from(shape.hot_y) / scale)),
+        }
+    }
+}
+
+/// Where a cursor picture goes: its hotspot on `at`.
+fn pointer_bounds(at: Point<Pixels>, size: Size<Pixels>, hot: Point<Pixels>) -> Bounds<Pixels> {
+    Bounds { origin: point(at.x - hot.x, at.y - hot.y), size }
+}
+
 /// One stream on screen.
 pub struct ScreenView {
     stream: StreamId,
@@ -86,6 +129,8 @@ pub struct ScreenView {
     quality: Quality,
     quality_changed: Instant,
     cursor: CursorState,
+    /// The host's cursor as it is drawn at that position.
+    pointer: Pointer,
     out: mpsc::Sender<ClientMsg>,
     theme: Theme,
     focus: FocusHandle,
@@ -357,6 +402,7 @@ impl ScreenView {
             quality,
             quality_changed: Instant::now(),
             cursor: CursorState::default(),
+            pointer: Pointer::Arrow,
             out,
             theme,
             focus: cx.focus_handle(),
@@ -440,6 +486,22 @@ impl ScreenView {
     /// The host's latest bitrate decision, shown in the overlay.
     pub const fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
         self.rate = Some((target_bps, verdict, capped));
+    }
+
+    /// The host said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
+    /// pointer from now on, or the arrow again for `None`.
+    pub fn set_cursor_shape(&mut self, shape: Option<CursorShape>, cx: &mut Context<Self>) {
+        self.pointer = Pointer::from_shape(shape);
+        cx.notify();
+    }
+
+    /// The host cursor picture's size and hotspot in points, when one is drawn.
+    #[cfg(test)]
+    const fn pointer_picture(&self) -> Option<(Size<Pixels>, Point<Pixels>)> {
+        match &self.pointer {
+            Pointer::Arrow => None,
+            Pointer::Image { size, hot, .. } => Some((*size, *hot)),
+        }
     }
 
     /// The host said whether its capture target is drawing. While it is not, the receiver stops
@@ -790,11 +852,16 @@ impl ScreenView {
         self.press(chord("c"), cx);
     }
 
-    /// The host's pointer as an arrow, in view coordinates.
+    /// The host's pointer in view coordinates: its own cursor picture when the host has sent
+    /// one, else a drawn arrow.
     fn cursor_overlay(&self) -> Option<impl IntoElement + use<>> {
         if !self.cursor.visible || self.latest.is_none() {
             return None;
         }
+        let picture = match &self.pointer {
+            Pointer::Arrow => None,
+            Pointer::Image { image, size, hot } => Some((Arc::clone(image), *size, *hot)),
+        };
         let w = f32::from(self.bounds.size.width).max(1.0);
         let h = f32::from(self.bounds.size.height).max(1.0);
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
@@ -808,6 +875,12 @@ impl ScreenView {
                 |_bounds, _window, _cx| {},
                 move |bounds, (), window, _cx| {
                     let origin = point(bounds.origin.x + px(cx_px), bounds.origin.y + px(cy_px));
+                    if let Some((image, size, hot)) = picture {
+                        let at = pointer_bounds(origin, size, hot);
+                        let _painted =
+                            window.paint_image(at, at, gpui::Corners::default(), image, 0, false);
+                        return;
+                    }
                     let arrow = |inset: f32, scale: f32| {
                         let mut path = PathBuilder::fill();
                         let at = |x: f32, y: f32| {
@@ -1043,7 +1116,7 @@ impl EntityInputHandler for ScreenView {
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
         let (x, y) = (self.cursor.x as f32 / sw * w, self.cursor.y as f32 / sh * h);
         let origin = point(self.bounds.origin.x + px(x), self.bounds.origin.y + px(y));
-        Some(Bounds::new(origin, gpui::size(px(1.0), px(16.0))))
+        Some(Bounds::new(origin, size(px(1.0), px(16.0))))
     }
 
     fn character_index_for_point(
@@ -1183,6 +1256,35 @@ mod tests {
             ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
         });
         (view, rx)
+    }
+
+    /// The host's cursor picture replaces the drawn arrow at the pointer, its hotspot on
+    /// the position and its size in points; bytes that do not fill it, or `None`, put the
+    /// arrow back.
+    #[gpui::test]
+    fn the_hosts_cursor_picture_is_drawn_at_its_hotspot(cx: &mut gpui::TestAppContext) {
+        let (view, _rx) = view(cx);
+        assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "the arrow to begin");
+        let shape = |bgra: Vec<u8>| CursorShape { w: 4, h: 2, hot_x: 2, hot_y: 1, bgra, scale: 2 };
+        view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(vec![0; 32])), cx));
+        let picture = view.read_with(cx, |v, _| v.pointer_picture());
+        assert_eq!(
+            picture,
+            Some((size(px(2.0), px(1.0)), point(px(1.0), px(0.5)))),
+            "pixels over the backing scale"
+        );
+        let at = pointer_bounds(
+            point(px(10.0), px(20.0)),
+            size(px(2.0), px(1.0)),
+            point(px(1.0), px(0.5)),
+        );
+        assert_eq!(at.origin, point(px(9.0), px(19.5)), "the hotspot sits on the pointer");
+        assert_eq!(at.size, size(px(2.0), px(1.0)));
+        view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(vec![0; 8])), cx));
+        assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "short bytes: the arrow");
+        view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(vec![0; 32])), cx));
+        view.update(cx, |v, cx| v.set_cursor_shape(None, cx));
+        assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
     }
 
     /// An instant past the quality cooldown.

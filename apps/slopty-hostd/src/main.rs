@@ -223,6 +223,11 @@ async fn main() -> Result<()> {
             Err(e) => tracing::debug!(error = %e, "capture warm-up failed"),
         }
     });
+    // So is AppKit's first look at the cursor (seconds); the shape loop must find it warm.
+    tokio::task::spawn_blocking(|| {
+        let took = slopty_capture::warm_cursor();
+        tracing::debug!(ms = took.as_millis(), "cursor warmed up");
+    });
     if !slopty_input::can_post() {
         tracing::warn!(
             "no post-event (Accessibility) access: remote-window input will be dropped; \
