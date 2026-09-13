@@ -533,7 +533,9 @@ exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stre
 `Done`) and flags `attention` on the transitions worth a sound. A block is a ledger of the
 calls waiting on the human (`tool_use_id`s), so a concurrent call finishing beside a pending
 permission does not release it; and a hook naming another agent session (a nested `claude -p`
-inherits the terminal's session) is dropped while the tracker is busy. `AgentEvent.detail` says what
+inherits the terminal's session) is dropped while the tracker is busy. An Esc interrupt fires
+no hook; the transcript's `[Request interrupted by user]` record takes the agent to `Idle`
+instead. `AgentEvent.detail` says what
 the agent wants: the tool call awaiting permission, the question it asked, the elicitation's
 message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload;
 when a payload has none of these but names a transcript, the daemon reads the JSONL tail —

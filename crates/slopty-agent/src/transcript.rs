@@ -202,14 +202,31 @@ pub fn record_progress(record: &Value) -> Option<Progress> {
     let message = record.get("message")?;
     let content = message.get("content")?;
     match record.get("type").and_then(Value::as_str)? {
-        // A prompt, or the result of a tool the agent called: either way the turn is running.
-        "user" => Some(Progress {
-            status: AgentStatus::Working,
-            detail: user_prompt(content).map(|t| crate::truncate(&t)),
-        }),
+        // A prompt, or the result of a tool the agent called: either way the turn is running —
+        // unless it is the record Claude Code writes when the human pressed Esc, which ends
+        // the turn with no `Stop` hook and is the one thing only the transcript can say.
+        "user" => {
+            let prompt = user_prompt(content);
+            if prompt.as_deref().is_some_and(is_interrupt) {
+                return Some(Progress {
+                    status: AgentStatus::Idle,
+                    detail: Some("interrupted".to_owned()),
+                });
+            }
+            Some(Progress {
+                status: AgentStatus::Working,
+                detail: prompt.map(|t| crate::truncate(&t)),
+            })
+        }
         "assistant" => assistant_progress(message, content),
         _ => None,
     }
+}
+
+/// The user record Claude Code writes on Esc: "[Request interrupted by user]" or
+/// "[Request interrupted by user for tool use]".
+fn is_interrupt(text: &str) -> bool {
+    text.starts_with("[Request interrupted by user")
 }
 
 /// The human's own words in a user record, if it holds any (a record of nothing but tool
@@ -1235,6 +1252,21 @@ mod tests {
         // A tool result is the turn continuing, with nothing to say for itself.
         let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
         assert_eq!(progress(result), Some(Progress { status: AgentStatus::Working, detail: None }));
+        // Esc: the turn is over without a Stop; the transcript is the only witness.
+        for text in ["[Request interrupted by user]", "[Request interrupted by user for tool use]"]
+        {
+            let esc = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            );
+            assert_eq!(
+                progress(&esc),
+                Some(Progress {
+                    status: AgentStatus::Idle,
+                    detail: Some("interrupted".to_owned())
+                }),
+                "{text}"
+            );
+        }
         // `end_turn` is the turn handing control back, with the last line it said.
         let done = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"All green.\n\nDone: two edits."}]}}"#;
         assert_eq!(

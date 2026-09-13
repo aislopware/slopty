@@ -406,14 +406,25 @@ impl Tracker {
     }
 
     /// Fold in what the session's transcript says the turn is doing. Ignored once a hook has
-    /// spoken: the hooks report blocking, which the transcript never does.
+    /// spoken — the hooks report blocking, which the transcript never does — except for an
+    /// interrupt: Esc ends the turn with no `Stop` hook, and the transcript's
+    /// "[Request interrupted by user]" record is the only signal of it, so it takes a busy
+    /// hooked agent to `Idle` (quietly: the human did it) and clears what it was waiting on.
     pub fn observe_progress(
         &mut self,
         session: SessionId,
         progress: &Progress,
     ) -> Option<AgentEvent> {
         if self.hooked {
-            return None;
+            let interrupted = progress.status == AgentStatus::Idle
+                && matches!(
+                    self.status,
+                    AgentStatus::Working | AgentStatus::Tool { .. } | AgentStatus::Blocked(_)
+                );
+            if !interrupted {
+                return None;
+            }
+            self.blocks.clear();
         }
         self.set(session, progress.status.clone(), progress.detail.clone(), AgentSource::Transcript)
     }
@@ -1154,6 +1165,35 @@ mod tests {
             t.status(),
             &AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() })
         );
+    }
+
+    /// Esc ends a turn with no hook at all: the transcript's interrupt record takes a hooked
+    /// agent from working, a tool or a block to idle without an alert, and nothing else the
+    /// transcript says gets past the hooks.
+    #[test]
+    fn an_interrupted_turn_goes_idle_from_the_transcript() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.apply(
+            sid,
+            &hook(r#"{"session_id":"abc","hook_event_name":"UserPromptSubmit","prompt":"go"}"#),
+        );
+        t.apply(sid, &hook(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"b1"}"#));
+        let idle = Progress { status: AgentStatus::Idle, detail: Some("interrupted".to_owned()) };
+        let e = t.observe_progress(sid, &idle).expect("interrupted");
+        assert_eq!(e.status, AgentStatus::Idle);
+        assert_eq!(e.detail.as_deref(), Some("interrupted"));
+        assert!(!e.attention, "the human did it");
+        assert!(t.blocks.is_empty(), "the permission it waited on is gone with the turn");
+        assert_eq!(t.observe_progress(sid, &idle), None, "already idle");
+
+        let working = Progress { status: AgentStatus::Working, detail: Some("x".to_owned()) };
+        assert_eq!(t.observe_progress(sid, &working), None, "the hooks still decide the rest");
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"again"}"#))
+            .expect("the next turn");
+        assert_eq!(e.status, AgentStatus::Working);
+        assert_eq!(e.source, AgentSource::Hook);
     }
 
     #[test]

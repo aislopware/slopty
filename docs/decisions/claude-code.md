@@ -885,3 +885,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stale hooks) — Slopty's transcript follower and the foreground-process probe already end a
   session whose hooks stopped. Tests: `a_block_stands_while_a_call_beside_it_finishes`,
   `a_nested_run_does_not_take_over_a_busy_agent`.
+
+- ✅ **An Esc interrupt is read from the transcript** (2026-09-15). Esc ends a turn with no
+  hook at all — no `Stop`, no `PostToolUseFailure` — so a hooked agent stayed "working" (or
+  blocked on the permission the human had just dismissed) until its next prompt, the pinned
+  spinner slop-desk recorded (`docs/knowledge-from-slop-desk.md` §5). Claude Code does write
+  a user record `[Request interrupted by user]` (or `… for tool use`) to the transcript,
+  and the daemon already tails that file. Ruled: `transcript::progress` reads that record as
+  `Idle` with the detail "interrupted", and `Tracker::observe_progress` lets exactly that
+  through the hook gate — a hooked agent that is working, in a tool or blocked goes idle,
+  quietly (no attention: the human did it), and its block ledger is cleared; every other
+  transcript verdict stays behind the hooks as before. Not done: a wall-clock watchdog; the
+  transcript is a witness, a timer would be a guess. Tests: transcript `progress` (both
+  markers), tracker `an_interrupted_turn_goes_idle_from_the_transcript`.
