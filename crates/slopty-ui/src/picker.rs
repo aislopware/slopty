@@ -534,7 +534,12 @@ pub fn ago(modified_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::matches;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use slopty_core::WindowId;
+
+    use super::*;
 
     #[test]
     fn the_filter_takes_every_word_in_any_order_and_case() {
@@ -542,5 +547,177 @@ mod tests {
         assert!(matches("build", "fix the build, 2 d ago · /w/slopty"));
         assert!(matches("SLOPTY fix", "fix the build, 2 d ago · /w/slopty"));
         assert!(!matches("fix tests", "fix the build, 2 d ago · /w/slopty"));
+    }
+
+    fn window(id: u32, app: &str, title: &str, on_screen: bool) -> WindowInfo {
+        WindowInfo {
+            id: WindowId(id),
+            app: app.to_owned(),
+            bundle_id: None,
+            title: title.to_owned(),
+            x: 0.0,
+            y: 0.0,
+            w: 1200.0,
+            h: 800.0,
+            display: 1,
+            on_screen,
+        }
+    }
+
+    /// The listing is sessions first (in the canvas's order), then the host's displays and
+    /// its on-screen windows by app then title, an untitled window under its app's name; a
+    /// window off screen (minimised, another Space) is not offered. The filter keeps the rows
+    /// whose text holds every word; ↑/↓ wrap over what is visible and ↩ emits the chosen
+    /// row's pick, with the ids untouched by the filter.
+    #[gpui::test]
+    fn sessions_then_screens_in_order_filtered_and_stepped(cx: &mut gpui::TestAppContext) {
+        let (s1, s2) = (SessionId::new(), SessionId::new());
+        let sessions = vec![
+            SessionRow {
+                session: s1,
+                title: "fix the build".to_owned(),
+                status: Some("waiting on you".to_owned()),
+                needs_you: true,
+            },
+            SessionRow { session: s2, title: "zsh".to_owned(), status: None, needs_you: false },
+        ];
+        let windows = vec![
+            window(30, "Xcode", "slopty.xcodeproj", true),
+            window(20, "Safari", "Rust docs", true),
+            window(21, "Safari", "", true),
+            window(40, "Music", "Music", false),
+        ];
+        let displays =
+            vec![DisplayInfo { id: 2, w: 1728.0, h: 1117.0, scale: 2.0, hz: 120.0, hdr: true }];
+        let picker =
+            cx.new(|cx| WindowPicker::new(sessions, windows, displays, Theme::default(), cx));
+        let picked: Rc<RefCell<Vec<PickerEvent>>> = Rc::default();
+        let sink = Rc::clone(&picked);
+        cx.update(|cx| {
+            cx.subscribe(&picker, move |_, ev: &PickerEvent, _| sink.borrow_mut().push(ev.clone()))
+                .detach();
+        });
+
+        let lines = |p: &WindowPicker| {
+            p.visible()
+                .into_iter()
+                .map(|r| (r.id, r.line.primary, r.line.secondary, r.line.hot))
+                .collect::<Vec<_>>()
+        };
+        picker.read_with(cx, |p, _| {
+            assert_eq!(
+                lines(p),
+                vec![
+                    (("session", 0), "fix the build".to_owned(), "waiting on you".to_owned(), true),
+                    (("session", 1), "zsh".to_owned(), String::new(), false),
+                    (
+                        ("display", 0),
+                        "Display 2".to_owned(),
+                        "1728×1117 @2× 120Hz".to_owned(),
+                        false
+                    ),
+                    (("window", 0), "Safari".to_owned(), "Safari".to_owned(), false),
+                    (("window", 1), "Safari".to_owned(), "Rust docs".to_owned(), false),
+                    (("window", 2), "Xcode".to_owned(), "slopty.xcodeproj".to_owned(), false),
+                ]
+            );
+        });
+
+        // ↑ from the top wraps to the last row; ↩ picks it: the Xcode window at its size.
+        picker.update(cx, |p, cx| {
+            p.step(-1, cx);
+            p.pick(cx);
+        });
+        match picked.borrow_mut().pop() {
+            Some(PickerEvent::Pick {
+                target: CaptureTarget::Window(WindowId(30)),
+                size,
+                title,
+            }) => {
+                assert_eq!((size, title.as_str()), ((1200.0, 800.0), "slopty.xcodeproj"));
+            }
+            other => panic!("expected the Xcode window, got {other:?}"),
+        }
+
+        // The filter narrows to the rows holding every word and keeps their ids; the choice
+        // is clamped to what is left, and ↓ from the last visible row wraps to the first.
+        picker.update(cx, |p, cx| {
+            p.query = "safari docs".to_owned();
+            assert_eq!(p.visible().iter().map(|r| r.id).collect::<Vec<_>>(), vec![("window", 1)]);
+            p.query = "safari".to_owned();
+            p.selected = 0;
+            p.step(1, cx);
+            p.step(1, cx);
+            p.pick(cx);
+        });
+        match picked.borrow_mut().pop() {
+            Some(PickerEvent::Pick {
+                target: CaptureTarget::Window(WindowId(21)), title, ..
+            }) => {
+                assert_eq!(title, "Safari", "an untitled window is named after its app");
+            }
+            other => panic!("expected the untitled Safari window, got {other:?}"),
+        }
+        // A session row jumps; a display row picks the display at its point size.
+        picker.update(cx, |p, cx| {
+            p.query = String::new();
+            p.selected = 0;
+            p.pick(cx);
+            p.selected = 2;
+            p.pick(cx);
+            p.query = "nothing like this".to_owned();
+            p.step(1, cx);
+            p.pick(cx);
+        });
+        let events = picked.borrow();
+        assert_eq!(events.len(), 2, "no row, no pick: {events:?}");
+        assert!(matches!(&events[0], PickerEvent::Jump(s) if *s == s1), "{events:?}");
+        assert!(
+            matches!(
+                &events[1],
+                PickerEvent::Pick { target: CaptureTarget::Display(2), size, title }
+                    if *size == (1728.0, 1117.0) && title == "display 2"
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The resume form lists the conversations newest first as given, and a one-directory
+    /// list ends with the "Every directory" way out, which no filter hides; a whole-host list
+    /// has no such row.
+    #[gpui::test]
+    fn the_resume_form_keeps_its_way_out_under_any_filter(cx: &mut gpui::TestAppContext) {
+        let agent = |id: &str, title: &str| AgentSessionInfo {
+            id: id.to_owned(),
+            cwd: "/w/slopty".to_owned(),
+            title: title.to_owned(),
+            modified_ms: 0,
+        };
+        let scoped = cx.new(|cx| {
+            WindowPicker::resume(
+                vec![agent("a1", "fix the build"), agent("a2", "")],
+                Some("/w/slopty".to_owned()),
+                Theme::default(),
+                cx,
+            )
+        });
+        scoped.update(cx, |p, _| {
+            let ids = |p: &WindowPicker| p.visible().iter().map(|r| r.id).collect::<Vec<_>>();
+            assert_eq!(ids(p), vec![("agent", 0), ("agent", 1), ("everywhere", 0)]);
+            let rows = p.visible();
+            assert_eq!(rows[1].line.primary, "a2", "an untitled conversation shows its id");
+            assert!(rows[0].line.secondary.ends_with("· /w/slopty"), "{}", rows[0].line.secondary);
+            p.query = "build".to_owned();
+            assert_eq!(ids(p), vec![("agent", 0), ("everywhere", 0)]);
+            p.query = "zzz".to_owned();
+            assert_eq!(ids(p), vec![("everywhere", 0)]);
+            assert!(matches!(p.visible()[0].on_pick, PickerEvent::Everywhere));
+        });
+        let whole = cx.new(|cx| {
+            WindowPicker::resume(vec![agent("a1", "fix the build")], None, Theme::default(), cx)
+        });
+        whole.read_with(cx, |p, _| {
+            assert_eq!(p.visible().iter().map(|r| r.id).collect::<Vec<_>>(), vec![("agent", 0)]);
+        });
     }
 }

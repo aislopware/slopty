@@ -444,12 +444,15 @@ document synced through the host so every client sees the same canvas — item g
 and note text are host state; the camera `{x, y, zoom}` is per client, so panning and zoom on one
 client do not move another (`slopty-host::canvas` owns the document,
 `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⌥←→↑↓/⌘⇧F are the keyboard surface (bound in
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘Z/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⌥←→↑↓/⌘⇧F are the keyboard surface (bound in
 `Canvas && !Screen`: a focused remote window gets them all, ⌃Tab is the way back), the last
 one a find in every card (the palette lists the cards with hits, ↩ opens that card's find bar), the two before it
 walking the cards in reading order and the arrows to the nearest card in that direction
 (`step_towards`, the window managers' cone rule); a minimap in the corner
-shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
+shows every item and the viewport and scrubs the camera). ⌘W on an idle shell removes its
+card but keeps the session and the attached view for `UNDO_CLOSE` (5 s): ⌘Z, the palette's
+"Undo close" or the toast's button put the item back as it was (`close_shell`,
+`take_back`), else `forget_closed` sends the host `Close`. Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), its
 fenced blocks as the conversation's block element with "copy" and, given a shell, "run"
@@ -984,7 +987,10 @@ focus ring and the warn-tinted attention row, and gpui-kit's colours after a syn
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the host cursor from the cursor channel, forwards mouse, scroll
 and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and asks the host for
-a stream scale matching its painted width. When the host window changes size, hostd notices
+a stream scale matching its painted width. The pointer mapping (card point → stream pixel over
+the bounds the render recorded, press/release with clicks and modifiers, pixel vs line scroll
+with its phase, ⌘-scroll left to the canvas, moves off the picture dropped) is covered headless
+by `pointer_and_scroll_reach_the_host_in_stream_pixels`. When the host window changes size, hostd notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the canvas re-aspects
 the item. The other way round, letting go of a window card's grip sends `Resize` with the size
 the card now stands for (native pixels), hostd sets `AXSize` on the matched window off the

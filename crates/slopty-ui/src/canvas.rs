@@ -84,6 +84,8 @@ pub mod actions {
             AddWindow,
             /// Close the active item (terminates its session).
             CloseItem,
+            /// Put back the shell closed last, while its session still runs.
+            UndoClose,
             /// Zoom in about the viewport centre.
             ZoomIn,
             /// Zoom out about the viewport centre.
@@ -151,7 +153,7 @@ pub use actions::{
     CloseItem, FindEverywhere, FitAll, FocusNext, FocusPrev, LineDown, LineFirst, LineLast, LineUp,
     NewAgent, NewDrivenAgent, NewNote, NewTerminal, NewWorktreeAgent, NextAttention, NextCard,
     OpenPalette, PageDown, PageUp, PointOthers, PrevCard, RenameItem, ResumeAgent, ToggleMute,
-    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
+    ToggleStats, UndoClose, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -181,6 +183,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-n", NewNote, CTX),
         KeyBinding::new("cmd-o", AddWindow, CTX),
         KeyBinding::new("cmd-w", CloseItem, CTX),
+        KeyBinding::new("cmd-z", UndoClose, CTX),
         KeyBinding::new("cmd-=", ZoomIn, CTX),
         KeyBinding::new("cmd-shift-=", ZoomIn, CTX),
         KeyBinding::new("cmd--", ZoomOut, CTX),
@@ -248,6 +251,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("New note", Box::new(NewNote)),
         c("Add a window or display", Box::new(AddWindow)),
         c("Close item", Box::new(CloseItem)),
+        c("Undo close", Box::new(UndoClose)),
         c("Zoom in", Box::new(ZoomIn)),
         c("Zoom out", Box::new(ZoomOut)),
         c("Zoom to 100%", Box::new(ZoomReset)),
@@ -310,6 +314,9 @@ const SETTLE: Duration = Duration::from_millis(80);
 const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// How long another client's pointing stays on offer before it goes by itself.
 const POINT_FOR: Duration = Duration::from_secs(8);
+
+/// How long a closed shell can be taken back (⌘Z) before its session is closed for good.
+const UNDO_CLOSE: Duration = Duration::from_secs(5);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
 /// Size of a new note.
@@ -368,6 +375,23 @@ enum ToastKind {
     },
     /// A word to this client alone ("nobody else is here").
     Said(String),
+    /// A shell just closed: a button that takes it back, until [`UNDO_CLOSE`] passes.
+    Closed {
+        /// Which closing (`ClosedShell::seq`).
+        seq: u64,
+        /// The card's title as it was.
+        title: String,
+    },
+}
+
+/// A shell taken off the canvas whose session still runs, until [`UNDO_CLOSE`] passes or
+/// ⌘Z puts it back as it was.
+struct ClosedShell {
+    /// The item, to put back where it was.
+    item: CanvasItem,
+    session: SessionId,
+    /// Which closing, for the timer and the toast.
+    seq: u64,
 }
 
 struct Rename {
@@ -665,6 +689,10 @@ pub struct CanvasView {
     /// The toast at the top: another client's pointing on offer, or a word to this client,
     /// until a click or [`POINT_FOR`].
     toast: Option<Toast>,
+    /// Shells closed within the last [`UNDO_CLOSE`], oldest first; their views stay in
+    /// `terminals`, attached, so taking one back shows it as it was.
+    closed: Vec<ClosedShell>,
+    closed_seq: u64,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
     /// The camera zoom the last frame drew, and whether this frame's differs (a pinch, a
@@ -789,6 +817,8 @@ impl CanvasView {
             looked: None,
             following: None,
             toast: None,
+            closed: Vec::new(),
+            closed_seq: 0,
             look_pending: false,
             flight: None,
             zoom_drawn: None,
@@ -2331,7 +2361,9 @@ impl CanvasView {
     }
 
     /// Create views for terminal items whose session is alive; drop views whose item is gone.
+    /// A shell closed within [`UNDO_CLOSE`] has no item but keeps its view, attached.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
+        self.closed.retain(|c| self.sessions.contains_key(&c.session));
         let wanted: Vec<SessionId> = self
             .doc
             .items()
@@ -2339,6 +2371,7 @@ impl CanvasView {
                 ItemKind::Terminal { session } if !i.sleeping => Some(session),
                 _ => None,
             })
+            .chain(self.closed.iter().map(|c| c.session))
             .filter(|s| self.sessions.contains_key(s))
             .collect();
         for session in &wanted {
@@ -2362,9 +2395,10 @@ impl CanvasView {
                     TerminalViewEvent::Notification { title, body } => {
                         this.notify_program(sid, title, body, cx);
                     }
-                    TerminalViewEvent::Exited(_) | TerminalViewEvent::CloseConfirmed => {
+                    TerminalViewEvent::Exited(_) => {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
+                    TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
                     TerminalViewEvent::Title(_) => cx.notify(),
                     TerminalViewEvent::Cwd { path, repo } => {
                         this.session_moved(sid, path.clone(), repo.clone());
@@ -2927,7 +2961,7 @@ impl CanvasView {
                     .get(&session)
                     .is_some_and(|view| view.update(cx, TerminalView::ask_close));
                 if !asked {
-                    self.send(ClientMsg::Term { session, req: TermRequest::Close });
+                    self.close_shell(session, cx);
                 }
             }
             ItemKind::Terminal { .. }
@@ -2939,6 +2973,67 @@ impl CanvasView {
             }
         }
         cx.notify();
+    }
+
+    /// Take a live shell off the canvas, its session kept for [`UNDO_CLOSE`]: ⌘Z (or the
+    /// toast) puts it back as it was, with its view; otherwise the host closes it then. A
+    /// shell without a view has nothing to keep and closes at once.
+    fn close_shell(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let item = self.doc.item_for_session(session).cloned();
+        let (Some(item), true) = (item, self.terminals.contains_key(&session)) else {
+            self.send(ClientMsg::Term { session, req: TermRequest::Close });
+            return;
+        };
+        self.closed_seq = self.closed_seq.wrapping_add(1);
+        let seq = self.closed_seq;
+        let title = self.card_title(&item, cx);
+        self.closed.push(ClosedShell { item: item.clone(), session, seq });
+        self.propose(CanvasOp::Remove(item.id));
+        self.reconcile(cx);
+        self.show_toast_for(ToastKind::Closed { seq, title }, UNDO_CLOSE, cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UNDO_CLOSE).await;
+            let _gone = this.update(cx, |this, cx| this.forget_closed(seq, cx));
+        })
+        .detach();
+    }
+
+    /// [`UNDO_CLOSE`] passed for closing `seq`: the host closes the session and the view goes.
+    fn forget_closed(&mut self, seq: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
+        let closed = self.closed.remove(ix);
+        if self.sessions.contains_key(&closed.session) {
+            self.send(ClientMsg::Term { session: closed.session, req: TermRequest::Close });
+        }
+        self.terminals.remove(&closed.session);
+        if matches!(self.toast, Some(Toast { what: ToastKind::Closed { seq: s, .. }, .. }) if s == seq)
+        {
+            self.toast = None;
+        }
+        cx.notify();
+    }
+
+    /// ⌘Z: the shell closed last comes back where it was, active and focused, its session
+    /// untouched. Nothing to take back is nothing.
+    pub fn undo_close(&mut self, _: &UndoClose, _window: &mut Window, cx: &mut Context<Self>) {
+        self.take_back(None, cx);
+    }
+
+    /// Put back the closing `seq` (the toast's), or the latest.
+    fn take_back(&mut self, seq: Option<u64>, cx: &mut Context<Self>) {
+        let ix = match seq {
+            Some(seq) => self.closed.iter().position(|c| c.seq == seq),
+            None => self.closed.len().checked_sub(1),
+        };
+        let Some(ix) = ix else { return };
+        let closed = self.closed.remove(ix);
+        if matches!(self.toast, Some(Toast { what: ToastKind::Closed { .. }, .. })) {
+            self.toast = None;
+        }
+        tracing::debug!(session = %closed.session, item = %closed.item.id, "shell taken back");
+        self.propose(CanvasOp::Upsert(closed.item));
+        self.reconcile(cx);
+        self.reveal_session(closed.session, cx);
     }
 
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
@@ -3219,11 +3314,16 @@ impl CanvasView {
 
     /// Show `what` for [`POINT_FOR`]: a newer toast replaces it and restarts the clock.
     fn show_toast(&mut self, what: ToastKind, cx: &mut Context<Self>) {
+        self.show_toast_for(what, POINT_FOR, cx);
+    }
+
+    /// Show `what` for `during`: a newer toast replaces it and restarts the clock.
+    fn show_toast_for(&mut self, what: ToastKind, during: Duration, cx: &mut Context<Self>) {
         let seq = self.toast.as_ref().map_or(0, |t| t.seq).wrapping_add(1);
         self.toast = Some(Toast { seq, what });
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(POINT_FOR).await;
+            cx.background_executor().timer(during).await;
             let _gone = this.update(cx, |this, cx| {
                 if this.toast.as_ref().is_some_and(|t| t.seq == seq) {
                     this.toast = None;
@@ -3377,6 +3477,21 @@ impl CanvasView {
                         this.toast = None;
                         this.go_to(id, cx);
                     }))
+                    .into_any_element()
+            }
+            ToastKind::Closed { seq, title } => {
+                let seq = *seq;
+                let pill = style(div().id("closed"))
+                    .debug_selector(|| "closed".to_owned())
+                    .role(Role::Button)
+                    .aria_label(format!("closed {title}, take it back"))
+                    .bg(hsla(theme.surfaces.accent))
+                    .text_color(hsla(theme.surfaces.accent_fg))
+                    .cursor_pointer()
+                    .child(SharedString::from(format!("closed {title}")))
+                    .child(div().opacity(0.8).child("· take back ⌘Z"));
+                tab_stop(pill, theme.surfaces.accent_fg)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)))
                     .into_any_element()
             }
             ToastKind::Said(text) => style(div().id("said"))
@@ -4435,6 +4550,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::close_item))
+            .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
@@ -5445,7 +5561,99 @@ mod tests {
         cx.simulate_keystrokes("cmd-w");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        assert_eq!(closes(&drain(&mut rx)), 1, "\u{21a9} closes it");
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Remove(_)))),
+            "\u{21a9} takes the card off the canvas: {sent:?}"
+        );
+        assert_eq!(closes(&sent), 0, "the session waits for a change of mind");
+        cx.executor().advance_clock(UNDO_CLOSE);
+        cx.run_until_parked();
+        assert_eq!(closes(&drain(&mut rx)), 1, "then the host closes it");
+    }
+
+    /// ⌘W on an idle shell takes its card off the canvas but leaves its session running for
+    /// five seconds; ⌘Z (or the toast's button) within them puts the card back as it was,
+    /// with the same view, active and focused. Once they pass the host closes the session,
+    /// the view goes, and ⌘Z has nothing to take back.
+    #[gpui::test]
+    fn a_closed_shell_can_be_taken_back_for_five_seconds(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let session = SessionId::new();
+        let id = host_opens(&view, cx, session, me, SHELL, 1);
+        assert!(terminal_focused(&view, cx, session));
+        let first = view.read_with(cx, |c, _| c.terminal(session).cloned().unwrap());
+        let closes = |sent: &[ClientMsg]| {
+            sent.iter()
+                .filter(|m| {
+                    matches!(m, ClientMsg::Term { session: s, req: TermRequest::Close } if *s == session)
+                })
+                .count()
+        };
+        let upserts = |sent: &[ClientMsg]| {
+            sent.iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Canvas(CanvasOp::Upsert(item)) => Some(item.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        drain(&mut rx);
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Remove(i)) if *i == id)),
+            "{sent:?}"
+        );
+        assert_eq!(closes(&sent), 0, "the session is kept");
+        view.read_with(cx, |c, _| {
+            assert!(c.items().iter().all(|i| i.id != id), "the card is off the canvas");
+            assert!(c.terminal(session).is_some(), "its view stays, attached");
+        });
+        assert!(cx.debug_bounds("closed").is_some(), "the toast offers to take it back");
+
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        let back = upserts(&sent);
+        assert_eq!(back.len(), 1, "{sent:?}");
+        assert_eq!((back[0].id, back[0].rect), (id, SHELL), "back where it was");
+        assert_eq!(closes(&sent), 0);
+        view.read_with(cx, |c, _| {
+            assert_eq!(c.active_item(), Some(id));
+            assert!(c.terminal(session).is_some_and(|v| *v == first), "the same view");
+        });
+        assert!(terminal_focused(&view, cx, session), "and the keyboard is in it");
+        assert!(cx.debug_bounds("closed").is_none(), "the toast went with the undo");
+
+        // The toast's button takes it back too.
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        drain(&mut rx);
+        let toast = cx.debug_bounds("closed").expect("the toast again");
+        cx.simulate_click(toast.center(), Modifiers::default());
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert_eq!(upserts(&sent).len(), 1, "{sent:?}");
+        assert_eq!(closes(&sent), 0);
+
+        // Five seconds after a close, the host closes the session and nothing comes back.
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        drain(&mut rx);
+        cx.executor().advance_clock(UNDO_CLOSE);
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert_eq!(closes(&sent), 1, "{sent:?}");
+        assert!(view.read_with(cx, |c, _| c.terminal(session).is_none()), "the view went");
+        assert!(cx.debug_bounds("closed").is_none(), "and the toast");
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(upserts(&sent).is_empty(), "nothing to take back: {sent:?}");
     }
 
     /// A shell command that ran long and ended in an item the human is not on badges its
@@ -6613,7 +6821,7 @@ mod tests {
         assert!(
             sent.iter().any(|m| matches!(
                 m,
-                ClientMsg::Term { session, req: TermRequest::Close } if *session == a
+                ClientMsg::Canvas(CanvasOp::Remove(id)) if *id == first
             )),
             "{sent:?}"
         );

@@ -195,3 +195,13 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   simulator run, in parallel. Ruling: a nextest test group `coreaudio` (`max-threads = 1`)
   holds the two tests that open a `Player`, with a 60 s slow timeout, and the worker test
   waits 45 s for the player. Neither test measures the open; the wait is for the machine.
+
+- ✅ **The remote window's pointer is tested through a laid-out window, against the bounds it
+  recorded** (2026-09-13). Line coverage put `slopty-ui::screen` at 65 %, with every pointer
+  and scroll path untested at the headless layer: the mapping from a card point to a stream
+  pixel needs the picture's bounds, which only a render records. Ruling: the test opens the view
+  with `add_window_view`, resizes and parks so the canvas prepaint stores the bounds, then reads
+  those bounds back and drives `simulate_mouse_*`/`simulate_event(ScrollWheelEvent)` at
+  fractions of them, asserting stream pixels as fractions of the stream size. Expectations are
+  never hard-coded window pixels: the letterboxed picture's size is the layout's business, and
+  a test that pinned it would break on any chrome change without a behaviour change.

@@ -264,4 +264,84 @@ mod tests {
         assert_eq!(key_code("/"), KeyCode::Slash);
         assert_eq!(key_code("wat"), KeyCode::Unidentified);
     }
+
+    /// Every letter, digit, function key and punctuation key names its own code, so a wrong
+    /// row in the table (a letter to its neighbour) cannot pass unnoticed; a key the host has
+    /// no code for is `Unidentified`, never a guess.
+    #[test]
+    fn every_typed_key_names_its_own_code() {
+        for c in 'a'..='z' {
+            let expect = c.to_ascii_uppercase().to_string();
+            assert_eq!(format!("{:?}", key_code(&c.to_string())), expect);
+            assert_eq!(format!("{:?}", key_code(&expect)), expect, "case does not matter");
+        }
+        for d in '0'..='9' {
+            assert_eq!(format!("{:?}", key_code(&d.to_string())), format!("Digit{d}"));
+        }
+        for n in 1..=20 {
+            assert_eq!(format!("{:?}", key_code(&format!("f{n}"))), format!("F{n}"));
+        }
+        let punctuation = [
+            ("-", KeyCode::Minus),
+            ("=", KeyCode::Equal),
+            ("[", KeyCode::BracketLeft),
+            ("]", KeyCode::BracketRight),
+            ("\\", KeyCode::Backslash),
+            (";", KeyCode::Semicolon),
+            ("'", KeyCode::Quote),
+            (",", KeyCode::Comma),
+            (".", KeyCode::Period),
+            ("/", KeyCode::Slash),
+            ("`", KeyCode::Backquote),
+            (" ", KeyCode::Space),
+            ("space", KeyCode::Space),
+            ("tab", KeyCode::Tab),
+            ("backspace", KeyCode::Backspace),
+            ("escape", KeyCode::Escape),
+            ("delete", KeyCode::Delete),
+            ("insert", KeyCode::Insert),
+            ("up", KeyCode::ArrowUp),
+            ("down", KeyCode::ArrowDown),
+            ("left", KeyCode::ArrowLeft),
+            ("right", KeyCode::ArrowRight),
+            ("home", KeyCode::Home),
+            ("end", KeyCode::End),
+            ("pagedown", KeyCode::PageDown),
+            ("capslock", KeyCode::CapsLock),
+        ];
+        for (name, code) in punctuation {
+            assert_eq!(key_code(name), code, "{name}");
+        }
+        for name in ["é", "!", "f21", "fn"] {
+            assert_eq!(key_code(name), KeyCode::Unidentified, "{name}");
+        }
+    }
+
+    /// Modifiers map one to one; a repeat is a repeat; a plain key's text is the layout's.
+    #[test]
+    fn modifiers_and_repeats_ride_on_the_event() {
+        let all =
+            Modifiers { shift: true, alt: true, control: true, platform: true, function: true };
+        assert_eq!(mods(all), Mods::SHIFT | Mods::ALT | Mods::CTRL | Mods::SUPER);
+        assert_eq!(mods(Modifiers::default()), Mods::empty());
+        let shift_a = Keystroke {
+            modifiers: Modifiers { shift: true, ..Modifiers::default() },
+            key: "a".to_owned(),
+            key_char: Some("A".to_owned()),
+        };
+        let ev = key_event(9, &shift_a, true, true);
+        assert_eq!(ev.action, KeyAction::Repeat);
+        assert_eq!((ev.code, ev.mods, ev.consumed_mods), (KeyCode::A, Mods::SHIFT, Mods::SHIFT));
+        assert_eq!((ev.text.as_deref(), ev.unshifted, ev.seq), (Some("A"), Some('a'), 9));
+        assert!(!ev.composing && !ev.option_as_alt);
+        // ⌃ produces no text on macOS: nothing is consumed and the host encodes the control.
+        let ctrl_c = Keystroke {
+            modifiers: Modifiers { control: true, ..Modifiers::default() },
+            key: "c".to_owned(),
+            key_char: None,
+        };
+        let ev = key_event(10, &ctrl_c, false, true);
+        assert_eq!((ev.action, ev.text, ev.consumed_mods), (KeyAction::Press, None, Mods::empty()));
+        assert_eq!(ev.mods, Mods::CTRL);
+    }
 }

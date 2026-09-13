@@ -968,6 +968,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   by setting), `a_busy_shell_closes_only_when_confirmed` (canvas: no `Close` until the
   view says so).
 
+- ✅ **A closed shell can be taken back for five seconds** (2026-09-13). The bar above
+  guards a running command; an idle shell still went on ⌘W, with its history, its
+  directory and whatever was half-typed. ghostty keeps a closed surface for
+  `undo-timeout` (5 s) and ⌘Z brings it back; Warp and Chrome reopen a closed tab. Ruling:
+  the canvas takes the card off the document (`CanvasOp::Remove`, so every client sees it
+  go) but sends no `Close`; the session and the view stay (`reconcile` keeps a closed
+  shell's view attached, so the picture is the one the human left) for `UNDO_CLOSE`
+  (5 s), during which ⌘Z, "Undo close" in the palette, or the toast's button (`closed
+  <title> · take back ⌘Z`) upserts the item as it was, active and focused. When the time
+  passes the host is sent `Close` and the view is dropped. A shell whose program exited
+  closes at once (nothing to take back), and so does every other card kind. The stack is
+  per client and holds every close within the window, newest taken back first; a session
+  the host reports gone leaves it. Tests: `a_closed_shell_can_be_taken_back_for_five_seconds`
+  (canvas: ⌘W removes and keeps, ⌘Z and the toast put back the same view at the same
+  rect, the clock passing sends `Close` and empties the stack).
+
 - ✅ **A `133;C` on its own is a frame** (2026-09-13). App e2e run 343 timed out waiting for
   `sleep 6` to badge its shell: the client saw the command start only when it ended
   (`elapsed` 76 ms for a six-second sleep), so nothing was slow and nothing was badged. The
