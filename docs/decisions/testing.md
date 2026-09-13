@@ -187,3 +187,11 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   editing the developer's `~/.claude`. The pill retires after one click, so a second *click* is
   not reachable through the UI; idempotence is asserted against the file the daemon actually
   wrote (`install_at` → `Unchanged`, bytes identical).
+
+- ✅ **The two CoreAudio openers run one at a time** (2026-09-13). Gate 341's only failure
+  was `a_worker_reassembles_nacks_reports_and_stops_with_the_connection` timing out after 20 s
+  waiting for the player, in the same minute `slopty-codec`'s `player_starts_and_drains` took
+  47 s: both had just opened CoreAudio's first client of the session, right after an iOS
+  simulator run, in parallel. Ruling: a nextest test group `coreaudio` (`max-threads = 1`)
+  holds the two tests that open a `Player`, with a 60 s slow timeout, and the worker test
+  waits 45 s for the player. Neither test measures the open; the wait is for the machine.

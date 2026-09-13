@@ -514,6 +514,8 @@ pub struct Behaviour {
     pub option_as_alt: OptionAsAlt,
     /// Closing a terminal whose command is still running asks first.
     pub confirm_close: bool,
+    /// ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ edit the shell's line as the Mac's text fields do.
+    pub natural_editing: bool,
     /// What a remote window or display stream asks the host for.
     pub stream: StreamPrefs,
 }
@@ -529,6 +531,7 @@ impl Default for Behaviour {
             scroll_multiplier: 100,
             option_as_alt: OptionAsAlt::False,
             confirm_close: true,
+            natural_editing: true,
             stream: StreamPrefs::default(),
         }
     }

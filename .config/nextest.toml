@@ -37,3 +37,13 @@ slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }
 filter = 'package(slopty-hostd) & test(/path_flap_/)'
 slow-timeout = { period = "120s", terminate-after = 4, grace-period = "15s" }
 threads-required = "num-test-threads"
+
+# CoreAudio's first client on a fresh session takes seconds (~7 s, and past 20 s right after an
+# iOS simulator run); the two tests that open a player must not both be that client at once.
+[test-groups.coreaudio]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = '(package(slopty-codec) & test(player_starts_and_drains)) | (package(slopty-client) & test(a_worker_reassembles_nacks))'
+test-group = 'coreaudio'
+slow-timeout = { period = "60s", terminate-after = 2, grace-period = "5s" }

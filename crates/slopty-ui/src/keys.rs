@@ -167,9 +167,57 @@ pub fn key_event(seq: u64, keystroke: &Keystroke, repeat: bool, alt_is_alt: bool
     }
 }
 
+/// What ghostty's macOS "natural text editing" keybinds send for `keystroke`.
+///
+/// ⌘← `^A`, ⌘→ `^E`, ⌘⌫ `^U`, ⌥← `ESC b`, ⌥→ `ESC f`, and ⌥⌫ `ESC DEL` (backward-kill-word,
+/// which ghostty leaves to its encoder under option-as-alt); `None` for any other chord.
+pub fn natural_editing(keystroke: &Keystroke) -> Option<&'static [u8]> {
+    let m = keystroke.modifiers;
+    if m.control || m.shift || m.function || (m.platform == m.alt) {
+        return None;
+    }
+    match (m.platform, keystroke.key.as_str()) {
+        (true, "left") => Some(b"\x01"),
+        (true, "right") => Some(b"\x05"),
+        (true, "backspace") => Some(b"\x15"),
+        (false, "left") => Some(b"\x1bb"),
+        (false, "right") => Some(b"\x1bf"),
+        (false, "backspace") => Some(b"\x1b\x7f"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The six chords and their bytes; anything else (another key, a third modifier, both
+    /// modifiers, none) is not one of them.
+    #[test]
+    fn natural_editing_keys() {
+        let chord = |platform: bool, alt: bool, shift: bool, key: &str| Keystroke {
+            modifiers: Modifiers { platform, alt, shift, ..Modifiers::default() },
+            key: key.to_owned(),
+            key_char: None,
+        };
+        assert_eq!(natural_editing(&chord(true, false, false, "left")), Some(&b"\x01"[..]));
+        assert_eq!(natural_editing(&chord(true, false, false, "right")), Some(&b"\x05"[..]));
+        assert_eq!(natural_editing(&chord(true, false, false, "backspace")), Some(&b"\x15"[..]));
+        assert_eq!(natural_editing(&chord(false, true, false, "left")), Some(&b"\x1bb"[..]));
+        assert_eq!(natural_editing(&chord(false, true, false, "right")), Some(&b"\x1bf"[..]));
+        assert_eq!(
+            natural_editing(&chord(false, true, false, "backspace")),
+            Some(&b"\x1b\x7f"[..])
+        );
+        assert_eq!(natural_editing(&chord(true, false, false, "up")), None, "⌘↑ is a prompt step");
+        assert_eq!(natural_editing(&chord(true, false, true, "left")), None, "⌘⇧← selects");
+        assert_eq!(natural_editing(&chord(true, true, false, "left")), None, "⌘⌥← walks cards");
+        assert_eq!(
+            natural_editing(&chord(false, false, false, "left")),
+            None,
+            "← is the program's"
+        );
+    }
 
     /// With ⌥ as Alt the event carries the key without ⌥ and the flag, so the host prefixes
     /// an escape; otherwise the layout's symbol goes as typed, ⌥ consumed.

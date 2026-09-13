@@ -106,3 +106,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **`[terminal] confirm_close`** (2026-09-13): ghostty's `confirm-close-surface`, default
   on, on `Theme::behaviour`; ruled in decisions/terminal.md ("Closing a busy shell asks").
+
+- ✅ **`[terminal] natural_editing`** (2026-09-13): ghostty's macOS "natural text editing"
+  keybinds (⌘← ⌘→ ⌘⌫ ⌥← ⌥→, plus ⌥⌫) as one switch, default on, on `Theme::behaviour`;
+  ruled in decisions/terminal.md ("The line is edited with the Mac's keys").

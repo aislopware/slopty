@@ -989,3 +989,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the actor's frames reports the command running within a second of ↩, the cursor below
   it), and the scanner's `other_sequences_are_ignored`. The `pty read` trace stays: the
   bytes a real shell writes are the evidence every ruling in this section rests on.
+
+- ✅ **The line is edited with the Mac's keys** (2026-09-13, ghostty's macOS "natural text
+  editing" defaults). ⌘← and ⌘→ went up to the app as unbound chords and did nothing; ⌥←
+  and ⌥→ reached the host's encoder as `CSI 1;3 D/C`, which zsh, bash and fish bind to
+  nothing, so a word could not be stepped over without ⌥b/⌥f, which need option-as-alt.
+  Ruling: with `[terminal] natural_editing` on (the default) the view sends what ghostty's
+  macOS keybinds send, as raw bytes: ⌘← `^A`, ⌘→ `^E`, ⌘⌫ `^U`, ⌥← `ESC b`, ⌥→ `ESC f`,
+  and ⌥⌫ `ESC DEL` (readline's and zle's backward-kill-word; ghostty leaves that one to
+  its encoder, which sends it only with option-as-alt). They are taken after the search
+  field, the composer and a selection's ⇧-arrows have had their say, so nothing else moves;
+  a program under the alternate screen gets the same bytes, as under ghostty. Off, the
+  chords go where they went. Tests: `natural_editing_keys` (keys: the table, other chords
+  none), `the_macs_editing_keys_edit_the_line` (view: ⌘← is `^A` on the wire, ⌥⌫ `ESC DEL`,
+  off nothing), `terminal_keys` (settings).

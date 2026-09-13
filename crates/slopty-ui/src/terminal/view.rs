@@ -2941,17 +2941,33 @@ impl TerminalView {
                 _ => self.cancel_pending(cx),
             }
         }
-        // Cmd shortcuts belong to the app.
-        if event.keystroke.modifiers.platform {
-            tracing::debug!(session = %self.session, key = %event.keystroke.key, "cmd key passed up");
-            return;
-        }
         // Typing in the search field must never reach the program.
         if self
             .search
             .as_ref()
             .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window))
         {
+            return;
+        }
+        // The Mac's line-editing chords, sent as readline's bytes (ghostty's macOS "natural
+        // text editing" keybinds); the composer keeps its own.
+        if self.theme.behaviour.natural_editing
+            && !self.composer_focused(window, cx)
+            && let Some(bytes) = keys::natural_editing(&event.keystroke)
+        {
+            self.selection = None;
+            self.pin_blink();
+            if self.state.view_offset() != 0 {
+                self.state.scroll_to_bottom();
+            }
+            self.send(TermRequest::Raw(bytes.to_vec()));
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Cmd shortcuts belong to the app.
+        if event.keystroke.modifiers.platform {
+            tracing::debug!(session = %self.session, key = %event.keystroke.key, "cmd key passed up");
             return;
         }
         // Typing in the composer stays there; Esc and Control keys (⌃C above all) keep their
@@ -5782,6 +5798,40 @@ mod tests {
         ));
         assert!(cx.debug_bounds("conversation").is_none(), "the grid is back");
         assert!(view.read_with(cx, |v, _| v.conversation().is_none()));
+    }
+
+    /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes; with the setting off the
+    /// chords are not the terminal's (⌘← goes up to the app, ⌥⌫ to the encoder as a key).
+    #[gpui::test]
+    fn the_macs_editing_keys_edit_the_line(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let raw = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            let mut out = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ClientMsg::Term { req: TermRequest::Raw(bytes), .. } => out.push(bytes),
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        out.push(format!("key:{:?}", key.code).into_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            out
+        };
+        let _attach = raw(&mut rx);
+        cx.simulate_keystrokes("cmd-left");
+        cx.simulate_keystrokes("alt-backspace");
+        cx.simulate_keystrokes("alt-right");
+        assert_eq!(raw(&mut rx), [b"\x01".to_vec(), b"\x1b\x7f".to_vec(), b"\x1bf".to_vec()]);
+
+        view.update(cx, |view, cx| {
+            let mut theme = Theme::default();
+            theme.behaviour.natural_editing = false;
+            view.set_theme(theme, cx);
+        });
+        cx.simulate_keystrokes("cmd-left");
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(raw(&mut rx), [b"key:Backspace".to_vec()], "off: ⌘← passes up, ⌥⌫ is a key");
     }
 
     /// Whether the composer has the window's focus.

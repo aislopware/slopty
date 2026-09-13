@@ -119,6 +119,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
     theme.behaviour.confirm_close = settings.terminal.confirm_close;
+    theme.behaviour.natural_editing = settings.terminal.natural_editing;
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
@@ -325,6 +326,9 @@ mod tests {
         assert!(t.behaviour.confirm_close);
         s.terminal.confirm_close = false;
         assert!(!theme_for(&s, true).behaviour.confirm_close);
+        assert!(t.behaviour.natural_editing);
+        s.terminal.natural_editing = false;
+        assert!(!theme_for(&s, true).behaviour.natural_editing);
         assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
         s.terminal.hide_pointer_while_typing = false;
         s.terminal.bold_is_bright = true;

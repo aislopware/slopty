@@ -1155,7 +1155,7 @@ mod worker_tests {
         let router = h.router.clone();
         let routed = Arc::clone(&h.routed);
         let opus = packets.clone();
-        h.wait_for("the player", 20, |handle| {
+        h.wait_for("the player", 45, |handle| {
             seq += 1;
             routed.fetch_add(1, Ordering::Relaxed);
             router.route(

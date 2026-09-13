@@ -1128,9 +1128,9 @@ ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty
 `[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
 never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
 hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right |
-confirm_close` (the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the
-blink override, paste protection, the pointer hide, the multiplier, option-as-alt and the
-close confirmation on `Theme::behaviour`,
+confirm_close | natural_editing` (the ratio and bold-is-bright ride on `TerminalPalette`,
+copy-on-select, the blink override, paste protection, the pointer hide, the multiplier,
+option-as-alt, the close confirmation and the natural editing keys on `Theme::behaviour`,
 the last travelling on every `KeyEvent` to the host's encoder, the bell flag is
 read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change and takes a changed `muted`, see
