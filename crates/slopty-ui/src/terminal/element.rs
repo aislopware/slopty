@@ -156,19 +156,40 @@ struct Decoration {
     thickness: Pixels,
     /// A curly underline: GPUI draws the wave, at this position and thickness.
     wavy: bool,
+    /// Painted over the glyphs (a strikethrough) rather than under them (an underline, so
+    /// a descender crosses it instead of being cut by it).
+    over: bool,
+}
+
+/// Where a stroke sits relative to the glyphs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Layer {
+    /// Under the text: underlines, which descenders cross.
+    Under,
+    /// Over the text: strikethroughs.
+    Over,
 }
 
 /// Add one cell's worth of stroke, joining it to the run to its left when they match.
 ///
 /// A cell contributes at most three strokes (two for a double underline, one strikethrough),
 /// so the run this one continues, if any, is within the last few.
-fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line, wavy: bool) {
+fn stroke(
+    out: &mut Vec<Decoration>,
+    col: u16,
+    color: Hsla,
+    line: metrics::Line,
+    wavy: bool,
+    layer: Layer,
+) {
+    let over = layer == Layer::Over;
     let joins = |d: &&mut Decoration| {
         d.end == col
             && d.color == color
             && d.y == line.y
             && d.thickness == line.thickness
             && d.wavy == wavy
+            && d.over == over
     };
     if let Some(run) = out.iter_mut().rev().take(3).find(joins) {
         run.end = col.saturating_add(1);
@@ -181,7 +202,17 @@ fn stroke(out: &mut Vec<Decoration>, col: u16, color: Hsla, line: metrics::Line,
         y: line.y,
         thickness: line.thickness,
         wavy,
+        over,
     });
+}
+
+/// How many columns the cursor covers at `col` of `line`: two on a wide character (ghostty's
+/// `cursor_wide`), else one — a block over half a CJK glyph reads as a bug.
+fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
+    let wide = line
+        .and_then(|l| l.cells.get(usize::from(col)))
+        .is_some_and(|cell| cell.width == CellWidth::Wide);
+    if wide { 2 } else { 1 }
 }
 
 /// The command-block separator for a prompt-start row: the terminal foreground, faint, or
@@ -902,18 +933,18 @@ impl Element for TerminalElement {
                     if cell.style.underline != Underline::None {
                         let color = underline_color(&cell.style, palette, text);
                         let wavy = cell.style.underline == Underline::Curly;
-                        stroke(&mut decorations, col, color, grid.underline, wavy);
+                        stroke(&mut decorations, col, color, grid.underline, wavy, Layer::Under);
                         if cell.style.underline == Underline::Double {
                             // The second stroke sits one stroke's gap above the first.
                             let above = metrics::Line {
                                 y: grid.underline.y - grid.underline.thickness * 2.0,
                                 thickness: grid.underline.thickness,
                             };
-                            stroke(&mut decorations, col, color, above, false);
+                            stroke(&mut decorations, col, color, above, false, Layer::Under);
                         }
                     }
                     if cell.style.flags.contains(StyleFlags::STRIKETHROUGH) {
-                        stroke(&mut decorations, col, text, grid.strikethrough, false);
+                        stroke(&mut decorations, col, text, grid.strikethrough, false, Layer::Over);
                     }
                 }
                 // The selection paints over cell backgrounds and under the text.
@@ -1014,11 +1045,9 @@ impl Element for TerminalElement {
                 let x = origin.x + cell_width * f32::from(cursor.col);
                 let y = origin.y + line_height * f32::from(cursor.row);
                 let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
-                (
-                    Bounds::new(point(x, y), size(cell_width, line_height)),
-                    shape,
-                    hsla(palette.cursor),
-                )
+                let line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
+                let width = cell_width * f32::from(cursor_span(line, cursor.col));
+                (Bounds::new(point(x, y), size(width, line_height)), shape, hsla(palette.cursor))
             });
 
             // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
@@ -1160,13 +1189,18 @@ impl Element for TerminalElement {
                             cursor_bounds.origin.x,
                             cursor_bounds.origin.y + m.line_height - grid.cursor_thickness,
                         ),
-                        size(m.cell_width, grid.cursor_thickness),
+                        size(cursor_bounds.size.width, grid.cursor_thickness),
                     ),
                     color,
                 ),
                 CursorShape::BlockHollow => gpui::outline(cursor_bounds, color, BorderStyle::Solid),
             };
             window.paint_quad(quad);
+        }
+        // Underlines, under the glyphs so a descender crosses the line rather than being
+        // cut by it (ghostty draws them in the same order).
+        for row in &prepared.rows {
+            paint_decorations(window, &m, row, Layer::Under);
         }
         // The words: every glyph at the derived baseline, from the base-size shaping, at the
         // zoomed size. Nothing is shaped here and the word cache never sees the zoom. One
@@ -1197,23 +1231,9 @@ impl Element for TerminalElement {
                 }
             }
         });
-        // Underlines and strikethroughs, over the glyphs, where the font's metrics put them.
+        // Strikethroughs, over the glyphs, where the font's metrics put them.
         for row in &prepared.rows {
-            for deco in &row.decorations {
-                let x = m.origin.x + m.cell_width * f32::from(deco.start);
-                let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
-                if deco.wavy {
-                    let style = UnderlineStyle {
-                        thickness: deco.thickness,
-                        color: Some(deco.color),
-                        wavy: true,
-                    };
-                    window.paint_underline(point(x, row.y + deco.y), w, &style);
-                } else {
-                    let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
-                    window.paint_quad(fill(bounds, deco.color));
-                }
-            }
+            paint_decorations(window, &m, row, Layer::Over);
         }
         // The ⌘-hover link underline joins them, in the text colour.
         for row in &prepared.rows {
@@ -1256,6 +1276,23 @@ impl Element for TerminalElement {
 /// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
 const THUMB_CELLS: f32 = 0.6;
 const THUMB_MIN_ROWS: f32 = 1.5;
+
+/// Paint one row's decorations on `layer`, where the font's metrics put them.
+fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, layer: Layer) {
+    let over = layer == Layer::Over;
+    for deco in row.decorations.iter().filter(|d| d.over == over) {
+        let x = m.origin.x + m.cell_width * f32::from(deco.start);
+        let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
+        if deco.wavy {
+            let style =
+                UnderlineStyle { thickness: deco.thickness, color: Some(deco.color), wavy: true };
+            window.paint_underline(point(x, row.y + deco.y), w, &style);
+        } else {
+            let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
+            window.paint_quad(fill(bounds, deco.color));
+        }
+    }
+}
 
 /// The scrollbar's thumb over the grid's right edge: none without history. The track is the
 /// grid's height; the thumb's share of it is the screen's share of the whole (screen plus
@@ -1505,6 +1542,35 @@ mod tests {
             2,
             "a curly underline changes nothing: it is a decoration"
         );
+    }
+
+    /// The cursor covers both columns of a wide character and one of anything else, so a
+    /// block over a CJK glyph does not stop halfway through it.
+    #[test]
+    fn the_cursor_covers_a_wide_character_whole() {
+        let mut line = Line::from_text("a", 4, CellStyle::DEFAULT);
+        line.cells[1] = Cell::wide("字", CellStyle::DEFAULT);
+        line.cells[2] = Cell { width: CellWidth::SpacerTail, ..Cell::BLANK };
+        assert_eq!(cursor_span(Some(&line), 0), 1, "narrow");
+        assert_eq!(cursor_span(Some(&line), 1), 2, "the wide head");
+        assert_eq!(cursor_span(Some(&line), 2), 1, "its tail is a cell like any other");
+        assert_eq!(cursor_span(Some(&line), 9), 1, "past the line");
+        assert_eq!(cursor_span(None, 1), 1, "a row still being fetched");
+    }
+
+    /// Underlines go under the glyphs and strikethroughs over them, and a stroke joins only
+    /// a run on its own layer.
+    #[test]
+    fn underlines_lie_under_the_glyphs_and_strikethroughs_over() {
+        let line = metrics::Line { y: px(10.0), thickness: px(1.0) };
+        let color = Hsla::default();
+        let mut out = Vec::new();
+        stroke(&mut out, 0, color, line, false, Layer::Under);
+        stroke(&mut out, 1, color, line, false, Layer::Over);
+        stroke(&mut out, 1, color, line, false, Layer::Under);
+        assert_eq!(out.len(), 2, "each layer joins its own run");
+        assert_eq!((out[0].start, out[0].end, out[0].over), (0, 2, false));
+        assert_eq!((out[1].start, out[1].end, out[1].over), (1, 2, true));
     }
 
     #[test]

@@ -128,7 +128,8 @@ rest of a multi-line prompt, `Input`, `Output`; `input` is the column of the row
 (`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
 function from a face — advance, ascent, descent, line gap, and the underline/strikethrough
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
-underline, the strikethrough, the overline and the cursor. The face comes from the font's own
+underline, the strikethrough, the overline and the cursor (which spans both columns of a
+wide character). Underlines paint under the glyphs, strikethroughs over them. The face comes from the font's own
 tables through the fork's `TextSystem::font_metrics` (`hhea` line gap, `post` underline
 position and thickness; Core Text on both platforms), with ghostty's estimates only where a
 font says zero; the self-test dump reports it (`terminals[].face`). The element measures the

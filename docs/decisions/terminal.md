@@ -569,3 +569,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   placed glyphs (font, id, position, emoji, colour) — the shaped line is dropped after
   placing, so painting walks one flat vector. Test: element
   `a_wide_cluster_takes_two_cells_whatever_its_code_points` (CJK, emoji, VS16, ZWJ, flag).
+
+- ✅ **The cursor covers a wide character whole; underlines lie under the glyphs** (2026-09-15).
+  Two ghostty rules slop-desk had to relearn (`docs/knowledge-from-slop-desk.md` §1, §2) and
+  the element had not taken. (1) The block, hollow and underline cursors were one cell wide
+  on every cell, so over a CJK glyph or an emoji they stopped halfway through it; now the
+  cursor spans the columns of the cell under it (`cursor_span`: two for a `Wide` head, one
+  for anything else — ghostty's `cursor_wide`). (2) Underlines and strikethroughs were both
+  painted after the glyph layer, so a `g` or `p` on an underlined word was cut by the line.
+  Each `Decoration` now carries its `Layer`: underlines (single, double, curly, and the SGR
+  58 colour) paint before the glyphs so descenders cross them, strikethroughs after so they
+  stay over the ink; a stroke joins only a run on its own layer. Tests: element
+  `the_cursor_covers_a_wide_character_whole`,
+  `underlines_lie_under_the_glyphs_and_strikethroughs_over`.
