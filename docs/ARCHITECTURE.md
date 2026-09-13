@@ -912,7 +912,9 @@ focus ring and the warn-tinted attention row, and gpui-kit's colours after a syn
 and keys (including ⌘ chords the canvas does not bind) as `ScreenInput`, and asks the host for
 a stream scale matching its painted width. When the host window changes size, hostd notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the canvas re-aspects
-the item. It is also a text input (`EntityInputHandler`): on iOS a tap raises the soft
+the item. The other way round, letting go of a window card's grip sends `Resize` with the size
+the card now stands for (native pixels), hostd sets `AXSize` on the matched window off the
+runtime, and the same poll reports what the window took. It is also a text input (`EntityInputHandler`): on iOS a tap raises the soft
 keyboard and committed text goes to the host one key per character through
 `ScreenView::press` (press + release, armed ⌃/⌘ from the phone key bar applied); the bar over
 a window is esc, tab, ⌃, ⌘, arrows, `/`, copy, paste (⌘C/⌘V on the host, so the host's

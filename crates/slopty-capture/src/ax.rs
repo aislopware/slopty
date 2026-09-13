@@ -75,6 +75,43 @@ pub enum AxError {
     /// The watch thread ended before it reported.
     #[error("the accessibility watch thread ended before it was ready")]
     Thread,
+    /// The application lists no window with the target's frame and title.
+    #[error("the application lists no window matching the target")]
+    NoWindow,
+    /// The accessibility API refused to set an attribute (an `AXError` code).
+    #[error("accessibility attribute write failed with AXError {0}")]
+    Attribute(i32),
+}
+
+/// Give the window of the application `pid` that matches `target` the size in points.
+///
+/// Written through `kAXSizeAttribute`. The application applies its own limits (a minimum
+/// size, a fixed aspect), so the size it ends up with is read back from the window list, not
+/// assumed. Blocks for the accessibility round trips (a few milliseconds).
+pub fn resize_window(
+    pid: i32,
+    target: &TargetWindow,
+    width: f64,
+    height: f64,
+) -> Result<(), AxError> {
+    // SAFETY: the documented no-argument query; it takes and returns nothing owned.
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err(AxError::NotTrusted);
+    }
+    // SAFETY: the documented constructor for an application element; it returns +1.
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let window =
+        windows_of(&app).into_iter().find(|w| matches(w, target)).ok_or(AxError::NoWindow)?;
+    let mut size = CGSize::new(width, height);
+    // SAFETY: `size` outlives the call and is the type `AXValueType::CGSize` names
+    // (`AXValueCreate` copies it).
+    let value = unsafe { AXValue::new(AXValueType::CGSize, NonNull::from(&mut size).cast()) }
+        .ok_or(AxError::Attribute(0))?;
+    let attribute = CFString::from_str(SIZE_ATTRIBUTE);
+    // SAFETY: `window` is live and `value` is an `AXValue` of the type the attribute takes
+    // (`AXUIElementSetAttributeValue`).
+    let status = unsafe { window.set_attribute_value(&attribute, &value) };
+    if status == AXError::Success { Ok(()) } else { Err(AxError::Attribute(status.0)) }
 }
 
 /// A +1 reference to the watch thread's `CFRunLoop`, handed to the owner that stops it.

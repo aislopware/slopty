@@ -873,6 +873,23 @@ impl Peer<'_> {
                     tracing::debug!(client = %self.client, %stream, error = %e, "focus");
                 }
             }
+            ScreenRequest::Resize { stream, width, height } => {
+                let Some(asked) =
+                    self.screens.get(&stream).and_then(|s| s.resize_points(width, height))
+                else {
+                    tracing::debug!(client = %self.client, %stream, "resize: not a window stream");
+                    return;
+                };
+                let client = self.client;
+                // Off the runtime: a few accessibility round trips.
+                drop(tokio::task::spawn_blocking(move || {
+                    let (window, w, h) = asked;
+                    match slopty_host::screen::resize_window(window, w, h) {
+                        Ok(()) => tracing::debug!(%client, %stream, w, h, "window resized"),
+                        Err(e) => tracing::debug!(%client, %stream, error = %e, "resize"),
+                    }
+                }));
+            }
             ScreenRequest::Clipboard { text } => {
                 if self.screens.is_empty() || text.len() > MAX_CLIPBOARD_BYTES {
                     tracing::debug!(client = %self.client, bytes = text.len(), "clipboard refused");

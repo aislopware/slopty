@@ -211,6 +211,17 @@ pub enum ScreenRequest {
     },
     /// Raise/focus the window on the host.
     Focus(StreamId),
+    /// Give the streamed window this size on the host, in the stream's native pixels (what
+    /// `Opened` / `Geometry` report). A display stream ignores it; the host answers, when the
+    /// window did move, with a `Geometry` event from its geometry poll.
+    Resize {
+        /// Stream.
+        stream: StreamId,
+        /// Wanted width in native pixels.
+        width: u32,
+        /// Wanted height in native pixels.
+        height: u32,
+    },
     /// Put `text` on the host's pasteboard (sent ahead of a paste chord so the host pastes
     /// what the client copied). Text only, at most `MAX_CLIPBOARD_BYTES`.
     Clipboard {

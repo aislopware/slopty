@@ -708,6 +708,18 @@ mod golden {
     }
 
     #[test]
+    fn screen_resize() {
+        snap(
+            "client_screen_resize",
+            &ClientMsg::Screen(ScreenRequest::Resize {
+                stream: StreamId(7),
+                width: 1440,
+                height: 900,
+            }),
+        );
+    }
+
+    #[test]
     fn receiver_report_and_rate() {
         snap(
             "client_screen_report",

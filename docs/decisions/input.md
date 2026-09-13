@@ -84,3 +84,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ⌘ held) — the release does arrive from GPUI when the key goes up in this window, and a
   focus-loss sweep belongs with a sweep of `held` too. Test: headless
   `modifier_keys_go_to_the_host_as_they_move`.
+
+- ✅ **A window card's grip resizes the host window** (2026-09-13). Dragging a card's grip only
+  changed the card, and the next `Geometry` event snapped it back to the window's aspect;
+  the window itself could be resized only from the host. Ruling: on the grip's release the
+  canvas sends `ScreenRequest::Resize { stream, width, height }` (protocol 41) — the card's
+  new size over the scale it drew the window at when the drag began (its width over the
+  native pixels), less the title bar — for a window stream whose size changed; hostd turns
+  the pixels into points with the stream's `point_scale` and, off the runtime, sets
+  `kAXSizeAttribute` on the window the accessibility API lists with the frame and title the
+  window list gives it (`slopty_capture::resize_window`, the same match the hide watch uses;
+  the API has no window number). Nothing is assumed about the result: the application keeps
+  its own minimum size and aspect, the geometry poll reads the frame it settled on within
+  250 ms, and `follow_geometry` re-aspects the card to it. A display card asks nothing.
+  Not the alternatives: `CGEvent`-driven drags of the window's corner (a synthetic drag of
+  another app's resize edge is fragile and visible); an `AXPosition` move too (the user
+  pulled a size, not a place). Tests: proto golden `client_screen_resize`, canvas
+  `the_grip_asks_the_host_to_resize_the_window`.

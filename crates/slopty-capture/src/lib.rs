@@ -14,7 +14,7 @@ mod geometry;
 mod snapshot;
 mod stream;
 
-pub use ax::{AxError, HideWatch, TargetWindow, Went};
+pub use ax::{AxError, HideWatch, TargetWindow, Went, resize_window};
 pub use content::{Shareable, enumerate};
 pub use cursor::{AlphaAt, Layout, bgra_premultiplied, cursor_shape, warm_cursor};
 pub use geometry::{

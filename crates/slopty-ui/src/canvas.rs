@@ -3600,15 +3600,52 @@ impl CanvasView {
         let Some(drag) = self.drag.take() else { return };
         match drag {
             Drag::Pan { .. } | Drag::Minimap => {}
-            Drag::Move { id, .. } | Drag::Resize { id, .. } => {
+            Drag::Move { id, .. } => {
                 if let Some(item) = self.doc.get(id) {
                     let r = item.rect;
                     let rect = Rect { x: snap(r.x), y: snap(r.y), w: snap(r.w), h: snap(r.h) };
                     self.propose(CanvasOp::Place { id, rect });
                 }
             }
+            Drag::Resize { id, start, .. } => {
+                if let Some(item) = self.doc.get(id) {
+                    let r = item.rect;
+                    let rect = Rect { x: snap(r.x), y: snap(r.y), w: snap(r.w), h: snap(r.h) };
+                    self.propose(CanvasOp::Place { id, rect });
+                    self.resize_remote_window(id, start, rect, cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// The grip of a streamed window's card was let go: ask the host to give the window the
+    /// size the card now has, at the scale the card drew the window at when the drag began
+    /// (its width over the window's native pixels), so pulling a card twice as wide asks for
+    /// a window twice as wide. The host's answer comes back as a `Geometry` event and
+    /// [`Self::follow_geometry`] settles the card on the size the window really took.
+    fn resize_remote_window(&self, id: ItemId, start: Rect, rect: Rect, cx: &Context<Self>) {
+        let Some(view) = self.screens.get(&id).map(|v| v.read(cx)) else { return };
+        if !matches!(view.target(), CaptureTarget::Window(_)) {
+            return;
+        }
+        let (native_w, native_h) = view.size();
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        let per_pixel = start.w / native_w.max(1) as f32;
+        if per_pixel <= 0.0 {
+            return;
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped ≥ 1")]
+        let px = |units: f32| (units / per_pixel).round().max(1.0) as u32;
+        let (width, height) = (px(rect.w), px(rect.h - TITLE_H));
+        if (width, height) == (native_w, native_h) {
+            return;
+        }
+        self.send(ClientMsg::Screen(ScreenRequest::Resize {
+            stream: view.stream(),
+            width,
+            height,
+        }));
     }
 
     // ----- render --------------------------------------------------------------------------
@@ -4850,6 +4887,86 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(cx.active_idle_sleep_preventions(), 0, "a sleeping window lets go");
+    }
+
+    /// Letting go of a window card's grip asks the host for the window size the card now
+    /// stands for: the card's new size over the scale it drew the window at, less the title
+    /// bar. A card left at its size asks nothing; a display card never asks.
+    #[gpui::test]
+    fn the_grip_asks_the_host_to_resize_the_window(cx: &mut TestAppContext) {
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            view.set_animation(false);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+        cx.run_until_parked();
+        let open = |view: &Entity<CanvasView>,
+                    cx: &mut VisualTestContext,
+                    id: ItemId,
+                    kind: ItemKind,
+                    target: CaptureTarget,
+                    stream: StreamId| {
+            let item = CanvasItem {
+                id,
+                kind,
+                rect: Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 + TITLE_H },
+                z: 1,
+                group: None,
+                sleeping: false,
+                name: None,
+            };
+            view.update_in(cx, |c, _window, cx| {
+                let op = CanvasOp::Upsert(item);
+                c.apply_sync(CanvasSync::Delta { version: 1, by: me, op }, cx);
+                let opened = ScreenEvent::Opened {
+                    stream,
+                    target,
+                    codec: slopty_proto::screen::VideoCodec::Hevc,
+                    width: 1280,
+                    height: 800,
+                    scale: 2.0,
+                    hdr: false,
+                };
+                c.screen_event(opened, cx);
+            });
+            cx.run_until_parked();
+        };
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| -> Vec<(StreamId, u32, u32)> {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Screen(ScreenRequest::Resize { stream, width, height }) => {
+                        Some((stream, width, height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let window = ItemId::new();
+        let wid = slopty_core::WindowId(9);
+        let kind = ItemKind::Window { window: wid };
+        open(&view, cx, window, kind, CaptureTarget::Window(wid), StreamId(1));
+        let start = Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 + TITLE_H };
+        let wider = Rect { w: 960.0, h: 500.0 + TITLE_H, ..start };
+        view.update(cx, |c, cx| c.resize_remote_window(window, start, wider, cx));
+        assert_eq!(
+            resizes(&mut rx),
+            vec![(StreamId(1), 1920, 1000)],
+            "1.5× as wide, 1.25× as tall"
+        );
+        view.update(cx, |c, cx| c.resize_remote_window(window, start, start, cx));
+        assert!(resizes(&mut rx).is_empty(), "the same size asks nothing");
+
+        let display = ItemId::new();
+        let kind = ItemKind::Display { display: 2 };
+        open(&view, cx, display, kind, CaptureTarget::Display(2), StreamId(2));
+        view.update(cx, |c, cx| c.resize_remote_window(display, start, wider, cx));
+        assert!(resizes(&mut rx).is_empty(), "a display is not resized");
     }
 
     /// An agent at work keeps the device awake (the human is waiting on it); an agent that

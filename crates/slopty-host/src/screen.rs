@@ -112,6 +112,12 @@ pub enum ScreenError {
     /// Event injection.
     #[error(transparent)]
     Input(#[from] InputError),
+    /// The accessibility API would not resize the window.
+    #[error(transparent)]
+    Resize(#[from] slopty_capture::AxError),
+    /// The window is gone from the window list.
+    #[error("the window is gone")]
+    WindowGone,
     /// A callback-based framework call never completed.
     #[error("screen pipeline closed")]
     Closed,
@@ -1732,6 +1738,22 @@ impl ScreenStream {
         Ok(self.injector.focus()?)
     }
 
+    /// What a client's resize to `(width, height)` native pixels asks of the host: the window
+    /// and the size in points, for [`resize_window`] off the runtime. A display stream asks
+    /// nothing.
+    #[must_use]
+    pub fn resize_points(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Option<(slopty_core::WindowId, f64, f64)> {
+        let CaptureTarget::Window(id) = self.target else { return None };
+        if self.point_scale <= 0.0 || width == 0 || height == 0 {
+            return None;
+        }
+        Some((id, f64::from(width) / self.point_scale, f64::from(height) / self.point_scale))
+    }
+
     /// Fold in a receiver report: LTR acks feed the encoder, loss feeds the parity ratio, and
     /// loss, queueing, stalls and the QUIC path (`path`) drive the bitrate. Returns the
     /// controller's decision when this report completed a decision window.
@@ -1775,6 +1797,24 @@ impl ScreenStream {
         let stats = self.stats();
         tracing::info!(stream = %self.id, ?stats, "screen stream closed");
     }
+}
+
+/// Set a host window's size in points through the accessibility API.
+///
+/// The window is matched by the frame and title the window list gives it (the API has no
+/// window number; see `slopty_capture::ax`). Blocking: call it off the runtime. The stream's
+/// geometry poll sees the new frame within its period and tells the client with a `Geometry`
+/// event.
+pub fn resize_window(
+    window: slopty_core::WindowId,
+    width: f64,
+    height: f64,
+) -> Result<(), ScreenError> {
+    let pid = slopty_capture::window_owner_pid(window).ok_or(ScreenError::WindowGone)?;
+    let bounds = slopty_capture::window_bounds(window).ok_or(ScreenError::WindowGone)?;
+    let title = slopty_capture::window_title(window);
+    let target = slopty_capture::TargetWindow { bounds, title };
+    Ok(slopty_capture::resize_window(pid, &target, width, height)?)
 }
 
 /// Put a window target's application under the accessibility watch, off the runtime (the
