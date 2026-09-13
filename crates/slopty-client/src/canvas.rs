@@ -774,6 +774,13 @@ mod tests {
         // the union is centred both ways.
         assert!(close(union.x, GAP) && close(union.w, vp.0 - inset), "{union:?}");
         assert!(close(union.y + union.h / 2.0, vp.1 / 2.0), "{union:?}");
+        // Taller than wide: the height is the tighter side, less a gap top and bottom.
+        let mut cam = Camera::default();
+        cam.fit([Rect { x: 0.0, y: 0.0, w: 100.0, h: 1000.0 }], vp);
+        let tall = cam.to_screen(Rect { x: 0.0, y: 0.0, w: 100.0, h: 1000.0 });
+        assert!(close(cam.zoom, (vp.1 - inset) / 1000.0), "{cam:?}");
+        assert!(close(tall.y, GAP) && close(tall.h, vp.1 - inset), "{tall:?}");
+        assert!(close(tall.x + tall.w / 2.0, vp.0 / 2.0), "{tall:?}");
         // Zoom is a fit, never a blow-up: a small union sits at 1:1 in the middle.
         let mut cam = Camera::default();
         cam.fit([Rect { x: 10.0, y: 20.0, w: 200.0, h: 100.0 }], vp);
