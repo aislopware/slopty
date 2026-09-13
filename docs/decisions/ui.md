@@ -48,6 +48,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the check now also accepts a local branch that sits on the new upstream and replays the
   fork's patches by subject, in order. Stable 1.98.1, every tool floor and the objc2 family
   were already at their latest; nightly rustfmt moved to 2026-09-11.
+  2026-09-13: rebased onto zed main `7960b2a7c9` (2026-09-12, 8 commits), fork head
+  `1d2b4bb500`. Upstream grew `Platform::on_system_sleep` and
+  `PlatformWindow::{visibility, on_visibility_change}` (`WindowVisibility`, so an occluded
+  window is not asked for frames); the iOS backend now answers them — visible from
+  `willEnterForeground` to `didEnterBackground`, only transitions reach the callback, and
+  system sleep is a no-op as on the web (fork commit `1d2b4bb500`). gpui-kit was at upstream
+  head; `vendor/ghostty` moved 5 commits to ghostty main `5252b193c` (translations and a
+  translate-c build refactor, no C API change: the regenerated bindings are byte-identical) with
+  the binding fork re-pinned at `e69a909`. Standing order from the same day: every coding
+  session starts with `cargo xtask upstream check` (sync what is behind), `rustup update`,
+  `cargo update -w` and the tool versions (`docs/DEV.md`).
 
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,

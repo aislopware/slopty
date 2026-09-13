@@ -9,6 +9,9 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 `slopty`) and gpui-kit from `aislopware/gpui-kit` (branch `slopty`) as rev-pinned git dependencies.
 
 ## Dev loop
+- Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever
+  is behind (the three forks and `vendor/ghostty`), `rustup update`, `cargo update -w`, and
+  `cargo binstall -y <tool>` for any gate tool `cargo info <tool>` shows behind.
 - `cargo xtask setup` installs tools (binstall) and initialises submodules.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
@@ -16,7 +19,7 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
-- `cargo xtask upstream check` shows how far the GPUI and gpui-kit forks are behind upstream
+- `cargo xtask upstream check` shows how far the GPUI, gpui-kit and libghostty forks are behind upstream
   (bases in `xtask/upstream.toml`; the gate warns past 7 days); `cargo xtask upstream sync`
   rebases the forks in `.research/` under the main checkout, build-checks, pushes them
   (`SSH_AUTH_SOCK` on the signing agent first) and moves the `Cargo.lock` pins, stopping on
