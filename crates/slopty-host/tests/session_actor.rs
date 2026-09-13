@@ -421,6 +421,44 @@ mod actor {
         session.close();
     }
 
+    /// A restored session (a checkpoint from the last host) tells its first attach the
+    /// program's colours and the directory the replay carried, ahead of the frame.
+    #[tokio::test]
+    async fn a_restored_session_tells_the_first_attach_what_the_replay_said() {
+        let mut e = slopty_engine::GhosttyEngine::new(slopty_engine::EngineConfig {
+            size: size(40, 6),
+            scrollback_lines: 100,
+        })
+        .unwrap();
+        slopty_engine::VtEngine::write(
+            &mut e,
+            b"\x1b]7;file:///tmp\x1b\\\x1b]11;#282c34\x1b\\hello",
+        );
+        let checkpoint = e.checkpoint().unwrap();
+        let (session, mut child, _tap) =
+            start_tapped(&["/bin/sh", "-c", "read x; exit 0"], checkpoint);
+        let a = ClientId::new();
+        let (tx_a, mut rx_a) = mpsc::channel(64);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        let (events, screen) = wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        let frame = events.iter().position(|e| matches!(e, TermEvent::Frame(_)));
+        let colors = events
+            .iter()
+            .position(|e| matches!(e, TermEvent::Colors(c) if c.bg == Some([0x28, 0x2c, 0x34])));
+        assert!(colors.is_some() && colors < frame, "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, TermEvent::Cwd { path, .. } if path == "/tmp")),
+            "{events:?}"
+        );
+        assert!(text(&screen).contains("hello"), "{}", text(&screen));
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+    }
+
     /// The opener drives even when another client attaches first.
     #[tokio::test]
     async fn reserved_driver_beats_the_first_attach() {

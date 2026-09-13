@@ -269,13 +269,14 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     )?;
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
-    let _simulator_env = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)
+    let simulator = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)
         .then(|| -> Result<_> {
             let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
             let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
             Ok((
-                sh.push_env("SLOPTY_SIM_UDID", udid),
+                sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
                 sh.push_env("SLOPTY_SIM_BUNDLE_ID", crate::ios::BUNDLE_ID),
+                udid,
             ))
         })
         .transpose()?;
@@ -294,6 +295,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         if step(title.trim(), &command).is_err() {
             failed.push(title);
         }
+    }
+    if let Some((_, _, udid)) = &simulator {
+        // A simulator left booted keeps CoreAudio busy long after: the client's audio player
+        // then takes tens of seconds to open and the screen worker's test times out in the
+        // next gate (gate 307, 2026-09-15).
+        cmd!(sh, "xcrun simctl shutdown {udid}").ignore_status().quiet().run()?;
     }
     if failed.is_empty() {
         println!(

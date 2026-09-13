@@ -200,7 +200,10 @@ connection, which is the only one ptyd accepts taps from) and replaces the ring 
 modes, every retained row, margins, cursor): right after adopting, then 500 ms after the last
 output (deferred while the output stands inside an escape sequence) or once 1 MiB has been
 tapped. `Attach` returns the checkpoint and the ring, and the new host's engine replays them in
-that order, so the screen, the scrollback and the title survive a hostd restart or crash. A bare
+that order, so the screen, the scrollback, the directory and the program's colour changes (the
+checkpoint carries them as the OSC sequences that made them, never a palette dump) survive a
+hostd restart or crash; what the replay reports is kept for the first attach, not broadcast or
+answered. A bare
 program name the daemon cannot find on its own `PATH` runs through the user's login shell,
 interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
 

@@ -791,6 +791,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   of the program's, so a theme swap on the driver does not re-send it. Not taken: a diff per
   change (smaller, but attach needs the whole set anyway) and a change callback in the fork (a
   polling read per chunk is cheaper than a binding patch to carry).
+  Found on the way (2026-09-15): the checkpoint's `with_palette(true)` had libghostty's
+  formatter write all 256 entries as OSC 4 sets, so a restored session (hostd restart, ptyd
+  replay) would have reported the previous driver's ANSI 0–15 as the program's changes and
+  every client would have painted them over its theme for good. The checkpoint now carries
+  the program's changes as the sequences that made them (`colour_sets`) and no palette dump;
+  test `a_checkpoint_carries_the_programs_colours_not_the_drivers`. And the actor now reads
+  what the replay said at construction instead of at the first output: the title, the
+  directory (the checkpoint's OSC 7) and the colours are kept for the first attach, while the
+  replay's bells, notifications, clipboard writes and query answers are dropped — the last
+  host delivered them, and an answer written now would land in a shell that is not asking.
+  Test `a_restored_session_tells_the_first_attach_what_the_replay_said`.
 
 - ✅ **A running command survives a reflow** (2026-09-15). App e2e run 298 lost the "done"
   badge of a `sleep 6` whose prompt had come back (second flake of that test; run 287 was the

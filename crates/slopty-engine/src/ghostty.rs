@@ -242,7 +242,10 @@ impl GhosttyEngine {
             .with_format(Format::Vt)
             .with_unwrap(false)
             .with_trim(false)
-            .with_palette(true)
+            // Not the palette: the formatter writes all 256 entries as OSC 4 sets, which would
+            // come back as the program's changes over whatever the next driver paints with.
+            // The program's own colour changes are written below.
+            .with_palette(false)
             .with_modes(true)
             .with_scrolling_region(true)
             // Not tab stops: emitting them (`CSI 3 g`, then `CSI n G` + `ESC H` per stop) leaves
@@ -260,7 +263,8 @@ impl GhosttyEngine {
             .with_charsets(true);
         let mut formatter = Formatter::new(&self.term, options)?;
         let bytes = formatter.format_alloc(None)?;
-        let mut out = Vec::with_capacity(bytes.len().saturating_add(64));
+        let mut out = colour_sets(&self.overrides);
+        out.reserve(bytes.len().saturating_add(64));
         if self.on_alt {
             // No history behind the alternate screen: nothing to scroll back into place.
             out.extend_from_slice(&bytes);
@@ -1151,6 +1155,22 @@ fn set_colors(term: &mut Terminal<'_, '_>, colors: &TermColors) -> Result<(), En
     }
     term.set_default_color_palette(Some(palette))?;
     Ok(())
+}
+
+/// The program's colour changes as the sequences that made them (OSC 10/11/12, OSC 4), so a
+/// checkpoint replays them and nothing else about the colours.
+fn colour_sets(set: &ColorOverrides) -> Vec<u8> {
+    let mut out = Vec::new();
+    let rgb = |[r, g, b]: [u8; 3]| format!("rgb:{r:02x}/{g:02x}/{b:02x}");
+    for (code, color) in [(10, set.fg), (11, set.bg), (12, set.cursor)] {
+        if let Some(color) = color {
+            out.extend_from_slice(format!("\x1b]{code};{}\x1b\\", rgb(color)).as_bytes());
+        }
+    }
+    for &(index, color) in &set.palette {
+        out.extend_from_slice(format!("\x1b]4;{index};{}\x1b\\", rgb(color)).as_bytes());
+    }
+    out
 }
 
 /// What the program changed over the defaults (OSC 4/10/11/12): each current colour that
@@ -2282,6 +2302,44 @@ mod checkpoint_tests {
         let total = u32::try_from(e.total_lines().unwrap()).unwrap();
         let (_start, lines) = e.lines(e.oldest_line(), total).unwrap();
         lines.iter().map(|l| l.text().trim_end().to_owned()).collect()
+    }
+
+    /// A checkpoint replays the program's colour changes and nothing else about the colours:
+    /// the driver's palette is the next driver's business, so a restored engine must not
+    /// report it as the program's.
+    #[test]
+    fn a_checkpoint_carries_the_programs_colours_not_the_drivers() {
+        let colors = |e: &mut GhosttyEngine| -> Vec<ColorOverrides> {
+            e.drain_events()
+                .into_iter()
+                .filter_map(|ev| match ev {
+                    EngineEvent::Colors(c) => Some(c),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut a = engine(12, 3, 100);
+        a.set_colors(&slopty_theme::TerminalPalette::LIGHT.wire()).unwrap();
+        a.write(b"plain\r\n");
+        let mut b = engine(12, 3, 100);
+        let checkpoint = a.checkpoint().unwrap();
+        b.write(&checkpoint);
+        assert!(colors(&mut b).is_empty(), "a light driver's palette is not a program's change");
+        assert_eq!(all_text(&b), all_text(&a));
+        a.write(b"\x1b]11;#282c34\x1b\\\x1b]12;#ffffff\x1b\\\x1b]4;1;#e06c75;200;#123456\x1b\\");
+        let _seen = colors(&mut a);
+        let checkpoint = a.checkpoint().unwrap();
+        let mut c = engine(12, 3, 100);
+        c.write(&checkpoint);
+        assert_eq!(
+            colors(&mut c),
+            vec![ColorOverrides {
+                fg: None,
+                bg: Some([0x28, 0x2c, 0x34]),
+                cursor: Some([0xff; 3]),
+                palette: vec![(1, [0xe0, 0x6c, 0x75]), (200, [0x12, 0x34, 0x56])],
+            }]
+        );
     }
 
     #[test]

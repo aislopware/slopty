@@ -323,6 +323,23 @@ impl Actor {
         if !start.backlog.is_empty() {
             engine.write(&start.backlog);
         }
+        // What the replay said is state, not news: the last host delivered the bells, the
+        // notifications, the clipboard writes and the query answers already (an answer written
+        // now would land in a shell that is not asking). The title, the directory and the
+        // program's colours are what the first attach is told.
+        let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
+        for ev in engine.drain_events() {
+            match ev {
+                EngineEvent::Title(t) => title = Some(t),
+                EngineEvent::Cwd(c) => cwd = Some(c),
+                EngineEvent::Colors(c) => program_colors = c,
+                EngineEvent::PtyWrite(_)
+                | EngineEvent::Bell
+                | EngineEvent::Notification { .. }
+                | EngineEvent::ClipboardWrite { .. } => {}
+            }
+        }
+        let repo = cwd.as_deref().and_then(crate::repo::root_of_str);
         let master = Arc::new(PtyMaster::new(start.master)?);
         Ok(Self {
             id: start.id,
@@ -331,10 +348,10 @@ impl Actor {
             rx,
             viewers: Vec::new(),
             driver: None,
-            title: None,
-            cwd: None,
-            program_colors: ColorOverrides::default(),
-            repo: None,
+            title,
+            cwd,
+            program_colors,
+            repo,
             exited: None,
             written_seq: 0,
             ack_seq: 0,
