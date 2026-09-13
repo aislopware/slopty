@@ -856,6 +856,13 @@ impl CanvasView {
         self.propose(CanvasOp::Place { id, rect });
     }
 
+    /// `size` cut down to what fits this viewport at zoom 1: a card this client opens is
+    /// phone-sized on a phone, its default size everywhere larger.
+    fn fitted(&self, size: (f32, f32)) -> (f32, f32) {
+        let Some((max_w, max_h)) = self.viewport_max() else { return size };
+        (size.0.min(max_w), size.1.min(max_h))
+    }
+
     /// The largest item that fits this viewport at zoom 1 with a `GAP` margin.
     fn viewport_max(&self) -> Option<(f32, f32)> {
         let (_, vp) = self.viewport;
@@ -1998,7 +2005,9 @@ impl CanvasView {
     /// Put a window/display item on the canvas; `reconcile` opens its stream.
     fn add_screen_item(&mut self, target: CaptureTarget, size: (f32, f32), title: String) {
         let (mut w, mut h) = (size.0.max(160.0), size.1.max(120.0));
-        let shrink = (MAX_PICKED.0 / w).min(MAX_PICKED.1 / h).min(1.0);
+        // Its own shape, no larger than the cap and, on a phone, than the viewport.
+        let (max_w, max_h) = self.fitted(MAX_PICKED);
+        let shrink = (max_w / w).min((max_h - TITLE_H) / h).min(1.0);
         w = snap(w * shrink);
         h = snap(h.mul_add(shrink, TITLE_H));
         let rect = self.doc.free_slot((w, h));
@@ -2470,7 +2479,7 @@ impl CanvasView {
     /// ⌘⇧N: an empty note in the next free slot, revealed and focused right away (the
     /// document applies our op optimistically; the host's echo changes nothing).
     pub fn new_note(&mut self, _: &NewNote, _window: &mut Window, cx: &mut Context<Self>) {
-        let rect = self.doc.free_slot(NOTE_SIZE);
+        let rect = self.doc.free_slot(self.fitted(NOTE_SIZE));
         let id = ItemId::new();
         let item = CanvasItem {
             id,
@@ -2540,7 +2549,7 @@ impl CanvasView {
             self.request_file(id);
             id
         } else {
-            let rect = self.doc.free_slot(FILE_SIZE);
+            let rect = self.doc.free_slot(self.fitted(FILE_SIZE));
             let id = ItemId::new();
             let item = CanvasItem {
                 id,
@@ -5404,6 +5413,82 @@ mod tests {
 
     /// ⌘] and ⌘[ walk the cards in reading order — rows by their top edge, left to right —
     /// wrapping at both ends, revealing each; nothing active starts at the first or the last.
+    /// A note or a file card this client opens is its default size on a desktop and, on a
+    /// phone, no wider or taller than the viewport leaves — a 560 pt file card on a 393 pt
+    /// phone had its find bar off the right edge.
+    #[gpui::test]
+    fn a_phone_opens_notes_and_file_cards_that_fit_it(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        let sizes = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |c, _| {
+                let of = |wanted: fn(&ItemKind) -> bool| {
+                    c.items().into_iter().find(|i| wanted(&i.kind)).map(|i| (i.rect.w, i.rect.h))
+                };
+                (
+                    of(|k| matches!(k, ItemKind::Note { .. })),
+                    of(|k| matches!(k, ItemKind::File { .. })),
+                )
+            })
+        };
+        view.update_in(cx, |c, window, cx| {
+            c.new_note(&NewNote, window, cx);
+            c.open_file("/tmp/work/a.txt", None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(sizes(cx), (Some(NOTE_SIZE), Some(FILE_SIZE)), "a desktop keeps the defaults");
+        view.update_in(cx, |c, _window, _cx| {
+            let ids: Vec<ItemId> = c.items().into_iter().map(|i| i.id).collect();
+            for id in ids {
+                c.propose(CanvasOp::Remove(id));
+            }
+        });
+
+        let phone = (393.0, 852.0);
+        cx.simulate_resize(size(px(phone.0), px(phone.1)));
+        cx.run_until_parked();
+        view.update_in(cx, |c, window, cx| {
+            c.new_note(&NewNote, window, cx);
+            c.open_file("/tmp/work/b.txt", None, cx);
+        });
+        cx.run_until_parked();
+        let (note, file) = sizes(cx);
+        let max_w = snap(2.0_f32.mul_add(-GAP, phone.0));
+        let (note, file) = (note.expect("the note"), file.expect("the file card"));
+        assert!(note.0 <= max_w && note.0 >= MIN_ITEM, "the note fits the phone: {note:?}");
+        assert!(file.0 <= max_w && file.0 >= MIN_ITEM, "the file card fits the phone: {file:?}");
+        assert!(file.0 < FILE_SIZE.0, "cut down from the default: {file:?}");
+
+        // A display added from the host keeps its shape inside the phone too.
+        view.update_in(cx, |c, _window, cx| {
+            c.add_first_display(cx);
+            c.screen_event(
+                ScreenEvent::Listing {
+                    windows: Vec::new(),
+                    displays: vec![DisplayInfo {
+                        id: 1,
+                        w: 1920.0,
+                        h: 1080.0,
+                        scale: 2.0,
+                        hz: 60.0,
+                        hdr: false,
+                    }],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let display = view.read_with(cx, |c, _| {
+            c.items()
+                .into_iter()
+                .find(|i| matches!(i.kind, ItemKind::Display { .. }))
+                .map(|i| (i.rect.w, i.rect.h))
+        });
+        let display = display.expect("the display");
+        assert!(display.0 <= max_w, "the display fits the phone: {display:?}");
+        let shape = (display.1 - TITLE_H) / display.0;
+        assert!((shape - 1080.0 / 1920.0).abs() < 0.05, "its shape is kept: {display:?}");
+    }
+
     /// The palette and the picker are their desktop width on a desktop and, on a phone, what
     /// the screen leaves after a margin each side; neither runs off the edge.
     #[gpui::test]

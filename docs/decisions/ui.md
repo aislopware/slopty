@@ -380,6 +380,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_past_conversation_is_resumed_from_the_picker` types a word, sees one row, presses ↩ and
   gets the `OpenAgent` for it.
 
+- ✅ **A note or a file card opened on the phone fits the phone** (2026-09-13). The host's
+  terminals are cut down to the viewport when this client opened them (above), but the cards
+  the client places itself — a note at 320×240, a file card at 560×420 — went in at their
+  desktop size, so a file card on a 393 pt phone ran past the right edge with its find bar
+  there. Ruling: `fitted(size)` cuts a default size to `viewport_max` before the free slot
+  is asked for, so a phone gets a phone-wide card and a desktop the default; the rule is the
+  terminal's (`fit_to_viewport`), applied at placement since the client is the placer. A
+  window or display picked from the host is cut the same way, keeping its shape (the
+  `MAX_PICKED` cap is itself fitted first, so the aspect-preserving shrink sees the
+  viewport). Test: headless `a_phone_opens_notes_and_file_cards_that_fit_it` (defaults at
+  1000 pt, both within the snapped viewport width at 393 pt, a 1920×1080 display inside it
+  at 16:9).
+
 - ✅ **The palette and the picker fit the phone** (2026-09-13). Both were a fixed desktop
   width (520 / 560 pt) centred on the backdrop, which on a 393 pt phone put a third of the
   dialog off each edge: the field was typed into blind and the rows' right ends were gone.
