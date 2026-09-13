@@ -4989,7 +4989,10 @@ mod tests {
         let bar = cx.debug_bounds("terminal-search").expect("the bar is up");
         let header = cx.debug_bounds("conversation").expect("the conversation");
         assert!(bar.origin.y > header.origin.y, "the bar is a row in the card, not over it");
-        cx.simulate_keystrokes("a l p h a");
+        cx.simulate_keystrokes("shift-a l p h a");
+        cx.run_until_parked();
+        assert_eq!(hits(cx), Some((vec![], None)), "a capital is as typed: smart case");
+        cx.simulate_keystrokes("cmd-a a l p h a");
         cx.run_until_parked();
         assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(2))), "three entries, on the newest");
         assert!(drain_words(&mut rx).is_empty(), "nothing asked of the host");

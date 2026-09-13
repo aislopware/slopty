@@ -1817,8 +1817,10 @@ pub fn entry_text(entry: &TranscriptEntry) -> String {
     }
 }
 
-/// The entries holding `needle` (case-insensitive; a regular expression when `regex`), in
-/// order; none for an empty needle. `Err` is the regex's complaint.
+/// The entries holding `needle` (a regular expression when `regex`), in order.
+///
+/// None for an empty needle. Smart case, the terminal's rule: a needle with no capital
+/// matches in any case, one with a capital as typed. `Err` is the regex's complaint.
 ///
 /// # Errors
 ///
@@ -1831,15 +1833,19 @@ pub fn entry_hits(
     if needle.is_empty() {
         return Ok(Vec::new());
     }
+    let insensitive = !needle.chars().any(char::is_uppercase);
     let matcher: Box<dyn Fn(&str) -> bool> = if regex {
         let re = regex::RegexBuilder::new(needle)
-            .case_insensitive(true)
+            .case_insensitive(insensitive)
             .build()
             .map_err(|e| e.to_string())?;
         Box::new(move |text| re.is_match(text))
-    } else {
+    } else if insensitive {
         let needle = needle.to_lowercase();
         Box::new(move |text| text.to_lowercase().contains(&needle))
+    } else {
+        let needle = needle.to_owned();
+        Box::new(move |text| text.contains(&needle))
     };
     Ok(entries
         .iter()

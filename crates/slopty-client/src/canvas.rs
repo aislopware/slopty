@@ -337,7 +337,7 @@ impl Camera {
     pub fn fit(&mut self, rects: impl IntoIterator<Item = Rect>, viewport: (f32, f32)) {
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
         for r in rects {
-            let b = bounds.get_or_insert((r.x, r.y, r.x + r.w, r.y + r.h));
+            let b = bounds.get_or_insert((r.x, r.y, r.x, r.y));
             b.0 = b.0.min(r.x);
             b.1 = b.1.min(r.y);
             b.2 = b.2.max(r.x + r.w);
@@ -587,6 +587,11 @@ mod tests {
         // The slot goes past `wide`'s right edge, on `wide`'s row.
         let slot = doc.free_slot((640.0, 400.0));
         assert_eq!((slot.x, slot.y), (snap(500.0 + GAP), 64.0));
+        // A narrow item starting past `wide`'s edge reaches further still: the slot follows
+        // its right edge, which is where it starts plus its width, not minus.
+        doc.apply_op(&CanvasOp::Upsert(term(560.0, 2)));
+        let slot = doc.free_slot((640.0, 400.0));
+        assert_eq!((slot.x, slot.y), (snap(660.0 + GAP), 0.0), "{slot:?}");
         // Snapping rounds to the nearest grid line, in both directions.
         assert!((snap(100.0) - 96.0).abs() < f32::EPSILON);
         assert!((snap(-40.0) - -48.0).abs() < f32::EPSILON);
@@ -632,6 +637,15 @@ mod tests {
         let edge = Rect { x: GAP, y: GAP, w: vp.0 - inset, h: vp.1 - inset };
         cam.reveal(edge, vp);
         assert_eq!(cam, origin);
+        // Well inside: nothing moves either (the far edges are compared, not the near ones).
+        let mut cam = origin;
+        cam.reveal(Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0 }, vp);
+        assert_eq!(cam, origin);
+        // A little past the right and bottom gaps: nudged by exactly that little.
+        let mut cam = origin;
+        let over = Rect { x: vp.0 - GAP - 186.0, y: vp.1 - GAP - 86.0, w: 200.0, h: 100.0 };
+        cam.reveal(over, vp);
+        assert!(close(cam.x, 14.0) && close(cam.y, 14.0), "{cam:?}");
         // An item that fits exactly at the current zoom is panned to, not re-zoomed: the
         // vertical axis, already in view, stays where it was.
         let mut cam = Camera { x: 500.0, y: 0.0, zoom: 1.0 };

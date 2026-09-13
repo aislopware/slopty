@@ -248,8 +248,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`FileView::find`); the bar is the terminal's in shape and position (top-right, the field,
   `n/total`, ↑ ↓ ✕) with its own key context `FileSearch` bound in the canvas's table (Esc
   closes, ⌘G/⌘⇧G step, ↩/⇧↩ step from the field) since no terminal is around it; (2) a hit
-  is a line, not a span — plain case-insensitive `contains` on the client
-  (`file::find_hits`), no regex and no host round trip, because the card already holds every
+  is a line, not a span — plain `contains` on the client (`file::find_hits`) with the
+  terminal's smart case (a needle with no capital matches in any case, one with a capital
+  as typed; so the counts of a find in every card agree across cards), no regex and no host
+  round trip, because the card already holds every
   line it draws and a line is what the gutter numbers; hit lines are tinted in the warn tone,
   the current one stronger, over the edit's accent and the change's success tints; (3) the
   first hit landed on is the first at or after the line the card opened at, since a search

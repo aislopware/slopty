@@ -61,17 +61,22 @@ struct FileSearch {
     _subscription: Subscription,
 }
 
-/// The lines holding `needle`, case-insensitive, in order; none for an empty needle.
+/// The lines holding `needle`, in order; none for an empty needle. Smart case, the
+/// terminal's rule: a needle with no capital matches in any case, one with a capital as
+/// typed.
 #[must_use]
 pub fn find_hits(lines: &[SharedString], needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
     }
-    let needle = needle.to_lowercase();
+    let sensitive = needle.chars().any(char::is_uppercase);
+    let needle = if sensitive { needle.to_owned() } else { needle.to_lowercase() };
     lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.to_lowercase().contains(&needle))
+        .filter(|(_, line)| {
+            if sensitive { line.contains(&*needle) } else { line.to_lowercase().contains(&needle) }
+        })
         .map(|(ix, _)| ix)
         .collect()
 }
@@ -747,13 +752,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hits_are_the_lines_holding_the_needle_in_any_case() {
+    fn hits_are_the_lines_holding_the_needle_with_smart_case() {
         let lines: Vec<SharedString> = ["Alpha", "beta", "alpha beta", "gamma"]
             .iter()
             .map(|l| SharedString::from(*l))
             .collect();
-        assert_eq!(find_hits(&lines, "alpha"), [0, 2]);
-        assert_eq!(find_hits(&lines, "BETA"), [1, 2]);
+        assert_eq!(find_hits(&lines, "alpha"), [0, 2], "no capital: any case");
+        assert_eq!(find_hits(&lines, "Alpha"), [0], "a capital: as typed");
+        assert_eq!(find_hits(&lines, "BETA"), Vec::<usize>::new());
         assert_eq!(find_hits(&lines, "delta"), Vec::<usize>::new());
         assert_eq!(find_hits(&lines, ""), Vec::<usize>::new(), "an empty needle finds nothing");
     }

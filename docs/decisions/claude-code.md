@@ -732,8 +732,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   for the grid; a reader expects the same chord to work here. Rulings: (1) the search runs in
   the client over the entries it already holds (`conversation::entry_hits` over
   `entry_text`: the prompt, the answer, the thinking, a call's name and summary, a result, a
-  notice — not the card's chrome), so no `TermRequest::Search` is sent and nothing is asked of
-  the host; (2) the bar is the terminal's own (`Search`, `render_search`) so the ids
+  notice — not the card's chrome) with the terminal's smart case, so a needle means the same
+  in every card; no `TermRequest::Search` is sent and nothing is asked of the host; (2) the bar is the terminal's own (`Search`, `render_search`) so the ids
   (`terminal-search*`), the a11y labels, the `.*` regex toggle and the `TerminalSearch` Esc
   context are one thing everywhere, but in a conversation it is a row under the header
   (`floating = false`) rather than a corner overlay, so it covers no chip and no line; (3) a
