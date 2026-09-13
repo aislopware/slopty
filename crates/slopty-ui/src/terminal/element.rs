@@ -667,6 +667,17 @@ fn mono_font(family: &str, ligatures: bool, style: &CellStyle) -> Font {
     )
 }
 
+/// The shape a focused cursor is drawn in: the program's (DECSCUSR), unless the theme fixes
+/// one (ghostty's `cursor-style`).
+const fn cursor_shape_for(style: slopty_theme::CursorStyle, program: CursorShape) -> CursorShape {
+    match style {
+        slopty_theme::CursorStyle::Program => program,
+        slopty_theme::CursorStyle::Block => CursorShape::Block,
+        slopty_theme::CursorStyle::Bar => CursorShape::Bar,
+        slopty_theme::CursorStyle::Underline => CursorShape::Underline,
+    }
+}
+
 /// The colour a cell's glyphs take, with inverse, faint and invisible applied, held to the
 /// theme's minimum contrast against the cell's background. In the off phase of the blink
 /// clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
@@ -843,13 +854,14 @@ impl Element for TerminalElement {
             picked
         });
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
-        let (base_size, height_mult, base_pad, cursor_blink, ligatures) = {
+        let (base_size, height_mult, base_pad, cursor_blink, cursor_style, ligatures) = {
             let theme = self.view.read(cx).theme();
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
                 px(theme.spacing.sm),
                 theme.behaviour.cursor_blink,
+                theme.behaviour.cursor_style,
                 theme.typography.ligatures,
             )
         };
@@ -1111,7 +1123,11 @@ impl Element for TerminalElement {
             let cursor_prepared = (cursor_shown && marked.is_none()).then(|| {
                 let x = origin.x + cell_width * f32::from(cursor.col);
                 let y = origin.y + line_height * f32::from(cursor.row);
-                let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
+                let shape = if focused {
+                    cursor_shape_for(cursor_style, cursor.shape)
+                } else {
+                    CursorShape::BlockHollow
+                };
                 let line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
                 let width = cell_width * f32::from(cursor_span(line, cursor.col));
                 (
@@ -1956,6 +1972,18 @@ mod tests {
 
     /// A cell whose text would not read against its background is painted black or white
     /// once the theme sets a minimum contrast; inverse video is judged the painted way round.
+    #[test]
+    fn the_cursor_style_fixes_the_shape_or_leaves_it() {
+        use slopty_theme::CursorStyle;
+        assert_eq!(cursor_shape_for(CursorStyle::Program, CursorShape::Bar), CursorShape::Bar);
+        assert_eq!(cursor_shape_for(CursorStyle::Block, CursorShape::Bar), CursorShape::Block);
+        assert_eq!(cursor_shape_for(CursorStyle::Bar, CursorShape::Block), CursorShape::Bar);
+        assert_eq!(
+            cursor_shape_for(CursorStyle::Underline, CursorShape::Block),
+            CursorShape::Underline
+        );
+    }
+
     #[test]
     fn bold_text_is_painted_bright_when_asked() {
         let mut theme = Theme::default().terminal;

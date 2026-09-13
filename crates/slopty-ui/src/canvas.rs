@@ -1270,7 +1270,9 @@ impl CanvasView {
     /// new end replaces an older badge.
     pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
         let watched = self.doc.item_for_session(session).is_some_and(|i| self.active == Some(i.id));
-        if watched || done.elapsed < self.slow_command {
+        let slow = done.elapsed >= self.slow_command;
+        tracing::info!(%session, watched, slow, elapsed = ?done.elapsed, "command finished");
+        if watched || !slow {
             return;
         }
         self.finished.insert(session, done);

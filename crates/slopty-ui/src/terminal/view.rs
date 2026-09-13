@@ -2519,10 +2519,21 @@ impl TerminalView {
                 Effect::SearchInvalid { needle, message } => {
                     self.search_invalid(&needle, message, cx);
                 }
-                Effect::CommandStarted(_) => self.command_started = Some(Instant::now()),
+                Effect::CommandStarted(command) => {
+                    tracing::info!(session = %self.session, %command, "command started");
+                    self.command_started = Some(Instant::now());
+                }
                 Effect::CommandFinished { prompt, command, exit } => {
-                    let elapsed =
-                        self.command_started.take().map_or(Duration::ZERO, |t| t.elapsed());
+                    let started = self.command_started.take();
+                    let elapsed = started.map_or(Duration::ZERO, |t| t.elapsed());
+                    tracing::info!(
+                        session = %self.session,
+                        %command,
+                        ?exit,
+                        ?elapsed,
+                        timed = started.is_some(),
+                        "command finished"
+                    );
                     if let Some(prompt) = prompt {
                         self.set_took(prompt, elapsed);
                     }

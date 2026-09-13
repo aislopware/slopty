@@ -501,6 +501,8 @@ pub struct Behaviour {
     pub copy_on_select: bool,
     /// Whether the cursor blinks: the program's choice (DECSCUSR), or overridden either way.
     pub cursor_blink: CursorBlink,
+    /// The cursor's shape: the program's, or one fixed.
+    pub cursor_style: CursorStyle,
     /// A paste that could run commands (a newline outside bracketed paste, the bracket's end
     /// sequence inside it) waits for a confirmation.
     pub paste_protection: bool,
@@ -517,6 +519,7 @@ impl Default for Behaviour {
         Self {
             copy_on_select: false,
             cursor_blink: CursorBlink::Program,
+            cursor_style: CursorStyle::Program,
             paste_protection: true,
             hide_pointer_while_typing: true,
             scroll_multiplier: 100,
@@ -535,6 +538,21 @@ pub enum CursorBlink {
     Always,
     /// Never blinks.
     Never,
+}
+
+/// The cursor's shape (ghostty's `cursor-style`): the program's (DECSCUSR), or one of the
+/// three fixed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum CursorStyle {
+    /// The program decides.
+    #[default]
+    Program,
+    /// A filled block.
+    Block,
+    /// A bar at the left edge.
+    Bar,
+    /// An underline.
+    Underline,
 }
 
 impl CursorBlink {

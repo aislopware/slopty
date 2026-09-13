@@ -874,7 +874,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `program` leaves DECSCUSR to the shell or editor (the default: shells are steady, editors
   often blink), `always` and `never` override it either way. Applied where the element
   decides whether the cursor ticks the blink clock, so an unfocused card stays a steady
-  hollow block as before. Test: the blink-clock test's last two frames.
+  hollow block as before. Test: the blink-clock test's last two frames. Its companion
+  `cursor_style = program | block | bar | underline` (ghostty's `cursor-style`,
+  `Behaviour::cursor_style`, `element::cursor_shape_for`) fixes the focused shape the same
+  way; unfocused stays the hollow block. Test: `the_cursor_style_fixes_the_shape_or_leaves_it`.
 
 - ✅ **A click on the input line moves the shell's cursor** (2026-09-15, ghostty's
   `cursor-click-to-move`, on by default there and here). A plain left click released without

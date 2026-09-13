@@ -1111,7 +1111,8 @@ missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | m
 ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
 `[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
-never | paste_protection | bold_is_bright | hide_pointer_while_typing | scroll_multiplier`
+never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
+hide_pointer_while_typing | scroll_multiplier`
 (the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the blink override,
 paste protection, the pointer hide and the multiplier on `Theme::behaviour`, the bell flag is
 read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
-use slopty_settings::{Appearance, Color, ColorSettings, CursorBlink, Settings};
+use slopty_settings::{Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Settings};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Variant};
 
 /// GPUI actions.
@@ -76,6 +76,12 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
+    theme.behaviour.cursor_style = match settings.terminal.cursor_style {
+        CursorStyle::Program => slopty_theme::CursorStyle::Program,
+        CursorStyle::Block => slopty_theme::CursorStyle::Block,
+        CursorStyle::Bar => slopty_theme::CursorStyle::Bar,
+        CursorStyle::Underline => slopty_theme::CursorStyle::Underline,
+    };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
@@ -275,6 +281,8 @@ mod tests {
         assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 250);
         s.terminal.scroll_multiplier = 0.0;
         assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 100, "a typo: one for one");
+        s.terminal.cursor_style = CursorStyle::Bar;
+        assert_eq!(theme_for(&s, true).behaviour.cursor_style, slopty_theme::CursorStyle::Bar);
         s.terminal.cursor_blink = CursorBlink::Never;
         assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
         s.terminal.minimum_contrast = 0.0;

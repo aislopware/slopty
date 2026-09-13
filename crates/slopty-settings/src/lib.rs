@@ -63,6 +63,21 @@ pub enum CursorBlink {
     Never,
 }
 
+/// The terminal cursor's shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorStyle {
+    /// The program decides (DECSCUSR).
+    #[default]
+    Program,
+    /// A filled block.
+    Block,
+    /// A bar at the left edge.
+    Bar,
+    /// An underline.
+    Underline,
+}
+
 /// A colour as `"#rrggbb"` (or `"rrggbb"`), or `""` for the theme's own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Color(pub Option<[u8; 3]>);
@@ -176,6 +191,9 @@ pub struct TerminalSettings {
     /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
     /// always, or never.
     pub cursor_blink: CursorBlink,
+    /// The cursor's shape (ghostty's `cursor-style`): the program's choice, or block, bar
+    /// or underline.
+    pub cursor_style: CursorStyle,
     /// A paste that could run commands (a newline into a shell that did not ask for
     /// bracketed paste) waits for a confirmation (ghostty's `clipboard-paste-protection`).
     pub paste_protection: bool,
@@ -195,6 +213,7 @@ impl Default for TerminalSettings {
             copy_on_select: false,
             bell_alert: true,
             cursor_blink: CursorBlink::Program,
+            cursor_style: CursorStyle::Program,
             paste_protection: true,
             bold_is_bright: false,
             hide_pointer_while_typing: true,
@@ -354,6 +373,8 @@ copy_on_select = {copy_on_select}
 bell_alert = {bell_alert}
 # \"program\" (the shell or editor decides), \"always\" or \"never\".
 cursor_blink = {cursor_blink}
+# \"program\" (the shell or editor decides), \"block\", \"bar\" or \"underline\".
+cursor_style = {cursor_style}
 # A paste with a newline into a shell that did not ask for bracketed paste
 # (so it would run) waits for a confirmation.
 paste_protection = {paste_protection}
@@ -398,6 +419,7 @@ ansi = []
             copy_on_select = d.terminal.copy_on_select,
             bell_alert = d.terminal.bell_alert,
             cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
+            cursor_style = toml_string(cursor_style_name(d.terminal.cursor_style)),
             paste_protection = d.terminal.paste_protection,
             bold_is_bright = d.terminal.bold_is_bright,
             hide_pointer_while_typing = d.terminal.hide_pointer_while_typing,
@@ -461,6 +483,15 @@ const fn appearance_name(a: Appearance) -> &'static str {
     }
 }
 
+const fn cursor_style_name(c: CursorStyle) -> &'static str {
+    match c {
+        CursorStyle::Program => "program",
+        CursorStyle::Block => "block",
+        CursorStyle::Bar => "bar",
+        CursorStyle::Underline => "underline",
+    }
+}
+
 const fn cursor_blink_name(c: CursorBlink) -> &'static str {
     match c {
         CursorBlink::Program => "program",
@@ -507,6 +538,7 @@ mod tests {
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
         assert!(d.terminal.bell_alert, "a bell in the background is heard");
         assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
+        assert_eq!(d.terminal.cursor_style, CursorStyle::Program, "and its shape");
         assert!(d.terminal.paste_protection, "a pasted newline asks first");
         assert!(!d.terminal.bold_is_bright, "bold is a weight, as in ghostty");
         assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
@@ -578,6 +610,15 @@ mod tests {
         assert_eq!(loaded.settings.terminal.scroll_multiplier, 3.0);
         let loaded = Settings::parse("[font]\nligatures = false\n");
         assert!(!loaded.settings.font.ligatures);
+        for (text, want) in [
+            ("program", CursorStyle::Program),
+            ("block", CursorStyle::Block),
+            ("bar", CursorStyle::Bar),
+            ("underline", CursorStyle::Underline),
+        ] {
+            let loaded = Settings::parse(&format!("[terminal]\ncursor_style = \"{text}\"\n"));
+            assert_eq!(loaded.settings.terminal.cursor_style, want, "{text}");
+        }
         for (text, want) in [("program", CursorBlink::Program), ("always", CursorBlink::Always)] {
             let loaded = Settings::parse(&format!("[terminal]\ncursor_blink = \"{text}\"\n"));
             assert_eq!(loaded.settings.terminal.cursor_blink, want, "{text}");

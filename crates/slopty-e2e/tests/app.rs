@@ -208,12 +208,29 @@ mod tests {
         // ⌘0 brings the grids back and the active shell takes the keyboard again.
         drv.keys("cmd-0").await.unwrap();
         let session = term.session.clone().unwrap();
-        let _dump = drv
+        let dump = drv
             .wait_for("the first shell to take focus at zoom 1", STEP, |d| {
                 (d.zoom - 1.0).abs() < 1e-3 && d.focused == format!("terminal:{session}")
             })
             .await
             .unwrap();
+
+        // A saved settings file reaches the live grid: the app polls `settings.toml` in its
+        // data directory, folds it into the theme and the face is measured at the new size
+        // (`face.size` is points × display scale, so the ratio is what to check).
+        let before = dump.terminals[0].face.as_ref().map_or(0.0, |f| f.size);
+        assert!(before > 0.0, "{dump:#?}");
+        let settings = stack.dir.path().join("app").join("settings.toml");
+        std::fs::write(&settings, "[font]\nmono_size = 20\n").unwrap();
+        let dump = drv
+            .wait_for("the grid to take the new font size", STEP + Duration::from_secs(2), |d| {
+                d.terminals.iter().any(|t| t.face.as_ref().is_some_and(|f| f.size > before * 1.4))
+            })
+            .await
+            .unwrap();
+        let after = dump.terminals[0].face.as_ref().map_or(0.0, |f| f.size);
+        assert!(((after / before) - 20.0 / 13.0).abs() < 0.02, "{before} → {after}");
+        assert_eq!(dump.status, "connected", "{dump:#?}");
 
         // ⌘W closes the active one; the host tears its session down and one shell remains.
         drv.keys("cmd-w").await.unwrap();

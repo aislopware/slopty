@@ -50,7 +50,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Theme::behaviour.copy_on_select`) and the existing `set_theme` push delivers them, so a
   save applies within the poll second with no second channel. The unknown-key warning for a
   `[terminal]` key now names the key (`terminal.scrollback_lines`), as it does for `[font]`.
-- ✅ **`[font] mono_line_height`, `[terminal] bell_alert | cursor_blink | paste_protection`** (2026-09-15): the line height
+- ✅ **`[font] mono_line_height`, `[terminal] bell_alert | cursor_blink | cursor_style | paste_protection`** (2026-09-15): the line height
   (`Typography::mono_line_height`, ghostty's `adjust-cell-height`, default 1.0, held to
   0.5–2.0 by `theme_for` as the sizes are) was a theme knob with no key; it rides the same
   theme push. `bell_alert` (default on) is the one setting the theme does not carry: the app's
