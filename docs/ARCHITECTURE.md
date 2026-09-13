@@ -103,7 +103,9 @@ selection/primary targets and every read (`?`) are dropped on the host, and no m
 for a read reply. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
-session so a click reveals the card, and bounces the Dock like an agent's attention.
+session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints
+the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::BELL`) and, when no window
+is active, plays the alert sound and bounces the Dock.
 
 **Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh, bash and fish:
 at every start it writes the bundled scripts (`slopty-pty/assets/shell`, compiled in with
@@ -133,7 +135,7 @@ function from a face — advance, ascent, descent, line gap, and the underline/s
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
 underline, the strikethrough, the overline and the cursor (which spans both columns of a
 wide character). Underlines paint under the glyphs, strikethroughs over them. Box drawing,
-block elements, Braille and Powerline cells are not shaped at all: `terminal::sprite` turns
+block elements, sextants, octants, Braille and Powerline cells are not shaped at all: `terminal::sprite` turns
 each into rectangles, arcs and strokes from the cell size and the underline thickness, snapped
 to device pixels, so borders never seam between rows. The face comes from the font's own
 tables through the fork's `TextSystem::font_metrics` (`hhea` line gap, `post` underline

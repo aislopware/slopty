@@ -1307,6 +1307,10 @@ impl Element for TerminalElement {
                 BorderStyle::default(),
             ));
         }
+        if self.view.read(cx).bell_flashing() {
+            // The visual bell: the text colour laid thinly over the whole grid.
+            window.paint_quad(fill(bounds, Hsla { a: alpha::BELL, ..prepared.link }));
+        }
         let shown = std::mem::take(&mut prepared.shown);
         self.view.update(cx, |view, _cx| view.painted(&shown));
     }

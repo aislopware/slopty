@@ -259,6 +259,8 @@ pub mod alpha {
     pub const SCRIM: f32 = 0.6;
     /// The command-block separator (the terminal foreground).
     pub const SEPARATOR: f32 = 0.18;
+    /// The visual bell: the terminal foreground laid over the whole grid for a flash.
+    pub const BELL: f32 = 0.15;
     /// The separator after a failed command (the error tone).
     pub const SEPARATOR_ERROR: f32 = 0.7;
     /// The translucent panel behind a HUD readout over video.

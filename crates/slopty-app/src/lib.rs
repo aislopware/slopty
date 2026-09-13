@@ -458,7 +458,14 @@ impl Workspace {
                             slopty_platform::attention();
                             slopty_platform::bounce();
                         }
-                        CanvasEvent::Bell(_session) => {}
+                        // A bell while the human is elsewhere is an alert; in front of the
+                        // window the view's own flash is enough.
+                        CanvasEvent::Bell(_session) => {
+                            if cx.active_window().is_none() {
+                                slopty_platform::attention();
+                                slopty_platform::bounce();
+                            }
+                        }
                         CanvasEvent::Notice(text) => ws.show_notice(text.clone(), cx),
                     });
                     // The chrome follows the active item (key bar target), so every canvas

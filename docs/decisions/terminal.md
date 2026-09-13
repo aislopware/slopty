@@ -635,3 +635,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   already has its own path. Tests: engine `desktop_notifications_are_events`, client
   `apply` mapping, `host_term_notification` golden, canvas
   `a_programs_banner_has_a_title_even_when_the_protocol_gave_none`.
+
+- ✅ **The bell is seen, and heard only when the human is elsewhere** (2026-09-15). BEL
+  travelled the whole way (engine → `TermEvent::Bell` → `TerminalViewEvent::Bell` →
+  `CanvasEvent::Bell`) and the app dropped it. Now the view tints its grid with the text
+  colour (`alpha::BELL`) for 150 ms — a visual bell, the one every terminal offers and the only
+  one that names *which* card rang on a canvas of many — a second bell inside the flash
+  restarts it, and the app, when no window of ours is active, plays the user's alert sound and
+  bounces the Dock through the attention path an agent's block takes. In front of the window
+  nothing sounds: a `printf '\a'` in a loop must not be a siren. Tests: view
+  `a_bell_flashes_the_view_briefly`.
+
+- ✅ **Sextants and octants are mosaics drawn from the cell** (2026-09-15). Charts and
+  graphs in today's TUIs (btop, plotting libraries, Rust TUI canvases) tile the
+  cell two by three (U+1FB00–1FB3B) and two by four (U+1CD00–1CDE5, Unicode 16), and a font
+  either lacks them or fits each to its own metrics with seams between neighbours — the same
+  reason the box-drawing set is drawn (`87c008d`). `sprite::mosaic` cuts the cell at snapped
+  device-pixel boundaries and fills the named tiles in reading order; sextants take ghostty's
+  index arithmetic (the block skips the four patterns block elements already draw), octants a
+  230-entry mask table transcribed from ghostty's `octants.txt` (there is no formula: the
+  block skips every pattern another character already draws). Tests:
+  `sextants_and_octants_are_mosaics_of_the_cell`, the ranges test.

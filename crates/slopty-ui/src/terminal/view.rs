@@ -44,6 +44,11 @@ const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
 /// Half a blink: the cursor (and SGR 5 text) shows for this long, then hides for as long.
 /// Ghostty's cadence.
 const BLINK_HALF: Duration = Duration::from_millis(600);
+/// How long the view flashes for a bell (BEL): a tint over the grid, gone before it annoys.
+const BELL_FLASH: Duration = Duration::from_millis(150);
+/// Half of it, for the tests.
+#[cfg(test)]
+const BELL_HALF: Duration = Duration::from_millis(75);
 const AUTOSCROLL_MAX: i64 = 8;
 
 mod actions {
@@ -305,6 +310,10 @@ pub struct TerminalView {
     blink_wanted: bool,
     blink_pinned: Option<Instant>,
     blink_task: Option<gpui::Task<()>>,
+    /// The visual bell: the grid is tinted while the task waits out [`BELL_FLASH`]; a new
+    /// bell restarts it (dropping the old task cancels it).
+    bell_flash: bool,
+    bell_task: Option<gpui::Task<()>>,
     /// The scrollbar's thumb is held: the pointer's offset from the thumb's top.
     thumb_drag: Option<Pixels>,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
@@ -441,6 +450,8 @@ impl TerminalView {
             blink_wanted: false,
             blink_pinned: None,
             blink_task: None,
+            bell_flash: false,
+            bell_task: None,
             thumb_drag: None,
             wheel_remainder: 0.0,
             search: None,
@@ -2285,7 +2296,10 @@ impl TerminalView {
             match effect {
                 Effect::Request(req) => self.send(req),
                 Effect::Title(t) => cx.emit(TerminalViewEvent::Title(t)),
-                Effect::Bell => cx.emit(TerminalViewEvent::Bell),
+                Effect::Bell => {
+                    self.ring(cx);
+                    cx.emit(TerminalViewEvent::Bell);
+                }
                 Effect::Notification { title, body } => {
                     cx.emit(TerminalViewEvent::Notification { title, body });
                 }
@@ -2383,6 +2397,28 @@ impl TerminalView {
         self.blink_on = !self.blink_on;
         cx.notify();
         true
+    }
+
+    /// Whether the grid is tinted for a bell right now.
+    #[must_use]
+    pub const fn bell_flashing(&self) -> bool {
+        self.bell_flash
+    }
+
+    /// A bell: tint the grid for [`BELL_FLASH`]; what the platform does about it (a sound, the
+    /// Dock) is the app's call.
+    fn ring(&mut self, cx: &mut Context<Self>) {
+        self.bell_flash = true;
+        cx.notify();
+        self.bell_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BELL_FLASH).await;
+            // A gone view has nothing to un-tint.
+            let _gone = this.update(cx, |view, cx| {
+                view.bell_flash = false;
+                view.bell_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// A keystroke: the cursor shows solid for a full half-blink from now.
@@ -3637,6 +3673,26 @@ mod tests {
     /// The blink clock runs only while a painted frame blinks: a frame with SGR 5 text (or a
     /// blinking cursor, while focused) starts it, each half-blink flips the phase, a keystroke
     /// pins the phase on for a half, and a frame with nothing to blink stops it, phase on.
+    /// BEL tints the grid for a flash and then leaves it alone; a second bell inside the
+    /// flash restarts it rather than ending it early.
+    #[gpui::test]
+    fn a_bell_flashes_the_view_briefly(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let flashing = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.bell_flashing());
+        assert!(!flashing(cx));
+        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Bell, cx));
+        assert!(flashing(cx), "rings: the view flashes");
+        cx.background_executor.advance_clock(BELL_HALF);
+        cx.run_until_parked();
+        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Bell, cx));
+        cx.background_executor.advance_clock(BELL_HALF);
+        cx.run_until_parked();
+        assert!(flashing(cx), "a second bell restarted the flash");
+        cx.background_executor.advance_clock(BELL_HALF);
+        cx.run_until_parked();
+        assert!(!flashing(cx), "and it is itself again");
+    }
+
     #[gpui::test]
     fn the_blink_clock_ticks_only_while_something_blinks(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
