@@ -127,7 +127,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   / "**Claude**" headed turns, a tool call as a quoted `> **Name** summary` line, a failed
   result's first line, a compaction as a rule with its token numbers, a notice quoted in
   italics — thinking and tool output stay out, as they are folded on screen; (3) no file
-  export: the clipboard reaches every editor, and the transcript file itself is the agent's.
+  export: the clipboard reaches every editor, and the transcript file itself is the agent's;
+  (4) (2026-09-14) a "note" button next to "copy" (`conversation-note-<ix>`, "Keep answer as
+  a card") keeps the answer on the canvas instead: the same `NoteBlock` event a command
+  block's "Save as note" sends, so the card lands beside the agent's card with the answer's
+  Markdown, its fences runnable while the canvas has a shell — an answer that is a plan or
+  a runbook stays in view after the conversation has moved on.
   Tests: `the_conversation_exports_as_markdown_turns`,
   `the_conversation_replaces_the_grid_and_follows_the_transcript`.
 

@@ -937,7 +937,9 @@ emptied with the epoch). Terminal-context bindings: ⌘C /
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output; in a
 conversation card the prompts are the `User` entries, `Conversation::prompt_from_top`, and
-⌘⇧C copies the newest answer, each answer's "copy" button copies that one, and the palette's
+⌘⇧C copies the newest answer, each answer's "copy" button copies that one, its "note" button
+keeps it as a note card beside the agent (`conversation-note-<ix>`, the block menu's
+`NoteBlock` event), and the palette's
 "Copy conversation as Markdown" writes the lot as `conversation::as_markdown`),
 ⌘K clears the screen and the history (`TermRequest::Clear`, protocol 31: the host writes
 `CSI 3 J` through its engine and output tap, as if the program had, then ⌃L to the shell so

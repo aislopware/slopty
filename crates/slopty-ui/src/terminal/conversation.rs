@@ -1786,6 +1786,7 @@ fn entry(
             )
             .children(time)
             .child(copy_button(ix, markdown, theme))
+            .child(note_button(ix, markdown, view, theme))
             .into_any_element(),
         TranscriptBody::Thinking { text } => row
             .flex()
@@ -2160,6 +2161,40 @@ fn copy_button(ix: usize, markdown: &str, theme: &Theme) -> AnyElement {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
         })
         .child("copy")
+        .into_any_element()
+}
+
+/// The "note" button under an answer: the answer's Markdown as a note card beside the agent
+/// (`TerminalViewEvent::NoteBlock`, which the canvas places as it does a command block's).
+fn note_button(
+    ix: usize,
+    markdown: &str,
+    view: &Entity<TerminalView>,
+    theme: &Theme,
+) -> AnyElement {
+    let s = &theme.surfaces;
+    let text = markdown.to_owned();
+    let view = view.clone();
+    let id = format!("conversation-note-{ix}");
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .debug_selector(move || id)
+        .role(Role::Button)
+        .aria_label("Keep answer as a card")
+        .flex_none()
+        .px(px(theme.spacing.xs))
+        .rounded(px(theme.radii.xs))
+        .cursor_pointer()
+        .text_size(px(theme.typography.caption()))
+        .text_color(hsla(s.text_muted))
+        .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+        .on_click(move |_ev, _window, cx| {
+            cx.stop_propagation();
+            let text = text.clone();
+            view.update(cx, |_v, cx| cx.emit(TerminalViewEvent::NoteBlock(text)));
+        })
+        .child("note")
         .into_any_element()
 }
 

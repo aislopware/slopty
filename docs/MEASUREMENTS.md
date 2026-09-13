@@ -2835,3 +2835,25 @@ receiver gone quiet. Fixed in the same change: the player opens on `spawn_blocki
 that land meanwhile count as `audio_lost`, and the test asserts a second video frame is
 delivered while the player is still opening (the whole test runs in ~7.6 s, nearly all of it
 that HAL initialisation).
+
+## 2026-09-14 — the smooth probe after the week's element work (main `c689d06`)
+
+`SLOPTY_SMOOTH_E2E=1 cargo xtask e2e smooth` on an idle Mac Studio (no mutants, no build), the
+display-stream scenario skipped (no screen-recording grant in this shell). Since the 2026-09-12
+run at `becd27e` the element gained the sticky block header, the ⌘-hover link, the "took"
+caption overlay and the coloured file card's run split; the file card scenarios (e)/(f) now
+drop nothing where (f) had dropped 116 of 565 at `e931d97`, and (b)'s one drop is gone.
+
+```
+MEASURE (e) mac: 1 file card of 2 000 lines + 5 streaming shells, pan at zoom 1: draw 1.1 / 1.5 / 1.6 / 5.2 ms · every 3.9 / 14.1 ms · 882 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (f) mac: 1 file card of 2 000 lines + 5 streaming shells, zoom fit → 200 % → fit: draw 1.2 / 4.7 / 6.1 / 8.0 ms · every 4.8 / 12.7 ms · 883 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (a) mac: 20 streaming shells, pan at zoom 1: draw 0.8 / 1.1 / 3.3 / 9.3 ms · every 7.9 / 17.4 ms · 594 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (b) mac: 20 streaming shells, zoom fit → 200 % → fit: draw 0.7 / 1.7 / 2.8 / 10.2 ms · every 1.9 / 16.7 ms · 812 frames, 0 over 16.7 ms, 0 dropped
+MEASURE frames while typing: draw 1.3 / 2.8 / 5.0 / 12.4 ms · every 7.4 / 64.1 ms · 190 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (d) mac, SLOPTY_PREDICT=never: echo 11.9 / 19.9 / 27.0 ms (60 keys) · predicted 0.0 / 0.0 / 0.0 ms (0 keys)
+MEASURE frames while typing: draw 1.4 / 3.3 / 4.0 / 4.2 ms · every 6.9 / 63.0 ms · 190 frames, 0 over 16.7 ms, 0 dropped
+MEASURE (d) mac, SLOPTY_PREDICT=always: echo 11.4 / 18.3 / 22.8 ms (60 keys) · predicted 2.4 / 3.8 / 4.3 ms (60 keys)
+```
+
+Nothing to optimise from this run: the p90 draw stays under 7 ms everywhere and the
+prediction path still answers a key in under 5 ms at p90.

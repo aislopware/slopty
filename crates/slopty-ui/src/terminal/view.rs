@@ -4156,6 +4156,25 @@ mod tests {
         cx.run_until_parked();
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("On it.\n\n```sh\ncargo test\n```\n\nthen look."));
+        // Its "note" button asks the canvas for a card with the answer, as a block's does.
+        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&notes);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::NoteBlock(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        let note = cx.debug_bounds("conversation-note-1").expect("the answer's note button");
+        cx.simulate_click(note.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            notes.borrow().as_slice(),
+            ["On it.\n\n```sh\ncargo test\n```\n\nthen look."],
+            "the answer's Markdown, as copied"
+        );
         cx.update(|window, cx| window.dispatch_action(Box::new(CopyConversation), cx));
         cx.run_until_parked();
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
