@@ -82,9 +82,16 @@ mod tests {
 
         drv.type_text("echo ios-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();
+        // The echo, and the prompt back under it (the cursor's row is the grid's a11y value):
+        // a frame rendered between the two is a different picture.
         let dump = drv
-            .wait_for("the echo", STEP, |d| {
+            .wait_for("the echo and the next prompt", STEP, |d| {
                 d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
+                    && d.a11y_node("Terminal", None).is_some_and(|g| {
+                        g.value
+                            .as_deref()
+                            .is_some_and(|v| !v.trim().is_empty() && !v.contains("ios-42"))
+                    })
             })
             .await
             .unwrap();
@@ -130,8 +137,8 @@ mod tests {
         .unwrap();
 
         // The phone has no editor for a file in its sandbox: "Open settings" from the palette
-        // puts `settings.toml` in the in-app editor, the soft keyboard types a section into
-        // it and ⌘↩ writes the file.
+        // puts `settings.toml` (the commented defaults here) in the in-app editor, ⌘A and the
+        // soft keyboard replace it with one section, ⌘↩ writes the file.
         let dump = drv.dump().await.unwrap();
         let commands = dump
             .a11y_node("Button", Some("Commands"))
@@ -153,7 +160,8 @@ mod tests {
         })
         .await
         .unwrap();
-        drv.ui_insert_text("\n[terminal]\nbell_alert = false\n").await.unwrap();
+        drv.keys("cmd-a").await.unwrap();
+        drv.ui_insert_text("[terminal]\nbell_alert = false\n").await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
             d.a11y_node("Dialog", Some("Settings")).is_none()

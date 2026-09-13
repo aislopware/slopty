@@ -119,6 +119,11 @@ pub struct KeyEvent {
     pub unshifted: Option<char>,
     /// Inside an IME composition; the engine must not encode it.
     pub composing: bool,
+    /// The ⌥ held is Alt for this press (the client's `option_as_alt` setting, resolved for
+    /// the side): `text` is then the key without ⌥ and the host prefixes an escape instead of
+    /// typing the layout's symbol. Per key, since the encoder is the host's and a session's
+    /// clients may differ.
+    pub option_as_alt: bool,
 }
 
 /// Pointer button.

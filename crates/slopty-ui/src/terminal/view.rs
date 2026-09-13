@@ -87,6 +87,16 @@ mod actions {
             PrevPrompt,
             /// Scroll the next prompt to the top of the viewport.
             NextPrompt,
+            /// Scroll a page up into history.
+            ScrollPageUp,
+            /// Scroll a page down towards the output.
+            ScrollPageDown,
+            /// Scroll to the oldest line the host keeps.
+            ScrollToTop,
+            /// Back to following the output.
+            ScrollToBottom,
+            /// Select every line, history included.
+            SelectAll,
             /// Copy the output of the last command.
             CopyLastOutput,
             /// Copy the whole conversation as Markdown.
@@ -109,7 +119,8 @@ mod actions {
 }
 pub use actions::{
     ClearScreen, CloseFind, CompleteSlash, Copy, CopyConversation, CopyLastOutput, Find, FindNext,
-    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ToggleConversation,
+    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -124,6 +135,14 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-g", FindPrev, CTX),
         KeyBinding::new("cmd-up", PrevPrompt, CTX),
         KeyBinding::new("cmd-down", NextPrompt, CTX),
+        // ghostty's scroll keys; the ⌘ pair is what Terminal.app taught the Mac.
+        KeyBinding::new("shift-pageup", ScrollPageUp, CTX),
+        KeyBinding::new("shift-pagedown", ScrollPageDown, CTX),
+        KeyBinding::new("shift-home", ScrollToTop, CTX),
+        KeyBinding::new("shift-end", ScrollToBottom, CTX),
+        KeyBinding::new("cmd-home", ScrollToTop, CTX),
+        KeyBinding::new("cmd-end", ScrollToBottom, CTX),
+        KeyBinding::new("cmd-a", SelectAll, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
         KeyBinding::new("cmd-shift-enter", RerunLast, CTX),
         KeyBinding::new("cmd-k", ClearScreen, CTX),
@@ -1714,28 +1733,67 @@ impl TerminalView {
         }
     }
 
-    /// The block menu's items, in order: what applies to this block.
-    fn block_menu_items(block: &CommandBlock) -> Vec<BlockMenuItem> {
+    /// The menu's items, in order: what applies to the block under the click, then the
+    /// terminal's own (Copy only with something selected).
+    fn block_menu_items(block: Option<&CommandBlock>, has_selection: bool) -> Vec<BlockMenuItem> {
         let mut items = Vec::new();
-        if block.command.is_some() {
-            items.push(BlockMenuItem::CopyCommand);
+        if let Some(block) = block {
+            if block.command.is_some() {
+                items.push(BlockMenuItem::CopyCommand);
+            }
+            if !block.output.is_empty() {
+                items.push(BlockMenuItem::CopyOutput);
+            }
+            if block.command.is_some() {
+                items.push(BlockMenuItem::Rerun);
+            }
+            items.push(BlockMenuItem::Ask);
+            items.push(BlockMenuItem::Note);
+            items.push(BlockMenuItem::SelectBlock);
         }
-        if !block.output.is_empty() {
-            items.push(BlockMenuItem::CopyOutput);
+        if has_selection {
+            items.push(BlockMenuItem::Copy);
         }
-        if block.command.is_some() {
-            items.push(BlockMenuItem::Rerun);
-        }
-        items.push(BlockMenuItem::Ask);
-        items.push(BlockMenuItem::Note);
-        items.push(BlockMenuItem::SelectBlock);
+        items.push(BlockMenuItem::Paste);
+        items.push(BlockMenuItem::Find);
+        items.push(BlockMenuItem::ClearScreen);
         items
     }
 
-    /// A block menu item was chosen: do it and close the menu.
-    fn block_menu_pick(&mut self, item: BlockMenuItem, cx: &mut Context<Self>) {
+    /// A menu item was chosen: do it and close the menu.
+    fn block_menu_pick(
+        &mut self,
+        item: BlockMenuItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.block_menu.take() else { return };
-        let block = menu.block;
+        match item {
+            BlockMenuItem::Copy => self.copy(&Copy, window, cx),
+            BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
+            BlockMenuItem::Find => self.find(&Find, window, cx),
+            BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
+            BlockMenuItem::CopyCommand
+            | BlockMenuItem::CopyOutput
+            | BlockMenuItem::Rerun
+            | BlockMenuItem::Ask
+            | BlockMenuItem::Note
+            | BlockMenuItem::SelectBlock => {
+                if let Some(block) = menu.block {
+                    self.block_item_pick(item, block, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// One of the block's own items.
+    fn block_item_pick(
+        &mut self,
+        item: BlockMenuItem,
+        block: CommandBlock,
+        cx: &mut Context<Self>,
+    ) {
         match item {
             BlockMenuItem::CopyCommand => {
                 if let Some(command) = block.command {
@@ -1768,8 +1826,11 @@ impl TerminalView {
                     Some(Selection::run((block.prompt, 0), (last, cols.saturating_sub(1))));
                 self.selecting = false;
             }
+            BlockMenuItem::Copy
+            | BlockMenuItem::Paste
+            | BlockMenuItem::Find
+            | BlockMenuItem::ClearScreen => {}
         }
-        cx.notify();
     }
 
     /// The block menu, drawn late and anchored where the right click landed.
@@ -1851,12 +1912,13 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = &theme.spacing;
-        let items = Self::block_menu_items(&menu.block);
+        let has_selection = self.selected_text().is_some_and(|t| !t.is_empty());
+        let items = Self::block_menu_items(menu.block.as_ref(), has_selection);
         let list = div()
             .id("block-menu")
             .debug_selector(|| "block-menu".to_owned())
             .role(gpui::accesskit::Role::Menu)
-            .aria_label("Command block")
+            .aria_label(if menu.block.is_some() { "Command block" } else { "Terminal" })
             .occlude()
             .flex()
             .flex_col()
@@ -1887,8 +1949,8 @@ impl TerminalView {
                     .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::TINT_PRESSED)))
                     .child(SharedString::from(item.label()));
                 crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
-                    move |this, _ev, _window, cx| {
-                        this.block_menu_pick(item, cx);
+                    move |this, _ev, window, cx| {
+                        this.block_menu_pick(item, window, cx);
                     },
                 ))
             }));
@@ -1965,6 +2027,57 @@ impl TerminalView {
     /// to following output.
     pub fn next_prompt(&mut self, _: &NextPrompt, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_prompt(1, cx);
+    }
+
+    /// ⇧⇞: a page up into history.
+    pub fn scroll_page_up(
+        &mut self,
+        _: &ScrollPageUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_lines(i64::from(self.state.size().rows).max(1), cx);
+    }
+
+    /// ⇧⇟: a page down towards the output.
+    pub fn scroll_page_down(
+        &mut self,
+        _: &ScrollPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_lines(i64::from(self.state.size().rows).max(1).saturating_neg(), cx);
+    }
+
+    /// ⇧⇱ / ⌘⇱: the oldest line the host keeps at the top.
+    pub fn scroll_to_top(&mut self, _: &ScrollToTop, _window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_lines(i64::MAX, cx);
+    }
+
+    /// ⇧⇲ / ⌘⇲: back to following the output.
+    pub fn scroll_to_bottom(
+        &mut self,
+        _: &ScrollToBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_lines(i64::MIN, cx);
+    }
+
+    /// ⌘A: every line from the oldest the host keeps to the newest; the history not cached
+    /// yet is fetched so the copy that follows has it.
+    pub fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        let size = self.state.size();
+        let oldest = self.state.scrollback().oldest();
+        let total = self.state.scrollback().total();
+        let newest = LineIndex(total.saturating_sub(1).max(oldest.0));
+        self.selection = Some(Selection::run((oldest, 0), (newest, size.cols.saturating_sub(1))));
+        self.selecting = false;
+        for (start, count) in self.state.scrollback().missing(oldest, total) {
+            let count = u32::try_from(count).unwrap_or(u32::MAX);
+            self.send(TermRequest::FetchLines { start, count });
+        }
+        cx.notify();
     }
 
     /// ⌘↑ (`delta` −1) / ⌘↓ (+1), also the phone's armed ⌘ with the bar's ↑ / ↓.
@@ -2335,6 +2448,11 @@ impl TerminalView {
         self.sticky_command
     }
 
+    /// Whether the ⌥ of the key being handled is Alt: the setting, for the side that is down.
+    fn alt_is_alt(&self) -> bool {
+        self.theme.behaviour.option_as_alt.applies(slopty_platform::right_option_held())
+    }
+
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
         // An armed ⌘ with the bar's ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
@@ -2347,7 +2465,7 @@ impl TerminalView {
             keystroke.modifiers.control = true;
         }
         self.key_seq = self.key_seq.wrapping_add(1);
-        let key = keys::key_event(self.key_seq, &keystroke, false);
+        let key = keys::key_event(self.key_seq, &keystroke, false, self.alt_is_alt());
         tracing::trace!(session = %self.session, ?key, "key");
         if self.state.view_offset() != 0 {
             self.state.scroll_to_bottom();
@@ -2776,7 +2894,7 @@ impl TerminalView {
         }
         if event.is_held {
             self.key_seq = self.key_seq.wrapping_add(1);
-            let key = keys::key_event(self.key_seq, &event.keystroke, true);
+            let key = keys::key_event(self.key_seq, &event.keystroke, true, self.alt_is_alt());
             self.send(TermRequest::Key(key));
         } else {
             self.press(event.keystroke.clone(), cx);
@@ -2907,9 +3025,9 @@ impl TerminalView {
                 self.state.line(index).and_then(|line| url::path_at_col(line, col))
             {
                 self.open_path(&span, armed, cx);
-            } else if armed && let Some(block) = self.state.command_block(index) {
-                // The phone has no right button: the armed tap on a bare block row is its
-                // menu.
+            } else if armed {
+                // The phone has no right button: the armed tap on a bare row is its menu.
+                let block = self.state.command_block(index);
                 self.block_menu = Some(BlockMenu { block, at: event.position });
                 cx.notify();
             }
@@ -2918,11 +3036,10 @@ impl TerminalView {
         // Left button selects unless the program asked for the mouse (⇧ overrides, as in
         // every terminal); everything else is reported to the program.
         let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);
-        // Right button on a command block (shell integration marks them) opens its menu.
-        if event.button == MouseButton::Right
-            && (!program_wants_mouse || event.modifiers.shift)
-            && let Some(block) = self.state.command_block(self.state.index_at_row(row))
-        {
+        // Right button opens the menu: the command block's items when the row is in one
+        // (shell integration marks them), the terminal's own always.
+        if event.button == MouseButton::Right && (!program_wants_mouse || event.modifiers.shift) {
+            let block = self.state.command_block(self.state.index_at_row(row));
             self.block_menu = Some(BlockMenu { block, at: event.position });
             cx.notify();
             return;
@@ -3493,6 +3610,11 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::note_last_block))
             .on_action(cx.listener(Self::clear_screen))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::toggle_conversation_action))
             .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
                 if !this.completion_nav("tab", window, cx) {
@@ -3581,13 +3703,14 @@ impl Render for TerminalView {
 
 /// The command-block menu a right click opened.
 struct BlockMenu {
-    /// The block under the click.
-    block: CommandBlock,
+    /// The block under the click; `None` on a row outside every block (the terminal's own
+    /// items only).
+    block: Option<CommandBlock>,
     /// Where the click landed (window coordinates), the menu's anchor.
     at: gpui::Point<Pixels>,
 }
 
-/// What the block menu offers.
+/// What the right-click menu offers: a block's items on a block, the terminal's own after.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BlockMenuItem {
     /// The typed command to the clipboard.
@@ -3602,6 +3725,14 @@ enum BlockMenuItem {
     Note,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
+    /// The selection to the clipboard.
+    Copy,
+    /// The clipboard into the session.
+    Paste,
+    /// The find field.
+    Find,
+    /// Clear the screen (`clear`, or the sequence, as ⌘K does).
+    ClearScreen,
 }
 
 /// The shortest command whose row gets a "took" caption.
@@ -3671,6 +3802,10 @@ impl BlockMenuItem {
             Self::Ask => "ask",
             Self::Note => "note",
             Self::SelectBlock => "select-block",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::Find => "find",
+            Self::ClearScreen => "clear",
         }
     }
 
@@ -3682,6 +3817,10 @@ impl BlockMenuItem {
             Self::Ask => "Ask the agent",
             Self::Note => "Save as note",
             Self::SelectBlock => "Select block",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+            Self::Find => "Find…",
+            Self::ClearScreen => "Clear screen",
         }
     }
 }
@@ -4404,7 +4543,7 @@ mod tests {
 
     /// A right click on a block's row opens its menu: the typed command and the output to
     /// the clipboard, the command run again (a paste, then ↩), the block selected; Esc and
-    /// any click close it; a row before the first prompt offers nothing.
+    /// any click close it; the terminal's own items come after the block's.
     #[gpui::test]
     fn a_right_click_on_a_block_offers_its_command_and_output(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -4442,10 +4581,14 @@ mod tests {
             "Ask the agent",
             "Save as note",
             "Select block",
+            "Paste",
+            "Find…",
+            "Clear screen",
         ] {
             assert!(tree.iter().any(|n| n.is("MenuItem", Some(label))), "{label}: {tree:#?}");
         }
-        let block = view.read_with(cx, |v, _| v.block_menu.as_ref().map(|m| m.block.clone()));
+        assert!(!tree.iter().any(|n| n.is("MenuItem", Some("Copy"))), "nothing selected yet");
+        let block = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
         let block = block.expect("the menu holds its block");
         assert_eq!(block_markdown(&block), "```\n$ seq 2\n1\n2\n```\n\n");
         assert!(drain_input(&mut rx).is_empty(), "a right click on a block is not reported");
@@ -4507,7 +4650,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("block-menu").is_some(), "the armed tap opens the menu");
         assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
-        let tapped = view.read_with(cx, |v, _| v.block_menu.as_ref().map(|m| m.block.clone()));
+        let tapped = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
         assert_eq!(
             tapped.map(|b| block_markdown(&b)).as_deref(),
             Some("```\n$ seq 2\n1\n2\n```\n\n")
@@ -4519,6 +4662,90 @@ mod tests {
         cx.simulate_click(at, gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("block-menu").is_none());
+    }
+
+    /// A right click off any block (no shell integration, a program's output) still offers
+    /// the terminal's own items: Paste, Find, Clear screen, and Copy once something is
+    /// selected; each does what its shortcut does and closes the menu.
+    #[gpui::test]
+    fn a_right_click_off_a_block_offers_the_terminals_own_items(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let rows = ["hello wor", "second", "third row"];
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates: rows
+                        .iter()
+                        .enumerate()
+                        .map(|(row, text)| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: marked(text, SemanticMark::Output),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        drain_input(&mut rx);
+        let at = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * 1.5, m.line_height * 1.5)
+        });
+        let right_click = |cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(at, MouseButton::Right, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let pick = |cx: &mut VisualTestContext, key: &'static str| {
+            let selector: &'static str = Box::leak(format!("block-menu-{key}").into_boxed_str());
+            let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{key} in the menu"));
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("block-menu").is_none(), "the menu closes after {key}");
+        };
+
+        right_click(cx);
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Menu", Some("Terminal"))), "{tree:#?}");
+        let items: Vec<_> =
+            tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
+        assert_eq!(items, ["Paste", "Find…", "Clear screen"]);
+        assert!(drain_input(&mut rx).is_empty(), "a right click is not reported");
+        pick(cx, "clear");
+        assert_eq!(drain_words(&mut rx), ["clear"], "the host clears, nothing typed");
+
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
+        right_click(cx);
+        pick(cx, "paste");
+        assert_eq!(drain_input(&mut rx), ["paste:hi"]);
+
+        view.update(cx, |v, cx| {
+            v.selection = Some(Selection::run((LineIndex(1), 0), (LineIndex(1), 5)));
+            cx.notify();
+        });
+        right_click(cx);
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("MenuItem", Some("Copy"))), "{tree:#?}");
+        pick(cx, "copy");
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(text.as_deref(), Some("second"));
+
+        right_click(cx);
+        pick(cx, "find");
+        assert!(view.read_with(cx, |v, _| v.search.is_some()), "the find field opened");
     }
 
     #[test]
@@ -4991,6 +5218,77 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
+    }
+
+    /// ⇧⇞ / ⇧⇟ page through history, ⇧⇱ / ⌘⇱ go to the oldest line and ⇧⇲ / ⌘⇲ back to the
+    /// output; each fetches what the cache lacks. ⌘A selects it all and fetches the rest so
+    /// ⌘C has every line.
+    #[gpui::test]
+    fn the_keys_page_through_history_and_select_it_all(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(100, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let offset = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.state.view_offset());
+        let fetches = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            let mut out = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                if let ClientMsg::Term { req: TermRequest::FetchLines { start, count }, .. } = msg {
+                    out.push((start.0, count));
+                }
+            }
+            out
+        };
+
+        cx.simulate_keystrokes("shift-pageup");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 3, "a page is the viewport's rows");
+        assert_eq!(fetches(&mut rx), [(97, 3)]);
+        cx.simulate_keystrokes("shift-pagedown");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 0);
+        cx.simulate_keystrokes("cmd-home");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 100, "the top is the oldest line");
+        assert_eq!(fetches(&mut rx), [(0, 3)]);
+        cx.simulate_keystrokes("cmd-end");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 0);
+        cx.simulate_keystrokes("shift-home");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 100);
+        cx.simulate_keystrokes("shift-end");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), 0);
+        assert!(drain_words(&mut rx).iter().all(|w| w.starts_with("fetch")), "no keys typed");
+
+        cx.simulate_keystrokes("cmd-a");
+        cx.run_until_parked();
+        let selection = view.read_with(cx, |v, _| v.selection.map(Selection::ordered));
+        assert_eq!(selection, Some(((LineIndex(0), 0), (LineIndex(102), 9))));
+        assert_eq!(fetches(&mut rx), [(0, 100)], "the history not cached yet");
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Lines {
+                    start: LineIndex(98),
+                    lines: vec![
+                        Line::from_text("older", 10, Style::DEFAULT),
+                        Line::from_text("old", 10, Style::DEFAULT),
+                    ],
+                },
+                cx,
+            );
+        });
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(
+            text.as_deref().map(|t| t.trim_start_matches('\n')),
+            Some("older\nold\nhello wor\nsecond\nthird row"),
+            "what arrived, in order; lines never fetched are blank"
+        );
     }
 
     /// A trackpad's fractions of a line add up to whole lines scrolled; a program tracking

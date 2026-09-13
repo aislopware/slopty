@@ -19,6 +19,9 @@ use slopty_theme::{Theme, alpha};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 
+/// Key context of the dialog.
+pub const CTX: &str = "SettingsEditor";
+
 /// What the user asked of the editor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsEditorEvent {
@@ -180,6 +183,7 @@ impl Render for SettingsEditor {
         });
         div()
             .id("settings-backdrop")
+            .key_context(CTX)
             .absolute()
             .inset_0()
             .flex()
@@ -192,7 +196,8 @@ impl Render for SettingsEditor {
                 cx.emit(SettingsEditorEvent::Dismiss);
                 cx.stop_propagation();
             }))
-            // ⌘↩ saves; captured so the field does not also break the line.
+            // ⌘↩ saves (the field's `secondary-enter`: ⌘ on macOS and iOS alike); captured so
+            // the field does not also break the line.
             .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
                 if enter.secondary {
                     this.save(cx);

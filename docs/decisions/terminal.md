@@ -896,3 +896,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   trigger (a drag would start with a cursor move). Tests:
   `a_click_on_the_input_is_a_path_for_the_cursor`,
   `a_click_on_the_input_line_moves_the_cursor_there`.
+
+- ✅ **Option is Alt when asked** (2026-09-15, ghostty's `macos-option-as-alt`, off there and
+  here). macOS translates ⌥ into the layout's symbol (⌥b is `∫`), so the Emacs bindings zsh,
+  bash, fish and every readline program answer to (⌥b/⌥f words, ⌥d, ⌥.) sent a glyph
+  instead of `ESC b`. `[terminal] option_as_alt = false | true | left | right` chooses
+  whether the key is a modifier (the escape prefix on the key, ghostty's `legacyAltPrefix`)
+  or the layout's key (`false`, the default: accents and symbols stay typeable);
+  `left`/`right` keep one side for each. It takes both ends, as in ghostty: the client
+  resolves the side (`OptionAsAlt::applies`; the Mac reads the right key's device bit off
+  the current `NSEvent`, since GPUI does not tell sides; iOS has none and reads as left)
+  and, when the key is Alt, sends the key without ⌥ (a letter, shifted when Shift is down;
+  anything else no text, the encoder prefixes the unshifted codepoint) with ⌥ not consumed
+  and `KeyEvent::option_as_alt` set (protocol 47); the host puts that on libghostty's
+  encoder after `setopt_from_terminal`, which resets it. Per key rather than per session
+  because the session is shared: two clients with different keyboards get each their own.
+  Tests: `option_as_alt_prefixes_escape_on_the_host` (engine),
+  `option_as_alt_rides_on_the_event` (client keys), `terminal_keys` (settings).
+
+- ✅ **The right click works on every row** (2026-09-13). The block menu opened only on a
+  command block's rows, so without shell integration (a raw `ssh`, a program's screen) a
+  right click did nothing, and even with it a mouse-only reader had no Paste. The menu now
+  opens on any row: the block's items first when the row is in one, then the terminal's own —
+  Copy (with a selection), Paste, Find…, Clear screen — the four the mouse-only reader
+  reaches for, each the same code as its shortcut so nothing new to test on the host side.
+  `BlockMenu::block` is optional; the aria name says which menu opened. Not a full copy of
+  the Edit menu: the rest (fonts, splits, agents) is the palette's. Tests:
+  `a_right_click_off_a_block_offers_the_terminals_own_items`,
+  `a_right_click_on_a_block_offers_its_command_and_output`.
+
+- ✅ **Keyboard scrolling and ⌘A** (2026-09-13). The wheel, the scrollbar and ⌘↑/⌘↓ were the
+  only ways through history; a keyboard reader (and a program that eats the wheel) had none.
+  ⇧⇞ / ⇧⇟ page by the viewport's rows, ⇧⇱ / ⇧⇲ go to the oldest line / the output, as in
+  ghostty, plus ⌘⇱ / ⌘⇲ since that is what Terminal.app taught the Mac; all bindings in the
+  Terminal context, so a program never sees them (ghostty binds them unconditionally too).
+  ⌘A selects from the host's oldest line to the newest and fetches every gap in the cache
+  at once, so the copy that follows a beat later has the whole scrollback; lines that have
+  not arrived yet copy blank rather than waiting. Test:
+  `the_keys_page_through_history_and_select_it_all`.

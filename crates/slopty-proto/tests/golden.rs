@@ -126,6 +126,7 @@ mod golden {
                     text: Some("A".to_owned()),
                     unshifted: Some('a'),
                     composing: false,
+                    option_as_alt: false,
                 }),
             },
         );

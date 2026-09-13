@@ -124,6 +124,27 @@ pub fn hide_pointer_until_moved() {
     }
 }
 
+/// Whether the ⌥ key down in the event being handled is the right one.
+///
+/// AppKit's `modifierFlags` carry the device-dependent side bits GPUI drops; read off the
+/// application's current event, so only meaningful from a key handler on the main thread.
+/// `false` on iOS (no sides) and off the main thread.
+#[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
+#[must_use]
+pub fn right_option_held() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // `NX_DEVICERALTKEYMASK` from `<IOKit/hidsystem/IOLLEvent.h>`: the right Option key's
+        // device-dependent bit in `NSEvent.modifierFlags` (not in AppKit's public flags).
+        const NX_DEVICERALTKEYMASK: usize = 0x0000_0040;
+        objc2::MainThreadMarker::new()
+            .and_then(|mtm| objc2_app_kit::NSApplication::sharedApplication(mtm).currentEvent())
+            .is_some_and(|event| event.modifierFlags().0 & NX_DEVICERALTKEYMASK != 0)
+    }
+    #[cfg(target_os = "ios")]
+    false
+}
+
 /// Show how many sessions are waiting on the human on the app icon.
 ///
 /// The Dock badge on macOS (cleared at zero). iOS keeps the count inside the app; its icon

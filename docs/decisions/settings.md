@@ -98,3 +98,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   parse-then-write), `the_editor_saves_on_command_enter_and_shows_a_refusal` and
   `escape_and_cancel_dismiss_and_the_phone_has_no_external_editor` (slopty-ui, headless);
   the app e2e types a section into the editor and reads the file back.
+- ✅ **`[terminal] option_as_alt`** (2026-09-15): ghostty's `macos-option-as-alt`, the one
+  key setting that has to reach the host (the encoder lives there); ruled in
+  decisions/terminal.md. It rides on `Theme::behaviour.option_as_alt` like the other
+  terminal settings and from there, resolved for the side held, on every key event, not on
+  the session, since the session is shared between clients.
+

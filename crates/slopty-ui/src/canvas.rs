@@ -158,7 +158,10 @@ pub enum KeyTarget {
 /// Key bindings for the canvas context.
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
-    const CTX: Option<&str> = Some("Canvas");
+    // A focused remote window gets every chord (its editor's ⌘W, ⌘T, ⌘0 are not ours to
+    // take, as on Parsec); ⌃Tab alone stays, the keyboard's way back to the canvas.
+    const CTX: Option<&str> = Some("Canvas && !Screen");
+    const RING_CTX: Option<&str> = Some("Canvas");
     const FILE_CTX: Option<&str> = Some("Canvas && file_card");
     vec![
         KeyBinding::new("cmd-t", NewTerminal, CTX),
@@ -182,8 +185,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
         KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
-        KeyBinding::new("ctrl-tab", FocusNext, CTX),
-        KeyBinding::new("ctrl-shift-tab", FocusPrev, CTX),
+        KeyBinding::new("ctrl-tab", FocusNext, RING_CTX),
+        KeyBinding::new("ctrl-shift-tab", FocusPrev, RING_CTX),
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
         KeyBinding::new("cmd-e", RenameItem, CTX),
         KeyBinding::new("cmd-shift-o", PointOthers, CTX),
@@ -3597,6 +3600,18 @@ impl CanvasView {
         self.activate(id, cx);
     }
 
+    /// After a ring step: a remote window with no tab stop around it kept the keys, so the
+    /// canvas itself takes them — ⌃Tab is always the way out of a window, whose chords are
+    /// all the host's while it has the focus.
+    fn leave_screen(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_screen = self
+            .active_screen()
+            .is_some_and(|screen| screen.read(cx).focus_handle(cx).is_focused(window));
+        if on_screen {
+            window.focus(&self.focus, cx);
+        }
+    }
+
     fn activate(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let session = match self.doc.get(id).map(|i| &i.kind) {
             Some(ItemKind::Terminal { session }) => Some(*session),
@@ -4391,8 +4406,14 @@ impl Render for CanvasView {
                     }
                 },
             ))
-            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
-            .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
+            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+                window.focus_next(cx);
+                this.leave_screen(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
+                window.focus_prev(cx);
+                this.leave_screen(window, cx);
+            }))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .capture_pinch(cx.listener(Self::pinch))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_pan))
@@ -4848,6 +4869,8 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::agent::{AgentKind, TranscriptBody, TranscriptEntry};
+    use slopty_proto::input::{KeyCode, Mods};
+    use slopty_proto::screen::ScreenInput;
     use slopty_proto::terminal::{Frame, SessionState, SessionSummary};
 
     use super::*;
@@ -5026,6 +5049,94 @@ mod tests {
         open(&view, cx, display, kind, CaptureTarget::Display(2), StreamId(2));
         view.update(cx, |c, cx| c.resize_remote_window(display, start, wider, cx));
         assert!(resizes(&mut rx).is_empty(), "a display is not resized");
+    }
+
+    /// A focused remote window gets every chord, the canvas's own included: ⌘W goes to the
+    /// host as the remote editor's close-tab, the card stays. ⌃Tab is the way back: it moves
+    /// the focus out of the window, and the same ⌘W then closes the card.
+    #[gpui::test]
+    fn a_focused_remote_window_takes_every_chord(cx: &mut TestAppContext) {
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        cx.update(|cx| cx.bind_keys(key_bindings()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            view.set_animation(false);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+        cx.run_until_parked();
+        let window = ItemId::new();
+        let wid = slopty_core::WindowId(9);
+        let item = CanvasItem {
+            id: window,
+            kind: ItemKind::Window { window: wid },
+            rect: Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 + TITLE_H },
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        view.update_in(cx, |c, _window, cx| {
+            let op = CanvasOp::Upsert(item);
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op }, cx);
+            c.screen_event(
+                ScreenEvent::Opened {
+                    stream: StreamId(1),
+                    target: CaptureTarget::Window(wid),
+                    codec: slopty_proto::screen::VideoCodec::Hevc,
+                    width: 1280,
+                    height: 800,
+                    scale: 2.0,
+                    hdr: false,
+                },
+                cx,
+            );
+            c.activate(window, cx);
+        });
+        cx.run_until_parked();
+        let screen = view.read_with(cx, |c, _| c.active_screen()).expect("a screen view");
+        cx.update(|window, cx| {
+            let focus = screen.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| -> Vec<(KeyCode, Mods)> {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Screen(ScreenRequest::Input {
+                        input: ScreenInput::Key { code, mods, .. },
+                        ..
+                    }) => Some((code, mods)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |c, _| c.doc.get(window).is_some()), "the card stays");
+        assert!(
+            keys(&mut rx)
+                .iter()
+                .any(|(code, mods)| *code == crate::keys::key_code("w")
+                    && mods.contains(Mods::SUPER)),
+            "⌘W went to the host"
+        );
+
+        cx.simulate_keystrokes("ctrl-tab");
+        cx.run_until_parked();
+        let focused = cx.update(|window, cx| screen.read(cx).focus_handle(cx).is_focused(window));
+        assert!(!focused, "⌃Tab leaves the window");
+        while rx.try_recv().is_ok() {}
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |c, _| c.doc.get(window).is_none()), "the canvas's ⌘W again");
+        assert!(keys(&mut rx).is_empty(), "nothing went to the host");
     }
 
     /// An agent at work keeps the device awake (the human is waiting on it); an agent that
@@ -6579,7 +6690,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(keys, [slopty_proto::input::KeyCode::Escape], "{keys:?}");
+        assert_eq!(keys, [KeyCode::Escape], "{keys:?}");
         let tree = cx.update(|window, _| crate::a11y::tree(window));
         assert!(!tree.iter().any(|n| n.is("Button", Some("deny"))), "answered: {tree:#?}");
     }
@@ -7748,7 +7859,7 @@ mod tests {
         match sent.as_slice() {
             [TermRequest::Paste(code), TermRequest::Key(key)] => {
                 assert_eq!(code, "echo hi", "the fenced lines alone, no fences and no prompt");
-                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+                assert_eq!(key.code, KeyCode::Enter, "{key:?}");
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),
         }
@@ -7848,7 +7959,7 @@ mod tests {
         match sent.as_slice() {
             [TermRequest::Paste(code), TermRequest::Key(key)] => {
                 assert_eq!(code, "${EDITOR:-vi} '/tmp/work/src/it'\\''s.rs'", "quoted as one word");
-                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+                assert_eq!(key.code, KeyCode::Enter, "{key:?}");
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),
         }
@@ -8822,7 +8933,7 @@ mod tests {
         match sent.as_slice() {
             [TermRequest::Paste(code), TermRequest::Key(key)] => {
                 assert_eq!(code, "echo hi");
-                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+                assert_eq!(key.code, KeyCode::Enter, "{key:?}");
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),
         }
@@ -8895,7 +9006,7 @@ mod tests {
         match sent.as_slice() {
             [TermRequest::Paste(code), TermRequest::Key(key)] => {
                 assert_eq!(code, "cargo test");
-                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+                assert_eq!(key.code, KeyCode::Enter, "{key:?}");
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),
         }

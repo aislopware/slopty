@@ -53,7 +53,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `PlatformWindow::{visibility, on_visibility_change}` (`WindowVisibility`, so an occluded
   window is not asked for frames); the iOS backend now answers them — visible from
   `willEnterForeground` to `didEnterBackground`, only transitions reach the callback, and
-  system sleep is a no-op as on the web (fork commit `1d2b4bb500`). gpui-kit was at upstream
+  system sleep is a no-op as on the web (fork commit `1d2b4bb500`; `6e87f6a825` on top makes
+  the `secondary` modifier ⌘ on iOS as on macOS — an iPad keyboard is a Mac keyboard, and
+  gpui-kit's `secondary-a` / `secondary-enter` never matched there, found by the iOS e2e's
+  settings-editor step; gpui-kit `569f7a21` on top of `2604f69` does the same for its own
+  bindings — ⌘A, ⌘C, ⌘V, ⌥-word motion were `cfg(target_os = "macos")` — and `Kbd`'s
+  glyphs). gpui-kit was at upstream
   head; `vendor/ghostty` moved 5 commits to ghostty main `5252b193c` (translations and a
   translate-c build refactor, no C API change: the regenerated bindings are byte-identical) with
   the binding fork re-pinned at `e69a909`. Standing order from the same day: every coding

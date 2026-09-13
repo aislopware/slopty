@@ -11,7 +11,8 @@ use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, Settings, SettingsError,
+    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Settings,
+    SettingsError,
 };
 use slopty_theme::{Rgb, TerminalPalette, Theme, Variant};
 
@@ -109,6 +110,12 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         CursorStyle::Block => slopty_theme::CursorStyle::Block,
         CursorStyle::Bar => slopty_theme::CursorStyle::Bar,
         CursorStyle::Underline => slopty_theme::CursorStyle::Underline,
+    };
+    theme.behaviour.option_as_alt = match settings.terminal.option_as_alt {
+        OptionAsAlt::False => slopty_theme::OptionAsAlt::False,
+        OptionAsAlt::True => slopty_theme::OptionAsAlt::True,
+        OptionAsAlt::Left => slopty_theme::OptionAsAlt::Left,
+        OptionAsAlt::Right => slopty_theme::OptionAsAlt::Right,
     };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
@@ -331,6 +338,8 @@ mod tests {
         assert_eq!(theme_for(&s, true).behaviour.cursor_style, slopty_theme::CursorStyle::Bar);
         s.terminal.cursor_blink = CursorBlink::Never;
         assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
+        s.terminal.option_as_alt = OptionAsAlt::Left;
+        assert_eq!(theme_for(&s, true).behaviour.option_as_alt, slopty_theme::OptionAsAlt::Left);
         s.terminal.minimum_contrast = 0.0;
         assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "a typo reads as off");
         s.terminal.minimum_contrast = f32::INFINITY;

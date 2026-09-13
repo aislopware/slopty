@@ -510,6 +510,8 @@ pub struct Behaviour {
     pub hide_pointer_while_typing: bool,
     /// What a wheel or trackpad line is worth in grid lines, in hundredths (`100` = one).
     pub scroll_multiplier: u16,
+    /// ⌥ as Alt: sent with every key, since the encoder is the host's.
+    pub option_as_alt: OptionAsAlt,
     /// What a remote window or display stream asks the host for.
     pub stream: StreamPrefs,
 }
@@ -523,7 +525,36 @@ impl Default for Behaviour {
             paste_protection: true,
             hide_pointer_while_typing: true,
             scroll_multiplier: 100,
+            option_as_alt: OptionAsAlt::False,
             stream: StreamPrefs::default(),
+        }
+    }
+}
+
+/// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
+/// prefix, or the layout's key that types the symbol.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum OptionAsAlt {
+    /// The layout's key (`⌥b` types `∫`).
+    #[default]
+    False,
+    /// Alt on both sides.
+    True,
+    /// Only the left key is Alt.
+    Left,
+    /// Only the right key is Alt.
+    Right,
+}
+
+impl OptionAsAlt {
+    /// Whether the ⌥ held (`right` says which) is Alt.
+    #[must_use]
+    pub const fn applies(self, right: bool) -> bool {
+        match self {
+            Self::False => false,
+            Self::True => true,
+            Self::Left => !right,
+            Self::Right => right,
         }
     }
 }
@@ -742,6 +773,22 @@ mod tests {
         assert_eq!(colors.bold_slot(Color::Palette(9), true), Color::Palette(9), "already bright");
         assert_eq!(colors.bold_slot(Color::Palette(196), true), Color::Palette(196), "the cube");
         assert_eq!(colors.bold_slot(Color::Default, true), Color::Default);
+    }
+
+    #[test]
+    fn option_as_alt_applies_to_the_side_held() {
+        for (setting, left, right) in [
+            (OptionAsAlt::False, false, false),
+            (OptionAsAlt::True, true, true),
+            (OptionAsAlt::Left, true, false),
+            (OptionAsAlt::Right, false, true),
+        ] {
+            assert_eq!(
+                (setting.applies(false), setting.applies(true)),
+                (left, right),
+                "{setting:?}"
+            );
+        }
     }
 
     #[test]

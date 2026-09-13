@@ -1110,6 +1110,8 @@ impl Render for ScreenView {
         });
         div()
             .id("screen")
+            // While the view has the keys, the canvas's own chords stand back (`!Screen`).
+            .key_context("Screen")
             .role(gpui::accesskit::Role::Image)
             .aria_label(gpui::SharedString::from(self.a11y_label()))
             .track_focus(&self.focus)

@@ -444,7 +444,8 @@ document synced through the host so every client sees the same canvas — item g
 and note text are host state; the camera `{x, y, zoom}` is per client, so panning and zoom on one
 client do not move another (`slopty-host::canvas` owns the document,
 `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⇧F are the keyboard surface, the last
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⇧F are the keyboard surface (bound in
+`Canvas && !Screen`: a focused remote window gets them all, ⌃Tab is the way back), the last
 one a find in every card (the palette lists the cards with hits, ↩ opens that card's find bar), the two before it
 walking the cards in reading order; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
@@ -1022,7 +1023,10 @@ at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 prompt row whose command took a second or more, its duration (`took_label`, fg at
 `alpha::TINT_STRONG`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
 emptied with the epoch; the sticky block header repeats it at its right end). Terminal-context bindings: ⌘C /
-⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
+⌘V copy and paste, ⌘A selects every line the host keeps and fetches the history the cache
+lacks so the ⌘C after it has it all, ⌘F / ⌘G / ⌘⇧G search, ⇧⇞ / ⇧⇟ page through history and
+⇧⇱ / ⌘⇱ / ⇧⇲ / ⌘⇲ go to the oldest line / back to the output (ghostty's keys plus
+Terminal.app's ⌘ pair), ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output; in a
 conversation card the prompts are the `User` entries, `Conversation::prompt_from_top`, and
@@ -1037,7 +1041,8 @@ the prompt repaints at the top; the view drops its scroll offset),
 newest prompt, typed as the block menu's rerun types it; also "Rerun last command" in the
 palette), ⌘⇧C copies the last finished command's output (`TermState::last_command_output`: the
 `Output` rows right above the newest prompt start, blank tail trimmed; nothing without shell
-integration). A right click on a block row opens the block menu (`block-menu`, protocol 28:
+integration). A right click on any row opens the context menu (`block-menu`; on a block row
+the block's items come first, protocol 28:
 the marks carry the input column, `TermState::command_block` reads the command and the
 output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
 ↩ as a key), "Ask the agent" (the block as a fence, `block_markdown`, into the composer of the
@@ -1048,7 +1053,10 @@ block as a note card beside the shell: the command as a heading and a runnable `
 the output as a plain fence, `block_note`; `TerminalViewEvent::NoteBlock` →
 `CanvasView::note_beside`, a free slot when the space beside is taken; the palette's "Keep
 last block as a card" does the same for the block before the newest prompt,
-`TermState::last_block`) and "Select block". While the viewport's top row is inside a block whose prompt
+`TermState::last_block`) and "Select block"; then, on every row, the terminal's own: "Copy"
+(only with a selection), "Paste", "Find…" and "Clear screen", each what its shortcut does. The
+menu is `Menu "Command block"` on a block, `Menu "Terminal"` elsewhere; the armed tap on the
+phone opens the same. While the viewport's top row is inside a block whose prompt
 rows have all scrolled above, a one-row header over the grid (`block-header`, role Button,
 `TerminalView::block_header`, reading `TermState::block_head` — the prompt's rows alone, never
 the output) names the command in the mono face on the panel colour, ruled
@@ -1115,9 +1123,10 @@ ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
 `[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
 never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
-hide_pointer_while_typing | scroll_multiplier`
+hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right`
 (the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the blink override,
-paste protection, the pointer hide and the multiplier on `Theme::behaviour`, the bell flag is
+paste protection, the pointer hide, the multiplier and option-as-alt on `Theme::behaviour`,
+the last travelling on every `KeyEvent` to the host's encoder, the bell flag is
 read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change and takes a changed `muted`, see
 decisions/video.md and decisions/settings.md), `[colors] foreground |

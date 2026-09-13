@@ -78,6 +78,22 @@ pub enum CursorStyle {
     Underline,
 }
 
+/// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
+/// prefix, or the layout's key that types the symbol.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    /// The layout's key (`⌥b` types `∫`).
+    #[default]
+    False,
+    /// Alt on both sides.
+    True,
+    /// Only the left key is Alt.
+    Left,
+    /// Only the right key is Alt.
+    Right,
+}
+
 /// A colour as `"#rrggbb"` (or `"rrggbb"`), or `""` for the theme's own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Color(pub Option<[u8; 3]>);
@@ -204,6 +220,9 @@ pub struct TerminalSettings {
     /// What a wheel or trackpad line scrolls, in grid lines (ghostty's
     /// `mouse-scroll-multiplier`): `1.0` one for one, `3.0` fast.
     pub scroll_multiplier: f32,
+    /// ⌥ as Alt (ghostty's `macos-option-as-alt`): `false` types the layout's symbol,
+    /// `true` sends an escape prefix for readline's ⌥b/⌥f, `left`/`right` one side each.
+    pub option_as_alt: OptionAsAlt,
 }
 
 impl Default for TerminalSettings {
@@ -218,6 +237,7 @@ impl Default for TerminalSettings {
             bold_is_bright: false,
             hide_pointer_while_typing: true,
             scroll_multiplier: 1.0,
+            option_as_alt: OptionAsAlt::False,
         }
     }
 }
@@ -384,6 +404,9 @@ bold_is_bright = {bold_is_bright}
 hide_pointer_while_typing = {hide_pointer_while_typing}
 # Grid lines per wheel or trackpad line (0.1 to 10).
 scroll_multiplier = {scroll_multiplier}
+# Option as Alt: false types the layout's symbol (⌥b is ∫); true sends the
+# escape prefix readline's ⌥b/⌥f want; \"left\" or \"right\" keep one side each.
+option_as_alt = {option_as_alt}
 
 [remote]
 # Frames per second a remote window or display is captured at (15 to 120).
@@ -424,6 +447,7 @@ ansi = []
             bold_is_bright = d.terminal.bold_is_bright,
             hide_pointer_while_typing = d.terminal.hide_pointer_while_typing,
             scroll_multiplier = toml_float(d.terminal.scroll_multiplier),
+            option_as_alt = toml_string(option_as_alt_name(d.terminal.option_as_alt)),
             fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             hdr = d.remote.hdr,
@@ -489,6 +513,15 @@ const fn cursor_style_name(c: CursorStyle) -> &'static str {
         CursorStyle::Block => "block",
         CursorStyle::Bar => "bar",
         CursorStyle::Underline => "underline",
+    }
+}
+
+const fn option_as_alt_name(o: OptionAsAlt) -> &'static str {
+    match o {
+        OptionAsAlt::False => "false",
+        OptionAsAlt::True => "true",
+        OptionAsAlt::Left => "left",
+        OptionAsAlt::Right => "right",
     }
 }
 
@@ -618,6 +651,15 @@ mod tests {
         ] {
             let loaded = Settings::parse(&format!("[terminal]\ncursor_style = \"{text}\"\n"));
             assert_eq!(loaded.settings.terminal.cursor_style, want, "{text}");
+        }
+        for (text, want) in [
+            ("false", OptionAsAlt::False),
+            ("true", OptionAsAlt::True),
+            ("left", OptionAsAlt::Left),
+            ("right", OptionAsAlt::Right),
+        ] {
+            let loaded = Settings::parse(&format!("[terminal]\noption_as_alt = \"{text}\"\n"));
+            assert_eq!(loaded.settings.terminal.option_as_alt, want, "{text}");
         }
         for (text, want) in [("program", CursorBlink::Program), ("always", CursorBlink::Always)] {
             let loaded = Settings::parse(&format!("[terminal]\ncursor_blink = \"{text}\"\n"));

@@ -1288,7 +1288,10 @@ impl VtEngine for GhosttyEngine {
         if let Some(c) = event.unshifted {
             ev.set_unshifted_codepoint(c);
         }
-        self.key_enc.set_options_from_terminal(&self.term);
+        // The terminal's modes reset option-as-alt; the client's choice goes on after them.
+        let option_as_alt =
+            if event.option_as_alt { key::OptionAsAlt::True } else { key::OptionAsAlt::False };
+        self.key_enc.set_options_from_terminal(&self.term).set_macos_option_as_alt(option_as_alt);
         match self.key_enc.encode_to_vec(ev, out) {
             // Not every key produces bytes; the encoder reports that as an invalid value.
             Ok(()) | Err(libghostty_vt::Error::InvalidValue) => Ok(()),
@@ -1315,6 +1318,7 @@ impl VtEngine for GhosttyEngine {
                     text: None,
                     unshifted: None,
                     composing: false,
+                    option_as_alt: false,
                 };
                 for _ in 0..rows.unsigned_abs() {
                     self.encode_key(&arrow, out)?;
@@ -1725,6 +1729,7 @@ mod tests {
             text: text.map(str::to_owned),
             unshifted: None,
             composing: false,
+            option_as_alt: false,
         };
         e.encode_key(&key(KeyCode::A, Some("a"), Mods::empty()), &mut out).unwrap();
         assert_eq!(out, b"a");
@@ -1738,6 +1743,36 @@ mod tests {
         out.clear();
         e.encode_key(&key(KeyCode::C, Some("c"), Mods::CTRL), &mut out).unwrap();
         assert_eq!(out, b"\x03");
+    }
+
+    /// ⌥b on a Mac client arrives as the layout's `∫` and is typed as such; when the client
+    /// says the key is Alt (its text then the key without ⌥) the host prefixes an escape.
+    #[test]
+    fn option_as_alt_prefixes_escape_on_the_host() {
+        let mut e = engine(10, 3);
+        let mut out = Vec::new();
+        let key = |text: Option<&str>, consumed_mods, option_as_alt| KeyEvent {
+            seq: 1,
+            action: KeyAction::Press,
+            code: KeyCode::B,
+            mods: Mods::ALT,
+            consumed_mods,
+            text: text.map(str::to_owned),
+            unshifted: Some('b'),
+            composing: false,
+            option_as_alt,
+        };
+        let cases: [(Option<&str>, Mods, bool, &[u8]); 4] = [
+            (Some("∫"), Mods::ALT, false, "∫".as_bytes()),
+            (Some("b"), Mods::empty(), true, b"\x1bb"),
+            (Some("B"), Mods::empty(), true, b"\x1bB"),
+            (None, Mods::empty(), true, b"\x1bb"),
+        ];
+        for (text, consumed, option_as_alt, want) in cases {
+            out.clear();
+            e.encode_key(&key(text, consumed, option_as_alt), &mut out).unwrap();
+            assert_eq!(out, want, "{text:?} {option_as_alt}");
+        }
     }
 
     #[test]

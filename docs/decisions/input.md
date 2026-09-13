@@ -39,8 +39,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   client reconnecting with a persisted window item). `slopty-capture` calls `CGMainDisplayID`
   once before any enumerate/resolve.
 
-- ✅ **⌘ chords go to the remote window unless the canvas binds them** (2026-09-04). GPUI runs
-  key bindings before key listeners, so ⌘T/⌘N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- never reach `ScreenView`;
+- ✅ **⌘ chords go to the remote window unless the canvas binds them** (2026-09-04; superseded
+  below on 2026-09-13: a focused window now gets the canvas's chords too). GPUI runs
+  key bindings before key listeners, so ⌘T/⌘N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘- never reached `ScreenView`;
   every other chord (⌘C/⌘V/⌘Z/⌘S/⌘K…) is forwarded with `Mods::SUPER` and no text (GPUI gives
   no `key_char` for ⌘ chords; the injector's virtual keycode carries it). Verified: ⌘K from the
   app reached hostd as `Key { K, Press, SUPER }` and cleared the streamed Ghostty. The view
@@ -48,6 +49,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ⌘Q/⌘H/⌘M stay with the app (menu bar). Modifier-only presses are not forwarded (GPUI has no
   key-down for them); the injector sets flags per event instead.
 
+- ✅ **A focused remote window gets every chord** (2026-09-13). ⌘W in a remote VS Code closed
+  the Slopty card, ⌘T opened a shell, ⌘0 reset the canvas zoom: the canvas's bindings ran
+  first. Now `ScreenView` puts `Screen` on its key context and the canvas binds its chords in
+  `Canvas && !Screen`, so while the window has the keys they all go to the host (as Parsec
+  does in a window: the app's chords are the remote's until the focus leaves). ⌃Tab / ⌃⇧Tab
+  keep `Canvas` — the control ring is the keyboard's way out, then the same ⌘W is the card's
+  — and a click on the canvas or a title bar does the same. No modal "capture" toggle: the
+  focus is the toggle, visible as the card's focus ring. Test:
+  `a_focused_remote_window_takes_every_chord`.
 - ⚠️ **An absolute GPUI element without insets sits at its static position.** `ScreenView`
   recorded its bounds from a `canvas().absolute().size_full()` placed *after* the picture, so
   Taffy put it one body-height below the real top: every pointer event mapped ~834 px too high

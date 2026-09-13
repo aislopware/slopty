@@ -296,6 +296,7 @@ mod tests {
             text: Some(text.to_owned()),
             unshifted: text.chars().next(),
             composing: false,
+            option_as_alt: false,
         }
     }
 

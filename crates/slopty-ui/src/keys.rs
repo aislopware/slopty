@@ -119,13 +119,41 @@ const fn single_char(c: char) -> KeyCode {
 }
 
 /// Build the protocol event for a key press.
+///
+/// `alt_is_alt` says the ⌥ held is a modifier (the client's `option_as_alt` setting, resolved
+/// for the side): the text is then the key without ⌥ (ghostty's own view retranslates the
+/// key that way), so the host's encoder prefixes an escape instead of typing the symbol.
 #[must_use]
-pub fn key_event(seq: u64, keystroke: &Keystroke, repeat: bool) -> KeyEvent {
+pub fn key_event(seq: u64, keystroke: &Keystroke, repeat: bool, alt_is_alt: bool) -> KeyEvent {
     let all = mods(keystroke.modifiers);
+    let unshifted = {
+        let mut chars = keystroke.key.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        }
+    };
+    let option_as_alt = alt_is_alt && all.contains(Mods::ALT);
     // Text the layout produced with Shift/Option already applied. Ctrl and Cmd never produce
     // text on macOS, so anything present had Shift (and maybe Alt) consumed.
-    let text = keystroke.key_char.clone().filter(|t| !t.is_empty());
-    let consumed = if text.is_some() { all & (Mods::SHIFT | Mods::ALT) } else { Mods::empty() };
+    let text = if option_as_alt {
+        // Without ⌥: the key itself, shifted when it is a letter; anything else leaves the
+        // encoder its unshifted codepoint.
+        unshifted.filter(char::is_ascii_alphabetic).map(|c| {
+            if keystroke.modifiers.shift {
+                c.to_ascii_uppercase().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+    } else {
+        keystroke.key_char.clone().filter(|t| !t.is_empty())
+    };
+    let consumed = match (&text, option_as_alt) {
+        (Some(_), true) => all & Mods::SHIFT,
+        (Some(_), false) => all & (Mods::SHIFT | Mods::ALT),
+        (None, _) => Mods::empty(),
+    };
     KeyEvent {
         seq,
         action: if repeat { KeyAction::Repeat } else { KeyAction::Press },
@@ -133,20 +161,50 @@ pub fn key_event(seq: u64, keystroke: &Keystroke, repeat: bool) -> KeyEvent {
         mods: all,
         consumed_mods: consumed,
         text,
-        unshifted: {
-            let mut chars = keystroke.key.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => Some(c),
-                _ => None,
-            }
-        },
+        unshifted,
         composing: false,
+        option_as_alt,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With ⌥ as Alt the event carries the key without ⌥ and the flag, so the host prefixes
+    /// an escape; otherwise the layout's symbol goes as typed, ⌥ consumed.
+    #[test]
+    fn option_as_alt_rides_on_the_event() {
+        let alt_b = Keystroke {
+            modifiers: Modifiers { alt: true, ..Modifiers::default() },
+            key: "b".to_owned(),
+            key_char: Some("∫".to_owned()),
+        };
+        let typed = key_event(1, &alt_b, false, false);
+        assert_eq!((typed.mods, typed.consumed_mods), (Mods::ALT, Mods::ALT));
+        assert_eq!((typed.text.as_deref(), typed.option_as_alt), (Some("∫"), false));
+        let alt = key_event(2, &alt_b, false, true);
+        assert_eq!((alt.mods, alt.consumed_mods), (Mods::ALT, Mods::empty()));
+        assert_eq!(
+            (alt.text.as_deref(), alt.unshifted, alt.option_as_alt),
+            (Some("b"), Some('b'), true)
+        );
+        let shifted = Keystroke {
+            modifiers: Modifiers { alt: true, shift: true, ..Modifiers::default() },
+            key_char: Some("ı".to_owned()),
+            ..alt_b.clone()
+        };
+        let alt = key_event(3, &shifted, false, true);
+        assert_eq!((alt.text.as_deref(), alt.consumed_mods), (Some("B"), Mods::SHIFT));
+        // A symbol key has no text without ⌥; the host prefixes its unshifted codepoint.
+        let alt_1 = Keystroke { key: "1".to_owned(), key_char: Some("¡".to_owned()), ..alt_b };
+        let alt = key_event(4, &alt_1, false, true);
+        assert_eq!((alt.text, alt.unshifted, alt.consumed_mods), (None, Some('1'), Mods::empty()));
+        // The flag means nothing without ⌥ down.
+        let plain =
+            Keystroke { modifiers: Modifiers::default(), key_char: Some("b".to_owned()), ..alt_b };
+        assert!(!key_event(5, &plain, false, true).option_as_alt);
+    }
 
     #[test]
     fn names_map_to_codes() {
