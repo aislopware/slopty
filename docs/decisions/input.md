@@ -101,3 +101,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   another app's resize edge is fragile and visible); an `AXPosition` move too (the user
   pulled a size, not a place). Tests: proto golden `client_screen_resize`, canvas
   `the_grip_asks_the_host_to_resize_the_window`.
+
+- ✅ **Losing focus lets go of every key held on the host** (2026-09-13). A key whose press
+  went to the host and whose release went elsewhere — ⌘-tab away with ⌘ down, a click on
+  another card mid-keystroke, the window going inactive — stayed down on the host until the
+  same key was pressed again there. Ruling: the screen view registers, at its first render
+  (the constructor has no window), `on_blur` on its focus handle and a window-activation
+  observer; either sends a release for every key in `held` (with empty modifiers) and then
+  the modifier releases through the same diff the modifier keys use, so the host sees the
+  keyboard as the client does: nothing down. A view with nothing held sends nothing. The
+  earlier "Modifier keys reach the host on their own" entry's open item is closed by this.
+  Test: headless `losing_focus_releases_what_is_held_on_the_host`.

@@ -24,8 +24,8 @@ use gpui::{
     Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point,
     Render, RenderImage, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement as _,
-    Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window,
-    canvas, div, point, px, size, surface,
+    Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchPhase,
+    UTF16Selection, Window, canvas, div, point, px, size, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -146,6 +146,9 @@ pub struct ScreenView {
     sticky: Modifiers,
     /// The modifier keys as last reported, so a change forwards the key that moved.
     modifiers: Modifiers,
+    /// Focus leaving the view and the window going inactive each release what is held on the
+    /// host (registered at the first render: the constructor has no window).
+    let_go: Option<[Subscription; 2]>,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
@@ -412,6 +415,7 @@ impl ScreenView {
             frames: 0,
             held: Vec::new(),
             modifiers: Modifiers::default(),
+            let_go: None,
             host_clipboard: None,
             sticky: Modifiers::default(),
             marked: None,
@@ -740,20 +744,42 @@ impl ScreenView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let code = keys::key_code(&ev.keystroke.key);
-        if !self.held.contains(&code) {
-            self.held.push(code);
-        }
         if is_paste_chord(&ev.keystroke) {
             self.push_clipboard(cx);
         }
+        let text = ev.keystroke.key_char.clone().filter(|t| !t.is_empty());
+        self.press_key(&ev.keystroke, ev.is_held, text);
+        cx.stop_propagation();
+    }
+
+    /// A key went down (or repeats): remember it as held and send it.
+    fn press_key(&mut self, keystroke: &Keystroke, repeat: bool, text: Option<String>) {
+        let code = keys::key_code(&keystroke.key);
+        if !self.held.contains(&code) {
+            self.held.push(code);
+        }
         self.input(ScreenInput::Key {
             code,
-            action: if ev.is_held { KeyAction::Repeat } else { KeyAction::Press },
-            mods: keys::mods(ev.keystroke.modifiers),
-            text: ev.keystroke.key_char.clone().filter(|t| !t.is_empty()),
+            action: if repeat { KeyAction::Repeat } else { KeyAction::Press },
+            mods: keys::mods(keystroke.modifiers),
+            text,
         });
-        cx.stop_propagation();
+    }
+
+    /// Focus left the view or the window went inactive: release on the host every key and
+    /// modifier whose press went there, since the release never will (⌘-tab away with ⌘
+    /// held, a click on another card while a key is down) — a key stuck down on the host is
+    /// the one thing a remote desktop must never leave behind.
+    fn let_go(&mut self, cx: &mut Context<Self>) {
+        for code in std::mem::take(&mut self.held) {
+            self.input(ScreenInput::Key {
+                code,
+                action: KeyAction::Release,
+                mods: Mods::empty(),
+                text: None,
+            });
+        }
+        self.modifiers(Modifiers::default(), cx);
     }
 
     fn key_up(&mut self, ev: &KeyUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -953,7 +979,16 @@ const fn proto_button(button: MouseButton) -> ProtoButton {
 }
 
 impl Render for ScreenView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.let_go.is_none() {
+            let blur = cx.on_blur(&self.focus, window, |this, _window, cx| this.let_go(cx));
+            let inactive = cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.let_go(cx);
+                }
+            });
+            self.let_go = Some([blur, inactive]);
+        }
         let entity = cx.entity();
         let handler = cx.entity();
         let focus = self.focus.clone();
@@ -1362,6 +1397,46 @@ mod tests {
                 (KeyCode::MetaLeft, KeyAction::Release, Mods::empty(), None),
             ]
         );
+    }
+
+    /// Losing focus (or the window going inactive) releases on the host every key and
+    /// modifier whose press went there, once; with nothing held it sends nothing.
+    #[gpui::test]
+    fn losing_focus_releases_what_is_held_on_the_host(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        let keys = |reqs: Vec<ScreenRequest>| -> Vec<(KeyCode, KeyAction)> {
+            reqs.iter()
+                .filter_map(|req| match req {
+                    ScreenRequest::Input {
+                        input: ScreenInput::Key { code, action, .. }, ..
+                    } => Some((*code, *action)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cmd = Modifiers { platform: true, ..Modifiers::default() };
+        view.update(cx, |v, cx| {
+            v.modifiers(cmd, cx);
+            let a = Keystroke { modifiers: cmd, key: "a".into(), key_char: None };
+            v.press_key(&a, false, None);
+            v.press_key(&a, true, None);
+        });
+        assert_eq!(
+            keys(sent(&mut rx)),
+            vec![
+                (KeyCode::MetaLeft, KeyAction::Press),
+                (KeyCode::A, KeyAction::Press),
+                (KeyCode::A, KeyAction::Repeat),
+            ]
+        );
+        view.update(cx, ScreenView::let_go);
+        assert_eq!(
+            keys(sent(&mut rx)),
+            vec![(KeyCode::A, KeyAction::Release), (KeyCode::MetaLeft, KeyAction::Release)],
+            "the key, then the modifier, let go"
+        );
+        view.update(cx, ScreenView::let_go);
+        assert!(sent(&mut rx).is_empty(), "nothing held: nothing sent");
     }
 
     /// An instant past the quality cooldown.
