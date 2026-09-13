@@ -842,6 +842,19 @@ mod feedback_tests {
     }
 
     #[test]
+    fn the_observed_parity_is_the_shard_ratio_in_thousandths() {
+        let stats = |data: u64, parity: u64| ReassemblerStats {
+            data_shards: data,
+            parity_shards: parity,
+            ..ReassemblerStats::default()
+        };
+        assert_eq!(observed_parity(&stats(0, 0)), 0, "nothing seen yet");
+        assert_eq!(observed_parity(&stats(10, 2)), 200);
+        assert_eq!(observed_parity(&stats(3, 1)), 333, "rounds down");
+        assert_eq!(observed_parity(&stats(1, 100)), u16::MAX, "a silly ratio saturates");
+    }
+
+    #[test]
     fn a_short_one_round_trips() {
         let nack = Feedback::Nack { stream: StreamId(3), frame: 9, fragments: vec![1, 4] };
         let bytes = encode_feedback(nack.clone());
