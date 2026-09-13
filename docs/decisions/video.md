@@ -723,8 +723,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   straight alpha, padded rows, short data, rounding), the host's `shape_tests` (one send per
   change, a blank read changes nothing), the proto golden `host_screen_cursor`, and headless
   `the_hosts_cursor_picture_is_drawn_at_its_hotspot` (size and hotspot in points, short bytes
-  and `None` put the arrow back). Not done: hiding the client's own pointer over the card —
-  GPUI has no hidden cursor style; the two pointers sit a round trip apart.
+  and `None` put the arrow back).
+
+- ✅ **The client's own pointer hides over a card that shows a frame** (2026-09-15). With the
+  host's pointer drawn on the card, the client's arrow sat a round trip ahead of it, and the
+  pair read as lag. GPUI had no cursor style that hides the pointer, so the fork gained
+  `CursorStyle::None` (fc045ebc): on macOS it registers a cursor rect whose `NSCursor` is one
+  clear pixel, so AppKit brings the arrow back on its own when the pointer leaves the view —
+  a balanced `NSCursor hide`/`unhide` pair could leave it hidden over another app if the
+  window lost the pointer without a style change; Linux and web map to the CSS `none`,
+  Wayland's shape protocol and Windows have no hidden shape and fall back to the default
+  arrow. The card sets it while a frame is up (`local_pointer`): the host's pointer is drawn
+  there, its picture or an arrow, or nothing when the host hides it (a hidden host pointer
+  is then mirrored rather than replaced by ours), and before the first frame the arrow stays
+  since there is nothing to point at. Test: `the_local_pointer_hides_once_a_frame_is_up`.
 
 - ✅ **The source state follows the frames, not the first one** (2026-09-06). `check_source`
   decided `Live` from `encoded > 0`, a latch: a window that drew once and was then hidden, or

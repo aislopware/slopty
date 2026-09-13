@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType as _;
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
-    Autocapitalize, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
-    Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point,
-    Render, RenderImage, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchPhase,
-    UTF16Selection, Window, canvas, div, point, px, size, surface,
+    Autocapitalize, Bounds, Context, CursorStyle, ElementInputHandler, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
+    KeyUpEvent, Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder,
+    Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
+    TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
+    surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -1066,6 +1067,7 @@ impl Render for ScreenView {
             .size_full()
             .overflow_hidden()
             .bg(hsla(self.theme.surfaces.canvas))
+            .cursor(local_pointer(self.latest.is_some()))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -1082,6 +1084,14 @@ impl Render for ScreenView {
             .children(self.cursor_overlay())
             .children(hud)
     }
+}
+
+/// The pointer the client shows over the card: none while a frame is up, since the host's
+/// pointer is drawn on it (its picture, or an arrow, or nothing when the host hides it, all
+/// one round trip behind — two pointers that far apart read as a lag), and the arrow before
+/// the first frame, when there is nothing to point at yet.
+const fn local_pointer(showing: bool) -> CursorStyle {
+    if showing { CursorStyle::None } else { CursorStyle::Arrow }
 }
 
 /// ⌘ + `key`.
@@ -1359,6 +1369,14 @@ mod tests {
         view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(vec![0; 32])), cx));
         view.update(cx, |v, cx| v.set_cursor_shape(None, cx));
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
+    }
+
+    /// The client's own pointer hides over a card that shows a frame, where the host's is
+    /// drawn, and stays the arrow before the first frame.
+    #[test]
+    fn the_local_pointer_hides_once_a_frame_is_up() {
+        assert_eq!(local_pointer(false), CursorStyle::Arrow);
+        assert_eq!(local_pointer(true), CursorStyle::None);
     }
 
     /// A modifier pressed on its own reaches the host as that key: each one that moves is a

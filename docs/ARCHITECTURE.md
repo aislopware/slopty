@@ -203,7 +203,10 @@ control stream (`ScreenEvent::Cursor`, a `CursorShape` of premultiplied BGRA wit
 and backing scale), read by `slopty_capture::cursor_shape` from `NSCursor.currentSystemCursor`
 at 30 Hz while the host's pointer is over the target and sent only when it changed
 (`slopty_host::screen::ShapeDedup`); the client draws that picture with its hotspot on the
-position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives.
+position (`ScreenView`'s `Pointer`), and its own arrow until the first one arrives. While a
+frame is up the card hides the client's own pointer (`CursorStyle::None`, a fork addition: on
+macOS a cursor rect with a one-pixel clear `NSCursor`, restored by AppKit when the pointer
+leaves), so only the host's pointer shows on it.
 
 **How much parity.** The host's `Redundancy` turns the receiver reports into the ratio the
 packetizer cuts each frame with: parity tracks twice the smoothed datagram loss over a 5 % floor,
