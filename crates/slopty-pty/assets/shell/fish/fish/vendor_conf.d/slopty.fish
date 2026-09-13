@@ -55,3 +55,27 @@ if status is-interactive; and test "$__slopty_integrated" = 1; and not string ma
         end
     end
 end
+
+# `sudo` keeps the terminfo (ghostty's `sudo` feature): TERM names our entry, and TERMINFO
+# says where it is, so `sudo vim` without it would find no terminal at all. sudoedit
+# (`-e`, `--edit`) takes no --preserve-env and is left alone; a sudo that is already a
+# function or an alias is the user's.
+if status is-interactive; and test -n "$TERMINFO"; and test file = (type -t sudo 2>/dev/null; or echo x)
+    function sudo -d "sudo, keeping TERMINFO"
+        set -l edit no
+        for arg in $argv
+            if test "$arg" = -e; or test "$arg" = --edit
+                set edit yes
+                break
+            end
+            if not string match -rq -- '^-' "$arg"; and not string match -rq -- '=' "$arg"
+                break
+            end
+        end
+        if test "$edit" = yes
+            command sudo $argv
+        else
+            command sudo --preserve-env=TERMINFO $argv
+        end
+    end
+end

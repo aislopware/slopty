@@ -33,10 +33,65 @@ _slopty_precmd() {
 }
 
 _slopty_preexec() {
-    'builtin' 'print' -n -- $'\e]133;C\a'
+    # The cursor is the program's shape again before the command runs.
+    'builtin' 'print' -n -- $'\e[0 q\e]133;C\a'
     _slopty_running=1
 }
 
 'builtin' 'typeset' -ga precmd_functions preexec_functions
 precmd_functions+=(_slopty_precmd)
 preexec_functions+=(_slopty_preexec)
+
+# The cursor says which keymap zle is in (ghostty's `cursor` feature): a blinking bar to
+# insert, a blinking block in vi command or visual mode. Hooked through
+# add-zle-hook-widget when the widget is already one of its hooks; otherwise the widget in
+# place (a plugin's, or none) is kept and called after ours, as ghostty does, since
+# add-zle-hook-widget over a hand-set widget breaks that widget.
+_slopty_zle_cursor() {
+    case ${KEYMAP-} in
+        vicmd|visual) 'builtin' 'print' -n -- $'\e[1 q' ;;
+        *)            'builtin' 'print' -n -- $'\e[5 q' ;;
+    esac
+}
+() {
+    'builtin' 'local' hook widget func orig flag
+    for hook in line-init line-finish keymap-select; do
+        widget=zle-$hook
+        func=_slopty_zle_${hook/-/_}
+        functions[$func]='_slopty_zle_cursor'
+        if [[ $widgets[$widget] == user:azhw:* && $+functions[add-zle-hook-widget] -eq 1 ]]; then
+            add-zle-hook-widget $hook $func
+        else
+            if (( $+widgets[$widget] )); then
+                orig=._slopty_orig_$widget
+                'builtin' 'zle' -A $widget $orig
+                flag=
+                [[ $widgets[$widget] == user:* ]] || flag=w
+                functions[$func]+="
+                    'builtin' 'zle' $orig -N$flag -- \"\$@\""
+            fi
+            'builtin' 'zle' -N $widget $func
+        fi
+    done
+}
+
+# `sudo` keeps the terminfo (ghostty's `sudo` feature): TERM names our entry, and TERMINFO
+# says where it is, so a root shell or `sudo vim` without it would find no terminal at all.
+# sudoedit (`-e`, `--edit`) takes no --preserve-env and is left alone.
+if [[ -n "${TERMINFO-}" ]]; then
+    sudo() {
+        'builtin' 'local' arg edit=0
+        for arg in "$@"; do
+            if [[ "$arg" == -e || "$arg" == --edit ]]; then
+                edit=1
+                'builtin' 'break'
+            fi
+            [[ "$arg" == -* || "$arg" == *=* ]] || 'builtin' 'break'
+        done
+        if (( edit )); then
+            'builtin' 'command' sudo "$@"
+        else
+            'builtin' 'command' sudo --preserve-env=TERMINFO "$@"
+        fi
+    }
+fi

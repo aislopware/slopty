@@ -1003,3 +1003,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   chords go where they went. Tests: `natural_editing_keys` (keys: the table, other chords
   none), `the_macs_editing_keys_edit_the_line` (view: ⌘← is `^A` on the wire, ⌥⌫ `ESC DEL`,
   off nothing), `terminal_keys` (settings).
+
+- ✅ **`sudo` keeps the terminfo, and zsh's cursor says its keymap** (2026-09-13, ghostty's
+  `sudo` and `cursor` shell-integration features). `TERM=xterm-ghostty` with `TERMINFO`
+  pointing at our compiled entry left `sudo vim` (and any root shell) without a terminal
+  description, since sudo's default policy drops `TERMINFO`. Ruling: when `TERMINFO` is set,
+  the three snippets define a `sudo` function that runs `command sudo --preserve-env=TERMINFO`;
+  sudoedit (`-e`/`--edit`) is left alone, and fish keeps a `sudo` the user already made a
+  function or an alias. zsh additionally prints a blinking bar (`CSI 5 q`) when zle starts a
+  line or the keymap changes to insert, a blinking block (`CSI 1 q`) in `vicmd`/`visual`, and
+  `CSI 0 q` from preexec so the command starts with the program's shape; the widgets are
+  wired as ghostty wires them (add-zle-hook-widget when the widget is already such a hook, else
+  wrapping whatever widget was there). bash has no keymap hook; fish shapes its own cursor.
+  Titles (ghostty's `title` feature) are not emitted: the card already shows the directory
+  and the running command from the marks. Tests: the live-shell tests in
+  `shell_integration.rs` run with a `TERMINFO` and check `sudo` is a function in zsh, bash and
+  fish, and that zsh writes `CSI 5 q` at the prompt and `CSI 0 q` ahead of its `133;C`.

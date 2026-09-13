@@ -110,3 +110,25 @@ else
         *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }_slopty_arm" ;;
     esac
 fi
+
+# `sudo` keeps the terminfo (ghostty's `sudo` feature): TERM names our entry, and TERMINFO
+# says where it is, so `sudo vim` without it would find no terminal at all. sudoedit (`-e`,
+# `--edit`) takes no --preserve-env and is left alone. An alias of sudo defined after this
+# wins over it; one defined before is wrapped.
+if [ -n "${TERMINFO-}" ]; then
+    sudo() {
+        local arg edit=0
+        for arg in "$@"; do
+            case $arg in
+                -e|--edit) edit=1; break ;;
+                -*|*=*) ;;
+                *) break ;;
+            esac
+        done
+        if [ "$edit" = 1 ]; then
+            command sudo "$@"
+        else
+            command sudo --preserve-env=TERMINFO "$@"
+        fi
+    }
+fi

@@ -163,7 +163,7 @@ registers with bash-preexec when the user loads it). fish gets `<shell>/fish` in
 `XDG_DATA_DIRS` so its `vendor_conf.d/slopty.fish` loads before the user's `config.fish`;
 fish ≥ 4 emits the marks itself and the snippet steps aside. All three emit `133;A` (in the
 prompt), `B`, `C` and `D;<status>`. `SLOPTY_NO_SHELL_INTEGRATION=1` in the daemon's or the
-session's environment opts out (`apply` then changes nothing); other programs run untouched. The engine takes libghostty's per-row prompt flag for the row kind and, because
+session's environment opts out (`apply` then changes nothing); other programs run untouched. The snippets also wrap `sudo` to keep `TERMINFO` (our compiled `xterm-ghostty` entry) when it is set, and zsh's zle hooks shape the cursor by keymap (bar to insert, block in vi command mode, the program's shape again before a command runs). The engine takes libghostty's per-row prompt flag for the row kind and, because
 the library exposes neither which row an `A` landed on nor the status a `D` carries, scans the
 PTY bytes for those two marks itself (`slopty_engine::osc133::Scanner`, state kept across
 reads so a mark split over two PTY reads is still found) and notes the cursor's absolute line

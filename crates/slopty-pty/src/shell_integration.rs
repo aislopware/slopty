@@ -381,9 +381,12 @@ mod tests {
         let pty = Pty::open(size).unwrap();
         let injection = si.apply(program, &strings(args), arg0, &[]);
         // A daemon's PATH: none of the developer's Homebrew hooks (mise, direnv) in the way.
+        // A TERMINFO of our own, as ptyd sets once its database is compiled: the `sudo`
+        // wrapper is defined only then.
         let mut env = vec![
             pair("HOME", &home.to_string_lossy()),
             pair("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
+            pair("TERMINFO", &tmp.join("terminfo").to_string_lossy()),
         ];
         env.extend(injection.env);
         // Spawn exactly the way ptyd does, through `spawn_with`, so the rewrite is the real one.
@@ -439,6 +442,11 @@ mod tests {
         assert!(has_mark(text, "D;1"), "{shell} status of `false`: {text:?}");
     }
 
+    /// `sudo` is the wrapper that keeps TERMINFO (the shells print `function` for it).
+    fn assert_sudo_wrapped(text: &str, shell: &str) {
+        assert!(text.contains("sudo=function"), "{shell} wraps sudo: {text:?}");
+    }
+
     #[tokio::test]
     async fn an_interactive_zsh_emits_prompt_marks() {
         // The user's own .zshenv still runs, from the real ZDOTDIR (here: HOME).
@@ -449,14 +457,18 @@ mod tests {
             None,
             &[(".zshenv", "export SLOPTY_TEST_ZSHENV=ran\n")],
             // Two lines: the status of the first is reported by the precmd before the second.
-            "echo zdotdir=$ZDOTDIR env=$SLOPTY_TEST_ZSHENV; false\nexit\n",
+            "echo zdotdir=$ZDOTDIR env=$SLOPTY_TEST_ZSHENV sudo=$(whence -w sudo); false\nexit\n",
         )
         .await;
         assert_marks(&text, "zsh");
         assert!(
-            text.contains("zdotdir= env=ran"),
-            "ZDOTDIR handed back, user .zshenv ran: {text:?}"
+            text.contains("zdotdir= env=ran sudo=sudo: function"),
+            "ZDOTDIR handed back, user .zshenv ran, sudo wrapped: {text:?}"
         );
+        // The cursor is a blinking bar while zle reads a line (the `main` keymap) and the
+        // program's shape again just before the command runs, ahead of its output mark.
+        assert!(text.contains("\x1b[5 q"), "a bar at the prompt: {text:?}");
+        assert!(text.contains("\x1b[0 q\x1b]133;C"), "reset before the command: {text:?}");
     }
 
     /// Every bash on this Mac: Apple's 3.2 and Homebrew's, when installed.
@@ -476,14 +488,15 @@ mod tests {
                 &["-i"],
                 None,
                 &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", "export SLOPTY_TEST_PROFILE=ran\n")],
-                "echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN; false\nexit\n",
+                "echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN sudo=$(type -t sudo); false\nexit\n",
             )
             .await;
             assert_marks(&text, bash);
             assert!(
-                text.contains("rc=ran profile= login="),
-                "{bash}: .bashrc only, env clean: {text:?}"
+                text.contains("rc=ran profile= login= sudo=function"),
+                "{bash}: .bashrc only, env clean, sudo wrapped: {text:?}"
             );
+            assert_sudo_wrapped(&text, bash);
         }
     }
 
@@ -522,15 +535,17 @@ mod tests {
             &["-i"],
             None,
             &[(".config/fish/config.fish", "set -gx SLOPTY_TEST_FISH ran\n")],
-            "echo cfg=$SLOPTY_TEST_FISH loaded=$__slopty_integrated; false\nexit\n",
+            "echo cfg=$SLOPTY_TEST_FISH loaded=$__slopty_integrated sudo=(type -t sudo); false\nexit\n",
         )
         .await;
         assert_marks(&text, "fish");
         // fish 4 marks on its own and the snippet only records that it loaded; on fish 3 it
         // wraps the prompt.
         assert!(
-            text.contains("cfg=ran loaded=1") || text.contains("cfg=ran loaded=wrapped"),
-            "user config.fish ran, the vendor snippet loaded: {text:?}"
+            text.contains("cfg=ran loaded=1 sudo=function")
+                || text.contains("cfg=ran loaded=wrapped sudo=function"),
+            "user config.fish ran, the vendor snippet loaded, sudo wrapped: {text:?}"
         );
+        assert_sudo_wrapped(&text, "fish");
     }
 }
