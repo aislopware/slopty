@@ -929,7 +929,10 @@ as GPUI's wave — and strikethroughs at the offsets §2's metrics derive, ⌘-h
 underline) with a hairline over every prompt-start row but the first line: the
 command-block separator, the foreground at 18 % alpha, or the theme's `surfaces.error` token
 at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
-(`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`). Terminal-context bindings: ⌘C /
+(`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
+prompt row whose command took a second or more, its duration (`took_label`, fg at
+`alpha::TINT_STRONG`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
+emptied with the epoch). Terminal-context bindings: ⌘C /
 ⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output; in a

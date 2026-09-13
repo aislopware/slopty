@@ -1,5 +1,6 @@
 //! `TerminalView`: one attached session on screen.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
@@ -285,6 +286,11 @@ pub struct TerminalView {
     files_asked: Option<String>,
     /// When the running shell command left its prompt.
     command_started: Option<Instant>,
+    /// How long each finished command took, by the row it was typed at, for the caption at
+    /// the right end of that row; only those at or over [`TOOK_MIN`]. Rows are numbered per
+    /// epoch, so a new epoch empties it (`took_epoch` remembers which one filled it).
+    took: HashMap<LineIndex, Duration>,
+    took_epoch: Option<u32>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
     /// ⌘ is down: links under the pointer show as links.
@@ -390,6 +396,8 @@ impl TerminalView {
             files: None,
             files_asked: None,
             command_started: None,
+            took: HashMap::new(),
+            took_epoch: None,
             selection: None,
             selecting: false,
             hover: None,
@@ -1695,7 +1703,7 @@ impl TerminalView {
         }
     }
 
-    /// The palette's "Save last block as note": the last finished command's block (the one
+    /// The palette's "Keep last block as a card": the last finished command's block (the one
     /// before the newest prompt) as a note card beside the shell; nothing without one.
     pub fn note_last_block(
         &mut self,
@@ -2225,6 +2233,10 @@ impl TerminalView {
                 tracing::debug!(session = %self.session, ?outcome, "prediction miss");
             }
         }
+        if self.state.epoch() != self.took_epoch {
+            self.took.clear();
+            self.took_epoch = self.state.epoch();
+        }
         for effect in effects {
             match effect {
                 Effect::Request(req) => self.send(req),
@@ -2243,14 +2255,29 @@ impl TerminalView {
                     self.search_invalid(&needle, message, cx);
                 }
                 Effect::CommandStarted(_) => self.command_started = Some(Instant::now()),
-                Effect::CommandFinished { command, exit } => {
+                Effect::CommandFinished { prompt, command, exit } => {
                     let elapsed =
                         self.command_started.take().map_or(Duration::ZERO, |t| t.elapsed());
+                    self.set_took(prompt, elapsed);
                     cx.emit(TerminalViewEvent::CommandFinished { command, exit, elapsed });
                 }
             }
         }
         cx.notify();
+    }
+
+    /// A command typed at `prompt` took `elapsed`: kept for the row's caption when it is at
+    /// or over `TOOK_MIN` (a quick command says nothing worth a caption).
+    pub fn set_took(&mut self, prompt: LineIndex, elapsed: Duration) {
+        if elapsed >= TOOK_MIN {
+            self.took.insert(prompt, elapsed);
+        }
+    }
+
+    /// How long the command typed at `prompt` took, when it was long enough to say.
+    #[must_use]
+    pub fn took(&self, prompt: LineIndex) -> Option<Duration> {
+        self.took.get(&prompt).copied()
     }
 
     /// The element measured the grid: `cols × rows` fit, with these metrics.
@@ -3120,6 +3147,23 @@ enum BlockMenuItem {
     SelectBlock,
 }
 
+/// The shortest command whose row gets a "took" caption.
+pub const TOOK_MIN: Duration = Duration::from_secs(1);
+
+/// A command's duration for its row's caption: `1.4 s` under a minute, `2 m 03 s` under an
+/// hour, `1 h 02 m` from there.
+#[must_use]
+pub fn took_label(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{:.1} s", elapsed.as_secs_f64())
+    } else if secs < 3600 {
+        format!("{} m {:02} s", secs / 60, secs % 60)
+    } else {
+        format!("{} h {:02} m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// A command block as the agent should read it: the command on a `$` line and its output,
 /// fenced, with a blank line after for the question.
 #[must_use]
@@ -3620,6 +3664,73 @@ mod tests {
         cx.simulate_click(at, gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("block-menu").is_none());
+    }
+
+    #[test]
+    fn a_took_label_reads_as_a_clock_would() {
+        assert_eq!(took_label(Duration::from_millis(1_040)), "1.0 s");
+        assert_eq!(took_label(Duration::from_millis(3_260)), "3.3 s", "a tenth, rounded");
+        assert_eq!(took_label(Duration::from_secs(59)), "59.0 s");
+        assert_eq!(took_label(Duration::from_secs(60)), "1 m 00 s");
+        assert_eq!(took_label(Duration::from_secs(123)), "2 m 03 s");
+        assert_eq!(took_label(Duration::from_secs(3_599)), "59 m 59 s");
+        assert_eq!(took_label(Duration::from_secs(3_600)), "1 h 00 m");
+        assert_eq!(took_label(Duration::from_mins(362)), "6 h 02 m");
+    }
+
+    /// A finished command's row says how long it took, at its right end, once it took a
+    /// second or more; the caption follows the row through history and a new epoch (a
+    /// reflow renumbers the rows) forgets them all.
+    #[gpui::test]
+    fn a_slow_commands_row_says_how_long_it_took(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let captions = |cx: &mut VisualTestContext| {
+            view.update(cx, |_v, cx| cx.notify());
+            cx.run_until_parked();
+            cx.update(|_window, cx| crate::terminal::captions_drawn(cx))
+        };
+        assert!(captions(cx).is_empty());
+        view.update(cx, |v, _cx| {
+            v.set_took(LineIndex(0), Duration::from_millis(3_260));
+            v.set_took(LineIndex(3), Duration::from_millis(400));
+            v.set_took(LineIndex(4), Duration::from_secs(2));
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(3))), None, "under a second");
+        assert!(captions(cx).is_empty(), "the captioned rows are above the viewport");
+        // Ten columns: `$ seq 2` reaches the caption's cells, so the text wins.
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(4));
+        assert!(captions(cx).is_empty(), "`$ seq 2` at the top: its text reaches the caption");
+        cx.simulate_keystrokes("cmd-up");
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(0));
+        assert_eq!(captions(cx), ["3.3 s"], "`$ ls` leaves room: its row says how long it took");
+        // A new epoch renumbers the rows: nothing said before applies.
+        view.update_in(cx, |view, _window, cx| {
+            let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+            let mut frame = Frame {
+                seq: 9,
+                full: true,
+                epoch: 1,
+                cols: 20,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                updates: vec![RowUpdate {
+                    row: 0,
+                    line: Line::from_text("$ ", 20, Style::DEFAULT),
+                }],
+            };
+            frame.updates[0].line.mark = prompt;
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(4))), None, "a new epoch forgets");
+        assert!(captions(cx).is_empty());
     }
 
     #[test]
@@ -5968,6 +6079,12 @@ mod tests {
         // The model chip opens the menu; a model in it is asked of the host, and the chip
         // only changes when the host confirms.
         let chip = cx.debug_bounds("conversation-model").expect("the model chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-model-opus").is_some(), "the menu opened");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-model-opus").is_none(), "the chip again closes it");
         cx.simulate_click(chip.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         let opus = cx.debug_bounds("conversation-model-opus").expect("the menu opened");

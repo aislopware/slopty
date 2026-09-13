@@ -404,6 +404,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   increase. Tests: `a_screen_erased_in_place_drops_the_marks_of_its_rows` (engine bytes) and
   the ⌃L frames in `a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts`.
 
+- ✅ **A slow command's row says how long it took** (2026-09-14). Warp writes a block's
+  duration in its header; here the badge for a command that ended unwatched carried the
+  time, and a watched one said nothing, so "did the build take three seconds or thirty"
+  was a guess. Rulings: (1) `Effect::CommandFinished` names the row the command was typed
+  at (`prompt`), and the view keeps the elapsed time by that row (`TerminalView::set_took`
+  / `took`), only from [`TOOK_MIN`] (1 s) up — a quick command says nothing worth a caption;
+  (2) the caption (`took_label`: `3.3 s`, `2 m 03 s`, `1 h 02 m`) is drawn at the right end
+  of that prompt row by the element's prepaint as an overlay glyph run, the foreground at
+  `alpha::TINT_STRONG`, flush with the grid's right edge, and left out when the command's
+  text comes within a cell of it (the text wins); the row keeps it through history; (3) rows are numbered
+  per epoch, so a new epoch (a reflow, a reset, the alt screen) empties the map; the host
+  is not asked (the marks carry no time). Tests: `a_took_label_reads_as_a_clock_would`,
+  headless `a_slow_commands_row_says_how_long_it_took` (the element's captions read back
+  through a test-only counter on the shape cache), `prompt` in the client's command test.
+
 - ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
   click on the block; the command a human reruns most is the one that just finished, and
   Warp puts that on a key. Ruling: `TermState::last_command` is the command of the block

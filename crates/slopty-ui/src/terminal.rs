@@ -10,9 +10,9 @@ mod view;
 
 pub use element::{CellMetrics, Prepared, TerminalElement};
 #[cfg(test)]
-pub(crate) use element::{family_picks, rows_prepared};
+pub(crate) use element::{captions_drawn, family_picks, rows_prepared};
 pub use view::{
     ClearScreen, CloseFind, Copy, CopyConversation, CopyLastOutput, Find, FindNext, FindPrev,
-    NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, Selection, TerminalView,
-    TerminalViewEvent, ToggleConversation, key_bindings,
+    NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, Selection, TOOK_MIN, TerminalView,
+    TerminalViewEvent, ToggleConversation, key_bindings, took_label,
 };

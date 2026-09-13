@@ -309,6 +309,9 @@ struct ShapeCache {
     /// How many rows the last prepaint built (tests: the rows the clip shows, not the grid's).
     #[cfg(test)]
     rows_prepared: usize,
+    /// The "took" captions the last prepaint drew, top row first (tests).
+    #[cfg(test)]
+    captions: Vec<String>,
 }
 
 impl gpui::Global for ShapeCache {}
@@ -774,6 +777,10 @@ impl Element for TerminalElement {
             // Rows above the oldest line the host still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<Word>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
+            // "took 3.2 s" at the right end of a prompt row whose command took a while.
+            let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
+            #[cfg(test)]
+            let mut caption_texts: Vec<String> = Vec::new();
             for (i, row) in rows_view.iter().enumerate() {
                 let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
                 if !row_in_band(y, line_height, overhang, clip_top, clip_bottom) {
@@ -882,6 +889,30 @@ impl Element for TerminalElement {
                 // A prompt starts here: rule off the command above it, red when it failed.
                 let separator = (line.mark.starts_prompt() && index.0 > 0)
                     .then(|| separator_color(theme, line.mark.exit()));
+                if line.mark.starts_prompt()
+                    && let Some(elapsed) = view.took(index)
+                {
+                    let text = super::view::took_label(elapsed);
+                    let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+                    let typed =
+                        u16::try_from(line.text().trim_end().chars().count()).unwrap_or(u16::MAX);
+                    // Flush with the right edge, a cell clear of the command's text.
+                    if let Some(col) = grid_cols.checked_sub(width)
+                        && typed < col
+                    {
+                        let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
+                        run.color = hsla_alpha(palette.fg, alpha::TINT_STRONG);
+                        let shaped = text_system.shape_line(
+                            SharedString::from(text.clone()),
+                            font_size,
+                            &[run],
+                            Some(cell_width),
+                        );
+                        captions.push((point(origin.x + cell_width * f32::from(col), y), shaped));
+                        #[cfg(test)]
+                        caption_texts.push(text);
+                    }
+                }
                 prepared_rows.push(PreparedRow {
                     y,
                     quads,
@@ -895,6 +926,7 @@ impl Element for TerminalElement {
             #[cfg(test)]
             {
                 cache.rows_prepared = prepared_rows.len();
+                cache.captions = caption_texts;
             }
 
             let cursor_visible = cursor.visible
@@ -957,6 +989,7 @@ impl Element for TerminalElement {
                 );
                 overlay.push((at, shaped));
             }
+            overlay.extend(captions);
 
             Prepared {
                 metrics,
@@ -1227,6 +1260,12 @@ pub fn family_picks(cx: &App) -> usize {
 #[cfg(test)]
 pub fn rows_prepared(cx: &App) -> usize {
     cx.try_global::<ShapeCache>().map_or(0, |cache| cache.rows_prepared)
+}
+
+/// The "took" captions the last prepaint drew, top row first (tests).
+#[cfg(test)]
+pub fn captions_drawn(cx: &App) -> Vec<String> {
+    cx.try_global::<ShapeCache>().map_or_else(Vec::new, |cache| cache.captions.clone())
 }
 
 #[cfg(test)]

@@ -48,6 +48,8 @@ pub enum Effect {
     CommandStarted(String),
     /// The shell printed its next prompt: the running command finished.
     CommandFinished {
+        /// The row the command was typed at (its block's prompt).
+        prompt: LineIndex,
         /// What was typed.
         command: String,
         /// Its exit status, when the shell said.
@@ -347,9 +349,9 @@ impl TermState {
             // and redraws the prompt higher up): either way a prompt the shell just drew.
             Some(seen) if prompt != seen => {
                 self.latest_prompt = Some(prompt);
-                if let Some((_, command)) = self.running.take() {
+                if let Some((typed_at, command)) = self.running.take() {
                     let exit = self.line(prompt).and_then(|l| l.mark.exit());
-                    effects.push(Effect::CommandFinished { command, exit });
+                    effects.push(Effect::CommandFinished { prompt: typed_at, command, exit });
                 }
             }
             Some(_) => {}
@@ -786,7 +788,11 @@ mod tests {
         f.updates[0].line.mark = prompt(Some(1));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 2)))),
-            vec![Effect::CommandFinished { command: "sleep 9".to_owned(), exit: Some(1) }]
+            vec![Effect::CommandFinished {
+                prompt: LineIndex(0),
+                command: "sleep 9".to_owned(),
+                exit: Some(1)
+            }]
         );
         assert!(!state.command_running());
         // ⌃L at the prompt: the shell erases the screen in place and redraws its prompt on the
@@ -807,7 +813,11 @@ mod tests {
         f.updates[0].line.mark = prompt(Some(0));
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
-            vec![Effect::CommandFinished { command: "sleep 2".to_owned(), exit: Some(0) }]
+            vec![Effect::CommandFinished {
+                prompt: LineIndex(0),
+                command: "sleep 2".to_owned(),
+                exit: Some(0)
+            }]
         );
         // A new epoch forgets which prompt was newest, so its first prompt ends nothing.
         let mut f = frame(10, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
