@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
             hook::relay().await;
             Ok(())
         }
-        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd),
+        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd).await,
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);
             match cmd {

@@ -552,7 +552,10 @@ pill shows "allowed" / "denied" until the host reports the agent's next state, s
 one key. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
 next waiting terminal in reading order, cycling from the active item; the top bar shows an
 "N need you" pill with the count that does the same on a click or a tap (the phone's way in).
-`slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`.
+`slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`;
+`slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any
+program (a wrapper around another agent), is the same relay with the agent's own word, and
+gets the same pill, badge, attention and banner.
 On macOS the count is also the Dock badge, an attention event bounces the Dock icon when the
 app is not active, and (bundled app only) a notification-centre banner with Allow/Deny buttons
 is posted; clicking it activates the app and reveals the session

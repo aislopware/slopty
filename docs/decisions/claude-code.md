@@ -898,3 +898,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   transcript verdict stays behind the hooks as before. Not done: a wall-clock watchdog; the
   transcript is a witness, a timer would be a guess. Tests: transcript `progress` (both
   markers), tracker `an_interrupted_turn_goes_idle_from_the_transcript`.
+
+- ✅ **Any program can report its own status** (2026-09-15). slop-desk's `ctl report` verb
+  (`docs/knowledge-from-slop-desk.md` §5) is the name-agnostic half of the design: a codex,
+  gemini or opencode wrapper that says what it is doing gets first-class treatment with no
+  per-agent code. `slopty hook report <working|blocked|done|idle|gone> [message…]`, run
+  inside a session (`SLOPTY_SESSION` names it; outside one it fails loudly instead of being
+  silently ignored as the Claude relay is), relays a `Report` hook payload over the same
+  control socket; the tracker reads it as an ordinary hook — the pill moves, a block raises
+  attention once and shows as a question, `done` lights the finished badge, `gone` ends the
+  agent — and it clears the block ledger, since a wrapper has no `tool_use_id`s to settle. No
+  session id on the payload, so a Claude session owning the terminal is not displaced. Tests:
+  tracker `a_report_from_any_program_drives_the_pill`, CLI
+  `a_report_is_a_hook_payload_the_tracker_reads`.

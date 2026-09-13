@@ -102,6 +102,9 @@ pub struct Hook {
     /// `Stop`: the text of the turn's final response, so nobody has to read the transcript.
     #[serde(default)]
     pub last_assistant_message: Option<String>,
+    /// `Report` (`slopty hook report`): `working|blocked|done|idle|gone`, from any program.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 impl Hook {
@@ -501,7 +504,7 @@ impl Tracker {
         let Some(id) = hook.tool_use_id.as_ref() else {
             if matches!(
                 hook.event.as_str(),
-                "SessionStart" | "SessionEnd" | "UserPromptSubmit" | "Stop"
+                "SessionStart" | "SessionEnd" | "UserPromptSubmit" | "Stop" | "Report"
             ) {
                 self.blocks.clear();
             }
@@ -572,6 +575,19 @@ impl Tracker {
                 _ => return None,
             },
             "Stop" => (AgentStatus::Done, hook.last_said()),
+            // Any program's own word (`slopty hook report`): a wrapper around another agent
+            // gets the same pill, badge and attention as Claude Code's hooks buy it.
+            "Report" => {
+                let said = hook.message.as_deref().map(first_line).map(truncate);
+                match hook.status.as_deref()? {
+                    "working" => (AgentStatus::Working, said),
+                    "blocked" => (AgentStatus::Blocked(BlockReason::Question), said),
+                    "done" => (AgentStatus::Done, said),
+                    "idle" => (AgentStatus::Idle, said),
+                    "gone" => (AgentStatus::None, None),
+                    _ => return None,
+                }
+            }
             _ => return None,
         })
     }
@@ -702,6 +718,32 @@ mod tests {
 
     fn hook(json: &str) -> Hook {
         Hook::parse(json).expect("hook json")
+    }
+
+    /// `slopty hook report` speaks for any program: the five words walk the pill, a block
+    /// raises attention once, and "gone" ends the agent.
+    #[test]
+    fn a_report_from_any_program_drives_the_pill() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let report = |status: &str, msg: &str| {
+            hook(&format!(
+                r#"{{"hook_event_name":"Report","status":"{status}","message":"{msg}"}}"#
+            ))
+        };
+        let e = t.apply(sid, &report("working", "planning")).expect("working");
+        assert_eq!((e.status, e.detail.as_deref()), (AgentStatus::Working, Some("planning")));
+        let e = t.apply(sid, &report("blocked", "approve rm -rf?")).expect("blocked");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
+        assert!(e.attention);
+        assert_eq!(t.apply(sid, &report("blocked", "approve rm -rf?")), None, "same again");
+        let e = t.apply(sid, &report("done", "all green")).expect("done");
+        assert_eq!((e.status, e.detail.as_deref()), (AgentStatus::Done, Some("all green")));
+        let e = t.apply(sid, &report("idle", "")).expect("idle");
+        assert_eq!(e.status, AgentStatus::Idle);
+        assert_eq!(t.apply(sid, &report("dancing", "")), None, "not a status");
+        let e = t.apply(sid, &report("gone", "")).expect("gone");
+        assert_eq!(e.status, AgentStatus::None);
     }
 
     #[test]
