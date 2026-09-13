@@ -41,7 +41,14 @@ pub fn is_sprite(text: &str) -> bool {
 }
 
 const fn is_sprite_char(c: char) -> bool {
-    matches!(c, '\u{2500}'..='\u{259F}' | '\u{2800}'..='\u{28FF}' | '\u{E0B0}'..='\u{E0B3}')
+    matches!(
+        c,
+        '\u{2500}'..='\u{259F}'
+            | '\u{2800}'..='\u{28FF}'
+            | '\u{E0B0}'..='\u{E0B3}'
+            | '\u{1FB00}'..='\u{1FB3B}'
+            | '\u{1CD00}'..='\u{1CDE5}'
+    )
 }
 
 /// A line's weight on one side of the cell.
@@ -224,6 +231,8 @@ pub fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
         0x2580..=0x259f => blocks(n, cell),
         0x2800..=0x28ff => braille(n, cell),
         0xe0b0..=0xe0b3 => powerline(n, cell),
+        0x1fb00..=0x1fb3b => sextant(n, cell),
+        0x1cd00..=0x1cde5 => octant(n, cell),
         _ => return None,
     })
 }
@@ -466,6 +475,68 @@ fn blocks(n: u32, cell: Cell) -> Vec<Shape> {
     }
 }
 
+/// A mosaic: the cell cut into two columns and `rows` rows, `mask` naming the filled tiles in
+/// reading order (bit 0 top-left, bit 1 top-right, bit 2 the next row's left, …). The cuts are
+/// snapped so neighbouring cells' tiles meet without a seam.
+fn mosaic(mask: u32, rows: u32, cell: Cell) -> Vec<Shape> {
+    let (w, h) = (cell.w, cell.h);
+    #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+    let rows_f = rows as f32;
+    let cut = |k: u32| {
+        if k == rows {
+            return h;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+        let k = k as f32;
+        cell.snap(h * k / rows_f)
+    };
+    let mx = cell.snap(w / 2.0);
+    let mut out = Vec::new();
+    for row in 0..rows {
+        let (y0, y1) = (cut(row), cut(row.saturating_add(1)));
+        let left = row.saturating_mul(2);
+        if mask & (1_u32 << left) != 0 {
+            out.push(cell.rect(0.0, y0, mx, y1, Ink::Fg));
+        }
+        if mask & (1_u32 << left.saturating_add(1)) != 0 {
+            out.push(cell.rect(mx, y0, w, y1, Ink::Fg));
+        }
+    }
+    out
+}
+
+/// Sextants U+1FB00–U+1FB3B: two columns by three rows. The block skips the empty, left-half,
+/// right-half and full patterns (they are block elements), so the mask is the index plus one
+/// plus one more for each twenty passed — ghostty's arithmetic.
+fn sextant(n: u32, cell: Cell) -> Vec<Shape> {
+    let idx = n.saturating_sub(0x1fb00);
+    mosaic(idx.saturating_add(idx / 0x14).saturating_add(1), 3, cell)
+}
+
+/// Octants U+1CD00–U+1CDE5: two columns by four rows. No arithmetic fits the block (it skips
+/// every pattern another character already draws), so the masks come from Unicode's names, in
+/// code point order (ghostty's `octants.txt`).
+fn octant(n: u32, cell: Cell) -> Vec<Shape> {
+    let idx = n.saturating_sub(0x1cd00);
+    OCTANTS.get(idx as usize).map_or_else(Vec::new, |&mask| mosaic(u32::from(mask), 4, cell))
+}
+
+/// The filled tiles of each octant, reading order bits, from `BLOCK OCTANT-…` names.
+const OCTANTS: [u8; 230] = [
+    4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+    33, 34, 35, 36, 37, 38, 39, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+    58, 59, 60, 61, 62, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 81, 82, 83, 84,
+    86, 87, 88, 89, 91, 92, 93, 94, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+    109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+    129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147,
+    148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 161, 162, 163, 164, 166, 167, 168,
+    169, 171, 172, 173, 174, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189,
+    190, 191, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209,
+    210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228,
+    229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 241, 242, 243, 244, 246, 247, 248, 249,
+    251, 253, 254,
+];
+
 /// Braille dot bits in code point order with each dot's (column, row): 1 2 4 are column 1
 /// rows 1–3, 8 16 32 column 2 rows 1–3, 64 column 1 row 4, 128 column 2 row 4.
 const DOTS: [(u32, u32, u32); 8] =
@@ -525,7 +596,7 @@ mod tests {
 
     #[test]
     fn the_ranges_are_box_drawing_blocks_braille_and_powerline() {
-        for text in ["─", "╬", "▄", "⠿", "\u{E0B0}"] {
+        for text in ["─", "╬", "▄", "⠿", "\u{E0B0}", "\u{1FB00}", "\u{1CD00}"] {
             assert!(is_sprite(text), "{text}");
         }
         for text in ["a", "─a", "", "字", "→"] {
@@ -609,6 +680,21 @@ mod tests {
             shapes('▒', CELL).expect("shade")[0],
             Shape::Rect { ink: Ink::Shade(a), .. } if (a - 0.5).abs() < f32::EPSILON
         ));
+    }
+
+    /// U+1FB00 is the top-left sextant alone; U+1FB3B (mask 62) everything but the top-left;
+    /// U+1CD00 is OCTANT-3 (second row, left); the last octant, U+1CDE5, is OCTANT-2345678.
+    #[test]
+    fn sextants_and_octants_are_mosaics_of_the_cell() {
+        assert_eq!(rects('\u{1FB00}'), vec![(0.0, 0.0, 4.0, 5.0)]);
+        assert_eq!(rects('\u{1FB3B}').len(), 5);
+        // SEXTANT-35: the left column's middle and bottom tiles, cut at 5 and 11 of 16.
+        assert_eq!(rects('\u{1FB13}'), vec![(0.0, 5.0, 4.0, 6.0), (0.0, 11.0, 4.0, 5.0)]);
+        assert_eq!(rects('\u{1CD00}'), vec![(0.0, 4.0, 4.0, 4.0)]);
+        assert_eq!(rects('\u{1CDE5}').len(), 7);
+        let tiles = rects('\u{1CDE5}');
+        assert_eq!(tiles[0], (4.0, 0.0, 4.0, 4.0), "OCTANT-2 is the top-right tile");
+        assert_eq!(tiles.last().copied(), Some((4.0, 12.0, 4.0, 4.0)));
     }
 
     #[test]
