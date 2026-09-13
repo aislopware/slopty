@@ -551,3 +551,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   frame has no blinking content would still be asked). Tests: element
   `a_word_hashes_the_same_wherever_it_sits` (the phase in the key, the hidden colour), headless
   `the_blink_clock_ticks_only_while_something_blinks`.
+
+- ✅ **Glyphs are placed by their cell, not by GPUI's forced width** (2026-09-13). `shape_cells`
+  shaped a word with `shape_line(.., Some(cell_width))`, which moves every *base* glyph (one
+  whose shaped x advanced more than half a cell past the last base) to base index × cell and
+  hangs the rest off it, and added a spacer space after a wide cell of one code point so the
+  wide glyph took two bases. A wide cluster of several code points — `❤️` (VS16), a ZWJ
+  family, a flag — got no spacer and, when GPUI's font fallback shaped it to several base
+  glyphs, pushed the rest of the word along by that many cells (the family emoji put the
+  next glyph five cells on, test). Ruling: shape with no forced width and place each glyph
+  at the column of the cell its byte index falls in (`starts`: the first byte and column of
+  every drawing cell), keeping its shaped offset from that cell's first glyph. A wide cell is
+  two columns whatever it shaped to; a ligature (`->` in JetBrains Mono, one glyph for two
+  cells) keeps its cells since the next cell has its own column; a combining mark stays on its
+  base at its shaped offset; a cluster the fallback split into several glyphs overdraws its
+  neighbour instead of shifting the row (ghostty does the same). The `Word` now holds the
+  placed glyphs (font, id, position, emoji, colour) — the shaped line is dropped after
+  placing, so painting walks one flat vector. Test: element
+  `a_wide_cluster_takes_two_cells_whatever_its_code_points` (CJK, emoji, VS16, ZWJ, flag).

@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, DispatchPhase, Edges, Element, ElementId,
-    ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, Hsla,
+    ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId, Hsla,
     InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, Pixels, Point,
     ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point,
     px, quad, relative, size,
@@ -458,25 +458,31 @@ fn segments(cells: &[Cell]) -> Vec<(u16, &[Cell])> {
     out
 }
 
-/// A word shaped once, at the base font size with the base cell width forced, and what
-/// painting it at any size needs: the glyph runs (through the shaped line) and the colour of
-/// each byte of its text.
+/// A word shaped once, at the base font size, and what painting it at any size needs: every
+/// glyph with its font, its colour and its position — placed by the column of the cell its
+/// byte came from, so a wide cluster spans two cells whatever it shaped to.
 #[derive(Debug)]
 struct Word {
-    line: ShapedLine,
-    /// `(end byte, colour)` per style run, in text order.
-    colors: Vec<(usize, Hsla)>,
+    glyphs: Vec<Glyph>,
 }
 
-impl Word {
-    /// Colour of the glyph at byte `index` of the text.
-    fn color_at(&self, index: usize) -> Hsla {
-        self.colors
-            .iter()
-            .find(|(end, _)| index < *end)
-            .or_else(|| self.colors.last())
-            .map_or(gpui::black(), |(_, color)| *color)
-    }
+/// One glyph of a [`Word`], at the base size, relative to the word's origin on the baseline.
+#[derive(Debug, Clone, Copy)]
+struct Glyph {
+    font: FontId,
+    id: GlyphId,
+    position: Point<Pixels>,
+    emoji: bool,
+    color: Hsla,
+}
+
+/// Colour of the byte at `index` of a word's text, from its `(end byte, colour)` style runs.
+fn color_at(colors: &[(usize, Hsla)], index: usize) -> Hsla {
+    colors
+        .iter()
+        .find(|(end, _)| index < *end)
+        .or_else(|| colors.last())
+        .map_or(gpui::black(), |(_, color)| *color)
 }
 
 /// Where a glyph shaped at the base size goes when the word is painted at `zoom` times it:
@@ -486,8 +492,11 @@ fn glyph_origin(origin: Point<Pixels>, shaped: Point<Pixels>, zoom: f32) -> Poin
     point(origin.x + shaped.x * zoom, origin.y + shaped.y * zoom)
 }
 
-/// Shape one word of `cells` (wide cells followed by a spacer so advances line up under the
-/// forced cell width).
+/// Shape one word of `cells` and place its glyphs on the cell grid: each glyph goes at the
+/// column of the cell its byte belongs to, keeping its shaped offset from the cell's first
+/// glyph. A wide cluster (CJK, an emoji, a ZWJ sequence, a flag) so spans exactly two cells
+/// whether the font shaped it to one glyph or several, a ligature keeps its cells, and a
+/// combining mark stays on its base.
 fn shape_cells(
     text_system: &gpui::WindowTextSystem,
     cells: &[Cell],
@@ -499,20 +508,23 @@ fn shape_cells(
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::new();
     let mut colors: Vec<(usize, Hsla)> = Vec::new();
+    // `(first byte, column)` of every cell that draws text, in text order.
+    let mut starts: Vec<(usize, u16)> = Vec::with_capacity(cells.len());
     let mut current: Option<(CellStyle, usize)> = None;
+    let mut col: u16 = 0;
     for cell in cells {
         if !cell.width.draws_text() {
+            // A wide cell's tail is already counted in its columns; a spacer head is its own.
+            if cell.width == CellWidth::SpacerHead {
+                col = col.saturating_add(1);
+            }
             continue;
         }
         let piece: &str = if cell.text.is_empty() { " " } else { cell.text.as_str() };
+        starts.push((text.len(), col));
+        col = col.saturating_add(cell.width.columns());
         text.push_str(piece);
-        let mut len = piece.len();
-        if cell.width.columns() == 2 && piece.chars().count() == 1 {
-            // shape_line forces per-glyph width; a wide glyph gets one cell, so add a spacer
-            // cell after it.
-            text.push(' ');
-            len = len.saturating_add(1);
-        }
+        let len = piece.len();
         match &mut current {
             Some((style, acc)) if *style == cell.style => {
                 *acc = acc.saturating_add(len);
@@ -532,8 +544,44 @@ fn shape_cells(
         colors.push((text.len(), run.color));
         runs.push(run);
     }
-    let line = text_system.shape_line(SharedString::from(text), font_size, &runs, Some(cell_width));
-    Word { line, colors }
+    let line = text_system.shape_line(SharedString::from(text), font_size, &runs, None);
+    Word { glyphs: place(&line, &starts, cell_width, &colors) }
+}
+
+/// Every glyph of `line` at its cell's column (see [`shape_cells`]).
+fn place(
+    line: &ShapedLine,
+    starts: &[(usize, u16)],
+    cell_width: Pixels,
+    colors: &[(usize, Hsla)],
+) -> Vec<Glyph> {
+    let mut glyphs = Vec::new();
+    // The cell the last glyph fell in and where its first glyph was shaped.
+    let mut anchor: Option<(usize, Pixels)> = None;
+    for run in &line.layout().runs {
+        for glyph in &run.glyphs {
+            let k = starts.partition_point(|(start, _)| *start <= glyph.index).saturating_sub(1);
+            let col = starts.get(k).map_or(0, |(_, col)| *col);
+            let first = match anchor {
+                Some((cell, first)) if cell == k => first,
+                _ => {
+                    anchor = Some((k, glyph.position.x));
+                    glyph.position.x
+                }
+            };
+            glyphs.push(Glyph {
+                font: run.font_id,
+                id: glyph.id,
+                position: point(
+                    cell_width * f32::from(col) + (glyph.position.x - first),
+                    glyph.position.y,
+                ),
+                emoji: glyph.is_emoji,
+                color: color_at(colors, glyph.index),
+            });
+        }
+    }
+    glyphs
 }
 
 fn mono_font(family: &str, style: &CellStyle) -> Font {
@@ -816,14 +864,9 @@ impl Element for TerminalElement {
                 }
                 let Some(line) = row.line else {
                     let filler = filler.get_or_insert_with(|| {
-                        let line = text_system.shape_line(
-                            "~".into(),
-                            base_size,
-                            &[text_run(1, &family, &CellStyle::DEFAULT, palette, false)],
-                            Some(base_cell_width),
-                        );
-                        let colors = vec![(1, cell_color(&CellStyle::DEFAULT, palette, false))];
-                        Rc::new(Word { line, colors })
+                        let cells = [Cell::narrow('~', CellStyle::DEFAULT)];
+                        let look = Look { family: &family, palette, blink_off: false };
+                        Rc::new(shape_cells(&text_system, &cells, base_size, base_cell_width, look))
                     });
                     prepared_rows.push(PreparedRow {
                         y,
@@ -1136,23 +1179,19 @@ impl Element for TerminalElement {
                 let baseline = row.y + grid.baseline;
                 for (col, word) in &row.segments {
                     let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
-                    for run in &word.line.layout().runs {
-                        for glyph in &run.glyphs {
-                            let at = glyph_origin(origin, glyph.position, zoom);
-                            let painted = if glyph.is_emoji {
-                                window.paint_emoji(at, run.font_id, glyph.id, font_size)
-                            } else if raster == font_size {
-                                let color = word.color_at(glyph.index);
-                                window.paint_glyph(at, run.font_id, glyph.id, font_size, color)
-                            } else {
-                                // In motion: the nearest rung's raster, stretched (the fork).
-                                let color = word.color_at(glyph.index);
-                                let (f, g) = (run.font_id, glyph.id);
-                                window.paint_glyph_scaled(at, f, g, raster, font_size, color)
-                            };
-                            if let Err(e) = painted {
-                                tracing::debug!(error = %e, "paint glyph");
-                            }
+                    for glyph in &word.glyphs {
+                        let at = glyph_origin(origin, glyph.position, zoom);
+                        let painted = if glyph.emoji {
+                            window.paint_emoji(at, glyph.font, glyph.id, font_size)
+                        } else if raster == font_size {
+                            window.paint_glyph(at, glyph.font, glyph.id, font_size, glyph.color)
+                        } else {
+                            // In motion: the nearest rung's raster, stretched (the fork).
+                            let (f, g, c) = (glyph.font, glyph.id, glyph.color);
+                            window.paint_glyph_scaled(at, f, g, raster, font_size, c)
+                        };
+                        if let Err(e) = painted {
+                            tracing::debug!(error = %e, "paint glyph");
                         }
                     }
                 }
@@ -1414,8 +1453,8 @@ mod tests {
         assert_eq!(row_overhang(&roomy, &tight, 1.0), (px(1.0), px(0.0)));
     }
 
-    /// A word shaped at 13 pt with an 8 pt cell forced paints at 26 pt with the glyphs 16 pt
-    /// apart, from the same shaping: the position scales, the origin is the cell grid's.
+    /// A word shaped at 13 pt on an 8 pt cell paints at 26 pt with the glyphs 16 pt apart,
+    /// from the same shaping: the position scales, the origin is the cell grid's.
     #[test]
     fn a_glyph_shaped_at_the_base_size_lands_on_the_zoomed_cell() {
         let origin = point(px(100.0), px(50.0));
@@ -1430,14 +1469,13 @@ mod tests {
     fn a_word_remembers_the_colour_of_every_byte() {
         let red = gpui::red();
         let blue = gpui::blue();
-        let word = Word { line: ShapedLine::default(), colors: vec![(2, red), (5, blue)] };
-        assert_eq!(word.color_at(0), red);
-        assert_eq!(word.color_at(1), red);
-        assert_eq!(word.color_at(2), blue);
-        assert_eq!(word.color_at(4), blue);
-        assert_eq!(word.color_at(9), blue, "past the end: the last run");
-        let empty = Word { line: ShapedLine::default(), colors: Vec::new() };
-        assert_eq!(empty.color_at(0), gpui::black());
+        let colors = [(2, red), (5, blue)];
+        assert_eq!(color_at(&colors, 0), red);
+        assert_eq!(color_at(&colors, 1), red);
+        assert_eq!(color_at(&colors, 2), blue);
+        assert_eq!(color_at(&colors, 4), blue);
+        assert_eq!(color_at(&colors, 9), blue, "past the end: the last run");
+        assert_eq!(color_at(&[], 0), gpui::black());
     }
 
     fn cells(text: &str) -> Vec<Cell> {
@@ -1483,6 +1521,38 @@ mod tests {
         let mut row = cells("a b");
         row[1].style.bg = slopty_grid::Color::Palette(1);
         assert_eq!(segments(&row).len(), 2, "a background is a quad, not a glyph");
+    }
+
+    /// A wide cell — a CJK character, an emoji, one with a variation selector, a ZWJ family,
+    /// a flag — spans two cells, so the word's next glyph lands two cells on, whatever the
+    /// cluster's code point count and however many glyphs the font shaped it to.
+    #[gpui::test]
+    fn a_wide_cluster_takes_two_cells_whatever_its_code_points(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| fonts::install(cx).expect("fonts"));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        let width = px(8.0);
+        for cluster in ["日", "😀", "❤️", "👨\u{200d}👩\u{200d}👧", "🇻🇳"] {
+            let cells = [
+                Cell::wide(cluster, CellStyle::DEFAULT),
+                Cell {
+                    text: slopty_grid::CellText::EMPTY,
+                    style: CellStyle::DEFAULT,
+                    width: CellWidth::SpacerTail,
+                },
+                Cell::narrow('x', CellStyle::DEFAULT),
+            ];
+            let word = cx.update(|window, _| {
+                let look = Look {
+                    family: fonts::MONO_FAMILY,
+                    palette: &Theme::default().terminal,
+                    blink_off: false,
+                };
+                shape_cells(window.text_system(), &cells, px(13.0), width, look)
+            });
+            let last = word.glyphs.last().expect("the x");
+            assert_eq!(last.position.x, width * 2.0, "{cluster:?} then x");
+            assert_eq!(word.glyphs.first().expect("the cluster").position.x, px(0.0));
+        }
     }
 
     #[test]

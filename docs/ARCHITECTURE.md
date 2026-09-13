@@ -1001,7 +1001,9 @@ inside the window's content mask, so a grid hanging off the viewport builds noth
 rest — splits each into words (plain spaces and digits are the boundaries) and looks every word up in
 the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plus its per-byte
 colours) per (text, styles, family, palette, focus, and the blink phase for a word with an
-SGR 5 cell), never per zoom, swept once per frame — so
+SGR 5 cell), never per zoom, swept once per frame; a word is shaped with no forced width and
+each glyph placed at the column of the cell its byte came from, so a wide cluster spans two
+cells however many glyphs it shaped to — so
 a frame of streaming output shapes only the words it has never seen and a zoom step shapes
 nothing; paint puts every glyph of a word at column × cell width plus its shaped position
 scaled by the zoom, on the derived baseline, through `Window::paint_glyph` at the zoomed font

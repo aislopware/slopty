@@ -550,8 +550,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   now split at plain spaces (blank, narrow, no underline or strikethrough: a background is a
   quad, not a glyph) and every plain digit stands alone; each piece is shaped on its own with
   the forced cell width and cached by (text, styles, size, family, palette, focus) as an
-  `Rc<ShapedLine>`, then painted at its start column. Pixel-identical to whole-row shaping:
-  under the forced width every glyph sits at cluster index × cell width, kerning is off, and
+  `Rc<ShapedLine>`, then painted at its start column (2026-09-13: shaped without the forced
+  width and placed by cell, terminal.md "Glyphs are placed by their cell"). Pixel-identical
+  to whole-row shaping: every glyph sits at its cell's column, kerning is off, and
   no coding font ligates across a space or between digits (a decorated digit stays in its
   word so the underline is one piece). The cache sweeps once per frame (stamped with
   `frames::index`), not once per element: with four terminals in view the per-element sweep
@@ -574,11 +575,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   every zoom step re-shaped every visible word and the card → grid flip at `CARD_ZOOM` shaped
   twenty grids in one frame (the p99 / max of scenario (b) above). Now the word cache is keyed
   without the zoom (`hash_base(focused, base_size, family, palette)`), `shape_cells` shapes at
-  the theme's size with the base cell width forced, and `paint` walks each word's glyph runs
-  (`ShapedLine::layout()`, the fork's accessor; `LineLayout` / `ShapedRun` / `ShapedGlyph` were
+  the theme's size on the base cell, and `paint` walks each word's placed glyphs (read off
+  `ShapedLine::layout()`, the fork's accessor; `LineLayout` / `ShapedRun` / `ShapedGlyph` were
   already public) and calls `Window::paint_glyph` / `paint_emoji` at the zoomed font size, at
-  `origin + shaped position × zoom` on the derived baseline (`glyph_origin`, unit-tested). Sound
-  because, under the forced cell width, a glyph's shaped x is cluster index × base cell and the
+  `origin + placed position × zoom` on the derived baseline (`glyph_origin`, unit-tested). Sound
+  because a glyph's placed x is its cell's column × base cell and the
   zoomed grid is the base grid × zoom, so the positions are the grid's either way; the glyph
   ids are the font's and do not depend on the size. All the glyphs go in **one `paint_layer`**
   per element: a primitive painted outside a layer takes a bounds-tree insert of its own for
