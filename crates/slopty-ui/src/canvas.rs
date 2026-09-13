@@ -981,9 +981,18 @@ impl CanvasView {
         }
     }
 
-    /// The "ask" pill of a window, display or file item.
+    /// The "ask" pill of a window, display, file or note item.
     fn ask_about_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(item) = self.doc.get(id) else { return };
+        if let ItemKind::Note { text } = &item.kind {
+            // The note as written, a blank line after it for the question; an empty note
+            // has nothing to ask about.
+            let text = text.trim();
+            if !text.is_empty() {
+                self.ask_agent(format!("{text}\n\n"), cx);
+            }
+            return;
+        }
         if let ItemKind::File { path } = &item.kind {
             // The reading line, when there is one, is what the question is about.
             let line = self.files.get(&id).and_then(|v| v.read(cx).reading_line());
@@ -3634,7 +3643,9 @@ impl CanvasView {
             }
             // A file card: `@path` into the agent's composer, the way the human would name it.
             ItemKind::File { .. } => Some(ask_button(id, "file", theme, chrome, cx)),
-            ItemKind::Terminal { .. } | ItemKind::Note { .. } => None,
+            // A note: its Markdown into the composer, the question typed under it.
+            ItemKind::Note { .. } => Some(ask_button(id, "note", theme, chrome, cx)),
+            ItemKind::Terminal { .. } => None,
         };
         // Somebody else is on the canvas: the active card offers to point them at it, so a
         // phone without ⌘⇧O can too.
@@ -8600,6 +8611,64 @@ mod tests {
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),
         }
+    }
+
+    /// A note's "ask" pill puts the note's Markdown into the agent's composer with a blank
+    /// line after it, so the plan written in the note is what the question is about; an
+    /// empty note asks nothing.
+    #[gpui::test]
+    fn a_notes_ask_pill_puts_it_in_the_agents_composer(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let note = |text: &str| CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: text.to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let plan = note("# Plan\n\n1. build\n2. ship\n");
+        let id = plan.id;
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(plan) }, cx);
+        });
+        let agent = SessionId::new();
+        host_opens_agent(&view, cx, agent, me, Rect { x: 800.0, ..SHELL }, 2);
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.is("Button", Some("Ask the agent about this note"))),
+            "{tree:#?}"
+        );
+        let ask = cx.debug_bounds(selector("ask", id)).expect("the note's ask pill");
+        cx.simulate_click(ask.center(), Modifiers::default());
+        cx.run_until_parked();
+        let text = view.read_with(cx, |c, cx| {
+            c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
+        });
+        assert_eq!(text.as_deref(), Some("# Plan\n\n1. build\n2. ship\n\n"), "the note, then room");
+        let empty = note("  \n");
+        let empty_id = empty.id;
+        view.update_in(cx, |c, window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 3, by: me, op: CanvasOp::Upsert(empty) }, cx);
+            if let Some(v) = c.terminal(agent) {
+                v.update(cx, |v, cx| {
+                    if let Some(k) = v.conversation_mut() {
+                        let _taken = k.take_composer_text(window, cx);
+                    }
+                });
+            }
+        });
+        cx.run_until_parked();
+        let ask = cx.debug_bounds(selector("ask", empty_id)).expect("an empty note's pill");
+        cx.simulate_click(ask.center(), Modifiers::default());
+        cx.run_until_parked();
+        let text = view.read_with(cx, |c, cx| {
+            c.terminal(agent).and_then(|v| v.read(cx).conversation().map(|k| k.composer_text(cx)))
+        });
+        assert_eq!(text.as_deref(), Some(""), "nothing to ask about");
     }
 
     /// A note reads as Markdown until someone edits it: unfocused it is the rendered

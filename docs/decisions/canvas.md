@@ -435,6 +435,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `last_block` in the prompt-navigation unit test, headless
   `a_block_saved_as_a_note_lands_beside_the_shell`.
 
+- ✅ **A note's "ask" pill puts the note to the agent** (2026-09-14). A note is where the
+  plan gets written; asking Claude to carry it out meant copying the note into the
+  composer. Rulings: (1) a note card carries the "ask" pill a file card does ("Ask the agent
+  about this note"), and it puts the note's Markdown, trimmed, into the agent's composer
+  with a blank line after it for the question (`ask_about_item`, through the same
+  `ask_agent` path: the agent card the human is on, else the topmost, else a new one), and
+  does not send; (2) an empty note asks nothing; (3) no wire change. Test:
+  `a_notes_ask_pill_puts_it_in_the_agents_composer`.
+
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note

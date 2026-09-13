@@ -415,7 +415,8 @@ absolute against the agent's `cwd` (`TerminalView::view_file`); the palette list
 as "Go to <title>" after the sessions (`PaletteRun::Item`), the last five distinct commands
 of the shell a "run" would go to as "Rerun <command>" (`TermState::recent_commands`,
 `PaletteRun::Rerun`, typed through `run_text`), and the card's "ask" pill puts
-`@<path>` into the agent's composer. ⌘F with the card active opens a find bar like the
+`@<path>` into the agent's composer (a note card's puts the note's Markdown, a blank line
+after it). ⌘F with the card active opens a find bar like the
 terminal's (`FileView::find`, key context `FileSearch`): a hit is a line holding the text,
 case-insensitive (`file::find_hits`), tinted in the warn tone, stepped with ⌘G/↩ and wrapped;
 Esc closes it and the canvas takes the keyboard back. An "edit" pill (`edit-<item>`, shown
