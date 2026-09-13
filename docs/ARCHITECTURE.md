@@ -57,7 +57,9 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
   block's prompt is a range query, not a walk. Mouse selection is client-side too
-  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, ⌥-drag for a
+  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`, held for a
+  confirmation strip first when it holds a newline and the program has not asked for
+  bracketed paste (`paste_is_safe`, `[terminal] paste_protection`); drag, ⌥-drag for a
   rectangle, double/triple click, ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
   keeps scrolling through the cache at a pace set by the distance); nothing reaches the host,
   except a plain click on the shell's input line, which becomes the arrow keys that put the
@@ -124,7 +126,8 @@ all three) become `TermEvent::Notification { title, body }`, each field capped a
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints
 the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::BELL`) and, when no window
-is active, plays the alert sound and bounces the Dock.
+is active and `[terminal] bell_alert` holds (the default), plays the alert sound and bounces
+the Dock.
 
 **Kitty graphics.** libghostty keeps the images (`KITTY_STORAGE_BYTES` per screen; PNG
 decoded through the `png` crate by `slopty_engine::graphics::PngDecoder`) and lays the
@@ -1104,11 +1107,16 @@ runs the load scenarios (MEASUREMENTS, "canvas frame time").
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
-missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | ui_size`,
-`[theme] appearance = dark | light | system`, `[terminal] minimum_contrast | copy_on_select`
-(the ratio rides on `TerminalPalette` in hundredths, the flag on `Theme::behaviour`, see
+missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
+ui_size` (the line height is `Typography::mono_line_height`, ghostty's `adjust-cell-height`),
+`[theme] appearance = dark | light | system`, `[terminal] minimum_contrast | copy_on_select |
+bell_alert | cursor_blink = program | always | never | paste_protection` (the ratio rides on
+`TerminalPalette` in hundredths, copy-on-select, the blink override and paste protection on
+`Theme::behaviour`, the bell flag is read by the app's bell handler, see
 decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr` (`Theme::behaviour.stream`;
-a live stream re-asks its quality on change, see decisions/video.md); every key has a
+a live stream re-asks its quality on change, see decisions/video.md), `[colors] foreground |
+background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over
+`TerminalPalette` in both appearances, see decisions/settings.md); every key has a
 default, unknown keys warn, a
 file that does not parse is skipped with the error in the top bar for a few seconds. The app
 polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from

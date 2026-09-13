@@ -50,3 +50,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Theme::behaviour.copy_on_select`) and the existing `set_theme` push delivers them, so a
   save applies within the poll second with no second channel. The unknown-key warning for a
   `[terminal]` key now names the key (`terminal.scrollback_lines`), as it does for `[font]`.
+- ✅ **`[font] mono_line_height`, `[terminal] bell_alert | cursor_blink | paste_protection`** (2026-09-15): the line height
+  (`Typography::mono_line_height`, ghostty's `adjust-cell-height`, default 1.0, held to
+  0.5–2.0 by `theme_for` as the sizes are) was a theme knob with no key; it rides the same
+  theme push. `bell_alert` (default on) is the one setting the theme does not carry: the app's
+  bell handler reads it directly (`settings::bell_alerts`), since sounding the alert and
+  bouncing the Dock is an app act, not a view's. A bell in front of an active window still
+  only flashes the card, whatever the flag. `cursor_blink` is ghostty's `cursor-style-blink`
+  (`Behaviour::cursor_blink`: `program` leaves DECSCUSR alone, `always`/`never` override it
+  either way); the element applies it where it decides whether the cursor ticks the blink
+  clock, so an unfocused card stays steady as before. `paste_protection` (default on) is
+  the confirmation before a paste that would run, ruled in decisions/terminal.md.
+- ✅ **`[colors]` lays a palette over the theme** (2026-09-15). ghostty ships hundreds of
+  schemes and every terminal takes a custom palette; Slopty's two variants were fixed. The
+  section has `foreground | background | cursor | cursor_text | selection` and `ansi` (a
+  list of up to 16), each a `"#rrggbb"` string (the `#` optional) or `""` for the theme's
+  own (`Color(Option<[u8; 3]>)`, a malformed value is a parse error like an unknown
+  appearance, so a typo never paints half a palette). `theme_for` lays them over
+  `TerminalPalette` in both appearances (`colour_the_terminal`); a custom cursor takes
+  black or white text under it (`Rgb::is_light`) unless `cursor_text` says otherwise. Ruled
+  out: a scheme name (no bundled scheme table to pick from yet; a file of 16 hex strings
+  is what every scheme repository exports) and per-appearance sections (the theme's
+  appearance switch is for the chrome; a palette is chosen once). Since the driver's
+  colours answer OSC queries and follow theme changes, a program asking for its
+  background hears the custom one. Tests: `colour_keys`, `custom_colours_lay_over_the_theme`.

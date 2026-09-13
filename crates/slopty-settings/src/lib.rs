@@ -50,6 +50,76 @@ pub enum Appearance {
     System,
 }
 
+/// Whether the terminal cursor blinks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorBlink {
+    /// The program decides (DECSCUSR): shells are steady, editors often blink.
+    #[default]
+    Program,
+    /// Always.
+    Always,
+    /// Never.
+    Never,
+}
+
+/// A colour as `"#rrggbb"` (or `"rrggbb"`), or `""` for the theme's own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Color(pub Option<[u8; 3]>);
+
+impl Color {
+    /// Parse `"#rrggbb"`, `"rrggbb"` or the empty string.
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let hex = text.strip_prefix('#').unwrap_or(text);
+        if hex.is_empty() {
+            return Some(Self(None));
+        }
+        if hex.len() != 6 || !hex.is_ascii() {
+            return None;
+        }
+        let byte = |at: usize| u8::from_str_radix(hex.get(at..at.checked_add(2)?)?, 16).ok();
+        Some(Self(Some([byte(0)?, byte(2)?, byte(4)?])))
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Some([r, g, b]) => serializer.serialize_str(&format!("#{r:02x}{g:02x}{b:02x}")),
+            None => serializer.serialize_str(""),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!("expected \"#rrggbb\" or \"\", got {text:?}"))
+        })
+    }
+}
+
+/// `[colors]`: the terminal palette, each entry the theme's own unless set. They apply
+/// to both appearances.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorSettings {
+    /// Default text.
+    pub foreground: Color,
+    /// Default background.
+    pub background: Color,
+    /// The cursor block.
+    pub cursor: Color,
+    /// Text under the cursor block (black or white against `cursor` when unset).
+    pub cursor_text: Color,
+    /// Selection background.
+    pub selection: Color,
+    /// ANSI 0–15 in order; fewer than 16 leave the rest to the theme.
+    pub ansi: Vec<Color>,
+}
+
 /// `[font]`.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -59,13 +129,21 @@ pub struct Font {
     pub mono_family: String,
     /// Terminal font size in points.
     pub mono_size: f32,
+    /// Terminal line height as a multiple of the font's own (ghostty's `adjust-cell-height`):
+    /// `1.0` is the font's, `1.2` airier, `0.9` tighter.
+    pub mono_line_height: f32,
     /// Chrome (top bar, pills, picker) font size in points.
     pub ui_size: f32,
 }
 
 impl Default for Font {
     fn default() -> Self {
-        Self { mono_family: "JetBrains Mono".to_owned(), mono_size: 13.0, ui_size: 13.0 }
+        Self {
+            mono_family: "JetBrains Mono".to_owned(),
+            mono_size: 13.0,
+            mono_line_height: 1.0,
+            ui_size: 13.0,
+        }
     }
 }
 
@@ -88,11 +166,26 @@ pub struct TerminalSettings {
     /// Copy a selection to the clipboard as soon as it is made (ghostty's
     /// `copy-on-select = clipboard`, iTerm2's default).
     pub copy_on_select: bool,
+    /// A bell while the app is in the background plays the alert sound and bounces the Dock;
+    /// off, it only flashes the card.
+    pub bell_alert: bool,
+    /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
+    /// always, or never.
+    pub cursor_blink: CursorBlink,
+    /// A paste that could run commands (a newline into a shell that did not ask for
+    /// bracketed paste) waits for a confirmation (ghostty's `clipboard-paste-protection`).
+    pub paste_protection: bool,
 }
 
 impl Default for TerminalSettings {
     fn default() -> Self {
-        Self { minimum_contrast: 1.0, copy_on_select: false }
+        Self {
+            minimum_contrast: 1.0,
+            copy_on_select: false,
+            bell_alert: true,
+            cursor_blink: CursorBlink::Program,
+            paste_protection: true,
+        }
     }
 }
 
@@ -128,6 +221,8 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     /// Remote window and display streams.
     pub remote: RemoteSettings,
+    /// Terminal colours.
+    pub colors: ColorSettings,
 }
 
 /// Why a file could not be used.
@@ -221,6 +316,8 @@ impl Settings {
 mono_family = {mono_family}
 # Terminal size in points.
 mono_size = {mono_size}
+# Terminal line height as a multiple of the font's own (0.5 to 2.0).
+mono_line_height = {mono_line_height}
 # Top bar, pills and picker size in points.
 ui_size = {ui_size}
 
@@ -234,6 +331,14 @@ appearance = {appearance}
 minimum_contrast = {minimum_contrast}
 # Copy a selection to the clipboard as soon as it is made.
 copy_on_select = {copy_on_select}
+# A bell while the app is in the background sounds the alert and bounces
+# the Dock; off, the card only flashes.
+bell_alert = {bell_alert}
+# \"program\" (the shell or editor decides), \"always\" or \"never\".
+cursor_blink = {cursor_blink}
+# A paste with a newline into a shell that did not ask for bracketed paste
+# (so it would run) waits for a confirmation.
+paste_protection = {paste_protection}
 
 [remote]
 # Frames per second a remote window or display is captured at (15 to 120).
@@ -243,13 +348,30 @@ fps = {fps}
 max_bitrate_mbps = {max_bitrate_mbps}
 # 10-bit HEVC, for an HDR source.
 hdr = {hdr}
+
+[colors]
+# Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
+# both appearances.
+foreground = \"\"
+background = \"\"
+cursor = \"\"
+# Text under the cursor block; black or white against the cursor when unset.
+cursor_text = \"\"
+selection = \"\"
+# ANSI 0-15 in order: black, red, green, yellow, blue, magenta, cyan, white,
+# then their bright forms. Fewer than 16 keep the rest.
+ansi = []
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
+            mono_line_height = toml_float(d.font.mono_line_height),
             ui_size = toml_float(d.font.ui_size),
             appearance = toml_string(appearance_name(d.theme.appearance)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
+            bell_alert = d.terminal.bell_alert,
+            cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
+            paste_protection = d.terminal.paste_protection,
             fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             hdr = d.remote.hdr,
@@ -308,6 +430,14 @@ const fn appearance_name(a: Appearance) -> &'static str {
     }
 }
 
+const fn cursor_blink_name(c: CursorBlink) -> &'static str {
+    match c {
+        CursorBlink::Program => "program",
+        CursorBlink::Always => "always",
+        CursorBlink::Never => "never",
+    }
+}
+
 fn toml_string(s: &str) -> String {
     toml::Value::String(s.to_owned()).to_string()
 }
@@ -339,10 +469,14 @@ mod tests {
         let d = Settings::default();
         assert_eq!(d.font.mono_family, "JetBrains Mono");
         assert_eq!(d.font.mono_size, 13.0);
+        assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
         assert_eq!(d.font.ui_size, 13.0);
         assert_eq!(d.theme.appearance, Appearance::System);
         assert_eq!(d.terminal.minimum_contrast, 1.0, "off, as ghostty");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
+        assert!(d.terminal.bell_alert, "a bell in the background is heard");
+        assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
+        assert!(d.terminal.paste_protection, "a pasted newline asks first");
         assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps, d.remote.hdr), (60, 30, false));
     }
 
@@ -357,12 +491,60 @@ mod tests {
     }
 
     #[test]
-    fn terminal_keys() {
-        let loaded = Settings::parse("[terminal]\nminimum_contrast = 3\ncopy_on_select = true\n");
+    fn colour_keys() {
+        let loaded = Settings::parse(
+            "[colors]\nforeground = \"#c0caf5\"\nbackground = \"1a1b26\"\ncursor = \"\"\nansi = [\"#15161e\", \"#f7768e\"]\n",
+        );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        let c = &loaded.settings.colors;
+        assert_eq!(c.foreground, Color(Some([0xc0, 0xca, 0xf5])));
+        assert_eq!(c.background, Color(Some([0x1a, 0x1b, 0x26])), "the # is optional");
+        assert_eq!(c.cursor, Color(None), "empty: the theme's own");
+        assert_eq!(c.ansi, [Color(Some([0x15, 0x16, 0x1e])), Color(Some([0xf7, 0x76, 0x8e]))]);
+        assert_eq!(Settings::default().colors, ColorSettings::default(), "nothing set");
+        for bad in ["#12345", "#gg0000", "red"] {
+            let loaded = Settings::parse(&format!("[colors]\ncursor = \"{bad}\"\n"));
+            assert!(
+                loaded.error.as_ref().is_some_and(|e| e.to_string().contains("#rrggbb")),
+                "{bad}: {:?}",
+                loaded.error
+            );
+        }
+        assert_eq!(
+            toml::to_string(&ColorSettings {
+                cursor: Color(Some([1, 0xab, 0xff])),
+                ..ColorSettings::default()
+            })
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("cursor ="))
+            .unwrap_or_default(),
+            "cursor = \"#01abff\"",
+            "written back as #rrggbb"
+        );
+    }
+
+    #[test]
+    fn terminal_keys() {
+        let loaded = Settings::parse(
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\n",
+        );
+        assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);
-        assert_eq!(loaded.settings.font, Font::default());
+        assert!(!loaded.settings.terminal.bell_alert);
+        assert_eq!(loaded.settings.terminal.cursor_blink, CursorBlink::Never);
+        assert!(!loaded.settings.terminal.paste_protection);
+        for (text, want) in [("program", CursorBlink::Program), ("always", CursorBlink::Always)] {
+            let loaded = Settings::parse(&format!("[terminal]\ncursor_blink = \"{text}\"\n"));
+            assert_eq!(loaded.settings.terminal.cursor_blink, want, "{text}");
+        }
+        assert!(
+            Settings::parse("[terminal]\ncursor_blink = \"sometimes\"\n").error.is_some(),
+            "an unknown variant is an error"
+        );
+        assert_eq!(loaded.settings.font.mono_family, Font::default().mono_family);
     }
 
     #[test]

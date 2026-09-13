@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
-use slopty_settings::{Appearance, Settings};
-use slopty_theme::{Theme, Variant};
+use slopty_settings::{Appearance, Color, ColorSettings, CursorBlink, Settings};
+use slopty_theme::{Rgb, TerminalPalette, Theme, Variant};
 
 /// GPUI actions.
 pub mod actions {
@@ -35,6 +35,8 @@ pub const POLL: Duration = Duration::from_secs(1);
 /// Sizes outside this range are typos; the default applies instead.
 const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
+/// Half the font's line height packs rows past reading; twice it is a list, not a grid.
+const LINE_HEIGHT: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
 const CONTRAST: std::ops::RangeInclusive<f32> = 1.0..=21.0;
 /// Below 15 the stream is a slideshow; above 120 no display here refreshes.
@@ -66,8 +68,17 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     }
     theme.typography.mono_size = sized(settings.font.mono_size, &MONO_SIZE, defaults.mono_size);
     theme.typography.ui_size = sized(settings.font.ui_size, &UI_SIZE, defaults.ui_size);
+    theme.typography.mono_line_height =
+        sized(settings.font.mono_line_height, &LINE_HEIGHT, defaults.mono_line_height);
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
+    colour_the_terminal(&mut theme.terminal, &settings.colors);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
+    theme.behaviour.paste_protection = settings.terminal.paste_protection;
+    theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
+        CursorBlink::Program => slopty_theme::CursorBlink::Program,
+        CursorBlink::Always => slopty_theme::CursorBlink::Always,
+        CursorBlink::Never => slopty_theme::CursorBlink::Never,
+    };
     let remote = &settings.remote;
     let defaults = slopty_theme::StreamPrefs::default();
     theme.behaviour.stream = slopty_theme::StreamPrefs {
@@ -93,8 +104,42 @@ fn hundredths(ratio: f32) -> u16 {
     hundredths
 }
 
+/// Lay the `[colors]` overrides over the theme's palette. Text under the cursor follows a
+/// custom cursor (black or white, whichever reads) unless set itself.
+fn colour_the_terminal(palette: &mut TerminalPalette, colors: &ColorSettings) {
+    let rgb = |c: Color| c.0.map(|[r, g, b]| Rgb { r, g, b });
+    if let Some(fg) = rgb(colors.foreground) {
+        palette.fg = fg;
+    }
+    if let Some(bg) = rgb(colors.background) {
+        palette.bg = bg;
+    }
+    if let Some(cursor) = rgb(colors.cursor) {
+        palette.cursor = cursor;
+        palette.cursor_text = if cursor.is_light() { Rgb::hex(0) } else { Rgb::hex(0xff_ffff) };
+    }
+    if let Some(cursor_text) = rgb(colors.cursor_text) {
+        palette.cursor_text = cursor_text;
+    }
+    if let Some(selection) = rgb(colors.selection) {
+        palette.selection = selection;
+    }
+    for (slot, color) in palette.ansi.iter_mut().zip(&colors.ansi) {
+        if let Some(color) = rgb(*color) {
+            *slot = color;
+        }
+    }
+}
+
 fn sized(v: f32, range: &std::ops::RangeInclusive<f32>, default: f32) -> f32 {
     if v.is_finite() && range.contains(&v) { v } else { default }
+}
+
+/// Whether a bell should sound the alert and bounce the Dock: only while the human is
+/// elsewhere (no window of ours active), and only when the settings say so.
+#[must_use]
+pub const fn bell_alerts(settings: &Settings, window_active: bool) -> bool {
+    settings.terminal.bell_alert && !window_active
 }
 
 /// What the watcher compares between polls.
@@ -152,6 +197,47 @@ mod tests {
         assert_eq!(t.typography.ui_size, 13.0);
         s.font.mono_size = 16.0;
         assert_eq!(theme_for(&s, true).typography.mono_size, 16.0);
+        s.font.mono_line_height = 1.2;
+        assert_eq!(theme_for(&s, true).typography.mono_line_height, 1.2);
+        s.font.mono_line_height = 3.0;
+        assert_eq!(theme_for(&s, true).typography.mono_line_height, 1.0, "a typo: the font's");
+    }
+
+    #[test]
+    fn custom_colours_lay_over_the_theme() {
+        let mut s = Settings::default();
+        let dark = theme_for(&s, true).terminal;
+        s.colors.foreground = Color(Some([0xc0, 0xca, 0xf5]));
+        s.colors.cursor = Color(Some([0xff, 0xff, 0xff]));
+        s.colors.ansi = vec![Color(None), Color(Some([0xf7, 0x76, 0x8e]))];
+        let t = theme_for(&s, true).terminal;
+        assert_eq!((t.fg, t.bg), (Rgb::hex(0x00c0_caf5), dark.bg), "set and unset");
+        assert_eq!(
+            (t.cursor, t.cursor_text),
+            (Rgb::hex(0x00ff_ffff), Rgb::hex(0)),
+            "black on a light cursor"
+        );
+        assert_eq!(
+            (t.ansi[0], t.ansi[1], t.ansi[2]),
+            (dark.ansi[0], Rgb::hex(0x00f7_768e), dark.ansi[2])
+        );
+        s.colors.cursor_text = Color(Some([1, 2, 3]));
+        assert_eq!(
+            theme_for(&s, true).terminal.cursor_text,
+            Rgb { r: 1, g: 2, b: 3 },
+            "set: as said"
+        );
+        let light = theme_for(&s, false).terminal;
+        assert_eq!(light.fg, Rgb::hex(0x00c0_caf5), "both appearances");
+    }
+
+    #[test]
+    fn a_bell_alerts_only_in_the_background_and_when_asked() {
+        let mut s = Settings::default();
+        assert!(bell_alerts(&s, false));
+        assert!(!bell_alerts(&s, true), "in front of the window the flash is enough");
+        s.terminal.bell_alert = false;
+        assert!(!bell_alerts(&s, false));
     }
 
     #[test]
@@ -165,6 +251,11 @@ mod tests {
         let t = theme_for(&s, true);
         assert_eq!(t.terminal.minimum_contrast, 450);
         assert!(t.behaviour.copy_on_select);
+        assert!(t.behaviour.paste_protection);
+        s.terminal.paste_protection = false;
+        assert!(!theme_for(&s, true).behaviour.paste_protection);
+        s.terminal.cursor_blink = CursorBlink::Never;
+        assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
         s.terminal.minimum_contrast = 0.0;
         assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "a typo reads as off");
         s.terminal.minimum_contrast = f32::INFINITY;

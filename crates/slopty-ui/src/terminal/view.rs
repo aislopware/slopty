@@ -43,6 +43,14 @@ const SEARCH_REFRESH: Duration = Duration::from_millis(300);
 /// How often a selection dragged past the grid's edge scrolls, and the most lines one tick
 /// moves (the pointer's distance past the edge picks the pace, one line per row of distance).
 const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
+/// Whether a paste can go straight to the program (ghostty's `clipboard-paste-protection`):
+/// outside bracketed paste a newline runs whatever precedes it, inside it the end sequence
+/// closes the bracket and the rest is typed. Either waits for a confirmation.
+#[must_use]
+pub fn paste_is_safe(text: &str, bracketed: bool) -> bool {
+    if bracketed { !text.contains("\x1b[201~") } else { !text.contains(['\n', '\r']) }
+}
+
 /// Half a blink: the cursor (and SGR 5 text) shows for this long, then hides for as long.
 /// Ghostty's cadence.
 const BLINK_HALF: Duration = Duration::from_millis(600);
@@ -390,6 +398,8 @@ pub struct TerminalView {
     /// Text for the composer once the conversation exists (a driven view opens it on its
     /// first frame, so a block asked of a card that was just opened has to wait).
     pending_compose: Option<String>,
+    /// A paste held back by paste protection until ↩ or the Paste button confirms it.
+    pending_paste: Option<String>,
     /// A window whose picture waits for the conversation to exist before it is attached.
     pending_snapshot: Option<(slopty_proto::screen::CaptureTarget, String)>,
     /// The permission the driven agent waits on, with the input it would run with.
@@ -502,6 +512,7 @@ impl TerminalView {
             preparing: 0,
             open_conversation: false,
             pending_compose: None,
+            pending_paste: None,
             pending_snapshot: None,
             permission: None,
             partial: String::new(),
@@ -1444,6 +1455,67 @@ impl TerminalView {
     }
 
     /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
+    /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
+    fn render_paste_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        let text = self.pending_paste.as_deref()?;
+        let theme = &self.theme;
+        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
+        let lines = text.lines().count().max(1);
+        let what = if lines == 1 {
+            "Paste a line that would run?".to_owned()
+        } else {
+            format!("Paste {lines} lines that would run?")
+        };
+        let button = move |id: &'static str, label: &'static str, accent: bool| {
+            let row = div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(label)
+                .px(px(spacing.sm))
+                .py(px(spacing.xxs))
+                .rounded(px(radii.xs))
+                .cursor_pointer()
+                .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
+                .when(!accent, |el| {
+                    el.text_color(hsla(s.text_secondary))
+                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::HOVER)))
+                })
+                .child(label);
+            crate::a11y::tab_stop(row, s.accent)
+        };
+        Some(
+            div()
+                .debug_selector(|| "paste-confirm".to_owned())
+                .absolute()
+                .bottom(px(spacing.xs))
+                .left(px(spacing.xs))
+                .occlude()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .px(px(spacing.sm))
+                .py(px(spacing.xs))
+                .rounded(px(radii.sm))
+                .bg(hsla(s.panel))
+                .border_1()
+                .border_color(hsla(s.border))
+                .shadow_md()
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text))
+                .font_family(theme.typography.ui_family.clone())
+                .child(SharedString::from(what))
+                .child(
+                    button("terminal-paste-confirm", "Paste", true)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_paste(cx))),
+                )
+                .child(
+                    button("terminal-paste-cancel", "Cancel", false)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_paste(cx))),
+                ),
+        )
+    }
+
     fn render_link_preview(&self) -> Option<gpui::Div> {
         let target = self.link_target()?;
         let theme = &self.theme;
@@ -2115,8 +2187,34 @@ impl TerminalView {
         let Some(text) = item.text() else { return };
         self.selection = None;
         self.state.scroll_to_bottom();
-        self.send(TermRequest::Paste(text));
+        let bracketed = self.state.modes().contains(TermModes::BRACKETED_PASTE);
+        if self.theme.behaviour.paste_protection && !paste_is_safe(&text, bracketed) {
+            self.pending_paste = Some(text);
+        } else {
+            self.send(TermRequest::Paste(text));
+        }
         cx.notify();
+    }
+
+    /// The held-back paste goes through (↩, or the Paste button).
+    pub fn confirm_paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.pending_paste.take() {
+            self.send(TermRequest::Paste(text));
+            cx.notify();
+        }
+    }
+
+    /// The held-back paste is dropped (Esc, or the Cancel button).
+    pub fn cancel_paste(&mut self, cx: &mut Context<Self>) {
+        if self.pending_paste.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The paste waiting for a confirmation, when there is one.
+    #[must_use]
+    pub fn pending_paste(&self) -> Option<&str> {
+        self.pending_paste.as_deref()
     }
 
     /// Session id.
@@ -2604,6 +2702,23 @@ impl TerminalView {
             cx.notify();
             cx.stop_propagation();
             return;
+        }
+        // A held-back paste: ↩ sends it, Esc drops it, any other key drops it and goes on
+        // to the program as typed (nothing is swallowed).
+        if self.pending_paste.is_some() && !event.keystroke.modifiers.platform {
+            match event.keystroke.key.as_str() {
+                "enter" => {
+                    self.confirm_paste(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "escape" => {
+                    self.cancel_paste(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => self.cancel_paste(cx),
+            }
         }
         // Cmd shortcuts belong to the app.
         if event.keystroke.modifiers.platform {
@@ -3444,6 +3559,7 @@ impl Render for TerminalView {
             .children(header)
             .children(search)
             .children(self.render_link_preview())
+            .children(self.render_paste_confirm(cx))
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
 }
@@ -4134,6 +4250,120 @@ mod tests {
         cx.background_executor.advance_clock(BLINK_HALF);
         cx.run_until_parked();
         assert_eq!(phase(cx), (true, false), "nothing blinks: the clock stops, phase on");
+
+        // The theme overrides the program either way.
+        let blink_theme = |cursor_blink| {
+            let mut theme = Theme::new(slopty_theme::Variant::Dark);
+            theme.behaviour.cursor_blink = cursor_blink;
+            theme
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.set_theme(blink_theme(slopty_theme::CursorBlink::Never), cx);
+            view.apply(frame(4, false, true), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(phase(cx), (true, false), "never: a program's blink is steady");
+        view.update_in(cx, |view, _window, cx| {
+            view.set_theme(blink_theme(slopty_theme::CursorBlink::Always), cx);
+            view.apply(frame(5, false, false), cx);
+        });
+        cx.run_until_parked();
+        assert!(phase(cx).1, "always: a steady program's cursor blinks");
+    }
+
+    /// Paste protection: a newline into a shell without bracketed paste waits (↩ sends it,
+    /// Esc drops it, another key drops it and types), a bracketed paste goes straight
+    /// unless it holds the bracket's end, and the setting turns the wait off.
+    #[gpui::test]
+    fn a_paste_that_would_run_waits_for_a_confirmation(cx: &mut TestAppContext) {
+        assert!(paste_is_safe("ls\n", true) && !paste_is_safe("ls\n", false));
+        assert!(paste_is_safe("ls", false) && !paste_is_safe("ls\r", false));
+        assert!(!paste_is_safe("a\x1b[201~rm\n", true));
+
+        let (view, mut rx, cx) = terminal(cx);
+        let frame = |seq, modes| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes,
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                images: Vec::new(),
+                updates: vec![RowUpdate {
+                    row: 0,
+                    line: Line::from_text("$ ", 10, Style::DEFAULT),
+                }],
+            })
+        };
+        let pastes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let put = |cx: &mut VisualTestContext, text: &str| {
+            cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.into())));
+        };
+        view.update_in(cx, |view, _window, cx| view.apply(frame(1, TermModes::empty()), cx));
+        cx.run_until_parked();
+
+        put(cx, "make\nrm -rf build\n");
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert!(pastes(&mut rx).is_empty(), "held back");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.pending_paste().map(str::to_owned)).as_deref(),
+            Some("make\nrm -rf build\n")
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(pastes(&mut rx), ["make\nrm -rf build\n"], "\u{21a9} sends it whole");
+        assert!(view.read_with(cx, |v, _| v.pending_paste().is_none()));
+
+        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            pastes(&mut rx).is_empty() && view.read_with(cx, |v, _| v.pending_paste().is_none()),
+            "Esc drops it"
+        );
+
+        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("x");
+        cx.run_until_parked();
+        assert!(pastes(&mut rx).is_empty(), "another key drops it");
+        assert!(view.read_with(cx, |v, _| v.pending_paste().is_none()));
+
+        put(cx, "one line");
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(pastes(&mut rx), ["one line"], "nothing to run: straight through");
+
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(frame(2, TermModes::BRACKETED_PASTE), cx);
+        });
+        put(cx, "make\nrm -rf build\n");
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(pastes(&mut rx).len(), 1, "bracketed: the program sees a paste, not keys");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(3, TermModes::empty()), cx));
+        view.update_in(cx, |view, _window, cx| {
+            let mut theme = Theme::new(slopty_theme::Variant::Dark);
+            theme.behaviour.paste_protection = false;
+            view.set_theme(theme, cx);
+        });
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        assert_eq!(pastes(&mut rx).len(), 1, "protection off: straight through");
     }
 
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.

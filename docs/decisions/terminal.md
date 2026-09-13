@@ -837,6 +837,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `text_is_held_to_the_minimum_contrast`, `terminal_settings_ride_on_the_theme`,
   `a_selection_is_copied_as_it_is_made_when_asked`, `terminal_keys`.
 
+- ✅ **A paste that would run waits for a confirmation** (2026-09-15, ghostty's
+  `clipboard-paste-protection`, iTerm2's multi-line warning). A copied snippet with a
+  newline pasted into a shell without bracketed paste runs its first line the moment it
+  lands; ghostty refuses such a paste until confirmed, and so does the view: ⌘V holds the
+  text (`pending_paste`) and shows a strip at the card's corner ("Paste N lines that would
+  run?", `terminal-paste-confirm` / `terminal-paste-cancel`); ↩ sends it whole, Esc drops
+  it, any other key drops it and goes on to the program (nothing typed is swallowed). The
+  rule is `paste_is_safe`: outside bracketed paste a `\n` or `\r` is unsafe; inside it only
+  the bracket's end sequence (`ESC [ 201 ~`) is, so an editor or a shell with mode 2004
+  (zsh, fish, bash 5.1+) takes a multi-line paste straight, as ghostty does. Deliberate
+  pastes (`run_text`: Rerun, the agent's typed command) bypass it. `[terminal]
+  paste_protection` turns it off (`Theme::behaviour.paste_protection`, default on). Test:
+  `a_paste_that_would_run_waits_for_a_confirmation`.
+
+- ✅ **The cursor's blink can be overridden** (2026-09-15, ghostty's `cursor-style-blink`).
+  `[terminal] cursor_blink = program | always | never` (`Behaviour::cursor_blink`):
+  `program` leaves DECSCUSR to the shell or editor (the default: shells are steady, editors
+  often blink), `always` and `never` override it either way. Applied where the element
+  decides whether the cursor ticks the blink clock, so an unfocused card stays a steady
+  hollow block as before. Test: the blink-clock test's last two frames.
+
 - ✅ **A click on the input line moves the shell's cursor** (2026-09-15, ghostty's
   `cursor-click-to-move`, on by default there and here). A plain left click released without
   a drag, on a row the shell marked as its input (the prompt row from its OSC 133;B column,

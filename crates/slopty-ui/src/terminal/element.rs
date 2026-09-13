@@ -832,12 +832,13 @@ impl Element for TerminalElement {
             picked
         });
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
-        let (base_size, height_mult, base_pad) = {
+        let (base_size, height_mult, base_pad, cursor_blink) = {
             let theme = self.view.read(cx).theme();
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
                 px(theme.spacing.sm),
+                theme.behaviour.cursor_blink,
             )
         };
         // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
@@ -1083,8 +1084,9 @@ impl Element for TerminalElement {
                 && view_offset == 0
                 && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
             // A blinking cursor blinks only while focused; unfocused it is a steady hollow
-            // block (what ghostty does), so a background terminal never ticks for it.
-            let cursor_blinks = cursor_visible && cursor.blink && focused;
+            // block (what ghostty does), so a background terminal never ticks for it. The
+            // theme may override the program's choice either way.
+            let cursor_blinks = cursor_visible && cursor_blink.blinks(cursor.blink) && focused;
             blinking |= cursor_blinks;
             let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
             // While an input method composes, its underlined preview stands in for the cursor.

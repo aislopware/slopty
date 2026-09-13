@@ -461,7 +461,8 @@ impl Workspace {
                         // A bell while the human is elsewhere is an alert; in front of the
                         // window the view's own flash is enough.
                         CanvasEvent::Bell(_session) => {
-                            if cx.active_window().is_none() {
+                            if settings::bell_alerts(&ws.settings, cx.active_window().is_some())
+                            {
                                 slopty_platform::attention();
                                 slopty_platform::bounce();
                             }

@@ -476,12 +476,52 @@ pub enum Variant {
 
 /// How the terminal behaves: settings that are neither colours nor type but ride with them,
 /// so one `set_theme` reaches every view when the file changes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Behaviour {
     /// A selection goes to the clipboard as soon as it is made.
     pub copy_on_select: bool,
+    /// Whether the cursor blinks: the program's choice (DECSCUSR), or overridden either way.
+    pub cursor_blink: CursorBlink,
+    /// A paste that could run commands (a newline outside bracketed paste, the bracket's end
+    /// sequence inside it) waits for a confirmation.
+    pub paste_protection: bool,
     /// What a remote window or display stream asks the host for.
     pub stream: StreamPrefs,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            copy_on_select: false,
+            cursor_blink: CursorBlink::Program,
+            paste_protection: true,
+            stream: StreamPrefs::default(),
+        }
+    }
+}
+
+/// Whether the cursor blinks (ghostty's `cursor-style-blink`: unset, true, false).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum CursorBlink {
+    /// The program decides (DECSCUSR); shells default to steady, editors often ask to blink.
+    #[default]
+    Program,
+    /// Always blinks.
+    Always,
+    /// Never blinks.
+    Never,
+}
+
+impl CursorBlink {
+    /// Whether the cursor blinks, given what the program asked for.
+    #[must_use]
+    pub const fn blinks(self, program: bool) -> bool {
+        match self {
+            Self::Program => program,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
 }
 
 /// The quality a remote stream is opened at (the scale follows the canvas zoom, not this).
@@ -642,6 +682,22 @@ mod tests {
         let plain = Colors::from(&theme);
         assert_eq!(plain.resolve(Color::Palette(17), false), theme.palette(17));
         assert_ne!(plain, colors, "the shaped-word cache keys on the colours");
+    }
+
+    #[test]
+    fn the_cursor_blink_override_beats_the_program() {
+        assert_eq!(
+            (CursorBlink::Program.blinks(true), CursorBlink::Program.blinks(false)),
+            (true, false)
+        );
+        assert_eq!(
+            (CursorBlink::Always.blinks(true), CursorBlink::Always.blinks(false)),
+            (true, true)
+        );
+        assert_eq!(
+            (CursorBlink::Never.blinks(true), CursorBlink::Never.blinks(false)),
+            (false, false)
+        );
     }
 
     #[test]
