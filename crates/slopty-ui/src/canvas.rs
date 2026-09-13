@@ -553,6 +553,9 @@ pub struct CanvasView {
     pending_find: Option<(SessionId, String)>,
     /// A file card to open its find bar on a needle once revealed.
     pending_find_file: Option<(ItemId, String)>,
+    /// The last needle of a find in every card: the next one starts from it when no card
+    /// offers its own.
+    last_find: String,
 
     /// The field naming a card, while one is open in a title bar.
     rename: Option<Rename>,
@@ -701,6 +704,7 @@ impl CanvasView {
             find_hits: HashMap::new(),
             pending_find: None,
             pending_find_file: None,
+            last_find: String::new(),
             palette_action: None,
             palette_extra: Vec::new(),
             pending_focus_palette: false,
@@ -1673,7 +1677,10 @@ impl CanvasView {
             return;
         }
         let theme = self.theme.clone();
-        let seed = self.active_needle(cx);
+        let seed = match self.active_needle(cx) {
+            own if own.is_empty() => self.last_find.clone(),
+            own => own,
+        };
         let palette = cx.new(|cx| CommandPalette::find(&seed, theme, window, cx));
         self.find_needle = Some(String::new());
         self.find_hits.clear();
@@ -1684,7 +1691,8 @@ impl CanvasView {
     }
 
     /// The active card's own find-bar needle, to start a find in every card from: what was
-    /// sought in one card is what is sought in all of them. Empty with no bar open.
+    /// sought in one card is what is sought in all of them. Empty with no bar open (the last
+    /// find in every card stands in then).
     fn active_needle(&self, cx: &App) -> String {
         let Some(active) = self.active.and_then(|id| self.doc.get(id)) else {
             return String::new();
@@ -1773,6 +1781,7 @@ impl CanvasView {
             self.refresh_find_lines(cx);
             return;
         }
+        needle.clone_into(&mut self.last_find);
         for id in self.reading_order() {
             let Some(item) = self.doc.get(id) else { continue };
             let (total, run) = match &item.kind {
@@ -6876,6 +6885,18 @@ mod tests {
             )),
             "the shell is asked for the seed: {sent:?}"
         );
+
+        // From a card with no bar of its own, the last find is the start.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |c, _window, cx| c.go_to(note_id, cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(note_id));
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let lines = tree.iter().filter(|n| n.role == "ListBoxOption").count();
+        assert_eq!(lines, 3, "the last needle stands in: {tree:#?}");
     }
 
     /// A directory typed into the palette, spelled from the host's root or home with a

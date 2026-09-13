@@ -438,8 +438,11 @@ impl Render for WindowPicker {
             .absolute()
             .inset_0()
             .flex()
-            .items_center()
+            // At the top like the palette: one shape for the two dialogs that are typed at,
+            // and the phone's keyboard, rising from the bottom, covers fewer rows.
+            .items_start()
             .justify_center()
+            .pt(px(theme.spacing.xl * 2.0))
             .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
             .on_key_down(cx.listener(Self::key_down))
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))

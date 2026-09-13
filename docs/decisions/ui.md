@@ -374,7 +374,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   picker's backdrop on that frame, and the frame moves the keyboard into the field, so
   typing works at once (`Focusable::focus_handle` is the field from then on); (4) an empty
   filtered list says "no conversation matches" / "nothing matches", not that the host has
-  nothing. Tests: unit `the_filter_takes_every_word_in_any_order_and_case`; headless
+  nothing; (5) the picker sits at the top of the backdrop as the palette does — one shape
+  for the two dialogs that are typed at, and the phone's keyboard, rising from the bottom,
+  covers fewer rows than under a centred one. Tests: unit `the_filter_takes_every_word_in_any_order_and_case`; headless
   `a_past_conversation_is_resumed_from_the_picker` types a word, sees one row, presses ↩ and
   gets the `OpenAgent` for it.
 
