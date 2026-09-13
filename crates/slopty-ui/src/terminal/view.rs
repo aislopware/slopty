@@ -2552,6 +2552,23 @@ impl TerminalView {
             self.step_prompt(if keystroke.key == "up" { -1 } else { 1 }, cx);
             return;
         }
+        // An armed ⌘ with the bar's ← → ⌫ is the Mac's line-editing chord, as on the desktop.
+        if self.sticky_command
+            && self.theme.behaviour.natural_editing
+            && let Some(bytes) = keys::natural_editing(&Keystroke {
+                modifiers: gpui::Modifiers { platform: true, ..gpui::Modifiers::default() },
+                key: keystroke.key.clone(),
+                ..Keystroke::default()
+            })
+        {
+            self.sticky_command = false;
+            if self.state.view_offset() != 0 {
+                self.state.scroll_to_bottom();
+            }
+            self.send(TermRequest::Raw(bytes.to_vec()));
+            cx.notify();
+            return;
+        }
         if std::mem::take(&mut self.sticky_control) {
             keystroke.modifiers.control = true;
         }
@@ -5823,6 +5840,13 @@ mod tests {
         cx.simulate_keystrokes("alt-backspace");
         cx.simulate_keystrokes("alt-right");
         assert_eq!(raw(&mut rx), [b"\x01".to_vec(), b"\x1b\x7f".to_vec(), b"\x1bf".to_vec()]);
+        // The phone's key bar: ⌘ armed, then ⌫ from the bar.
+        view.update(cx, |view, cx| {
+            view.set_sticky_command(true, cx);
+            view.press(Keystroke { key: "backspace".to_owned(), ..Keystroke::default() }, cx);
+        });
+        assert_eq!(raw(&mut rx), [b"\x15".to_vec()], "armed ⌘⌫ is ^U");
+        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one key");
 
         view.update(cx, |view, cx| {
             let mut theme = Theme::default();

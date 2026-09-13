@@ -1000,9 +1000,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   its encoder, which sends it only with option-as-alt). They are taken after the search
   field, the composer and a selection's ⇧-arrows have had their say, so nothing else moves;
   a program under the alternate screen gets the same bytes, as under ghostty. Off, the
-  chords go where they went. Tests: `natural_editing_keys` (keys: the table, other chords
-  none), `the_macs_editing_keys_edit_the_line` (view: ⌘← is `^A` on the wire, ⌥⌫ `ESC DEL`,
-  off nothing), `terminal_keys` (settings).
+  chords go where they went. On the phone the key bar's armed ⌘ with ← → ⌫ is the same
+  chord (`press`), so a line can be edited without a hardware keyboard. Tests:
+  `natural_editing_keys` (keys: the table, other chords none),
+  `the_macs_editing_keys_edit_the_line` (view: ⌘← is `^A` on the wire, ⌥⌫ `ESC DEL`, the
+  armed ⌘ too, off nothing), `terminal_keys` (settings).
 
 - ✅ **`sudo` keeps the terminfo, and zsh's cursor says its keymap** (2026-09-13, ghostty's
   `sudo` and `cursor` shell-integration features). `TERM=xterm-ghostty` with `TERMINFO`

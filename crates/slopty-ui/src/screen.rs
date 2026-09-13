@@ -1708,4 +1708,152 @@ mod tests {
         assert!(!is_paste_chord(&chord("cmd-alt-v")));
         assert!(!is_paste_chord(&chord("cmd-c")));
     }
+
+    /// The view in a window, laid out, so the picture's bounds are recorded and pointer
+    /// positions can be mapped to stream pixels.
+    fn windowed(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
+        let (out, rx) = mpsc::channel(64);
+        let opened = Opened {
+            stream: StreamId(4),
+            target: CaptureTarget::Display(2),
+            size: (800, 600),
+            quality: Quality { scale: 1.0, ..Quality::default() },
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = ScreenView::new(
+                opened,
+                ScreenHandle::detached(StreamId(4)),
+                out,
+                Theme::default(),
+                cx,
+            );
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        cx.run_until_parked();
+        (view, rx, cx)
+    }
+
+    fn inputs(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ScreenInput> {
+        sent(rx)
+            .into_iter()
+            .filter_map(|req| match req {
+                ScreenRequest::Input { stream: StreamId(4), input } => Some(input),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pointer reaches the host in the stream's pixels: a point on the painted picture
+    /// scales by the stream size over the picture's bounds. A press carries its button, click
+    /// count and modifiers, a release the same, a move only while over the picture, and a
+    /// scroll its deltas with the unit (pixels are precise, lines are not) and the touch
+    /// phase; ⌘-scroll is the canvas's zoom and sends nothing.
+    #[gpui::test]
+    fn pointer_and_scroll_reach_the_host_in_stream_pixels(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        drop(sent(&mut rx));
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        assert!(bounds.size.width > px(0.0), "laid out: {bounds:?}");
+        // A point a quarter of the way across and half-way down the picture.
+        let at = |fx: f32, fy: f32| {
+            point(
+                bounds.origin.x + bounds.size.width * fx,
+                bounds.origin.y + bounds.size.height * fy,
+            )
+        };
+        let near =
+            |(x, y): (f32, f32), ex: f32, ey: f32| (x - ex).abs() < 1.0 && (y - ey).abs() < 1.0;
+
+        cx.simulate_mouse_move(at(0.25, 0.5), None, Modifiers::default());
+        cx.simulate_mouse_down(
+            at(0.25, 0.5),
+            MouseButton::Left,
+            Modifiers { shift: true, ..Modifiers::default() },
+        );
+        cx.simulate_mouse_up(at(0.5, 0.25), MouseButton::Left, Modifiers::default());
+        cx.simulate_event(ScrollWheelEvent {
+            position: at(0.5, 0.5),
+            delta: ScrollDelta::Pixels(point(px(3.0), px(-12.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: at(0.5, 0.5),
+            delta: ScrollDelta::Lines(point(0.0, 2.0)),
+            modifiers: Modifiers { alt: true, ..Modifiers::default() },
+            touch_phase: TouchPhase::Started,
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: at(0.5, 0.5),
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            modifiers: Modifiers { platform: true, ..Modifiers::default() },
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let got = inputs(&mut rx);
+        assert_eq!(got.len(), 5, "{got:?}");
+        match &got[0] {
+            ScreenInput::Move { x, y } => assert!(near((*x, *y), 200.0, 300.0), "{got:?}"),
+            other => panic!("expected a move, got {other:?}"),
+        }
+        match &got[1] {
+            ScreenInput::Button {
+                button: ProtoButton::Left,
+                down: true,
+                x,
+                y,
+                clicks: 1,
+                mods,
+            } => {
+                assert!(near((*x, *y), 200.0, 300.0), "{got:?}");
+                assert_eq!(*mods, Mods::SHIFT);
+            }
+            other => panic!("expected a press, got {other:?}"),
+        }
+        match &got[2] {
+            ScreenInput::Button {
+                button: ProtoButton::Left,
+                down: false,
+                x,
+                y,
+                clicks: 1,
+                mods,
+            } => {
+                assert!(near((*x, *y), 400.0, 150.0), "{got:?}");
+                assert_eq!(*mods, Mods::empty());
+            }
+            other => panic!("expected a release, got {other:?}"),
+        }
+        match &got[3] {
+            ScreenInput::Scroll { dx, dy, precise: true, phase, momentum, x, y, mods } => {
+                assert_eq!((*dx, *dy), (3.0, -12.0));
+                assert_eq!((*phase, *momentum), (ScrollPhase::Changed, ScrollPhase::None));
+                assert!(near((*x, *y), 400.0, 300.0), "{got:?}");
+                assert_eq!(*mods, Mods::empty());
+            }
+            other => panic!("expected a precise scroll, got {other:?}"),
+        }
+        match &got[4] {
+            ScreenInput::Scroll { dx, dy, precise: false, phase, mods, .. } => {
+                assert_eq!((*dx, *dy), (0.0, 2.0));
+                assert_eq!(*phase, ScrollPhase::Began);
+                assert_eq!(*mods, Mods::ALT);
+            }
+            other => panic!("expected a line scroll, got {other:?}"),
+        }
+
+        // Off the picture the pointer belongs to another card: a move there sends nothing.
+        cx.simulate_mouse_move(
+            point(bounds.origin.x - px(5.0), bounds.origin.y - px(5.0)),
+            None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(inputs(&mut rx).is_empty());
+    }
 }
