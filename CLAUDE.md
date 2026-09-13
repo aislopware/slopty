@@ -9,6 +9,7 @@ behind them), `docs/DEV.md` (commands and the loop), `docs/TESTING.md` (the four
 `docs/knowledge-from-slop-desk.md` is unverified prior art.
 
 ## What must hold
+
 - Pure Rust, everywhere: the app, the daemons, and every script (`cargo xtask …`).
 - Floor macOS 26.5 / iOS 26.5, Apple silicon; no availability checks, no fallbacks.
 - Latest stable toolchain and dependencies; the strictest lints, all of them on. An `#[allow]`
@@ -26,8 +27,7 @@ behind them), `docs/DEV.md` (commands and the loop), `docs/TESTING.md` (the four
   decision worth a paragraph gets its entry under `docs/decisions/` in the same change.
 
 ## Session safety
+
 - Checks run as tests, never by hand: no synthetic keys into a pid, no screenshots of other
   windows, no reading images back (that pattern reads as surveillance tooling and has been
   flagged). Goldens are compared numerically; read the diff numbers, never open the image.
-- Old Claude Code transcripts (`~/.claude/projects/**/*.jsonl`) are never read, grepped or
-  dumped into a session; a flag is investigated through metadata only.
