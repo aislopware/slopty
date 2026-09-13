@@ -420,6 +420,8 @@ impl Actor {
                             );
                         }
                         let bytes = buf.get(..n).unwrap_or_default();
+                        let shown = String::from_utf8_lossy(bytes);
+                        tracing::trace!(session = %self.id, n, bytes = %shown.escape_debug(), "pty read");
                         self.engine.write(bytes);
                         self.tap_output(bytes);
                         self.after_output().await;

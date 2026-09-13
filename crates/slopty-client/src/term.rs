@@ -545,6 +545,12 @@ impl TermState {
         self.running.is_some()
     }
 
+    /// The command running now, as typed (rows joined with newlines); `None` when none is.
+    #[must_use]
+    pub fn running_command(&self) -> Option<&str> {
+        self.running.as_ref().map(|(_, command)| command.as_str())
+    }
+
     /// The last finished command: what was typed at the block before the newest prompt
     /// (shell integration marks it); `None` when no command has run.
     #[must_use]
@@ -627,8 +633,7 @@ impl TermState {
                     if line.mark.is_prompt() && (i == prompt.0 || !line.mark.starts_prompt()) =>
                 {
                     if let Some(col) = line.mark.input_col() {
-                        let typed: String = line.text().chars().skip(usize::from(col)).collect();
-                        command.push(typed.trim_end().to_owned());
+                        command.push(line.text_from(col).trim_end().to_owned());
                     }
                 }
                 Some(line) if line.mark == SemanticMark::Input => {
@@ -853,7 +858,7 @@ const fn input_start(line: &Line) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use slopty_grid::{RowUpdate, Style};
+    use slopty_grid::{Cell, RowUpdate, Style};
 
     use super::*;
 
@@ -966,6 +971,22 @@ mod tests {
         assert_eq!(state.apply(TermEvent::Exited { status: 3 }), vec![Effect::Exited(3)]);
         assert_eq!(state.exited(), Some(3));
         assert!(state.running.is_none());
+    }
+
+    /// The input column is a cell: a wide glyph in the prompt (a starship's, a Powerline
+    /// segment) takes two, so the command is read from its cell and not from a character
+    /// count (which lost the command's first letter for every such prompt).
+    #[test]
+    fn a_prompt_with_a_wide_glyph_keeps_the_commands_first_letter() {
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "  > ls")]);
+        let line = &mut f.updates[0].line;
+        line.cells[0] = Cell::wide("マ", Style::DEFAULT);
+        line.cells[1] = Cell::spacer_tail(Style::DEFAULT);
+        line.mark = SemanticMark::Prompt { exit: None, input: Some(4) };
+        f.cursor.row = 1;
+        assert_eq!(state.apply(TermEvent::Frame(f)), vec![Effect::CommandStarted("ls".to_owned())]);
+        assert_eq!(state.block_head(LineIndex(0)).and_then(|h| h.command).as_deref(), Some("ls"));
     }
 
     #[test]
@@ -1196,8 +1217,8 @@ mod tests {
         let mut f = frame(1, true, 0, 0, 3, &[(0, "out"), (1, "$ ab\u{4f60}ccd"), (2, "efg")]);
         f.updates[1].line.mark = prompt(Some(0));
         // `from_text` knows no widths: the CJK character takes the two cells at 4 and 5.
-        f.updates[1].line.cells[4] = slopty_grid::Cell::wide("\u{4f60}", Style::DEFAULT);
-        f.updates[1].line.cells[5] = slopty_grid::Cell::spacer_tail(Style::DEFAULT);
+        f.updates[1].line.cells[4] = Cell::wide("\u{4f60}", Style::DEFAULT);
+        f.updates[1].line.cells[5] = Cell::spacer_tail(Style::DEFAULT);
         f.updates[2].line.mark = SemanticMark::Input;
         f.updates[2].line.flags |= LineFlags::WRAPPED;
         f.cursor = Cursor { row: 1, col: 4, visible: true, ..Cursor::default() };

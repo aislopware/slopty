@@ -45,6 +45,9 @@ pub enum Mark {
     /// `133;A`: a primary prompt starts on the cursor row (`k=s`/`k=c` continuations are not
     /// reported; they are rows of the same prompt).
     PromptStart,
+    /// `133;C`: the command's output starts on the cursor row. libghostty takes the row
+    /// out of the prompt on it but writes no cell, so the row would not be in a frame.
+    OutputStart,
     /// `133;D`: the command ended.
     CommandEnd {
         /// The status the shell reported, when it did and it fits.
@@ -121,6 +124,7 @@ fn mark(payload: &[u8]) -> Option<Mark> {
             let continuation = params.any(|p| p == b"k=s" || p == b"k=c");
             (!continuation).then_some(Mark::PromptStart)
         }
+        b'C' => Some(Mark::OutputStart),
         b'D' => {
             let exit = params
                 .next()
@@ -171,7 +175,12 @@ mod tests {
     #[test]
     fn other_sequences_are_ignored() {
         let mut s = Scanner::default();
-        assert_eq!(s.scan(b"\x1b]133;C\x07\x1b]0;title\x07\x1b[31m\x1b]8;;http://x\x1b\\"), None);
+        assert_eq!(
+            s.scan(b"\x1b]133;C\x07\x1b]0;title\x07"),
+            Some(Found { end: 8, mark: Mark::OutputStart }),
+            "C is reported: the row it lands on changes without a cell written"
+        );
+        assert_eq!(s.scan(b"\x1b]0;title\x07\x1b[31m\x1b]8;;http://x\x1b\\"), None);
         assert_eq!(s.scan(b"\x1b]133;D;3\x1b[0m"), None, "ESC that is not ST aborts the OSC");
         assert_eq!(
             s.scan(b"\x1b]133;D;3\x1b\x1b]133;D;4\x07"),

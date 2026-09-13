@@ -104,3 +104,5 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   terminal settings and from there, resolved for the side held, on every key event, not on
   the session, since the session is shared between clients.
 
+- ✅ **`[terminal] confirm_close`** (2026-09-13): ghostty's `confirm-close-surface`, default
+  on, on `Theme::behaviour`; ruled in decisions/terminal.md ("Closing a busy shell asks").

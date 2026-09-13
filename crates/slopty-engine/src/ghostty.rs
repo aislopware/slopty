@@ -79,6 +79,10 @@ pub struct GhosttyEngine {
     exit_marks: BTreeMap<u64, Option<u8>>,
     /// Absolute lines a primary prompt started on (`133;A`).
     prompt_starts: BTreeSet<u64>,
+    /// Rows the next frame carries whether or not a cell changed: a `133;C` moved the cursor
+    /// row out of the prompt without writing to it, and the client's command tracking waits
+    /// on that row (a silent `sleep` was not seen running until its output or its end).
+    forced_rows: BTreeSet<u64>,
     /// Walks the kitty graphics placements of the active screen.
     placements: PlacementIterator<'static>,
     /// The images the clients hold.
@@ -163,6 +167,7 @@ impl GhosttyEngine {
             osc: osc133::Scanner::default(),
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
+            forced_rows: BTreeSet::new(),
             placements: PlacementIterator::new()?,
             ledger: Ledger::default(),
             uploads: Vec::new(),
@@ -332,6 +337,7 @@ impl GhosttyEngine {
         self.base = 0;
         self.exit_marks.clear();
         self.prompt_starts.clear();
+        self.forced_rows.clear();
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }
 
@@ -389,6 +395,9 @@ impl GhosttyEngine {
             }
             osc133::Mark::CommandEnd { exit } => {
                 self.exit_marks.insert(line, exit);
+            }
+            osc133::Mark::OutputStart => {
+                self.forced_rows.insert(line);
             }
         }
     }
@@ -471,7 +480,11 @@ impl GhosttyEngine {
         let full = force_full || dirty == Dirty::Full;
         // A placement added or deleted moves no cell, but the frame must say so.
         let graphics_gen = self.term.kitty_graphics()?.generation()?;
-        if !full && dirty == Dirty::Clean && graphics_gen == self.graphics_gen {
+        if !full
+            && dirty == Dirty::Clean
+            && graphics_gen == self.graphics_gen
+            && self.forced_rows.is_empty()
+        {
             return Ok(None);
         }
         self.graphics_gen = graphics_gen;
@@ -491,7 +504,9 @@ impl GhosttyEngine {
             let raw = row.raw_row()?;
             // The row flag may be a false positive, but a row without it has no placeholders.
             let placeholders = raw.has_kitty_virtual_placeholder()?;
-            if full || row.dirty()? {
+            let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
+            let forced = self.forced_rows.remove(&abs);
+            if full || row.dirty()? || forced {
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
                 let mut first_input = None;
@@ -549,9 +564,16 @@ impl GhosttyEngine {
                 }
                 line.links = links.finish(x);
                 line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
-                let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
-                let semantic =
-                    raw.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None);
+                // The render state copies a row when the terminal dirtied it; a forced row
+                // was not, so its prompt flag is read from the live grid.
+                let semantic = if forced {
+                    self.term
+                        .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: u32::from(y) }))?
+                        .row()?
+                        .semantic_prompt()?
+                } else {
+                    raw.semantic_prompt().unwrap_or(libghostty_vt::screen::RowSemanticPrompt::None)
+                };
                 // A row erased in place (`CSI 2 J`, ⌃L at a prompt) keeps its number but not
                 // its prompt: the marks the shell wrote there are gone with it, else the next
                 // prompt drawn below would read as a continuation of a start that no longer
@@ -594,6 +616,8 @@ impl GhosttyEngine {
             runs.finish();
             y = y.saturating_add(1);
         }
+        // A forced row that is no longer on the screen has nothing left to say.
+        self.forced_rows.clear();
         snapshot.set_dirty(Dirty::Clean)?;
 
         let total = self.total_rows()?;
@@ -2129,6 +2153,38 @@ mod tests {
         assert_eq!(marks[3], prompt(Some(0)));
         assert_eq!(marks[4], SemanticMark::PromptContinuation { input: None });
         assert_eq!(marks[5], SemanticMark::PromptContinuation { input: None });
+    }
+
+    /// zsh writes `\r\r\n` and then `133;C` as two writes (app e2e run 345). The linefeed
+    /// from the input row leaves the new row a prompt continuation (libghostty's guess for
+    /// shells without `k=s`), and the `C` takes it out again without touching a cell, so
+    /// nothing was dirty and no frame said so until the command printed or ended: a silent
+    /// `sleep` was never seen running. The `C` row is forced into the next frame.
+    #[test]
+    fn a_133_c_on_its_own_puts_its_row_in_a_frame() {
+        let mut e = engine(80, 6);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07sleep 6");
+        let _typed = e.take_frame(0).unwrap().expect("the prompt");
+        e.write(b"\x1b[?2004l\r\r\n");
+        let f = e.take_frame(0).unwrap().expect("the cursor moved");
+        assert_eq!(f.cursor.row, 1);
+        assert_eq!(f.updates.len(), 2, "the row left and the row reached");
+        assert_eq!(
+            f.updates[1].line.mark,
+            SemanticMark::PromptContinuation { input: None },
+            "libghostty guesses a continuation until told otherwise"
+        );
+        e.write(b"\x1b]133;C\x07");
+        let f = e.take_frame(0).unwrap().expect("the mark alone is a frame");
+        assert_eq!(f.cursor.row, 1);
+        let rows: Vec<(u16, SemanticMark)> =
+            f.updates.iter().map(|u| (u.row, u.line.mark)).collect();
+        assert_eq!(rows, vec![(1, SemanticMark::Output)]);
+        assert!(e.take_frame(0).unwrap().is_none(), "forced once");
+        // A `C` on a row the shell then scrolls away leaves nothing behind.
+        e.write(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+        let _prompt = e.take_frame(0).unwrap().expect("the prompt");
+        assert!(e.take_frame(0).unwrap().is_none());
     }
 
     /// Bytes captured from a real zsh with the integration loaded (synchronized output,

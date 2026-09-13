@@ -918,7 +918,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   command block's rows, so without shell integration (a raw `ssh`, a program's screen) a
   right click did nothing, and even with it a mouse-only reader had no Paste. The menu now
   opens on any row: the block's items first when the row is in one, then the terminal's own —
-  Copy (with a selection), Paste, Find…, Clear screen — the four the mouse-only reader
+  Copy (with a selection; off a block a selection also offers "Ask the agent" and "Save as
+  note", the selection fenced), Paste, Find…, Clear screen — what the mouse-only reader
   reaches for, each the same code as its shortcut so nothing new to test on the host side.
   `BlockMenu::block` is optional; the aria name says which menu opened. Not a full copy of
   the Edit menu: the rest (fonts, splits, agents) is the palette's. Tests:
@@ -934,3 +935,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   at once, so the copy that follows a beat later has the whole scrollback; lines that have
   not arrived yet copy blank rather than waiting. Test:
   `the_keys_page_through_history_and_select_it_all`.
+
+- ✅ **⇧-arrows adjust a selection** (2026-09-13). A selection could only be shaped by the
+  pointer (drag, ⇧-click); ghostty's `adjust_selection` gives the keyboard the same. With a
+  selection, ⇧←/→ move its head a cell (wrapping at a row's ends), ⇧↑/↓ a row, within the
+  lines the host keeps; the shell sees none of them. With no selection the keys stay the
+  program's, as any other key — no mode to enter or leave, and any plain key still drops
+  the selection. Test: `a_right_click_off_a_block_offers_the_terminals_own_items`.
+
+- ✅ **The typed command is read from its cell, not a character count** (2026-09-13). App
+  e2e run 343 logged every command one letter short (`cho e2e-42`, `leep 6`): the block
+  head sliced the prompt row's text with `chars().skip(input_col)`, and the prompt on this
+  machine has a wide glyph before the input column (a starship segment, as any Powerline
+  prompt), which is two cells but one character. `Line::text_from(col)` walks the cells from
+  the column, skipping spacer tails as `text()` does, and `block_head` reads the command
+  with it. A wrong first letter poisoned everything downstream: the block head, the menu's
+  "copy command", "run again", the badge's caption and the agent's fence. Tests:
+  `text_trims_trailing_blanks_and_skips_spacers` (grid),
+  `a_prompt_with_a_wide_glyph_keeps_the_commands_first_letter` (client).
+
+- ✅ **Closing a busy shell asks first** (2026-09-13). ⌘W (or "Close item") on a terminal
+  whose command is still running (the marks say so: `command_running`) ended it on the
+  spot, a build or a long test gone with one chord meant for another card. Every terminal
+  asks here (ghostty's `confirm-close-surface`, iTerm's, Terminal.app's). Ruling: the
+  view's bar at the card's bottom-left — the same one the held-back paste uses, one
+  `Pending` for both — names the command and offers Close / Keep; ↩ closes, Esc keeps, any
+  other key keeps and goes on to the program. The canvas asks the view before sending
+  `Close` and sends it on `TerminalViewEvent::CloseConfirmed`; an idle shell, an exited one
+  and every other card kind close as before. `[terminal] confirm_close = false` turns it
+  off. Tests:
+  `closing_a_busy_shell_asks_first` (view: asks while running, ↩ confirms, Esc keeps, off
+  by setting), `a_busy_shell_closes_only_when_confirmed` (canvas: no `Close` until the
+  view says so).
+
+- ✅ **A `133;C` on its own is a frame** (2026-09-13). App e2e run 343 timed out waiting for
+  `sleep 6` to badge its shell: the client saw the command start only when it ended
+  (`elapsed` 76 ms for a six-second sleep), so nothing was slow and nothing was badged. The
+  PTY bytes (traced at `slopty_host::session=trace`, run 345) show zsh writing `\r\r\n`
+  and then `133;C` as two writes. The linefeed from the input row leaves the new row a
+  prompt continuation (libghostty's guess for shells without `k=s`), and the `C` takes it
+  out again without touching a cell, so the row was never dirty: the frame after the
+  linefeed said "prompt continuation, cursor here", and no frame followed until the
+  command printed or its prompt came back. The client's block tracking (a command runs
+  once the cursor is past the prompt's rows) rightly saw a prompt row under the cursor.
+  Ruling: the engine's OSC 133 scanner reports `C` too (`Mark::OutputStart`), the engine
+  keeps the cursor's line in `forced_rows`, and the next frame carries that row whether or
+  not libghostty dirtied it — its prompt flag read from the live grid (`grid_ref`), since
+  the render state only copies rows the terminal dirtied. The set is cleared on every
+  frame and every epoch. Tests: `a_133_c_on_its_own_puts_its_row_in_a_frame` (engine: the
+  linefeed's frame says continuation, the `C`'s frame says output, once), the host actor
+  against a raw-mode `sh` that writes the linefeed and the `C` separately
+  (`a_silent_command_after_a_clear_is_seen_running_at_once`: the client state built from
+  the actor's frames reports the command running within a second of ↩, the cursor below
+  it), and the scanner's `other_sequences_are_ignored`. The `pty read` trace stays: the
+  bytes a real shell writes are the evidence every ruling in this section rests on.

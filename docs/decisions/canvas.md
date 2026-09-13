@@ -502,8 +502,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   block reads as its grid; (2) both keys wrap, and nothing active starts at the first (⌘])
   or the last (⌘[); (3) the step is the palette's "go to" (`go_to`): active, revealed, and a
   terminal takes the keyboard, so ⌘] into a shell is one key, not two. Tested headless
-  (`the_cards_are_walked_in_reading_order`). Not done: a spatial walk (⌘⌥→ to the card on the
-  right) — reading order covers a grid, and a free-form layout has no unambiguous "right".
+  (`the_cards_are_walked_in_reading_order`). The spatial walk this entry left out landed
+  2026-09-13: ⌘⌥←/→/↑/↓ (`step_towards`, also the palette's "Card to the left"…) go to the
+  nearest card whose centre lies in that direction's 90° cone from the active card's centre —
+  the rule every tiling window manager uses, unambiguous enough on a free layout because the
+  cone excludes what is more beside than ahead; nothing in the cone leaves the focus where it
+  is, no wrap (a wrap in a direction reads as a jump). Test: `the_cards_are_walked_by_direction`.
 
 - ✅ **The palette runs a recent command again** (2026-09-13). ⌘⇧↩ reruns only the last
   command; the one wanted is often two or three back (`make`, then a look at a log, then

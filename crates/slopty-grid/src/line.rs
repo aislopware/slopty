@@ -182,9 +182,16 @@ impl Line {
     /// The visible text of the line with trailing blanks trimmed, for search, copy and summaries.
     #[must_use]
     pub fn text(&self) -> String {
+        self.text_from(0)
+    }
+
+    /// The visible text from cell `col` on, trailing blanks trimmed: a column is a cell, not
+    /// a character, so a wide character before `col` (a prompt's glyph) shifts nothing.
+    #[must_use]
+    pub fn text_from(&self, col: u16) -> String {
         let end = self.last_content_col().map_or(0, |c| usize::from(c).saturating_add(1));
         let mut out = String::new();
-        for cell in self.cells.iter().take(end) {
+        for cell in self.cells.iter().take(end).skip(usize::from(col)) {
             if !cell.width.draws_text() {
                 continue;
             }
@@ -215,6 +222,10 @@ mod tests {
         line.cells[3] = Cell::spacer_tail(Style::DEFAULT);
         assert_eq!(line.text(), "ab字");
         assert_eq!(line.last_content_col(), Some(3), "the spacer tail is not blank");
+        line.cells[4] = Cell::narrow('c', Style::DEFAULT);
+        assert_eq!(line.text_from(4), "c", "a cell column, not a character index");
+        assert_eq!(line.text_from(3), "c", "starting on a spacer tail skips it");
+        assert_eq!(line.text_from(9), "", "past the content is empty");
     }
 
     #[test]

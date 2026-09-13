@@ -29,6 +29,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 objc2-core-foundation.workspace = true
+slopty-client.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true
 slopty-grid.workspace = true

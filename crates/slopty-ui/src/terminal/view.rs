@@ -266,6 +266,9 @@ pub enum TerminalViewEvent {
     },
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
+    /// The human confirmed closing this shell while its command runs: the canvas sends
+    /// the host `Close`.
+    CloseConfirmed,
     /// A shell command finished (shell integration marks): what was typed, its status, and how
     /// long it ran from the frame the cursor left its prompt to the frame the next prompt
     /// arrived. The canvas badges the item when that was long and nobody was watching.
@@ -417,8 +420,9 @@ pub struct TerminalView {
     /// Text for the composer once the conversation exists (a driven view opens it on its
     /// first frame, so a block asked of a card that was just opened has to wait).
     pending_compose: Option<String>,
-    /// A paste held back by paste protection until ↩ or the Paste button confirms it.
-    pending_paste: Option<String>,
+    /// What waits on a confirmation at the card's foot: a paste held back by paste
+    /// protection, or the close of a shell whose command is still running.
+    pending: Option<Pending>,
     /// A window whose picture waits for the conversation to exist before it is attached.
     pending_snapshot: Option<(slopty_proto::screen::CaptureTarget, String)>,
     /// The permission the driven agent waits on, with the input it would run with.
@@ -531,7 +535,7 @@ impl TerminalView {
             preparing: 0,
             open_conversation: false,
             pending_compose: None,
-            pending_paste: None,
+            pending: None,
             pending_snapshot: None,
             permission: None,
             partial: String::new(),
@@ -1475,15 +1479,27 @@ impl TerminalView {
 
     /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
     /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
-    fn render_paste_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
-        let text = self.pending_paste.as_deref()?;
+    fn render_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        let pending = self.pending.as_ref()?;
         let theme = &self.theme;
         let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
-        let lines = text.lines().count().max(1);
-        let what = if lines == 1 {
-            "Paste a line that would run?".to_owned()
-        } else {
-            format!("Paste {lines} lines that would run?")
+        let (what, selector, accept, accept_id, cancel_id) = match pending {
+            Pending::Paste(text) => {
+                let lines = text.lines().count().max(1);
+                let what = if lines == 1 {
+                    "Paste a line that would run?".to_owned()
+                } else {
+                    format!("Paste {lines} lines that would run?")
+                };
+                (what, "paste-confirm", "Paste", "terminal-paste-confirm", "terminal-paste-cancel")
+            }
+            Pending::Close(command) => (
+                format!("Close while `{command}` runs?"),
+                "close-confirm",
+                "Close",
+                "terminal-close-confirm",
+                "terminal-close-cancel",
+            ),
         };
         let button = move |id: &'static str, label: &'static str, accent: bool| {
             let row = div()
@@ -1505,7 +1521,7 @@ impl TerminalView {
         };
         Some(
             div()
-                .debug_selector(|| "paste-confirm".to_owned())
+                .debug_selector(move || selector.to_owned())
                 .absolute()
                 .bottom(px(spacing.xs))
                 .left(px(spacing.xs))
@@ -1525,12 +1541,12 @@ impl TerminalView {
                 .font_family(theme.typography.ui_family.clone())
                 .child(SharedString::from(what))
                 .child(
-                    button("terminal-paste-confirm", "Paste", true)
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_paste(cx))),
+                    button(accept_id, accept, true)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_pending(cx))),
                 )
                 .child(
-                    button("terminal-paste-cancel", "Cancel", false)
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_paste(cx))),
+                    button(cancel_id, "Cancel", false)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_pending(cx))),
                 ),
         )
     }
@@ -1753,6 +1769,10 @@ impl TerminalView {
         }
         if has_selection {
             items.push(BlockMenuItem::Copy);
+            if block.is_none() {
+                items.push(BlockMenuItem::Ask);
+                items.push(BlockMenuItem::Note);
+            }
         }
         items.push(BlockMenuItem::Paste);
         items.push(BlockMenuItem::Find);
@@ -1773,11 +1793,29 @@ impl TerminalView {
             BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
             BlockMenuItem::Find => self.find(&Find, window, cx),
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
+            BlockMenuItem::Ask => {
+                // A selection is what the human meant; the block is the default.
+                let selected = self.selected_text().filter(|t| !t.trim().is_empty());
+                let text = match (selected, menu.block) {
+                    (Some(t), _) => format!("```\n{t}\n```\n\n"),
+                    (None, Some(block)) => block_markdown(&block),
+                    (None, None) => return,
+                };
+                cx.emit(TerminalViewEvent::AskAgent(text));
+            }
+            BlockMenuItem::Note => {
+                let text = match menu.block {
+                    Some(block) => block_note(&block),
+                    None => match self.selected_text().filter(|t| !t.trim().is_empty()) {
+                        Some(t) => format!("```\n{t}\n```\n"),
+                        None => return,
+                    },
+                };
+                cx.emit(TerminalViewEvent::NoteBlock(text));
+            }
             BlockMenuItem::CopyCommand
             | BlockMenuItem::CopyOutput
             | BlockMenuItem::Rerun
-            | BlockMenuItem::Ask
-            | BlockMenuItem::Note
             | BlockMenuItem::SelectBlock => {
                 if let Some(block) = menu.block {
                     self.block_item_pick(item, block, cx);
@@ -1810,15 +1848,6 @@ impl TerminalView {
                     self.run_text(command, cx);
                 }
             }
-            BlockMenuItem::Ask => {
-                // A selection is what the human meant; the block is the default.
-                let text = self
-                    .selected_text()
-                    .filter(|t| !t.trim().is_empty())
-                    .map_or_else(|| block_markdown(&block), |t| format!("```\n{t}\n```\n\n"));
-                cx.emit(TerminalViewEvent::AskAgent(text));
-            }
-            BlockMenuItem::Note => cx.emit(TerminalViewEvent::NoteBlock(block_note(&block))),
             BlockMenuItem::SelectBlock => {
                 let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
                 let cols = self.state.size().cols;
@@ -1829,8 +1858,38 @@ impl TerminalView {
             BlockMenuItem::Copy
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
-            | BlockMenuItem::ClearScreen => {}
+            | BlockMenuItem::ClearScreen
+            | BlockMenuItem::Ask
+            | BlockMenuItem::Note => {}
         }
+    }
+
+    /// ⇧-arrow with a selection: where its head moves (a cell sideways, wrapping at the row's
+    /// ends; a row up or down, within the lines the host keeps). `None` when the keystroke is
+    /// not that.
+    fn adjusted_head(
+        &self,
+        selection: Selection,
+        keystroke: &Keystroke,
+    ) -> Option<(LineIndex, u16)> {
+        let m = keystroke.modifiers;
+        if !m.shift || m.control || m.alt || m.platform {
+            return None;
+        }
+        let last_col = self.state.size().cols.saturating_sub(1);
+        let oldest = self.state.scrollback().oldest();
+        let newest = LineIndex(self.state.scrollback().total().saturating_sub(1).max(oldest.0));
+        let (line, col) = selection.head;
+        Some(match keystroke.key.as_str() {
+            "left" if col > 0 => (line, col.saturating_sub(1)),
+            "left" if line > oldest => (LineIndex(line.0.saturating_sub(1)), last_col),
+            "right" if col < last_col => (line, col.saturating_add(1)),
+            "right" if line < newest => (LineIndex(line.0.saturating_add(1)), 0),
+            "left" | "right" => (line, col),
+            "up" => (LineIndex(line.0.saturating_sub(1).max(oldest.0)), col),
+            "down" => (LineIndex(line.0.saturating_add(1).min(newest.0)), col),
+            _ => return None,
+        })
     }
 
     /// The block menu, drawn late and anchored where the right click landed.
@@ -2302,24 +2361,27 @@ impl TerminalView {
         self.state.scroll_to_bottom();
         let bracketed = self.state.modes().contains(TermModes::BRACKETED_PASTE);
         if self.theme.behaviour.paste_protection && !paste_is_safe(&text, bracketed) {
-            self.pending_paste = Some(text);
+            self.pending = Some(Pending::Paste(text));
         } else {
             self.send(TermRequest::Paste(text));
         }
         cx.notify();
     }
 
-    /// The held-back paste goes through (↩, or the Paste button).
-    pub fn confirm_paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.pending_paste.take() {
-            self.send(TermRequest::Paste(text));
-            cx.notify();
+    /// What waits goes through (↩, or the bar's first button): the paste is sent, the
+    /// close is confirmed to the canvas.
+    pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
+        match self.pending.take() {
+            Some(Pending::Paste(text)) => self.send(TermRequest::Paste(text)),
+            Some(Pending::Close(_)) => cx.emit(TerminalViewEvent::CloseConfirmed),
+            None => return,
         }
+        cx.notify();
     }
 
-    /// The held-back paste is dropped (Esc, or the Cancel button).
-    pub fn cancel_paste(&mut self, cx: &mut Context<Self>) {
-        if self.pending_paste.take().is_some() {
+    /// What waits is dropped (Esc, or the Cancel button).
+    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) {
+        if self.pending.take().is_some() {
             cx.notify();
         }
     }
@@ -2327,7 +2389,36 @@ impl TerminalView {
     /// The paste waiting for a confirmation, when there is one.
     #[must_use]
     pub fn pending_paste(&self) -> Option<&str> {
-        self.pending_paste.as_deref()
+        match &self.pending {
+            Some(Pending::Paste(text)) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The canvas is about to close this shell: with a command running and the setting
+    /// on, the bar asks first and this says so (`true`); otherwise nothing stands in the
+    /// way. A driven agent has no grid to read a command from and closes at once.
+    pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.driven || !self.theme.behaviour.confirm_close || !self.state.command_running() {
+            return false;
+        }
+        let command = self
+            .state
+            .running_command()
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        self.pending = Some(Pending::Close(command));
+        cx.notify();
+        true
+    }
+
+    /// Whether the close of this shell waits on a confirmation.
+    #[must_use]
+    pub const fn close_asked(&self) -> bool {
+        matches!(self.pending, Some(Pending::Close(_)))
     }
 
     /// Session id.
@@ -2832,21 +2923,22 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        // A held-back paste: ↩ sends it, Esc drops it, any other key drops it and goes on
-        // to the program as typed (nothing is swallowed).
-        if self.pending_paste.is_some() && !event.keystroke.modifiers.platform {
+        // Something waiting at the foot (a held-back paste, a close): ↩ confirms it, Esc
+        // drops it, any other key drops it and goes on to the program as typed (nothing is
+        // swallowed).
+        if self.pending.is_some() && !event.keystroke.modifiers.platform {
             match event.keystroke.key.as_str() {
                 "enter" => {
-                    self.confirm_paste(cx);
+                    self.confirm_pending(cx);
                     cx.stop_propagation();
                     return;
                 }
                 "escape" => {
-                    self.cancel_paste(cx);
+                    self.cancel_pending(cx);
                     cx.stop_propagation();
                     return;
                 }
-                _ => self.cancel_paste(cx),
+                _ => self.cancel_pending(cx),
             }
         }
         // Cmd shortcuts belong to the app.
@@ -2886,6 +2978,16 @@ impl TerminalView {
                 }
                 return;
             }
+        }
+        // ⇧-arrows move a selection's head (ghostty's `adjust_selection`); with nothing
+        // selected they are the program's, as every other key.
+        if let Some(selection) = self.selection
+            && let Some(head) = self.adjusted_head(selection, &event.keystroke)
+        {
+            self.selection = Some(Selection { head, ..selection });
+            cx.stop_propagation();
+            cx.notify();
+            return;
         }
         self.selection = None;
         self.pin_blink();
@@ -3696,7 +3798,7 @@ impl Render for TerminalView {
             .children(header)
             .children(search)
             .children(self.render_link_preview())
-            .children(self.render_paste_confirm(cx))
+            .children(self.render_confirm(cx))
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
 }
@@ -3708,6 +3810,15 @@ struct BlockMenu {
     block: Option<CommandBlock>,
     /// Where the click landed (window coordinates), the menu's anchor.
     at: gpui::Point<Pixels>,
+}
+
+/// What waits on a confirmation at the card's foot.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Pending {
+    /// A paste held back by paste protection until ↩ or the Paste button sends it.
+    Paste(String),
+    /// The close of a shell whose command (the first line of it) is still running.
+    Close(String),
 }
 
 /// What the right-click menu offers: a block's items on a block, the terminal's own after.
@@ -4520,6 +4631,91 @@ mod tests {
         assert_eq!(pastes(&mut rx).len(), 1, "protection off: straight through");
     }
 
+    /// ⌘W on a shell whose command is running asks first: the canvas's `ask_close` puts the
+    /// bar up and says so; ↩ confirms (the canvas hears `CloseConfirmed`), Esc keeps the
+    /// shell, any other key keeps it and goes to the program; an idle shell, a shell with
+    /// the setting off, never ask.
+    #[gpui::test]
+    fn closing_a_busy_shell_asks_first(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let confirmed = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        cx.update(|_window, cx| {
+            let confirmed = std::rc::Rc::clone(&confirmed);
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if matches!(event, TerminalViewEvent::CloseConfirmed) {
+                    confirmed.set(confirmed.get().saturating_add(1));
+                }
+            })
+            .detach();
+        });
+        let frame = |seq, rows: &[(&str, SemanticMark)], cursor_row| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor { row: cursor_row, ..Cursor::default() },
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                images: Vec::new(),
+                updates: rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, (text, mark))| {
+                        let mut line = Line::from_text(text, 10, Style::DEFAULT);
+                        line.mark = *mark;
+                        RowUpdate { row: u16::try_from(row).unwrap(), line }
+                    })
+                    .collect(),
+            })
+        };
+        let prompt = SemanticMark::Prompt { exit: None, input: Some(2) };
+        // Idle at the prompt: nothing to ask.
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(frame(1, &[("$ ", prompt), ("", SemanticMark::Output)], 0), cx);
+        });
+        assert!(!view.update(cx, TerminalView::ask_close), "idle: closes at once");
+        // Running: the bar asks, ↩ confirms.
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(frame(2, &[("$ make", prompt), ("", SemanticMark::Output)], 1), cx);
+        });
+        assert!(view.read_with(cx, |v, _| v.state.command_running()));
+        assert!(view.update(cx, TerminalView::ask_close), "running: asks");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("close-confirm").is_some(), "the bar is up");
+        assert!(view.read_with(cx, |v, _| v.close_asked()));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(confirmed.get(), 1, "\u{21a9} confirms");
+        assert!(!view.read_with(cx, |v, _| v.close_asked()));
+        assert!(drain_input(&mut rx).is_empty(), "the \u{21a9} was not typed");
+        // Esc keeps it.
+        assert!(view.update(cx, TerminalView::ask_close));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.close_asked()), "Esc keeps the shell");
+        assert_eq!(confirmed.get(), 1);
+        assert!(drain_input(&mut rx).is_empty());
+        // Any other key keeps it and goes on to the program.
+        assert!(view.update(cx, TerminalView::ask_close));
+        cx.simulate_keystrokes("x");
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.close_asked()));
+        assert_eq!(drain_input(&mut rx), ["x"], "the key reached the program");
+        assert_eq!(confirmed.get(), 1);
+        // The setting off: closes at once.
+        view.update_in(cx, |view, _window, cx| {
+            let mut theme = Theme::new(slopty_theme::Variant::Dark);
+            theme.behaviour.confirm_close = false;
+            view.set_theme(theme, cx);
+        });
+        assert!(!view.update(cx, TerminalView::ask_close), "off: closes at once");
+    }
+
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.
     #[gpui::test]
     fn cmd_shift_c_copies_the_last_commands_output(cx: &mut TestAppContext) {
@@ -4738,10 +4934,59 @@ mod tests {
         });
         right_click(cx);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("MenuItem", Some("Copy"))), "{tree:#?}");
+        let items: Vec<_> =
+            tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
+        assert_eq!(
+            items,
+            ["Copy", "Ask the agent", "Save as note", "Paste", "Find…", "Clear screen"]
+        );
         pick(cx, "copy");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(text.as_deref(), Some("second"));
+
+        // The selection, fenced, is what the agent is asked about and what the note keeps.
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&events);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                let line = match event {
+                    TerminalViewEvent::AskAgent(text) => format!("ask:{text}"),
+                    TerminalViewEvent::NoteBlock(text) => format!("note:{text}"),
+                    _ => return,
+                };
+                seen.borrow_mut().push(line);
+            })
+            .detach();
+        });
+        right_click(cx);
+        pick(cx, "ask");
+        right_click(cx);
+        pick(cx, "note");
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["ask:```\nsecond\n```\n\n", "note:```\nsecond\n```\n"]
+        );
+
+        // ⇧-arrows move the selection's head; the shell sees none of them. Without a
+        // selection the same keys are the shell's.
+        cx.simulate_keystrokes("shift-right shift-down");
+        let head =
+            |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.selection.map(|s| s.head));
+        assert_eq!(head(cx), Some((LineIndex(2), 6)));
+        cx.simulate_keystrokes("shift-left shift-up");
+        assert_eq!(head(cx), Some((LineIndex(1), 5)));
+        cx.simulate_keystrokes("shift-right shift-right shift-right shift-right shift-right");
+        assert_eq!(head(cx), Some((LineIndex(2), 0)), "past the row's end, the next row");
+        cx.simulate_keystrokes("shift-left");
+        assert_eq!(head(cx), Some((LineIndex(1), 9)));
+        cx.simulate_keystrokes("shift-down shift-down shift-down");
+        assert_eq!(head(cx), Some((LineIndex(2), 9)), "no line below the newest");
+        assert!(drain_input(&mut rx).is_empty(), "the shell saw no arrow");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(head(cx), None, "a plain key drops the selection");
+        drain_input(&mut rx);
+        cx.simulate_keystrokes("shift-right");
+        assert_eq!(drain_input(&mut rx), ["arrowright"], "no selection: the shell's key");
 
         right_click(cx);
         pick(cx, "find");

@@ -170,7 +170,7 @@ reads so a mark split over two PTY reads is still found) and notes the cursor's 
 at each. Every `Line` then carries a `SemanticMark`: `Prompt { exit, input }` on the row a
 prompt started (with the previous command's status), `PromptContinuation { input }` for the
 rest of a multi-line prompt, `Input`, `Output`; `input` is the column of the row's first
-`Input` cell (libghostty's per-cell `CellSemanticContent`), where the typed command begins. The client side is in §6.
+`Input` cell (libghostty's per-cell `CellSemanticContent`), where the typed command begins. The scanner also reports `C`: libghostty takes that row out of the prompt without writing a cell, so the engine keeps the line in `forced_rows` and the next frame carries it (prompt flag read from the live grid, since the render state only copies dirty rows); without this a `sleep` typed at a fresh prompt showed as running only when it ended. `slopty_host::session=trace` logs every PTY read's bytes (`pty read`), the evidence behind the rulings in `docs/decisions/terminal.md`. The client side is in §6.
 
 **Render metrics.** The cell grid is derived exactly as ghostty derives it
 (`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
@@ -444,10 +444,11 @@ document synced through the host so every client sees the same canvas — item g
 and note text are host state; the camera `{x, y, zoom}` is per client, so panning and zoom on one
 client do not move another (`slopty-host::canvas` owns the document,
 `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⇧F are the keyboard surface (bound in
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⌥←→↑↓/⌘⇧F are the keyboard surface (bound in
 `Canvas && !Screen`: a focused remote window gets them all, ⌃Tab is the way back), the last
 one a find in every card (the palette lists the cards with hits, ↩ opens that card's find bar), the two before it
-walking the cards in reading order; a minimap in the corner
+walking the cards in reading order and the arrows to the nearest card in that direction
+(`step_towards`, the window managers' cone rule); a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), its
@@ -1054,7 +1055,10 @@ the output as a plain fence, `block_note`; `TerminalViewEvent::NoteBlock` →
 `CanvasView::note_beside`, a free slot when the space beside is taken; the palette's "Keep
 last block as a card" does the same for the block before the newest prompt,
 `TermState::last_block`) and "Select block"; then, on every row, the terminal's own: "Copy"
-(only with a selection), "Paste", "Find…" and "Clear screen", each what its shortcut does. The
+(only with a selection; off a block a selection also offers "Ask the agent" and "Save as
+note", fenced), "Paste", "Find…" and "Clear screen", each what its shortcut does. ⇧-arrows move
+a selection's head (`adjusted_head`: a cell sideways wrapping at the row's ends, a row up or
+down), the shell never sees them; without a selection they are the shell's. The
 menu is `Menu "Command block"` on a block, `Menu "Terminal"` elsewhere; the armed tap on the
 phone opens the same. While the viewport's top row is inside a block whose prompt
 rows have all scrolled above, a one-row header over the grid (`block-header`, role Button,
@@ -1123,9 +1127,10 @@ ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
 `[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
 never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
-hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right`
-(the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the blink override,
-paste protection, the pointer hide, the multiplier and option-as-alt on `Theme::behaviour`,
+hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right |
+confirm_close` (the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the
+blink override, paste protection, the pointer hide, the multiplier, option-as-alt and the
+close confirmation on `Theme::behaviour`,
 the last travelling on every `KeyEvent` to the host's encoder, the bell flag is
 read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change and takes a changed `muted`, see

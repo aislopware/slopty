@@ -123,6 +123,14 @@ pub mod actions {
             NextCard,
             /// Activate and reveal the previous card in reading order, wrapping.
             PrevCard,
+            /// Activate and reveal the nearest card to the left of the active one.
+            CardLeft,
+            /// Activate and reveal the nearest card to the right of the active one.
+            CardRight,
+            /// Activate and reveal the nearest card above the active one.
+            CardUp,
+            /// Activate and reveal the nearest card below the active one.
+            CardDown,
             /// Move the active file card's reading line up one line.
             LineUp,
             /// Move the active file card's reading line down one line.
@@ -139,11 +147,11 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FindEverywhere, FitAll, FocusNext,
-    FocusPrev, LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote,
-    NewTerminal, NewWorktreeAgent, NextAttention, NextCard, OpenPalette, PageDown, PageUp,
-    PointOthers, PrevCard, RenameItem, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut,
-    ZoomReset, ZoomToItem,
+    AddWindow, ArrangeByRepo, AskAgentAboutWindow, CardDown, CardLeft, CardRight, CardUp,
+    CloseItem, FindEverywhere, FitAll, FocusNext, FocusPrev, LineDown, LineFirst, LineLast, LineUp,
+    NewAgent, NewDrivenAgent, NewNote, NewTerminal, NewWorktreeAgent, NextAttention, NextCard,
+    OpenPalette, PageDown, PageUp, PointOthers, PrevCard, RenameItem, ResumeAgent, ToggleMute,
+    ToggleStats, ZoomIn, ZoomOut, ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -196,6 +204,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-f", FindEverywhere, Some("Input")),
         KeyBinding::new("cmd-]", NextCard, CTX),
         KeyBinding::new("cmd-[", PrevCard, CTX),
+        KeyBinding::new("cmd-alt-left", CardLeft, CTX),
+        KeyBinding::new("cmd-alt-right", CardRight, CTX),
+        KeyBinding::new("cmd-alt-up", CardUp, CTX),
+        KeyBinding::new("cmd-alt-down", CardDown, CTX),
         // The active file card's reading line. Only while a file card is active (the canvas
         // sets `file_card` on its context then): a binding matches before a focused terminal's
         // key handler runs, so an unscoped `up` would take the arrows from the shell.
@@ -250,6 +262,10 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Find in every card", Box::new(FindEverywhere)),
         c("Next card", Box::new(NextCard)),
         c("Previous card", Box::new(PrevCard)),
+        c("Card to the left", Box::new(CardLeft)),
+        c("Card to the right", Box::new(CardRight)),
+        c("Card above", Box::new(CardUp)),
+        c("Card below", Box::new(CardDown)),
         t("Find in terminal, conversation or file", Box::new(Find)),
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
@@ -2346,7 +2362,7 @@ impl CanvasView {
                     TerminalViewEvent::Notification { title, body } => {
                         this.notify_program(sid, title, body, cx);
                     }
-                    TerminalViewEvent::Exited(_) => {
+                    TerminalViewEvent::Exited(_) | TerminalViewEvent::CloseConfirmed => {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
                     TerminalViewEvent::Title(_) => cx.notify(),
@@ -2902,9 +2918,17 @@ impl CanvasView {
         tracing::debug!(%id, kind = ?item.kind, "close item");
         match item.kind {
             // A live session closes through the host, which removes the item; an ended one
-            // has nothing to close, so drop the item straight from the document.
+            // has nothing to close, so drop the item straight from the document. A shell
+            // whose command still runs asks first (its view's bar), and closes on its
+            // `CloseConfirmed`.
             ItemKind::Terminal { session } if self.sessions.contains_key(&session) => {
-                self.send(ClientMsg::Term { session, req: TermRequest::Close });
+                let asked = self
+                    .terminals
+                    .get(&session)
+                    .is_some_and(|view| view.update(cx, TerminalView::ask_close));
+                if !asked {
+                    self.send(ClientMsg::Term { session, req: TermRequest::Close });
+                }
             }
             ItemKind::Terminal { .. }
             | ItemKind::Window { .. }
@@ -3273,6 +3297,37 @@ impl CanvasView {
             (Some(i), false) => i.checked_sub(1).unwrap_or(last),
         };
         if let Some(&id) = order.get(next) {
+            self.go_to(id, cx);
+        }
+    }
+
+    /// ⌘⌥-arrow: the nearest card in that direction — its centre inside the 90° cone from
+    /// the active card's centre, the closest by distance — as a window manager walks
+    /// windows; nothing there leaves the focus where it is. Nothing active starts at the
+    /// first card in reading order.
+    fn step_towards(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let Some(active) = self.active.and_then(|id| self.doc.get(id)) else {
+            if let Some(&first) = self.reading_order().first() {
+                self.go_to(first, cx);
+            }
+            return;
+        };
+        let centre = |r: &Rect| (r.w.mul_add(0.5, r.x), r.h.mul_add(0.5, r.y));
+        let from = centre(&active.rect);
+        let active_id = active.id;
+        let nearest = self
+            .doc
+            .items()
+            .filter(|item| item.id != active_id)
+            .filter_map(|item| {
+                let c = centre(&item.rect);
+                let (vx, vy) = (c.0 - from.0, c.1 - from.1);
+                let along = vx.mul_add(dx, vy * dy);
+                let across = vx.mul_add(dy, -(vy * dx)).abs();
+                (along > 0.0 && across <= along).then(|| (vx.hypot(vy), item.id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, id)) = nearest {
             self.go_to(id, cx);
         }
     }
@@ -4396,6 +4451,10 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::find_everywhere))
             .on_action(cx.listener(Self::next_card))
             .on_action(cx.listener(Self::prev_card))
+            .on_action(cx.listener(|this, _: &CardLeft, _w, cx| this.step_towards(-1.0, 0.0, cx)))
+            .on_action(cx.listener(|this, _: &CardRight, _w, cx| this.step_towards(1.0, 0.0, cx)))
+            .on_action(cx.listener(|this, _: &CardUp, _w, cx| this.step_towards(0.0, -1.0, cx)))
+            .on_action(cx.listener(|this, _: &CardDown, _w, cx| this.step_towards(0.0, 1.0, cx)))
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the canvas has the keyboard.
             .capture_action(cx.listener(
@@ -5352,6 +5411,43 @@ mod tests {
         })
     }
 
+    /// ⌘W on a shell whose command runs sends the host nothing until the shell's bar is
+    /// confirmed with ↩; Esc keeps the shell and its session.
+    #[gpui::test]
+    fn a_busy_shell_closes_only_when_confirmed(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        let session = SessionId::new();
+        let _id = host_opens(&view, cx, session, me, SHELL, 1);
+        assert!(terminal_focused(&view, cx, session));
+        let prompt = SemanticMark::Prompt { exit: None, input: Some(2) };
+        view.update_in(cx, |c, _window, cx| {
+            let typed = [("$ sleep 9", prompt), ("", SemanticMark::Output)];
+            c.term_event(session, marked_frame(1, &typed, 0), cx);
+            c.term_event(session, marked_frame(2, &typed, 1), cx);
+        });
+        cx.run_until_parked();
+        let closes = |sent: &[ClientMsg]| {
+            sent.iter()
+                .filter(|m| {
+                    matches!(m, ClientMsg::Term { session: s, req: TermRequest::Close } if *s == session)
+                })
+                .count()
+        };
+        drain(&mut rx);
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert_eq!(closes(&drain(&mut rx)), 0, "a running command: the shell asks first");
+        assert!(cx.debug_bounds("close-confirm").is_some(), "the bar is up");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(closes(&drain(&mut rx)), 0, "Esc keeps it");
+        assert!(cx.debug_bounds("close-confirm").is_none());
+        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(closes(&drain(&mut rx)), 1, "\u{21a9} closes it");
+    }
+
     /// A shell command that ran long and ended in an item the human is not on badges its
     /// title bar with the status and the time; the same end in the active item badges
     /// nothing; pressing the badge goes to the item and clears it.
@@ -6019,6 +6115,57 @@ mod tests {
         view.update_in(cx, |c, _window, cx| c.agent_sessions(None, Vec::new(), cx));
         cx.run_until_parked();
         assert!(within(cx, "picker", phone.0) < phone.0, "a margin each side");
+    }
+
+    /// ⌘⌥-arrows walk to the nearest card whose centre lies in that direction's cone; a
+    /// direction with nothing there leaves the focus where it is, and nothing active starts
+    /// at the first card.
+    #[gpui::test]
+    fn the_cards_are_walked_by_direction(cx: &mut TestAppContext) {
+        let (view, _rx, me, cx) = canvas(cx);
+        let note = |x: f32, y: f32| CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: format!("{x},{y}") },
+            rect: Rect { x, y, w: 200.0, h: 100.0 },
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        // `far` is to the right too, but `right` is nearer; `below_right` is under `right`,
+        // not under `first` (its centre is outside first's downward cone).
+        let (first, right, far, below_right) =
+            (note(0.0, 0.0), note(300.0, 0.0), note(1300.0, 40.0), note(750.0, 700.0));
+        let ids = [first.id, right.id, far.id, below_right.id];
+        view.update(cx, |c, cx| {
+            for (version, item) in (1_u64..).zip([first, right, far, below_right]) {
+                c.apply_sync(CanvasSync::Delta { version, by: me, op: CanvasOp::Upsert(item) }, cx);
+            }
+        });
+        cx.run_until_parked();
+        let active = |cx: &mut VisualTestContext| view.read_with(cx, |c, _| c.active);
+        let step = |cx: &mut VisualTestContext, key: &str| {
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+        };
+        step(cx, "cmd-alt-right");
+        assert_eq!(active(cx), Some(ids[0]), "nothing active: the first card");
+        step(cx, "cmd-alt-right");
+        assert_eq!(active(cx), Some(ids[1]), "the nearer of the two to the right");
+        step(cx, "cmd-alt-right");
+        assert_eq!(active(cx), Some(ids[2]));
+        step(cx, "cmd-alt-right");
+        assert_eq!(active(cx), Some(ids[2]), "nothing further right");
+        step(cx, "cmd-alt-left");
+        assert_eq!(active(cx), Some(ids[1]));
+        step(cx, "cmd-alt-down");
+        assert_eq!(active(cx), Some(ids[3]));
+        step(cx, "cmd-alt-up");
+        assert_eq!(active(cx), Some(ids[1]));
+        step(cx, "cmd-alt-left");
+        assert_eq!(active(cx), Some(ids[0]));
+        step(cx, "cmd-alt-down");
+        assert_eq!(active(cx), Some(ids[0]), "below-right is outside the downward cone");
     }
 
     #[gpui::test]

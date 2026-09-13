@@ -512,6 +512,8 @@ pub struct Behaviour {
     pub scroll_multiplier: u16,
     /// ⌥ as Alt: sent with every key, since the encoder is the host's.
     pub option_as_alt: OptionAsAlt,
+    /// Closing a terminal whose command is still running asks first.
+    pub confirm_close: bool,
     /// What a remote window or display stream asks the host for.
     pub stream: StreamPrefs,
 }
@@ -526,6 +528,7 @@ impl Default for Behaviour {
             hide_pointer_while_typing: true,
             scroll_multiplier: 100,
             option_as_alt: OptionAsAlt::False,
+            confirm_close: true,
             stream: StreamPrefs::default(),
         }
     }

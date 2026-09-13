@@ -223,6 +223,9 @@ pub struct TerminalSettings {
     /// ⌥ as Alt (ghostty's `macos-option-as-alt`): `false` types the layout's symbol,
     /// `true` sends an escape prefix for readline's ⌥b/⌥f, `left`/`right` one side each.
     pub option_as_alt: OptionAsAlt,
+    /// Closing a terminal whose command is still running asks first (ghostty's
+    /// `confirm-close-surface`).
+    pub confirm_close: bool,
 }
 
 impl Default for TerminalSettings {
@@ -238,6 +241,7 @@ impl Default for TerminalSettings {
             hide_pointer_while_typing: true,
             scroll_multiplier: 1.0,
             option_as_alt: OptionAsAlt::False,
+            confirm_close: true,
         }
     }
 }
@@ -407,6 +411,8 @@ scroll_multiplier = {scroll_multiplier}
 # Option as Alt: false types the layout's symbol (⌥b is ∫); true sends the
 # escape prefix readline's ⌥b/⌥f want; \"left\" or \"right\" keep one side each.
 option_as_alt = {option_as_alt}
+# Closing a terminal whose command is still running asks first.
+confirm_close = {confirm_close}
 
 [remote]
 # Frames per second a remote window or display is captured at (15 to 120).
@@ -448,6 +454,7 @@ ansi = []
             hide_pointer_while_typing = d.terminal.hide_pointer_while_typing,
             scroll_multiplier = toml_float(d.terminal.scroll_multiplier),
             option_as_alt = toml_string(option_as_alt_name(d.terminal.option_as_alt)),
+            confirm_close = d.terminal.confirm_close,
             fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             hdr = d.remote.hdr,
@@ -629,9 +636,10 @@ mod tests {
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\n",
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\nconfirm_close = false\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert!(!loaded.settings.terminal.confirm_close);
         assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);

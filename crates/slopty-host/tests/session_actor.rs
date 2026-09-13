@@ -80,6 +80,7 @@ mod actor {
         for u in &f.updates {
             screen.apply(u.clone()).unwrap();
         }
+        *screen.cursor_mut() = f.cursor;
     }
 
     fn text(screen: &slopty_grid::Screen) -> String {
@@ -605,6 +606,91 @@ mod actor {
             "{:?}",
             String::from_utf8_lossy(&state)
         );
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A raw-mode `sh` standing in for zsh with the integration: a three-row prompt with the
+    /// marks, ⌃L erases the screen and repaints it at the top, ↩ writes the linefeed and the
+    /// `133;C` separately (as zsh does), a `sleep 2` prints nothing while it runs and its
+    /// prompt comes ~80 ms after the `D` (a starship's precmd).
+    const MARKED_SHELL: &str = r#"
+stty raw -echo
+CR=$(printf '\r'); FF=$(printf '\f')
+p() { printf '\033]133;A\007\r\n~\r\n> \033]133;B\007'; }
+p
+line=''
+while c=$(dd bs=1 count=1 2>/dev/null); do
+  if [ "$c" = "$FF" ]; then printf '\033[H\033[2J'; p; line=''
+  elif [ "$c" = "$CR" ]; then
+    printf '\r\r\n'; sleep 0.02; printf '\033]133;C\007'
+    case "$line" in
+      sleep*) sleep 2 ;;
+      exit) exit 0 ;;
+      *) printf 'out\r\n' ;;
+    esac
+    printf '\033]133;D;0\007\r\033[J'; sleep 0.08; p; line=''
+  else printf '%s' "$c"; line="$line$c"; fi
+done
+"#;
+
+    /// A command that prints nothing while it runs (the e2e's `sleep 6` after ⌘K) is seen
+    /// running right after ↩, not when its prompt comes back: the `133;C` that takes the
+    /// cursor's row out of the prompt reaches the client as a frame of its own, so the
+    /// block tracking sees the cursor below the command while it runs.
+    #[tokio::test]
+    async fn a_silent_command_after_a_clear_is_seen_running_at_once() {
+        fn pump(
+            events: &[TermEvent],
+            state: &mut slopty_client::term::TermState,
+            effects: &mut Vec<slopty_client::term::Effect>,
+        ) {
+            for ev in events {
+                effects.extend(state.apply(ev.clone()));
+            }
+        }
+        let (session, mut child) = start(&["/bin/sh", "-c", MARKED_SHELL]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let mut state = slopty_client::term::TermState::new(size(40, 6));
+        let mut effects = Vec::new();
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("> ")).await;
+        pump(&events, &mut state, &mut effects);
+        session.request(me, TermRequest::Raw(b"echo hi\r".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("out\n\n~\n> ")).await;
+        pump(&events, &mut state, &mut effects);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, slopty_client::term::Effect::CommandFinished { .. })),
+            "{effects:?}"
+        );
+        effects.clear();
+        session.request(me, TermRequest::Clear).unwrap();
+        let (events, screen) =
+            wait_for(&mut rx, |_, s| !text(s).contains("out") && s.cursor().row == 2).await;
+        assert_eq!(text(&screen).trim_end(), "\n~\n>", "{:?}", text(&screen));
+        pump(&events, &mut state, &mut effects);
+        effects.clear();
+        session.request(me, TermRequest::Raw(b"sleep 2\r".to_vec())).unwrap();
+        let typed = tokio::time::Instant::now();
+        let deadline = typed.checked_add(Duration::from_secs(1)).unwrap();
+        while !state.command_running() {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("not seen running within a second; {effects:?}"))
+                .expect("sink closed");
+            pump(std::slice::from_ref(&ev), &mut state, &mut effects);
+        }
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, slopty_client::term::Effect::CommandStarted(c) if c == "sleep 2")
+            ),
+            "{effects:?}"
+        );
+        assert_eq!(state.cursor().row, 3, "the cursor sits below the command while it runs");
+        session.request(me, TermRequest::Raw(b"\x04".to_vec())).unwrap();
         session.close();
         let _killed = child.kill().await;
     }

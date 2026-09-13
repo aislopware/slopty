@@ -118,6 +118,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         OptionAsAlt::Right => slopty_theme::OptionAsAlt::Right,
     };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
+    theme.behaviour.confirm_close = settings.terminal.confirm_close;
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
@@ -321,6 +322,9 @@ mod tests {
         assert!(t.behaviour.paste_protection);
         s.terminal.paste_protection = false;
         assert!(!theme_for(&s, true).behaviour.paste_protection);
+        assert!(t.behaviour.confirm_close);
+        s.terminal.confirm_close = false;
+        assert!(!theme_for(&s, true).behaviour.confirm_close);
         assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
         s.terminal.hide_pointer_while_typing = false;
         s.terminal.bold_is_bright = true;

@@ -8192,6 +8192,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slopty-capture",
+ "slopty-client",
  "slopty-codec",
  "slopty-core",
  "slopty-engine",
