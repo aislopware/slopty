@@ -8164,6 +8164,7 @@ dependencies = [
  "slopty-core",
  "slopty-grid",
  "slopty-proto",
+ "slopty-theme",
  "thiserror 2.0.20",
  "tracing",
 ]

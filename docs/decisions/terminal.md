@@ -717,3 +717,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_placed_image_has_one_texture_until_its_pixels_are_forgotten`; element
   `a_placement_is_painted_at_its_cell_in_the_hosts_pixels`; goldens `host_frame`,
   `host_term_image` (protocol 43).
+
+- ✅ **Colour queries are answered with the dark theme** (2026-09-15). A TUI that picks its
+  look from the terminal's background (neovim's `background`, helix, delta, bat) asks with
+  OSC 11 `?`, and libghostty answers only when the embedder set a default colour: the engine
+  set none, so the question went unanswered and the program waited its timeout or guessed;
+  OSC 4 answered with ghostty's built-in palette, not the one the client paints. Now the
+  engine sets the dark theme's foreground, background, cursor and ANSI 0–15 as libghostty's
+  defaults at start (`set_theme_colors`), and the answers say what a client in the default
+  theme shows. Cells keep their symbolic colours on the wire, so a light-theme client still
+  paints its own palette — it just gets asked-about colours from the dark one; telling the
+  host the client's theme (an Attach field, one host answer per session while clients may
+  differ) is the follow-up if that ever matters. Test:
+  `colour_queries_are_answered_with_the_dark_theme`.

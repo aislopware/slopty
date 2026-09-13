@@ -102,7 +102,11 @@ wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTer
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
 `MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
-for a read reply. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
+for a read reply. Colour queries (OSC 10/11/12 `?`, OSC 4) are answered by libghostty from
+the defaults the engine sets at start: the dark theme's foreground, background, cursor and
+ANSI 0–15 (`ghostty::set_theme_colors`, from `slopty_theme::TerminalPalette::DARK`); cell
+colours still travel symbolically (`Color::Default`/`Palette`/`Rgb`), so the client's own
+theme paints them. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints

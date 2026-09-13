@@ -9,6 +9,7 @@ use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
 use libghostty_vt::selection::Selection;
+use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{ClipboardLocation, Mode, Point, PointCoordinate, PointSpace};
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
 use slopty_core::{Duration, MonoTime};
@@ -120,6 +121,7 @@ impl GhosttyEngine {
         // and the engine lives on its session's thread.
         term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
         kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
+        set_theme_colors(&mut term)?;
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
         install_callbacks(&mut term, &events)?;
@@ -986,6 +988,23 @@ fn install_callbacks(
     Ok(())
 }
 
+/// The colours a program asking with OSC 10/11/12 `?` or OSC 4 is told: the dark theme,
+/// the one every client starts in. Without defaults libghostty answers the first three with
+/// nothing, and a TUI that asks (neovim, helix, delta) waits its timeout or guesses.
+fn set_theme_colors(term: &mut Terminal<'_, '_>) -> Result<(), EngineError> {
+    let theme = slopty_theme::TerminalPalette::DARK;
+    let rgb = |c: slopty_theme::Rgb| RgbColor { r: c.r, g: c.g, b: c.b };
+    term.set_default_fg_color(Some(rgb(theme.fg)))?
+        .set_default_bg_color(Some(rgb(theme.bg)))?
+        .set_default_cursor_color(Some(rgb(theme.cursor)))?;
+    let mut palette = term.default_color_palette()?;
+    for (index, &color) in (0_u8..).zip(theme.ansi.iter()) {
+        palette.set(PaletteIndex(index), rgb(color));
+    }
+    term.set_default_color_palette(Some(palette))?;
+    Ok(())
+}
+
 impl VtEngine for GhosttyEngine {
     fn write(&mut self, bytes: &[u8]) {
         // Feed up to each prompt mark separately so the cursor row at the mark is exact.
@@ -1591,6 +1610,32 @@ mod tests {
         out.clear();
         e.encode_mouse(&wheel(-2), &mut out).unwrap();
         assert_eq!(out, b"\x1b[<65;2;2M\x1b[<65;2;2M");
+    }
+
+    /// OSC 10/11/12 `?` and OSC 4: the answer is the dark theme, the one every client starts
+    /// in, in xterm's `rgb:rrrr/gggg/bbbb` form.
+    #[test]
+    fn colour_queries_are_answered_with_the_dark_theme() {
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]11;?\x1b\\\x1b]10;?\x1b\\\x1b]12;?\x1b\\\x1b]4;1;?\x1b\\");
+        let answers: Vec<String> = e
+            .drain_events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                EngineEvent::PtyWrite(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                _ => None,
+            })
+            .collect();
+        let joined = answers.concat();
+        assert!(joined.contains("\x1b]11;rgb:0e0e/0f0f/1212"), "{answers:?}");
+        assert!(joined.contains("\x1b]10;rgb:e6e6/e6e6/e6e6"), "{answers:?}");
+        assert!(joined.contains("\x1b]12;rgb:8a8a/b4b4/f8f8"), "{answers:?}");
+        let red = slopty_theme::TerminalPalette::DARK.ansi.get(1).copied().expect("red");
+        let want = format!(
+            "\x1b]4;1;rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}",
+            red.r, red.g, red.b
+        );
+        assert!(joined.contains(&want), "{answers:?} lacks {want:?}");
     }
 
     #[test]

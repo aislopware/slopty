@@ -17,6 +17,7 @@ png.workspace = true
 regex.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
+slopty-theme.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
