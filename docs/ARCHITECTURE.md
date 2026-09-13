@@ -387,7 +387,8 @@ fenced blocks as the conversation's block element with "copy" and, given a shell
 (`- [ ] …`, `markdown::task_row`) as rows whose box ticks the line in the text on a click
 without opening the editor (`NoteView::toggle_task`, committed at once), and a
 click on it puts the caret back in the editor; its title bar reads the first non-empty
-line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty.
+line (`canvas::note_title`, heading, list and task marks stripped, 40 chars, a checklist's
+ticks counted after it as `· 1/3`), "note" while empty.
 Any card takes a **name** (⌘E, or a double-click on its title bar; `CanvasItem.name`,
 protocol 37, host-sanitised to 128 characters): document state every client shows in place
 of the derived title until it is cleared, and what the palette's "Go to" line says. A
@@ -792,7 +793,9 @@ plain shell, and a click types `url::editor_command` for the path into that shel
 names a file (`url::first_path`: a grep hit `src/a.rs:12:…`, a compiler's ` --> src/b.rs:3:5`)
 is a button (`result-path-<entry>-<line>`, a11y "View <path>:<line> on the canvas") that opens
 the file card at that line (`TerminalView::view_file`). A screen reader hears the
-counts ("Tool Edit: src/a.rs, 2 added, 1 removed", "Tool TodoWrite: 1 of 3 done"); headless
+counts ("Tool Edit: src/a.rs, 2 added, 1 removed", "Tool TodoWrite: 1 of 3 done"); the list's
+header carries a "note" button that keeps it as a checklist card beside the agent
+(`conversation::todos_note`, `- [x]` for done, the same `NoteBlock` event as an answer's); headless
 `an_edit_shows_its_diff_and_a_todo_list_its_checklist` and `a_tool_calls_path_opens_in_the_canvas_shell`,
 the app self-test's `edit` turn against the fake (golden `conversation-tools`). Under the list sits the
 **composer**, a gpui-kit `TextareaState` growing from one to six rows: ↩ sends the text into

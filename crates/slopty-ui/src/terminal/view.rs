@@ -4650,6 +4650,31 @@ mod tests {
             ["Tool Edit: src/a.rs, 10 added, 10 removed", "Tool TodoWrite: 1 of 3 done"],
             "{tree:#?}"
         );
+
+        // The list's "note" button asks the canvas for a checklist card of it.
+        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&notes);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::NoteBlock(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        assert!(cx.debug_bounds("conversation-note-0").is_none(), "an edit has no list to keep");
+        let note = cx.debug_bounds("conversation-note-1").expect("the todo list's note button");
+        cx.simulate_click(note.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            notes.borrow().as_slice(),
+            ["# Tasks\n\n- [x] read\n- [ ] write\n- [ ] test\n"],
+            "done ticked, the rest open, in the agent's order"
+        );
+        assert!(
+            view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(1))),
+            "the press was the button's, not the header's fold"
+        );
     }
 
     /// A subagent's progress shows under the call that spawned it — the kind, the tool

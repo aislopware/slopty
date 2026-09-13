@@ -73,6 +73,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   "HH:MM" (`chrono`, already in the tree). Goldens `host_transcript` (every variant) and
   `client_hello` re-accepted; PROTOCOL_VERSION 10 → 11.
 
+- ✅ **The agent's task list is kept as a checklist card** (2026-09-14). `TodoWrite` shows
+  whole in the card, but it is the agent's list: it is rewritten on every call and gone when
+  the session is. Rulings: (1) the list's header carries the "note" button an answer has
+  ("Keep the task list as a card", `conversation-note-<entry>`), which puts the list beside
+  the agent as a note (`conversation::todos_note`: a "Tasks" heading, `- [x]` for what is
+  completed, `- [ ]` for pending and in progress — the note is the human's to tick from
+  there, see canvas.md "A note's task line ticks on a click"); (2) it is the same
+  `NoteBlock` event and the same `note_beside` placement as an answer's, so one path lands
+  every kept thing; (3) a list with no items has no button. Test: headless
+  `an_edit_shows_its_diff_and_a_todo_list_its_checklist` (the edit has no button, the list's
+  press emits the checklist without folding the entry).
+
 - ✅ **The answer that closes a turn says how long the turn took** (2026-09-14). Claude
   Code's own screen ends a turn with "worked for 42s"; a card showed only the clock stamps,
   so the length of a turn was a subtraction. Rulings: (1) the last answer before the next

@@ -1806,7 +1806,7 @@ fn entry(
                     .child(SharedString::from(format!("took {}", turn_label(elapsed))))
             }))
             .child(copy_button(ix, markdown, theme))
-            .child(note_button(ix, markdown, view, theme))
+            .child(note_button(ix, markdown, "Keep answer as a card", view, theme))
             .into_any_element(),
         TranscriptBody::Thinking { text } => row
             .flex()
@@ -1847,6 +1847,16 @@ fn entry(
                     )
                     .children(tool_badge(detail, theme))
                     .children(view_button(ix, detail, view, theme))
+                    .children(match detail {
+                        ToolDetail::Todos { items } if !items.is_empty() => Some(note_button(
+                            ix,
+                            &todos_note(items),
+                            "Keep the task list as a card",
+                            view,
+                            theme,
+                        )),
+                        _ => None,
+                    })
                     .children(run.and_then(|r| open_button(ix, detail, r, theme)))
                     .on_click(toggle),
             )
@@ -2189,6 +2199,7 @@ fn copy_button(ix: usize, markdown: &str, theme: &Theme) -> AnyElement {
 fn note_button(
     ix: usize,
     markdown: &str,
+    aria: &'static str,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -2200,7 +2211,7 @@ fn note_button(
         .id(ElementId::Name(id.clone().into()))
         .debug_selector(move || id)
         .role(Role::Button)
-        .aria_label("Keep answer as a card")
+        .aria_label(aria)
         .flex_none()
         .px(px(theme.spacing.xs))
         .rounded(px(theme.radii.xs))
@@ -2612,6 +2623,21 @@ fn diff_row(
                 .child(sign),
         )
         .child(div().flex_1().min_w(px(0.0)).whitespace_normal().child(body))
+}
+
+/// The agent's task list as a checklist note.
+///
+/// A "Tasks" heading, then one `- [x]`/`- [ ]` line per item (in progress counts as not
+/// done; the note is the human's to tick).
+#[must_use]
+pub fn todos_note(items: &[Todo]) -> String {
+    let mut out = String::from("# Tasks\n\n");
+    for todo in items {
+        out.push_str(if todo.status == TodoStatus::Completed { "- [x] " } else { "- [ ] " });
+        out.push_str(todo.text.trim());
+        out.push('\n');
+    }
+    out
 }
 
 /// One todo: a mark for its state, then the text; done items are struck through and muted,
