@@ -20,7 +20,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   painting its own window, diffed numerically against a golden with a 24-value channel slack
   and a 1 % pixel tolerance. No external process ever posts events into the app or captures
   it, and nobody has to look at the images: the numbers and the `.diff.png` path are the
-  verdict. Two real bugs surfaced on the first run (below).
+  verdict. Two real bugs surfaced on the first run (below). `dump` reads its state in one
+  next-frame callback and the accessibility tree in the following one (2026-09-15): GPUI
+  runs those callbacks before the frame's draw, so a dump read at once paired fresh state
+  with the previous frame's tree, and the driven-agent test twice found an Allow row in the
+  state but no Allow button in the tree. The draw after the first callback paints exactly
+  the state it read, and the second callback sees that draw's tree.
 
 - ✅ **The iOS app is tested through the same socket, in the simulator** (2026-09-05).
   `cargo xtask e2e ios [--sim iphone|ipad]` builds the app with the `e2e` feature, boots the

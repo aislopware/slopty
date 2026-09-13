@@ -14,7 +14,8 @@
    launches ptyd + hostd + the app (built with `--features slopty/e2e`) in a temp dir, pairs
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
    dump, render). `dump` is the structured state (items, focus, zoom, terminal rows, and
-   `a11y`: the accessibility tree as role/label/value/focused/bounds in reading order);
+   `a11y`: the accessibility tree as role/label/value/focused/bounds in reading order,
+   from the frame that painted the state in the same dump);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden` (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden). Nothing touches another app.
    `cargo xtask e2e ios [--sim iphone|ipad]` (gate `SLOPTY_IOS_E2E`) is the same socket with

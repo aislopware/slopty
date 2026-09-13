@@ -99,6 +99,30 @@ pub fn serve(
                         Err(e) => error(&e),
                     }
                 }
+                Command::Dump => {
+                    // Next-frame callbacks run before that frame's draw. The state read in
+                    // the first is exactly what the draw paints; the second sees that
+                    // frame's accessibility tree. Read at once, the tree could lag a state
+                    // change by a frame and a test would find a node its state promised.
+                    let (done_tx, done_rx) = oneshot::channel();
+                    let workspace = workspace.clone();
+                    let scheduled = cx.update_window(window, |_root, window, _cx| {
+                        window.on_next_frame(move |window, cx| {
+                            window.refresh();
+                            let mut dump = workspace.read(cx).dump(window, cx);
+                            window.on_next_frame(move |window, _cx| {
+                                dump.a11y = a11y_nodes(window);
+                                let _sent = done_tx.send(Reply::Dump(Box::new(dump)));
+                            });
+                        });
+                    });
+                    match scheduled {
+                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
+                            message: "window closed before the frame".into(),
+                        }),
+                        Err(e) => error(&e),
+                    }
+                }
                 Command::Quit => {
                     let _sent = reply.send(Reply::Ok);
                     cx.update(|cx| cx.quit());
@@ -538,8 +562,8 @@ fn apply(
             window.resize(size(px(width), px(height)));
             Reply::Ok
         }
-        Command::Dump => Reply::Dump(Box::new(workspace.read(cx).dump(window, cx))),
-        Command::Pair { .. }
+        Command::Dump
+        | Command::Pair { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }
@@ -933,6 +957,7 @@ impl Workspace {
                     latency: latency_info(view.latency()),
                     face: view.metrics().map(|m| face_info(&m)),
                     driving: view.driving(),
+                    images: view.state().placements().len(),
                 });
             }
         }

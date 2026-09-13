@@ -232,6 +232,12 @@ pub fn assert_matches(
     }
 }
 
+/// Pixels within 8 of `rgb` on every channel: how much of a flat colour the frame shows.
+#[must_use]
+pub fn pixels_near(img: &RgbaImage, rgb: [u8; 3]) -> usize {
+    img.pixels().filter(|p| p.0.iter().zip(rgb.iter()).all(|(a, b)| a.abs_diff(*b) <= 8)).count()
+}
+
 /// The fraction of pixels that are not close to the top-left pixel's colour: a blank frame is
 /// a renderer failure, not a layout to compare.
 #[must_use]

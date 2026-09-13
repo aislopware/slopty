@@ -620,6 +620,9 @@ pub struct TerminalInfo {
     /// This client drives the PTY size (the other clients wear the "take" pill).
     #[serde(default)]
     pub driving: bool,
+    /// Images placed on the visible grid (kitty graphics).
+    #[serde(default)]
+    pub images: usize,
 }
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.

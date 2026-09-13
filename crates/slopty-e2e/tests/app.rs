@@ -10,7 +10,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_e2e::harness::{TRANSCRIPT_LINES, artifacts_dir};
-    use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
+    use slopty_e2e::snapshot::{assert_matches, foreground_fraction, pixels_near};
     use slopty_e2e::{Button, Command, Stack};
 
     /// How long a host round trip (open a shell, run a command) may take.
@@ -53,6 +53,7 @@ mod tests {
         }
         let mut stack = Stack::launch("e2e-host").await.unwrap();
         let render_path = stack.path("terminal.png");
+        let image_path = stack.path("terminal-image.png");
         let terminfo_db = stack.path("terminfo");
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -125,6 +126,21 @@ mod tests {
         let fg = foreground_fraction(&frame);
         assert!(fg > 0.01, "frame is blank ({fg:.4} foreground)");
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // A kitty graphics image typed through the shell: 16 × 16 red pixels transmitted and
+        // placed at the cursor. The host lays it out, the pixels cross the wire once, and the
+        // app paints a block of red the text never has.
+        let red_before = pixels_near(&frame, [255, 0, 0]);
+        let apc = concat!(
+            r#"printf '\e_Ga=T,f=32,s=16,v=16;%s\e\\' "#,
+            r#""$(printf '\377\0\0\377%.0s' {1..256} | base64 | tr -d '\n')""#,
+        );
+        drv.type_text(apc).await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the image to be placed", STEP, |d| d.terminals[0].images == 1).await.unwrap();
+        let with_image = drv.render(&image_path).await.unwrap();
+        let red = pixels_near(&with_image, [255, 0, 0]);
+        assert!(red >= red_before + 200, "red block of 256 pixels expected: {red_before} → {red}");
 
         // ⌘K: the host erases the history and the shell repaints its prompt at the top, so
         // the echo is gone and the cursor is back where a fresh prompt puts it.
