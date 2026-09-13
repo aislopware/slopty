@@ -129,6 +129,41 @@ mod tests {
         .await
         .unwrap();
 
+        // The phone has no editor for a file in its sandbox: "Open settings" from the palette
+        // puts `settings.toml` in the in-app editor, the soft keyboard types a section into
+        // it and ⌘↩ writes the file.
+        let dump = drv.dump().await.unwrap();
+        let commands = dump
+            .a11y_node("Button", Some("Commands"))
+            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
+        let [x, y, w, h] = commands.bounds;
+        drv.ui_tap(x + w / 2.0, y + h / 2.0).await.unwrap();
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
+        drv.ui_insert_text("open settings").await.unwrap();
+        drv.wait_for("one line", STEP, |d| {
+            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.wait_for("the settings editor", STEP, |d| {
+            d.a11y_node("Dialog", Some("Settings")).is_some()
+        })
+        .await
+        .unwrap();
+        drv.ui_insert_text("\n[terminal]\nbell_alert = false\n").await.unwrap();
+        drv.keys("cmd-enter").await.unwrap();
+        drv.wait_for("the settings editor to close", STEP, |d| {
+            d.a11y_node("Dialog", Some("Settings")).is_none()
+        })
+        .await
+        .unwrap();
+        let saved =
+            std::fs::read_to_string(stack.dir.path().join("app").join("settings.toml")).unwrap();
+        assert!(saved.contains("bell_alert = false"), "{saved}");
+
         // The phone names a card the same way: "Name this card" from the palette puts the
         // field in the active card's title bar, the soft keyboard types into it, ↩ keeps it.
         let dump = drv.dump().await.unwrap();

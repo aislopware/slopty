@@ -39,6 +39,7 @@ use slopty_ui::canvas::{
 };
 use slopty_ui::colors::{hsla, hsla_alpha};
 use slopty_ui::screen::{ScreenView, Sticky};
+use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
 
 /// Height of the top bar (the titlebar area; traffic lights sit at its left on macOS).
@@ -155,9 +156,77 @@ pub struct Workspace {
     runtime: tokio::runtime::Handle,
     /// The window, for focusing a canvas from a task or a banner.
     window: Option<gpui::AnyWindowHandle>,
+    /// Where `settings.toml` lives (the data directory's).
+    settings_path: std::path::PathBuf,
+    /// The in-app settings editor while it is open.
+    settings_editor: Option<Entity<SettingsEditor>>,
+    /// Focus the editor's field on the next frame (it needs a frame to exist).
+    pending_focus_editor: bool,
 }
 
 impl Workspace {
+    /// ⌘, / "Settings…" / the palette: the file's text (the commented defaults when there is
+    /// none) in the in-app editor. A second ask while it is open just refocuses it.
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_focus_editor = true;
+        if self.settings_editor.is_some() {
+            cx.notify();
+            return;
+        }
+        let text = settings::editable_text(&self.settings_path);
+        let path = self.settings_path.display().to_string();
+        let theme = self.theme.clone();
+        let editor = cx.new(|cx| {
+            SettingsEditor::new(&text, &path, cfg!(target_os = "macos"), theme, window, cx)
+        });
+        self.subscriptions.push(cx.subscribe_in(
+            &editor,
+            window,
+            |this, editor, event, window, cx| match event {
+                SettingsEditorEvent::Save(text) => this.save_settings(text, editor, window, cx),
+                SettingsEditorEvent::OpenExternally => {
+                    open_settings_file(cx);
+                    this.close_settings(window, cx);
+                }
+                SettingsEditorEvent::Dismiss => this.close_settings(window, cx),
+            },
+        ));
+        self.settings_editor = Some(editor);
+        cx.notify();
+    }
+
+    /// The editor's Save: a text that parses is written and applied at once (the watcher
+    /// would see it within a second anyway); one that does not stays in the editor with
+    /// the reason under it.
+    fn save_settings(
+        &mut self,
+        text: &str,
+        editor: &Entity<SettingsEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match settings::save(&self.settings_path, text) {
+            Ok(loaded) => {
+                tracing::info!(path = %self.settings_path.display(), "settings saved");
+                self.apply_loaded(loaded, cx);
+                self.close_settings(window, cx);
+            }
+            Err(error) => editor.update(cx, |e, cx| e.set_error(error, cx)),
+        }
+    }
+
+    /// Drop the editor and hand the keyboard back to the canvas.
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_editor.take().is_none() {
+            return;
+        }
+        if let Some(canvas) = self.active_canvas() {
+            let handle = canvas.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
     /// A keyboard was attached or removed: show or hide the key bar.
     fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
@@ -209,6 +278,9 @@ impl Workspace {
         let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
         for canvas in canvases {
             canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
+        }
+        if let Some(editor) = &self.settings_editor {
+            editor.update(cx, |e, cx| e.set_theme(theme.clone(), cx));
         }
         self.theme = theme;
         cx.refresh_windows();
@@ -1421,6 +1493,12 @@ impl Render for Workspace {
             .then(|| self.active_canvas()?.read(cx).active_key_target())
             .flatten()
             .map(|target| self.key_bar(&target, cx));
+        if std::mem::take(&mut self.pending_focus_editor)
+            && let Some(editor) = self.settings_editor.clone()
+        {
+            editor.update(cx, |e, cx| e.focus(window, cx));
+        }
+        let settings_editor = self.settings_editor.clone();
         let switcher = self.switcher.then(|| self.switcher(insets.top, cx));
         let agent_menu = self.agent_menu.then(|| self.agent_menu(insets.top, cx));
         div()
@@ -1431,6 +1509,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NextHost, window, cx| this.step_host(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevHost, window, cx| this.step_host(-1, window, cx)))
             .on_action(cx.listener(|this, _: &AddHost, window, cx| this.show_pairing(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ForgetHost, window, cx| {
                 if let Some(id) = this.active {
                     this.forget_host(id, window, cx);
@@ -1451,6 +1532,7 @@ impl Render for Workspace {
             )
             .when_some(switcher, gpui::ParentElement::child)
             .when_some(agent_menu, gpui::ParentElement::child)
+            .when_some(settings_editor, gpui::ParentElement::child)
             .child(slopty_ui::frames::probe())
     }
 }
@@ -1622,7 +1704,6 @@ pub fn open_workspace(
     cx.bind_keys(slopty_ui::canvas::key_bindings());
     cx.bind_keys(slopty_ui::terminal::key_bindings());
     cx.bind_keys(app_key_bindings());
-    cx.on_action(|_: &OpenSettings, cx| open_settings_file(cx));
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
     slopty_ui::kit::sync(&Theme::default(), cx);
@@ -1644,6 +1725,9 @@ pub fn open_workspace(
         pairing: None,
         runtime: handle,
         window: None,
+        settings_path: settings_path.clone(),
+        settings_editor: None,
+        pending_focus_editor: false,
     });
     let root_view = workspace.clone();
     let window = cx.open_window(options, move |window, cx| {
@@ -1728,8 +1812,8 @@ fn watch_settings(path: std::path::PathBuf, workspace: Entity<Workspace>, cx: &A
     .detach();
 }
 
-/// The "Settings…" menu item (⌘,): open the file in the default editor, writing the commented
-/// defaults first when there is none.
+/// The editor's "Open in editor" button: the file in the default `.toml` editor, written with
+/// the commented defaults first when there is none.
 fn open_settings_file(cx: &App) {
     let path = slopty_settings::path();
     match Settings::init(&path) {

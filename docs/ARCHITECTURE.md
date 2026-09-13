@@ -1106,8 +1106,11 @@ how long the local echo and the host's echo took to reach a paint. `cargo xtask 
 runs the load scenarios (MEASUREMENTS, "canvas frame time").
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
-item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
-missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
+item, ⌘, and the palette's "Open settings" open it in the in-app editor, `SettingsEditor`
+in slopty-ui: a dialog with the text in a monospace field, ⌘↩ parses then writes and
+applies it, a parse error stays under the field; the Mac's dialog also offers the default
+`.toml` editor, writing the commented defaults first when the file is missing).
+`slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
 ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
 `[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
@@ -1126,7 +1129,8 @@ polls the file's stamp once a second and on a change rebuilds the `Theme` (varia
 `appearance`, `system` following `window.appearance()` through `observe_window_appearance`)
 and pushes it down `CanvasView::set_theme` → every terminal, window and the picker; the
 terminal element re-measures its cell grid from the new size on the next frame and `fitted`
-resizes the session. iOS reads the same path (in its sandbox) but has no editor entry.
+resizes the session. iOS reads the same path (in its sandbox); the in-app editor is its
+only way to change it.
 
 **Hosts.** The app holds every paired host at once: one `HostLink` (own iroh endpoint,
 own reconnect loop, own silence check) and one `CanvasView` per host (`slopty_app::hosts`),

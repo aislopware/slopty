@@ -10,7 +10,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
-use slopty_settings::{Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Settings};
+use slopty_settings::{
+    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, Settings, SettingsError,
+};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Variant};
 
 /// GPUI actions.
@@ -24,7 +26,7 @@ pub mod actions {
     actions!(
         slopty,
         [
-            /// Open `settings.toml` in the default editor (creating it first).
+            /// Open `settings.toml` in the in-app editor.
             OpenSettings,
         ]
     );
@@ -32,6 +34,32 @@ pub mod actions {
 
 /// Poll period of the file watcher.
 pub const POLL: Duration = Duration::from_secs(1);
+
+/// The text the in-app editor opens on: the file, or the commented defaults when there is
+/// none (or it cannot be read; saving then overwrites it, which is what fixing it means).
+#[must_use]
+pub fn editable_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|_| Settings::default_file())
+}
+
+/// The editor's Save: parse `text`, and only when it holds write it to `path` and hand back
+/// what was loaded (its unknown-key warnings included). The error is the message shown
+/// under the field.
+pub fn save(path: &Path, text: &str) -> Result<Loaded, String> {
+    let mut loaded = Settings::parse(text);
+    if let Some(error) = loaded.error.take() {
+        // A parse error names no path (the text came from the field, not a file).
+        return Err(match error {
+            SettingsError::Parse { message, .. } => message,
+            other @ SettingsError::Read { .. } => other.to_string(),
+        });
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(loaded)
+}
 /// Sizes outside this range are typos; the default applies instead.
 const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
@@ -243,6 +271,24 @@ mod tests {
         );
         let light = theme_for(&s, false).terminal;
         assert_eq!(light.fg, Rgb::hex(0x00c0_caf5), "both appearances");
+    }
+
+    /// The editor opens on the file, or the commented defaults; a text that does not parse
+    /// is refused with the parser's line and leaves the file alone; one that does is written
+    /// and comes back loaded, warnings and all.
+    #[test]
+    fn the_editor_saves_only_what_parses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app").join("settings.toml");
+        assert_eq!(editable_text(&path), Settings::default_file());
+        let refused = save(&path, "[font]\nmono_size = \"big\"\n").expect_err("a string size");
+        assert!(refused.contains("\"big\""), "{refused}");
+        assert!(!refused.starts_with(':'), "no empty path in front: {refused}");
+        assert!(!path.exists());
+        let loaded = save(&path, "[font]\nmono_size = 20\nkerning = true\n").expect("parses");
+        assert_eq!(loaded.settings.font.mono_size, 20.0);
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert_eq!(editable_text(&path), "[font]\nmono_size = 20\nkerning = true\n");
     }
 
     #[test]

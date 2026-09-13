@@ -30,4 +30,5 @@ pub mod note;
 pub mod palette;
 pub mod picker;
 pub mod screen;
+pub mod settings_editor;
 pub mod terminal;

@@ -232,6 +232,30 @@ mod tests {
         assert!(((after / before) - 20.0 / 13.0).abs() < 0.02, "{before} → {after}");
         assert_eq!(dump.status, "connected", "{dump:#?}");
 
+        // ⌘, opens the in-app editor on the file; a line typed into it and ⌘↩ write the
+        // file (the phone's only way to change a setting), and the dialog goes.
+        drv.keys("cmd-,").await.unwrap();
+        drv.wait_for("the settings editor", STEP, |d| {
+            d.a11y_node("Dialog", Some("Settings")).is_some()
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.type_text("[terminal]").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        drv.type_text("bell_alert = false").await.unwrap();
+        drv.keys("cmd-enter").await.unwrap();
+        drv.wait_for("the settings editor to close", STEP, |d| {
+            d.a11y_node("Dialog", Some("Settings")).is_none()
+        })
+        .await
+        .unwrap();
+        let saved = std::fs::read_to_string(&settings).unwrap();
+        assert!(
+            saved.contains("mono_size = 20") && saved.contains("bell_alert = false"),
+            "{saved}"
+        );
+
         // ⌘W closes the active one; the host tears its session down and one shell remains.
         drv.keys("cmd-w").await.unwrap();
         let dump =

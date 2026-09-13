@@ -82,3 +82,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   appearance switch is for the chrome; a palette is chosen once). Since the driver's
   colours answer OSC queries and follow theme changes, a program asking for its
   background hears the custom one. Tests: `colour_keys`, `custom_colours_lay_over_the_theme`.
+
+- ✅ **An in-app editor for `settings.toml`** (2026-09-15). The phone had no way to change
+  a setting: ⌘, handed the file to the system editor, and iOS has none for a file in the
+  app's sandbox. Now ⌘, (the "Settings…" menu item, the palette's "Open settings") opens
+  `SettingsEditor` (slopty-ui): a dialog over the workspace with the file's text (the
+  commented defaults when there is none) in a monospace field; ⌘↩ or Save hands the text
+  to the app, which parses it first (`settings::save`) and only then writes it and applies
+  it at once (the watcher would take a second), or shows the parser's line under the field
+  and keeps the dialog open so the typo can be fixed in place; Escape or a click outside
+  discards. The Mac keeps an "Open in editor" button for the old path (the file written
+  with the defaults first). A form with a widget per key was ruled out: the file is the
+  schema's one source of truth, a text field takes every key at once, and the commented
+  defaults are the documentation. Tests: `the_editor_saves_only_what_parses` (the app's
+  parse-then-write), `the_editor_saves_on_command_enter_and_shows_a_refusal` and
+  `escape_and_cancel_dismiss_and_the_phone_has_no_external_editor` (slopty-ui, headless);
+  the app e2e types a section into the editor and reads the file back.
