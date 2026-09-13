@@ -2353,6 +2353,7 @@ impl TerminalView {
         }
         let effects = self.state.apply(event);
         if self.state.epoch() != epoch_before {
+            tracing::info!(session = %self.session, epoch = ?self.state.epoch(), "line numbering changed");
             // Line numbering changed (reflow, reset, alt screen): the selection means nothing,
             // and neither do the search hits.
             self.selection = None;
@@ -2410,7 +2411,9 @@ impl TerminalView {
                 Effect::CommandFinished { prompt, command, exit } => {
                     let elapsed =
                         self.command_started.take().map_or(Duration::ZERO, |t| t.elapsed());
-                    self.set_took(prompt, elapsed);
+                    if let Some(prompt) = prompt {
+                        self.set_took(prompt, elapsed);
+                    }
                     cx.emit(TerminalViewEvent::CommandFinished { command, exit, elapsed });
                 }
             }

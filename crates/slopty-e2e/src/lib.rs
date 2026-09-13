@@ -600,6 +600,9 @@ pub struct TerminalInfo {
     pub cursor: [u16; 2],
     /// The visible rows, top to bottom, trailing spaces trimmed.
     pub rows: Vec<String>,
+    /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
+    /// starts a new one); `None` before the first frame.
+    pub epoch: Option<u32>,
     /// The coding agent's state as the host reports it: `idle`, `working`, `tool:<name>`,
     /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
     /// `blocked:idle`, `done`; `None` without an agent.

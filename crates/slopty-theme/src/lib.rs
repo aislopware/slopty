@@ -32,6 +32,16 @@ impl Rgb {
     pub const fn hex(v: u32) -> Self {
         Self { r: ((v >> 16) & 0xff) as u8, g: ((v >> 8) & 0xff) as u8, b: (v & 0xff) as u8 }
     }
+
+    /// Whether the colour reads as light: BT.601 luma past the middle.
+    #[must_use]
+    pub const fn is_light(self) -> bool {
+        let luma = (self.r as u32)
+            .wrapping_mul(299)
+            .wrapping_add((self.g as u32).wrapping_mul(587))
+            .wrapping_add((self.b as u32).wrapping_mul(114));
+        luma > 128_000
+    }
 }
 
 /// Terminal colours.
@@ -183,7 +193,11 @@ impl Colors {
             theme.bg = rgb(bg);
         }
         if let Some(cursor) = set.cursor {
+            // The theme's text-under-cursor colour was chosen against the theme's cursor;
+            // against the program's it is whichever of black and white reads.
             theme.cursor = rgb(cursor);
+            theme.cursor_text =
+                if theme.cursor.is_light() { Rgb::hex(0) } else { Rgb::hex(0xff_ffff) };
         }
         let mut cube = BTreeMap::new();
         for &(index, color) in &set.palette {
@@ -551,6 +565,10 @@ mod tests {
         assert_eq!(colors.resolve(Color::Default, false), rgb(1, 2, 3));
         assert_eq!(colors.resolve(Color::Default, true), theme.bg, "not set: the theme's");
         assert_eq!(colors.theme.cursor, rgb(9, 9, 9));
+        assert_eq!(colors.theme.cursor_text, rgb(255, 255, 255), "text reads on a dark cursor");
+        let white = ColorOverrides { cursor: Some([255; 3]), ..ColorOverrides::default() };
+        assert_eq!(Colors::new(&theme, &white).theme.cursor_text, rgb(0, 0, 0));
+        assert!(Rgb::hex(0xff_ffff).is_light() && !Rgb::hex(0x80_8080).is_light());
         assert_eq!(colors.resolve(Color::Palette(1), false), rgb(4, 5, 6));
         assert_eq!(colors.resolve(Color::Palette(17), false), rgb(7, 8, 9), "cube entries too");
         assert_eq!(colors.resolve(Color::Palette(18), false), theme.palette(18));

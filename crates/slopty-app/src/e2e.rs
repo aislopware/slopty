@@ -941,6 +941,7 @@ impl Workspace {
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
                     rows: view.rows(),
+                    epoch: view.state().epoch(),
                     agent: view.agent_status().map(agent_line),
                     agent_detail: canvas.agent(session).and_then(|a| a.detail.clone()),
                     agent_source: canvas

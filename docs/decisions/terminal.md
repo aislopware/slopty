@@ -786,8 +786,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   session keeps the last set and sends it to an attach ahead of the full frame. The client
   paints through `slopty_theme::Colors`: the theme with fg/bg/cursor/ANSI 0–15 replaced and a
   map for cube entries (base16 sets 16–21), hashed into the shaped-word cache key so a change
-  never replays old colours. The driver's palette changing under the program's is not a change
+  never replays old colours; a program-set cursor colour takes black or white text under it
+  by BT.601 luma, since the theme's `cursor_text` was picked against the theme's cursor. The driver's palette changing under the program's is not a change
   of the program's, so a theme swap on the driver does not re-send it. Not taken: a diff per
   change (smaller, but attach needs the whole set anyway) and a change callback in the fork (a
   polling read per chunk is cheaper than a binding patch to carry).
 
+- ✅ **A running command survives a reflow** (2026-09-15). App e2e run 298 lost the "done"
+  badge of a `sleep 6` whose prompt had come back (second flake of that test; run 287 was the
+  first): the client's `track_command` treated the first prompt of a new epoch as saying
+  nothing about what ran before it, so a reflow (a resize while a command runs), a reset or an
+  alt-screen round trip between Enter and the next prompt dropped the badge, the took caption
+  and the block's end — and left `running` set, so the *next* command's start was swallowed
+  too. Ruled: on the first frame of an epoch with a command running, the newest prompt's block
+  is compared with it by its typed text — the same command means it runs on, re-keyed to its
+  new row; a different one (or none) means it finished, with that prompt's exit status and
+  `CommandFinished { prompt: None }` when its own prompt is no longer among the rows held (no
+  caption to place, still a badge). The e2e dump now carries `epoch` and the view logs a
+  numbering change at info, so the next flake names its cause. Test:
+  `a_running_command_survives_a_reflow_and_finishes_after_one`.

@@ -61,8 +61,9 @@ pub enum Effect {
     CommandStarted(String),
     /// The shell printed its next prompt: the running command finished.
     CommandFinished {
-        /// The row the command was typed at (its block's prompt).
-        prompt: LineIndex,
+        /// The row the command was typed at (its block's prompt); `None` when the numbering
+        /// changed while it ran and its prompt is not among the rows held here.
+        prompt: Option<LineIndex>,
         /// What was typed.
         command: String,
         /// Its exit status, when the shell said.
@@ -447,15 +448,31 @@ impl TermState {
         let Some(prompt) = self.newest_prompt() else { return };
         match self.latest_prompt {
             // The first prompt of an epoch (a reflow, a reset, the alt screen coming or going)
-            // says nothing about what ran before it.
-            None => self.latest_prompt = Some(prompt),
+            // says nothing about what ran before it — unless a command was running: its
+            // block is either still the newest (running on, under new numbers) or not (it
+            // finished, and the newest prompt carries its status).
+            None => {
+                self.latest_prompt = Some(prompt);
+                if let Some((_, command)) = &self.running {
+                    let head = self.block_head(prompt);
+                    if head.as_ref().and_then(|h| h.command.as_ref()) == Some(command) {
+                        self.running = Some((prompt, command.clone()));
+                    } else if let Some((_, command)) = self.running.take() {
+                        let typed_at = self.prompt_before(prompt).filter(|&p| {
+                            self.block_head(p).and_then(|h| h.command) == Some(command.clone())
+                        });
+                        let exit = head.and_then(|h| h.exit);
+                        effects.push(Effect::CommandFinished { prompt: typed_at, command, exit });
+                    }
+                }
+            }
             // Newer, or the screen was erased in place (⌃L at a prompt keeps the numbering
             // and redraws the prompt higher up): either way a prompt the shell just drew.
             Some(seen) if prompt != seen => {
                 self.latest_prompt = Some(prompt);
                 if let Some((typed_at, command)) = self.running.take() {
                     let exit = self.line(prompt).and_then(|l| l.mark.exit());
-                    effects.push(Effect::CommandFinished { prompt: typed_at, command, exit });
+                    effects.push(Effect::CommandFinished { prompt: Some(typed_at), command, exit });
                 }
             }
             Some(_) => {}
@@ -901,7 +918,7 @@ mod tests {
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 2)))),
             vec![Effect::CommandFinished {
-                prompt: LineIndex(0),
+                prompt: Some(LineIndex(0)),
                 command: "sleep 9".to_owned(),
                 exit: Some(1)
             }]
@@ -926,7 +943,7 @@ mod tests {
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
             vec![Effect::CommandFinished {
-                prompt: LineIndex(0),
+                prompt: Some(LineIndex(0)),
                 command: "sleep 2".to_owned(),
                 exit: Some(0)
             }]
@@ -936,6 +953,70 @@ mod tests {
         f.updates[0].line.mark = prompt(None);
         f.updates[1].line.mark = prompt(Some(0));
         assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
+    }
+
+    /// The numbering changes under a running command (the window was resized, so the host
+    /// reflowed): while its block is still the newest it runs on under the new numbers, and
+    /// once a newer prompt exists it finished, with that prompt's status and its own new row
+    /// when it is held here.
+    #[test]
+    fn a_running_command_survives_a_reflow_and_finishes_after_one() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let at = |mut f: Frame, row: u16| {
+            f.cursor.row = row;
+            f
+        };
+        let commands = |effects: Vec<Effect>| {
+            effects
+                .into_iter()
+                .filter(|e| matches!(e, Effect::CommandStarted(_) | Effect::CommandFinished { .. }))
+                .collect::<Vec<_>>()
+        };
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ sleep 9"), (1, ""), (2, "")]);
+        f.updates[0].line.mark = prompt(None);
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandStarted("sleep 9".to_owned())]
+        );
+        // Reflowed: the same block, one row further down, still the newest.
+        let mut f = frame(2, true, 1, 0, 3, &[(0, ""), (1, "$ sleep 9"), (2, "")]);
+        f.updates[1].line.mark = prompt(None);
+        assert!(commands(state.apply(TermEvent::Frame(at(f, 2)))).is_empty());
+        assert!(state.command_running(), "runs on under the new numbers");
+        assert_eq!(state.running.as_ref().map(|(p, _)| *p), Some(LineIndex(1)));
+        // Reflowed again, and this time the shell has printed the next prompt.
+        let mut f = frame(3, true, 2, 0, 3, &[(0, "$ sleep 9"), (1, "$ "), (2, "")]);
+        f.updates[0].line.mark = prompt(None);
+        f.updates[1].line.mark = prompt(Some(3));
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandFinished {
+                prompt: Some(LineIndex(0)),
+                command: "sleep 9".to_owned(),
+                exit: Some(3)
+            }]
+        );
+        assert!(!state.command_running());
+        // A command whose prompt scrolled out of the rows held here still finishes; the
+        // caption has no row to land on.
+        let mut f = frame(4, true, 3, 0, 3, &[(0, "$ make"), (1, ""), (2, "")]);
+        f.updates[0].line.mark = prompt(None);
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandStarted("make".to_owned())]
+        );
+        let mut f = frame(5, true, 4, 10, 13, &[(0, "out"), (1, "$ "), (2, "")]);
+        f.updates[0].line.mark = SemanticMark::Output;
+        f.updates[1].line.mark = prompt(Some(0));
+        assert_eq!(
+            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            vec![Effect::CommandFinished {
+                prompt: None,
+                command: "make".to_owned(),
+                exit: Some(0)
+            }]
+        );
     }
 
     #[test]
