@@ -870,7 +870,7 @@ impl Workspace {
                 .role(Role::Button)
                 .aria_label(SharedString::from(key_label(label, lit)))
                 .child(SharedString::from(label));
-            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
+            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, window, cx| {
                 target.update(cx, |t, cx| {
                     if is_control {
                         let on = !t.sticky_control();
@@ -879,12 +879,13 @@ impl Workspace {
                         let on = !t.sticky_command();
                         t.set_sticky_command(on, cx);
                     } else {
-                        t.press(
+                        t.bar_key(
                             gpui::Keystroke {
                                 modifiers: gpui::Modifiers::default(),
                                 key: key.to_owned(),
                                 key_char: typed.map(str::to_owned),
                             },
+                            window,
                             cx,
                         );
                     }

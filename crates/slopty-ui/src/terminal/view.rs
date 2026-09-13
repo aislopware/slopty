@@ -2034,6 +2034,31 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// A key of the phone's bar. In a conversation the bar's ↑ / ↓ are the composer's, as a
+    /// hardware keyboard's would be — the completion list's while it is up, else a prompt
+    /// sent back ([`Conversation::recall`]) — since the program behind the card is not on
+    /// show for a raw arrow to mean anything there; everything else is [`Self::press`].
+    pub fn bar_key(&mut self, keystroke: Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let delta = match keystroke.key.as_str() {
+            "up" => -1,
+            "down" => 1,
+            _ => 0,
+        };
+        if delta != 0 && !self.sticky_command && self.conversation.is_some() {
+            let completions = self.completions(cx);
+            if let Some(c) = self.conversation.as_mut() {
+                if completions.is_empty() {
+                    let _recalled = c.recall(delta, window, cx);
+                } else {
+                    c.step_completion(i32::from(delta), completions.len());
+                }
+            }
+            cx.notify();
+            return;
+        }
+        self.press(keystroke, cx);
+    }
+
     /// The visible rows as text, top to bottom, trailing spaces trimmed; a row still being
     /// fetched is empty. What a self-test reads instead of pixels.
     #[must_use]
@@ -5077,6 +5102,24 @@ mod tests {
         drain_words(&mut rx);
         up_down(cx, "up");
         assert_eq!(text(cx).as_deref(), Some("third"), "the transcript has not grown yet");
+
+        // The phone's bar ↑ / ↓ are the composer's too, not raw keys to the program.
+        let bar = |cx: &mut VisualTestContext, key: &str| {
+            let stroke = Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: key.into(),
+                key_char: None,
+            };
+            view.update_in(cx, |v, window, cx| v.bar_key(stroke, window, cx));
+            cx.run_until_parked();
+        };
+        bar(cx, "up");
+        assert_eq!(text(cx).as_deref(), Some("second"));
+        bar(cx, "down");
+        assert_eq!(text(cx).as_deref(), Some("third"));
+        assert!(rx.try_recv().is_err(), "nothing went to the program");
+        bar(cx, "left");
+        assert!(rx.try_recv().is_ok(), "any other bar key is pressed as before");
     }
 
     #[gpui::test]

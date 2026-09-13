@@ -95,7 +95,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `set_value` emits no `Change`, so the recall itself does not) — ↑ / ↓ move the caret as they
   would, so a multi-line draft is still editable; (3) the caret lands at the end of a recalled
   prompt (`set_selected_range`); (4) the completion list takes ↑ / ↓ first while it is up; (5)
-  sending forgets the recall. Test: `the_composer_recalls_sent_prompts_on_up_and_down`.
+  sending forgets the recall; (6) the phone's bar ↑ / ↓ are the composer's too
+  (`TerminalView::bar_key`: the completion list's while it is up, else a recall) — the program
+  behind a conversation card is not on show for a raw arrow to mean anything there; the other
+  bar keys, and every key in a shell, are pressed as before. Test:
+  `the_composer_recalls_sent_prompts_on_up_and_down`.
 
 - ✅ **Collapse defaults** (2026-09-05). Thinking and tool input start folded (they explain a
   step, they are not the step); a tool result shows its first 4 lines (`RESULT_PREVIEW_LINES`)
