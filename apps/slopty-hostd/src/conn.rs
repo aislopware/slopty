@@ -31,6 +31,8 @@ const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(10
 const TRANSCRIPT_PERIOD: std::time::Duration = std::time::Duration::from_millis(400);
 /// Entries the first snapshot of a conversation carries (older ones are not sent).
 const TRANSCRIPT_SNAPSHOT: usize = 200;
+/// How often the files behind a client's file cards are looked at for a change.
+const FILES_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Events buffered per attached session before the client is considered stuck.
 const SINK_DEPTH: usize = 256;
@@ -111,6 +113,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         health,
         feedback,
         transcripts: HashMap::new(),
+        watched: HashMap::new(),
     };
     daemon.wake.lock().client_joined();
 
@@ -120,8 +123,15 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut transcripts = tokio::time::interval(TRANSCRIPT_PERIOD);
     transcripts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut files = tokio::time::interval(FILES_PERIOD);
+    files.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
+            _ = files.tick(), if !peer.watched.is_empty() => {
+                if !peer.poll_files().await {
+                    break Ok("writer gone");
+                }
+            }
             _ = geometry.tick(), if !peer.screens.is_empty() => {
                 if !peer.check_geometry().await {
                     break Ok("writer gone");
@@ -451,6 +461,8 @@ struct Peer<'d> {
     feedback: JoinHandle<()>,
     /// Conversations this client follows, with the reader's position in each file.
     transcripts: HashMap<SessionId, Tail>,
+    /// Files behind this client's file cards, each with the stamp it was last seen with.
+    watched: HashMap<String, Option<(u64, u128)>>,
 }
 
 impl Drop for Peer<'_> {
@@ -632,21 +644,27 @@ impl Peer<'_> {
             }
             ClientMsg::ReadFile { path } => {
                 // A paired client already has a shell here; a read is nothing it could not do.
-                let target = path.clone();
-                let read = tokio::task::spawn_blocking(move || {
-                    slopty_host::file::read(std::path::Path::new(&target))
-                })
-                .await
-                .unwrap_or_else(|_| slopty_proto::file::FileRead::Missing {
-                    error: "read failed".to_owned(),
-                });
-                let kind = match &read {
-                    slopty_proto::file::FileRead::Text { .. } => "text",
-                    slopty_proto::file::FileRead::Binary { .. } => "binary",
-                    slopty_proto::file::FileRead::Missing { .. } => "missing",
-                };
-                tracing::info!(client = %self.client, %path, kind, "read file");
-                let _sent = self.out.send(HostMsg::File { path, read }).await;
+                let _sent = self.send_file(path).await;
+            }
+            ClientMsg::WatchFiles { paths } => {
+                let mut watched = HashMap::with_capacity(paths.len());
+                for path in paths {
+                    // A path kept keeps its stamp; a new one is stamped as it is now (the
+                    // card's own read shows that state).
+                    let stamp = if let Some(stamp) = self.watched.remove(&path) {
+                        stamp
+                    } else {
+                        let target = path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            slopty_host::file::stamp(std::path::Path::new(&target))
+                        })
+                        .await
+                        .unwrap_or(None)
+                    };
+                    watched.insert(path, stamp);
+                }
+                tracing::debug!(client = %self.client, files = watched.len(), "watch files");
+                self.watched = watched;
             }
             ClientMsg::InstallHooks => {
                 let (ok, message) = install_hooks().await;
@@ -654,6 +672,53 @@ impl Peer<'_> {
                 let _sent = self.out.send(HostMsg::HooksInstalled { ok, message }).await;
             }
         }
+    }
+
+    /// Read `path` and send what is there; `false` when the writer is gone.
+    async fn send_file(&self, path: String) -> bool {
+        let target = path.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            slopty_host::file::read(std::path::Path::new(&target))
+        })
+        .await
+        .unwrap_or_else(|_| slopty_proto::file::FileRead::Missing {
+            error: "read failed".to_owned(),
+        });
+        let kind = match &read {
+            slopty_proto::file::FileRead::Text { .. } => "text",
+            slopty_proto::file::FileRead::Binary { .. } => "binary",
+            slopty_proto::file::FileRead::Missing { .. } => "missing",
+        };
+        tracing::info!(client = %self.client, %path, kind, "read file");
+        self.out.send(HostMsg::File { path, read }).await.is_ok()
+    }
+
+    /// Look at every watched file; one whose stamp moved is read and sent again. `false`
+    /// when the writer is gone.
+    async fn poll_files(&mut self) -> bool {
+        let paths: Vec<String> = self.watched.keys().cloned().collect();
+        let stamps = tokio::task::spawn_blocking(move || {
+            paths
+                .into_iter()
+                .map(|path| {
+                    let stamp = slopty_host::file::stamp(std::path::Path::new(&path));
+                    (path, stamp)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let Ok(stamps) = stamps else { return true };
+        for (path, stamp) in stamps {
+            let Some(seen) = self.watched.get_mut(&path) else { continue };
+            if *seen == stamp {
+                continue;
+            }
+            *seen = stamp;
+            if !self.send_file(path).await {
+                return false;
+            }
+        }
+        true
     }
 
     /// Read every followed transcript for new lines and send what appeared. The first read of

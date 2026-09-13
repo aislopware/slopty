@@ -465,6 +465,12 @@ mod golden {
             &ClientMsg::FindFiles { root: "~".to_owned(), query: "main".to_owned() },
         );
         snap(
+            "client_watch_files",
+            &ClientMsg::WatchFiles {
+                paths: vec!["/w/slopty/src/main.rs".to_owned(), "/w/notes.md".to_owned()],
+            },
+        );
+        snap(
             "host_found_files",
             &HostMsg::FoundFiles {
                 root: "~".to_owned(),

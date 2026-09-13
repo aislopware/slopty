@@ -208,7 +208,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   answers (`HostMsg::File`, `slopty-host::file::read`) with the first 512 KiB then the first
   2 000 lines, `Binary` on a NUL or invalid UTF-8, `Missing` with the OS's word; (2) **no path
   restriction** on the host: a paired client already has a shell there, so a read is nothing
-  it could not do (logged like the rest); (3) **one card per path** — "view" on another call
+  it could not do (logged like the rest) — and (2026-09-13, protocol 40) the host **watches
+  the files behind a client's cards**: the client sends the whole set as `ClientMsg::WatchFiles`
+  whenever it changes (`canvas::reconcile_files`, sorted, empty when the last card goes), the
+  connection looks at each path's size and modification time every second
+  (`slopty_host::file::stamp`, `FILES_PERIOD`, off the runtime on `spawn_blocking`) and answers
+  a moved stamp with a fresh `HostMsg::File` unasked — a removal too, since the card says
+  "missing" until it is back. Polling over FSEvents: cards are few, a second is the eye's
+  latency for a file the human is not editing, and no watcher API means no dependency and no
+  per-path descriptor to leak; a path new to the set is stamped as it is, the card's own read
+  showing that state. Covered by the hostd e2e `a_watched_file_is_read_again_when_it_changes`,
+  `a_stamp_changes_with_the_file_and_is_none_for_what_is_not_one` and the watch asserts in
+  `a_tool_calls_path_opens_a_file_card`; (3) **one card per path** — "view" on another call
   for the same file reveals the card and reads it again (`canvas::open_file`), because two
   copies of one file drift; (4) the card **reads again unasked when an agent's Edit or Write
   result lands** anywhere on the canvas (a result does not name its file, cards are few, and

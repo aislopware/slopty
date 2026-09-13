@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 39;
+pub const PROTOCOL_VERSION: u16 = 40;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -135,6 +135,13 @@ pub enum ClientMsg {
         /// The card.
         item: slopty_core::ItemId,
     },
+    /// The files this client's file cards show, the whole set each time it changes: the host
+    /// looks at each one every so often and answers with `HostMsg::File` again when one has
+    /// changed on disk. Empty when the last card goes.
+    WatchFiles {
+        /// Absolute paths on the host.
+        paths: Vec<String>,
+    },
 }
 
 impl ClientMsg {
@@ -161,6 +168,7 @@ impl ClientMsg {
             Self::Point { .. } => "Point",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
+            Self::WatchFiles { .. } => "WatchFiles",
         }
     }
 }

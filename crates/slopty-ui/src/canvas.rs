@@ -532,6 +532,8 @@ pub struct CanvasView {
     files: HashMap<ItemId, Entity<FileView>>,
     /// The line a file card opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
+    /// The paths the host was last asked to watch for the file cards, sorted.
+    watched: Vec<String>,
     /// Streams requested from the host but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// A `List` is in flight to name restored window items.
@@ -689,6 +691,7 @@ impl CanvasView {
             notes: HashMap::new(),
             files: HashMap::new(),
             file_focus: HashMap::new(),
+            watched: Vec::new(),
             pending_opens: HashMap::new(),
             titles_requested: false,
             titles: HashMap::new(),
@@ -2669,6 +2672,14 @@ impl CanvasView {
             self.send(ClientMsg::ReadFile { path: path.clone() });
         }
         self.files.retain(|id, _| files.iter().any(|(f, _)| f == id));
+        // The host watches the set behind the cards and re-reads one that changes on disk.
+        let mut paths: Vec<String> = files.into_iter().map(|(_, path)| path).collect();
+        paths.sort_unstable();
+        paths.dedup();
+        if paths != self.watched {
+            self.watched.clone_from(&paths);
+            self.send(ClientMsg::WatchFiles { paths });
+        }
     }
 
     /// The file cards on the canvas, for tests and the self-test dump.
@@ -7483,6 +7494,19 @@ mod tests {
                 .count()
         };
         assert_eq!(reads(&sent), 1, "one read asked of the host: {sent:?}");
+        let watches = |sent: &[ClientMsg]| -> Vec<Vec<String>> {
+            sent.iter()
+                .filter_map(|m| match m {
+                    ClientMsg::WatchFiles { paths } => Some(paths.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            watches(&sent),
+            vec![vec!["/tmp/work/note.txt".to_owned()]],
+            "the host is asked to watch it: {sent:?}"
+        );
         assert!(
             cx.debug_bounds(selector("file", file)).is_some(),
             "the card draws its view while waiting"
@@ -7594,6 +7618,7 @@ mod tests {
             "{sent:?}"
         );
         assert!(view.read_with(cx, |c, _| c.file(file).is_none()), "the view is dropped");
+        assert_eq!(watches(&sent), vec![Vec::<String>::new()], "and the watch is dropped");
     }
 
     /// A path a shell's view asks to see is made absolute against that shell's directory.

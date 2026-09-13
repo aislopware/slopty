@@ -394,6 +394,49 @@ mod tests {
         drop(endpoint_b);
     }
 
+    /// A file behind a file card is watched: a write on the host reaches the client as a
+    /// fresh `HostMsg::File` unasked, its removal too, and an emptied watch list stops it.
+    #[tokio::test]
+    async fn a_watched_file_is_read_again_when_it_changes() {
+        use slopty_proto::file::FileRead;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut host) = connect(dir.path()).await;
+        let path = dir.path().join("watched.txt");
+        std::fs::write(&path, "one").unwrap();
+        let name = path.to_string_lossy().into_owned();
+        host.tx.send(&ClientMsg::ReadFile { path: name.clone() }).await.unwrap();
+        let read = next_file(&mut host, &name).await;
+        assert!(matches!(&read, FileRead::Text { text, .. } if text == "one"), "{read:?}");
+
+        host.tx.send(&ClientMsg::WatchFiles { paths: vec![name.clone()] }).await.unwrap();
+        // The watch stamps the file as it is; the write must come after that.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(&path, "two").unwrap();
+        let read = next_file(&mut host, &name).await;
+        assert!(matches!(&read, FileRead::Text { text, .. } if text == "two"), "{read:?}");
+        std::fs::remove_file(&path).unwrap();
+        let read = next_file(&mut host, &name).await;
+        assert!(matches!(read, FileRead::Missing { .. }), "{read:?}");
+
+        host.tx.send(&ClientMsg::WatchFiles { paths: Vec::new() }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(&path, "three").unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(2500), next_file(&mut host, &name));
+        assert!(quiet.await.is_err(), "nothing is read once the watch is dropped");
+    }
+
+    /// The next `HostMsg::File` for `path` on `host`'s control stream, skipping everything
+    /// else.
+    async fn next_file(host: &mut HostConn, path: &str) -> slopty_proto::file::FileRead {
+        loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::File { path: p, read } if p == path => break read,
+                _other => {}
+            }
+        }
+    }
+
     /// The next presence sync on `host`'s control stream, skipping everything else.
     async fn next_presence(host: &mut HostConn) -> slopty_proto::canvas::CanvasSync {
         next_canvas(host, |s| matches!(s, slopty_proto::canvas::CanvasSync::Presence { .. })).await

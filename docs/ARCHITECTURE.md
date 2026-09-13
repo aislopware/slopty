@@ -389,7 +389,9 @@ protocol 37, host-sanitised to 128 characters): document state every client show
 of the derived title until it is cleared, and what the palette's "Go to" line says. A
 **file card** (`ItemKind::File { path }`, protocol 34, `slopty-ui::file`) shows a file on the
 host read-only: the item names the absolute path and lives in the shared document, the text
-does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`)
+does not — each client asks `ClientMsg::ReadFile` when the card appears (`canvas::reconcile_files`,
+which also sends the set of paths as `ClientMsg::WatchFiles`, protocol 40: the host looks at
+each one's size and modification time every second and re-sends a changed file unasked)
 and draws the `HostMsg::File` answer (`slopty-host::file::read`: the first 512 KiB, then the
 first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
 `uniform_list`, coloured by the grammar the path names (`slopty-ui::highlight`: syntect's

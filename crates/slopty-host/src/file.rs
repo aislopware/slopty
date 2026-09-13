@@ -57,6 +57,21 @@ pub fn read(path: &Path) -> FileRead {
     FileRead::Text { text, more_lines, size, modified_ms }
 }
 
+/// What a watcher compares between two looks at a file.
+///
+/// Its size and its modification time (nanoseconds since the Unix epoch, as the file system
+/// keeps it). `None` when nothing readable is there, which is a state too (a file removed,
+/// then written back).
+#[must_use]
+pub fn stamp(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(expand_home(path)).ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some((meta.len(), modified.as_nanos()))
+}
+
 /// `~` or `~/…` as the host's home directory (`$HOME`, `/tmp` when unset); any other path
 /// as is. A client types `~/notes.md` into its palette without knowing the host's home.
 #[must_use]
@@ -94,6 +109,22 @@ fn os_word(e: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stamp_changes_with_the_file_and_is_none_for_what_is_not_one() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = dir.path().join("a.txt");
+        assert_eq!(stamp(&path), None, "nothing there yet");
+        assert_eq!(stamp(dir.path()), None, "a directory is not a file");
+        std::fs::write(&path, "one").map_err(|e| e.to_string())?;
+        let first = stamp(&path).ok_or("stamped")?;
+        assert_eq!(first.0, 3);
+        std::fs::write(&path, "two!").map_err(|e| e.to_string())?;
+        let second = stamp(&path).ok_or("stamped")?;
+        assert_ne!(first, second, "a write changes it");
+        assert_eq!(second.0, 4);
+        Ok(())
+    }
 
     #[test]
     fn a_tilde_is_the_hosts_home() {
