@@ -851,6 +851,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   paste_protection` turns it off (`Theme::behaviour.paste_protection`, default on). Test:
   `a_paste_that_would_run_waits_for_a_confirmation`.
 
+- ✅ **Bold is bright, ligatures, pointer hiding and the scroll multiplier are settings**
+  (2026-09-15). Four small ghostty/Terminal.app conveniences the views had fixed: `[terminal] bold_is_bright`
+  (xterm's `boldColors`, off as in ghostty; `Colors::bold_slot` lifts ANSI 0–7 to 8–15 for
+  a bold cell before the inverse swap, so the many schemes whose bright half is a lighter
+  tint read as they were drawn), `[font] ligatures` (on: the font's own; off: `calt`
+  disabled through GPUI's `FontFeatures::disable_ligatures`, so `=>` stays two glyphs —
+  part of the shaped-word cache key, since the same cells shape differently) and
+  `[terminal] hide_pointer_while_typing` (on, as Terminal.app and iTerm2: a key that goes
+  to the program calls `NSCursor.setHiddenUntilMouseMoves`, AppKit unhides on the next
+  move; nothing on iOS, and nothing without a running `NSApplication`: in a headless test
+  the AppKit call stalled ten seconds on a window server connection, which is how the
+  guard was found) and `[terminal] scroll_multiplier` (ghostty's `mouse-scroll-multiplier`,
+  `Behaviour::scroll_multiplier` in hundredths; applied to the wheel's lines before the
+  fraction carry, so a program on the alternate screen sees the multiplied rows too).
+  Tests: `bold_is_bright_lifts_only_the_named_eight`, `bold_text_is_painted_bright_when_asked`,
+  `the_wheel_scrolls_by_the_multiplier`; the pointer hide is a platform call with no
+  headless observer, so only its plumbing is tested (`terminal_settings_ride_on_the_theme`).
+
 - ✅ **The cursor's blink can be overridden** (2026-09-15, ghostty's `cursor-style-blink`).
   `[terminal] cursor_blink = program | always | never` (`Behaviour::cursor_blink`):
   `program` leaves DECSCUSR to the shell or editor (the default: shells are steady, editors

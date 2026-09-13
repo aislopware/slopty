@@ -132,6 +132,9 @@ pub struct Font {
     /// Terminal line height as a multiple of the font's own (ghostty's `adjust-cell-height`):
     /// `1.0` is the font's, `1.2` airier, `0.9` tighter.
     pub mono_line_height: f32,
+    /// Whether the terminal font's ligatures are shaped (`=>`, `!=` as one glyph in fonts
+    /// that have them).
+    pub ligatures: bool,
     /// Chrome (top bar, pills, picker) font size in points.
     pub ui_size: f32,
 }
@@ -142,6 +145,7 @@ impl Default for Font {
             mono_family: "JetBrains Mono".to_owned(),
             mono_size: 13.0,
             mono_line_height: 1.0,
+            ligatures: true,
             ui_size: 13.0,
         }
     }
@@ -175,6 +179,13 @@ pub struct TerminalSettings {
     /// A paste that could run commands (a newline into a shell that did not ask for
     /// bracketed paste) waits for a confirmation (ghostty's `clipboard-paste-protection`).
     pub paste_protection: bool,
+    /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (ghostty's `bold-is-bright`).
+    pub bold_is_bright: bool,
+    /// The pointer hides while typing into a terminal, until it moves.
+    pub hide_pointer_while_typing: bool,
+    /// What a wheel or trackpad line scrolls, in grid lines (ghostty's
+    /// `mouse-scroll-multiplier`): `1.0` one for one, `3.0` fast.
+    pub scroll_multiplier: f32,
 }
 
 impl Default for TerminalSettings {
@@ -185,6 +196,9 @@ impl Default for TerminalSettings {
             bell_alert: true,
             cursor_blink: CursorBlink::Program,
             paste_protection: true,
+            bold_is_bright: false,
+            hide_pointer_while_typing: true,
+            scroll_multiplier: 1.0,
         }
     }
 }
@@ -201,11 +215,13 @@ pub struct RemoteSettings {
     /// Encode 10-bit HEVC (Main 10) so an HDR source keeps its range; off, everything is
     /// 8-bit.
     pub hdr: bool,
+    /// A stream opens silenced on this client; the title-bar pill still toggles it.
+    pub muted: bool,
 }
 
 impl Default for RemoteSettings {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_mbps: 30, hdr: false }
+        Self { fps: 60, max_bitrate_mbps: 30, hdr: false, muted: false }
     }
 }
 
@@ -318,6 +334,8 @@ mono_family = {mono_family}
 mono_size = {mono_size}
 # Terminal line height as a multiple of the font's own (0.5 to 2.0).
 mono_line_height = {mono_line_height}
+# Shape the terminal font's ligatures (=> != as one glyph, in fonts that have them).
+ligatures = {ligatures}
 # Top bar, pills and picker size in points.
 ui_size = {ui_size}
 
@@ -339,6 +357,12 @@ cursor_blink = {cursor_blink}
 # A paste with a newline into a shell that did not ask for bracketed paste
 # (so it would run) waits for a confirmation.
 paste_protection = {paste_protection}
+# Paint bold text in ANSI colours 0-7 with the bright 8-15.
+bold_is_bright = {bold_is_bright}
+# Hide the pointer while typing into a terminal, until it moves.
+hide_pointer_while_typing = {hide_pointer_while_typing}
+# Grid lines per wheel or trackpad line (0.1 to 10).
+scroll_multiplier = {scroll_multiplier}
 
 [remote]
 # Frames per second a remote window or display is captured at (15 to 120).
@@ -348,6 +372,8 @@ fps = {fps}
 max_bitrate_mbps = {max_bitrate_mbps}
 # 10-bit HEVC, for an HDR source.
 hdr = {hdr}
+# Open a stream with its audio silenced here; the title-bar pill still toggles it.
+muted = {muted}
 
 [colors]
 # Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
@@ -365,6 +391,7 @@ ansi = []
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
             mono_line_height = toml_float(d.font.mono_line_height),
+            ligatures = d.font.ligatures,
             ui_size = toml_float(d.font.ui_size),
             appearance = toml_string(appearance_name(d.theme.appearance)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
@@ -372,9 +399,13 @@ ansi = []
             bell_alert = d.terminal.bell_alert,
             cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
             paste_protection = d.terminal.paste_protection,
+            bold_is_bright = d.terminal.bold_is_bright,
+            hide_pointer_while_typing = d.terminal.hide_pointer_while_typing,
+            scroll_multiplier = toml_float(d.terminal.scroll_multiplier),
             fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             hdr = d.remote.hdr,
+            muted = d.remote.muted,
         )
     }
 
@@ -477,17 +508,23 @@ mod tests {
         assert!(d.terminal.bell_alert, "a bell in the background is heard");
         assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
         assert!(d.terminal.paste_protection, "a pasted newline asks first");
+        assert!(!d.terminal.bold_is_bright, "bold is a weight, as in ghostty");
+        assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
+        assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
+        assert!(d.font.ligatures, "the font's own");
         assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps, d.remote.hdr), (60, 30, false));
     }
 
     #[test]
     fn remote_keys() {
-        let loaded = Settings::parse("[remote]\nfps = 30\nmax_bitrate_mbps = 8\nhdr = true\n");
+        let loaded =
+            Settings::parse("[remote]\nfps = 30\nmax_bitrate_mbps = 8\nhdr = true\nmuted = true\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(
             loaded.settings.remote,
-            RemoteSettings { fps: 30, max_bitrate_mbps: 8, hdr: true }
+            RemoteSettings { fps: 30, max_bitrate_mbps: 8, hdr: true, muted: true }
         );
+        assert!(!Settings::default().remote.muted, "sound on, as the host plays it");
     }
 
     #[test]
@@ -527,7 +564,7 @@ mod tests {
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\n",
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(loaded.settings.font.mono_line_height, 1.2);
@@ -536,6 +573,11 @@ mod tests {
         assert!(!loaded.settings.terminal.bell_alert);
         assert_eq!(loaded.settings.terminal.cursor_blink, CursorBlink::Never);
         assert!(!loaded.settings.terminal.paste_protection);
+        assert!(loaded.settings.terminal.bold_is_bright);
+        assert!(!loaded.settings.terminal.hide_pointer_while_typing);
+        assert_eq!(loaded.settings.terminal.scroll_multiplier, 3.0);
+        let loaded = Settings::parse("[font]\nligatures = false\n");
+        assert!(!loaded.settings.font.ligatures);
         for (text, want) in [("program", CursorBlink::Program), ("always", CursorBlink::Always)] {
             let loaded = Settings::parse(&format!("[terminal]\ncursor_blink = \"{text}\"\n"));
             assert_eq!(loaded.settings.terminal.cursor_blink, want, "{text}");
@@ -582,14 +624,14 @@ mod tests {
     #[test]
     fn unknown_keys_warn_but_load() {
         let loaded = Settings::parse(
-            "[font]\nmono_size = 11.0\nligatures = true\n[terminal]\nscrollback_lines = 1\n",
+            "[font]\nmono_size = 11.0\nkerning = true\n[terminal]\nscrollback_lines = 1\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(loaded.settings.font.mono_size, 11.0);
         assert_eq!(
             loaded.warnings,
             vec![
-                "unknown key `font.ligatures`".to_owned(),
+                "unknown key `font.kerning`".to_owned(),
                 "unknown key `terminal.scrollback_lines`".to_owned()
             ]
         );

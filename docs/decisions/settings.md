@@ -21,7 +21,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   to the iOS triple. Verified: `mono_size` 13 → 20 while the app ran re-fit the shell from
   21×87 to 14×58 (`stty size`) within ~2 s and back again; a `[font` typo showed
   `settings: …: TOML parse error at line 1, column 6` in the bar for 6 s with the defaults in
-  force; `ligatures = true` showed the unknown-key notice for `font.ligatures` and loaded the rest.
+  force; an unknown `[font]` key showed the unknown-key notice and loaded the rest (the example then was `ligatures`, a real key since 2026-09-15).
 
 - ✅ **Theme swap is a push, not a global** (2026-09-05): `Workspace::rebuild_theme` derives
   the `Theme` (`slopty_app::settings::theme_for`: variant, the family ahead of the bundled
@@ -61,6 +61,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   either way); the element applies it where it decides whether the cursor ticks the blink
   clock, so an unfocused card stays steady as before. `paste_protection` (default on) is
   the confirmation before a paste that would run, ruled in decisions/terminal.md.
+- ✅ **`[font] ligatures`, `[terminal] bold_is_bright | hide_pointer_while_typing |
+  scroll_multiplier`, `[remote] muted`** (2026-09-15): the terminal ones are ruled in
+  decisions/terminal.md; ligatures ride on `Typography`, bold-is-bright on
+  `TerminalPalette` (a colour rule, like the contrast floor), the pointer hide and the
+  multiplier on `Theme::behaviour`. `[remote] muted` (`StreamPrefs::muted`, off) opens a
+  stream silenced on this client; `ScreenView::set_theme` moves the switch only when the
+  setting itself changes, so the title-bar pill's own toggle survives an unrelated theme
+  change (test: the tail of `new_stream_settings_are_asked_of_a_live_stream`).
 - ✅ **`[colors]` lays a palette over the theme** (2026-09-15). ghostty ships hundreds of
   schemes and every terminal takes a custom palette; Slopty's two variants were fixed. The
   section has `foreground | background | cursor | cursor_text | selection` and `ansi` (a

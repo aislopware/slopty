@@ -637,7 +637,8 @@ impl Render for FileView {
                 let gutter_ch = f32::from(u8::try_from(digits).unwrap_or(u8::MAX));
                 let lines = self.lines.clone();
                 let spans = self.spans.clone();
-                let font = crate::fonts::terminal_font(&mono, false, false);
+                let font =
+                    crate::fonts::terminal_font(&mono, false, false, theme.typography.ligatures);
                 let run_theme = theme.clone();
                 let changed = self.changed.clone();
                 let focus = self.focus;

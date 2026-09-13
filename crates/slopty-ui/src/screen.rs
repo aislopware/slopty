@@ -361,6 +361,10 @@ impl ScreenView {
             self.quality = wanted;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
         }
+        // The pill's own toggles stand; only a change of the setting moves the switch.
+        if theme.behaviour.stream.muted != self.theme.behaviour.stream.muted {
+            self.handle.set_muted(theme.behaviour.stream.muted);
+        }
         self.theme = theme;
         cx.notify();
     }
@@ -374,6 +378,7 @@ impl ScreenView {
         cx: &Context<Self>,
     ) -> Self {
         let Opened { stream, target, size, quality } = opened;
+        handle.set_muted(theme.behaviour.stream.muted);
         let mut frames = handle.frames();
         let mut cursor = handle.cursor();
         let pump = cx.spawn(async move |this, cx| {
@@ -1422,6 +1427,20 @@ mod tests {
         assert!((quality.scale - 1.0).abs() < f32::EPSILON, "the scale is the canvas's");
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");
+
+        // The muted preference moves the switch only when it changes; the pill's own
+        // toggle stands through an unrelated theme change.
+        let muted = |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.muted());
+        assert!(!muted(cx));
+        let mut theme = Theme::default();
+        theme.behaviour.stream.muted = true;
+        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        assert!(muted(cx), "the setting silences a live stream");
+        view.update(cx, |v, _| v.toggle_mute());
+        theme.behaviour.stream.fps = 30;
+        view.update(cx, |v, cx| v.set_theme(theme, cx));
+        assert!(!muted(cx), "the pill's toggle stands");
+        assert!(!sent(&mut rx).is_empty(), "fps change asked");
     }
 
     /// The host's cursor picture replaces the drawn arrow at the pointer, its hotspot on

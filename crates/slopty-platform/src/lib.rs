@@ -108,6 +108,22 @@ pub fn attention() {
     }
 }
 
+/// Hide the pointer until it next moves.
+///
+/// What Terminal.app does on a keystroke, so the arrow does not sit over the text being
+/// typed. A no-op on iOS (no pointer to hide; an iPad's pointer is the system's), and
+/// without a running `NSApplication` (a headless test: the call then stalls for seconds
+/// waiting on a window server connection).
+#[cfg_attr(target_os = "ios", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
+pub fn hide_pointer_until_moved() {
+    #[cfg(target_os = "macos")]
+    if let Some(mtm) = objc2::MainThreadMarker::new()
+        && objc2_app_kit::NSApplication::sharedApplication(mtm).isRunning()
+    {
+        objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(true);
+    }
+}
+
 /// Show how many sessions are waiting on the human on the app icon.
 ///
 /// The Dock badge on macOS (cleared at zero). iOS keeps the count inside the app; its icon

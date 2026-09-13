@@ -1108,13 +1108,15 @@ runs the load scenarios (MEASUREMENTS, "canvas frame time").
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
 missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
-ui_size` (the line height is `Typography::mono_line_height`, ghostty's `adjust-cell-height`),
-`[theme] appearance = dark | light | system`, `[terminal] minimum_contrast | copy_on_select |
-bell_alert | cursor_blink = program | always | never | paste_protection` (the ratio rides on
-`TerminalPalette` in hundredths, copy-on-select, the blink override and paste protection on
-`Theme::behaviour`, the bell flag is read by the app's bell handler, see
-decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr` (`Theme::behaviour.stream`;
-a live stream re-asks its quality on change, see decisions/video.md), `[colors] foreground |
+ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
+`adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
+`[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
+never | paste_protection | bold_is_bright | hide_pointer_while_typing | scroll_multiplier`
+(the ratio and bold-is-bright ride on `TerminalPalette`, copy-on-select, the blink override,
+paste protection, the pointer hide and the multiplier on `Theme::behaviour`, the bell flag is
+read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr | muted` (`Theme::behaviour.stream`;
+a live stream re-asks its quality on change and takes a changed `muted`, see
+decisions/video.md and decisions/settings.md), `[colors] foreground |
 background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over
 `TerminalPalette` in both appearances, see decisions/settings.md); every key has a
 default, unknown keys warn, a

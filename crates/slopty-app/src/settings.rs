@@ -37,6 +37,8 @@ const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 /// Half the font's line height packs rows past reading; twice it is a list, not a grid.
 const LINE_HEIGHT: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+/// A tenth of a line per wheel line is glacial; ten is a page.
+const SCROLL: std::ops::RangeInclusive<f32> = 0.1..=10.0;
 /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
 const CONTRAST: std::ops::RangeInclusive<f32> = 1.0..=21.0;
 /// Below 15 the stream is a slideshow; above 120 no display here refreshes.
@@ -70,10 +72,15 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.typography.ui_size = sized(settings.font.ui_size, &UI_SIZE, defaults.ui_size);
     theme.typography.mono_line_height =
         sized(settings.font.mono_line_height, &LINE_HEIGHT, defaults.mono_line_height);
+    theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
+    theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
+    theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
+    theme.behaviour.scroll_multiplier =
+        hundredths(sized(settings.terminal.scroll_multiplier, &SCROLL, 1.0));
     theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
         CursorBlink::Program => slopty_theme::CursorBlink::Program,
         CursorBlink::Always => slopty_theme::CursorBlink::Always,
@@ -89,6 +96,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
             defaults.max_bitrate_bps
         },
         hdr: remote.hdr,
+        muted: remote.muted,
     };
     theme
 }
@@ -254,6 +262,19 @@ mod tests {
         assert!(t.behaviour.paste_protection);
         s.terminal.paste_protection = false;
         assert!(!theme_for(&s, true).behaviour.paste_protection);
+        assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
+        s.terminal.hide_pointer_while_typing = false;
+        s.terminal.bold_is_bright = true;
+        let t = theme_for(&s, true);
+        assert!(!t.behaviour.hide_pointer_while_typing && t.terminal.bold_is_bright);
+        assert!(t.typography.ligatures);
+        s.font.ligatures = false;
+        assert!(!theme_for(&s, true).typography.ligatures);
+        assert_eq!(t.behaviour.scroll_multiplier, 100);
+        s.terminal.scroll_multiplier = 2.5;
+        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 250);
+        s.terminal.scroll_multiplier = 0.0;
+        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 100, "a typo: one for one");
         s.terminal.cursor_blink = CursorBlink::Never;
         assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
         s.terminal.minimum_contrast = 0.0;
@@ -276,6 +297,9 @@ mod tests {
         s.remote.max_bitrate_mbps = 500;
         let stream = theme_for(&s, true).behaviour.stream;
         assert_eq!((stream.fps, stream.max_bitrate_bps), (60, 30_000_000), "typos read as default");
+        assert!(!stream.muted);
+        s.remote.muted = true;
+        assert!(theme_for(&s, true).behaviour.stream.muted);
     }
 
     #[test]

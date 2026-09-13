@@ -2760,6 +2760,9 @@ impl TerminalView {
         }
         self.selection = None;
         self.pin_blink();
+        if self.theme.behaviour.hide_pointer_while_typing {
+            slopty_platform::hide_pointer_until_moved();
+        }
         if event.is_held {
             self.key_seq = self.key_seq.wrapping_add(1);
             let key = keys::key_event(self.key_seq, &event.keystroke, true);
@@ -2788,6 +2791,7 @@ impl TerminalView {
                 f32::from(p.y) / line_height
             }
         };
+        let lines = lines * f32::from(self.theme.behaviour.scroll_multiplier) / 100.0;
         // ⌘-wheel is the canvas's zoom, never the grid's.
         if event.modifiers.platform {
             self.wheel_remainder = 0.0;
@@ -4953,6 +4957,28 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(150));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| (v.autoscroll, v.selecting)), (None, false));
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
+    }
+
+    /// The scroll multiplier: three grid lines per wheel line when the theme says so.
+    #[gpui::test]
+    fn the_wheel_scrolls_by_the_multiplier(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(100, &["hello wor", "second", "third row"]), cx);
+            let mut theme = Theme::new(slopty_theme::Variant::Dark);
+            theme.behaviour.scroll_multiplier = 300;
+            view.set_theme(theme, cx);
+        });
+        cx.run_until_parked();
+        let at = cell_center(&view, cx, 2.0, 1.0);
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: TouchPhase::Started,
+        });
+        cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
     }
 

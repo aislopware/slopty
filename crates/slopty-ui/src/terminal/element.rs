@@ -436,11 +436,18 @@ impl ShapeCache {
 /// The part of a shaped word's key that is the same for every word of a view this frame:
 /// size, family and the palette the styles were resolved through, so a theme swap never
 /// replays old colours.
-fn hash_base(focused: bool, font_size: Pixels, family: &str, palette: &Colors) -> u64 {
+fn hash_base(
+    focused: bool,
+    font_size: Pixels,
+    family: &str,
+    ligatures: bool,
+    palette: &Colors,
+) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     focused.hash(&mut h);
     f32::from(font_size).to_bits().hash(&mut h);
     family.hash(&mut h);
+    ligatures.hash(&mut h);
     palette.hash(&mut h);
     h.finish()
 }
@@ -458,11 +465,12 @@ fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
     h.finish()
 }
 
-/// What a word's colours depend on besides its cells: the font family, the palette and the
-/// blink clock's phase.
+/// What a word's colours depend on besides its cells: the font family (and whether its
+/// ligatures shape), the palette and the blink clock's phase.
 #[derive(Clone, Copy)]
 struct Look<'a> {
     family: &'a str,
+    ligatures: bool,
     palette: &'a Colors,
     blink_off: bool,
 }
@@ -570,7 +578,7 @@ fn shape_cells(
     cell_width: Pixels,
     look: Look<'_>,
 ) -> Word {
-    let Look { family, palette, blink_off } = look;
+    let Look { family, ligatures, palette, blink_off } = look;
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::new();
     let mut colors: Vec<(usize, Hsla)> = Vec::new();
@@ -597,7 +605,7 @@ fn shape_cells(
             }
             _ => {
                 if let Some((style, acc)) = current.take() {
-                    let run = text_run(acc, family, &style, palette, blink_off);
+                    let run = text_run(acc, family, ligatures, &style, palette, blink_off);
                     colors.push((text.len().saturating_sub(len), run.color));
                     runs.push(run);
                 }
@@ -606,7 +614,7 @@ fn shape_cells(
         }
     }
     if let Some((style, acc)) = current.take() {
-        let run = text_run(acc, family, &style, palette, blink_off);
+        let run = text_run(acc, family, ligatures, &style, palette, blink_off);
         colors.push((text.len(), run.color));
         runs.push(run);
     }
@@ -650,11 +658,12 @@ fn place(
     glyphs
 }
 
-fn mono_font(family: &str, style: &CellStyle) -> Font {
+fn mono_font(family: &str, ligatures: bool, style: &CellStyle) -> Font {
     fonts::terminal_font(
         family,
         style.flags.contains(StyleFlags::BOLD),
         style.flags.contains(StyleFlags::ITALIC),
+        ligatures,
     )
 }
 
@@ -663,7 +672,8 @@ fn mono_font(family: &str, style: &CellStyle) -> Font {
 /// clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
 fn cell_color(style: &CellStyle, palette: &Colors, blink_off: bool) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
-    let (fg_slot, bg_slot) = if inverse { (style.bg, style.fg) } else { (style.fg, style.bg) };
+    let fg = palette.bold_slot(style.fg, style.flags.contains(StyleFlags::BOLD));
+    let (fg_slot, bg_slot) = if inverse { (style.bg, fg) } else { (fg, style.bg) };
     let fg = palette.resolve(fg_slot, inverse);
     let bg = palette.resolve(bg_slot, !inverse);
     let mut color = hsla(palette.text_over(fg, bg));
@@ -691,13 +701,14 @@ fn underline_color(style: &CellStyle, palette: &Colors, text: Hsla) -> Hsla {
 fn text_run(
     len: usize,
     family: &str,
+    ligatures: bool,
     style: &CellStyle,
     palette: &Colors,
     blink_off: bool,
 ) -> TextRun {
     TextRun {
         len,
-        font: mono_font(family, style),
+        font: mono_font(family, ligatures, style),
         color: cell_color(style, palette, blink_off),
         background_color: None,
         underline: None,
@@ -832,18 +843,19 @@ impl Element for TerminalElement {
             picked
         });
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
-        let (base_size, height_mult, base_pad, cursor_blink) = {
+        let (base_size, height_mult, base_pad, cursor_blink, ligatures) = {
             let theme = self.view.read(cx).theme();
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
                 px(theme.spacing.sm),
                 theme.behaviour.cursor_blink,
+                theme.typography.ligatures,
             )
         };
         // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
         // cell is derived once per family, size and scale, not once per frame.
-        let base_font = fonts::terminal_font(&family, false, false);
+        let base_font = fonts::terminal_font(&family, false, false, ligatures);
         let (base_grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
             cache.grid(window, &family, &base_font, base_size, height_mult)
         });
@@ -917,7 +929,7 @@ impl Element for TerminalElement {
             });
 
             cache.sweep(crate::frames::index(cx));
-            let base = hash_base(focused, base_size, &family, palette);
+            let base = hash_base(focused, base_size, &family, ligatures, palette);
             // Rows the clip cannot show (a grid half off the viewport) are not built at all:
             // no quads, no words, no hashing. Paint walks only the rows prepared here.
             let clip = window.content_mask().bounds.intersect(&bounds);
@@ -938,7 +950,7 @@ impl Element for TerminalElement {
                 let Some(line) = row.line else {
                     let filler = filler.get_or_insert_with(|| {
                         let cells = [Cell::narrow('~', CellStyle::DEFAULT)];
-                        let look = Look { family: &family, palette, blink_off: false };
+                        let look = Look { family: &family, ligatures, palette, blink_off: false };
                         Rc::new(shape_cells(&text_system, &cells, base_size, base_cell_width, look))
                     });
                     prepared_rows.push(PreparedRow {
@@ -1026,7 +1038,7 @@ impl Element for TerminalElement {
                                 cells,
                                 base_size,
                                 base_cell_width,
-                                Look { family: &family, palette, blink_off },
+                                Look { family: &family, ligatures, palette, blink_off },
                             ))
                         });
                         (col, Rc::clone(shaped))
@@ -1049,8 +1061,14 @@ impl Element for TerminalElement {
                     if let Some(col) = grid_cols.checked_sub(width)
                         && typed < col
                     {
-                        let mut run =
-                            text_run(text.len(), &family, &CellStyle::DEFAULT, palette, false);
+                        let mut run = text_run(
+                            text.len(),
+                            &family,
+                            ligatures,
+                            &CellStyle::DEFAULT,
+                            palette,
+                            false,
+                        );
                         run.color = hsla_alpha(palette.theme.fg, alpha::TINT_STRONG);
                         let shaped = text_system.shape_line(
                             SharedString::from(text.clone()),
@@ -1108,8 +1126,14 @@ impl Element for TerminalElement {
             let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
                 .iter()
                 .map(|p| {
-                    let mut run =
-                        text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette, false);
+                    let mut run = text_run(
+                        p.text.len(),
+                        &family,
+                        ligatures,
+                        &CellStyle::DEFAULT,
+                        palette,
+                        false,
+                    );
                     run.color.a = 0.75;
                     run.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
@@ -1131,7 +1155,8 @@ impl Element for TerminalElement {
                 .collect();
             // The input method's composition, underlined at the cursor (what Terminal.app does).
             if let Some(text) = marked.filter(|_| cursor_visible) {
-                let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette, false);
+                let mut run =
+                    text_run(text.len(), &family, ligatures, &CellStyle::DEFAULT, palette, false);
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(run.color),
@@ -1864,7 +1889,12 @@ mod tests {
             ];
             let word = cx.update(|window, _| {
                 let colors = Colors::from(&Theme::default().terminal);
-                let look = Look { family: fonts::MONO_FAMILY, palette: &colors, blink_off: false };
+                let look = Look {
+                    family: fonts::MONO_FAMILY,
+                    ligatures: true,
+                    palette: &colors,
+                    blink_off: false,
+                };
                 shape_cells(window.text_system(), &cells, px(13.0), width, look)
             });
             let last = word.glyphs.last().expect("the x");
@@ -1926,6 +1956,22 @@ mod tests {
 
     /// A cell whose text would not read against its background is painted black or white
     /// once the theme sets a minimum contrast; inverse video is judged the painted way round.
+    #[test]
+    fn bold_text_is_painted_bright_when_asked() {
+        let mut theme = Theme::default().terminal;
+        let bold_red = CellStyle {
+            fg: slopty_grid::Color::Palette(1),
+            flags: StyleFlags::BOLD,
+            ..CellStyle::default()
+        };
+        assert_eq!(cell_color(&bold_red, &Colors::from(&theme), false), hsla(theme.ansi[1]));
+        theme.bold_is_bright = true;
+        let colors = Colors::from(&theme);
+        assert_eq!(cell_color(&bold_red, &colors, false), hsla(theme.ansi[9]));
+        let inverse = CellStyle { flags: StyleFlags::BOLD | StyleFlags::INVERSE, ..bold_red };
+        assert_eq!(cell_color(&inverse, &colors, false), hsla(theme.bg), "inverse: the bg slot");
+    }
+
     #[test]
     fn text_is_held_to_the_minimum_contrast() {
         let mut theme = Theme::default().terminal;

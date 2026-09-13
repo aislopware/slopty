@@ -2386,7 +2386,7 @@ fn tool_body(
             let shown = if open { lines.len() } else { lines.len().min(DIFF_PREVIEW_LINES) };
             let hidden = lines.len().saturating_sub(shown);
             let more = u32::try_from(hidden).unwrap_or(u32::MAX).saturating_add(*more_lines);
-            let font = crate::fonts::terminal_font(mono, false, false);
+            let font = crate::fonts::terminal_font(mono, false, false, theme.typography.ligatures);
             let mut rows: Vec<AnyElement> = lines
                 .iter()
                 .take(shown)

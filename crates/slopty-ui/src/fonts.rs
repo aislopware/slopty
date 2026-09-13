@@ -50,11 +50,16 @@ pub fn terminal_fallbacks() -> FontFallbacks {
 }
 
 /// A terminal font for `family` with the given weight and style, carrying the fallback chain.
+/// Without `ligatures` the font's `calt` is off, so `=>` stays two glyphs.
 #[must_use]
-pub fn terminal_font(family: &str, bold: bool, italic: bool) -> Font {
+pub fn terminal_font(family: &str, bold: bool, italic: bool, ligatures: bool) -> Font {
     Font {
         family: family.to_owned().into(),
-        features: FontFeatures::default(),
+        features: if ligatures {
+            FontFeatures::default()
+        } else {
+            FontFeatures::disable_ligatures()
+        },
         fallbacks: Some(terminal_fallbacks()),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },

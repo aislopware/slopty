@@ -85,6 +85,9 @@ pub struct TerminalPalette {
     /// (`100` = 1.0, off; `300` = 3.0). Text under it is painted black or white, whichever
     /// contrasts more with the background: ghostty's `minimum-contrast`.
     pub minimum_contrast: u16,
+    /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (xterm's `boldColors`, ghostty's
+    /// `bold-is-bright`), for the many schemes that make the bright half a lighter tint.
+    pub bold_is_bright: bool,
 }
 
 impl TerminalPalette {
@@ -117,6 +120,7 @@ impl TerminalPalette {
             Rgb::hex(0xffffff),
         ],
         minimum_contrast: 100,
+        bold_is_bright: false,
     };
     /// The default light palette (GitHub-light hues: legible on white without glare).
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
@@ -147,6 +151,7 @@ impl TerminalPalette {
             Rgb::hex(0x8c959f),
         ],
         minimum_contrast: 100,
+        bold_is_bright: false,
     };
 
     /// The palette as the host hears it: what colour queries answer while this client drives.
@@ -245,6 +250,17 @@ impl Colors {
         }
     }
 
+    /// The slot bold text takes: ANSI 0–7 becomes 8–15 when the theme says bold is bright.
+    #[must_use]
+    pub const fn bold_slot(&self, color: Color, bold: bool) -> Color {
+        match color {
+            Color::Palette(n) if bold && self.theme.bold_is_bright && n < 8 => {
+                Color::Palette(n.saturating_add(8))
+            }
+            other => other,
+        }
+    }
+
     /// The colour text `fg` is painted in over `bg`: itself, unless the theme's minimum
     /// contrast says it would not read, then black or white, whichever contrasts more.
     #[must_use]
@@ -275,6 +291,8 @@ pub struct Typography {
     pub mono_families: Vec<String>,
     /// Terminal font size in points.
     pub mono_size: f32,
+    /// Whether the terminal font's ligatures (`calt`) are shaped; off, `=>` stays two glyphs.
+    pub ligatures: bool,
     /// Terminal line height as a multiple of the one the font asks for (ghostty's
     /// `adjust-cell-height`). `1.0` is the font's own, which is what a terminal wants.
     pub mono_line_height: f32,
@@ -315,6 +333,7 @@ impl Default for Typography {
                 "Menlo".to_owned(),
             ],
             mono_size: 13.0,
+            ligatures: true,
             mono_line_height: 1.0,
             markdown_line_height: 1.5,
             ui_family: ".SystemUIFont".to_owned(),
@@ -485,6 +504,10 @@ pub struct Behaviour {
     /// A paste that could run commands (a newline outside bracketed paste, the bracket's end
     /// sequence inside it) waits for a confirmation.
     pub paste_protection: bool,
+    /// The pointer hides while typing into a terminal, until it moves (Terminal.app's way).
+    pub hide_pointer_while_typing: bool,
+    /// What a wheel or trackpad line is worth in grid lines, in hundredths (`100` = one).
+    pub scroll_multiplier: u16,
     /// What a remote window or display stream asks the host for.
     pub stream: StreamPrefs,
 }
@@ -495,6 +518,8 @@ impl Default for Behaviour {
             copy_on_select: false,
             cursor_blink: CursorBlink::Program,
             paste_protection: true,
+            hide_pointer_while_typing: true,
+            scroll_multiplier: 100,
             stream: StreamPrefs::default(),
         }
     }
@@ -533,11 +558,14 @@ pub struct StreamPrefs {
     pub max_bitrate_bps: u32,
     /// 10-bit HEVC.
     pub hdr: bool,
+    /// A stream opens with its audio silenced on this client (the title-bar pill still
+    /// toggles it).
+    pub muted: bool,
 }
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { fps: 60, max_bitrate_bps: 30_000_000, hdr: false }
+        Self { fps: 60, max_bitrate_bps: 30_000_000, hdr: false, muted: false }
     }
 }
 
@@ -682,6 +710,20 @@ mod tests {
         let plain = Colors::from(&theme);
         assert_eq!(plain.resolve(Color::Palette(17), false), theme.palette(17));
         assert_ne!(plain, colors, "the shaped-word cache keys on the colours");
+    }
+
+    #[test]
+    fn bold_is_bright_lifts_only_the_named_eight() {
+        let mut theme = TerminalPalette::DARK;
+        let colors = Colors::from(&theme);
+        assert_eq!(colors.bold_slot(Color::Palette(1), true), Color::Palette(1), "off");
+        theme.bold_is_bright = true;
+        let colors = Colors::from(&theme);
+        assert_eq!(colors.bold_slot(Color::Palette(1), true), Color::Palette(9));
+        assert_eq!(colors.bold_slot(Color::Palette(1), false), Color::Palette(1), "not bold");
+        assert_eq!(colors.bold_slot(Color::Palette(9), true), Color::Palette(9), "already bright");
+        assert_eq!(colors.bold_slot(Color::Palette(196), true), Color::Palette(196), "the cube");
+        assert_eq!(colors.bold_slot(Color::Default, true), Color::Default);
     }
 
     #[test]
