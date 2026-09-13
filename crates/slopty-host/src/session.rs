@@ -9,7 +9,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_engine::boundary::Boundary;
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine as _};
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
-use slopty_proto::terminal::{TermColors, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{ColorOverrides, TermColors, TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
 use tokio::sync::{mpsc, oneshot};
 
@@ -263,6 +263,8 @@ struct Actor {
     driver: Option<ClientId>,
     title: Option<String>,
     cwd: Option<String>,
+    /// The program's colour changes (OSC 4/10/11/12): broadcast, and sent to a late attach.
+    program_colors: ColorOverrides,
     /// [`crate::repo::root_of`] of `cwd`, resolved once per change rather than per summary.
     repo: Option<String>,
     exited: Option<i32>,
@@ -331,6 +333,7 @@ impl Actor {
             driver: None,
             title: None,
             cwd: None,
+            program_colors: ColorOverrides::default(),
             repo: None,
             exited: None,
             written_seq: 0,
@@ -518,6 +521,10 @@ impl Actor {
                     }
                 }
                 EngineEvent::Bell => self.broadcast(&TermEvent::Bell),
+                EngineEvent::Colors(colors) => {
+                    self.program_colors = colors.clone();
+                    self.broadcast(&TermEvent::Colors(colors));
+                }
                 EngineEvent::Notification { title, body } => {
                     self.broadcast(&TermEvent::Notification { title, body });
                 }
@@ -698,6 +705,9 @@ impl Actor {
                         client,
                         TermEvent::Cwd { path: c.clone(), repo: self.repo.clone() },
                     );
+                }
+                if self.program_colors != ColorOverrides::default() {
+                    self.send_to(client, TermEvent::Colors(self.program_colors.clone()));
                 }
                 match self.engine.full_frame(self.ack_seq) {
                     Ok(frame) => {

@@ -773,3 +773,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (BT.601 weights, over half is light) and, when the mode is on and the scheme actually
   flips on a `set_colors`, sends the report unprompted. Test:
   `the_colour_scheme_follows_the_drivers_background`.
+- ✅ **A program's colour changes reach every client** (2026-09-15, protocol 45). Themes
+  scripts (base16-shell, vim's `termguicolors` off, Emacs' `xterm-color` hooks) set OSC 4/10/11/12
+  and the terminal is expected to paint with them, not just answer queries with them; a shared
+  session must show the same colours on every client, including one attaching later. libghostty
+  keeps the current colours next to the defaults but has no change callback, so
+  `GhosttyEngine::write` reads fg/bg/cursor/palette against the defaults after each chunk
+  (three reads and two 768-byte palette copies) and a difference is `EngineEvent::Colors` with
+  the whole `ColorOverrides` set: whole, so a late attach and a viewer that saw every change
+  paint alike, and so a reset (OSC 104/110/111/112; RIS keeps them, as in xterm and libghostty)
+  needs no second message shape. The
+  session keeps the last set and sends it to an attach ahead of the full frame. The client
+  paints through `slopty_theme::Colors`: the theme with fg/bg/cursor/ANSI 0–15 replaced and a
+  map for cube entries (base16 sets 16–21), hashed into the shaped-word cache key so a change
+  never replays old colours. The driver's palette changing under the program's is not a change
+  of the program's, so a theme swap on the driver does not re-send it. Not taken: a diff per
+  change (smaller, but attach needs the whole set anyway) and a change callback in the fork (a
+  polling read per chunk is cheaper than a binding patch to carry).
+

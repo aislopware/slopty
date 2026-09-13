@@ -13,7 +13,8 @@ mod golden {
         CaptureTarget, Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest,
     };
     use slopty_proto::terminal::{
-        Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent, TermRequest,
+        ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
+        TermRequest,
     };
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -98,6 +99,15 @@ mod golden {
                     ansi,
                 }),
             },
+        );
+        snap(
+            "host_term_colors",
+            &TermEvent::Colors(ColorOverrides {
+                fg: None,
+                bg: Some([0x28, 0x2c, 0x34]),
+                cursor: Some([0xff, 0xff, 0xff]),
+                palette: vec![(1, [0xe0, 0x6c, 0x75]), (17, [0x00, 0x00, 0x5f])],
+            }),
         );
     }
 

@@ -22,7 +22,7 @@ use gpui::{
 };
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::{Placement, TermSize};
-use slopty_theme::{TerminalPalette, Theme, alpha};
+use slopty_theme::{Colors, Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
@@ -436,7 +436,7 @@ impl ShapeCache {
 /// The part of a shaped word's key that is the same for every word of a view this frame:
 /// size, family and the palette the styles were resolved through, so a theme swap never
 /// replays old colours.
-fn hash_base(focused: bool, font_size: Pixels, family: &str, palette: &TerminalPalette) -> u64 {
+fn hash_base(focused: bool, font_size: Pixels, family: &str, palette: &Colors) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     focused.hash(&mut h);
     f32::from(font_size).to_bits().hash(&mut h);
@@ -463,7 +463,7 @@ fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
 #[derive(Clone, Copy)]
 struct Look<'a> {
     family: &'a str,
-    palette: &'a TerminalPalette,
+    palette: &'a Colors,
     blink_off: bool,
 }
 
@@ -660,7 +660,7 @@ fn mono_font(family: &str, style: &CellStyle) -> Font {
 
 /// The colour a cell's glyphs take, with inverse, faint and invisible applied. In the off
 /// phase of the blink clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
-fn cell_color(style: &CellStyle, palette: &TerminalPalette, blink_off: bool) -> Hsla {
+fn cell_color(style: &CellStyle, palette: &Colors, blink_off: bool) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
     let fg_slot = if inverse { style.bg } else { style.fg };
     let mut color = hsla(palette.resolve(fg_slot, inverse));
@@ -676,7 +676,7 @@ fn cell_color(style: &CellStyle, palette: &TerminalPalette, blink_off: bool) -> 
 }
 
 /// The colour of a cell's underline: SGR 58 when the cell sets one, else the text colour.
-fn underline_color(style: &CellStyle, palette: &TerminalPalette, text: Hsla) -> Hsla {
+fn underline_color(style: &CellStyle, palette: &Colors, text: Hsla) -> Hsla {
     match style.underline_color {
         slopty_grid::Color::Default => text,
         other => hsla(palette.resolve(other, false)),
@@ -689,7 +689,7 @@ fn text_run(
     len: usize,
     family: &str,
     style: &CellStyle,
-    palette: &TerminalPalette,
+    palette: &Colors,
     blink_off: bool,
 ) -> TextRun {
     TextRun {
@@ -890,8 +890,9 @@ impl Element for TerminalElement {
         let prepared = {
             let view = self.view.read(cx);
             let theme = view.theme();
-            let palette = &theme.terminal;
             let state = view.state();
+            let colors = Colors::new(&theme.terminal, state.colors());
+            let palette = &colors;
             let rows_view = state.view();
             let predicted = view.predictions();
             let cursor = predicted.as_ref().map_or_else(|| state.cursor(), |(_, c)| *c);
@@ -908,7 +909,7 @@ impl Element for TerminalElement {
             let scrollbar = view.scrollbar_shown().then(|| {
                 let held = view.thumb_held();
                 let alpha = if held { alpha::TINT_PRESSED } else { alpha::TINT_STRONG };
-                (hsla_alpha(palette.fg, alpha), state.history_len(), view_offset)
+                (hsla_alpha(palette.theme.fg, alpha), state.history_len(), view_offset)
             });
 
             cache.sweep(crate::frames::index(cx));
@@ -994,7 +995,7 @@ impl Element for TerminalElement {
                     top_index.0.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
                 );
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
-                    quads.push((range.start, range.end, hsla(palette.selection)));
+                    quads.push((range.start, range.end, hsla(palette.theme.selection)));
                 }
                 // Search hits, sorted by line: the slice for this row by binary search.
                 let first = matches.partition_point(|m| m.line < index);
@@ -1003,9 +1004,9 @@ impl Element for TerminalElement {
                         break;
                     }
                     let color = if current == Some(first.saturating_add(k)) {
-                        palette.search_current
+                        palette.theme.search_current
                     } else {
-                        palette.search_match
+                        palette.theme.search_match
                     };
                     quads.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
                 }
@@ -1046,7 +1047,7 @@ impl Element for TerminalElement {
                     {
                         let mut run =
                             text_run(text.len(), &family, &CellStyle::DEFAULT, palette, false);
-                        run.color = hsla_alpha(palette.fg, alpha::TINT_STRONG);
+                        run.color = hsla_alpha(palette.theme.fg, alpha::TINT_STRONG);
                         let shaped = text_system.shape_line(
                             SharedString::from(text.clone()),
                             font_size,
@@ -1090,7 +1091,11 @@ impl Element for TerminalElement {
                 let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
                 let line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
                 let width = cell_width * f32::from(cursor_span(line, cursor.col));
-                (Bounds::new(point(x, y), size(width, line_height)), shape, hsla(palette.cursor))
+                (
+                    Bounds::new(point(x, y), size(width, line_height)),
+                    shape,
+                    hsla(palette.theme.cursor),
+                )
             });
 
             // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
@@ -1167,8 +1172,8 @@ impl Element for TerminalElement {
                 raster_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
-                background: hsla(palette.bg),
-                link: hsla(palette.fg),
+                background: hsla(palette.theme.bg),
+                link: hsla(palette.theme.fg),
                 scrollbar: scrollbar.and_then(|(color, history, offset)| {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
@@ -1853,11 +1858,8 @@ mod tests {
                 Cell::narrow('x', CellStyle::DEFAULT),
             ];
             let word = cx.update(|window, _| {
-                let look = Look {
-                    family: fonts::MONO_FAMILY,
-                    palette: &Theme::default().terminal,
-                    blink_off: false,
-                };
+                let colors = Colors::from(&Theme::default().terminal);
+                let look = Look { family: fonts::MONO_FAMILY, palette: &colors, blink_off: false };
                 shape_cells(window.text_system(), &cells, px(13.0), width, look)
             });
             let last = word.glyphs.last().expect("the x");
@@ -1907,10 +1909,14 @@ mod tests {
             "a blinking word is shaped once per phase"
         );
         assert!(
-            cell_color(&blinking[1].style, &Theme::default().terminal, true).a <= 0.0,
+            cell_color(&blinking[1].style, &Colors::from(&Theme::default().terminal), true).a
+                <= 0.0,
             "off phase: the glyph is hidden"
         );
-        assert!(cell_color(&blinking[1].style, &Theme::default().terminal, false).a > 0.5);
+        assert!(
+            cell_color(&blinking[1].style, &Colors::from(&Theme::default().terminal), false).a
+                > 0.5
+        );
     }
 
     #[test]

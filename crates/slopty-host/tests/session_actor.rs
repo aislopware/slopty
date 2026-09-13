@@ -381,6 +381,46 @@ mod actor {
         session.close();
     }
 
+    /// A program's colour change reaches every viewer, and a client attaching afterwards
+    /// learns the whole set ahead of its first frame.
+    #[tokio::test]
+    async fn the_programs_colours_reach_every_viewer_and_a_late_attach() {
+        let (session, mut child) = start(&[
+            "/bin/sh",
+            "-c",
+            "printf '\\033]11;#282c34\\033\\\\'; read x; printf '\\033]111\\033\\\\'; exit 0",
+        ]);
+        let a = ClientId::new();
+        let b = ClientId::new();
+        let (tx_a, mut rx_a) = mpsc::channel(64);
+        let (tx_b, mut rx_b) = mpsc::channel(64);
+        session.attach(a, size(60, 6), tx_a).unwrap();
+        let bg = Some([0x28, 0x2c, 0x34]);
+        let (events, _) = wait_for(&mut rx_a, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Colors(c) if c.bg == bg))
+        })
+        .await;
+        assert!(
+            events.iter().all(|e| !matches!(e, TermEvent::Colors(c) if c.bg.is_none())),
+            "only the change is sent, not the default set: {events:?}"
+        );
+        session.attach(b, size(60, 6), tx_b).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        let colors = events.iter().position(|e| matches!(e, TermEvent::Colors(c) if c.bg == bg));
+        let frame = events.iter().position(|e| matches!(e, TermEvent::Frame(_)));
+        assert!(colors < frame && colors.is_some(), "colours before the frame: {events:?}");
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Colors(c) if c.bg.is_none()))
+        })
+        .await;
+        child.wait().await.unwrap();
+        session.close();
+    }
+
     /// The opener drives even when another client attaches first.
     #[tokio::test]
     async fn reserved_driver_beats_the_first_attach() {

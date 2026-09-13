@@ -111,7 +111,12 @@ attach, on claiming the wheel, on a change) reach `VtEngine::set_colors`. The dr
 background also decides the colour scheme: `CSI ? 996 n` is answered light or dark from its
 luma, and a program that set mode 2031 hears a change of scheme unprompted. Cell colours still
 travel symbolically (`Color::Default`/`Palette`/`Rgb`), so each client's own theme paints
-them. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
+them — under the program's own changes: libghostty has no colour-change callback, so after
+each chunk the engine reads the current fg/bg/cursor/palette against the defaults, and a
+difference is `TermEvent::Colors(ColorOverrides)` with the whole set (an OSC 104/110/111/112
+reset sends it again without the entry; RIS keeps them, as xterm does). A late attach gets the set ahead of its first
+frame; `slopty_theme::Colors` paints it over the client's theme, ANSI 0–15 and the cube
+alike, and the shaped-word cache keys on it. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints

@@ -20,7 +20,7 @@ use slopty_grid::{
     RowUpdate, SemanticMark, Style, TermModes,
 };
 use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseEvent};
-use slopty_proto::terminal::{Frame, PixelRect, Placement, TermColors, TermSize};
+use slopty_proto::terminal::{ColorOverrides, Frame, PixelRect, Placement, TermColors, TermSize};
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
@@ -87,6 +87,8 @@ pub struct GhosttyEngine {
     uploads: Vec<ImageUpload>,
     /// The graphics storage's generation at the last frame: a change alone makes a frame.
     graphics_gen: u64,
+    /// The program's colour changes as last reported.
+    overrides: ColorOverrides,
 }
 
 /// A tracked row plus its absolute index.
@@ -165,6 +167,7 @@ impl GhosttyEngine {
             ledger: Ledger::default(),
             uploads: Vec::new(),
             graphics_gen: 0,
+            overrides: ColorOverrides::default(),
         };
         engine.reanchor()?;
         Ok(engine)
@@ -1150,6 +1153,25 @@ fn set_colors(term: &mut Terminal<'_, '_>, colors: &TermColors) -> Result<(), En
     Ok(())
 }
 
+/// What the program changed over the defaults (OSC 4/10/11/12): each current colour that
+/// differs from its default.
+fn overrides(term: &Terminal<'_, '_>) -> Result<ColorOverrides, EngineError> {
+    let bytes = |c: RgbColor| [c.r, c.g, c.b];
+    let changed = |now: Option<RgbColor>, default: Option<RgbColor>| {
+        now.filter(|&n| Some(n) != default).map(bytes)
+    };
+    let fg = changed(term.fg_color()?, term.default_fg_color()?);
+    let bg = changed(term.bg_color()?, term.default_bg_color()?);
+    let cursor = changed(term.cursor_color()?, term.default_cursor_color()?);
+    let (now, default) = (term.color_palette()?, term.default_color_palette()?);
+    let palette = (0..=u8::MAX)
+        .zip(now.0.iter().zip(default.0.iter()))
+        .filter(|(_, (n, d))| n != d)
+        .map(|(i, (n, _))| (i, bytes(*n)))
+        .collect();
+    Ok(ColorOverrides { fg, bg, cursor, palette })
+}
+
 impl VtEngine for GhosttyEngine {
     fn write(&mut self, bytes: &[u8]) {
         // Feed up to each prompt mark separately so the cursor row at the mark is exact.
@@ -1161,6 +1183,14 @@ impl VtEngine for GhosttyEngine {
             rest = tail;
         }
         self.feed(rest);
+        // libghostty has no colour-change callback; the current set against the defaults is
+        // a handful of reads per chunk, and a change is an event.
+        if let Ok(now) = overrides(&self.term)
+            && now != self.overrides
+        {
+            self.overrides = now.clone();
+            self.events.borrow_mut().push(EngineEvent::Colors(now));
+        }
     }
 
     fn resize(&mut self, size: TermSize) -> Result<(), EngineError> {
@@ -1827,6 +1857,54 @@ mod tests {
         assert!(is_light([0xff, 0xff, 0xff]) && !is_light([0x0e, 0x0f, 0x12]));
     }
 
+    /// OSC 10/11/12 and OSC 4 sets are reported as the whole set of changes, once per change;
+    /// a reset (OSC 104/110/111/112) reports the set without them, and RIS keeps them as xterm
+    /// does; the driver's palette changing under the program's is not a change of the program's.
+    #[test]
+    fn the_programs_colour_changes_are_reported_as_a_whole_set() {
+        let mut e = engine(10, 3);
+        let colors = |e: &mut GhosttyEngine| -> Vec<ColorOverrides> {
+            e.drain_events()
+                .into_iter()
+                .filter_map(|ev| match ev {
+                    EngineEvent::Colors(c) => Some(c),
+                    _ => None,
+                })
+                .collect()
+        };
+        let bg = Some([0x28, 0x2c, 0x34]);
+        e.write(b"\x1b]11;#282c34\x1b\\");
+        assert_eq!(colors(&mut e), vec![ColorOverrides { bg, ..ColorOverrides::default() }]);
+        e.write(b"\x1b]4;1;rgb:e0/6c/75;17;#123456\x1b\\\x1b]12;#ffffff\x1b\\");
+        let red = (1, [0xe0, 0x6c, 0x75]);
+        assert_eq!(
+            colors(&mut e),
+            vec![ColorOverrides {
+                fg: None,
+                bg,
+                cursor: Some([0xff; 3]),
+                palette: vec![red, (17, [0x12, 0x34, 0x56])],
+            }]
+        );
+        e.write(b"\x1b]12;#ffffff\x1b\\");
+        assert!(colors(&mut e).is_empty(), "setting what is set says nothing");
+        e.set_colors(&slopty_theme::TerminalPalette::LIGHT.wire()).unwrap();
+        e.write(b"x");
+        assert!(colors(&mut e).is_empty(), "the driver's palette is under the program's");
+        e.write(b"\x1b]111\x1b\\\x1b]104;17\x1b\\");
+        assert_eq!(
+            colors(&mut e),
+            vec![ColorOverrides {
+                cursor: Some([0xff; 3]),
+                palette: vec![red],
+                ..ColorOverrides::default()
+            }]
+        );
+        e.write(b"\x1bc");
+        assert!(colors(&mut e).is_empty(), "RIS keeps the dynamic colours, as xterm does");
+        e.write(b"\x1b]112\x1b\\\x1b]104\x1b\\");
+        assert_eq!(colors(&mut e), vec![ColorOverrides::default()]);
+    }
     #[test]
     fn colour_queries_answer_with_the_drivers_colours_once_set() {
         let mut e = engine(10, 3);

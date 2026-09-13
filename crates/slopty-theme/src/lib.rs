@@ -9,9 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use slopty_grid::Color;
-use slopty_proto::terminal::TermColors;
+use slopty_proto::terminal::{ColorOverrides, TermColors};
 
 /// An sRGB colour.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -155,6 +157,61 @@ impl TerminalPalette {
             let grey = 8_u8.saturating_add(index.saturating_sub(232).saturating_mul(10));
             Rgb { r: grey, g: grey, b: grey }
         }
+    }
+}
+
+/// The theme's terminal colours under a program's changes (OSC 4, 10, 11, 12): what the cells
+/// are painted with.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Colors {
+    /// The theme with the program's default text, background, cursor and ANSI 0–15 on it.
+    pub theme: TerminalPalette,
+    /// The program's changes to palette entries 16–255 (0–15 are on `theme`).
+    pub cube: BTreeMap<u8, Rgb>,
+}
+
+impl Colors {
+    /// `theme` with `set` painted over it.
+    #[must_use]
+    pub fn new(theme: &TerminalPalette, set: &ColorOverrides) -> Self {
+        let rgb = |[r, g, b]: [u8; 3]| Rgb { r, g, b };
+        let mut theme = *theme;
+        if let Some(fg) = set.fg {
+            theme.fg = rgb(fg);
+        }
+        if let Some(bg) = set.bg {
+            theme.bg = rgb(bg);
+        }
+        if let Some(cursor) = set.cursor {
+            theme.cursor = rgb(cursor);
+        }
+        let mut cube = BTreeMap::new();
+        for &(index, color) in &set.palette {
+            if let Some(named) = theme.ansi.get_mut(usize::from(index)) {
+                *named = rgb(color);
+            } else {
+                cube.insert(index, rgb(color));
+            }
+        }
+        Self { theme, cube }
+    }
+
+    /// Resolve a grid colour to RGB. `Default` uses `fg` or `bg` depending on `slot_is_bg`.
+    #[must_use]
+    pub fn resolve(&self, color: Color, slot_is_bg: bool) -> Rgb {
+        match color {
+            Color::Palette(n) => {
+                self.cube.get(&n).copied().unwrap_or_else(|| self.theme.palette(n))
+            }
+            other => self.theme.resolve(other, slot_is_bg),
+        }
+    }
+}
+
+impl From<&TerminalPalette> for Colors {
+    /// The theme as it is: nothing changed.
+    fn from(theme: &TerminalPalette) -> Self {
+        Self { theme: *theme, cube: BTreeMap::new() }
     }
 }
 
@@ -479,5 +536,27 @@ mod tests {
         let p = Theme::new(Variant::Dark).terminal;
         assert_eq!(p.palette(52), Rgb { r: 95, g: 0, b: 0 }, "16 + 36: one step of red");
         assert_eq!(p.palette(22), Rgb { r: 0, g: 95, b: 0 }, "16 + 6: one step of green");
+    }
+    #[test]
+    fn a_programs_colours_paint_over_the_themes() {
+        let theme = TerminalPalette::DARK;
+        let rgb = |r, g, b| Rgb { r, g, b };
+        let set = ColorOverrides {
+            fg: Some([1, 2, 3]),
+            bg: None,
+            cursor: Some([9, 9, 9]),
+            palette: vec![(1, [4, 5, 6]), (17, [7, 8, 9])],
+        };
+        let colors = Colors::new(&theme, &set);
+        assert_eq!(colors.resolve(Color::Default, false), rgb(1, 2, 3));
+        assert_eq!(colors.resolve(Color::Default, true), theme.bg, "not set: the theme's");
+        assert_eq!(colors.theme.cursor, rgb(9, 9, 9));
+        assert_eq!(colors.resolve(Color::Palette(1), false), rgb(4, 5, 6));
+        assert_eq!(colors.resolve(Color::Palette(17), false), rgb(7, 8, 9), "cube entries too");
+        assert_eq!(colors.resolve(Color::Palette(18), false), theme.palette(18));
+        assert_eq!(colors.resolve(Color::Rgb(7, 7, 7), false), rgb(7, 7, 7));
+        let plain = Colors::from(&theme);
+        assert_eq!(plain.resolve(Color::Palette(17), false), theme.palette(17));
+        assert_ne!(plain, colors, "the shaped-word cache keys on the colours");
     }
 }

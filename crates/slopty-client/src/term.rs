@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, SemanticMark, TermModes};
 use slopty_proto::terminal::{
-    Frame, IMAGE_CACHE_BYTES, Placement, SearchMatch, TermEvent, TermRequest, TermSize,
+    ColorOverrides, Frame, IMAGE_CACHE_BYTES, Placement, SearchMatch, TermEvent, TermRequest,
+    TermSize,
 };
 
 /// Lines kept client-side. Newest-first eviction; the host retains 50k.
@@ -107,6 +108,8 @@ pub struct TermState {
     image_bytes: usize,
     /// The placements of the latest frame, in paint order.
     placements: Vec<Placement>,
+    /// The program's colour changes over the theme.
+    colors: ColorOverrides,
 }
 
 /// The pixels of one image the host sent (kitty graphics).
@@ -180,6 +183,7 @@ impl TermState {
             images: BTreeMap::new(),
             image_bytes: 0,
             placements: Vec::new(),
+            colors: ColorOverrides::default(),
         }
     }
 
@@ -187,6 +191,12 @@ impl TermState {
     #[must_use]
     pub fn placements(&self) -> &[Placement] {
         &self.placements
+    }
+
+    /// The program's colour changes over the theme (OSC 4/10/11/12).
+    #[must_use]
+    pub const fn colors(&self) -> &ColorOverrides {
+        &self.colors
     }
 
     /// The pixels a placement names, once the host sent that generation.
@@ -346,6 +356,10 @@ impl TermState {
                 Vec::new()
             }
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],
+            TermEvent::Colors(colors) => {
+                self.colors = colors;
+                Vec::new()
+            }
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
                 self.running = None;
@@ -824,6 +838,9 @@ mod tests {
             state.apply(TermEvent::Error("lost".into())),
             vec![Effect::Error("lost".into())]
         );
+        let colors = ColorOverrides { bg: Some([0x28, 0x2c, 0x34]), ..ColorOverrides::default() };
+        assert_eq!(state.apply(TermEvent::Colors(colors.clone())), vec![]);
+        assert_eq!(state.colors(), &colors, "the program's colours are kept for the painter");
         let hit = SearchMatch { line: LineIndex(4), col: 2, len: 3 };
         assert_eq!(
             state.apply(TermEvent::Matches { needle: "x".into(), total: 1, matches: vec![hit] }),

@@ -197,6 +197,23 @@ pub struct TermColors {
     pub ansi: [[u8; 3]; 16],
 }
 
+/// The colours a program changed over the client's own (OSC 4, 10, 11, 12), as `[r, g, b]`.
+///
+/// `None` and an absent index mean the client's colour; an OSC 104/110/111/112 reset or a
+/// full reset sends the event again with the entry gone. The whole set is carried each time,
+/// so a client attaching later paints the same colours as one that watched every change.
+#[derive(Clone, Default, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ColorOverrides {
+    /// Default text (OSC 10).
+    pub fg: Option<[u8; 3]>,
+    /// Default background (OSC 11).
+    pub bg: Option<[u8; 3]>,
+    /// Cursor (OSC 12).
+    pub cursor: Option<[u8; 3]>,
+    /// Palette entries the program set (OSC 4), by index, ascending.
+    pub palette: Vec<(u8, [u8; 3])>,
+}
+
 /// One search hit, in cells.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SearchMatch {
@@ -380,4 +397,6 @@ pub enum TermEvent {
         /// `width * height * 4` bytes.
         rgba: Vec<u8>,
     },
+    /// The program changed (or reset) the terminal's colours; the whole current set.
+    Colors(ColorOverrides),
 }

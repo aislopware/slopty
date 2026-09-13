@@ -29,7 +29,7 @@ pub use ghostty::GhosttyEngine;
 pub use graphics::ImageUpload;
 use slopty_grid::{Line, LineIndex, TermModes};
 use slopty_proto::input::{KeyEvent, MouseEvent};
-use slopty_proto::terminal::{Frame, TermColors, TermSize};
+use slopty_proto::terminal::{ColorOverrides, Frame, TermColors, TermSize};
 
 /// Engine failure. libghostty-vt reports out-of-memory and invalid arguments; both are bugs or
 /// resource exhaustion, never a consequence of PTY output, so the session is torn down.
@@ -69,6 +69,9 @@ pub enum EngineEvent {
         /// Its body.
         body: String,
     },
+    /// The program changed or reset the terminal's colours (OSC 4/10/11/12, 104/110/111/112,
+    /// a full reset); the whole set now over the driver's.
+    Colors(ColorOverrides),
 }
 
 /// Configuration for a new engine.
