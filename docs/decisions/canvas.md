@@ -464,9 +464,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   shows, and a grid answer from one is ignored; a note's ↩ goes to the note, a file card's opens its find bar on the
   needle (`FileView::find_with`, `PaletteRun::FindInFile`); (6) ⌘⇧F is bound in gpui-kit's `Input` context too, after the
   kit's own binding (replace), so it works from a find bar, the palette or a note — a global
-  find beats replace in a one-line field. Tests: headless
+  find beats replace in a one-line field; (7) ⌘⇧F from a card whose find bar holds a needle
+  starts from that needle (`active_needle`: the terminal's or the file card's
+  `search_needle`), selected so typing replaces it, and the first fan-out is sent at once —
+  what was sought in one card is what is sought in all of them, and the escalation is one
+  chord. Tests: headless
   `find_in_every_card_lists_the_cards_with_hits_and_opens_ones_find_bar` (the shell asked,
   not the agent; the conversation, note and file card lines before any answer, a stale answer ignored, the
   shell's line joins with its count, ↩ reveals it with the bar on the needle and its own
   search sent; ⌘⇧F from the shell's find bar, ↩ on the file card's line opens its bar on
-  the first of two hits).
+  the first of two hits; ⌘⇧F from that bar lists the hits for its needle before a key is
+  typed).

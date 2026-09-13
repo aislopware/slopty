@@ -457,9 +457,13 @@ impl Render for WindowPicker {
             .child(
                 div()
                     .id("picker")
+                    .debug_selector(|| "picker".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label(title)
-                    .w(px(560.0))
+                    // The desktop width, or what a phone leaves after a margin each side.
+                    .w_full()
+                    .max_w(px(560.0))
+                    .mx(px(theme.spacing.md))
                     .max_h(px(520.0))
                     .flex()
                     .flex_col()

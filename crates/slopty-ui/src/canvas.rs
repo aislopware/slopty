@@ -1673,10 +1673,34 @@ impl CanvasView {
             return;
         }
         let theme = self.theme.clone();
-        let palette = cx.new(|cx| CommandPalette::find(theme, window, cx));
+        let seed = self.active_needle(cx);
+        let palette = cx.new(|cx| CommandPalette::find(&seed, theme, window, cx));
         self.find_needle = Some(String::new());
         self.find_hits.clear();
         self.show_palette(palette, window, cx);
+        if !seed.is_empty() {
+            self.find_changed(&seed, cx);
+        }
+    }
+
+    /// The active card's own find-bar needle, to start a find in every card from: what was
+    /// sought in one card is what is sought in all of them. Empty with no bar open.
+    fn active_needle(&self, cx: &App) -> String {
+        let Some(active) = self.active.and_then(|id| self.doc.get(id)) else {
+            return String::new();
+        };
+        let needle = match &active.kind {
+            ItemKind::Terminal { session } => self
+                .terminals
+                .get(session)
+                .and_then(|v| v.read(cx).search_needle().map(str::to_owned)),
+            ItemKind::File { .. } => self
+                .files
+                .get(&active.id)
+                .and_then(|v| v.read(cx).search_needle().map(str::to_owned)),
+            ItemKind::Note { .. } | ItemKind::Window { .. } | ItemKind::Display { .. } => None,
+        };
+        needle.unwrap_or_default()
     }
 
     fn show_palette(
@@ -5371,6 +5395,45 @@ mod tests {
 
     /// ⌘] and ⌘[ walk the cards in reading order — rows by their top edge, left to right —
     /// wrapping at both ends, revealing each; nothing active starts at the first or the last.
+    /// The palette and the picker are their desktop width on a desktop and, on a phone, what
+    /// the screen leaves after a margin each side; neither runs off the edge.
+    #[gpui::test]
+    fn the_palette_and_the_picker_fit_the_screen_they_are_on(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        let within = |cx: &mut VisualTestContext, selector: &'static str, width: f32| {
+            let b = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is up"));
+            let (left, right) = (f32::from(b.origin.x), f32::from(b.right()));
+            assert!(left >= 0.0 && right <= width, "{selector} on {width} wide: {b:?}");
+            f32::from(b.size.width)
+        };
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        assert!((within(cx, "palette", VIEWPORT.0) - 520.0).abs() < 0.5, "the desktop width");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-alt-r");
+        cx.run_until_parked();
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(None, Vec::new(), cx));
+        cx.run_until_parked();
+        assert!((within(cx, "picker", VIEWPORT.0) - 560.0).abs() < 0.5, "the desktop width");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let phone = (393.0, 852.0);
+        cx.simulate_resize(size(px(phone.0), px(phone.1)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        assert!(within(cx, "palette", phone.0) < phone.0, "a margin each side");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-alt-r");
+        cx.run_until_parked();
+        view.update_in(cx, |c, _window, cx| c.agent_sessions(None, Vec::new(), cx));
+        cx.run_until_parked();
+        assert!(within(cx, "picker", phone.0) < phone.0, "a margin each side");
+    }
+
     #[gpui::test]
     fn the_cards_are_walked_in_reading_order(cx: &mut TestAppContext) {
         let (view, _rx, me, cx) = canvas(cx);
@@ -6783,6 +6846,36 @@ mod tests {
         });
         assert_eq!(hits, Some(Some((vec![0, 2], Some(0)))), "finding, on the first hit");
         assert!(cx.debug_bounds("file-search").is_some(), "the file's find bar is up");
+
+        // ⌘⇧F from a card whose bar holds a needle starts from that needle: the lines are up
+        // and the shell asked before anything is typed.
+        drain(&mut rx);
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(
+            options,
+            [
+                format!("{agent_title} 1 hit"),
+                format!("{file_title} 2 hits"),
+                format!("{note_title} 2 hits")
+            ],
+            "the file card's needle seeds the find: {tree:#?}"
+        );
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session, req: TermRequest::Search { needle, max: 1, .. } }
+                    if *session == a && needle == "err"
+            )),
+            "the shell is asked for the seed: {sent:?}"
+        );
     }
 
     /// A directory typed into the palette, spelled from the host's root or home with a

@@ -410,9 +410,18 @@ impl CommandPalette {
     }
 
     /// The palette as a search across every card: no commands, no path lines, the field
-    /// says what it is for, and the lines are what the canvas sets from the hits.
-    pub fn find(theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::with_field(Vec::new(), "Find in every card", true, theme, window, cx)
+    /// says what it is for, and the lines are what the canvas sets from the hits. `seed` is
+    /// what the field starts with (the active card's own needle), selected so typing replaces
+    /// it; the canvas runs the first search itself, since a set value is no change.
+    pub fn find(seed: &str, theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let palette = Self::with_field(Vec::new(), "Find in every card", true, theme, window, cx);
+        if !seed.is_empty() {
+            palette.input.update(cx, |input, cx| {
+                input.set_value(seed.to_owned(), window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        palette
     }
 
     fn with_field(
@@ -596,7 +605,10 @@ impl Render for CommandPalette {
                     .debug_selector(|| "palette".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label("Commands")
-                    .w(px(520.0))
+                    // The desktop width, or what a phone leaves after a margin each side.
+                    .w_full()
+                    .max_w(px(520.0))
+                    .mx(px(theme.spacing.md))
                     .max_h(px(440.0))
                     .flex()
                     .flex_col()

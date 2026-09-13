@@ -259,6 +259,12 @@ impl FileView {
         self.refresh_hits(cx);
     }
 
+    /// The find bar's needle, when the bar is open.
+    #[must_use]
+    pub fn search_needle(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.needle.as_str())
+    }
+
     /// The text's lines as drawn (empty until the host answers).
     #[must_use]
     pub fn lines(&self) -> &[SharedString] {

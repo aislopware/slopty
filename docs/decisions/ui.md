@@ -378,6 +378,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_past_conversation_is_resumed_from_the_picker` types a word, sees one row, presses ↩ and
   gets the `OpenAgent` for it.
 
+- ✅ **The palette and the picker fit the phone** (2026-09-13). Both were a fixed desktop
+  width (520 / 560 pt) centred on the backdrop, which on a 393 pt phone put a third of the
+  dialog off each edge: the field was typed into blind and the rows' right ends were gone.
+  Ruling: `w_full` capped by `max_w` at the desktop width, with the theme's `md` margin each
+  side, so a desktop sees exactly what it did and a phone sees the dialog inside its screen.
+  Test: headless `the_palette_and_the_picker_fit_the_screen_they_are_on` (the desktop widths
+  at 1000 pt, both inside 393 pt with a margin after a resize).
+
 - ✅ **Design tokens: one system for every surface (Warp-class pass, 2026-09-05).** The UI
   grew title bars, pills, badges, separators, a composer, an attention row, a minimap, a HUD,
   a key bar and a picker on six tokens (`canvas`, `panel`, `border`, `text`, `text_muted`,
