@@ -334,13 +334,32 @@ impl Focusable for ScreenView {
     }
 }
 
+/// The quality a stream is asked for: the settings' rate, ceiling and depth at `scale`.
+#[must_use]
+pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality {
+    Quality {
+        fps: prefs.fps,
+        bitrate_bps: prefs.max_bitrate_bps,
+        scale,
+        codec: if prefs.hdr { VideoCodec::HevcMain10 } else { VideoCodec::Hevc },
+        hdr: prefs.hdr,
+    }
+}
+
 impl ScreenView {
-    /// Swap the theme (chrome colours only; the picture is the host's).
+    /// Swap the theme: chrome colours, and the stream settings, which a live stream asks
+    /// the host for at once (the scale it holds stays; that follows the canvas).
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        if self.theme != theme {
-            self.theme = theme;
-            cx.notify();
+        if self.theme == theme {
+            return;
         }
+        let wanted = quality_of(theme.behaviour.stream, self.quality.scale);
+        if wanted != self.quality {
+            self.quality = wanted;
+            self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
+        }
+        self.theme = theme;
+        cx.notify();
     }
 
     /// Wrap an opened stream.
@@ -1340,6 +1359,30 @@ mod tests {
             ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
         });
         (view, rx)
+    }
+
+    /// A settings change to the stream's rate, ceiling or depth reaches a live stream as a
+    /// `SetQuality` at the scale it holds; a chrome-only change asks nothing.
+    #[gpui::test]
+    fn new_stream_settings_are_asked_of_a_live_stream(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        let mut theme = Theme::default();
+        theme.behaviour.copy_on_select = true;
+        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        assert!(sent(&mut rx).is_empty(), "nothing about the stream changed");
+        theme.behaviour.stream.fps = 30;
+        theme.behaviour.stream.max_bitrate_bps = 8_000_000;
+        theme.behaviour.stream.hdr = true;
+        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        let asked = sent(&mut rx);
+        let [ScreenRequest::SetQuality { stream: StreamId(4), quality }] = asked.as_slice() else {
+            panic!("{asked:?}");
+        };
+        assert_eq!((quality.fps, quality.bitrate_bps, quality.hdr), (30, 8_000_000, true));
+        assert_eq!(quality.codec, VideoCodec::HevcMain10);
+        assert!((quality.scale - 1.0).abs() < f32::EPSILON, "the scale is the canvas's");
+        view.update(cx, |v, cx| v.set_theme(theme, cx));
+        assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");
     }
 
     /// The host's cursor picture replaces the drawn arrow at the pointer, its hotspot on

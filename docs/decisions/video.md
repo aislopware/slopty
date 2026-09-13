@@ -774,3 +774,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   detector's pessimism rules (a gap it cannot attribute is charged to the link on purpose,
   2026-09-05), not about pacing. `Shape::None` is kept as the baseline row precisely so the next
   reading of these numbers starts from it.
+
+- ✅ **The stream's rate, ceiling and depth are settings** (2026-09-15). `[remote] fps |
+  max_bitrate_mbps | hdr` in `settings.toml` (defaults 60, 30, off: what every stream asked
+  for before). They ride on `Theme::behaviour.stream`, so the settings poll delivers them
+  the way it delivers colours: a new stream opens at them (`quality_of`, the scale still
+  from the canvas zoom), and a live one hears a `SetQuality` from `ScreenView::set_theme`
+  at the scale it holds — a bitrate change is applied in place on the host, a rate or
+  depth change rebuilds its encoder, as `set_quality` already ruled. `hdr` selects HEVC
+  Main 10 (P010 capture); it is the client's choice, since the host cannot know what the
+  client's display shows. Out-of-range values (fps outside 15–120, a ceiling outside 1–200
+  Mbit/s) read as the defaults, as the font sizes do. Tests: `remote_keys`,
+  `remote_settings_ride_on_the_theme`, `new_stream_settings_are_asked_of_a_live_stream`.

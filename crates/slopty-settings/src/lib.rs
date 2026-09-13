@@ -96,6 +96,26 @@ impl Default for TerminalSettings {
     }
 }
 
+/// `[remote]`: what a remote window or display stream asks the host for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    /// Frames per second the host captures and encodes at (15–120).
+    pub fps: u16,
+    /// The most the host may send per stream, in megabits per second (1–200): the ceiling
+    /// its bitrate controller grows towards, never the rate it starts at.
+    pub max_bitrate_mbps: u16,
+    /// Encode 10-bit HEVC (Main 10) so an HDR source keeps its range; off, everything is
+    /// 8-bit.
+    pub hdr: bool,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self { fps: 60, max_bitrate_mbps: 30, hdr: false }
+    }
+}
+
 /// The whole file.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -106,6 +126,8 @@ pub struct Settings {
     pub theme: ThemeSettings,
     /// Terminal behaviour.
     pub terminal: TerminalSettings,
+    /// Remote window and display streams.
+    pub remote: RemoteSettings,
 }
 
 /// Why a file could not be used.
@@ -212,6 +234,15 @@ appearance = {appearance}
 minimum_contrast = {minimum_contrast}
 # Copy a selection to the clipboard as soon as it is made.
 copy_on_select = {copy_on_select}
+
+[remote]
+# Frames per second a remote window or display is captured at (15 to 120).
+fps = {fps}
+# Ceiling for one stream in megabits per second (1 to 200); the host grows
+# towards it as the link allows.
+max_bitrate_mbps = {max_bitrate_mbps}
+# 10-bit HEVC, for an HDR source.
+hdr = {hdr}
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
@@ -219,6 +250,9 @@ copy_on_select = {copy_on_select}
             appearance = toml_string(appearance_name(d.theme.appearance)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
+            fps = d.remote.fps,
+            max_bitrate_mbps = d.remote.max_bitrate_mbps,
+            hdr = d.remote.hdr,
         )
     }
 
@@ -309,6 +343,17 @@ mod tests {
         assert_eq!(d.theme.appearance, Appearance::System);
         assert_eq!(d.terminal.minimum_contrast, 1.0, "off, as ghostty");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
+        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps, d.remote.hdr), (60, 30, false));
+    }
+
+    #[test]
+    fn remote_keys() {
+        let loaded = Settings::parse("[remote]\nfps = 30\nmax_bitrate_mbps = 8\nhdr = true\n");
+        assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert_eq!(
+            loaded.settings.remote,
+            RemoteSettings { fps: 30, max_bitrate_mbps: 8, hdr: true }
+        );
     }
 
     #[test]
@@ -399,6 +444,7 @@ mod tests {
         assert!(text.contains("appearance = \"system\""), "{text}");
         assert!(text.contains("minimum_contrast = 1.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
+        assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
     }
 
     #[test]

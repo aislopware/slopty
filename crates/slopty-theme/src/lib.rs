@@ -480,6 +480,25 @@ pub enum Variant {
 pub struct Behaviour {
     /// A selection goes to the clipboard as soon as it is made.
     pub copy_on_select: bool,
+    /// What a remote window or display stream asks the host for.
+    pub stream: StreamPrefs,
+}
+
+/// The quality a remote stream is opened at (the scale follows the canvas zoom, not this).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct StreamPrefs {
+    /// Frames per second.
+    pub fps: u16,
+    /// The bitrate ceiling, bits per second.
+    pub max_bitrate_bps: u32,
+    /// 10-bit HEVC.
+    pub hdr: bool,
+}
+
+impl Default for StreamPrefs {
+    fn default() -> Self {
+        Self { fps: 60, max_bitrate_bps: 30_000_000, hdr: false }
+    }
 }
 
 /// The whole theme.

@@ -1664,11 +1664,12 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// Requested quality for a new stream: full scale unless the canvas is zoomed out.
+    /// Requested quality for a new stream: the settings' rate, ceiling and depth, at full
+    /// scale unless the canvas is zoomed out.
     fn quality_for(&self) -> Quality {
         let zoom = self.camera.zoom.clamp(0.25, 1.0);
         let scale = (zoom * 4.0).ceil() / 4.0;
-        Quality { scale, ..Quality::default() }
+        crate::screen::quality_of(self.theme.behaviour.stream, scale)
     }
 
     /// Lines the app adds to the palette after the canvas's own (settings, hosts).

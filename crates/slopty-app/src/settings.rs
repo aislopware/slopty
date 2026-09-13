@@ -37,6 +37,10 @@ const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
 const CONTRAST: std::ops::RangeInclusive<f32> = 1.0..=21.0;
+/// Below 15 the stream is a slideshow; above 120 no display here refreshes.
+const FPS: std::ops::RangeInclusive<u16> = 15..=120;
+/// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
+const MBPS: std::ops::RangeInclusive<u16> = 1..=200;
 
 /// Whether a window appearance is one of the dark ones.
 #[must_use]
@@ -64,6 +68,17 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.typography.ui_size = sized(settings.font.ui_size, &UI_SIZE, defaults.ui_size);
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
+    let remote = &settings.remote;
+    let defaults = slopty_theme::StreamPrefs::default();
+    theme.behaviour.stream = slopty_theme::StreamPrefs {
+        fps: if FPS.contains(&remote.fps) { remote.fps } else { defaults.fps },
+        max_bitrate_bps: if MBPS.contains(&remote.max_bitrate_mbps) {
+            u32::from(remote.max_bitrate_mbps).saturating_mul(1_000_000)
+        } else {
+            defaults.max_bitrate_bps
+        },
+        hdr: remote.hdr,
+    };
     theme
 }
 
@@ -154,6 +169,22 @@ mod tests {
         assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "a typo reads as off");
         s.terminal.minimum_contrast = f32::INFINITY;
         assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100);
+    }
+
+    #[test]
+    fn remote_settings_ride_on_the_theme() {
+        let mut s = Settings::default();
+        let stream = theme_for(&s, true).behaviour.stream;
+        assert_eq!((stream.fps, stream.max_bitrate_bps, stream.hdr), (60, 30_000_000, false));
+        s.remote.fps = 30;
+        s.remote.max_bitrate_mbps = 8;
+        s.remote.hdr = true;
+        let stream = theme_for(&s, true).behaviour.stream;
+        assert_eq!((stream.fps, stream.max_bitrate_bps, stream.hdr), (30, 8_000_000, true));
+        s.remote.fps = 0;
+        s.remote.max_bitrate_mbps = 500;
+        let stream = theme_for(&s, true).behaviour.stream;
+        assert_eq!((stream.fps, stream.max_bitrate_bps), (60, 30_000_000), "typos read as default");
     }
 
     #[test]

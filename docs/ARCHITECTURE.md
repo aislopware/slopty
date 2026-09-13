@@ -1105,7 +1105,9 @@ item, ⌘,, opens it in the default editor, writing the commented defaults first
 missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | ui_size`,
 `[theme] appearance = dark | light | system`, `[terminal] minimum_contrast | copy_on_select`
 (the ratio rides on `TerminalPalette` in hundredths, the flag on `Theme::behaviour`, see
-decisions/terminal.md); every key has a default, unknown keys warn, a
+decisions/terminal.md), `[remote] fps | max_bitrate_mbps | hdr` (`Theme::behaviour.stream`;
+a live stream re-asks its quality on change, see decisions/video.md); every key has a
+default, unknown keys warn, a
 file that does not parse is skipped with the error in the top bar for a few seconds. The app
 polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from
 `appearance`, `system` following `window.appearance()` through `observe_window_appearance`)
