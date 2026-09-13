@@ -1,5 +1,13 @@
-include = [ "**/Cargo.toml", "**/*.toml" ]
-exclude = [ "vendor/**", ".research/**", "target/**", ".claude/**" ]
+# Named roots, not `**/*.toml`: a bare glob walks `.research/` and every `target/` (minutes on a
+# busy disk) before the exclude list gets a say.
+include = [
+    "*.toml",
+    ".cargo/*.toml",
+    ".config/*.toml",
+    "apps/**/*.toml",
+    "crates/**/*.toml",
+    "xtask/**/*.toml",
+]
 
 [formatting]
 align_entries = false
