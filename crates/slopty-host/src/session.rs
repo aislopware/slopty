@@ -547,12 +547,16 @@ impl Actor {
         if self.viewers.is_empty() {
             // Still consume dirty state so the next attach gets a clean full frame.
             let _consumed = self.engine.take_frame(self.ack_seq);
+            let _unwatched = self.engine.drain_images();
             return;
         }
         match self.engine.take_frame(self.ack_seq) {
             Ok(Some(frame)) => {
                 let now = tokio::time::Instant::now();
                 self.last_frame = Some(now);
+                for image in self.images() {
+                    self.broadcast(&image);
+                }
                 self.broadcast(&TermEvent::Frame(frame));
                 if let (Some(input_at), Some(read_at)) =
                     (self.echo.input_at.take(), self.echo.read_at.take())
@@ -627,9 +631,29 @@ impl Actor {
 
     fn send_full_frame_to_all(&mut self) {
         match self.engine.full_frame(self.ack_seq) {
-            Ok(frame) => self.broadcast(&TermEvent::Frame(frame)),
+            Ok(frame) => {
+                for image in self.images() {
+                    self.broadcast(&image);
+                }
+                self.broadcast(&TermEvent::Frame(frame));
+            }
             Err(e) => tracing::error!(session = %self.id, error = %e, "full frame failed"),
         }
+    }
+
+    /// The pixels the frame just taken places and the clients do not hold: sent ahead of it.
+    fn images(&mut self) -> Vec<TermEvent> {
+        self.engine
+            .drain_images()
+            .into_iter()
+            .map(|u| TermEvent::Image {
+                id: u.id,
+                generation: u.generation,
+                width: u.width,
+                height: u.height,
+                rgba: u.rgba,
+            })
+            .collect()
     }
 
     /// Returns `false` when the actor should stop.
@@ -657,7 +681,12 @@ impl Actor {
                     );
                 }
                 match self.engine.full_frame(self.ack_seq) {
-                    Ok(frame) => self.send_to(client, TermEvent::Frame(frame)),
+                    Ok(frame) => {
+                        for image in self.images() {
+                            self.send_to(client, image);
+                        }
+                        self.send_to(client, TermEvent::Frame(frame));
+                    }
                     Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
                 }
                 if let Some(status) = self.exited {

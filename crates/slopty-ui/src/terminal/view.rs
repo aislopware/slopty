@@ -1,6 +1,7 @@
 //! `TerminalView`: one attached session on screen.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
@@ -14,7 +15,7 @@ use gpui::{
     size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use slopty_client::term::{BlockHead, CommandBlock};
+use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
@@ -25,7 +26,7 @@ use slopty_proto::agent::{
     ToolDetail, TranscriptFollow, TranscriptUpdate,
 };
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
-use slopty_proto::terminal::{SearchMatch, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{Placement, SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
@@ -270,10 +271,31 @@ pub enum TerminalViewEvent {
     },
 }
 
+/// A placed image with the texture the element paints it from.
+#[derive(Clone, Debug)]
+pub struct PlacedImage {
+    /// Where the host laid it out.
+    pub placement: Placement,
+    /// The texture, BGRA premultiplied as GPUI wants it.
+    pub image: Arc<gpui::RenderImage>,
+    /// The texture's size in pixels.
+    pub width: u32,
+    /// The texture's size in pixels.
+    pub height: u32,
+}
+
+/// The texture made of one image id, at the generation it was made from.
+struct Texture {
+    generation: u64,
+    image: Arc<gpui::RenderImage>,
+}
+
 /// One session's view.
 pub struct TerminalView {
     session: SessionId,
     state: TermState,
+    /// One texture per placed image, made when its pixels arrive, dropped with them.
+    textures: HashMap<u32, Texture>,
     out: mpsc::Sender<ClientMsg>,
     focus: FocusHandle,
     theme: Theme,
@@ -420,6 +442,7 @@ impl TerminalView {
         Self {
             session,
             state: TermState::new(size),
+            textures: HashMap::new(),
             out,
             focus: cx.focus_handle(),
             theme,
@@ -2409,6 +2432,50 @@ impl TerminalView {
         self.took.get(&prompt).copied()
     }
 
+    /// The images the latest frame places, each with its texture.
+    ///
+    /// A texture is made once per image generation when the pixels are first painted, and
+    /// dropped from the atlas when the state forgets the pixels (its cache budget) or a newer
+    /// generation replaces them.
+    pub fn placed_images(&mut self, window: &mut Window) -> Vec<PlacedImage> {
+        let mut out = Vec::new();
+        for placement in self.state.placements() {
+            let Some(pixels) = self.state.image(placement) else { continue };
+            let texture = match self.textures.get(&placement.image) {
+                Some(t) if t.generation == placement.generation => Arc::clone(&t.image),
+                _ => {
+                    let Some(image) = texture_of(pixels) else { continue };
+                    let made =
+                        Texture { generation: placement.generation, image: Arc::clone(&image) };
+                    if let Some(old) = self.textures.insert(placement.image, made) {
+                        let _dropped = window.drop_image(old.image);
+                    }
+                    image
+                }
+            };
+            let (width, height) = (pixels.width, pixels.height);
+            out.push(PlacedImage { placement: *placement, image: texture, width, height });
+        }
+        let stale: Vec<u32> = self
+            .textures
+            .iter()
+            .filter(|(id, t)| !self.state.holds(**id, t.generation))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(gone) = self.textures.remove(&id) {
+                let _dropped = window.drop_image(gone.image);
+            }
+        }
+        out
+    }
+
+    /// Textures currently made (tests).
+    #[must_use]
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
     /// The element measured the grid: `cols × rows` fit, with these metrics.
     pub fn fitted(&mut self, size: TermSize, metrics: CellMetrics, cx: &mut Context<Self>) {
         self.metrics = Some(metrics);
@@ -3448,6 +3515,24 @@ pub fn picture_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+/// A GPUI texture of the pixels: BGRA with the alpha premultiplied, as the renderer samples.
+fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
+    let bgra: Vec<u8> = pixels
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, a]| {
+            let pre = |c: u8| {
+                u8::try_from(u32::from(c).saturating_mul(u32::from(a)) / 255).unwrap_or(255)
+            };
+            [pre(b), pre(g), pre(r), a]
+        })
+        .collect();
+    let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, bgra)?;
+    Some(Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])))
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
@@ -3543,6 +3628,7 @@ mod tests {
                     first_visible_line: LineIndex(6),
                     total_lines: 9,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: screen
                         .iter()
                         .enumerate()
@@ -3698,6 +3784,84 @@ mod tests {
         assert!(cx.debug_bounds("block-header").is_none());
     }
 
+    /// A placed image gets one texture, kept across frames while its generation holds and
+    /// dropped when the frame stops placing it and the state forgets the pixels.
+    #[gpui::test]
+    fn a_placed_image_has_one_texture_until_its_pixels_are_forgotten(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::PixelRect;
+        let (view, _rx, cx) = terminal(cx);
+        let placement = Placement {
+            image: 7,
+            generation: 3,
+            col: 0,
+            row: 0,
+            cols: 1,
+            rows: 1,
+            x_offset: 0,
+            y_offset: 0,
+            width: 2,
+            height: 1,
+            source: PixelRect { x: 0, y: 0, width: 2, height: 1 },
+            z: 0,
+        };
+        let frame = |seq, images: Vec<Placement>| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                images,
+                updates: Vec::new(),
+            })
+        };
+        let image = TermEvent::Image {
+            id: 7,
+            generation: 3,
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(image, cx);
+            view.apply(frame(1, vec![placement]), cx);
+        });
+        let placed = view.update_in(cx, |view, window, _cx| view.placed_images(window));
+        assert_eq!(placed.len(), 1);
+        assert_eq!((placed[0].width, placed[0].height), (2, 1));
+        assert_eq!(placed[0].placement, placement);
+        let first = Arc::clone(&placed[0].image);
+        // Half-transparent blue premultiplied to BGRA.
+        assert_eq!(first.as_bytes(0), Some(&[0, 0, 255, 255, 128, 0, 0, 128][..]));
+        // The next frame places it again: the same texture.
+        view.update_in(cx, |view, _window, cx| view.apply(frame(2, vec![placement]), cx));
+        let again = view.update_in(cx, |view, window, _cx| view.placed_images(window));
+        assert!(Arc::ptr_eq(&again[0].image, &first), "made once");
+        assert_eq!(view.read_with(cx, |view, _cx| view.texture_count()), 1);
+        // A frame without it keeps the texture while the pixels are held (a scroll may bring
+        // it back); a newer generation of the id replaces it.
+        view.update_in(cx, |view, _window, cx| view.apply(frame(3, Vec::new()), cx));
+        let _none = view.update_in(cx, |view, window, _cx| view.placed_images(window));
+        assert_eq!(view.read_with(cx, |view, _cx| view.texture_count()), 1);
+        let newer = Placement { generation: 4, ..placement };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Image { id: 7, generation: 4, width: 1, height: 1, rgba: vec![9; 4] },
+                cx,
+            );
+            view.apply(frame(4, vec![newer]), cx);
+        });
+        let replaced = view.update_in(cx, |view, window, _cx| view.placed_images(window));
+        assert!(!Arc::ptr_eq(&replaced[0].image, &first), "a new generation, a new texture");
+        assert_eq!(view.read_with(cx, |view, _cx| view.texture_count()), 1);
+    }
+
     /// The shaped-word cache: three rows made of two words shape two entries, another frame
     /// with the same words shapes nothing new, and a new word adds one.
     #[gpui::test]
@@ -3716,6 +3880,7 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                images: Vec::new(),
                 updates: rows
                     .iter()
                     .enumerate()
@@ -3772,6 +3937,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![
                         row(0, "see http://a.b", Vec::new()),
                         row(
@@ -3879,6 +4045,7 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                images: Vec::new(),
                 updates: vec![RowUpdate { row: 0, line: Line::from_text("hi", 10, style) }],
             })
         };
@@ -4144,6 +4311,7 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                images: Vec::new(),
                 updates: vec![RowUpdate {
                     row: 0,
                     line: Line::from_text("$ ", 20, Style::DEFAULT),
@@ -4224,6 +4392,7 @@ mod tests {
                     first_visible_line: LineIndex(100),
                     total_lines: 103,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: rows
                         .iter()
                         .enumerate()
@@ -4276,6 +4445,7 @@ mod tests {
             first_visible_line: LineIndex(first),
             total_lines: first.saturating_add(u64::try_from(rows.len()).unwrap_or(3)),
             input_ack: 0,
+            images: Vec::new(),
             updates: rows
                 .iter()
                 .enumerate()
@@ -5304,6 +5474,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
                         line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
@@ -5431,6 +5602,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![
                         RowUpdate {
                             row: 0,
@@ -5484,6 +5656,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![
                         RowUpdate {
                             row: 0,
@@ -5548,6 +5721,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
                         line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT),
@@ -5609,6 +5783,7 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    images: Vec::new(),
                     updates: vec![RowUpdate { row: 0, line: Line::from_text("abc", 10, style) }],
                 }),
                 cx,

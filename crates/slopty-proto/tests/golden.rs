@@ -12,7 +12,9 @@ mod golden {
     use slopty_proto::screen::{
         CaptureTarget, Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest,
     };
-    use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest};
+    use slopty_proto::terminal::{
+        Frame, PixelRect, Placement, SearchMatch, TermEvent, TermRequest,
+    };
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
 
@@ -865,7 +867,35 @@ mod golden {
                 total_lines: 12,
                 input_ack: 7,
                 updates: vec![RowUpdate { row: 0, line }],
+                images: vec![Placement {
+                    image: 9,
+                    generation: 4,
+                    col: 2,
+                    row: -1,
+                    cols: 3,
+                    rows: 2,
+                    x_offset: 1,
+                    y_offset: 0,
+                    width: 24,
+                    height: 32,
+                    source: PixelRect { x: 0, y: 0, width: 6, height: 8 },
+                    z: -1,
+                }],
             }),
+        );
+    }
+
+    #[test]
+    fn term_image() {
+        snap(
+            "host_term_image",
+            &TermEvent::Image {
+                id: 9,
+                generation: 4,
+                width: 2,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+            },
         );
     }
 }
@@ -917,6 +947,7 @@ mod size_report {
                     total_lines: u64::from(rows),
                     input_ack: 0,
                     updates,
+                    images: Vec::new(),
                 };
                 let bytes = codec::encode(&TermEvent::Frame(frame)).expect("encodes");
                 eprintln!("frame {cols}x{rows} {name}: {} bytes", bytes.len());

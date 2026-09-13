@@ -673,3 +673,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   or the path with its `:line` — and the card draws it as a chip at its bottom-left
   (`link-preview`) while ⌘ is held over the run, muted panel text, clipped to the card,
   gone with the modifier. Test: `a_cmd_hover_previews_the_links_target`.
+
+- ✅ **Images are placed by the host and painted by the client** (2026-09-15). Kitty
+  graphics is how today's tools show a picture in the terminal (image previews, plots,
+  `timg`, agent screenshots). libghostty already parses the protocol and holds the images;
+  what Slopty adds is the wire. The host does the layout (`placement_render_info`, at the
+  client's cell pixels, which `TermSize::metrics` already carries for mouse reports), so
+  the client never learns kitty semantics: a `Frame` lists placements as cells, offsets, a
+  painted size and a source rectangle, and pixels come once per image generation as
+  `TermEvent::Image` — RGBA, converted from whatever was stored (RGB, gray, decoded PNG),
+  sampled down by a whole factor when a single image would not fit the codec's 16 MiB
+  frame. Pixels are sent ahead of the first frame that places them (the client paints
+  nothing for a placement whose pixels it lacks, and repaints when they land), and again
+  after a full frame, because an attaching client holds nothing. Both sides run the same
+  cache rule (`IMAGE_CACHE_BYTES`, least recently placed first) so the host's ledger of
+  what a client holds stays right without an acknowledgement; a client that attached
+  mid-stream may hold more than the ledger says, which is harmless. The storage generation
+  is part of the engine's dirty check, so deleting a placement makes a frame although no
+  cell moved. The PNG decoder is Slopty's own (the binding's `RustPngDecoder` has no
+  constructor); it expands every colour type to RGBA. Virtual placements (Unicode
+  placeholders, what some multiplexers use) are skipped for now. Tests: engine
+  `a_transmitted_image_is_placed_and_uploaded_once`, `a_placement_change_alone_makes_a_frame`,
+  `rgb_and_png_transmissions_arrive_as_rgba`, `graphics::tests`; client
+  `images_are_kept_for_their_placements_and_the_oldest_placed_go_first`; view
+  `a_placed_image_has_one_texture_until_its_pixels_are_forgotten`; element
+  `a_placement_is_painted_at_its_cell_in_the_hosts_pixels`; goldens `host_frame`,
+  `host_term_image` (protocol 43).

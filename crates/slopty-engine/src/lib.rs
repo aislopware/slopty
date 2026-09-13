@@ -20,10 +20,12 @@
 pub mod boundary;
 pub mod convert;
 pub mod ghostty;
+pub mod graphics;
 pub mod osc133;
 pub mod search;
 
 pub use ghostty::GhosttyEngine;
+pub use graphics::ImageUpload;
 use slopty_grid::{Line, LineIndex, TermModes};
 use slopty_proto::input::{KeyEvent, MouseEvent};
 use slopty_proto::terminal::{Frame, TermSize};
@@ -122,4 +124,8 @@ pub trait VtEngine {
 
     /// Side effects since the last drain.
     fn drain_events(&mut self) -> Vec<EngineEvent>;
+
+    /// Images the frames taken since the last drain place and the clients do not hold yet:
+    /// sent ahead of those frames (see [`graphics::Ledger`]).
+    fn drain_images(&mut self) -> Vec<ImageUpload>;
 }

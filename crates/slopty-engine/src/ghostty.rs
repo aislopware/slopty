@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
+use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
 use libghostty_vt::selection::Selection;
@@ -16,8 +17,9 @@ use slopty_grid::{
     RowUpdate, SemanticMark, Style, TermModes,
 };
 use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseEvent};
-use slopty_proto::terminal::{Frame, TermSize};
+use slopty_proto::terminal::{Frame, PixelRect, Placement, TermSize};
 
+use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
 
 /// Longest title or body of a desktop notification passed on: a banner shows a line or two,
@@ -70,6 +72,14 @@ pub struct GhosttyEngine {
     exit_marks: BTreeMap<u64, Option<u8>>,
     /// Absolute lines a primary prompt started on (`133;A`).
     prompt_starts: BTreeSet<u64>,
+    /// Walks the kitty graphics placements of the active screen.
+    placements: PlacementIterator<'static>,
+    /// The images the clients hold.
+    ledger: Ledger,
+    /// Images to send ahead of the frames just taken.
+    uploads: Vec<ImageUpload>,
+    /// The graphics storage's generation at the last frame: a change alone makes a frame.
+    graphics_gen: u64,
 }
 
 /// A tracked row plus its absolute index.
@@ -106,6 +116,10 @@ impl GhosttyEngine {
         // limit is the contract; lift the byte cap so it governs.
         term.set_scrollback_max_bytes(None)?;
         term.set_scrollback_max_lines(Some(config.scrollback_lines as usize))?;
+        // Kitty graphics: a storage limit turns the protocol on; the decoder is per thread,
+        // and the engine lives on its session's thread.
+        term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
+        kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
         install_callbacks(&mut term, &events)?;
@@ -136,6 +150,10 @@ impl GhosttyEngine {
             osc: osc133::Scanner::default(),
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
+            placements: PlacementIterator::new()?,
+            ledger: Ledger::default(),
+            uploads: Vec::new(),
+            graphics_gen: 0,
         };
         engine.reanchor()?;
         Ok(engine)
@@ -433,9 +451,12 @@ impl GhosttyEngine {
         let snapshot = self.render.update(&self.term)?;
         let dirty = snapshot.dirty()?;
         let full = force_full || dirty == Dirty::Full;
-        if !full && dirty == Dirty::Clean {
+        // A placement added or deleted moves no cell, but the frame must say so.
+        let graphics_gen = self.term.kitty_graphics()?.generation()?;
+        if !full && dirty == Dirty::Clean && graphics_gen == self.graphics_gen {
             return Ok(None);
         }
+        self.graphics_gen = graphics_gen;
 
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
@@ -526,6 +547,11 @@ impl GhosttyEngine {
 
         let total = self.total_rows()?;
         self.seq = self.seq.wrapping_add(1);
+        if force_full {
+            // A client attaching or resyncing holds nothing yet.
+            self.ledger.clear();
+        }
+        let images = if graphics_gen == 0 { Vec::new() } else { self.placed()? };
         Ok(Some(Frame {
             seq: self.seq,
             full,
@@ -539,7 +565,68 @@ impl GhosttyEngine {
             total_lines: self.base.saturating_add(total),
             input_ack,
             updates,
+            images,
         }))
+    }
+
+    /// Every placement on the viewport, as libghostty lays it out at the client's cell size.
+    ///
+    /// The pixels of any image the clients do not hold are queued for upload first. A
+    /// virtual placement (Unicode placeholders) is not drawn.
+    fn placed(&mut self) -> Result<Vec<Placement>, EngineError> {
+        let graphics = self.term.kitty_graphics()?;
+        let mut out = Vec::new();
+        let mut it = self.placements.update(&graphics)?;
+        while let Some(p) = it.next() {
+            if p.is_virtual()? {
+                continue;
+            }
+            let id = p.image_id()?;
+            let Some(image) = graphics.image(id) else { continue };
+            let info = p.placement_render_info(&image, &self.term)?;
+            if !info.viewport_visible {
+                continue;
+            }
+            let generation = image.generation()?;
+            let shrink = if let Some(shrink) = self.ledger.held(id, generation) {
+                shrink
+            } else {
+                let Some(data) = image.data()? else { continue };
+                let (w, h) = (image.width()?, image.height()?);
+                let Some((up, shrink)) =
+                    graphics::upload(id, generation, image.format()?, w, h, data)
+                else {
+                    continue;
+                };
+                let bytes = up.rgba.len();
+                self.uploads.push(up);
+                self.ledger.insert(id, Shipped { generation, shrink, bytes, last: self.seq });
+                shrink
+            };
+            self.ledger.touch(id, self.seq);
+            let scaled = |v: u32| v.checked_div(shrink).unwrap_or(v);
+            out.push(Placement {
+                image: id,
+                generation,
+                col: info.viewport_col,
+                row: info.viewport_row,
+                cols: info.grid_cols,
+                rows: info.grid_rows,
+                x_offset: p.x_offset()?,
+                y_offset: p.y_offset()?,
+                width: info.pixel_width,
+                height: info.pixel_height,
+                source: PixelRect {
+                    x: scaled(info.source_x),
+                    y: scaled(info.source_y),
+                    width: scaled(info.source_width),
+                    height: scaled(info.source_height),
+                },
+                z: p.z()?,
+            });
+        }
+        self.ledger.prune();
+        Ok(out)
     }
 
     fn read_line(&self, screen_y: u32, cols: u16) -> Result<Line, EngineError> {
@@ -1114,6 +1201,10 @@ impl VtEngine for GhosttyEngine {
 
     fn drain_events(&mut self) -> Vec<EngineEvent> {
         std::mem::take(&mut *self.events.borrow_mut())
+    }
+
+    fn drain_images(&mut self) -> Vec<ImageUpload> {
+        std::mem::take(&mut self.uploads)
     }
 }
 
@@ -2093,5 +2184,121 @@ mod checkpoint_tests {
         assert_eq!(alt_enter_at(b"\x1b[?25l\x1b[?47h"), Some(6));
         assert_eq!(alt_enter_at(b"\x1b[?1049l\x1b[?2004h"), None);
         assert_eq!(alt_enter_at(b"plain"), None);
+    }
+}
+
+#[cfg(test)]
+mod graphics_tests {
+    use pretty_assertions::assert_eq;
+    use slopty_proto::input::CellMetrics;
+
+    use super::*;
+
+    fn engine() -> GhosttyEngine {
+        GhosttyEngine::new(EngineConfig {
+            size: TermSize {
+                cols: 20,
+                rows: 5,
+                metrics: CellMetrics { cell_width: 8, cell_height: 16 },
+            },
+            scrollback_lines: 100,
+        })
+        .unwrap()
+    }
+
+    fn base64(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let at = |i: usize| chunk.get(i).copied().unwrap_or(0);
+            let n = u32::from(at(0)).wrapping_shl(16)
+                | u32::from(at(1)).wrapping_shl(8)
+                | u32::from(at(2));
+            let digit = |shift: u32| char::from(T[(n.wrapping_shr(shift) & 63) as usize]);
+            let digits = [digit(18), digit(12), digit(6), digit(0)];
+            let (keep, pad) = match chunk.len() {
+                1 => (2, "=="),
+                2 => (3, "="),
+                _ => (4, ""),
+            };
+            out.extend(digits.iter().take(keep));
+            out.push_str(pad);
+        }
+        out
+    }
+
+    /// A kitty transmit-and-place of `w × h` pixels in `format` (32 RGBA, 24 RGB, 100 PNG).
+    fn transmit(id: u32, format: u8, w: u32, h: u32, pixels: &[u8]) -> Vec<u8> {
+        format!("\x1b_Ga=T,f={format},s={w},v={h},i={id};{}\x1b\\", base64(pixels)).into_bytes()
+    }
+
+    #[test]
+    fn a_transmitted_image_is_placed_and_uploaded_once() {
+        let mut e = engine();
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 9, 9, 9, 128];
+        e.write(&transmit(1, 32, 2, 2, &pixels));
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        let generation = frame.images[0].generation;
+        assert_eq!(
+            frame.images,
+            vec![Placement {
+                image: 1,
+                generation,
+                col: 0,
+                row: 0,
+                cols: 1,
+                rows: 1,
+                x_offset: 0,
+                y_offset: 0,
+                width: 2,
+                height: 2,
+                source: PixelRect { x: 0, y: 0, width: 2, height: 2 },
+                z: 0,
+            }]
+        );
+        assert_eq!(
+            e.drain_images(),
+            vec![ImageUpload { id: 1, generation, width: 2, height: 2, rgba: pixels.to_vec() }]
+        );
+        // Text under it: the placement is listed again, the pixels are not sent again.
+        e.write(b"\r\nhello");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.images.len(), 1);
+        assert_eq!(e.drain_images(), vec![]);
+        // A client attaching holds nothing: a full frame ships them again.
+        let _full = e.full_frame(0).unwrap();
+        assert_eq!(e.drain_images().len(), 1);
+    }
+
+    #[test]
+    fn a_placement_change_alone_makes_a_frame() {
+        let mut e = engine();
+        e.write(&transmit(1, 32, 1, 1, &[1, 2, 3, 4]));
+        let _first = e.take_frame(0).unwrap().expect("a frame");
+        assert!(e.take_frame(0).unwrap().is_none(), "nothing changed");
+        // Delete every placement: no cell changes, the frame says the image is gone.
+        e.write(b"\x1b_Ga=d,d=a\x1b\\");
+        let frame = e.take_frame(0).unwrap().expect("a frame for the deletion");
+        assert_eq!(frame.images, vec![]);
+    }
+
+    #[test]
+    fn rgb_and_png_transmissions_arrive_as_rgba() {
+        let mut e = engine();
+        e.write(&transmit(1, 24, 1, 1, &[10, 20, 30]));
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 1, 1);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[40, 50, 60]).unwrap();
+        }
+        e.write(&transmit(2, 100, 1, 1, &png_bytes));
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.images.iter().map(|p| p.image).collect::<Vec<_>>(), vec![1, 2]);
+        let rgba: Vec<(u32, Vec<u8>)> =
+            e.drain_images().into_iter().map(|u| (u.id, u.rgba)).collect();
+        assert_eq!(rgba, vec![(1, vec![10, 20, 30, 255]), (2, vec![40, 50, 60, 255])]);
     }
 }

@@ -218,7 +218,60 @@ pub struct Frame {
     pub input_ack: u64,
     /// Changed rows.
     pub updates: Vec<RowUpdate>,
+    /// Every image placed on the visible screen (kitty graphics), in paint order.
+    pub images: Vec<Placement>,
 }
+
+/// A rectangle of an image, in its pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct PixelRect {
+    /// Left edge.
+    pub x: u32,
+    /// Top edge.
+    pub y: u32,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+}
+
+/// One image the program placed on the grid (kitty graphics).
+///
+/// Positions are cells of the viewport, sizes the cell pixels of `TermSize::metrics`, as the
+/// host laid it out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Placement {
+    /// The image, as `TermEvent::Image` carried it.
+    pub image: u32,
+    /// The pixels' generation: a re-sent image with the same id has a newer one.
+    pub generation: u64,
+    /// Top-left cell column; negative when the placement starts left of the viewport.
+    pub col: i32,
+    /// Top-left cell row; negative when it has scrolled partly above the viewport.
+    pub row: i32,
+    /// Cells covered.
+    pub cols: u32,
+    /// Rows covered.
+    pub rows: u32,
+    /// Pixel offset from the cell's left edge.
+    pub x_offset: u32,
+    /// Pixel offset from the cell's top edge.
+    pub y_offset: u32,
+    /// Painted width, in cell pixels.
+    pub width: u32,
+    /// Painted height, in cell pixels.
+    pub height: u32,
+    /// The part of the image shown, in the pixels `TermEvent::Image` carried.
+    pub source: PixelRect,
+    /// Z order: negative sits under the text, `≥ 0` over it.
+    pub z: i32,
+}
+
+/// Bytes of image pixels a client keeps for placements, and the host assumes it keeps.
+///
+/// The least recently placed image goes first once the budget is over. The host re-sends an
+/// image it dropped from its own ledger when a placement needs it again.
+pub const IMAGE_CACHE_BYTES: usize = 48 * 1024 * 1024;
 
 /// Host → client on the session stream.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -292,5 +345,21 @@ pub enum TermEvent {
         title: String,
         /// Its body.
         body: String,
+    },
+    /// The pixels of an image a `Frame` places (kitty graphics).
+    ///
+    /// Sent before the first frame that places it and again after a `full` frame. RGBA,
+    /// row-major, no padding.
+    Image {
+        /// The image id programs and placements use.
+        id: u32,
+        /// Its generation: a re-transmission under the same id carries a newer one.
+        generation: u64,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// `width * height * 4` bytes.
+        rgba: Vec<u8>,
     },
 }

@@ -109,6 +109,21 @@ session so a click reveals the card, and bounces the Dock like an agent's attent
 the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::BELL`) and, when no window
 is active, plays the alert sound and bounces the Dock.
 
+**Kitty graphics.** libghostty keeps the images (`KITTY_STORAGE_BYTES` per screen; PNG
+decoded through the `png` crate by `slopty_engine::graphics::PngDecoder`) and lays the
+placements out at the client's cell pixels. Every `Frame` lists the placements on the
+viewport (`Frame.images: Vec<Placement>` — cell, offsets, painted size, source rectangle,
+z), and a placement's pixels travel once as `TermEvent::Image` (RGBA, sampled down by a
+whole factor when over `IMAGE_WIRE_BYTES`) ahead of the first frame that places them, and
+again after a full frame (attach, resync). Host and client keep the same bounded cache
+(`IMAGE_CACHE_BYTES`, least recently placed first: `graphics::Ledger` and
+`TermState::keep_image`), so the host knows what to re-send. A placement change with no cell
+change still makes a frame (the storage generation is part of the dirty check). The view
+makes one GPUI texture per image generation (`TerminalView::placed_images`, BGRA
+premultiplied) and the element paints the source rectangle into the placement's cells
+(`placement_bounds`), under the glyphs for `z < 0` and over them otherwise, shifted by the
+rows a scrolled view shows. Virtual (Unicode placeholder) placements are not drawn.
+
 **Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh, bash and fish:
 at every start it writes the bundled scripts (`slopty-pty/assets/shell`, compiled in with
 `include_str!`, so nothing reads the source tree at runtime) under `<data dir>/shell` and

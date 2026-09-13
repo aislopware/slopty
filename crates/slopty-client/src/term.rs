@@ -1,7 +1,12 @@
 //! Terminal session state on the client.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, SemanticMark, TermModes};
-use slopty_proto::terminal::{Frame, SearchMatch, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{
+    Frame, IMAGE_CACHE_BYTES, Placement, SearchMatch, TermEvent, TermRequest, TermSize,
+};
 
 /// Lines kept client-side. Newest-first eviction; the host retains 50k.
 pub const CACHE_LINES: usize = 20_000;
@@ -96,6 +101,27 @@ pub struct TermState {
     latest_prompt: Option<LineIndex>,
     /// The command running since the cursor left its prompt, with the prompt it was typed at.
     running: Option<(LineIndex, String)>,
+    /// Images the host sent, by id, for the placements of the frames.
+    images: BTreeMap<u32, TermImage>,
+    /// Bytes of pixels in `images`.
+    image_bytes: usize,
+    /// The placements of the latest frame, in paint order.
+    placements: Vec<Placement>,
+}
+
+/// The pixels of one image the host sent (kitty graphics).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TermImage {
+    /// Its generation: a placement names the one it was laid out for.
+    pub generation: u64,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// RGBA, row-major; shared with whatever texture the view makes of it.
+    pub rgba: Arc<[u8]>,
+    /// The frame that last placed it (the cache drops the least recently placed first).
+    pub last: u64,
 }
 
 /// The head of a command block, as [`TermState::block_head`] reads it from the marks.
@@ -151,6 +177,50 @@ impl TermState {
             frames: 0,
             latest_prompt: None,
             running: None,
+            images: BTreeMap::new(),
+            image_bytes: 0,
+            placements: Vec::new(),
+        }
+    }
+
+    /// The placements of the latest frame, in paint order.
+    #[must_use]
+    pub fn placements(&self) -> &[Placement] {
+        &self.placements
+    }
+
+    /// The pixels a placement names, once the host sent that generation.
+    #[must_use]
+    pub fn image(&self, placement: &Placement) -> Option<&TermImage> {
+        self.images.get(&placement.image).filter(|i| i.generation == placement.generation)
+    }
+
+    /// Whether the pixels of `id` at `generation` are held.
+    #[must_use]
+    pub fn holds(&self, id: u32, generation: u64) -> bool {
+        self.images.get(&id).is_some_and(|i| i.generation == generation)
+    }
+
+    /// Keep an image the host sent.
+    ///
+    /// Drops the least recently placed ones over the budget the host assumes
+    /// (`IMAGE_CACHE_BYTES`), so both sides forget the same images.
+    fn keep_image(&mut self, id: u32, image: TermImage) {
+        if let Some(old) = self.images.insert(id, image) {
+            self.image_bytes = self.image_bytes.saturating_sub(old.rgba.len());
+        }
+        if let Some(new) = self.images.get(&id) {
+            self.image_bytes = self.image_bytes.saturating_add(new.rgba.len());
+        }
+        self.prune_images();
+    }
+
+    fn prune_images(&mut self) {
+        while self.image_bytes > IMAGE_CACHE_BYTES {
+            let Some((&id, _)) = self.images.iter().min_by_key(|(_, i)| i.last) else { break };
+            if let Some(gone) = self.images.remove(&id) {
+                self.image_bytes = self.image_bytes.saturating_sub(gone.rgba.len());
+            }
         }
     }
 
@@ -269,6 +339,12 @@ impl TermState {
             }
             TermEvent::Bell => vec![Effect::Bell],
             TermEvent::Notification { title, body } => vec![Effect::Notification { title, body }],
+            TermEvent::Image { id, generation, width, height, rgba } => {
+                let last = self.frames;
+                let image = TermImage { generation, width, height, rgba: rgba.into(), last };
+                self.keep_image(id, image);
+                Vec::new()
+            }
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
@@ -328,14 +404,20 @@ impl TermState {
             let index = self.first_visible.offset(u64::from(update.row));
             // One allocation held twice: the screen row and its scrollback entry are the same
             // line, so a row that scrolls into history is never copied.
-            let line = std::sync::Arc::new(update.line);
-            self.scrollback.insert_shared(index, std::sync::Arc::clone(&line));
+            let line = Arc::new(update.line);
+            self.scrollback.insert_shared(index, Arc::clone(&line));
             if let Err(e) = self.screen.apply_shared(update.row, line) {
                 tracing::debug!(error = %e, "row update rejected");
             }
         }
         *self.screen.cursor_mut() = frame.cursor;
         self.screen.set_modes(frame.modes);
+        for placement in &frame.images {
+            if let Some(image) = self.images.get_mut(&placement.image) {
+                image.last = self.frames;
+            }
+        }
+        self.placements = frame.images;
         self.input_ack = frame.input_ack;
         self.track_command(&mut effects);
         // Keep the viewport anchored on content while scrolled (offset counts from the bottom, so
@@ -662,15 +744,15 @@ mod tests {
         let mut s = TermState::new(size());
         s.apply(TermEvent::Frame(frame(1, true, 0, 100, 103, &[(0, "one"), (1, "two")])));
 
-        let on_screen = std::sync::Arc::clone(s.screen().lines().first().expect("row 0"));
+        let on_screen = Arc::clone(s.screen().lines().first().expect("row 0"));
         let in_history = s.scrollback().shared(LineIndex(100)).expect("cached at its index");
         assert!(
-            std::sync::Arc::ptr_eq(&on_screen, &in_history),
+            Arc::ptr_eq(&on_screen, &in_history),
             "the screen row and the history entry are the same line"
         );
         assert_eq!(on_screen.text(), "one");
         // Two owners inside the state, plus the two clones this test is holding.
-        assert_eq!(std::sync::Arc::strong_count(&on_screen), 4);
+        assert_eq!(Arc::strong_count(&on_screen), 4);
     }
 
     fn frame(
@@ -693,6 +775,7 @@ mod tests {
             first_visible_line: LineIndex(first),
             total_lines: total,
             input_ack: seq,
+            images: Vec::new(),
             updates: rows
                 .iter()
                 .map(|(row, text)| RowUpdate {
@@ -996,6 +1079,51 @@ mod tests {
         );
         s.apply(TermEvent::Frame(frame(7, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "")])));
         assert!(s.synced());
+    }
+
+    #[test]
+    fn images_are_kept_for_their_placements_and_the_oldest_placed_go_first() {
+        use slopty_proto::terminal::PixelRect;
+        let mut t = TermState::new(TermSize::default());
+        let image = |id: u32, generation: u64, bytes: usize| TermEvent::Image {
+            id,
+            generation,
+            width: 1,
+            height: 1,
+            rgba: vec![7; bytes],
+        };
+        let placement = |image: u32, generation: u64| Placement {
+            image,
+            generation,
+            col: 0,
+            row: 0,
+            cols: 1,
+            rows: 1,
+            x_offset: 0,
+            y_offset: 0,
+            width: 1,
+            height: 1,
+            source: PixelRect { x: 0, y: 0, width: 1, height: 1 },
+            z: 0,
+        };
+        assert!(t.apply(image(1, 1, 4)).is_empty());
+        let mut first = frame(1, true, 0, 0, 3, &[]);
+        first.images = vec![placement(1, 1)];
+        let _effects = t.apply(TermEvent::Frame(first));
+        assert_eq!(t.placements().len(), 1);
+        assert_eq!(t.image(&placement(1, 1)).map(|i| i.rgba.to_vec()), Some(vec![7; 4]));
+        assert_eq!(t.image(&placement(1, 2)), None, "a newer generation is not held");
+        // Image 2 arrives, then frame 2 places image 1 again: image 2 is now the least
+        // recently placed, and the first to go when image 3 pushes the cache over budget.
+        let half = IMAGE_CACHE_BYTES / 2;
+        let _effects = t.apply(image(2, 1, half));
+        let mut second = frame(2, false, 0, 0, 3, &[]);
+        second.images = vec![placement(1, 1)];
+        let _effects = t.apply(TermEvent::Frame(second));
+        let _effects = t.apply(image(3, 1, half + 1));
+        assert_eq!(t.image(&placement(2, 1)), None);
+        assert!(t.image(&placement(1, 1)).is_some(), "placed by the latest frame");
+        assert!(t.image(&placement(3, 1)).is_some(), "just arrived");
     }
 
     #[test]

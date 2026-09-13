@@ -11,16 +11,17 @@
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, BorrowAppContext as _, Bounds, DispatchPhase, Edges, Element, ElementId,
-    ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, PathBuilder, Pixels,
-    Point, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill,
-    point, px, quad, relative, size,
+    App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
+    ElementId, ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId,
+    Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, PathBuilder,
+    Pixels, Point, RenderImage, ShapedLine, SharedString, Size, Style, TextAlign, TextRun,
+    UnderlineStyle, Window, fill, point, px, quad, relative, size,
 };
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
-use slopty_proto::terminal::TermSize;
+use slopty_proto::terminal::{Placement, TermSize};
 use slopty_theme::{TerminalPalette, Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
@@ -130,6 +131,21 @@ pub struct Prepared {
     raster_size: Pixels,
     /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
     blinking: bool,
+    /// Images the program placed (kitty graphics), clipped to the grid.
+    images: Vec<PreparedImage>,
+}
+
+/// One placed image ready to paint.
+///
+/// The part shown, and where the whole image would sit so GPUI samples the right part of the
+/// texture.
+#[derive(Debug)]
+struct PreparedImage {
+    bounds: Bounds<Pixels>,
+    image_bounds: Bounds<Pixels>,
+    image: Arc<RenderImage>,
+    /// Painted over the glyphs (`z ≥ 0`) rather than under them.
+    over_text: bool,
 }
 
 #[derive(Debug)]
@@ -867,8 +883,10 @@ impl Element for TerminalElement {
         // Shaping reads the view's rows in place (no copy of the grid per frame) while the
         // cache is out of the app: put it back before anything else touches `cx`.
         let mut cache = std::mem::take(cx.global_mut::<ShapeCache>());
-        let text_system = std::sync::Arc::clone(window.text_system());
+        let text_system = Arc::clone(window.text_system());
         let focused = self.focused;
+        // Textures for the placed images are made (and stale ones dropped) before the read.
+        let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
         let prepared = {
             let view = self.view.read(cx);
             let theme = view.theme();
@@ -1123,6 +1141,24 @@ impl Element for TerminalElement {
             }
             overlay.extend(captions);
 
+            let grid_bounds = Bounds::new(
+                origin,
+                size(cell_width * f32::from(cols), line_height * f32::from(rows)),
+            );
+            let images = placed
+                .iter()
+                .filter_map(|p| {
+                    let (bounds, image_bounds) =
+                        placement_bounds(&metrics, &p.placement, (p.width, p.height), view_offset)?;
+                    Some(PreparedImage {
+                        bounds: bounds.intersect(&grid_bounds),
+                        image_bounds,
+                        image: Arc::clone(&p.image),
+                        over_text: p.placement.z >= 0,
+                    })
+                })
+                .collect();
+
             Prepared {
                 metrics,
                 grid,
@@ -1139,6 +1175,7 @@ impl Element for TerminalElement {
                 overlay,
                 shown: predicted.iter().map(|p| p.seq).collect(),
                 blinking,
+                images,
             }
         };
         *cx.global_mut::<ShapeCache>() = cache;
@@ -1200,6 +1237,10 @@ impl Element for TerminalElement {
                 window
                     .paint_quad(fill(Bounds::new(point(x, row.y), size(w, m.line_height)), *color));
             }
+        }
+        // Images under the text (kitty `z < 0`), over the cell backgrounds.
+        for image in prepared.images.iter().filter(|i| !i.over_text) {
+            paint_placed(window, image);
         }
         if let Some((cursor_bounds, shape, color)) = prepared.cursor {
             let quad = match shape {
@@ -1274,6 +1315,10 @@ impl Element for TerminalElement {
         for row in &prepared.rows {
             paint_decorations(window, &m, row, Layer::Over);
         }
+        // Images over the text (kitty `z ≥ 0`, the default: a picture covers what it sits on).
+        for image in prepared.images.iter().filter(|i| i.over_text) {
+            paint_placed(window, image);
+        }
         // The ⌘-hover link underline joins them, in the text colour.
         for row in &prepared.rows {
             if let Some((start, end)) = row.link {
@@ -1316,6 +1361,54 @@ impl Element for TerminalElement {
     }
 }
 
+fn paint_placed(window: &mut Window, image: &PreparedImage) {
+    let texture = Arc::clone(&image.image);
+    if let Err(e) =
+        window.paint_image(image.bounds, image.image_bounds, Corners::default(), texture, 0, false)
+    {
+        tracing::debug!(error = %e, "paint placed image");
+    }
+}
+
+/// Where a placement is painted.
+///
+/// The rectangle its shown part fills, and the rectangle the whole image (`image` pixels
+/// wide and high) would fill at that scale, so the renderer samples the placement's source
+/// rectangle. The host lays placements out in its cell pixels (device pixels of the unzoomed
+/// grid, `pixel_scale` of them per point) and in viewport rows; a view scrolled
+/// `view_offset` rows into its history shows them that far down. `None` when nothing would
+/// show (an empty source or size).
+#[expect(clippy::cast_precision_loss, reason = "pixel counts and cell positions, far below 2^24")]
+#[must_use]
+pub fn placement_bounds(
+    metrics: &CellMetrics,
+    placement: &Placement,
+    image: (u32, u32),
+    view_offset: u64,
+) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+    let (source, painted) = (placement.source, (placement.width, placement.height));
+    if source.width == 0 || source.height == 0 || painted.0 == 0 || painted.1 == 0 {
+        return None;
+    }
+    let scale = metrics.pixel_scale;
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let pt = |v: u32| px(v as f32 / scale);
+    let row = i64::from(placement.row).checked_add(i64::try_from(view_offset).ok()?)?;
+    let left =
+        metrics.origin.x + metrics.cell_width * (placement.col as f32) + pt(placement.x_offset);
+    let top = metrics.origin.y + metrics.line_height * (row as f32) + pt(placement.y_offset);
+    let shown = size(pt(painted.0), pt(painted.1));
+    let (sx, sy) = (
+        f32::from(shown.width) / source.width as f32,
+        f32::from(shown.height) / source.height as f32,
+    );
+    let whole = Bounds::new(
+        point(left - px(source.x as f32 * sx), top - px(source.y as f32 * sy)),
+        size(px(image.0 as f32 * sx), px(image.1 as f32 * sy)),
+    );
+    Some((Bounds::new(point(left, top), shown), whole))
+}
+
 /// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
 const THUMB_CELLS: f32 = 0.6;
 const THUMB_MIN_ROWS: f32 = 1.5;
@@ -1333,7 +1426,7 @@ fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, 
                 };
                 let mut quad = fill(Bounds::new(at((x, y)), size(px(w), px(h))), color);
                 if round {
-                    quad.corner_radii = gpui::Corners::all(px(w / 2.0));
+                    quad.corner_radii = Corners::all(px(w / 2.0));
                 }
                 window.paint_quad(quad);
             }
@@ -1500,6 +1593,44 @@ mod tests {
             face: metrics::Face::default(),
             face_size: 13.0 * scale,
         }
+    }
+
+    /// A placement's pixels are the host's cell pixels: at display scale 2 a 16 × 32 image
+    /// paints 8 × 16 points at its cell plus its offset; a source rectangle shifts the whole
+    /// image so that part lands in the placement; a scrolled view moves it down its rows.
+    #[test]
+    fn a_placement_is_painted_at_its_cell_in_the_hosts_pixels() {
+        use slopty_proto::terminal::PixelRect;
+        let m = metrics(2.0, 1.0);
+        let p = Placement {
+            image: 1,
+            generation: 1,
+            col: 2,
+            row: 1,
+            cols: 1,
+            rows: 1,
+            x_offset: 4,
+            y_offset: 0,
+            width: 16,
+            height: 32,
+            source: PixelRect { x: 0, y: 0, width: 16, height: 32 },
+            z: 0,
+        };
+        let (bounds, whole) = placement_bounds(&m, &p, (16, 32), 0).expect("shown");
+        // Cell (2, 1) is at 10 + 2 × 4 = 18, 20 + 8.5; the offset adds 4 px = 2 pt.
+        assert_eq!(bounds, Bounds::new(point(px(20.0), px(28.5)), size(px(8.0), px(16.0))));
+        assert_eq!(whole, bounds, "the whole image is shown");
+        // The right half of the image: the whole image starts one half-width to the left.
+        let half = Placement { source: PixelRect { x: 8, y: 0, width: 8, height: 32 }, ..p };
+        let (bounds, whole) = placement_bounds(&m, &half, (16, 32), 0).expect("shown");
+        assert_eq!(bounds.size, size(px(8.0), px(16.0)));
+        assert_eq!(whole, Bounds::new(point(px(12.0), px(28.5)), size(px(16.0), px(16.0))));
+        // Scrolled three rows into history: three rows further down.
+        let (scrolled, _) = placement_bounds(&m, &p, (16, 32), 3).expect("shown");
+        assert_eq!(scrolled.origin.y, px(54.0));
+        // An empty source shows nothing.
+        let none = Placement { source: PixelRect::default(), ..p };
+        assert_eq!(placement_bounds(&m, &none, (16, 32), 0), None);
     }
 
     /// The thumb is the screen's share of the whole, never thinner than a row and a half,

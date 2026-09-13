@@ -5174,6 +5174,7 @@ mod tests {
             first_visible_line: LineIndex(0),
             total_lines: rows.len() as u64,
             input_ack: 0,
+            images: Vec::new(),
             updates: rows
                 .iter()
                 .enumerate()
@@ -5200,6 +5201,7 @@ mod tests {
             first_visible_line: LineIndex(0),
             total_lines: rows.len() as u64,
             input_ack: 0,
+            images: Vec::new(),
             updates: rows
                 .iter()
                 .enumerate()

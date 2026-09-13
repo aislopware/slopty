@@ -4400,6 +4400,7 @@ dependencies = [
  "bitflags 2.13.2",
  "int-enum",
  "libghostty-vt-sys",
+ "png 0.18.1",
 ]
 
 [[package]]
@@ -8157,6 +8158,7 @@ version = "0.1.0"
 dependencies = [
  "libghostty-vt",
  "memchr",
+ "png 0.18.1",
  "pretty_assertions",
  "regex",
  "slopty-core",
