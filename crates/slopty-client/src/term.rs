@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use slopty_grid::{Cursor, Line, LineIndex, Screen, Scrollback, SemanticMark, TermModes};
+use slopty_grid::{
+    CellWidth, Cursor, Line, LineFlags, LineIndex, Screen, Scrollback, SemanticMark, TermModes,
+};
 use slopty_proto::terminal::{
     ColorOverrides, Frame, IMAGE_CACHE_BYTES, Placement, SearchMatch, TermEvent, TermRequest,
     TermSize,
@@ -645,6 +647,84 @@ impl TermState {
         })
     }
 
+    /// The arrow keys that take the shell's cursor to a click at (`index`, `col`): rows
+    /// (positive = down) then cells (positive = right), as ghostty's `cursor-click-to-move`.
+    ///
+    /// `None` when the click would not land in the shell's line editor: the alternate
+    /// screen, a program reading the mouse, a hidden cursor, or a row between the cursor's
+    /// and the clicked one that is not part of the typed input (the prompt's own text, a
+    /// command's output). The click is held to the input: not before its row's input column,
+    /// not past its text. Soft-wrapped rows are one line to the shell, so a click on another
+    /// wrapped row of the cursor's line is a cell count; a hard row boundary (a command
+    /// continued on the next line) is a row step, with the cell count taken from each line's
+    /// start, as the shell's ↑ / ↓ keep the column.
+    #[must_use]
+    pub fn cursor_path_to(&self, index: LineIndex, col: u16) -> Option<(i32, i32)> {
+        let modes = self.modes();
+        if modes.intersects(
+            TermModes::ALT_SCREEN | TermModes::MOUSE_TRACKING | TermModes::CURSOR_HIDDEN,
+        ) {
+            return None;
+        }
+        let cursor = self.cursor();
+        let from = self.index_at_row(cursor.row);
+        let (lo, hi) = if from <= index { (from, index) } else { (index, from) };
+        let mut i = lo.0;
+        while i <= hi.0 {
+            input_start(self.line(LineIndex(i))?)?;
+            i = i.saturating_add(1);
+        }
+        let target = self.line(index)?;
+        let first = input_start(target)?;
+        let end = target.last_content_col().map_or(0, |c| c.saturating_add(1));
+        // The spacer of a wide character is the character.
+        let on_spacer =
+            target.cells.get(usize::from(col)).is_some_and(|c| c.width == CellWidth::SpacerTail);
+        let col = if on_spacer { col.saturating_sub(1) } else { col };
+        let col = col.clamp(first, end.max(first));
+        let rows = i32::try_from(self.logical_line_of(index))
+            .ok()?
+            .checked_sub(i32::try_from(self.logical_line_of(from)).ok()?)?;
+        let cells = self
+            .cells_into_line(index, col)?
+            .checked_sub(self.cells_into_line(from, cursor.col)?)?;
+        Some((rows, cells))
+    }
+
+    /// The row the logical line holding `index` starts on: back over soft-wrapped rows.
+    fn logical_line_of(&self, index: LineIndex) -> u64 {
+        let mut i = index.0;
+        while i > 0 && self.line(LineIndex(i)).is_some_and(|l| l.flags.contains(LineFlags::WRAPPED))
+        {
+            i = i.saturating_sub(1);
+        }
+        i
+    }
+
+    /// Characters from the start of the typed input on the logical line holding `index` up
+    /// to `col` on that row: wide characters once, their spacer cells not at all.
+    fn cells_into_line(&self, index: LineIndex, col: u16) -> Option<i32> {
+        let start = self.logical_line_of(index);
+        let mut count = 0_i32;
+        let mut i = start;
+        while i <= index.0 {
+            let line = self.line(LineIndex(i))?;
+            let from = if i == start { input_start(line)? } else { 0 };
+            let to = if i == index.0 { col } else { u16::try_from(line.cells.len()).ok()? };
+            let drawn = line
+                .cells
+                .iter()
+                .skip(usize::from(from))
+                .take(usize::from(to.saturating_sub(from)))
+                .filter(|c| c.width.draws_text())
+                .count();
+            count = count.checked_add(i32::try_from(drawn).ok()?)?;
+            i = i.saturating_add(1);
+        }
+        Some(count)
+    }
+
+    /// The command block a line belongs to: its head ([`Self::block_head`]) and its output
     /// The command block a line belongs to: its head ([`Self::block_head`]) and its output
     /// (the rows from the command's end to the next prompt, trailing blank rows trimmed),
     /// among the lines held here. Reads the whole block: not for every frame.
@@ -758,6 +838,15 @@ impl TermState {
         self.size = size;
         self.screen.resize(size.cols, size.rows);
         vec![Effect::Request(TermRequest::Resize(size))]
+    }
+}
+
+/// The column the typed input starts at on a row of the shell's line editor: the prompt's
+/// input column, 0 on a row the shell marked as input, `None` elsewhere.
+const fn input_start(line: &Line) -> Option<u16> {
+    match line.mark {
+        SemanticMark::Input => Some(0),
+        mark => mark.input_col(),
     }
 }
 
@@ -1098,6 +1187,60 @@ mod tests {
         assert_eq!(head.body, LineIndex(2));
     }
 
+    /// A click on the input line is a path of arrow keys from the cursor; off the input
+    /// (the prompt's text, output, another program's screen) it is nothing.
+    #[test]
+    fn a_click_on_the_input_is_a_path_for_the_cursor() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "out"), (1, "$ ab\u{4f60}ccd"), (2, "efg")]);
+        f.updates[1].line.mark = prompt(Some(0));
+        // `from_text` knows no widths: the CJK character takes the two cells at 4 and 5.
+        f.updates[1].line.cells[4] = slopty_grid::Cell::wide("\u{4f60}", Style::DEFAULT);
+        f.updates[1].line.cells[5] = slopty_grid::Cell::spacer_tail(Style::DEFAULT);
+        f.updates[2].line.mark = SemanticMark::Input;
+        f.updates[2].line.flags |= LineFlags::WRAPPED;
+        f.cursor = Cursor { row: 1, col: 4, visible: true, ..Cursor::default() };
+        state.apply(TermEvent::Frame(f.clone()));
+        let at = |state: &TermState, row, col| state.cursor_path_to(LineIndex(row), col);
+        assert_eq!(at(&state, 1, 2), Some((0, -2)), "to the input's first cell");
+        assert_eq!(at(&state, 1, 0), Some((0, -2)), "the prompt's text is not input: held to it");
+        assert_eq!(at(&state, 1, 4), Some((0, 0)), "where the cursor is");
+        assert_eq!(
+            at(&state, 1, 5),
+            Some((0, 0)),
+            "the spacer of a wide character is the character"
+        );
+        assert_eq!(at(&state, 1, 6), Some((0, 1)), "past the wide character: one key, two cells");
+        assert_eq!(at(&state, 1, 9), Some((0, 3)), "beyond the text: held to its end");
+        assert_eq!(at(&state, 2, 1), Some((0, 6)), "a wrapped row is the same line to the shell");
+        assert_eq!(at(&state, 2, 9), Some((0, 8)));
+        assert_eq!(at(&state, 0, 1), None, "output is not input");
+
+        // A hard continuation (a `for` typed over two rows) is a row step.
+        let mut hard = f.clone();
+        hard.updates[2].line.flags = LineFlags::empty();
+        state.apply(TermEvent::Frame(hard));
+        assert_eq!(
+            at(&state, 2, 1),
+            Some((1, -1)),
+            "down a row, the column kept from each line's start"
+        );
+        assert_eq!(at(&state, 2, 3), Some((1, 1)));
+
+        // The cursor on an output row (a program running) or the modes say no.
+        let mut running = f.clone();
+        running.cursor = Cursor { row: 0, col: 3, visible: true, ..Cursor::default() };
+        state.apply(TermEvent::Frame(running));
+        assert_eq!(at(&state, 1, 3), None, "the cursor is not in the line editor");
+        for mode in [TermModes::ALT_SCREEN, TermModes::MOUSE_TRACKING, TermModes::CURSOR_HIDDEN] {
+            let mut moded = f.clone();
+            moded.modes = mode;
+            state.apply(TermEvent::Frame(moded));
+            assert_eq!(at(&state, 1, 2), None, "{mode:?}");
+        }
+    }
+
     /// Output that begins on the very first line (a shell attached mid-command) is all of the
     /// last command's output: the walk back stops at the top, not one short of it.
     #[test]
@@ -1211,6 +1354,7 @@ mod tests {
         assert_eq!(t.placements().len(), 1);
         assert_eq!(t.image(&placement(1, 1)).map(|i| i.rgba.to_vec()), Some(vec![7; 4]));
         assert_eq!(t.image(&placement(1, 2)), None, "a newer generation is not held");
+        assert!(t.holds(1, 1) && !t.holds(1, 2) && !t.holds(2, 1), "what a refresh must ask for");
         // Image 2 arrives, then frame 2 places image 1 again: image 2 is now the least
         // recently placed, and the first to go when image 3 pushes the cache over budget.
         let half = IMAGE_CACHE_BYTES / 2;
@@ -1218,6 +1362,8 @@ mod tests {
         let mut second = frame(2, false, 0, 0, 3, &[]);
         second.images = vec![placement(1, 1)];
         let _effects = t.apply(TermEvent::Frame(second));
+        let _effects = t.apply(image(3, 1, half - 4));
+        assert!(t.holds(2, 1), "exactly the budget is within it");
         let _effects = t.apply(image(3, 1, half + 1));
         assert_eq!(t.image(&placement(2, 1)), None);
         assert!(t.image(&placement(1, 1)).is_some(), "placed by the latest frame");

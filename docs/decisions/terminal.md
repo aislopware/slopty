@@ -816,3 +816,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   caption to place, still a badge). The e2e dump now carries `epoch` and the view logs a
   numbering change at info, so the next flake names its cause. Test:
   `a_running_command_survives_a_reflow_and_finishes_after_one`.
+
+- ✅ **A minimum contrast and copy-on-select, both off by default** (2026-09-15). Two
+  `[terminal]` keys in `settings.toml`, the first non-appearance settings. `minimum_contrast`
+  (1.0–21.0, ghostty's `minimum-contrast`) is the least WCAG ratio a cell's text may have
+  against its background; under it the text is black or white, whichever contrasts more.
+  Judged per cell in `cell_color` from the painted pair (inverse video swaps the slots first),
+  through `slopty_theme::Colors::text_over`, so a program's OSC 10/11 colours are held to it
+  as well; faint and blink still apply after. The ratio rides on `TerminalPalette` in
+  hundredths (the palette is `Copy + Eq + Hash`, keyed into the shaped-word cache, and a
+  float would break that), so a settings change repaints every view through `set_theme` like
+  a colour would. `copy_on_select` puts a selection on the clipboard as it ends: a drag on
+  release, a ⇧-click, a double or triple click, a phone long press; a click without a drag
+  selects nothing and copies nothing. It hangs off `Theme::behaviour`, a block for the
+  settings that are neither colours nor type but need the same delivery. Both default off:
+  1.0 is ghostty's default and the Mac's ⌘C is the convention (ghostty's own macOS default
+  copies only to the selection clipboard, which the Mac has none of). A typo in the ratio
+  (0, 40, `inf`) reads as off, as the font sizes do. Tests:
+  `text_under_the_minimum_contrast_turns_black_or_white`,
+  `text_is_held_to_the_minimum_contrast`, `terminal_settings_ride_on_the_theme`,
+  `a_selection_is_copied_as_it_is_made_when_asked`, `terminal_keys`.
+
+- ✅ **A click on the input line moves the shell's cursor** (2026-09-15, ghostty's
+  `cursor-click-to-move`, on by default there and here). A plain left click released without
+  a drag, on a row the shell marked as its input (the prompt row from its OSC 133;B column,
+  an `Input` row), sends the arrow keys that carry the cursor there: rows first (↑/↓ across a
+  hard continuation, the column kept from each line's start as the shell's own ↑/↓ do), then
+  cells (←/→, a wide character once, its spacer never). Soft-wrapped rows are one line to the
+  shell, so a click on the wrapped part is a cell count. The click is held to the input (not
+  into the prompt's text, not past the typed text, where zsh would take → as accepting a
+  suggestion), and nothing is sent when the cursor itself is not in the line editor (a
+  program running: its row is output), on the alternate screen, under mouse reporting, or
+  with the cursor hidden. The path is computed on the client (`TermState::cursor_path_to`,
+  the marks are already there) and sent as ordinary `TermRequest::Key`s through `press`, so
+  application cursor mode and the kitty protocol encode them on the host as they would a
+  keypress. Not taken: sending bytes (the host owns key encoding) and ghostty's press-time
+  trigger (a drag would start with a cursor move). Tests:
+  `a_click_on_the_input_is_a_path_for_the_cursor`,
+  `a_click_on_the_input_line_moves_the_cursor_there`.

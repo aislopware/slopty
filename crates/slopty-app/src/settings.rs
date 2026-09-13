@@ -35,6 +35,8 @@ pub const POLL: Duration = Duration::from_secs(1);
 /// Sizes outside this range are typos; the default applies instead.
 const MONO_SIZE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 const UI_SIZE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
+/// WCAG ratios run from 1 (the same colour) to 21 (black on white).
+const CONTRAST: std::ops::RangeInclusive<f32> = 1.0..=21.0;
 
 /// Whether a window appearance is one of the dark ones.
 #[must_use]
@@ -60,7 +62,20 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     }
     theme.typography.mono_size = sized(settings.font.mono_size, &MONO_SIZE, defaults.mono_size);
     theme.typography.ui_size = sized(settings.font.ui_size, &UI_SIZE, defaults.ui_size);
+    theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
+    theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme
+}
+
+/// A contrast ratio as the theme carries it: hundredths, a typo reads as off.
+fn hundredths(ratio: f32) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the ratio is clamped to 1..=21 first, so ×100 fits a u16 and is positive"
+    )]
+    let hundredths = (sized(ratio, &CONTRAST, 1.0) * 100.0).round() as u16;
+    hundredths
 }
 
 fn sized(v: f32, range: &std::ops::RangeInclusive<f32>, default: f32) -> f32 {
@@ -122,6 +137,23 @@ mod tests {
         assert_eq!(t.typography.ui_size, 13.0);
         s.font.mono_size = 16.0;
         assert_eq!(theme_for(&s, true).typography.mono_size, 16.0);
+    }
+
+    #[test]
+    fn terminal_settings_ride_on_the_theme() {
+        let mut s = Settings::default();
+        let t = theme_for(&s, true);
+        assert_eq!(t.terminal.minimum_contrast, 100, "off");
+        assert!(!t.behaviour.copy_on_select);
+        s.terminal.minimum_contrast = 4.5;
+        s.terminal.copy_on_select = true;
+        let t = theme_for(&s, true);
+        assert_eq!(t.terminal.minimum_contrast, 450);
+        assert!(t.behaviour.copy_on_select);
+        s.terminal.minimum_contrast = 0.0;
+        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "a typo reads as off");
+        s.terminal.minimum_contrast = f32::INFINITY;
+        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100);
     }
 
     #[test]

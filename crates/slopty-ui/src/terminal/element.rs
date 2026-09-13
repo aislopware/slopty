@@ -658,12 +658,15 @@ fn mono_font(family: &str, style: &CellStyle) -> Font {
     )
 }
 
-/// The colour a cell's glyphs take, with inverse, faint and invisible applied. In the off
-/// phase of the blink clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
+/// The colour a cell's glyphs take, with inverse, faint and invisible applied, held to the
+/// theme's minimum contrast against the cell's background. In the off phase of the blink
+/// clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
 fn cell_color(style: &CellStyle, palette: &Colors, blink_off: bool) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
-    let fg_slot = if inverse { style.bg } else { style.fg };
-    let mut color = hsla(palette.resolve(fg_slot, inverse));
+    let (fg_slot, bg_slot) = if inverse { (style.bg, style.fg) } else { (style.fg, style.bg) };
+    let fg = palette.resolve(fg_slot, inverse);
+    let bg = palette.resolve(bg_slot, !inverse);
+    let mut color = hsla(palette.text_over(fg, bg));
     if style.flags.contains(StyleFlags::FAINT) {
         color.a = 0.6;
     }
@@ -1917,6 +1920,40 @@ mod tests {
             cell_color(&blinking[1].style, &Colors::from(&Theme::default().terminal), false).a
                 > 0.5
         );
+    }
+
+    /// A cell whose text would not read against its background is painted black or white
+    /// once the theme sets a minimum contrast; inverse video is judged the painted way round.
+    #[test]
+    fn text_is_held_to_the_minimum_contrast() {
+        let mut theme = Theme::default().terminal;
+        let navy_on_black = CellStyle {
+            fg: slopty_grid::Color::Rgb(0, 0, 95),
+            bg: slopty_grid::Color::Rgb(0, 0, 0),
+            ..CellStyle::default()
+        };
+        let navy = hsla(slopty_theme::Rgb { r: 0, g: 0, b: 95 });
+        assert_eq!(cell_color(&navy_on_black, &Colors::from(&theme), false), navy, "off");
+        theme.minimum_contrast = 300;
+        let colors = Colors::from(&theme);
+        let white = hsla(slopty_theme::Rgb::hex(0xff_ffff));
+        assert_eq!(cell_color(&navy_on_black, &colors, false), white);
+        // Two greys either side of the luminance where black and white swap: the painted
+        // background decides, so inverse video flips the answer.
+        let greys = CellStyle {
+            fg: slopty_grid::Color::Rgb(118, 118, 118),
+            bg: slopty_grid::Color::Rgb(116, 116, 116),
+            ..CellStyle::default()
+        };
+        assert_eq!(cell_color(&greys, &colors, false), white, "over the darker grey");
+        let mut inverse = greys;
+        inverse.flags |= StyleFlags::INVERSE;
+        let black = hsla(slopty_theme::Rgb::hex(0));
+        assert_eq!(cell_color(&inverse, &colors, false), black, "over the lighter grey");
+        let mut faint = navy_on_black;
+        faint.flags |= StyleFlags::FAINT;
+        let painted = cell_color(&faint, &colors, false);
+        assert!((painted.a - 0.6).abs() < f32::EPSILON && painted.l > 0.9, "{painted:?}");
     }
 
     #[test]

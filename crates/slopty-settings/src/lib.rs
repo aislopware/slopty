@@ -77,6 +77,25 @@ pub struct ThemeSettings {
     pub appearance: Appearance,
 }
 
+/// `[terminal]`.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    /// The least WCAG contrast ratio (1–21) between a cell's text and its background; text
+    /// under it is painted black or white instead, whichever reads. `1.0` leaves every
+    /// colour as the program set it (ghostty's `minimum-contrast`).
+    pub minimum_contrast: f32,
+    /// Copy a selection to the clipboard as soon as it is made (ghostty's
+    /// `copy-on-select = clipboard`, iTerm2's default).
+    pub copy_on_select: bool,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self { minimum_contrast: 1.0, copy_on_select: false }
+    }
+}
+
 /// The whole file.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -85,6 +104,8 @@ pub struct Settings {
     pub font: Font,
     /// Theme.
     pub theme: ThemeSettings,
+    /// Terminal behaviour.
+    pub terminal: TerminalSettings,
 }
 
 /// Why a file could not be used.
@@ -184,11 +205,20 @@ ui_size = {ui_size}
 [theme]
 # \"dark\", \"light\" or \"system\" (follow the macOS appearance).
 appearance = {appearance}
+
+[terminal]
+# Least contrast ratio (1.0 to 21.0) between text and its background;
+# text under it turns black or white. 1.0 keeps every colour as set.
+minimum_contrast = {minimum_contrast}
+# Copy a selection to the clipboard as soon as it is made.
+copy_on_select = {copy_on_select}
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
             ui_size = toml_float(d.font.ui_size),
             appearance = toml_string(appearance_name(d.theme.appearance)),
+            minimum_contrast = toml_float(d.terminal.minimum_contrast),
+            copy_on_select = d.terminal.copy_on_select,
         )
     }
 
@@ -277,6 +307,17 @@ mod tests {
         assert_eq!(d.font.mono_size, 13.0);
         assert_eq!(d.font.ui_size, 13.0);
         assert_eq!(d.theme.appearance, Appearance::System);
+        assert_eq!(d.terminal.minimum_contrast, 1.0, "off, as ghostty");
+        assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
+    }
+
+    #[test]
+    fn terminal_keys() {
+        let loaded = Settings::parse("[terminal]\nminimum_contrast = 3\ncopy_on_select = true\n");
+        assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
+        assert!(loaded.settings.terminal.copy_on_select);
+        assert_eq!(loaded.settings.font, Font::default());
     }
 
     #[test]
@@ -320,7 +361,10 @@ mod tests {
         assert_eq!(loaded.settings.font.mono_size, 11.0);
         assert_eq!(
             loaded.warnings,
-            vec!["unknown key `font.ligatures`".to_owned(), "unknown key `terminal`".to_owned()]
+            vec![
+                "unknown key `font.ligatures`".to_owned(),
+                "unknown key `terminal.scrollback_lines`".to_owned()
+            ]
         );
     }
 
@@ -353,6 +397,8 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
         assert!(text.contains("mono_size = 13.0"), "{text}");
         assert!(text.contains("appearance = \"system\""), "{text}");
+        assert!(text.contains("minimum_contrast = 1.0"), "{text}");
+        assert!(text.contains("copy_on_select = false"), "{text}");
     }
 
     #[test]

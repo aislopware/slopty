@@ -42,6 +42,24 @@ impl Rgb {
             .wrapping_add((self.b as u32).wrapping_mul(114));
         luma > 128_000
     }
+
+    /// WCAG relative luminance: sRGB linearised, 0.0 black to 1.0 white.
+    #[must_use]
+    pub fn luminance(self) -> f32 {
+        let linear = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.039_28 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.0722_f32
+            .mul_add(linear(self.b), 0.7152_f32.mul_add(linear(self.g), 0.2126 * linear(self.r)))
+    }
+
+    /// WCAG contrast ratio with `other`: 1.0 (the same) to 21.0 (black on white).
+    #[must_use]
+    pub fn contrast(self, other: Self) -> f32 {
+        let (a, b) = (self.luminance() + 0.05, other.luminance() + 0.05);
+        if a > b { a / b } else { b / a }
+    }
 }
 
 /// Terminal colours.
@@ -63,6 +81,10 @@ pub struct TerminalPalette {
     pub search_current: Rgb,
     /// ANSI 0–15.
     pub ansi: [Rgb; 16],
+    /// The least contrast ratio between a cell's text and its background, in hundredths
+    /// (`100` = 1.0, off; `300` = 3.0). Text under it is painted black or white, whichever
+    /// contrasts more with the background: ghostty's `minimum-contrast`.
+    pub minimum_contrast: u16,
 }
 
 impl TerminalPalette {
@@ -94,6 +116,7 @@ impl TerminalPalette {
             Rgb::hex(0x66c7d4),
             Rgb::hex(0xffffff),
         ],
+        minimum_contrast: 100,
     };
     /// The default light palette (GitHub-light hues: legible on white without glare).
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
@@ -123,6 +146,7 @@ impl TerminalPalette {
             Rgb::hex(0x3192aa),
             Rgb::hex(0x8c959f),
         ],
+        minimum_contrast: 100,
     };
 
     /// The palette as the host hears it: what colour queries answer while this client drives.
@@ -219,6 +243,18 @@ impl Colors {
             }
             other => self.theme.resolve(other, slot_is_bg),
         }
+    }
+
+    /// The colour text `fg` is painted in over `bg`: itself, unless the theme's minimum
+    /// contrast says it would not read, then black or white, whichever contrasts more.
+    #[must_use]
+    pub fn text_over(&self, fg: Rgb, bg: Rgb) -> Rgb {
+        let least = f32::from(self.theme.minimum_contrast) / 100.0;
+        if least <= 1.0 || fg.contrast(bg) >= least {
+            return fg;
+        }
+        let (black, white) = (Rgb::hex(0), Rgb::hex(0xff_ffff));
+        if bg.contrast(white) >= bg.contrast(black) { white } else { black }
     }
 }
 
@@ -438,11 +474,21 @@ pub enum Variant {
     Light,
 }
 
+/// How the terminal behaves: settings that are neither colours nor type but ride with them,
+/// so one `set_theme` reaches every view when the file changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Behaviour {
+    /// A selection goes to the clipboard as soon as it is made.
+    pub copy_on_select: bool,
+}
+
 /// The whole theme.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Theme {
     /// Terminal colours.
     pub terminal: TerminalPalette,
+    /// Terminal behaviour.
+    pub behaviour: Behaviour,
     /// Chrome colours.
     pub surfaces: Surfaces,
     /// Type.
@@ -469,6 +515,7 @@ impl Theme {
         };
         Self {
             terminal,
+            behaviour: Behaviour::default(),
             surfaces,
             typography: Typography::default(),
             radii: Radii::default(),
@@ -576,5 +623,27 @@ mod tests {
         let plain = Colors::from(&theme);
         assert_eq!(plain.resolve(Color::Palette(17), false), theme.palette(17));
         assert_ne!(plain, colors, "the shaped-word cache keys on the colours");
+    }
+
+    #[test]
+    fn text_under_the_minimum_contrast_turns_black_or_white() {
+        let rgb = |r, g, b| Rgb { r, g, b };
+        let (black, white) = (rgb(0, 0, 0), rgb(255, 255, 255));
+        assert!((black.contrast(white) - 21.0).abs() < 0.01, "{}", black.contrast(white));
+        assert!((white.contrast(white) - 1.0).abs() < f32::EPSILON);
+        let mut theme = TerminalPalette::DARK;
+        let navy = rgb(0, 0, 95);
+        let off = Colors::from(&theme);
+        assert_eq!(off.text_over(navy, black), navy, "1.0 keeps every colour");
+        theme.minimum_contrast = 300;
+        let on = Colors::from(&theme);
+        assert_eq!(on.text_over(navy, black), white, "navy on black does not read");
+        assert_eq!(on.text_over(navy, white), navy, "navy on white does");
+        assert_eq!(on.text_over(rgb(200, 200, 200), rgb(220, 220, 220)), black);
+        assert_eq!(on.text_over(theme.fg, theme.bg), theme.fg, "the theme itself reads");
+        // The minimum rides on the theme, so a program's colours are held to it too.
+        let set = ColorOverrides { fg: Some([0, 0, 95]), ..ColorOverrides::default() };
+        let program = Colors::new(&theme, &set);
+        assert_eq!(program.text_over(program.theme.fg, program.theme.bg), white);
     }
 }

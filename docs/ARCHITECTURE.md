@@ -59,7 +59,10 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
   block's prompt is a range query, not a walk. Mouse selection is client-side too
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, ⌥-drag for a
   rectangle, double/triple click, ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
-  keeps scrolling through the cache at a pace set by the distance); nothing reaches the host.
+  keeps scrolling through the cache at a pace set by the distance); nothing reaches the host,
+  except a plain click on the shell's input line, which becomes the arrow keys that put the
+  cursor there (`TermState::cursor_path_to`), and, with `copy_on_select` set, a selection
+  goes to the clipboard as it ends.
   A scrollbar thumb over the grid's right edge shows while there is history and the pointer is
   over the card or the viewport is in the history; it drags and its track pages. The wheel
   scrolls the cache in whole lines (fractions carried between events), except for a program
@@ -1100,7 +1103,9 @@ runs the load scenarios (MEASUREMENTS, "canvas frame time").
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘,, opens it in the default editor, writing the commented defaults first when it is
 missing). `slopty-settings` owns the schema: `[font] mono_family | mono_size | ui_size`,
-`[theme] appearance = dark | light | system`; every key has a default, unknown keys warn, a
+`[theme] appearance = dark | light | system`, `[terminal] minimum_contrast | copy_on_select`
+(the ratio rides on `TerminalPalette` in hundredths, the flag on `Theme::behaviour`, see
+decisions/terminal.md); every key has a default, unknown keys warn, a
 file that does not parse is skipped with the error in the top bar for a few seconds. The app
 polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from
 `appearance`, `system` following `window.appearance()` through `observe_window_appearance`)

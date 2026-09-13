@@ -43,3 +43,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`open <path>` on a background thread in `gpui_macos`), after `Settings::init` so a first
   press has a file to edit. Verified: the menu item opened `settings.toml` in VS Code. iOS has
   no entry: the defaults apply there and the file, if present in the sandbox, is still read.
+
+- ✅ **`[terminal]` is the first behaviour section** (2026-09-15): `minimum_contrast` and
+  `copy_on_select`, ruled in decisions/terminal.md. They reach the views the way colours do:
+  `theme_for` folds them into the `Theme` (`TerminalPalette::minimum_contrast` in hundredths,
+  `Theme::behaviour.copy_on_select`) and the existing `set_theme` push delivers them, so a
+  save applies within the poll second with no second channel. The unknown-key warning for a
+  `[terminal]` key now names the key (`terminal.scrollback_lines`), as it does for `[font]`.

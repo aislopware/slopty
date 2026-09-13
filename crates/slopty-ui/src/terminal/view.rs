@@ -322,6 +322,12 @@ pub struct TerminalView {
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
     selecting: bool,
+    /// This press made or moved the selection: when the theme says copy on select, the
+    /// release copies it.
+    selected_by_press: bool,
+    /// A plain left press and its cell: released without a drag, it moves the shell's cursor
+    /// there.
+    click_at: Option<(LineIndex, u16)>,
     /// The selection is being dragged past the grid's top or bottom: lines to scroll each
     /// tick (positive = up into history) and the column the pointer holds.
     autoscroll: Option<(i64, u16)>,
@@ -467,6 +473,8 @@ impl TerminalView {
             took_epoch: None,
             selection: None,
             selecting: false,
+            selected_by_press: false,
+            click_at: None,
             hover: None,
             cmd_held: false,
             shift_held: false,
@@ -1571,7 +1579,13 @@ impl TerminalView {
                 }
                 true
             }
-            TouchPhase::Ended => std::mem::take(&mut self.touch_selecting),
+            TouchPhase::Ended => {
+                let selecting = std::mem::take(&mut self.touch_selecting);
+                if selecting {
+                    self.copy_on_select(cx);
+                }
+                selecting
+            }
             TouchPhase::Cancelled => {
                 if std::mem::take(&mut self.touch_selecting) {
                     self.selection = None;
@@ -2785,6 +2799,7 @@ impl TerminalView {
         }
         if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
             let index = self.state.index_at_row(row);
+            self.selected_by_press = true;
             if event.click_count >= 2 {
                 // Word, then line; the selection stands until the next click.
                 self.select_by_clicks(index, col, event.click_count);
@@ -2801,6 +2816,7 @@ impl TerminalView {
                 self.selection =
                     Some(Selection { anchor: at, head: at, block: event.modifiers.alt });
                 self.selecting = true;
+                self.click_at = (!event.modifiers.modified()).then_some(at);
             }
             cx.notify();
             return;
@@ -2957,14 +2973,49 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        if !std::mem::take(&mut self.selecting) {
+        let selecting = std::mem::take(&mut self.selecting);
+        let by_press = std::mem::take(&mut self.selected_by_press);
+        if !selecting && !by_press {
             return;
         }
-        // A click without a drag selects nothing.
+        // A click without a drag selects nothing; a plain one moves the shell's cursor.
+        let click_at = self.click_at.take();
         if self.selection.is_some_and(|s| s.anchor == s.head) {
             self.selection = None;
+            if let Some((index, col)) = click_at {
+                self.click_to_move(index, col, cx);
+            }
+        }
+        if by_press {
+            self.copy_on_select(cx);
         }
         cx.notify();
+    }
+
+    /// A click on the shell's input line puts the cursor there, with the arrow keys that get
+    /// it there (ghostty's `cursor-click-to-move`); anywhere else it does nothing.
+    fn click_to_move(&mut self, index: LineIndex, col: u16, cx: &mut Context<Self>) {
+        let Some((rows, cells)) = self.state.cursor_path_to(index, col) else { return };
+        let arrows = |key: &'static str, n: i32| {
+            std::iter::repeat_n(key, usize::try_from(n.unsigned_abs()).unwrap_or(0))
+        };
+        let keys = arrows(if rows < 0 { "up" } else { "down" }, rows)
+            .chain(arrows(if cells < 0 { "left" } else { "right" }, cells));
+        // The phone's armed ⌃ is for the next typed key, not for these.
+        let sticky_control = std::mem::take(&mut self.sticky_control);
+        for key in keys {
+            self.press(Keystroke { key: key.to_owned(), ..Keystroke::default() }, cx);
+        }
+        self.sticky_control = sticky_control;
+    }
+
+    /// A selection just made goes to the clipboard when the theme asks for it.
+    fn copy_on_select(&self, cx: &Context<Self>) {
+        if self.theme.behaviour.copy_on_select
+            && let Some(text) = self.selected_text().filter(|t| !t.is_empty())
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
     }
 }
 
@@ -4509,6 +4560,103 @@ mod tests {
         cx.simulate_click(cell_center(&view, cx, 1.0, 1.0), mods);
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.selected_text()), None, "a click clears it");
+    }
+
+    /// With `copy_on_select` on, a drag, a double-click and a ⇧-click each put the selection
+    /// on the clipboard as they end; off (the default), only ⌘C does.
+    #[gpui::test]
+    fn a_selection_is_copied_as_it_is_made_when_asked(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        let text = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        };
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into())));
+        let mods = gpui::Modifiers::default();
+        let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        cx.simulate_mouse_down(cell_center(&view, cx, 0.0, 0.0), MouseButton::Left, mods);
+        cx.simulate_mouse_move(cell_center(&view, cx, 4.0, 0.0), MouseButton::Left, mods);
+        cx.simulate_mouse_up(cell_center(&view, cx, 4.0, 0.0), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("hello"));
+        assert_eq!(text(cx).as_deref(), Some("before"), "off: the clipboard is untouched");
+
+        let mut theme = Theme::default();
+        theme.behaviour.copy_on_select = true;
+        view.update(cx, |view, cx| view.set_theme(theme, cx));
+        cx.simulate_mouse_down(cell_center(&view, cx, 2.0, 2.0), MouseButton::Left, shift);
+        cx.simulate_mouse_up(cell_center(&view, cx, 2.0, 2.0), MouseButton::Left, shift);
+        cx.run_until_parked();
+        assert_eq!(text(cx).as_deref(), Some("hello wor\nsecond\nthi"), "\u{21e7}-click copies");
+        cx.simulate_mouse_down(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, mods);
+        cx.simulate_mouse_move(cell_center(&view, cx, 3.0, 1.0), MouseButton::Left, mods);
+        cx.simulate_mouse_up(cell_center(&view, cx, 3.0, 1.0), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(text(cx).as_deref(), Some("eco"), "a drag copies on release");
+        cx.simulate_click(cell_center(&view, cx, 5.0, 2.0), mods);
+        cx.run_until_parked();
+        assert_eq!(text(cx).as_deref(), Some("eco"), "a click selects nothing, copies nothing");
+        let at = cell_center(&view, cx, 7.0, 0.0);
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: mods,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert_eq!(text(cx).as_deref(), Some("wor"), "a double-click copies the word");
+    }
+
+    /// A plain click on the shell's input line sends the arrow keys that put the cursor
+    /// under it; a click on output, a drag, or a modified click sends nothing.
+    #[gpui::test]
+    fn a_click_on_the_input_line_moves_the_cursor_there(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let mut f = history_frame(0, &["out", "$ abcdef", ""]);
+        if let TermEvent::Frame(frame) = &mut f {
+            frame.updates[1].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+            frame.updates[2].line.mark = SemanticMark::Input;
+            frame.updates[2].line.flags |= slopty_grid::LineFlags::WRAPPED;
+            frame.cursor = Cursor { row: 1, col: 8, visible: true, ..Cursor::default() };
+        }
+        view.update_in(cx, |view, _window, cx| view.apply(f, cx));
+        cx.run_until_parked();
+        let mods = gpui::Modifiers::default();
+        cx.simulate_click(cell_center(&view, cx, 3.0, 1.0), mods);
+        cx.run_until_parked();
+        assert_eq!(drain_input(&mut rx), ["arrowleft"; 5], "five cells back");
+        cx.simulate_click(cell_center(&view, cx, 0.0, 1.0), mods);
+        cx.run_until_parked();
+        assert_eq!(drain_input(&mut rx), ["arrowleft"; 6], "the prompt's text: held to the input");
+        cx.simulate_click(cell_center(&view, cx, 1.0, 0.0), mods);
+        cx.run_until_parked();
+        assert!(drain_input(&mut rx).is_empty(), "output is not the line editor");
+        cx.simulate_mouse_down(cell_center(&view, cx, 2.0, 1.0), MouseButton::Left, mods);
+        cx.simulate_mouse_move(cell_center(&view, cx, 5.0, 1.0), MouseButton::Left, mods);
+        cx.simulate_mouse_up(cell_center(&view, cx, 5.0, 1.0), MouseButton::Left, mods);
+        cx.run_until_parked();
+        assert!(drain_input(&mut rx).is_empty(), "a drag selects");
+        let alt = gpui::Modifiers { alt: true, ..gpui::Modifiers::default() };
+        cx.simulate_click(cell_center(&view, cx, 3.0, 1.0), alt);
+        cx.run_until_parked();
+        assert!(drain_input(&mut rx).is_empty(), "a modified click is not a plain one");
+        let mut alt_screen = history_frame(0, &["out", "$ abcdef", ""]);
+        if let TermEvent::Frame(frame) = &mut alt_screen {
+            frame.seq = 2;
+            frame.modes = TermModes::ALT_SCREEN;
+            frame.updates[1].line.mark = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+            frame.cursor = Cursor { row: 1, col: 8, visible: true, ..Cursor::default() };
+        }
+        view.update_in(cx, |view, _window, cx| view.apply(alt_screen, cx));
+        cx.run_until_parked();
+        cx.simulate_click(cell_center(&view, cx, 3.0, 1.0), mods);
+        cx.run_until_parked();
+        assert!(drain_input(&mut rx).is_empty(), "a full-screen program gets no arrows");
     }
 
     /// Dragging a selection above the grid keeps scrolling into history a tick at a time,
