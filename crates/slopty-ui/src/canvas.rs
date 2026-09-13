@@ -8,7 +8,7 @@
 //! dragging a title bar moves, the corner grip resizes, dragging empty space pans. Every
 //! geometry change is applied locally first and proposed to the host on release.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -546,14 +546,14 @@ pub struct CanvasView {
     palette: Option<Entity<CommandPalette>>,
     /// The needle of a find in every card while its palette is up.
     find_needle: Option<String>,
-    /// Hit counts per session for `find_needle`, as the hosts answer.
-    find_hits: BTreeMap<SessionId, u32>,
+    /// Hit counts per card for `find_needle`, with what ↩ on its line does: the shells' as
+    /// the hosts answer, the rest counted here.
+    find_hits: HashMap<ItemId, (u32, PaletteRun)>,
     /// A card to open its find bar on a needle once revealed (needs the window: from render).
     pending_find: Option<(SessionId, String)>,
     /// A file card to open its find bar on a needle once revealed.
     pending_find_file: Option<(ItemId, String)>,
-    /// The notes and file cards holding `find_needle`, counted on this client.
-    find_local: Vec<PaletteItem>,
+
     /// The field naming a card, while one is open in a title bar.
     rename: Option<Rename>,
     /// Where the keyboard goes once the name field closed (applied from `render`).
@@ -698,10 +698,9 @@ impl CanvasView {
             pending_focus_rename: false,
             palette_return: None,
             find_needle: None,
-            find_hits: BTreeMap::new(),
+            find_hits: HashMap::new(),
             pending_find: None,
             pending_find_file: None,
-            find_local: Vec::new(),
             palette_action: None,
             palette_extra: Vec::new(),
             pending_focus_palette: false,
@@ -1699,7 +1698,6 @@ impl CanvasView {
             this.palette = None;
             this.find_needle = None;
             this.find_hits.clear();
-            this.find_local.clear();
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
                     this.palette_action = Some(action.boxed_clone());
@@ -1740,27 +1738,41 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// The find-everywhere field changed: every live terminal is asked for the needle (one
-    /// hit each is enough: the count is what the line says), the notes and file cards are
-    /// counted here, where their text is, and the lines start over.
+    /// The find-everywhere field changed: every live shell is asked for the needle (one hit
+    /// each is enough: the count is what the line says); the conversations, notes and file
+    /// cards are counted here, where their text is; and the lines start over.
     fn find_changed(&mut self, text: &str, cx: &mut Context<Self>) {
         let needle = text.trim().to_owned();
         self.find_needle = Some(needle.clone());
         self.find_hits.clear();
-        self.find_local.clear();
         if needle.is_empty() {
             self.refresh_find_lines(cx);
             return;
         }
-        for session in self.terminals.keys() {
-            self.send(ClientMsg::Term {
-                session: *session,
-                req: TermRequest::Search { needle: needle.clone(), max: 1, regex: false },
-            });
-        }
         for id in self.reading_order() {
             let Some(item) = self.doc.get(id) else { continue };
             let (total, run) = match &item.kind {
+                ItemKind::Terminal { session } => {
+                    let Some(view) = self.terminals.get(session) else { continue };
+                    let Some(conversation) = view.read(cx).conversation() else {
+                        self.send(ClientMsg::Term {
+                            session: *session,
+                            req: TermRequest::Search {
+                                needle: needle.clone(),
+                                max: 1,
+                                regex: false,
+                            },
+                        });
+                        continue;
+                    };
+                    let hits = crate::terminal::conversation::entry_hits(
+                        conversation.entries(),
+                        &needle,
+                        false,
+                    );
+                    let total = hits.map_or(0, |hits| hits.len());
+                    (total, PaletteRun::FindIn { session: *session, needle: needle.clone() })
+                }
                 ItemKind::Note { text } => {
                     let lines: Vec<SharedString> = text.lines().map(SharedString::from).collect();
                     (crate::file::find_hits(&lines, &needle).len(), PaletteRun::Item(id))
@@ -1770,20 +1782,17 @@ impl CanvasView {
                     let total = crate::file::find_hits(view.read(cx).lines(), &needle).len();
                     (total, PaletteRun::FindInFile { item: id, needle: needle.clone() })
                 }
-                ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. } => {
-                    continue;
-                }
+                ItemKind::Window { .. } | ItemKind::Display { .. } => continue,
             };
-            if let Ok(total) = u32::try_from(total)
-                && total > 0
-            {
-                self.find_local.push(PaletteItem::hits(&self.card_title(item, cx), total, run));
+            if let Ok(total) = u32::try_from(total) {
+                self.find_hits.insert(id, (total, run));
             }
         }
         self.refresh_find_lines(cx);
     }
 
-    /// A card answered the find-everywhere needle: its line says how many hits it holds.
+    /// A shell answered the find-everywhere needle: its line says how many hits it holds. A
+    /// conversation's answer (its grid is not what it shows) is nothing: it was counted here.
     fn find_answered(
         &mut self,
         session: SessionId,
@@ -1794,25 +1803,30 @@ impl CanvasView {
         if self.find_needle.as_deref() != Some(needle) || needle.is_empty() {
             return;
         }
-        self.find_hits.insert(session, total);
+        if self.terminals.get(&session).is_none_or(|v| v.read(cx).conversation().is_some()) {
+            return;
+        }
+        let Some(item) = self.doc.item_for_session(session) else { return };
+        let run = PaletteRun::FindIn { session, needle: needle.to_owned() };
+        self.find_hits.insert(item.id, (total, run));
         self.refresh_find_lines(cx);
     }
 
-    /// The find-everywhere lines: the terminals that answered with hits, then the notes and
-    /// file cards counted here.
+    /// The find-everywhere lines: the cards with a hit, in reading order, as they are known.
     fn refresh_find_lines(&self, cx: &mut Context<Self>) {
-        let Some(needle) = self.find_needle.as_deref() else { return };
-        let mut lines: Vec<PaletteItem> = self
-            .find_hits
-            .iter()
-            .filter(|(_, total)| **total > 0)
-            .filter_map(|(session, total)| {
-                let item = self.doc.item_for_session(*session)?;
-                let run = PaletteRun::FindIn { session: *session, needle: needle.to_owned() };
-                Some(PaletteItem::hits(&self.card_title(item, cx), *total, run))
+        if self.find_needle.is_none() {
+            return;
+        }
+        let lines: Vec<PaletteItem> = self
+            .reading_order()
+            .into_iter()
+            .filter_map(|id| {
+                let (total, run) = self.find_hits.get(&id)?;
+                let item = self.doc.get(id)?;
+                (*total > 0)
+                    .then(|| PaletteItem::hits(&self.card_title(item, cx), *total, run.clone()))
             })
             .collect();
-        lines.extend(self.find_local.iter().cloned());
         if let Some(palette) = &self.palette {
             palette.update(cx, |p, cx| p.set_lines(lines, cx));
         }
@@ -6611,8 +6625,22 @@ mod tests {
         let (view, mut rx, me, cx) = canvas(cx);
         let (a, b) = (SessionId::new(), SessionId::new());
         let id_a = host_opens(&view, cx, a, me, SHELL, 1);
-        let _id_b = host_opens(&view, cx, b, me, Rect { x: 800.0, ..SHELL }, 2);
-        // A note below the shells and a file card hold the needle too; they are counted here.
+        let id_b = host_opens_agent(&view, cx, b, me, Rect { x: 800.0, ..SHELL }, 2);
+        view.update_in(cx, |c, _window, cx| {
+            c.transcript_update(
+                TranscriptUpdate {
+                    session: b,
+                    reset: true,
+                    entries: vec![TranscriptEntry {
+                        at: None,
+                        body: TranscriptBody::Assistant { markdown: "an error, fixed".to_owned() },
+                    }],
+                },
+                cx,
+            );
+        });
+        // A note below the shells and a file card hold the needle too; they are counted here,
+        // as the conversation is.
         let note = CanvasItem {
             id: ItemId::new(),
             kind: ItemKind::Note { text: "Errors\nno\nan ERROR again".to_owned() },
@@ -6649,6 +6677,7 @@ mod tests {
             view.read_with(cx, |c, cx| c.card_title(c.doc.get(id).expect("the card"), cx))
         };
         let (file_title, note_title) = (title_of(cx, file_id), title_of(cx, note_id));
+        let agent_title = title_of(cx, id_b);
         drain(&mut rx);
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.simulate_keystrokes("cmd-shift-f");
@@ -6667,8 +6696,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(asked.len(), 2, "every card is asked once for the final needle: {sent:?}");
-        assert!(asked.contains(&a) && asked.contains(&b));
+        assert_eq!(asked, [a], "the shell is asked once for the final needle: {sent:?}");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let options: Vec<&str> = tree
             .iter()
@@ -6677,7 +6705,11 @@ mod tests {
             .collect();
         assert_eq!(
             options,
-            [format!("{file_title} 2 hits"), format!("{note_title} 2 hits")],
+            [
+                format!("{agent_title} 1 hit"),
+                format!("{file_title} 2 hits"),
+                format!("{note_title} 2 hits")
+            ],
             "the cards counted here are lines at once, in reading order: {tree:#?}"
         );
 
@@ -6689,10 +6721,11 @@ mod tests {
                 matches: (total > 0).then_some(hit).into_iter().collect(),
             };
             c.term_event(a, answer(3), cx);
+            // A conversation's grid answer is nothing: it was counted here.
             c.term_event(b, answer(0), cx);
             // A stale answer (the needle moved on) is nothing.
             c.term_event(
-                b,
+                a,
                 TermEvent::Matches { needle: "er".into(), total: 9, matches: vec![] },
                 cx,
             );
@@ -6709,6 +6742,7 @@ mod tests {
             options,
             [
                 format!("{title} 3 hits"),
+                format!("{agent_title} 1 hit"),
                 format!("{file_title} 2 hits"),
                 format!("{note_title} 2 hits")
             ],
@@ -6736,12 +6770,12 @@ mod tests {
         assert!(view.read_with(cx, |c, _| c.find_needle.is_none()), "the fan-out is over");
 
         // ⌘⇧F again, from the terminal's find bar (a field would take it as replace): the
-        // file card's line (the first: no terminal has answered this time) opens its own find
+        // file card's line (the second: no shell has answered this time) opens its own find
         // bar on the needle, on the first hit.
         cx.simulate_keystrokes("cmd-shift-f");
         cx.run_until_parked();
         assert!(cx.debug_bounds("palette").is_some(), "⌘⇧F works from a field");
-        cx.simulate_keystrokes("e r r enter");
+        cx.simulate_keystrokes("e r r down enter");
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(file_id));
         let hits = view.read_with(cx, |c, cx| {
