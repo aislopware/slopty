@@ -369,6 +369,14 @@ pub fn banner_title(name: Option<&str>, what: &str) -> String {
     }
 }
 
+/// A program's notification as a banner: its title led by the card's name, "Terminal" when
+/// the protocol carried no title (OSC 9), and its body.
+#[must_use]
+pub fn program_banner(name: Option<&str>, title: &str, body: &str) -> (String, String) {
+    let title = if title.trim().is_empty() { "Terminal" } else { title.trim() };
+    (banner_title(name, title), body.trim().to_owned())
+}
+
 /// Whether two card rectangles share any area.
 const fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
@@ -1337,6 +1345,27 @@ impl CanvasView {
         });
     }
 
+    /// A program in a terminal asked for a desktop notification (OSC 9 / 777 / 99): the same
+    /// banner an agent gets when the human is not looking, tagged by the session so a click
+    /// reveals the card, and the dock bounce either way.
+    fn notify_program(&self, session: SessionId, title: &str, body: &str, cx: &mut Context<Self>) {
+        if cx.active_window().is_none() {
+            let name = self
+                .doc
+                .items()
+                .find(|i| matches!(i.kind, ItemKind::Terminal { session: s } if s == session))
+                .and_then(|i| i.name.as_deref());
+            let (title, body) = program_banner(name, title, body);
+            cx.show_system_notification(SystemNotification {
+                tag: session.to_string().into(),
+                title: title.into(),
+                body: body.into(),
+                actions: Vec::new(),
+            });
+        }
+        cx.emit(CanvasEvent::Attention(session));
+    }
+
     /// The user activated a notification: the body reveals the session, the buttons answer
     /// the permission prompt. Called from the app's response handler with the tag parsed.
     pub fn notification_response(
@@ -2292,6 +2321,9 @@ impl CanvasView {
                 &view,
                 move |this, _view, event, cx| match event {
                     TerminalViewEvent::Bell => cx.emit(CanvasEvent::Bell(sid)),
+                    TerminalViewEvent::Notification { title, body } => {
+                        this.notify_program(sid, title, body, cx);
+                    }
                     TerminalViewEvent::Exited(_) => {
                         this.send(ClientMsg::Term { session: sid, req: TermRequest::Close });
                     }
@@ -5228,6 +5260,18 @@ mod tests {
         assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id), "the badge goes there");
         assert!(view.read_with(cx, |c, _| c.finished(session).is_none()), "and clears");
         assert!(cx.debug_bounds(selector("finished", id)).is_none());
+    }
+
+    #[test]
+    fn a_programs_banner_has_a_title_even_when_the_protocol_gave_none() {
+        assert_eq!(
+            program_banner(None, "", "build done"),
+            ("Terminal".to_owned(), "build done".to_owned())
+        );
+        assert_eq!(
+            program_banner(Some("build box"), "Tests", " all green\n"),
+            ("build box · Tests".to_owned(), "all green".to_owned())
+        );
     }
 
     #[test]

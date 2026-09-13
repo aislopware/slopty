@@ -59,6 +59,13 @@ pub enum EngineEvent {
         /// The text.
         text: String,
     },
+    /// The program asked for a desktop notification (OSC 9, OSC 777 `notify`, OSC 99).
+    Notification {
+        /// Its title; empty when the protocol carries none (OSC 9).
+        title: String,
+        /// Its body.
+        body: String,
+    },
 }
 
 /// Configuration for a new engine.

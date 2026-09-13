@@ -100,7 +100,10 @@ wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTer
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
 `MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
-for a read reply.
+for a read reply. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
+all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
+the canvas posts them as a notification-centre banner when no window is active, tagged by the
+session so a click reveals the card, and bounces the Dock like an agent's attention.
 
 **Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh, bash and fish:
 at every start it writes the bundled scripts (`slopty-pty/assets/shell`, compiled in with

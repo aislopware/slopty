@@ -285,4 +285,12 @@ pub enum TermEvent {
         /// The compiler's complaint.
         message: String,
     },
+    /// The program asked for a desktop notification (OSC 9, OSC 777 `notify`, OSC 99):
+    /// a banner and the dock bounce when the human is not looking, as an agent's would be.
+    Notification {
+        /// Its title; empty when the protocol carries none.
+        title: String,
+        /// Its body.
+        body: String,
+    },
 }

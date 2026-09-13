@@ -516,6 +516,9 @@ impl Actor {
                     }
                 }
                 EngineEvent::Bell => self.broadcast(&TermEvent::Bell),
+                EngineEvent::Notification { title, body } => {
+                    self.broadcast(&TermEvent::Notification { title, body });
+                }
                 EngineEvent::Title(t) => {
                     self.title = Some(t.clone());
                     self.broadcast(&TermEvent::Title(t));

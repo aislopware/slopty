@@ -24,6 +24,13 @@ pub enum Effect {
     },
     /// The program wrote to the clipboard.
     ClipboardWrite(String),
+    /// The program asked for a desktop notification.
+    Notification {
+        /// Its title, possibly empty.
+        title: String,
+        /// Its body.
+        body: String,
+    },
     /// The child exited.
     Exited(i32),
     /// The host reported an error for a request.
@@ -261,6 +268,7 @@ impl TermState {
                 vec![Effect::Cwd { path, repo }]
             }
             TermEvent::Bell => vec![Effect::Bell],
+            TermEvent::Notification { title, body } => vec![Effect::Notification { title, body }],
             TermEvent::ClipboardWrite { text } => vec![Effect::ClipboardWrite(text)],
             TermEvent::Exited { status } => {
                 self.exited = Some(status);
@@ -721,6 +729,10 @@ mod tests {
         );
         assert_eq!((state.cwd(), state.repo()), (Some("/w/app"), Some("/w")));
         assert_eq!(state.apply(TermEvent::Bell), vec![Effect::Bell]);
+        assert_eq!(
+            state.apply(TermEvent::Notification { title: "T".to_owned(), body: "b".to_owned() }),
+            vec![Effect::Notification { title: "T".to_owned(), body: "b".to_owned() }]
+        );
         assert_eq!(
             state.apply(TermEvent::ClipboardWrite { text: "copied".into() }),
             vec![Effect::ClipboardWrite("copied".into())]

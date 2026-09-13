@@ -134,6 +134,11 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                                 out.write_all(b"\x07")?;
                                 out.flush()?;
                             }
+                            Effect::Notification { title, body } => {
+                                let mut out = std::io::stdout();
+                                out.write_all(relay_notification(&title, &body).as_bytes())?;
+                                out.flush()?;
+                            }
                             Effect::Exited(status) => {
                                 done = Some(if status == 0 { "exited" } else { "exited with error" });
                             }
@@ -196,6 +201,14 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
 }
 
 /// Redraw every row and place the cursor.
+/// A program's notification handed on to the terminal we sit in as OSC 777 `notify`, so it
+/// posts the banner; control characters are dropped so the payload cannot end or fake
+/// the sequence.
+fn relay_notification(title: &str, body: &str) -> String {
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+    format!("\x1b]777;notify;{};{}\x07", clean(title), clean(body))
+}
+
 fn paint(state: &TermState) -> Result<()> {
     let mut buf = Vec::with_capacity(8192);
     buf.extend_from_slice(b"\x1b[?25l");
@@ -274,5 +287,16 @@ fn color(params: &mut Vec<String>, base: u8, c: Color) {
         Color::Default => {}
         Color::Palette(n) => params.push(format!("{base};5;{n}")),
         Color::Rgb(r, g, b) => params.push(format!("{base};2;{r};{g};{b}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relay_notification;
+
+    #[test]
+    fn a_relayed_notification_is_one_clean_osc_777() {
+        assert_eq!(relay_notification("Tests", "all green"), "\x1b]777;notify;Tests;all green\x07");
+        assert_eq!(relay_notification("", "a\x1b]9;x\x07b\n"), "\x1b]777;notify;;a]9;xb\x07");
     }
 }

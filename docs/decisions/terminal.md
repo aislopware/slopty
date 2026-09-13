@@ -618,3 +618,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (each line still trims its trailing blanks). Word and line clicks, ⇧-click and the block
   menu's selection stay runs. Tests: `a_block_selection_is_the_same_columns_on_every_line`,
   the block case in `selected_text_spans_rows_and_trims`.
+
+- ✅ **OSC 9 / 777 / 99 notifications reach the desktop** (2026-09-15). A long build's
+  `printf '\e]9;done\a'` or a kitty `notify` used to end at `EngineEvent::Bell`'s neighbour
+  and vanish; ghostty, kitty, WezTerm and iTerm2 all post a banner. libghostty's
+  `desktop_notification` callback (registered in `install_callbacks` next to the bell) hands
+  over the parsed title and body for every dialect, so the engine needs no OSC parsing of
+  its own: it emits `EngineEvent::Notification { title, body }` with each field cut to
+  `NOTIFICATION_CHARS` (512; a banner shows a line or two and a program can write anything
+  into an OSC), the session broadcasts `TermEvent::Notification` (appended last, protocol 42)
+  to every attached client, and the canvas treats it as an agent's attention: a
+  notification-centre banner only when no window is active (`program_banner` leads the title
+  with the card's name and says "Terminal" when the protocol carried none, as OSC 9 does),
+  tagged by the session so a click reveals the card through the existing response path, and
+  `CanvasEvent::Attention` for the Dock bounce either way. No sound and no urgency: the bell
+  already has its own path. Tests: engine `desktop_notifications_are_events`, client
+  `apply` mapping, `host_term_notification` golden, canvas
+  `a_programs_banner_has_a_title_even_when_the_protocol_gave_none`.

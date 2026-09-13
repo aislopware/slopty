@@ -192,6 +192,13 @@ impl Selection {
 pub enum TerminalViewEvent {
     /// Title changed.
     Title(String),
+    /// The program asked for a desktop notification (OSC 9 / 777 / 99).
+    Notification {
+        /// Its title, possibly empty.
+        title: String,
+        /// Its body.
+        body: String,
+    },
     /// The working directory changed (OSC 7), with the repository the host resolved it to.
     /// What arrange-by-repo groups on, so it has to follow a `cd` and not stay at whatever the
     /// session opened in.
@@ -2279,6 +2286,9 @@ impl TerminalView {
                 Effect::Request(req) => self.send(req),
                 Effect::Title(t) => cx.emit(TerminalViewEvent::Title(t)),
                 Effect::Bell => cx.emit(TerminalViewEvent::Bell),
+                Effect::Notification { title, body } => {
+                    cx.emit(TerminalViewEvent::Notification { title, body });
+                }
                 Effect::Exited(status) => cx.emit(TerminalViewEvent::Exited(status)),
                 Effect::ClipboardWrite(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));

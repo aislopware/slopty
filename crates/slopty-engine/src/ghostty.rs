@@ -20,6 +20,10 @@ use slopty_proto::terminal::{Frame, TermSize};
 
 use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
 
+/// Longest title or body of a desktop notification passed on: a banner shows a line or two,
+/// and a program can write anything into an OSC.
+const NOTIFICATION_CHARS: usize = 512;
+
 /// How long a program may hold synchronized output (mode 2026) before we ship frames anyway.
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(1000);
 
@@ -855,6 +859,12 @@ fn install_callbacks(
     })?;
     let for_bell = Rc::clone(events);
     term.on_bell(move |_| for_bell.borrow_mut().push(EngineEvent::Bell))?;
+    let for_notify = Rc::clone(events);
+    term.on_desktop_notification(move |_, n| {
+        let title = n.title().chars().take(NOTIFICATION_CHARS).collect();
+        let body = n.body().chars().take(NOTIFICATION_CHARS).collect();
+        for_notify.borrow_mut().push(EngineEvent::Notification { title, body });
+    })?;
     let for_title = Rc::clone(events);
     term.on_title_changed(move |t| {
         let title = t.title().unwrap_or_default().to_owned();
@@ -1502,6 +1512,36 @@ mod tests {
         assert!(ev.contains(&EngineEvent::Title("hello".to_owned())));
         assert!(ev.contains(&EngineEvent::Cwd("/tmp".to_owned())));
         assert!(e.drain_events().is_empty());
+    }
+
+    /// OSC 9 (a body), OSC 777 `notify` (title and body) and OSC 99 (kitty) are one event;
+    /// the fields are cut to a banner's worth.
+    #[test]
+    fn desktop_notifications_are_events() {
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]9;build done\x07\x1b]777;notify;Tests;all green\x07");
+        let ev = e.drain_events();
+        assert!(
+            ev.contains(&EngineEvent::Notification {
+                title: String::new(),
+                body: "build done".to_owned()
+            }),
+            "{ev:?}"
+        );
+        assert!(
+            ev.contains(&EngineEvent::Notification {
+                title: "Tests".to_owned(),
+                body: "all green".to_owned()
+            }),
+            "{ev:?}"
+        );
+        let long = "x".repeat(2000);
+        e.write(format!("\x1b]9;{long}\x07").as_bytes());
+        let ev = e.drain_events();
+        assert!(
+            matches!(&ev[0], EngineEvent::Notification { body, .. } if body.len() == NOTIFICATION_CHARS),
+            "{ev:?}"
+        );
     }
 
     #[test]

@@ -806,6 +806,14 @@ mod golden {
     }
 
     #[test]
+    fn term_notification() {
+        snap(
+            "host_term_notification",
+            &TermEvent::Notification { title: "Tests".to_owned(), body: "all green".to_owned() },
+        );
+    }
+
+    #[test]
     fn lines_with_prompt_marks() {
         let mut prompt = Line::from_text("$ false", 8, Style::DEFAULT);
         prompt.mark = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
