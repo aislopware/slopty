@@ -949,7 +949,12 @@ output from any row): "Copy command", "Copy output", "Rerun" (a paste of the com
 ↩ as a key), "Ask the agent" (the block as a fence, `block_markdown`, into the composer of the
 agent card the human is on, else the topmost, else one the canvas opens in the active
 shell's directory — `TerminalViewEvent::AskAgent` → `CanvasView::ask_agent`, the text
-waiting in `TerminalView::compose` until the card has its conversation) and "Select block". While the viewport's top row is inside a block whose prompt
+waiting in `TerminalView::compose` until the card has its conversation), "Save as note" (the
+block as a note card beside the shell: the command as a heading and a runnable `sh` fence,
+the output as a plain fence, `block_note`; `TerminalViewEvent::NoteBlock` →
+`CanvasView::note_beside`, a free slot when the space beside is taken; the palette's "Keep
+last block as a card" does the same for the block before the newest prompt,
+`TermState::last_block`) and "Select block". While the viewport's top row is inside a block whose prompt
 rows have all scrolled above, a one-row header over the grid (`block-header`, role Button,
 `TerminalView::block_header`, reading `TermState::block_head` — the prompt's rows alone, never
 the output) names the command in the mono face on the panel colour, ruled

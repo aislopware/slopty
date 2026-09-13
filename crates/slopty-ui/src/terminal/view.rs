@@ -74,6 +74,8 @@ mod actions {
             CopyConversation,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
+            /// Save the last command and its output as a note card beside the shell.
+            NoteLastBlock,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
             /// Show the agent's conversation instead of the grid, or the grid again.
@@ -88,7 +90,7 @@ mod actions {
 }
 pub use actions::{
     ClearScreen, CloseFind, CompleteSlash, Copy, CopyConversation, CopyLastOutput, Find, FindNext,
-    FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ToggleConversation,
+    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -221,6 +223,9 @@ pub enum TerminalViewEvent {
     /// "Ask the agent" on a block's menu: the block as a Markdown fence for a driven agent's
     /// composer. The canvas picks the agent card (or opens one) and puts it there.
     AskAgent(String),
+    /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
+    /// canvas puts a note card with it beside the shell.
+    NoteBlock(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the canvas opens (or reveals) a file card for it, a relative path made absolute
     /// against the session's directory, landing on `line` (1-based) when one is known.
@@ -1490,6 +1495,7 @@ impl TerminalView {
             items.push(BlockMenuItem::Rerun);
         }
         items.push(BlockMenuItem::Ask);
+        items.push(BlockMenuItem::Note);
         items.push(BlockMenuItem::SelectBlock);
         items
     }
@@ -1522,6 +1528,7 @@ impl TerminalView {
                     .map_or_else(|| block_markdown(&block), |t| format!("```\n{t}\n```\n\n"));
                 cx.emit(TerminalViewEvent::AskAgent(text));
             }
+            BlockMenuItem::Note => cx.emit(TerminalViewEvent::NoteBlock(block_note(&block))),
             BlockMenuItem::SelectBlock => {
                 let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
                 let cols = self.state.size().cols;
@@ -1685,6 +1692,19 @@ impl TerminalView {
     pub fn rerun_last(&mut self, _: &RerunLast, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = self.state.last_command() {
             self.run_text(command, cx);
+        }
+    }
+
+    /// The palette's "Save last block as note": the last finished command's block (the one
+    /// before the newest prompt) as a note card beside the shell; nothing without one.
+    pub fn note_last_block(
+        &mut self,
+        _: &NoteLastBlock,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(block) = self.state.last_block() {
+            cx.emit(TerminalViewEvent::NoteBlock(block_note(&block)));
         }
     }
 
@@ -2990,6 +3010,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::copy_conversation))
             .on_action(cx.listener(Self::rerun_last))
+            .on_action(cx.listener(Self::note_last_block))
             .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(Self::toggle_conversation_action))
             .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
@@ -3093,6 +3114,8 @@ enum BlockMenuItem {
     Rerun,
     /// The block, as a fence, into the agent's composer.
     Ask,
+    /// The block as a note card beside the shell: the command runnable, the output under it.
+    Note,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
 }
@@ -3115,6 +3138,29 @@ pub fn block_markdown(block: &CommandBlock) -> String {
     text
 }
 
+/// A command block as a note: the command as a heading and a runnable `sh` fence, the
+/// output as a plain fence under it; either half alone when the block has only that.
+#[must_use]
+pub fn block_note(block: &CommandBlock) -> String {
+    let mut text = String::new();
+    if let Some(command) = &block.command {
+        text.push_str("# ");
+        text.push_str(command.lines().next().unwrap_or_default());
+        text.push_str("\n\n```sh\n");
+        text.push_str(command);
+        text.push_str("\n```\n");
+    }
+    if !block.output.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("```\n");
+        text.push_str(&block.output);
+        text.push_str("\n```\n");
+    }
+    text
+}
+
 impl BlockMenuItem {
     const fn key(self) -> &'static str {
         match self {
@@ -3122,6 +3168,7 @@ impl BlockMenuItem {
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
             Self::Ask => "ask",
+            Self::Note => "note",
             Self::SelectBlock => "select-block",
         }
     }
@@ -3132,6 +3179,7 @@ impl BlockMenuItem {
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
             Self::Ask => "Ask the agent",
+            Self::Note => "Save as note",
             Self::SelectBlock => "Select block",
         }
     }
@@ -3488,7 +3536,14 @@ mod tests {
         right_click(cx);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Menu", Some("Command block"))), "{tree:#?}");
-        for label in ["Copy command", "Copy output", "Rerun", "Ask the agent", "Select block"] {
+        for label in [
+            "Copy command",
+            "Copy output",
+            "Rerun",
+            "Ask the agent",
+            "Save as note",
+            "Select block",
+        ] {
             assert!(tree.iter().any(|n| n.is("MenuItem", Some(label))), "{label}: {tree:#?}");
         }
         let block = view.read_with(cx, |v, _| v.block_menu.as_ref().map(|m| m.block.clone()));
@@ -3505,6 +3560,26 @@ mod tests {
         right_click(cx);
         pick(cx, "rerun");
         assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
+
+        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&notes);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::NoteBlock(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        right_click(cx);
+        pick(cx, "note");
+        assert_eq!(notes.borrow().as_slice(), ["# seq 2\n\n```sh\nseq 2\n```\n\n```\n1\n2\n```\n"]);
+        assert!(drain_input(&mut rx).is_empty(), "a note is not typed into the shell");
+        // The palette's line needs no click on a row: the last finished block.
+        cx.update(|window, cx| window.dispatch_action(Box::new(NoteLastBlock), cx));
+        cx.run_until_parked();
+        assert_eq!(notes.borrow().len(), 2);
+        assert_eq!(notes.borrow()[1], "# seq 2\n\n```sh\nseq 2\n```\n\n```\n1\n2\n```\n");
 
         right_click(cx);
         pick(cx, "select-block");
@@ -3545,6 +3620,25 @@ mod tests {
         cx.simulate_click(at, gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("block-menu").is_none());
+    }
+
+    #[test]
+    fn a_block_note_keeps_the_half_it_has() {
+        let block = |command: Option<&str>, output: &str| CommandBlock {
+            prompt: LineIndex(0),
+            end: LineIndex(1),
+            exit: None,
+            command: command.map(str::to_owned),
+            output: output.to_owned(),
+        };
+        assert_eq!(block_note(&block(Some("ls"), "")), "# ls\n\n```sh\nls\n```\n");
+        assert_eq!(block_note(&block(None, "a\nb")), "```\na\nb\n```\n");
+        assert_eq!(
+            block_note(&block(Some("for x in 1 2\ndo echo $x\ndone"), "1\n2")),
+            "# for x in 1 2\n\n```sh\nfor x in 1 2\ndo echo $x\ndone\n```\n\n```\n1\n2\n```\n",
+            "a multi-line command is headed by its first line"
+        );
+        assert_eq!(block_note(&block(None, "")), "");
     }
 
     #[test]
@@ -5959,6 +6053,14 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(completions(cx), ["@src/main.rs", "@docs/manual/"], "the current answer only");
+        // The word grows past the answer: the stale list hides until the host answers again.
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["files:mai"]);
+        assert!(completions(cx).is_empty(), "an answer for `ma` is not one for `mai`");
+        view.update(cx, |v, cx| v.files("mai".to_owned(), vec!["src/main.rs".to_owned()], cx));
+        cx.run_until_parked();
+        assert_eq!(completions(cx), ["@src/main.rs"]);
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));

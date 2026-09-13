@@ -417,6 +417,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sizes scale with the note's zoom as its prose does. Test:
   `a_notes_fenced_block_runs_in_the_canvas_shell`.
 
+- ✅ **A command block is saved as a note** (2026-09-13). The runbook note took the
+  commands typed into it by hand; the command that had just worked, with its output, was
+  the thing worth keeping, and copying two halves into a new note was five steps. Rulings:
+  (1) "Save as note" on the block menu (`block-menu-note`) is a note card holding the
+  block as `block_note` writes it: the command's first line as a heading, the whole
+  command as an `sh` fence (so the note's "run" button reruns it), the output as a plain
+  fence under it, and only the half the block has; (2) the card lands beside the shell's
+  card (its right edge plus the gap, the shell's top, the note's size cut to the shell's
+  height) so the pair reads together, and in the canvas's next free slot when that space is
+  taken (`CanvasView::note_beside`); (3) the card is active and revealed but not editing:
+  its content was saved, nothing is about to be typed, and the caret would have hidden the
+  rendered fence's buttons; (4) the palette's "Keep last block as a card" (`NoteLastBlock`,
+  `TermState::last_block`) is the same for the block before the newest prompt, so a phone
+  needs no right click. Tests: `a_block_note_keeps_the_half_it_has` and the menu item and
+  the action in `a_right_click_on_a_block_offers_its_command_and_output` (terminal),
+  `last_block` in the prompt-navigation unit test, headless
+  `a_block_saved_as_a_note_lands_beside_the_shell`.
+
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note

@@ -436,6 +436,15 @@ impl TermState {
         )
     }
 
+    /// The last finished command's block (the one before the newest prompt): what was typed
+    /// and what it printed; `None` when no command has run.
+    #[must_use]
+    pub fn last_block(&self) -> Option<CommandBlock> {
+        let newest_prompt = self.prompt_before(LineIndex(self.newest().0.saturating_add(1)))?;
+        let previous = self.prompt_before(newest_prompt)?;
+        self.command_block(previous)
+    }
+
     /// The last `limit` distinct commands typed at this shell's prompts, newest first, among
     /// the lines held here (shell integration marks them; a repeat keeps its newest place).
     #[must_use]
@@ -838,6 +847,8 @@ mod tests {
         assert_eq!(state.last_command_output(), Some("1\n2".to_owned()), "blank tail trimmed");
         assert_eq!(state.last_command().as_deref(), Some("seq 2"));
         assert_eq!(state.recent_commands(8), ["seq 2", "false", "ls"], "newest first");
+        let last = state.last_block().expect("the seq block");
+        assert_eq!((last.command.as_deref(), last.output.as_str()), (Some("seq 2"), "1\n2"));
         assert_eq!(state.recent_commands(2), ["seq 2", "false"], "the limit cuts the oldest");
         assert!(state.recent_commands(0).is_empty());
         // A block from any of its rows: the prompt, the typed command, the trimmed output.

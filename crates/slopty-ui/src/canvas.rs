@@ -216,8 +216,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
     use crate::terminal::{
-        ClearScreen, CopyConversation, CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast,
-        ToggleConversation,
+        ClearScreen, CopyConversation, CopyLastOutput, Find, NextPrompt, NoteLastBlock, PrevPrompt,
+        RerunLast, ToggleConversation,
     };
     let canvas = key_bindings();
     let terminal = crate::terminal::key_bindings();
@@ -253,6 +253,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Copy last output", Box::new(CopyLastOutput)),
         t("Copy conversation as Markdown", Box::new(CopyConversation)),
         t("Rerun last command", Box::new(RerunLast)),
+        t("Keep last block as a card", Box::new(NoteLastBlock)),
         t("Clear the screen and history", Box::new(ClearScreen)),
         t("Show or hide the conversation", Box::new(ToggleConversation)),
     ]
@@ -366,6 +367,11 @@ pub fn banner_title(name: Option<&str>, what: &str) -> String {
         Some(name) => format!("{name} · {what}"),
         None => what.to_owned(),
     }
+}
+
+/// Whether two card rectangles share any area.
+const fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
 /// A note's title: its first non-empty line with Markdown's heading, list and quote marks
@@ -2276,6 +2282,7 @@ impl CanvasView {
                     }
                     TerminalViewEvent::RunInShell(code) => this.run_in_shell(code.clone(), cx),
                     TerminalViewEvent::AskAgent(text) => this.ask_agent(text.clone(), cx),
+                    TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
                     TerminalViewEvent::ViewFile { path, line } => {
                         let path = this.absolute_in_session(sid, path);
                         this.open_file(&path, *line, cx);
@@ -2546,6 +2553,40 @@ impl CanvasView {
         self.active = Some(id);
         self.reveal_pending = Some(id);
         self.pending_focus_note = Some(id);
+        cx.notify();
+    }
+
+    /// A block saved as a note: a note card with `text`, in the free slot beside the shell's
+    /// card (the canvas's next free slot without one), active and revealed but not editing,
+    /// since its content is what was saved, not what is about to be typed.
+    fn note_beside(&mut self, session: SessionId, text: String, cx: &mut Context<Self>) {
+        let size = self.fitted(NOTE_SIZE);
+        let rect = self.doc.item_for_session(session).map_or_else(
+            || self.doc.free_slot(size),
+            |shell| {
+                let mut rect = Rect { x: shell.rect.x + shell.rect.w + GAP, ..shell.rect };
+                rect.w = size.0;
+                rect.h = size.1.min(shell.rect.h);
+                if self.doc.items().any(|i| overlaps(i.rect, rect)) {
+                    self.doc.free_slot(size)
+                } else {
+                    rect
+                }
+            },
+        );
+        let id = ItemId::new();
+        let item = CanvasItem {
+            id,
+            kind: ItemKind::Note { text },
+            rect,
+            z: self.doc.top_z().saturating_add(1),
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        self.propose(CanvasOp::Upsert(item));
+        self.active = Some(id);
+        self.reveal_pending = Some(id);
         cx.notify();
     }
 
@@ -8229,6 +8270,54 @@ mod tests {
         cx.simulate_click(edit.center(), Modifiers::default());
         cx.run_until_parked();
         assert_eq!(typed(&mut rx), ["${EDITOR:-vi} +3 '/w/a.txt'"]);
+    }
+
+    /// "Save as note" on a block puts a note card with the block's Markdown beside the
+    /// shell, active and revealed, its caret not in it; a second one lands in a free slot.
+    #[gpui::test]
+    fn a_block_saved_as_a_note_lands_beside_the_shell(cx: &mut TestAppContext) {
+        const TEXT: &str = "# make\n\n```sh\nmake\n```\n\n```\nok\n```\n";
+        let (view, _rx, me, cx) = canvas(cx);
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, SHELL, 1);
+        let save = |view: &Entity<CanvasView>, cx: &mut VisualTestContext| {
+            view.update_in(cx, |c, _window, cx| {
+                let terminal = c.terminals[&shell].clone();
+                terminal.update(cx, |_v, cx| {
+                    cx.emit(TerminalViewEvent::NoteBlock(TEXT.to_owned()));
+                });
+            });
+            cx.run_until_parked();
+        };
+        save(&view, cx);
+        let notes =
+            |view: &Entity<CanvasView>, cx: &mut VisualTestContext| -> Vec<(String, Rect)> {
+                view.read_with(cx, |c, _| {
+                    c.items()
+                        .into_iter()
+                        .filter_map(|i| match &i.kind {
+                            ItemKind::Note { text } => Some((text.clone(), i.rect)),
+                            _ => None,
+                        })
+                        .collect()
+                })
+            };
+        let first = notes(&view, cx);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].0, TEXT);
+        let rect = first[0].1;
+        assert!((rect.x - (SHELL.x + SHELL.w + GAP)).abs() < 0.5, "beside the shell: {rect:?}");
+        assert!((rect.y - SHELL.y).abs() < 0.5, "{rect:?}");
+        let id = view.read_with(cx, |c, _| c.active_item()).expect("the note is active");
+        assert!(view.read_with(cx, |c, _| c.doc.get(id).is_some_and(|i| i.rect == rect)));
+        let editing = cx.update(|window, cx| {
+            view.read(cx).notes.get(&id).is_some_and(|n| n.read(cx).editing(window, cx))
+        });
+        assert!(!editing, "saved content: nothing to type yet");
+        save(&view, cx);
+        let second = notes(&view, cx);
+        assert_eq!(second.len(), 2, "{second:?}");
+        assert!(!overlaps(second[0].1, second[1].1), "the second finds its own slot: {second:?}");
     }
 
     #[gpui::test]
