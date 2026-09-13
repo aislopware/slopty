@@ -21,6 +21,7 @@ use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods, MouseAction, Mouse
 use slopty_proto::terminal::{Frame, PixelRect, Placement, TermSize};
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
+use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
 
 /// Longest title or body of a desktop notification passed on: a banner shows a line or two,
@@ -468,9 +469,14 @@ impl GhosttyEngine {
 
         let mut row_iter = self.rows_iter.update(&snapshot)?;
         let mut y: u16 = 0;
+        // Placeholder cells of virtual kitty placements, gathered from every row (a run that
+        // did not change still places its image in this frame).
+        let mut runs = Runs::default();
         while let Some(row) = row_iter.next() {
+            let raw = row.raw_row()?;
+            // The row flag may be a false positive, but a row without it has no placeholders.
+            let placeholders = raw.has_kitty_virtual_placeholder()?;
             if full || row.dirty()? {
-                let raw = row.raw_row()?;
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
                 let mut first_input = None;
@@ -495,11 +501,20 @@ impl GhosttyEngine {
                         Style::DEFAULT
                     };
                     let width = convert::cell_width(rc.wide()?);
-                    let text = if rc.has_text()? && width.draws_text() {
+                    let text = if placeholders && rc.codepoint()? == placeholder::PLACEHOLDER {
+                        // The image goes where the placeholder is; the character itself
+                        // is never drawn.
+                        self.scratch.clear();
+                        cell.graphemes_utf8(&mut self.scratch)?;
+                        runs.cell(x, y, placeholder_cell(&style, &self.scratch));
+                        CellText::EMPTY
+                    } else if rc.has_text()? && width.draws_text() {
+                        runs.finish();
                         self.scratch.clear();
                         cell.graphemes_utf8(&mut self.scratch)?;
                         CellText::from_cluster(&self.scratch)
                     } else {
+                        runs.finish();
                         CellText::EMPTY
                     };
                     if row_has_links {
@@ -542,7 +557,26 @@ impl GhosttyEngine {
                 });
                 updates.push(RowUpdate { row: y, line });
                 row.set_dirty(false)?;
+            } else if placeholders {
+                let mut cell_iter = self.cells_iter.update(row)?;
+                let mut x: u16 = 0;
+                while let Some(cell) = cell_iter.next() {
+                    if cell.raw_cell()?.codepoint()? == placeholder::PLACEHOLDER {
+                        let style = if cell.has_styling()? {
+                            convert::style(&cell.style()?)
+                        } else {
+                            Style::DEFAULT
+                        };
+                        self.scratch.clear();
+                        cell.graphemes_utf8(&mut self.scratch)?;
+                        runs.cell(x, y, placeholder_cell(&style, &self.scratch));
+                    } else {
+                        runs.finish();
+                    }
+                    x = x.saturating_add(1);
+                }
             }
+            runs.finish();
             y = y.saturating_add(1);
         }
         snapshot.set_dirty(Dirty::Clean)?;
@@ -553,7 +587,7 @@ impl GhosttyEngine {
             // A client attaching or resyncing holds nothing yet.
             self.ledger.clear();
         }
-        let images = if graphics_gen == 0 { Vec::new() } else { self.placed()? };
+        let images = if graphics_gen == 0 { Vec::new() } else { self.placed(&runs.into_runs())? };
         Ok(Some(Frame {
             seq: self.seq,
             full,
@@ -571,41 +605,38 @@ impl GhosttyEngine {
         }))
     }
 
-    /// Every placement on the viewport, as libghostty lays it out at the client's cell size.
+    /// Every placement on the viewport, as libghostty lays it out at the client's cell size,
+    /// then a placement per run of placeholder cells showing a virtual placement.
     ///
-    /// The pixels of any image the clients do not hold are queued for upload first. A
-    /// virtual placement (Unicode placeholders) is not drawn.
-    fn placed(&mut self) -> Result<Vec<Placement>, EngineError> {
+    /// The pixels of any image the clients do not hold are queued for upload first.
+    fn placed(&mut self, runs: &[placeholder::Run]) -> Result<Vec<Placement>, EngineError> {
         let graphics = self.term.kitty_graphics()?;
         let mut out = Vec::new();
+        let mut virtuals: Vec<Virtual> = Vec::new();
         let mut it = self.placements.update(&graphics)?;
         while let Some(p) = it.next() {
+            let id = p.image_id()?;
             if p.is_virtual()? {
+                if !runs.is_empty() {
+                    virtuals.push(Virtual {
+                        image: id,
+                        placement: p.placement_id()?,
+                        grid: placeholder::Grid { cols: p.columns()?, rows: p.rows()? },
+                        z: p.z()?,
+                    });
+                }
                 continue;
             }
-            let id = p.image_id()?;
             let Some(image) = graphics.image(id) else { continue };
             let info = p.placement_render_info(&image, &self.term)?;
             if !info.viewport_visible {
                 continue;
             }
-            let generation = image.generation()?;
-            let shrink = if let Some(shrink) = self.ledger.held(id, generation) {
-                shrink
-            } else {
-                let Some(data) = image.data()? else { continue };
-                let (w, h) = (image.width()?, image.height()?);
-                let Some((up, shrink)) =
-                    graphics::upload(id, generation, image.format()?, w, h, data)
-                else {
-                    continue;
-                };
-                let bytes = up.rgba.len();
-                self.uploads.push(up);
-                self.ledger.insert(id, Shipped { generation, shrink, bytes, last: self.seq });
-                shrink
+            let Some((generation, shrink)) =
+                ship(&mut self.ledger, &mut self.uploads, self.seq, id, &image)?
+            else {
+                continue;
             };
-            self.ledger.touch(id, self.seq);
             let scaled = |v: u32| v.checked_div(shrink).unwrap_or(v);
             out.push(Placement {
                 image: id,
@@ -625,6 +656,46 @@ impl GhosttyEngine {
                     height: scaled(info.source_height),
                 },
                 z: p.z()?,
+            });
+        }
+        let cell =
+            (u32::from(self.size.metrics.cell_width), u32::from(self.size.metrics.cell_height));
+        for run in runs {
+            // A placement id names one placement; 0 takes the image's first virtual one.
+            let Some(v) = virtuals.iter().find(|v| {
+                v.image == run.image && (run.placement == 0 || v.placement == run.placement)
+            }) else {
+                continue;
+            };
+            let Some(image) = graphics.image(run.image) else { continue };
+            let size = (image.width()?, image.height()?);
+            let Some(r) = placeholder::render(run, size, v.grid.resolved(size, cell), cell) else {
+                continue;
+            };
+            let Some((generation, shrink)) =
+                ship(&mut self.ledger, &mut self.uploads, self.seq, run.image, &image)?
+            else {
+                continue;
+            };
+            let scaled = |v: u32| v.checked_div(shrink).unwrap_or(v);
+            out.push(Placement {
+                image: run.image,
+                generation,
+                col: i32::from(run.x),
+                row: i32::from(run.y),
+                cols: run.width,
+                rows: 1,
+                x_offset: r.x_offset,
+                y_offset: r.y_offset,
+                width: r.width,
+                height: r.height,
+                source: PixelRect {
+                    x: scaled(r.source.x),
+                    y: scaled(r.source.y),
+                    width: scaled(r.source.width),
+                    height: scaled(r.source.height),
+                },
+                z: v.z,
             });
         }
         self.ledger.prune();
@@ -926,6 +997,54 @@ fn set_cell(line: &mut Line, x: u16, cell: Cell) {
     if let Some(slot) = line.cells.get_mut(usize::from(x)) {
         *slot = cell;
     }
+}
+
+/// A virtual kitty placement: shown only through placeholder cells.
+struct Virtual {
+    image: u32,
+    placement: u32,
+    grid: placeholder::Grid,
+    z: i32,
+}
+
+/// Queue `image`'s pixels unless the clients hold this generation already; the generation and
+/// the shrink factor they hold it at, or `None` while the transmission is incomplete.
+fn ship(
+    ledger: &mut Ledger,
+    uploads: &mut Vec<ImageUpload>,
+    seq: u64,
+    id: u32,
+    image: &kitty_graphics::Image<'_>,
+) -> Result<Option<(u64, u32)>, EngineError> {
+    let generation = image.generation()?;
+    let shrink = if let Some(shrink) = ledger.held(id, generation) {
+        shrink
+    } else {
+        let Some(data) = image.data()? else { return Ok(None) };
+        let (w, h) = (image.width()?, image.height()?);
+        let Some((up, shrink)) = graphics::upload(id, generation, image.format()?, w, h, data)
+        else {
+            return Ok(None);
+        };
+        let bytes = up.rgba.len();
+        uploads.push(up);
+        ledger.insert(id, Shipped { generation, shrink, bytes, last: seq });
+        shrink
+    };
+    ledger.touch(id, seq);
+    Ok(Some((generation, shrink)))
+}
+
+/// A placeholder cell decoded from its wire style and its grapheme cluster (U+10EEEE first,
+/// then the diacritics).
+fn placeholder_cell(style: &Style, cluster: &str) -> placeholder::Cell {
+    let id = |c: slopty_grid::Color| match c {
+        slopty_grid::Color::Palette(i) => placeholder::color_id(Some(i), None),
+        slopty_grid::Color::Rgb(r, g, b) => placeholder::color_id(None, Some((r, g, b))),
+        slopty_grid::Color::Default => 0,
+    };
+    let (fg, underline) = (id(style.fg), id(style.underline_color));
+    placeholder::Cell::decode(fg, underline, cluster.chars().skip(1).map(u32::from))
 }
 
 const fn check_size(size: TermSize) -> Result<(), EngineError> {
@@ -2313,6 +2432,52 @@ mod graphics_tests {
         // A client attaching holds nothing: a full frame ships them again.
         let _full = e.full_frame(0).unwrap();
         assert_eq!(e.drain_images().len(), 1);
+    }
+
+    /// A virtual placement (`U=1`) is shown by placeholder cells: the image id in the
+    /// foreground colour, the tile in the diacritics. Two cells in a row become one placement
+    /// over them, scaled to fit the placement's 2×1 grid; the cells go out blank; the pixels
+    /// ship once.
+    #[test]
+    fn unicode_placeholders_place_the_virtual_image_by_cell() {
+        let mut e = engine();
+        let pixels: Vec<u8> = (0..32).collect();
+        let transmit = format!("\x1b_Ga=T,U=1,f=32,s=4,v=2,i=7,c=2,r=1;{}\x1b\\", base64(&pixels));
+        e.write(transmit.as_bytes());
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.images, vec![], "a virtual placement alone draws nothing");
+        e.write(
+            "\x1b[38;5;7m\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}\x1b[0mx".as_bytes(),
+        );
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        let generation = frame.images.first().map_or(0, |p| p.generation);
+        assert_eq!(
+            frame.images,
+            vec![Placement {
+                image: 7,
+                generation,
+                col: 0,
+                row: 0,
+                cols: 2,
+                rows: 1,
+                x_offset: 0,
+                y_offset: 4,
+                width: 16,
+                height: 8,
+                source: PixelRect { x: 0, y: 0, width: 4, height: 2 },
+                z: 0,
+            }]
+        );
+        let row = &frame.updates[0].line;
+        assert_eq!(row.cells[0].text, CellText::EMPTY);
+        assert_eq!(row.cells[1].text, CellText::EMPTY);
+        assert_eq!(row.cells[2].text.as_str(), "x");
+        assert_eq!(e.drain_images().len(), 1, "the pixels ship once");
+        // Text elsewhere: the run is unchanged and still placed, nothing ships again.
+        e.write(b"\r\nmore");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.images.len(), 1);
+        assert_eq!(e.drain_images(), vec![]);
     }
 
     #[test]

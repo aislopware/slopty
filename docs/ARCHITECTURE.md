@@ -126,7 +126,13 @@ change still makes a frame (the storage generation is part of the dirty check). 
 makes one GPUI texture per image generation (`TerminalView::placed_images`, BGRA
 premultiplied) and the element paints the source rectangle into the placement's cells
 (`placement_bounds`), under the glyphs for `z < 0` and over them otherwise, shifted by the
-rows a scrolled view shows. Virtual (Unicode placeholder) placements are not drawn.
+rows a scrolled view shows. A virtual placement (`U=1`) is shown through Unicode
+placeholders: the host reads every U+10EEEE cell (image id in the foreground colour,
+placement id in the underline colour, tile row and column in the combining diacritics —
+`engine::placeholder`), joins consecutive cells into runs by kitty's rules, sends the cell
+blank, and emits one ordinary `Placement` per run with ghostty's geometry (the image scaled
+to fit the placement's grid and centred, the run showing its own strip), so the client
+paints it like any other and never sees the placeholder.
 
 **Command blocks (OSC 133).** `slopty-ptyd` injects shell integration for zsh, bash and fish:
 at every start it writes the bundled scripts (`slopty-pty/assets/shell`, compiled in with

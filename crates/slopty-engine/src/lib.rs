@@ -22,6 +22,7 @@ pub mod convert;
 pub mod ghostty;
 pub mod graphics;
 pub mod osc133;
+pub mod placeholder;
 pub mod search;
 
 pub use ghostty::GhosttyEngine;

@@ -709,14 +709,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   mid-stream may hold more than the ledger says, which is harmless. The storage generation
   is part of the engine's dirty check, so deleting a placement makes a frame although no
   cell moved. The PNG decoder is Slopty's own (the binding's `RustPngDecoder` has no
-  constructor); it expands every colour type to RGBA. Virtual placements (Unicode
-  placeholders, what some multiplexers use) are skipped for now. Tests: engine
+  constructor); it expands every colour type to RGBA. Tests: engine
   `a_transmitted_image_is_placed_and_uploaded_once`, `a_placement_change_alone_makes_a_frame`,
   `rgb_and_png_transmissions_arrive_as_rgba`, `graphics::tests`; client
   `images_are_kept_for_their_placements_and_the_oldest_placed_go_first`; view
   `a_placed_image_has_one_texture_until_its_pixels_are_forgotten`; element
   `a_placement_is_painted_at_its_cell_in_the_hosts_pixels`; goldens `host_frame`,
   `host_term_image` (protocol 43).
+
+- ✅ **Unicode placeholders are placed by the host** (2026-09-15). A virtual placement
+  (`U=1`) is how an image survives a multiplexer or a scrolling pager: the program prints
+  U+10EEEE cells and the terminal draws the image where they are (kitty, ghostty, WezTerm
+  do; `timg -pk`, kitty's own `icat` under tmux, chafa's kitty mode rely on it). libghostty
+  stores the placement and flags the row but draws nothing, and its C API exposes no
+  placeholder logic, so the host ports ghostty's: `engine::placeholder` decodes a cell
+  (image id from the foreground colour — palette index or `r<<16|g<<8|b` — placement id
+  from the underline colour, tile row and column from the first two combining diacritics
+  of kitty's 297-entry table, the image id's high byte from a third), joins consecutive
+  cells into runs by ghostty's rules (same image and placement, same row or none, the next
+  column or none) and turns each run into an ordinary `Placement`: the image scaled to fit
+  the placement's grid keeping its aspect, centred, the run showing its own strip (a run in
+  the letterbox places nothing). An unsized grid (`c`/`r` of 0) takes the cells the image
+  needs at the client's cell pixels. The rows are scanned every frame whether dirty or not
+  (a run that did not change still places its image), only when the row's placeholder flag
+  is set. The placeholder cell goes out blank, so the client paints the image and never
+  the character; nothing changes on the wire. Ruled out: doing it on the client (it would
+  need the raw cells, the placement table and the diacritics, all of which the host has).
+  Tests: `placeholder::tests` (decoding, run joining, the letterboxed strip), engine
+  `unicode_placeholders_place_the_virtual_image_by_cell`.
 
 - ✅ **Colour queries are answered with the dark theme** (2026-09-15). A TUI that picks its
   look from the terminal's background (neovim's `background`, helix, delta, bat) asks with
