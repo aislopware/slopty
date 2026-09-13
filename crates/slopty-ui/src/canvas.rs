@@ -7008,8 +7008,19 @@ mod tests {
                     && n.label.as_deref().is_some_and(|l| l.starts_with("2, "))),
             "an untitled conversation is named by its id: {tree:#?}"
         );
-        let row = cx.debug_bounds("picker-agent-0").expect("the first row");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        // The field filters by every word typed; ↩ picks the row left.
+        cx.simulate_keystrokes("b u i l d");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let rows: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "Button")
+            .filter_map(|n| n.label.as_deref())
+            .filter(|l| l.contains(" ago · "))
+            .collect();
+        assert_eq!(rows.len(), 1, "one conversation holds the word: {tree:#?}");
+        assert!(rows[0].starts_with("fix the build, "), "{rows:?}");
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         let opened = drain(&mut rx);
         assert!(

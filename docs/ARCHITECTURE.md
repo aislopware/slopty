@@ -416,8 +416,8 @@ Esc closes it and the canvas takes the keyboard back. An "edit" pill (`edit-<ite
 while a shell exists) types `${EDITOR:-vi} +line 'path'` into the last-used shell, the line
 being the current find hit or the one the card opened at (`FileView::reading_line`); with
 the card active, ↑/↓/⇞/⇟/Home/End move that reading line (`FileView::move_line`), a click
-on a row sets it, and the "ask" pill mentions it (`@path line N`). The picker (⌘O) lists the
-canvas's sessions first — agents waiting on the human, then other agents with their status
+on a row sets it, and the "ask" pill mentions it (`@path line N`). The picker (⌘O, a field at
+the top filtering by every word typed, ↑/↓/↩ choosing) lists the canvas's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the host's
 windows and displays. Remote-window items are
 created from the picker; `reconcile_screens` opens a stream for every window/display item

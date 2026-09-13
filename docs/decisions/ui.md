@@ -360,6 +360,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   click picks. Bound to ⌘O because Raycast owns ⌘⇧N system-wide on the dev Mac (evidence: the
   first binding opened Raycast's clipboard history instead).
 
+- ✅ **The picker is typed at, like the palette** (2026-09-13). Thirty conversations, or a
+  canvas of shells and a host of windows, were a wall to click through with the mouse or Tab
+  round. Rulings: (1) a field under the title filters the rows by every word typed, any order,
+  any case (`picker::matches`, the palette's rule), over the row's whole text (title and the
+  status/age/directory line), so "slopty fix" finds a conversation by its project as well as
+  its prompt; the "Every directory" row is a way out, not a match, and always shows; a hidden
+  row keeps its selector index (`picker-agent-<i>` is the i-th conversation, filtered or not);
+  (2) ↑/↓ choose a row (accent tint, wrapping) and ↩ picks it, through gpui-kit's `MoveUp`/
+  `MoveDown`/`Escape` actions captured on the backdrop as the palette does; Tab still walks
+  the rows; (3) the field is made on the picker's first frame, since `InputState` needs the
+  window and the picker is opened from a host answer that has none — the canvas focuses the
+  picker's backdrop on that frame, and the frame moves the keyboard into the field, so
+  typing works at once (`Focusable::focus_handle` is the field from then on); (4) an empty
+  filtered list says "no conversation matches" / "nothing matches", not that the host has
+  nothing. Tests: unit `the_filter_takes_every_word_in_any_order_and_case`; headless
+  `a_past_conversation_is_resumed_from_the_picker` types a word, sees one row, presses ↩ and
+  gets the `OpenAgent` for it.
+
 - ✅ **Design tokens: one system for every surface (Warp-class pass, 2026-09-05).** The UI
   grew title bars, pills, badges, separators, a composer, an attention row, a minimap, a HUD,
   a key bar and a picker on six tokens (`canvas`, `panel`, `border`, `text`, `text_muted`,
