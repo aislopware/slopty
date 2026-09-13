@@ -457,11 +457,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (3) in an answer the same row shows and does nothing: an assistant's checklist is its
   report, not the user's to edit; (4) only the line's box changes — indentation, the mark
   and the text stay, and a capital `[X]` unticks like a small one — so a toggle undoes
-  itself and a diff of the note is one character. Tests: `markdown::tests` (the line
-  grammar, segments with a fence hiding a task, the n-th toggle and its inverse) and
-  headless `a_notes_task_ticks_on_a_click_without_opening_the_editor` (the boxes read out,
-  each line its own row, the click sends the ticked text as an upsert without the editor
-  opening, a second click unticks).
+  itself and a diff of the note is one character; (5) a checklist's title counts it —
+  `Plan · 1/3` after the first line, the task box stripped from that line as the list mark
+  is (`note_title`, `note_progress`) — so the zoomed-out canvas and the palette's "Go to"
+  line say how far a plan has got. Tests: `markdown::tests` (the line grammar, segments
+  with a fence hiding a task, the n-th toggle and its inverse), `a_note_is_titled_by_its_first_line`
+  (the count, the stripped box) and headless
+  `a_notes_task_ticks_on_a_click_without_opening_the_editor` (the boxes read out, each line
+  its own row, the click sends the ticked text as an upsert without the editor opening, a
+  second click unticks).
 
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose

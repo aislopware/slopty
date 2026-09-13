@@ -374,22 +374,52 @@ const fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// A note's title: its first non-empty line with Markdown's heading, list and quote marks
-/// stripped, cut to [`NOTE_TITLE_CHARS`]; "note" while it is empty.
+/// A note's title, "note" while it is empty.
+///
+/// Its first non-empty line with Markdown's heading, list, quote and task marks stripped, cut
+/// to [`NOTE_TITLE_CHARS`]. A note with task lines counts them after it: `Plan · 1/3`.
 #[must_use]
 pub fn note_title(text: &str) -> String {
     let line = text
         .lines()
         .map(|l| l.trim().trim_start_matches(['#', '-', '*', '>', ' ']).trim())
+        .map(|l| {
+            ["[ ] ", "[x] ", "[X] "]
+                .iter()
+                .find_map(|mark| l.strip_prefix(mark))
+                .unwrap_or(l)
+                .trim()
+        })
         .find(|l| !l.is_empty());
-    match line {
+    let mut title = match line {
         None => "note".to_owned(),
         Some(line) if line.chars().count() > NOTE_TITLE_CHARS => {
             let cut: String = line.chars().take(NOTE_TITLE_CHARS).collect();
             format!("{}…", cut.trim_end())
         }
         Some(line) => line.to_owned(),
+    };
+    if let Some((done, total)) = note_progress(text) {
+        title.push_str(" · ");
+        title.push_str(&done.to_string());
+        title.push('/');
+        title.push_str(&total.to_string());
     }
+    title
+}
+
+/// How many of a note's task lines are ticked, and how many there are; `None` without any.
+#[must_use]
+pub fn note_progress(text: &str) -> Option<(usize, usize)> {
+    let mut done = 0_usize;
+    let mut total = 0_usize;
+    for segment in crate::markdown::segments(text) {
+        if let crate::markdown::Segment::Task(task) = segment {
+            total = total.saturating_add(1);
+            done = done.saturating_add(usize::from(task.done));
+        }
+    }
+    (total > 0).then_some((done, total))
 }
 
 /// How much of a note's first line the title bar shows.
@@ -5090,6 +5120,13 @@ mod tests {
         assert_eq!(note_title(""), "note");
         assert_eq!(note_title("\n  \n# Plan for today\n- x"), "Plan for today");
         assert_eq!(note_title("- first item"), "first item");
+        assert_eq!(
+            note_title("- [ ] ship\n- [x] test\n- [X] tag"),
+            "ship · 2/3",
+            "a checklist counts"
+        );
+        assert_eq!(note_title("# Plan\n\n- [ ] ship"), "Plan · 0/1");
+        assert_eq!(note_progress("no tasks"), None);
         let long = "a".repeat(NOTE_TITLE_CHARS + 5);
         assert_eq!(note_title(&long), format!("{}…", "a".repeat(NOTE_TITLE_CHARS)));
     }
