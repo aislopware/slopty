@@ -96,9 +96,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ Attention signal: `AgentEvent.attention` → `CanvasEvent::Attention` → `slopty_platform::attention()`,
   which is `AudioServicesPlayAlertSound(kSystemSoundID_UserPreferredAlert)` on macOS (the alert the
-  user picked in System Settings, respects their volume) and `AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)`
-  on iOS (`objc2-audio-toolbox`, `AudioServices` feature; AudioToolbox.framework linked in the
-  iOS spec). No `UNUserNotificationCenter`: it needs a signed bundle with the notification
+  user picked in System Settings, respects their volume) and, on iOS, the Taptic engine's
+  "warning" pattern (`UINotificationFeedbackGenerator`, `objc2-ui-kit`; since 2026-09-13 —
+  the whole-phone `kSystemSoundID_Vibrate` buzz it replaced is the pre-Taptic pattern, ignores
+  the haptics setting and reads as an alarm; the generator is main-thread only, so off the main
+  thread the buzz remains, via `objc2-audio-toolbox`, `AudioServices` feature, AudioToolbox.framework
+  linked in the iOS spec). Neither is unit-testable: the simulator has no Taptic engine. No `UNUserNotificationCenter`: it needs a signed bundle with the notification
   entitlement, which the bare macOS binary is not; revisit when the Mac app ships as a bundle
   (superseded 2026-09-05: bundled app ships via `cargo xtask bundle` with GPUI `SystemNotification`
   banners; see "Notification-centre banners for agents" below).

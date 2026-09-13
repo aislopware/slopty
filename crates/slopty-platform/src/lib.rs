@@ -74,10 +74,20 @@ impl Drop for Activity {
     }
 }
 
-/// Get the human's attention: the user's alert sound on macOS, a vibration on iOS.
+/// Get the human's attention: the user's alert sound on macOS, a haptic on iOS.
 ///
-/// Fire-and-forget; the system sound server plays asynchronously.
+/// Fire-and-forget; the system sound server plays asynchronously. On iOS the Taptic
+/// engine's "warning" notification pattern (`UINotificationFeedbackGenerator`, main thread
+/// only, a no-op on the simulator and on a phone whose haptics are off); off the main thread
+/// the old vibration pattern, which any thread may ask for.
 pub fn attention() {
+    #[cfg(target_os = "ios")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        let generator = objc2_ui_kit::UINotificationFeedbackGenerator::new(mtm);
+        generator.notificationOccurred(objc2_ui_kit::UINotificationFeedbackType::Warning);
+        tracing::debug!("attention: notification haptic");
+        return;
+    }
     #[cfg(target_os = "macos")]
     // SAFETY: AudioToolbox documents `AudioServicesPlayAlertSound` as callable from any thread
     // with any `SystemSoundID`; `kSystemSoundID_UserPreferredAlert` is the constant it names for
@@ -89,7 +99,8 @@ pub fn attention() {
     }
     #[cfg(target_os = "ios")]
     // SAFETY: as above; `kSystemSoundID_Vibrate` is the documented constant for the vibration
-    // pattern (a no-op on devices without a vibrator, such as the simulator).
+    // pattern (a no-op on devices without a vibrator, such as the simulator). Reached only off
+    // the main thread, where the feedback generator may not be made.
     unsafe {
         objc2_audio_toolbox::AudioServicesPlaySystemSound(
             objc2_audio_toolbox::kSystemSoundID_Vibrate,

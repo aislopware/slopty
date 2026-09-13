@@ -8308,6 +8308,7 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-foundation 0.3.2",
  "objc2-game-controller",
+ "objc2-ui-kit",
  "tracing",
 ]
 

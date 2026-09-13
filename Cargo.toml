@@ -250,6 +250,11 @@ objc2-game-controller = { version = "=0.3.2", default-features = false, features
     "std",
     "GCKeyboard",
 ] }
+objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "UIFeedbackGenerator",
+    "UINotificationFeedbackGenerator",
+] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 
