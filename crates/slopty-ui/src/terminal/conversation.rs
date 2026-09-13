@@ -23,9 +23,9 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, list, px,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
+    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
@@ -391,6 +391,55 @@ impl Conversation {
     pub fn reveal_entry(&self, ix: usize) {
         self.list.scroll_to_reveal_item(ix);
         self.list.pause_following_tail();
+    }
+
+    /// Scroll entry `ix`'s top edge to the top of the list and stop following the tail.
+    pub fn scroll_to_entry(&self, ix: usize) {
+        self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+        self.list.pause_following_tail();
+    }
+
+    /// The entry at the top of the list's viewport and whether its top edge is above it (the
+    /// reader is part-way through it); none before the list has been drawn. A list following
+    /// the tail keeps no top, so this steps off the tail from the very end first, which lands
+    /// exactly where the reader is (the last entry ends at the content's end): it stops the
+    /// following.
+    #[must_use]
+    pub fn top_entry(&self) -> Option<(usize, bool)> {
+        if self.list.is_following_tail() {
+            self.list.scroll_by(-self.list.viewport_bounds().size.height);
+        }
+        let top = self.list.logical_scroll_top();
+        (top.item_ix < self.entries.len()).then_some((top.item_ix, top.offset_in_item > px(0.0)))
+    }
+
+    /// The newest answer's Markdown, for ⌘⇧C (as the grid copies the newest block's output).
+    #[must_use]
+    pub fn last_answer(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|entry| match &entry.body {
+            TranscriptBody::Assistant { markdown } => Some(markdown.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The prompt (a `User` entry) to scroll to for ⌘↑ (`delta` −1: the one above the
+    /// viewport's top, or the top one when the reader is part-way through it) or ⌘↓ (+1:
+    /// the one below); none when there is none that way.
+    #[must_use]
+    pub fn prompt_from_top(&self, delta: i8) -> Option<usize> {
+        if delta > 0 && self.pinned() {
+            // Following the tail: nothing is below.
+            return None;
+        }
+        let (top, cut) = self.top_entry()?;
+        let is_prompt = |ix: &usize| {
+            matches!(self.entries.get(*ix).map(|e| &e.body), Some(TranscriptBody::User { .. }))
+        };
+        if delta < 0 {
+            (0..top.saturating_add(usize::from(cut))).rev().find(is_prompt)
+        } else {
+            (top.saturating_add(1)..self.entries.len()).find(is_prompt)
+        }
     }
 
     /// What completes the composer's text, unless Esc hid the list: the slash commands a

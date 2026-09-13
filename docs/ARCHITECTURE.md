@@ -923,7 +923,9 @@ at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`). Terminal-context bindings: ⌘C /
 ⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
-history is not fetched first; ⌘↓ past the newest prompt goes back to following output),
+history is not fetched first; ⌘↓ past the newest prompt goes back to following output; in a
+conversation card the prompts are the `User` entries, `Conversation::prompt_from_top`, and
+⌘⇧C copies the newest answer),
 ⌘K clears the screen and the history (`TermRequest::Clear`, protocol 31: the host writes
 `CSI 3 J` through its engine and output tap, as if the program had, then ⌃L to the shell so
 the prompt repaints at the top; the view drops its scroll offset),

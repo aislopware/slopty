@@ -1599,14 +1599,19 @@ impl TerminalView {
             .into_any_element()
     }
 
-    /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
+    /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard; in a
+    /// conversation, the newest answer's Markdown.
     pub fn copy_last_output(
         &mut self,
         _: &CopyLastOutput,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(text) = self.state.last_command_output() {
+        let text = match &self.conversation {
+            Some(conversation) => conversation.last_answer().map(str::to_owned),
+            None => self.state.last_command_output(),
+        };
+        if let Some(text) = text {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
@@ -1625,8 +1630,16 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// ⌘↑: the prompt above the viewport's top row, scrolled to the top.
+    /// ⌘↑: the prompt above the viewport's top row, scrolled to the top. In a conversation
+    /// the prompts are the `User` entries.
     pub fn prev_prompt(&mut self, _: &PrevPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(conversation) = &self.conversation {
+            if let Some(ix) = conversation.prompt_from_top(-1) {
+                conversation.scroll_to_entry(ix);
+                cx.notify();
+            }
+            return;
+        }
         let top = self.state.index_at_row(0);
         if let Some(target) = self.state.prompt_before(top) {
             self.jump_to(target, cx);
@@ -1636,6 +1649,14 @@ impl TerminalView {
     /// ⌘↓: the prompt below the viewport's top row, scrolled to the top; none left means back
     /// to following output.
     pub fn next_prompt(&mut self, _: &NextPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(conversation) = &self.conversation {
+            match conversation.prompt_from_top(1) {
+                Some(ix) => conversation.scroll_to_entry(ix),
+                None => conversation.pin(),
+            }
+            cx.notify();
+            return;
+        }
         let top = self.state.index_at_row(0);
         if let Some(target) = self.state.prompt_after(top) {
             self.jump_to(target, cx);
@@ -2902,6 +2923,24 @@ impl Render for TerminalView {
                 |this, _: &gpui_kit::component::input::Search, window, cx| {
                     if this.conversation.is_some() {
                         this.find(&Find, window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            // ⌘↑ / ⌘↓ with the caret in the composer: the input's own start/end actions
+            // would take them; between prompts is what a reader means.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveToStart, window, cx| {
+                    if this.conversation.is_some() {
+                        this.prev_prompt(&PrevPrompt, window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveToEnd, window, cx| {
+                    if this.conversation.is_some() {
+                        this.next_prompt(&NextPrompt, window, cx);
                         cx.stop_propagation();
                     }
                 },
@@ -4953,6 +4992,68 @@ mod tests {
     /// show), ⌘G / ↩ / ⇧↩ step and wrap, `.*` makes the needle a regex (a bad one says so),
     /// new entries keep the hits true, and Esc closes the bar with the caret back in the
     /// composer.
+    #[gpui::test]
+    fn a_driven_view_steps_between_its_prompts(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let session = view.read_with(cx, |v, _| v.session);
+        let mut entries = Vec::new();
+        for turn in 0..8 {
+            entries.push(user(&format!("prompt {turn}")));
+            entries.push(assistant(&format!("answer {turn}\n\nwith a second paragraph")));
+        }
+        view.update(cx, |v, cx| {
+            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
+        });
+        cx.run_until_parked();
+        let top = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.conversation().and_then(Conversation::top_entry))
+        };
+        let pinned = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned))
+        };
+        assert!(pinned(cx), "the list follows the tail to begin with");
+        // ⌘↓ while following the tail has nowhere to go and keeps following.
+        cx.simulate_keystrokes("cmd-down");
+        cx.run_until_parked();
+        assert!(pinned(cx));
+
+        // ⌘↑ from the composer: the prompt above the viewport's top (or the top one, when the
+        // reader is part-way through it), well past the first ones — sixteen entries overflow
+        // the card — and it stops following the tail.
+        cx.simulate_keystrokes("cmd-up");
+        cx.run_until_parked();
+        let (first, cut) = top(cx).expect("drawn");
+        assert!(first % 2 == 0 && (4..16).contains(&first) && !cut, "{first} {cut}");
+        assert!(!pinned(cx), "stepping up stops following the tail");
+        // Every prompt is two entries up; the first stays put.
+        cx.simulate_keystrokes("cmd-up");
+        cx.run_until_parked();
+        assert_eq!(top(cx), Some((first.saturating_sub(2), false)));
+        for _ in 0..8 {
+            cx.simulate_keystrokes("cmd-up");
+            cx.run_until_parked();
+        }
+        assert_eq!(top(cx), Some((0, false)));
+        // ⌘↓ steps down a prompt at a time; past the last one the list follows again.
+        cx.simulate_keystrokes("cmd-down");
+        cx.run_until_parked();
+        assert_eq!(top(cx), Some((2, false)));
+        for _ in 0..8 {
+            cx.simulate_keystrokes("cmd-down");
+            cx.run_until_parked();
+        }
+        assert!(pinned(cx), "past the last prompt the list follows the tail again");
+
+        // ⌘⇧C copies the newest answer, as the grid copies the newest block's output.
+        cx.simulate_keystrokes("cmd-shift-c");
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(copied.as_deref(), Some("answer 7\n\nwith a second paragraph"));
+    }
+
     #[gpui::test]
     fn a_driven_view_finds_in_its_conversation(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);

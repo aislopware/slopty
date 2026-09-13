@@ -727,6 +727,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_launch_line_quotes_only_what_a_shell_would_read`, the ⌘⌥⇧T step of
   `cmd_n_asks_the_host_for_a_shell_and_its_echo_places_and_focuses_it`, the chip in the header test,
   goldens `client_open_agent` and `host_agent_info`.
+- ✅ **⌘↑ / ⌘↓ step between a conversation's prompts** (2026-09-13). The grid's ⌘↑ / ⌘↓
+  put the previous / next prompt start at the top of the viewport; a conversation card is
+  the same chord over its `User` entries (`Conversation::prompt_from_top`, `scroll_to_entry`).
+  Rulings: (1) "above" is the prompt before the entry at the viewport's top, or that entry
+  itself when the reader is part-way through it, and "below" the first prompt after it; (2)
+  ⌘↓ past the last prompt follows the tail again (`pin`), as the grid goes back to following
+  output, and ⌘↓ while following goes nowhere; (3) gpui's `ListState` keeps no top while it
+  follows the tail, so the first ⌘↑ scrolls by minus the viewport's height from the very end
+  — which is exactly where the reader is, the last entry ending at the content's end — and
+  reads the logical top from there (`top_entry`); (4) with the caret in the composer the chord
+  is gpui-kit's `MoveToStart` / `MoveToEnd` first, captured on the card like ⌘F's `Search`;
+  (5) ⌘⇧C, the grid's "copy the newest block's output", copies the newest answer's Markdown
+  (`Conversation::last_answer`). Test: `a_driven_view_steps_between_its_prompts`.
 - ✅ **⌘F in a conversation card finds entries, no wire change** (2026-09-12). A driven
   card's transcript grows past a screen within minutes and the terminal's ⌘F already existed
   for the grid; a reader expects the same chord to work here. Rulings: (1) the search runs in
