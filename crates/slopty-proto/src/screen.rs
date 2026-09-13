@@ -228,11 +228,25 @@ pub enum ScreenRequest {
         /// The client's clipboard text.
         text: String,
     },
+    /// Put a picture on the host's pasteboard, sent ahead of a paste chord like `Clipboard`
+    /// (a screenshot taken on the client, pasted into a remote window). Client to host only;
+    /// the host's pictures stay where they are.
+    ClipboardImage {
+        /// `image/png`, `image/tiff` or `image/jpeg`: what the host's pasteboard can hold
+        /// as is.
+        media_type: String,
+        /// The encoded picture, at most `MAX_CLIPBOARD_IMAGE_BYTES`.
+        bytes: Vec<u8>,
+    },
 }
 
 /// Largest clipboard text carried in either direction; a pasteboard can hold a whole file,
 /// and pushing that on every change would starve the video stream.
 pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
+
+/// Largest clipboard picture pushed ahead of a paste: a Retina display's screenshot as PNG
+/// is a few megabytes; anything past this is a file, not a paste.
+pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Loss feedback, client → host, sent as a QUIC **datagram** rather than on the control stream.
 ///

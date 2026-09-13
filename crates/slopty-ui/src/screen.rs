@@ -34,8 +34,8 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, CursorShape, MAX_CLIPBOARD_BYTES, Quality, RateVerdict, ScreenInput,
-    ScreenRequest, ScrollPhase, SourceState, VideoCodec,
+    CaptureTarget, CursorShape, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_IMAGE_BYTES, Quality,
+    RateVerdict, ScreenInput, ScreenRequest, ScrollPhase, SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
@@ -143,6 +143,9 @@ pub struct ScreenView {
     /// The text last known to be on the host's pasteboard (received from it, or pushed by
     /// this view ahead of a paste); a paste chord only pushes when the clipboard differs.
     host_clipboard: Option<String>,
+    /// A fingerprint (length, hash) of the picture last pushed to the host's pasteboard, so
+    /// a second paste of the same screenshot does not ship it again.
+    host_picture: Option<(usize, u64)>,
     /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
     sticky: Modifiers,
     /// The modifier keys as last reported, so a change forwards the key that moved.
@@ -437,6 +440,7 @@ impl ScreenView {
             modifiers: Modifiers::default(),
             let_go: None,
             host_clipboard: None,
+            host_picture: None,
             sticky: Modifiers::default(),
             marked: None,
             hud: None,
@@ -836,15 +840,37 @@ impl ScreenView {
     }
 
     /// Before a paste reaches the host, make sure it pastes what this client copied: send the
-    /// clipboard text on the (ordered) control stream ahead of the key. Skipped when the host
-    /// already has it, or when the clipboard is not text small enough to sync.
+    /// clipboard text, or its picture, on the (ordered) control stream ahead of the key.
+    /// Skipped when the host already has it, or when the clipboard holds nothing small
+    /// enough to sync in a kind the host's pasteboard takes as it is.
     fn push_clipboard(&mut self, cx: &Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        if text.len() > MAX_CLIPBOARD_BYTES || self.host_clipboard.as_deref() == Some(&*text) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if let Some(text) = item.text() {
+            if text.len() > MAX_CLIPBOARD_BYTES || self.host_clipboard.as_deref() == Some(&*text) {
+                return;
+            }
+            self.send(ScreenRequest::Clipboard { text: text.clone() });
+            self.host_clipboard = Some(text);
             return;
         }
-        self.send(ScreenRequest::Clipboard { text: text.clone() });
-        self.host_clipboard = Some(text);
+        let Some(picture) = item.into_entries().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) if pasteboard_takes(image.format) => Some(image),
+            _ => None,
+        }) else {
+            return;
+        };
+        if picture.bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+            return;
+        }
+        let fingerprint = (picture.bytes.len(), fingerprint(&picture.bytes));
+        if self.host_picture == Some(fingerprint) {
+            return;
+        }
+        self.send(ScreenRequest::ClipboardImage {
+            media_type: picture.format.mime_type().to_owned(),
+            bytes: picture.bytes,
+        });
+        self.host_picture = Some(fingerprint);
     }
 
     /// The host's pasteboard changed (the canvas already copied it locally).
@@ -1246,6 +1272,19 @@ fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
 }
 
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
+/// The picture encodings the host's pasteboard holds as they are (`PictureKind` there).
+const fn pasteboard_takes(format: gpui::ImageFormat) -> bool {
+    matches!(format, gpui::ImageFormat::Png | gpui::ImageFormat::Tiff | gpui::ImageFormat::Jpeg)
+}
+
+/// A cheap fingerprint of a picture's bytes, to tell one paste of it from the next.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn is_paste_chord(keystroke: &Keystroke) -> bool {
     let m = keystroke.modifiers;
     m.platform && !m.control && !m.alt && keystroke.key == "v"
@@ -1596,6 +1635,47 @@ mod tests {
             v.host_clipboard_changed("copied on the host");
             assert_eq!(v.host_clipboard.as_deref(), Some("copied on the host"));
         });
+    }
+
+    /// ⌘V with a picture on the clipboard pushes it to the host's pasteboard ahead of the
+    /// key, once per picture; text takes the text path; a kind the pasteboard would have to
+    /// convert, or one past the cap, pushes nothing and the key still goes.
+    #[gpui::test]
+    fn a_paste_chord_pushes_the_clipboards_picture_once(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        let picture = |format, bytes: &[u8]| {
+            gpui::ClipboardItem::new_image(&gpui::Image { format, bytes: bytes.to_vec(), id: 1 })
+        };
+        let pushed = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            sent(rx)
+                .into_iter()
+                .filter_map(|req| match req {
+                    ScreenRequest::ClipboardImage { media_type, bytes } => {
+                        Some(format!("{media_type}:{}", bytes.len()))
+                    }
+                    ScreenRequest::Clipboard { text } => Some(format!("text:{text}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[1, 2, 3])));
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert_eq!(pushed(&mut rx), ["image/png:3"]);
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert!(pushed(&mut rx).is_empty(), "the host has it");
+        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Tiff, &[4; 10])));
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert_eq!(pushed(&mut rx), ["image/tiff:10"], "a new picture goes");
+        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Webp, &[5; 10])));
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert!(pushed(&mut rx).is_empty(), "webp would need converting");
+        let huge = vec![6; MAX_CLIPBOARD_IMAGE_BYTES + 1];
+        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &huge)));
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert!(pushed(&mut rx).is_empty(), "past the cap");
+        cx.update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        assert_eq!(pushed(&mut rx), ["text:hi"]);
     }
 
     #[test]

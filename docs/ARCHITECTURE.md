@@ -387,7 +387,9 @@ Mute is per item and per client (the "mute" pill, ⌘⇧M, Canvas ▸ Mute Windo
 arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
 different.
 
-**Clipboard** follows the window both ways, text only (≤ 256 KiB). Host → client: hostd polls
+**Clipboard** follows the window both ways for text (≤ 256 KiB), and client → host for a
+picture (PNG, TIFF or JPEG ≤ 16 MiB, `ScreenRequest::ClipboardImage` ahead of ⌘V, once per
+picture; the host's pictures are not polled). Host → client: hostd polls
 `NSPasteboard.changeCount` every 200 ms (`slopty-input::Pasteboard`) and broadcasts
 `ScreenEvent::Clipboard`, which each connection forwards only while that client has a window
 open; the canvas writes it to the local clipboard unless it already holds the same text (with

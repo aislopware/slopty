@@ -73,3 +73,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   silence). Decode and playback stay together in `Audio`, so the sequence baseline is the
   first packet the open player sees. The worker test proves a video frame goes through while
   the player is still opening.
+
+- ✅ **A picture on the client's clipboard is pushed ahead of ⌘V, text-style** (2026-09-15,
+  protocol 46). A screenshot taken on the client and pasted into a remote window is the
+  coding case (a picture into a chat, an issue, a design tool); the text ruling's shape
+  carries it: `ScreenRequest::ClipboardImage { media_type, bytes }` goes on the ordered
+  control stream right before the paste chord, so the host's paste already finds it, and a
+  `(length, hash)` fingerprint keeps a second ⌘V of the same screenshot from shipping it
+  again. Only the kinds the pasteboard holds as they are go (PNG, TIFF, JPEG;
+  `PictureKind`): WebP or GIF would need converting on one side, and the host is the wrong
+  side. The cap is 16 MiB (`MAX_CLIPBOARD_IMAGE_BYTES`; a Retina screenshot as PNG is a few
+  MB), checked on both ends. One way only: the host's pictures are not polled (a screenshot
+  on the host would push megabytes to every client with a window open, on every ⌘⇧4), and a
+  client that wants one has the terminal's drop and paste paths. Tests:
+  `a_paste_chord_pushes_the_clipboards_picture_once`, `the_kinds_the_pasteboard_holds_as_they_are`,
+  golden `client_clipboard_image`.

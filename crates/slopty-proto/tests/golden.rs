@@ -834,6 +834,13 @@ mod golden {
             &ClientMsg::Screen(ScreenRequest::Clipboard { text: "fox".to_owned() }),
         );
         snap("host_clipboard", &HostMsg::Screen(ScreenEvent::Clipboard { text: "fox".to_owned() }));
+        snap(
+            "client_clipboard_image",
+            &ClientMsg::Screen(ScreenRequest::ClipboardImage {
+                media_type: "image/png".to_owned(),
+                bytes: vec![0x89, b'P', b'N', b'G'],
+            }),
+        );
         snap("host_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
     }
 

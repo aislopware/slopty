@@ -34,7 +34,7 @@ pub mod keymap;
 pub mod pasteboard;
 
 pub use backend::{Backend, Event, Post, Recorder, Route, System};
-pub use pasteboard::Pasteboard;
+pub use pasteboard::{Pasteboard, PictureKind};
 
 /// How long cached window bounds stay valid; windows move rarely, pointer events are dense.
 const BOUNDS_TTL: Duration = Duration::from_millis(100);

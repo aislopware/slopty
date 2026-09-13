@@ -899,6 +899,15 @@ impl Peer<'_> {
                     tracing::warn!(client = %self.client, "pasteboard write failed");
                 }
             }
+            ScreenRequest::ClipboardImage { media_type, bytes } => {
+                if self.screens.is_empty() {
+                    tracing::debug!(client = %self.client, bytes = bytes.len(), "picture refused");
+                } else if self.daemon.pasteboard.write_picture(&media_type, &bytes) {
+                    tracing::debug!(client = %self.client, %media_type, bytes = bytes.len(), "pasteboard picture set");
+                } else {
+                    tracing::warn!(client = %self.client, %media_type, bytes = bytes.len(), "pasteboard picture refused");
+                }
+            }
         }
     }
 
