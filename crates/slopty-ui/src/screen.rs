@@ -21,11 +21,11 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
     Autocapitalize, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
-    Keystroke, LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point, Render, RenderImage,
-    ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement as _, Styled as _, Task,
-    TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window, canvas, div,
-    point, px, size, surface,
+    Keystroke, LongPressEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point,
+    Render, RenderImage, ScrollDelta, ScrollWheelEvent, Size, StatefulInteractiveElement as _,
+    Styled as _, Task, TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window,
+    canvas, div, point, px, size, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -144,6 +144,8 @@ pub struct ScreenView {
     host_clipboard: Option<String>,
     /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
     sticky: Modifiers,
+    /// The modifier keys as last reported, so a change forwards the key that moved.
+    modifiers: Modifiers,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
     /// The stats overlay (⌘⇧I).
@@ -409,6 +411,7 @@ impl ScreenView {
             bounds: Bounds::default(),
             frames: 0,
             held: Vec::new(),
+            modifiers: Modifiers::default(),
             host_clipboard: None,
             sticky: Modifiers::default(),
             marked: None,
@@ -766,6 +769,26 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
+    fn modifiers_changed(
+        &mut self,
+        ev: &ModifiersChangedEvent,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.modifiers(ev.modifiers, cx);
+    }
+
+    /// The modifier keys moved: forward each one that went down or up as its own key, so a
+    /// remote program sees ⌘ held on its own, ⌥ pressed over a menu, ⇧ held to run. GPUI
+    /// names no side, so the left key stands for both.
+    fn modifiers(&mut self, now: Modifiers, cx: &mut Context<Self>) {
+        let was = std::mem::replace(&mut self.modifiers, now);
+        for (code, action) in modifier_keys(was, now) {
+            self.input(ScreenInput::Key { code, action, mods: keys::mods(now), text: None });
+        }
+        cx.stop_propagation();
+    }
+
     /// Before a paste reaches the host, make sure it pastes what this client copied: send the
     /// clipboard text on the (ordered) control stream ahead of the key. Skipped when the host
     /// already has it, or when the clipboard is not text small enough to sync.
@@ -1010,6 +1033,7 @@ impl Render for ScreenView {
             .bg(hsla(self.theme.surfaces.canvas))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
@@ -1140,6 +1164,21 @@ impl EntityInputHandler for ScreenView {
             input_action: TextInputAction::Enter,
         }
     }
+}
+
+/// The modifier keys that went down or up between `was` and `now`, as presses and releases.
+/// The fn key is left out: the host's own fn setting (emoji picker, dictation) would fire.
+fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
+    [
+        (was.shift, now.shift, KeyCode::ShiftLeft),
+        (was.control, now.control, KeyCode::ControlLeft),
+        (was.alt, now.alt, KeyCode::AltLeft),
+        (was.platform, now.platform, KeyCode::MetaLeft),
+    ]
+    .into_iter()
+    .filter(|(before, after, _)| before != after)
+    .map(|(_, down, code)| (code, if down { KeyAction::Press } else { KeyAction::Release }))
+    .collect()
 }
 
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
@@ -1285,6 +1324,44 @@ mod tests {
         view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(vec![0; 32])), cx));
         view.update(cx, |v, cx| v.set_cursor_shape(None, cx));
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
+    }
+
+    /// A modifier pressed on its own reaches the host as that key: each one that moves is a
+    /// press or a release carrying the new state, an unchanged state sends nothing, and the
+    /// fn key is never forwarded.
+    #[gpui::test]
+    fn modifier_keys_go_to_the_host_as_they_move(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        let key = |req: &ScreenRequest| match req {
+            ScreenRequest::Input {
+                input: ScreenInput::Key { code, action, mods, text }, ..
+            } => Some((*code, *action, *mods, text.clone())),
+            _ => None,
+        };
+        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        view.update(cx, |v, cx| v.modifiers(shift, cx));
+        assert_eq!(
+            sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
+            vec![(KeyCode::ShiftLeft, KeyAction::Press, Mods::SHIFT, None)]
+        );
+        view.update(cx, |v, cx| v.modifiers(shift, cx));
+        assert!(sent(&mut rx).is_empty(), "nothing moved");
+        let both =
+            Modifiers { shift: true, platform: true, function: true, ..Modifiers::default() };
+        view.update(cx, |v, cx| v.modifiers(both, cx));
+        assert_eq!(
+            sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
+            vec![(KeyCode::MetaLeft, KeyAction::Press, Mods::SHIFT | Mods::SUPER, None)],
+            "⌘ joins ⇧; fn stays local"
+        );
+        view.update(cx, |v, cx| v.modifiers(Modifiers::default(), cx));
+        assert_eq!(
+            sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
+            vec![
+                (KeyCode::ShiftLeft, KeyAction::Release, Mods::empty(), None),
+                (KeyCode::MetaLeft, KeyAction::Release, Mods::empty(), None),
+            ]
+        );
     }
 
     /// An instant past the quality cooldown.

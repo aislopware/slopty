@@ -69,3 +69,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
   `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
   unverified; verify with a ⌘ chord once the daemon is signed).
+
+- ✅ **Modifier keys reach the host on their own** (2026-09-13). The injector has posted a bare
+  modifier as `FlagsChanged` since the first cut, but the client never sent one: GPUI reports
+  a modifier press as `ModifiersChangedEvent`, not a key, so a remote program never saw ⌘
+  held on its own (an app that reveals shortcuts or alternate menu items while ⌥/⌘ is down,
+  a game that runs while ⇧ is held), only the flags on the next key or click. Ruling: the
+  screen view keeps the last reported modifiers and, on each change, forwards every one that
+  moved as a press or release of its key (`ShiftLeft`, `ControlLeft`, `AltLeft`, `MetaLeft` —
+  GPUI names no side, so the left key stands for both) carrying the new state as `mods`; an
+  unchanged state sends nothing. The fn key stays local: forwarding it would fire the host's
+  own fn setting (emoji picker, dictation) every time a client pressed it for a function key.
+  Not done: releasing modifiers when the view loses focus while one is down (⌘-tab away with
+  ⌘ held) — the release does arrive from GPUI when the key goes up in this window, and a
+  focus-loss sweep belongs with a sweep of `held` too. Test: headless
+  `modifier_keys_go_to_the_host_as_they_move`.

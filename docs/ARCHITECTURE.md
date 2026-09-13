@@ -865,7 +865,9 @@ enter, tab, backspace, ⌃/⌥/⌘ chords) becomes the same `Keystroke` the Mac 
 so the Mac keymaps and the terminal's key encoder work unchanged; plain characters keep going
 through the text system (`insertText:`, IME) while a text input has focus. UIKit does not
 repeat presses, so the window repeats a held key itself (400 ms, then every 50 ms, delivered
-as `is_held`). A trackpad or mouse hovers as `MouseMove` and scrolls as `ScrollWheel` with
+as `is_held`). A modifier pressed on its own reaches a remote window as its key: the screen
+view diffs each `ModifiersChanged` against the last and forwards what moved (fn stays local).
+A trackpad or mouse hovers as `MouseMove` and scrolls as `ScrollWheel` with
 phases (a `UIPanGestureRecognizer` limited to indirect scrolls, so direct drags stay with the
 touch recognizer); while a keyboard is attached (`GCKeyboard.coalescedKeyboard`, polled once a
 second with the settings) the key bar hides, since every key on it is under the fingers; `UIApplicationSupportsIndirectInputEvents` is set so clicks are pointer
