@@ -5,12 +5,13 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Autocapitalize, Bounds, Context, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TextInputAction, TextInputConfiguration,
-    TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px, size,
+    AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
+    TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
+    size,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock};
@@ -336,6 +337,8 @@ pub struct TerminalView {
     hover: Option<(u16, u16)>,
     /// ⌘ is down: links under the pointer show as links.
     cmd_held: bool,
+    /// ⇧ is held: the pointer is the human's even while a program reports the mouse.
+    shift_held: bool,
     /// A long press claimed the touch; moving the finger extends the selection.
     touch_selecting: bool,
     /// The search bar, while open.
@@ -443,6 +446,7 @@ impl TerminalView {
             selecting: false,
             hover: None,
             cmd_held: false,
+            shift_held: false,
             touch_selecting: false,
             autoscroll: None,
             autoscroll_task: None,
@@ -1391,12 +1395,76 @@ impl TerminalView {
         self.run_text(command, cx);
     }
 
-    /// Pointer position and ⌘ state changed; repaint only when the underline moves.
-    fn set_pointer(&mut self, hover: Option<(u16, u16)>, cmd: bool, cx: &mut Context<Self>) {
-        let before = self.link_highlight();
+    /// Where the link under a ⌘-hover goes: the OSC 8 target or the URL as printed, or the
+    /// path (with its `:line`) — the text a click would act on, shown so an OSC 8 label
+    /// cannot hide its destination.
+    #[must_use]
+    pub fn link_target(&self) -> Option<String> {
+        if !self.cmd_held {
+            return None;
+        }
+        let (col, row) = self.hover?;
+        let line = self.state.line(self.state.index_at_row(row))?;
+        if let Some(link) = url::link_at_col(line, col) {
+            return Some(link.url);
+        }
+        let path = url::path_at_col(line, col)?;
+        Some(path.line.map_or_else(|| path.path.clone(), |n| format!("{}:{n}", path.path)))
+    }
+
+    /// The chip at the card's bottom-left naming the ⌘-hovered link's target.
+    fn render_link_preview(&self) -> Option<gpui::Div> {
+        let target = self.link_target()?;
+        let theme = &self.theme;
+        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
+        Some(
+            div()
+                .debug_selector(|| "link-preview".to_owned())
+                .absolute()
+                .bottom(px(spacing.xs))
+                .left(px(spacing.xs))
+                .max_w_full()
+                .px(px(spacing.sm))
+                .py(px(spacing.xs))
+                .rounded(px(radii.xs))
+                .bg(hsla(s.panel))
+                .border_1()
+                .border_color(hsla(s.border))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_muted))
+                .font_family(theme.typography.ui_family.clone())
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(SharedString::from(target)),
+        )
+    }
+
+    /// The pointer's shape over the grid: an I-beam over text, a hand over the link ⌘ would
+    /// open, and an arrow while a program has the mouse (⇧ takes it back, as a click does).
+    #[must_use]
+    pub fn pointer(&self) -> CursorStyle {
+        if self.link_highlight().is_some() {
+            return CursorStyle::PointingHand;
+        }
+        if self.state.modes().contains(TermModes::MOUSE_TRACKING) && !self.shift_held {
+            return CursorStyle::Arrow;
+        }
+        CursorStyle::IBeam
+    }
+
+    /// Pointer position and modifier state changed; repaint only when the underline or the
+    /// pointer's shape moves.
+    fn set_pointer(
+        &mut self,
+        hover: Option<(u16, u16)>,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let before = (self.link_highlight(), self.pointer());
         self.hover = hover;
-        self.cmd_held = cmd;
-        if self.link_highlight() != before {
+        self.cmd_held = modifiers.platform;
+        self.shift_held = modifiers.shift;
+        if (self.link_highlight(), self.pointer()) != before {
             cx.notify();
         }
     }
@@ -1407,7 +1475,7 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_pointer(self.hover, event.modifiers.platform, cx);
+        self.set_pointer(self.hover, event.modifiers, cx);
     }
 
     /// The word under `col` on line `index` as inclusive columns: the run of non-blank cells
@@ -2696,7 +2764,7 @@ impl TerminalView {
         }
         let shown = self.scrollbar_shown();
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
-        self.set_pointer(hover, event.modifiers.platform, cx);
+        self.set_pointer(hover, event.modifiers, cx);
         if shown != self.scrollbar_shown() {
             cx.notify();
         }
@@ -3241,8 +3309,9 @@ impl Render for TerminalView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .map(|el| {
                 if let Some(conversation) = conversation {
-                    return el.child(conversation);
+                    return el.cursor(CursorStyle::Arrow).child(conversation);
                 }
+                let el = el.cursor(self.pointer());
                 let mut grid =
                     TerminalElement::new(cx.entity(), focused).zoom(self.zoom).zooming(zooming);
                 if window.is_a11y_active() {
@@ -3253,6 +3322,7 @@ impl Render for TerminalView {
             })
             .children(header)
             .children(search)
+            .children(self.render_link_preview())
             .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
     }
 }
@@ -3381,7 +3451,7 @@ pub fn picture_type(path: &std::path::Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
-    use slopty_grid::{Line, RowUpdate, SemanticMark, Style, TermModes};
+    use slopty_grid::{Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
     use slopty_proto::agent::{Clipped, SlashCommand, ToolDetail, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, TermRequest};
 
@@ -3675,6 +3745,104 @@ mod tests {
     /// pins the phase on for a half, and a frame with nothing to blink stops it, phase on.
     /// BEL tints the grid for a flash and then leaves it alone; a second bell inside the
     /// flash restarts it rather than ending it early.
+    /// ⌘ over a printed URL previews it; over an OSC 8 label, the target the label hides;
+    /// over a path, the path with its line. The chip sits in the card while it applies.
+    #[gpui::test]
+    fn a_cmd_hover_previews_the_links_target(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let row = |row, text: &str, links| RowUpdate {
+            row,
+            line: {
+                let mut l = Line::from_text(text, 30, Style::DEFAULT);
+                l.links = links;
+                l
+            },
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    updates: vec![
+                        row(0, "see http://a.b", Vec::new()),
+                        row(
+                            1,
+                            "docs",
+                            vec![Hyperlink { col: 0, len: 4, uri: "https://x.y/z".into() }],
+                        ),
+                        row(2, "at src/main.rs:12", Vec::new()),
+                    ],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        let plain = gpui::Modifiers::default();
+        view.update_in(cx, |view, _window, cx| {
+            view.set_pointer(Some((6, 0)), cmd, cx);
+            assert_eq!(view.link_target().as_deref(), Some("http://a.b"));
+            view.set_pointer(Some((1, 1)), cmd, cx);
+            assert_eq!(view.link_target().as_deref(), Some("https://x.y/z"), "the OSC 8 target");
+            view.set_pointer(Some((5, 2)), cmd, cx);
+            assert_eq!(view.link_target().as_deref(), Some("src/main.rs:12"));
+            view.set_pointer(Some((5, 2)), plain, cx);
+            assert_eq!(view.link_target(), None, "no ⌘, no preview");
+        });
+        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, cmd);
+        cx.run_until_parked();
+        let chip = cx.debug_bounds("link-preview").expect("the chip is drawn");
+        let card = cx.debug_bounds("terminal").expect("the card");
+        assert!(chip.bottom() <= card.bottom() && chip.left() >= card.left(), "inside the card");
+        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, plain);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("link-preview").is_none(), "gone with ⌘");
+    }
+
+    /// Text gets an I-beam; the link under a ⌘-hover a hand; a program that reports the
+    /// mouse an arrow, unless ⇧ takes the pointer back.
+    #[gpui::test]
+    fn the_pointer_is_an_i_beam_a_hand_over_a_link_and_an_arrow_for_a_program(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, _rx, cx) = terminal(cx);
+        let frame = |modes| match history_frame(0, &["see http://a.b", "plain"]) {
+            TermEvent::Frame(mut f) => {
+                f.modes = modes;
+                TermEvent::Frame(f)
+            }
+            other => other,
+        };
+        let plain = gpui::Modifiers::default();
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(frame(TermModes::empty()), cx);
+            view.set_pointer(Some((6, 0)), plain, cx);
+            assert_eq!(view.pointer(), CursorStyle::IBeam);
+            view.set_pointer(Some((6, 0)), cmd, cx);
+            assert_eq!(view.pointer(), CursorStyle::PointingHand, "⌘ over the link");
+            view.set_pointer(Some((1, 1)), cmd, cx);
+            assert_eq!(view.pointer(), CursorStyle::IBeam, "⌘ over plain text");
+            view.apply(frame(TermModes::MOUSE_TRACKING), cx);
+            view.set_pointer(Some((1, 1)), plain, cx);
+            assert_eq!(view.pointer(), CursorStyle::Arrow, "the program has the mouse");
+            view.set_pointer(Some((1, 1)), shift, cx);
+            assert_eq!(view.pointer(), CursorStyle::IBeam, "⇧ takes it back");
+            view.set_pointer(Some((6, 0)), cmd, cx);
+            assert_eq!(view.pointer(), CursorStyle::PointingHand, "a link still opens");
+        });
+    }
+
     #[gpui::test]
     fn a_bell_flashes_the_view_briefly(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);

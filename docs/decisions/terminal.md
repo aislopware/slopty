@@ -656,3 +656,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   230-entry mask table transcribed from ghostty's `octants.txt` (there is no formula: the
   block skips every pattern another character already draws). Tests:
   `sextants_and_octants_are_mosaics_of_the_cell`, the ranges test.
+
+- ✅ **The pointer says what a click would do** (2026-09-15). The grid showed the arrow
+  everywhere. Now the card's root div sets the pointer from `TerminalView::pointer`: an
+  I-beam over text (the selection every terminal offers), a pointing hand over the run
+  `link_highlight` would open (⌘ held, over a URL or a path), and the arrow while a program
+  reports the mouse — unless ⇧ is held, which is what also keeps a click and the wheel from
+  the program. The conversation view keeps the arrow. `set_pointer` repaints only when the
+  shape or the underline changes, and tracks ⇧ beside ⌘. Test:
+  `the_pointer_is_an_i_beam_a_hand_over_a_link_and_an_arrow_for_a_program`.
+
+- ✅ **A ⌘-hover shows where the link goes** (2026-09-15). An OSC 8 label can say anything
+  (`docs`, the file's name, a shortened URL) and the underline alone does not say what a
+  click opens — the reason browsers show the target in the status bar and ghostty draws it
+  at the corner. `TerminalView::link_target` names it — the OSC 8 URI, the URL as printed,
+  or the path with its `:line` — and the card draws it as a chip at its bottom-left
+  (`link-preview`) while ⌘ is held over the run, muted panel text, clipped to the card,
+  gone with the modifier. Test: `a_cmd_hover_previews_the_links_target`.

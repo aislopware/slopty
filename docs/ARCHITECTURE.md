@@ -95,7 +95,9 @@ needle through the `regex` crate instead of the literal matcher; a bad pattern c
 URI of every linked cell (`ghostty_grid_ref_hyperlink_uri`, only on rows whose page flag says
 they may hold one) and folds them into `Line::links`, a list of `Hyperlink { col, len, uri }`
 runs, so a link-free row costs one byte and no cell carries an id. The client draws the run
-under the pointer underlined while ⌘ is held and opens the URI on ⌘-click; the OSC 8 target
+under the pointer underlined while ⌘ is held (the pointer a hand, an I-beam elsewhere, the
+arrow while a program reports the mouse), names the target in a chip at the card's corner
+(`TerminalView::link_target`) and opens the URI on ⌘-click; the OSC 8 target
 wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTerm2 OSC 1337
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
 `MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
