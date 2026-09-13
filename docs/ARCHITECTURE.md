@@ -933,7 +933,7 @@ at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
 prompt row whose command took a second or more, its duration (`took_label`, fg at
 `alpha::TINT_STRONG`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
-emptied with the epoch). Terminal-context bindings: ⌘C /
+emptied with the epoch; the sticky block header repeats it at its right end). Terminal-context bindings: ⌘C /
 ⌘V copy and paste, ⌘F / ⌘G / ⌘⇧G search, ⌘↑ / ⌘↓ scroll the previous / next prompt start to
 the top of the viewport (`TermState::prompt_before/after` over the cached lines, uncached
 history is not fetched first; ⌘↓ past the newest prompt goes back to following output; in a

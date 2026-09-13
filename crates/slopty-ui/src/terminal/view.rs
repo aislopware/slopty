@@ -1580,6 +1580,14 @@ impl TerminalView {
         let s = &theme.surfaces;
         let prompt = block.prompt;
         let family = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        // The block's duration at the right end, as its prompt row would show it.
+        let took = self.took(prompt).map(|elapsed| {
+            div()
+                .debug_selector(|| "block-header-took".to_owned())
+                .flex_none()
+                .pl(px(theme.spacing.sm))
+                .child(SharedString::from(took_label(elapsed)))
+        });
         Some(
             div()
                 .id("block-header")
@@ -1593,6 +1601,7 @@ impl TerminalView {
                 .h(metrics.line_height)
                 .flex()
                 .items_center()
+                .justify_between()
                 .px(px(theme.spacing.sm))
                 .bg(hsla(s.panel))
                 .border_b_1()
@@ -1610,7 +1619,8 @@ impl TerminalView {
                         this.jump_to(prompt, cx);
                     }),
                 )
-                .child(command)
+                .child(div().overflow_hidden().child(command))
+                .children(took)
                 .into_any_element(),
         )
     }
@@ -3470,6 +3480,15 @@ mod tests {
         );
         let command = view.read_with(cx, |view, _| view.block_header().and_then(|b| b.command));
         assert_eq!(command.as_deref(), Some("seq 2"));
+        // The block's duration, once known, sits at the header's right end.
+        assert!(cx.debug_bounds("block-header-took").is_none(), "nothing known yet");
+        view.update(cx, |v, cx| {
+            v.set_took(LineIndex(4), Duration::from_millis(3_260));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let took = cx.debug_bounds("block-header-took").expect("the header says how long");
+        assert!(took.right() <= header.right() && took.left() > header.center().x, "{took:?}");
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");

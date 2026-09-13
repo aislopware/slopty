@@ -415,9 +415,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `alpha::TINT_STRONG`, flush with the grid's right edge, and left out when the command's
   text comes within a cell of it (the text wins); the row keeps it through history; (3) rows are numbered
   per epoch, so a new epoch (a reflow, a reset, the alt screen) empties the map; the host
-  is not asked (the marks carry no time). Tests: `a_took_label_reads_as_a_clock_would`,
+  is not asked (the marks carry no time); (4) the sticky block header carries the same
+  caption at its right end (`block-header-took`), so a long output scrolled past its prompt
+  still says how long its command took. Tests: `a_took_label_reads_as_a_clock_would`,
   headless `a_slow_commands_row_says_how_long_it_took` (the element's captions read back
-  through a test-only counter on the shape cache), `prompt` in the client's command test.
+  through a test-only counter on the shape cache),
+  `a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header` (the header's
+  caption), `prompt` in the client's command test.
 
 - ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
   click on the block; the command a human reruns most is the one that just finished, and
