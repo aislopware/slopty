@@ -5990,6 +5990,27 @@ mod tests {
         );
         assert!(conversation::slash_matches("/co x", &named(&["/compact"])).is_empty());
         assert!(conversation::slash_matches("hello", &named(&["/help"])).is_empty());
+        assert!(conversation::slash_matches("hello x", &named(&["/help"])).is_empty());
+        assert!(
+            conversation::slash_matches("/Compact", &named(&["/compact"])).is_empty(),
+            "the only match typed out in full leaves nothing to complete"
+        );
+        assert_eq!(
+            names(conversation::slash_matches("/comp", &named(&["/compact"]))),
+            ["/compact"],
+            "one match not yet typed out still completes"
+        );
+        let label = |bytes: usize| {
+            attachment_label(&slopty_proto::agent::Image {
+                media_type: "image/png".to_owned(),
+                data: vec![0; bytes],
+            })
+        };
+        assert_eq!(label(999), "PNG · 999 B");
+        assert_eq!(label(1024), "PNG · 1 KB");
+        assert_eq!(label(1024 * 1024 - 1), "PNG · 1023 KB");
+        assert_eq!(label(1024 * 1024), "PNG · 1.0 MB");
+        assert_eq!(label(1024 * 1024 * 3 / 2), "PNG · 1.5 MB");
         let many: Vec<String> = (0..12).map(|i| format!("/cmd{i}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert_eq!(

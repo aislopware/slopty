@@ -2644,6 +2644,44 @@ mod tests {
         }
     }
 
+    /// The header's small labels: the context chip warns from four fifths, the usage reads
+    /// the windows or the earliest reset while limited, the cost turns to dollars at one.
+    #[test]
+    fn the_header_labels_read_the_context_usage_and_cost() {
+        use slopty_proto::agent::{Context, Usage, UsageWindow};
+        let ctx = |tokens: u64, window: Option<u64>| Context { tokens, window };
+        assert!(!context_is_tight(&ctx(79, Some(100))));
+        assert!(context_is_tight(&ctx(80, Some(100))), "four fifths spent is tight");
+        assert!(!context_is_tight(&ctx(1_000, None)), "no window known: no warning");
+
+        let window = |percent: u8, resets_at: u64| UsageWindow { percent, resets_at };
+        let usage = |limited: bool, five: Option<UsageWindow>, seven: Option<UsageWindow>| {
+            usage_label(&Usage { limited, five_hour: five, seven_day: seven })
+        };
+        assert_eq!(usage(false, None, None), "");
+        assert_eq!(usage(false, Some(window(23, 0)), None), "5h 23%");
+        assert_eq!(usage(false, Some(window(23, 0)), Some(window(74, 0))), "5h 23% · 7d 74%");
+        assert_eq!(usage(true, Some(window(100, 0)), None), "rate limited", "no reset known");
+        let later = 4_102_444_800; // 2100-01-01T00:00:00Z, seconds
+        let sooner = later - 3_600;
+        let at = |secs: u64| clock(Some(secs * 1000)).expect("a clock reading");
+        assert_eq!(
+            usage(true, Some(window(100, later)), Some(window(90, sooner))),
+            format!("limited until {}", at(sooner)),
+            "the earliest reset, whichever window"
+        );
+        assert_eq!(
+            usage(true, Some(window(100, 0)), Some(window(90, sooner))),
+            format!("limited until {}", at(sooner)),
+            "a zero reset is unknown, not the epoch"
+        );
+
+        assert_eq!(cost_label(0), "0¢");
+        assert_eq!(cost_label(999_999), "99¢");
+        assert_eq!(cost_label(1_000_000), "$1.00");
+        assert_eq!(cost_label(12_345_678), "$12.34");
+    }
+
     /// The export keeps what a reader would paste: the turns, the calls, the failures, the
     /// compaction; not the thinking or the tool output.
     #[test]
