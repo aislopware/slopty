@@ -721,6 +721,20 @@ impl TerminalView {
     fn composer_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.completion_nav(key, window, cx) {
             cx.stop_propagation();
+            return;
+        }
+        // ↑ / ↓ with nothing to complete: a sent prompt back, as a shell's history.
+        let delta = match key {
+            "up" => -1,
+            "down" => 1,
+            _ => return,
+        };
+        if self.driven
+            && self.composer_focused(window, cx)
+            && self.conversation.as_mut().is_some_and(|c| c.recall(delta, window, cx))
+        {
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -819,7 +833,7 @@ impl TerminalView {
     /// then Enter; an empty composer sends the bare Enter, which accepts whatever the agent
     /// is offering.
     pub fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(conversation) = &self.conversation else { return };
+        let Some(conversation) = self.conversation.as_mut() else { return };
         let text = conversation.take_composer_text(window, cx);
         if self.driven {
             if text.trim().is_empty() && self.attachments.is_empty() && self.snapshots.is_empty() {
@@ -962,6 +976,12 @@ impl TerminalView {
     #[must_use]
     pub const fn conversation(&self) -> Option<&Conversation> {
         self.conversation.as_ref()
+    }
+
+    /// The conversation on show, to change.
+    #[must_use]
+    pub const fn conversation_mut(&mut self) -> Option<&mut Conversation> {
+        self.conversation.as_mut()
     }
 
     /// A slice of the transcript from the host; ignored once the conversation is hidden.
@@ -1633,36 +1653,36 @@ impl TerminalView {
     /// ⌘↑: the prompt above the viewport's top row, scrolled to the top. In a conversation
     /// the prompts are the `User` entries.
     pub fn prev_prompt(&mut self, _: &PrevPrompt, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = &self.conversation {
-            if let Some(ix) = conversation.prompt_from_top(-1) {
-                conversation.scroll_to_entry(ix);
-                cx.notify();
-            }
-            return;
-        }
-        let top = self.state.index_at_row(0);
-        if let Some(target) = self.state.prompt_before(top) {
-            self.jump_to(target, cx);
-        }
+        self.step_prompt(-1, cx);
     }
 
     /// ⌘↓: the prompt below the viewport's top row, scrolled to the top; none left means back
     /// to following output.
     pub fn next_prompt(&mut self, _: &NextPrompt, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_prompt(1, cx);
+    }
+
+    /// ⌘↑ (`delta` −1) / ⌘↓ (+1), also the phone's armed ⌘ with the bar's ↑ / ↓.
+    fn step_prompt(&mut self, delta: i8, cx: &mut Context<Self>) {
         if let Some(conversation) = &self.conversation {
-            match conversation.prompt_from_top(1) {
+            match conversation.prompt_from_top(delta) {
                 Some(ix) => conversation.scroll_to_entry(ix),
-                None => conversation.pin(),
+                None if delta > 0 => conversation.pin(),
+                None => return,
             }
             cx.notify();
             return;
         }
         let top = self.state.index_at_row(0);
-        if let Some(target) = self.state.prompt_after(top) {
-            self.jump_to(target, cx);
-        } else {
-            self.state.scroll_to_bottom();
-            cx.notify();
+        let target =
+            if delta < 0 { self.state.prompt_before(top) } else { self.state.prompt_after(top) };
+        match target {
+            Some(target) => self.jump_to(target, cx),
+            None if delta > 0 => {
+                self.state.scroll_to_bottom();
+                cx.notify();
+            }
+            None => {}
         }
     }
 
@@ -1986,6 +2006,12 @@ impl TerminalView {
 
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
+        // An armed ⌘ with the bar's ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
+        if self.sticky_command && matches!(keystroke.key.as_str(), "up" | "down") {
+            self.sticky_command = false;
+            self.step_prompt(if keystroke.key == "up" { -1 } else { 1 }, cx);
+            return;
+        }
         if std::mem::take(&mut self.sticky_control) {
             keystroke.modifiers.control = true;
         }
@@ -4993,6 +5019,67 @@ mod tests {
     /// new entries keep the hits true, and Esc closes the bar with the caret back in the
     /// composer.
     #[gpui::test]
+    fn the_composer_recalls_sent_prompts_on_up_and_down(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let session = view.read_with(cx, |v, _| v.session);
+        view.update(cx, |v, cx| {
+            let entries = vec![
+                user("first"),
+                assistant("one"),
+                user("second"),
+                user("second"),
+                assistant("two"),
+                user("third"),
+                assistant("three"),
+            ];
+            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
+        });
+        cx.run_until_parked();
+        let text = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)))
+        };
+        let up_down = |cx: &mut VisualTestContext, keys: &str| {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+        };
+        assert!(composer_focused(&view, cx));
+        // ↑ on the empty composer: the newest prompt; ↑ again the older ones, the oldest
+        // stays; a prompt sent twice in a row is one step.
+        up_down(cx, "up");
+        assert_eq!(text(cx).as_deref(), Some("third"));
+        up_down(cx, "up");
+        assert_eq!(text(cx).as_deref(), Some("second"));
+        up_down(cx, "up up");
+        assert_eq!(text(cx).as_deref(), Some("first"));
+        // ↓ back down; past the newest the draft (empty) is back.
+        up_down(cx, "down down");
+        assert_eq!(text(cx).as_deref(), Some("third"));
+        up_down(cx, "down");
+        assert_eq!(text(cx).as_deref(), Some(""));
+        // A draft is kept aside while recalling and put back past the newest.
+        up_down(cx, "d r a f t up");
+        assert_eq!(text(cx).as_deref(), Some("draft"), "↑ in the human's own text moves the caret");
+        up_down(cx, "cmd-a backspace up down");
+        assert_eq!(text(cx).as_deref(), Some(""));
+        up_down(cx, "d up");
+        assert_eq!(text(cx).as_deref(), Some("d"));
+        up_down(cx, "backspace up");
+        assert_eq!(text(cx).as_deref(), Some("third"));
+        // Typing into a recalled prompt makes it the human's own: ↑ moves the caret.
+        up_down(cx, "x up");
+        assert_eq!(text(cx).as_deref(), Some("thirdx"), "the caret was at the end");
+        // Sending forgets the recall: ↑ starts from the newest again.
+        up_down(cx, "enter");
+        assert_eq!(text(cx).as_deref(), Some(""));
+        drain_words(&mut rx);
+        up_down(cx, "up");
+        assert_eq!(text(cx).as_deref(), Some("third"), "the transcript has not grown yet");
+    }
+
+    #[gpui::test]
     fn a_driven_view_steps_between_its_prompts(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
         view.update(cx, TerminalView::set_driven);
@@ -5046,6 +5133,22 @@ mod tests {
             cx.run_until_parked();
         }
         assert!(pinned(cx), "past the last prompt the list follows the tail again");
+
+        // The phone's armed ⌘ with the bar's ↑ is ⌘↑: it steps up a prompt and disarms.
+        drain_words(&mut rx);
+        view.update(cx, |v, cx| {
+            v.set_sticky_command(true, cx);
+            let up = Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: "up".into(),
+                key_char: None,
+            };
+            v.press(up, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(top(cx), Some((first, false)));
+        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one press");
+        assert!(rx.try_recv().is_err(), "nothing went to the program");
 
         // ⌘⇧C copies the newest answer, as the grid copies the newest block's output.
         cx.simulate_keystrokes("cmd-shift-c");
@@ -5595,7 +5698,7 @@ mod tests {
         assert!(drain_words(&mut rx).is_empty(), "nothing was sent");
 
         view.update_in(cx, |v, window, cx| {
-            if let Some(c) = v.conversation() {
+            if let Some(c) = v.conversation_mut() {
                 let _taken = c.take_composer_text(window, cx);
             }
         });
@@ -5616,7 +5719,7 @@ mod tests {
         // `@` completion: the word is asked of the host once per query, the answer lists
         // the paths while the word is still that query, Tab replaces the word alone.
         view.update_in(cx, |v, window, cx| {
-            if let Some(c) = v.conversation() {
+            if let Some(c) = v.conversation_mut() {
                 let _taken = c.take_composer_text(window, cx);
             }
         });

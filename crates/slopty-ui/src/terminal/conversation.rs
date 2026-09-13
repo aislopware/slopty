@@ -313,6 +313,11 @@ pub struct Conversation {
     /// The text being written.
     composer: Entity<TextareaState>,
     _composer_events: Subscription,
+    /// Which sent prompt (an index into [`Self::prompts`]) the composer shows for ↑ / ↓;
+    /// none while it holds the human's own draft.
+    recall: Option<usize>,
+    /// The draft set aside while a prompt is recalled, put back past the newest one.
+    draft: String,
     /// The model menu under the header is open.
     model_menu: bool,
     /// Which slash completion is selected, an index into the current matches.
@@ -367,6 +372,8 @@ impl Conversation {
             model_menu: false,
             completion: 0,
             completions_hidden: false,
+            recall: None,
+            draft: String::new(),
             hits: Rc::from([]),
             hit: None,
             diffs: Rc::default(),
@@ -491,6 +498,53 @@ impl Conversation {
     pub const fn composer_changed(&mut self) {
         self.completion = 0;
         self.completions_hidden = false;
+        // Typed into a recalled prompt: it is the human's own text now.
+        self.recall = None;
+    }
+
+    /// The prompts sent so far, oldest first, a repeat of the one before it dropped.
+    fn prompts(entries: &[TranscriptEntry]) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for entry in entries {
+            if let TranscriptBody::User { text, .. } = &entry.body
+                && !text.is_empty()
+                && out.last() != Some(&text.as_str())
+            {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    /// ↑ (`delta` −1) / ↓ (+1) in the composer as a shell's history: ↑ on an empty composer
+    /// shows the newest prompt sent, ↑ / ↓ from there the older / newer ones, and ↓ past the
+    /// newest puts the draft back. `false` when the key is not a recall (text of the human's
+    /// own under the caret), so it moves the caret as it would.
+    pub fn recall(&mut self, delta: i8, window: &mut Window, cx: &mut App) -> bool {
+        let entries = Rc::clone(&self.entries);
+        let prompts = Self::prompts(&entries);
+        let Some(newest) = prompts.len().checked_sub(1) else { return false };
+        let at = match self.recall {
+            None if delta < 0 && self.composer_text(cx).is_empty() => Some(newest),
+            None => return false,
+            Some(at) if delta < 0 => Some(at.saturating_sub(1)),
+            Some(at) => at.checked_add(1).filter(|next| *next <= newest),
+        };
+        if self.recall.is_none() {
+            self.draft = self.composer_text(cx);
+        }
+        let value = match at {
+            Some(at) => prompts.get(at).map(|p| (*p).to_owned()).unwrap_or_default(),
+            None => std::mem::take(&mut self.draft),
+        };
+        self.recall = at;
+        self.composer.update(cx, |input, cx| {
+            let end = value.len();
+            input.set_value(value, window, cx);
+            // The caret at the end, as a shell puts it after a recalled line.
+            input.set_selected_range(end..end, cx);
+        });
+        true
     }
 
     /// Esc: hide the completions until the text changes.
@@ -598,9 +652,11 @@ impl Conversation {
 
     /// Take the composer's text, leaving it empty.
     #[must_use]
-    pub fn take_composer_text(&self, window: &mut Window, cx: &mut App) -> String {
+    pub fn take_composer_text(&mut self, window: &mut Window, cx: &mut App) -> String {
         let text = self.composer_text(cx);
         self.composer.update(cx, |input, cx| input.clean(window, cx));
+        self.recall = None;
+        self.draft.clear();
         text
     }
 

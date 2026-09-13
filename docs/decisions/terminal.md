@@ -210,7 +210,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   fork) and disarms; covered by `sticky_command_opens_the_link_under_the_next_tap`. A path
   under that tap (2026-09-12) opens as a **file card**, prompt or not — the editor ⌘-click
   types on a Mac is `vi` in a phone-sized grid, and the card is what the phone can read —
-  covered by `sticky_command_views_the_path_under_the_next_tap`.
+  covered by `sticky_command_views_the_path_under_the_next_tap`. The armed ⌘ with the bar's
+  ↑ / ↓ (2026-09-13) is ⌘↑ / ⌘↓ — between prompts, in a shell or a conversation — and
+  disarms; nothing goes to the program (`TerminalView::press`, in
+  `a_driven_view_steps_between_its_prompts`).
 
 - ✅ **Command blocks from OSC 133, shell integration injected by ptyd** (2026-09-05).
   *Injection:* the `ZDOTDIR` bootstrap every terminal uses (Kitty, Ghostty, WezTerm); the

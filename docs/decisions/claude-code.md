@@ -85,6 +85,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   interrupt. Allow / Deny in the view raise `TerminalViewEvent::Answered` and the canvas types
   Enter / Esc through `allow_agent` / `deny_agent`, one answer per state, exactly as the badge.
 
+- ✅ **↑ / ↓ in the composer recall the prompts sent, as a shell's history** (2026-09-13).
+  A prompt is often the last one again with a word changed, and a shell reader's hand goes to
+  ↑. Rulings: (1) ↑ on an **empty** composer shows the newest `User` entry, ↑ / ↓ from there
+  the older / newer ones (`Conversation::recall`, `prompts()` — the empty ones and a repeat of
+  the one before it dropped), the oldest stays put, and ↓ past the newest puts the draft back
+  (`draft`, set aside on the first ↑); (2) with the human's own text under the caret — a draft,
+  or a recalled prompt once typed into (`composer_changed` forgets the recall; gpui-kit's
+  `set_value` emits no `Change`, so the recall itself does not) — ↑ / ↓ move the caret as they
+  would, so a multi-line draft is still editable; (3) the caret lands at the end of a recalled
+  prompt (`set_selected_range`); (4) the completion list takes ↑ / ↓ first while it is up; (5)
+  sending forgets the recall. Test: `the_composer_recalls_sent_prompts_on_up_and_down`.
+
 - ✅ **Collapse defaults** (2026-09-05). Thinking and tool input start folded (they explain a
   step, they are not the step); a tool result shows its first 4 lines (`RESULT_PREVIEW_LINES`)
   because the head of a result is usually the verdict ("running 2 tests", "error[E0308]"), and
