@@ -57,8 +57,8 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
   block's prompt is a range query, not a walk. Mouse selection is client-side too
-  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, double/triple click,
-  ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
+  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`; drag, ⌥-drag for a
+  rectangle, double/triple click, ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
   keeps scrolling through the cache at a pace set by the distance); nothing reaches the host.
   A scrollbar thumb over the grid's right edge shows while there is history and the pointer is
   over the card or the viewport is in the history; it drags and its track pages. The wheel

@@ -148,6 +148,8 @@ pub struct Selection {
     pub anchor: (LineIndex, u16),
     /// Where the pointer is.
     pub head: (LineIndex, u16),
+    /// A rectangle between the two corners (⌥-drag) rather than a run in reading order.
+    pub block: bool,
 }
 
 impl Selection {
@@ -157,16 +159,30 @@ impl Selection {
         if self.head < self.anchor { (self.head, self.anchor) } else { (self.anchor, self.head) }
     }
 
+    /// A run between two cells, in reading order.
+    #[must_use]
+    pub const fn run(anchor: (LineIndex, u16), head: (LineIndex, u16)) -> Self {
+        Self { anchor, head, block: false }
+    }
+
     /// The selected columns on line `index` as `start..end`, if the line is inside the
-    /// selection; a line in the middle is selected edge to edge.
+    /// selection; a line in the middle is selected edge to edge, or between the rectangle's
+    /// sides when the selection is a block.
     #[must_use]
     pub fn columns(self, index: LineIndex, cols: u16) -> Option<std::ops::Range<u16>> {
         let (start, end) = self.ordered();
         if index < start.0 || index > end.0 {
             return None;
         }
-        let from = if index == start.0 { start.1 } else { 0 };
-        let to = if index == end.0 { end.1.saturating_add(1).min(cols) } else { cols };
+        let (from, to) = if self.block {
+            let (a, b) = (self.anchor.1.min(self.head.1), self.anchor.1.max(self.head.1));
+            (a, b.saturating_add(1).min(cols))
+        } else {
+            (
+                if index == start.0 { start.1 } else { 0 },
+                if index == end.0 { end.1.saturating_add(1).min(cols) } else { cols },
+            )
+        };
         (from < to).then_some(from..to)
     }
 }
@@ -1406,7 +1422,7 @@ impl TerminalView {
         } else {
             (0, self.state.size().cols.saturating_sub(1))
         };
-        self.selection = Some(Selection { anchor: (index, start), head: (index, end) });
+        self.selection = Some(Selection::run((index, start), (index, end)));
     }
 
     /// A touch long press over the terminal. On the phone a plain drag pans the canvas, so
@@ -1553,10 +1569,8 @@ impl TerminalView {
             BlockMenuItem::SelectBlock => {
                 let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
                 let cols = self.state.size().cols;
-                self.selection = Some(Selection {
-                    anchor: (block.prompt, 0),
-                    head: (last, cols.saturating_sub(1)),
-                });
+                self.selection =
+                    Some(Selection::run((block.prompt, 0), (last, cols.saturating_sub(1))));
                 self.selecting = false;
             }
         }
@@ -2598,8 +2612,10 @@ impl TerminalView {
                 selection.head = (index, col);
                 self.selecting = true;
             } else {
+                // ⌥-drag selects a rectangle, as in every terminal.
                 let at = (index, col);
-                self.selection = Some(Selection { anchor: at, head: at });
+                self.selection =
+                    Some(Selection { anchor: at, head: at, block: event.modifiers.alt });
                 self.selecting = true;
             }
             cx.notify();
@@ -3927,14 +3943,28 @@ mod tests {
 
     #[test]
     fn selection_columns_cover_edges_and_middle_lines() {
-        let s = Selection { anchor: (LineIndex(7), 5), head: (LineIndex(5), 2) };
+        let s = Selection::run((LineIndex(7), 5), (LineIndex(5), 2));
         assert_eq!(s.columns(LineIndex(4), 10), None);
         assert_eq!(s.columns(LineIndex(5), 10), Some(2..10));
         assert_eq!(s.columns(LineIndex(6), 10), Some(0..10));
         assert_eq!(s.columns(LineIndex(7), 10), Some(0..6));
         assert_eq!(s.columns(LineIndex(8), 10), None);
-        let one = Selection { anchor: (LineIndex(1), 3), head: (LineIndex(1), 3) };
+        let one = Selection::run((LineIndex(1), 3), (LineIndex(1), 3));
         assert_eq!(one.columns(LineIndex(1), 10), Some(3..4));
+    }
+
+    /// A block selection is the rectangle between its corners: the same columns on every
+    /// line, whichever corner the drag started from, and never past the grid's edge.
+    #[test]
+    fn a_block_selection_is_the_same_columns_on_every_line() {
+        let s = Selection { anchor: (LineIndex(7), 5), head: (LineIndex(5), 2), block: true };
+        assert_eq!(s.columns(LineIndex(4), 10), None);
+        assert_eq!(s.columns(LineIndex(5), 10), Some(2..6));
+        assert_eq!(s.columns(LineIndex(6), 10), Some(2..6));
+        assert_eq!(s.columns(LineIndex(7), 10), Some(2..6));
+        assert_eq!(s.columns(LineIndex(8), 10), None);
+        let edge = Selection { anchor: (LineIndex(1), 9), head: (LineIndex(2), 12), block: true };
+        assert_eq!(edge.columns(LineIndex(2), 10), Some(9..10));
     }
 
     /// A drag across three rows copies the cells between the ends, trailing blanks trimmed.
@@ -3972,13 +4002,18 @@ mod tests {
                 cx,
             );
             assert_eq!(view.selected_text(), None);
-            view.selection =
-                Some(Selection { anchor: (LineIndex(100), 6), head: (LineIndex(102), 4) });
+            view.selection = Some(Selection::run((LineIndex(100), 6), (LineIndex(102), 4)));
             assert_eq!(view.selected_text().as_deref(), Some("wor\nsecond\nthird"));
             // Backwards drags read the same.
-            view.selection =
-                Some(Selection { anchor: (LineIndex(102), 4), head: (LineIndex(100), 6) });
+            view.selection = Some(Selection::run((LineIndex(102), 4), (LineIndex(100), 6)));
             assert_eq!(view.selected_text().as_deref(), Some("wor\nsecond\nthird"));
+            // A block takes the same columns of every row.
+            view.selection = Some(Selection {
+                anchor: (LineIndex(100), 6),
+                head: (LineIndex(102), 4),
+                block: true,
+            });
+            assert_eq!(view.selected_text().as_deref(), Some("o w\nnd\nd r"));
             // Two clicks take the word, three the line, a blank cell only itself.
             view.select_by_clicks(LineIndex(100), 7, 2);
             assert_eq!(view.selected_text().as_deref(), Some("wor"));

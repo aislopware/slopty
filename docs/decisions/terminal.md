@@ -609,3 +609,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `terminal::sprite::tests` (ranges, light/heavy/double bars, corners and junctions, dashes,
   arcs, blocks, Braille, Powerline, device-pixel snapping) and element
   `a_box_drawing_cell_is_drawn_not_shaped`.
+
+- ✅ **⌥-drag selects a rectangle** (2026-09-15). Every terminal has it (ghostty, iTerm,
+  Terminal.app) and a column of a table or a stack of prefixes is what people reach for it
+  for. `Selection` gained `block`: set from the ⌥ modifier on the press that starts a drag;
+  `columns` then answers the same span — between the two corners' columns, clipped to the
+  grid — on every line of the rectangle, so painting and `selected_text` needed no change
+  (each line still trims its trailing blanks). Word and line clicks, ⇧-click and the block
+  menu's selection stay runs. Tests: `a_block_selection_is_the_same_columns_on_every_line`,
+  the block case in `selected_text_spans_rows_and_trims`.
