@@ -316,6 +316,9 @@ pub struct Conversation {
     /// Which sent prompt (an index into [`Self::prompts`]) the composer shows for ↑ / ↓;
     /// none while it holds the human's own draft.
     recall: Option<usize>,
+    /// Prompts sent while the agent worked, not yet in the transcript: drawn as queued
+    /// under the list until their `User` entry arrives or the turn ends.
+    queued: Vec<String>,
     /// The draft set aside while a prompt is recalled, put back past the newest one.
     draft: String,
     /// The model menu under the header is open.
@@ -373,6 +376,7 @@ impl Conversation {
             completion: 0,
             completions_hidden: false,
             recall: None,
+            queued: Vec::new(),
             draft: String::new(),
             hits: Rc::from([]),
             hit: None,
@@ -676,6 +680,24 @@ impl Conversation {
         self.composer.update(cx, |input, cx| input.set_value(value, window, cx));
     }
 
+    /// A prompt went to the agent while it worked: it waits in the agent's queue, and here
+    /// under the list, until its entry arrives.
+    pub fn queue(&mut self, text: String) {
+        self.queued.push(text);
+    }
+
+    /// The turn ended without the queued prompts: the agent's queue is spent (each starts a
+    /// turn of its own, whose entry arrives) or was dropped, so nothing waits any more.
+    pub fn clear_queued(&mut self) {
+        self.queued.clear();
+    }
+
+    /// The prompts waiting on the agent, oldest first.
+    #[must_use]
+    pub fn queued(&self) -> &[String] {
+        &self.queued
+    }
+
     /// Take the composer's text, leaving it empty.
     #[must_use]
     pub fn take_composer_text(&mut self, window: &mut Window, cx: &mut App) -> String {
@@ -705,6 +727,16 @@ impl Conversation {
     /// Take a slice from the host: a reset replaces everything (and pins the view to the
     /// bottom again), otherwise the entries append.
     pub fn apply(&mut self, update: TranscriptUpdate) {
+        if update.reset {
+            self.queued.clear();
+        }
+        for entry in &update.entries {
+            if let TranscriptBody::User { text, .. } = &entry.body
+                && let Some(at) = self.queued.iter().position(|q| q.trim() == text.trim())
+            {
+                self.queued.remove(at);
+            }
+        }
         let mut entries = if update.reset { Vec::new() } else { self.entries.to_vec() };
         let before = entries.len();
         entries.extend(update.entries);
@@ -852,6 +884,7 @@ impl Conversation {
                     }),
             )
             .when(!partial.is_empty(), |el| el.child(partial_row(partial, &theme)))
+            .when(!self.queued.is_empty(), |el| el.child(queued_row(&self.queued, &theme)))
             .when_some(attention, |el, attention| el.child(attention_row(attention, &theme, cx)))
             .when(!completions.is_empty(), |el| {
                 el.child(self.completions_row(&completions, &theme, cx))
@@ -1224,6 +1257,59 @@ fn partial_row(partial: &str, theme: &Theme) -> AnyElement {
             TextView::markdown("conversation-partial-md", SharedString::from(partial.to_owned()))
                 .style(crate::markdown::style(theme, &mono, 1.0)),
         )
+        .into_any_element()
+}
+
+/// The prompts sent while the agent worked, under the list and what it is writing: faint
+/// bubbles on the human's side, each marked queued, until the agent's turn reaches them.
+fn queued_row(queued: &[String], theme: &Theme) -> AnyElement {
+    let s = &theme.surfaces;
+    let spacing = theme.spacing;
+    let ui_size = theme.typography.ui_size;
+    let prose = gpui::relative(theme.typography.markdown_line_height);
+    let first = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_owned();
+    div()
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(spacing.xs))
+        .px(px(spacing.md))
+        .py(px(spacing.xs))
+        .border_t_1()
+        .border_color(hsla(s.border))
+        .children(queued.iter().enumerate().map(|(i, text)| {
+            div()
+                .id(ElementId::NamedInteger(
+                    "conversation-queued".into(),
+                    u64::try_from(i).unwrap_or(0),
+                ))
+                .debug_selector(move || format!("conversation-queued-{i}"))
+                .role(Role::Status)
+                .aria_label(SharedString::from(format!("Queued: {}", first(text))))
+                .flex()
+                .items_end()
+                .justify_end()
+                .gap(px(spacing.sm))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(theme.typography.caption()))
+                        .text_color(hsla(s.text_muted))
+                        .child("queued"),
+                )
+                .child(
+                    div()
+                        .max_w(px(ui_size * 40.0))
+                        .px(px(spacing.md))
+                        .py(px(spacing.sm))
+                        .rounded(px(theme.radii.md))
+                        .bg(hsla_alpha(s.accent, alpha::TINT))
+                        .text_color(hsla(s.text_muted))
+                        .line_height(prose)
+                        .child(SharedString::from(text.clone())),
+                )
+        }))
         .into_any_element()
 }
 

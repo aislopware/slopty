@@ -104,6 +104,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   back past the newest — the prompt to send again is more often on screen than a count of
   ↑ away. Test: `the_composer_recalls_sent_prompts_on_up_and_down`.
 
+- ✅ **A prompt sent mid-turn shows as queued** (2026-09-13). ↩ while the agent works still
+  sends — Claude Code queues a prompt that arrives over stream-json mid-turn and takes it
+  as its next turn (its interrupt reply even lists `still_queued`) — but the conversation
+  showed nothing of it until that turn began, minutes later on a long one. Rulings: (1) a
+  prompt sent while the status is `Working` or `Tool` is kept in `Conversation::queued` and
+  drawn under the list and the partial as a faint bubble on the human's side captioned
+  "queued" (`conversation-queued-<i>`, role Status, "Queued: first line"); (2) it leaves
+  the queue when a `User` entry with its text arrives (a reset drops the lot), or when the
+  status leaves the turn — `Done`, `Idle`, `None` — since a queued prompt the agent takes
+  starts a turn of its own whose entry follows, and one it dropped will never come;
+  `Blocked` mid-turn keeps the queue; (3) no "unsend": the agent holds the queue, and the
+  client has no word for taking one back. Test:
+  `a_prompt_sent_while_the_agent_works_waits_as_queued`.
+
 - ✅ **A conversation copies out as Markdown** (2026-09-13). What an agent said is often
   pasted into a review, an issue or a note, and one answer more often than the lot. Rulings:
   (1) every answer ends in a "copy" button (`conversation-copy-<ix>`, "Copy answer") that

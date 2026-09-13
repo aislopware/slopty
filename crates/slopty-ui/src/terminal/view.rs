@@ -847,7 +847,14 @@ impl TerminalView {
                 let images = std::mem::take(&mut self.attachments);
                 let snapshots =
                     std::mem::take(&mut self.snapshots).into_iter().map(|(t, _)| t).collect();
+                // Sent mid-turn, the prompt waits in the agent's queue: shown as queued here.
+                let queued = (self.agent_busy() && !text.trim().is_empty()).then(|| text.clone());
                 self.say(ClientMsg::AgentSay { session: self.session, text, images, snapshots });
+                if let Some(text) = queued
+                    && let Some(conversation) = self.conversation.as_mut()
+                {
+                    conversation.queue(text);
+                }
                 cx.notify();
             }
             return;
@@ -926,7 +933,20 @@ impl TerminalView {
             self.focus_composer = true;
         }
         self.agent = status;
+        // A turn that ended, or an agent gone: nothing of what was queued waits any more
+        // (a prompt the agent took starts a turn of its own and arrives as an entry).
+        if !self.agent_busy()
+            && !matches!(self.agent, Some(AgentStatus::Blocked(_)))
+            && let Some(conversation) = self.conversation.as_mut()
+        {
+            conversation.clear_queued();
+        }
         cx.notify();
+    }
+
+    /// Whether the agent is in a turn: working, or in a tool.
+    const fn agent_busy(&self) -> bool {
+        matches!(self.agent, Some(AgentStatus::Working | AgentStatus::Tool { .. }))
     }
 
     /// The agent's state as last reported.
@@ -5111,6 +5131,75 @@ mod tests {
     /// show), ⌘G / ↩ / ⇧↩ step and wrap, `.*` makes the needle a regex (a bad one says so),
     /// new entries keep the hits true, and Esc closes the bar with the caret back in the
     /// composer.
+    /// ↩ while the agent works still sends (Claude Code queues the prompt for its next turn),
+    /// and the conversation shows it as queued until its entry arrives or the turn ends.
+    #[gpui::test]
+    fn a_prompt_sent_while_the_agent_works_waits_as_queued(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let session = view.read_with(cx, |v, _| v.session);
+        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
+            session,
+            reset,
+            entries,
+        };
+        view.update(cx, |v, cx| {
+            v.transcript_update(update(true, vec![user("first"), assistant("one")]), cx);
+            v.set_agent_status(Some(AgentStatus::Working), cx);
+        });
+        cx.run_until_parked();
+        let queued = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.conversation().map(|c| c.queued().to_vec()))
+        };
+        cx.simulate_keystrokes("l a t e r enter");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["say:later"], "sent, not held back");
+        assert_eq!(queued(cx).as_deref(), Some(&["later".to_owned()][..]));
+        assert!(cx.debug_bounds("conversation-queued-0").is_some(), "drawn as queued");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some("Queued: later"))), "{tree:#?}");
+        view.update(cx, |v, cx| {
+            v.set_agent_status(Some(AgentStatus::Tool { tool: "Bash".to_owned() }), cx);
+        });
+        cx.simulate_keystrokes("m o r e enter");
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        assert_eq!(queued(cx).map(|q| q.len()), Some(2), "a tool is still the turn");
+        // Its entry arrives: that one is off the queue, the other still waits.
+        view.update(cx, |v, cx| {
+            v.transcript_update(update(false, vec![user("later"), assistant("two")]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(queued(cx).as_deref(), Some(&["more".to_owned()][..]));
+        assert!(cx.debug_bounds("conversation-queued-1").is_none());
+        // Blocked on the human mid-turn keeps the queue; the turn's end clears it.
+        view.update(cx, |v, cx| {
+            v.set_agent_status(Some(AgentStatus::Blocked(BlockReason::Question)), cx);
+        });
+        assert_eq!(queued(cx).map(|q| q.len()), Some(1));
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Done), cx));
+        cx.run_until_parked();
+        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
+        assert!(cx.debug_bounds("conversation-queued-0").is_none());
+        // Sent while idle: nothing is queued.
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Idle), cx));
+        cx.simulate_keystrokes("n o w enter");
+        cx.run_until_parked();
+        assert_eq!(drain_words(&mut rx), ["say:now"]);
+        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
+        // A reset (a resumed card) drops whatever was queued.
+        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
+        cx.simulate_keystrokes("x enter");
+        cx.run_until_parked();
+        assert_eq!(queued(cx).map(|q| q.len()), Some(1));
+        view.update(cx, |v, cx| v.transcript_update(update(true, vec![user("first")]), cx));
+        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
+    }
+
     #[gpui::test]
     fn the_composer_recalls_sent_prompts_on_up_and_down(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
