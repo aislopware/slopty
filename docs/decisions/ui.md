@@ -264,7 +264,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   proposes a `Place` that clamps it to the viewport minus `GAP` at zoom 1, so a phone gets a
   phone-wide terminal and, being its driver, a PTY of that width; desktop viewports exceed the
   default and are untouched. Terminals opened elsewhere are still viewed zoomed out; the
-  driver/viewer hand-off is the "take" pill below.
+  driver/viewer hand-off is the "take" pill below. The first shell comes with the attach,
+  often before a frame has measured the viewport (2026-09-15: the phone e2e opened onto a
+  720-wide card one run in two, and its agent golden flapped between the two layouts); a
+  placement that finds the viewport unmeasured waits in `fit_items_pending` and is fitted on
+  the first frame, before the reveal that follows it. Test:
+  `a_shell_placed_before_the_first_frame_is_fitted_on_it`.
   Verified on the iOS 26.5 simulator 2026-09-05: "+ shell" on the phone opens a 43×22 PTY
   shown at 100 % across the phone's width. Landscape (both directions in the spec) rotates the
   GPUI window with the keyboard; nothing else was needed.

@@ -206,8 +206,21 @@ mod tests {
         assert!(conversation.composer_focused && conversation.pinned, "{conversation:?}");
         // VoiceOver's view of it, from the same tree the bridge mirrors: the entries as list
         // items, the composer field with the keyboard, the send button, the key bar's keys.
-        let items = dump.a11y.iter().filter(|n| n.role == "ListItem").count();
-        assert_eq!(items, TRANSCRIPT_LINES.len(), "{:#?}", dump.a11y);
+        // The list paints only what fits above the keyboard, pinned to the newest entry,
+        // so the items are a tail of the transcript ending in its last line.
+        let items: Vec<&str> = dump
+            .a11y
+            .iter()
+            .filter(|n| n.role == "ListItem")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert!(!items.is_empty() && items.len() <= TRANSCRIPT_LINES.len(), "{:#?}", dump.a11y);
+        assert_eq!(
+            items.last().copied(),
+            Some("Claude: Fixed: `b` compared **id** with *name*."),
+            "{:#?}",
+            dump.a11y
+        );
         // (`composer_focused` above is the keyboard check: GPUI pins the focus to a node
         // inside gpui-kit's input, not to the labelled field.)
         assert!(
@@ -327,6 +340,29 @@ mod tests {
             dump.window.width,
             dump.window.height
         );
+        // A card fitted to the phone flies there: render once the camera and the card rest
+        // (two dumps in a row agree), and say where they rested if the golden disagrees.
+        let session = card.session.clone();
+        let place = move |d: &slopty_e2e::Dump| {
+            let bounds = d
+                .items
+                .iter()
+                .find(|i| i.session.as_deref() == Some(&session))
+                .map(|i| i.bounds)
+                .unwrap_or_default();
+            (d.zoom.to_bits(), bounds.map(f32::to_bits))
+        };
+        let mut last = place(&dump);
+        let dump = drv
+            .wait_for("the camera at rest", STEP, |d| {
+                let now = place(d);
+                let rest = now == last;
+                last = now;
+                rest
+            })
+            .await
+            .unwrap();
+        eprintln!("agent card at rest: zoom {} items {:?}", dump.zoom, dump.items);
         let frame = drv.render(&render_path).await.unwrap();
         assert!(foreground_fraction(&frame) > BLANK, "frame is blank");
         let name = format!("ios-{}-agent", device(dump.window.width));
@@ -402,9 +438,17 @@ mod tests {
         // file, so it appears, active, saying the file is not there yet.
         drv.ui_insert_text("edit the note").await.unwrap();
         drv.keys("enter").await.unwrap();
+        // The turn must be over before the button is located: the entries that follow the
+        // edit (the todo result, the answer, its caption) shift the list under a finger.
         let dump = drv
-            .wait_for("the edit's view button", STEP, |d| {
-                d.a11y_node("Button", Some("View note.txt on the canvas")).is_some()
+            .wait_for("the edit's view button after the turn", STEP, |d| {
+                d.terminals.iter().any(|t| {
+                    t.agent.as_deref() == Some("done")
+                        && t.conversation.as_ref().is_some_and(|c| {
+                            c.entries.last().map(String::as_str)
+                                == Some("assistant: Edited: hi is now hello.")
+                        })
+                }) && d.a11y_node("Button", Some("View note.txt on the canvas")).is_some()
             })
             .await
             .unwrap();

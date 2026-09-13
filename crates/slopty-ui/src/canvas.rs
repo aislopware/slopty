@@ -629,6 +629,9 @@ pub struct CanvasView {
     viewport: (Point<Pixels>, Size<Pixels>),
     /// Fit every item into the viewport on the next frame (once the viewport is known).
     fit_pending: bool,
+    /// Items the host placed for us before a frame measured the viewport: sized to it on
+    /// the first frame, before the reveal that follows.
+    fit_items_pending: Vec<ItemId>,
     /// The viewport last told to the host (`ClientMsg::Look`).
     looked: Option<Rect>,
     /// A `Look` is scheduled for `LOOK_EVERY` from the first change; it reads the viewport
@@ -763,6 +766,7 @@ impl CanvasView {
             rtt: None,
             viewport: (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))),
             fit_pending: false,
+            fit_items_pending: Vec::new(),
             looked: None,
             following: None,
             toast: None,
@@ -911,7 +915,12 @@ impl CanvasView {
     /// one it can only read zoomed out. Desktop viewports are larger than the default and are
     /// left alone.
     fn fit_to_viewport(&mut self, id: ItemId) {
-        let Some((max_w, max_h)) = self.viewport_max() else { return };
+        let Some((max_w, max_h)) = self.viewport_max() else {
+            // The first shell arrives with the attach, often before the first frame: fit it
+            // then, or a phone opens onto a desktop-sized card hanging off its edge.
+            self.fit_items_pending.push(id);
+            return;
+        };
         let Some(item) = self.doc.get(id) else { return };
         if item.rect.w <= max_w && item.rect.h <= max_h {
             return;
@@ -4248,6 +4257,9 @@ impl Render for CanvasView {
                         });
                     }
                     this.viewport = (bounds.origin, bounds.size);
+                    for id in std::mem::take(&mut this.fit_items_pending) {
+                        this.fit_to_viewport(id);
+                    }
                     if std::mem::take(&mut this.fit_pending) && !this.is_empty() {
                         this.fit_now(cx);
                     }
@@ -5729,6 +5741,45 @@ mod tests {
 
     /// ⌘] and ⌘[ walk the cards in reading order — rows by their top edge, left to right —
     /// wrapping at both ends, revealing each; nothing active starts at the first or the last.
+    /// The first shell comes with the attach, before a frame has measured the viewport: the
+    /// phone still gets a phone-sized card, fitted on the first frame (and the host asked to
+    /// place it so), not a desktop one hanging off its right edge.
+    #[gpui::test]
+    fn a_shell_placed_before_the_first_frame_is_fitted_on_it(cx: &mut TestAppContext) {
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let factory: ScreenFactory =
+                Arc::new(|_stream, _codec| panic!("this canvas opens no screens"));
+            let mut view = CanvasView::new(me, tx, Vec::new(), factory, Theme::default(), cx);
+            view.set_animation(false);
+            window.focus(&view.focus, cx);
+            view
+        });
+        let phone = (393.0, 852.0);
+        cx.simulate_resize(size(px(phone.0), px(phone.1)));
+        // Back to the state before the first frame: the viewport unmeasured (a headless
+        // window draws on creation; a phone attaches before it draws).
+        view.update(cx, |c, _| c.viewport = (point(px(0.0), px(0.0)), size(px(1.0), px(1.0))));
+        let session = SessionId::new();
+        let id = host_opens_in(&view, cx, session, me, SHELL, 1, Where::loose("/tmp/work"));
+        let (rect, max) = view.read_with(cx, |c, _| {
+            (c.items().into_iter().find(|i| i.id == id).unwrap().rect, c.viewport_max())
+        });
+        let (max_w, _) = max.expect("the frame measured the phone");
+        assert!(
+            (rect.w - max_w).abs() < f32::EPSILON && rect.w < SHELL.w && rect.h >= SHELL.h,
+            "{rect:?} {max_w}"
+        );
+        let placed = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| matches!(msg, ClientMsg::Canvas(CanvasOp::Place { .. })))
+            .count();
+        assert_eq!(placed, 1, "the host is asked to place it at the phone's size");
+        let camera = view.read_with(cx, |c, _| c.camera());
+        let right = (rect.x + rect.w - camera.x) * camera.zoom;
+        assert!(right <= phone.0, "revealed inside the phone: {camera:?} {rect:?}");
+    }
+
     /// A note or a file card this client opens is its default size on a desktop and, on a
     /// phone, no wider or taller than the viewport leaves — a 560 pt file card on a 393 pt
     /// phone had its find bar off the right edge.
