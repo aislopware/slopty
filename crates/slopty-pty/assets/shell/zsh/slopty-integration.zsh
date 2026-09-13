@@ -53,12 +53,21 @@ _slopty_zle_cursor() {
         *)            'builtin' 'print' -n -- $'\e[5 q' ;;
     esac
 }
+# A prompt whose PS1 lost the marks (a theme that rebuilt it after our precmd, before the
+# hook order settled) still gets them when zle starts reading: `P` marks the row in place (no
+# fresh line, the prompt is already drawn) and `B` the input, so blocks and click-to-move hold.
+_slopty_zle_marks() {
+    if [[ "$PS1" != *$'\e]133;A'* ]]; then
+        'builtin' 'print' -n -- $'\e]133;P;k=i\a\e]133;B\a'
+    fi
+}
 () {
     'builtin' 'local' hook widget func orig flag
     for hook in line-init line-finish keymap-select; do
         widget=zle-$hook
         func=_slopty_zle_${hook/-/_}
         functions[$func]='_slopty_zle_cursor'
+        [[ $hook == line-init ]] && functions[$func]='_slopty_zle_marks; _slopty_zle_cursor'
         if [[ $widgets[$widget] == user:azhw:* && $+functions[add-zle-hook-widget] -eq 1 ]]; then
             add-zle-hook-widget $hook $func
         else

@@ -1019,3 +1019,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and the running command from the marks. Tests: the live-shell tests in
   `shell_integration.rs` run with a `TERMINFO` and check `sudo` is a function in zsh, bash and
   fish, and that zsh writes `CSI 5 q` at the prompt and `CSI 0 q` ahead of its `133;C`.
+
+- ✅ **A prompt that lost its marks is marked in place** (2026-09-13, ghostty's zle-line-init
+  fallback). The marks live in PS1, put there by our precmd, which also moves itself to the
+  end of `precmd_functions` so a theme's precmd cannot rebuild PS1 behind it — but on the
+  first prompt the order is not yet ours, so a theme registered after us (from `.zshrc`;
+  `.zshenv` loads us first) draws a prompt without marks: no block, no click-to-move, and
+  the first command's status lands nowhere. Ruling: when zle starts reading a line and PS1
+  has no `133;A`, the widget prints `133;P;k=i` (a prompt start that draws nothing and
+  moves no cursor, the prompt being already on screen) and `133;B`; the scanner reports `P`
+  as a prompt start like `A`, `k=s`/`k=c` continuations excepted. Tests:
+  `a_theme_that_rebuilds_ps1_still_gets_its_prompt_marked` (a `.zshrc` precmd that sets
+  PS1: the first prompt is marked by `P`, the second in PS1) and the scanner's
+  `prompt_starts_but_not_continuations`.

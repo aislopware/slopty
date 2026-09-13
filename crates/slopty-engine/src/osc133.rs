@@ -120,7 +120,9 @@ fn mark(payload: &[u8]) -> Option<Mark> {
     };
     let mut params = params.split(|&b| b == b';');
     match kind {
-        b'A' => {
+        // `P` is a prompt start without `A`'s fresh line: what zsh's line-init prints when
+        // a theme rebuilt PS1 after the marks went in, with the prompt already drawn.
+        b'A' | b'P' => {
             let continuation = params.any(|p| p == b"k=s" || p == b"k=c");
             (!continuation).then_some(Mark::PromptStart)
         }
@@ -169,7 +171,12 @@ mod tests {
             s.scan(b"\x1b]133;A;cl=line\x07"),
             Some(Found { end: 16, mark: Mark::PromptStart })
         );
-        assert_eq!(s.scan(b"\x1b]133;A;k=s\x07\x1b]133;P;k=i\x07\x1b]133;B\x07"), None);
+        assert_eq!(
+            s.scan(b"\x1b]133;A;k=s\x07\x1b]133;P;k=i\x07\x1b]133;B\x07"),
+            Some(Found { end: 24, mark: Mark::PromptStart }),
+            "the continuation is skipped, the in-place P is a start, B is nothing"
+        );
+        assert_eq!(s.scan(b"\x1b]133;A;k=c\x07"), None);
     }
 
     #[test]
@@ -180,6 +187,12 @@ mod tests {
             Some(Found { end: 8, mark: Mark::OutputStart }),
             "C is reported: the row it lands on changes without a cell written"
         );
+        assert_eq!(
+            s.scan(b"\x1b]133;P;k=i\x07"),
+            Some(Found { end: 12, mark: Mark::PromptStart }),
+            "P is a prompt start too, drawn in place"
+        );
+        assert_eq!(s.scan(b"\x1b]133;P;k=s\x07"), None, "a continuation, as with A");
         assert_eq!(s.scan(b"\x1b]0;title\x07\x1b[31m\x1b]8;;http://x\x1b\\"), None);
         assert_eq!(s.scan(b"\x1b]133;D;3\x1b[0m"), None, "ESC that is not ST aborts the OSC");
         assert_eq!(

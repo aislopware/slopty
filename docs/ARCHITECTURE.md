@@ -161,7 +161,7 @@ because bash ignores `--rcfile` for login shells); the rcfile sources the user's
 `.bashrc` as bash would have, then adds prompt hooks and a `DEBUG` trap for preexec (or
 registers with bash-preexec when the user loads it). fish gets `<shell>/fish` in front of
 `XDG_DATA_DIRS` so its `vendor_conf.d/slopty.fish` loads before the user's `config.fish`;
-fish ≥ 4 emits the marks itself and the snippet steps aside. All three emit `133;A` (in the
+fish ≥ 4 emits the marks itself and the snippet steps aside. zsh's line-init widget marks a prompt whose PS1 lost the marks in place (`133;P;k=i` + `B`). All three emit `133;A` (in the
 prompt), `B`, `C` and `D;<status>`. `SLOPTY_NO_SHELL_INTEGRATION=1` in the daemon's or the
 session's environment opts out (`apply` then changes nothing); other programs run untouched. The snippets also wrap `sudo` to keep `TERMINFO` (our compiled `xterm-ghostty` entry) when it is set, and zsh's zle hooks shape the cursor by keymap (bar to insert, block in vi command mode, the program's shape again before a command runs). The engine takes libghostty's per-row prompt flag for the row kind and, because
 the library exposes neither which row an `A` landed on nor the status a `D` carries, scans the

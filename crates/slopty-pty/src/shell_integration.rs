@@ -471,6 +471,29 @@ mod tests {
         assert!(text.contains("\x1b[0 q\x1b]133;C"), "reset before the command: {text:?}");
     }
 
+    /// A theme whose precmd rebuilds PS1 after ours has wrapped it (the first prompt, before
+    /// our hook has moved itself last) loses the marks in PS1; zle's line-init then marks the
+    /// prompt in place (`133;P;k=i` and `133;B`). The next prompt has them in PS1 again.
+    #[tokio::test]
+    async fn a_theme_that_rebuilds_ps1_still_gets_its_prompt_marked() {
+        let text = run_shell(
+            "zsh-theme",
+            "/bin/zsh",
+            &["-i"],
+            None,
+            &[(".zshrc", "_theme_precmd() { PS1='%% ' }\nprecmd_functions+=(_theme_precmd)\n")],
+            "false\nexit\n",
+        )
+        .await;
+        assert!(has_mark(&text, "P;k=i"), "the first prompt marked in place: {text:?}");
+        assert!(has_mark(&text, "B"), "and its input: {text:?}");
+        assert!(has_mark(&text, "A"), "the second prompt marked in PS1: {text:?}");
+        assert!(has_mark(&text, "D;1"), "status of `false`: {text:?}");
+        let (first, rest) = text.split_once("\x1b]133;P;k=i").unwrap();
+        assert!(!first.contains("\x1b]133;A"), "PS1 had no marks before the fallback: {first:?}");
+        assert!(rest.contains("\x1b]133;A"), "PS1 has them after: {rest:?}");
+    }
+
     /// Every bash on this Mac: Apple's 3.2 and Homebrew's, when installed.
     fn bashes() -> Vec<&'static str> {
         ["/bin/bash", "/opt/homebrew/bin/bash"]
