@@ -436,6 +436,24 @@ impl TermState {
         )
     }
 
+    /// The last `limit` distinct commands typed at this shell's prompts, newest first, among
+    /// the lines held here (shell integration marks them; a repeat keeps its newest place).
+    #[must_use]
+    pub fn recent_commands(&self, limit: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut at = LineIndex(self.newest().0.saturating_add(1));
+        while out.len() < limit {
+            let Some(prompt) = self.prompt_before(at) else { break };
+            if let Some(command) = self.block_head(prompt).and_then(|head| head.command)
+                && !out.contains(&command)
+            {
+                out.push(command);
+            }
+            at = prompt;
+        }
+        out
+    }
+
     /// The start of the nearest prompt strictly above `index`, among the lines held here
     /// (uncached history is not searched).
     #[must_use]
@@ -819,6 +837,9 @@ mod tests {
         assert_eq!(state.prompt_after(LineIndex(8)), None);
         assert_eq!(state.last_command_output(), Some("1\n2".to_owned()), "blank tail trimmed");
         assert_eq!(state.last_command().as_deref(), Some("seq 2"));
+        assert_eq!(state.recent_commands(8), ["seq 2", "false", "ls"], "newest first");
+        assert_eq!(state.recent_commands(2), ["seq 2", "false"], "the limit cuts the oldest");
+        assert!(state.recent_commands(0).is_empty());
         // A block from any of its rows: the prompt, the typed command, the trimmed output.
         let block = state.command_block(LineIndex(6)).expect("the seq block");
         assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(1)));
@@ -831,6 +852,12 @@ mod tests {
         let newest = state.command_block(LineIndex(8)).expect("the open prompt");
         assert_eq!((newest.prompt, newest.end), (LineIndex(8), LineIndex(9)));
         assert_eq!(newest.command, None, "nothing typed after the prompt");
+        // A command typed twice is listed once, at its newest place.
+        state.apply(TermEvent::Lines {
+            start: LineIndex(3),
+            lines: vec![marked("$ ls", prompt(Some(0)))],
+        });
+        assert_eq!(state.recent_commands(8), ["seq 2", "ls"], "the repeat keeps its newest place");
         // The head alone, read every frame by the sticky header: no output is gathered.
         let head = state.block_head(LineIndex(6)).expect("the seq head");
         assert_eq!((head.prompt, head.body, head.exit), (LineIndex(4), LineIndex(5), Some(1)));

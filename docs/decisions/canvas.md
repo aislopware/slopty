@@ -455,6 +455,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`the_cards_are_walked_in_reading_order`). Not done: a spatial walk (⌘⌥→ to the card on the
   right) — reading order covers a grid, and a free-form layout has no unambiguous "right".
 
+- ✅ **The palette runs a recent command again** (2026-09-13). ⌘⇧↩ reruns only the last
+  command; the one wanted is often two or three back (`make`, then a look at a log, then
+  `make` again), and reaching it was ↑ in the shell or a right click on the block. Rulings:
+  (1) the palette lists the last five distinct commands of the shell a "run" would go to
+  (`run_target`, the shell last used) as "Rerun <command>" with "shell" on the right, newest
+  first, a repeat at its newest place, a multi-line command by its first line and `…`
+  (`TermState::recent_commands`, walking the cache's prompt index through `block_head`;
+  `PaletteItem::rerun`); (2) ↩ is `PaletteRun::Rerun`: the canvas reveals that shell and
+  types the command through `run_text` (one paste, one ↩), as the block menu's does; (3)
+  only that shell's commands are offered, since the line runs there, and a canvas without a
+  shell lists none. Tests: `recent_commands` in the prompt-navigation unit test and
+  headless `the_palette_reruns_a_recent_command`.
+
 - ✅ **A directory typed into the palette opens a shell or a conversation there**
   (2026-09-13). A new terminal inherits the active card's directory and, with none, the
   host's default; on the phone the way to a project no card was in yet was a shell at home

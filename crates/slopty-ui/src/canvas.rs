@@ -278,6 +278,8 @@ fn element_id(part: &str, id: ItemId) -> ElementId {
 
 /// Title bar height at zoom 1, in points.
 const TITLE_H: f32 = 28.0;
+/// How many of the run-target shell's last commands the palette offers to run again.
+const RERUN_LINES: usize = 5;
 /// Resize grip size at zoom 1.
 const GRIP: f32 = 14.0;
 /// How long after the last zoom change the settled frame (exact rasters) is asked for. A
@@ -1584,7 +1586,8 @@ impl CanvasView {
     }
 
     /// Every line the palette offers: the canvas's sessions to go to (agents waiting on the
-    /// human first, as the picker orders them), its file cards, then every action, then the
+    /// human first, as the picker orders them), its file cards, the other clients to follow,
+    /// the last few commands of the shell a "run" would go to, then every action, then the
     /// app's own.
     #[must_use]
     pub fn palette_lines(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
@@ -1608,6 +1611,15 @@ impl CanvasView {
         items.extend(
             self.doc.lookers().map(|l| PaletteItem::looker(&l.name, device_name(l.kind), l.client)),
         );
+        // The shell a "run" would go to: its last few commands, to run again.
+        if let Some(shell) = self.run_target()
+            && let Some(view) = self.terminals.get(&shell)
+        {
+            let state = view.read(cx).state();
+            items.extend(
+                state.recent_commands(RERUN_LINES).iter().map(|c| PaletteItem::rerun(c, shell)),
+            );
+        }
         items.extend(palette_items());
         items.extend(self.palette_extra.iter().cloned());
         items
@@ -1794,6 +1806,14 @@ impl CanvasView {
                     this.palette_return = None;
                     this.reveal_session(*session, cx);
                     this.pending_find = Some((*session, needle.clone()));
+                }
+                PaletteEvent::Run(PaletteRun::Rerun { session, command }) => {
+                    this.palette_return = None;
+                    this.reveal_session(*session, cx);
+                    if let Some(view) = this.terminals.get(session).cloned() {
+                        let command = command.clone();
+                        view.update(cx, |v, cx| v.run_text(command, cx));
+                    }
                 }
                 PaletteEvent::Run(PaletteRun::FindInFile { item, needle }) => {
                     this.palette_return = None;
@@ -8414,6 +8434,79 @@ mod tests {
         match sent.as_slice() {
             [TermRequest::Paste(code), TermRequest::Key(key)] => {
                 assert_eq!(code, "echo hi");
+                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+            }
+            other => panic!("a paste then one ↩ into the shell: {other:?}"),
+        }
+    }
+
+    /// The palette lists the last commands of the shell a "run" goes to, newest first and
+    /// once each, and ↩ on one types it into that shell again.
+    #[gpui::test]
+    fn the_palette_reruns_a_recent_command(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        assert!(
+            view.update(cx, |c, cx| c.palette_lines(cx))
+                .iter()
+                .all(|l| !matches!(l.run, PaletteRun::Rerun { .. })),
+            "no shell: nothing to run again"
+        );
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, SHELL, 1);
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let rows = [
+            ("$ make", prompt(None)),
+            ("ok", SemanticMark::Output),
+            ("$ cargo test", prompt(Some(0))),
+            ("ok", SemanticMark::Output),
+            ("$ make", prompt(Some(0))),
+            ("ok", SemanticMark::Output),
+            ("$ ", prompt(Some(0))),
+        ];
+        view.update_in(cx, |c, _window, cx| c.term_event(shell, marked_frame(1, &rows, 6), cx));
+        cx.run_until_parked();
+        let labels: Vec<String> = view
+            .update(cx, |c, cx| c.palette_lines(cx))
+            .into_iter()
+            .filter(|l| matches!(l.run, PaletteRun::Rerun { .. }))
+            .map(|l| l.label)
+            .collect();
+        assert_eq!(labels, ["Rerun make", "Rerun cargo test"], "newest first, once each");
+        cx.executor().advance_clock(Duration::from_secs(2));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("r e r u n space c a r g o");
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<String> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.clone())
+            .collect();
+        assert_eq!(options, ["Rerun cargo test shell"], "{tree:#?}");
+        drain(&mut rx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none());
+        assert!(terminal_focused(&view, cx, shell), "the shell took the keyboard");
+        let sent: Vec<TermRequest> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { session, req }
+                    if session == shell
+                        && matches!(req, TermRequest::Paste(_) | TermRequest::Key(_)) =>
+                {
+                    Some(req)
+                }
+                _ => None,
+            })
+            .collect();
+        match sent.as_slice() {
+            [TermRequest::Paste(code), TermRequest::Key(key)] => {
+                assert_eq!(code, "cargo test");
                 assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
             }
             other => panic!("a paste then one ↩ into the shell: {other:?}"),

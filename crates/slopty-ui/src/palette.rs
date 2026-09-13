@@ -52,6 +52,13 @@ pub enum PaletteRun {
         /// What was typed.
         needle: String,
     },
+    /// Type `command` into this shell again (a paste then ↩).
+    Rerun {
+        /// The shell that ran it.
+        session: SessionId,
+        /// What was typed at its prompt.
+        command: String,
+    },
     /// Reveal this file card and open its find bar on `needle` (find in every card).
     FindInFile {
         /// The card.
@@ -74,6 +81,9 @@ impl Clone for PaletteRun {
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
+            Self::Rerun { session, command } => {
+                Self::Rerun { session: *session, command: command.clone() }
+            }
             Self::FindInFile { item, needle } => {
                 Self::FindInFile { item: *item, needle: needle.clone() }
             }
@@ -95,6 +105,9 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
             Self::FindIn { session, needle } => {
                 f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
+            }
+            Self::Rerun { session, command } => {
+                f.debug_struct("Rerun").field("session", session).field("command", command).finish()
             }
             Self::FindInFile { item, needle } => {
                 f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
@@ -140,6 +153,23 @@ impl PaletteItem {
     #[must_use]
     pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
+    }
+
+    /// `Rerun <command>` for a command the active shell ran (a multi-line command shows its
+    /// first line and `…`), "shell" on the right.
+    #[must_use]
+    pub fn rerun(command: &str, session: SessionId) -> Self {
+        let first = command.lines().next().unwrap_or_default();
+        let label = if command.lines().nth(1).is_some() {
+            format!("Rerun {first} …")
+        } else {
+            format!("Rerun {first}")
+        };
+        Self {
+            label,
+            keys: "shell".to_owned(),
+            run: PaletteRun::Rerun { session, command: command.to_owned() },
+        }
     }
 
     /// `Follow <name>` for another client on the canvas, what device it is on the right.
