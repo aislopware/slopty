@@ -403,6 +403,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_card_is_named_from_its_title_bar` (headless), `a_name_is_trimmed_blank_is_none_and_too_long_is_refused`
   (host), goldens `host_canvas_named` and the re-accepted `host_canvas_file` / `client_hello`.
 
+- ✅ **A note of commands is a runbook** (2026-09-13). Warp keeps saved commands in
+  workflows; the canvas keeps prose in notes, and a note that lists the deploy steps was the
+  natural place for them, except that its fenced blocks were inert text. Rulings: (1) a
+  rendered note draws its Markdown in pieces — prose through `TextView`, each fenced block
+  as the conversation's own block element, now shared as `markdown::code_block` (with
+  `markdown::segments`), so it carries the same "copy" button and, while the canvas has a
+  shell, the same "run" (`note-code-copy-<id>-<i>` / `note-code-run-<id>-<i>`; a press on
+  either stays on the button and does not put the caret in the note); (2) "run" is
+  `NoteViewEvent::Run` to the canvas, which types the code into the shell it last used
+  (`run_in_shell`, a paste then ↩) exactly as the conversation's does, and
+  `NoteView::set_can_run` follows `update_run_targets` as the terminals do; (3) the block's
+  sizes scale with the note's zoom as its prose does. Test:
+  `a_notes_fenced_block_runs_in_the_canvas_shell`.
+
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note

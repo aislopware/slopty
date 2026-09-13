@@ -1060,6 +1060,9 @@ impl CanvasView {
         for view in self.terminals.values() {
             view.update(cx, |v, cx| v.set_can_run_in_shell(can, cx));
         }
+        for note in self.notes.values() {
+            note.update(cx, |n, cx| n.set_can_run(can, cx));
+        }
     }
 
     /// A "run" button on a fenced block was pressed: reveal the shell it goes to and type the
@@ -2556,10 +2559,13 @@ impl CanvasView {
             let view = cx.new(|cx| NoteView::new(*id, text, theme, window, cx));
             let item = *id;
             self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
-                let NoteViewEvent::Commit(text) = event;
-                this.commit_note(item, text.clone());
+                match event {
+                    NoteViewEvent::Commit(text) => this.commit_note(item, text.clone()),
+                    NoteViewEvent::Run(code) => this.run_in_shell(code.clone(), cx),
+                }
                 cx.notify();
             }));
+            view.update(cx, |n, cx| n.set_can_run(self.run_target().is_some(), cx));
             self.notes.insert(*id, view);
         }
         self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
@@ -8339,6 +8345,79 @@ mod tests {
         let count =
             view.read_with(cx, |c, cx| c.terminal(agent).map(|v| v.read(cx).snapshots().len()));
         assert_eq!(count, Some(0), "the chip went with the prompt");
+    }
+
+    /// A note of commands is a runbook: each fenced block is drawn with the conversation's
+    /// "copy" button, and "run" once the canvas has a shell — a click types the code into
+    /// it (a paste, then ↩) without putting the caret in the note.
+    #[gpui::test]
+    fn a_notes_fenced_block_runs_in_the_canvas_shell(cx: &mut TestAppContext) {
+        const TEXT: &str = "# Deploy\n\n```sh\necho hi\n```\n\nthen check.";
+        let (view, mut rx, me, cx) = canvas(cx);
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: TEXT.to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let id = item.id;
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        let copy = selector("note-code-copy", id);
+        let copy: &'static str = Box::leak(format!("{copy}-1").into_boxed_str());
+        let run: &'static str =
+            Box::leak(format!("{}-1", selector("note-code-run", id)).into_boxed_str());
+        assert!(cx.debug_bounds(copy).is_some(), "the block is its own element");
+        assert!(cx.debug_bounds(run).is_none(), "no shell yet: nowhere to run it");
+        let bounds = cx.debug_bounds(copy).expect("copy");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(copied.as_deref(), Some("echo hi"));
+        let editing = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                view.read(cx).notes.get(&id).is_some_and(|n| n.read(cx).editing(window, cx))
+            })
+        };
+        assert!(!editing(cx), "a button press is not a click into the note");
+
+        let shell = SessionId::new();
+        host_opens(&view, cx, shell, me, Rect { x: 760.0, ..SHELL }, 2);
+        cx.run_until_parked();
+        // The reveal of the new shell flies the camera: let it land before reading bounds.
+        cx.executor().advance_clock(Duration::from_secs(2));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds(run).expect("with a shell the block has a run button");
+        drain(&mut rx);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(terminal_focused(&view, cx, shell), "the shell was revealed and took the keyboard");
+        assert!(!editing(cx));
+        let sent: Vec<TermRequest> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term { session, req }
+                    if session == shell
+                        && matches!(req, TermRequest::Paste(_) | TermRequest::Key(_)) =>
+                {
+                    Some(req)
+                }
+                _ => None,
+            })
+            .collect();
+        match sent.as_slice() {
+            [TermRequest::Paste(code), TermRequest::Key(key)] => {
+                assert_eq!(code, "echo hi");
+                assert_eq!(key.code, slopty_proto::input::KeyCode::Enter, "{key:?}");
+            }
+            other => panic!("a paste then one ↩ into the shell: {other:?}"),
+        }
     }
 
     /// A note reads as Markdown until someone edits it: unfocused it is the rendered

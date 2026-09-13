@@ -29,6 +29,8 @@ const COMMIT_AFTER: Duration = Duration::from_millis(400);
 pub enum NoteViewEvent {
     /// The text changed and should be written to the document.
     Commit(String),
+    /// A fenced block's "run" button: type its code into the canvas's shell.
+    Run(String),
 }
 
 /// The editor for one note item.
@@ -44,6 +46,8 @@ pub struct NoteView {
     pad: f32,
     /// Text size at zoom 1 (the theme's UI size).
     text_size: f32,
+    /// The canvas has a shell to run a fenced block in (the "run" button shows only then).
+    can_run: bool,
     theme: Theme,
     _subscription: gpui::Subscription,
 }
@@ -89,6 +93,7 @@ impl NoteView {
             zoom: 1.0,
             pad: 8.0,
             text_size: 13.0,
+            can_run: false,
             theme,
             _subscription: subscription,
         }
@@ -98,6 +103,15 @@ impl NoteView {
     #[must_use]
     pub const fn id(&self) -> ItemId {
         self.id
+    }
+
+    /// Whether the canvas has a shell to run a fenced block in: with one, a block that is
+    /// read (not edited) carries a "run" button beside its "copy".
+    pub fn set_can_run(&mut self, can: bool, cx: &mut Context<Self>) {
+        if self.can_run != can {
+            self.can_run = can;
+            cx.notify();
+        }
     }
 
     /// The text as last committed or received.
@@ -209,14 +223,38 @@ impl Render for NoteView {
                         cx.notify();
                     }),
                 )
-                .child(
-                    TextView::markdown(
-                        SharedString::from(format!("note-md-{id}")),
-                        SharedString::from(text),
-                    )
-                    .style(crate::markdown::style(&self.theme, &mono, self.zoom))
-                    .selectable(false),
-                )
+                .flex()
+                .flex_col()
+                .gap(px(self.theme.spacing.xs * self.zoom))
+                // Fenced blocks are their own elements, with the conversation's copy and run
+                // buttons: a note of commands is a runbook.
+                .children(crate::markdown::segments(&text).into_iter().enumerate().map(
+                    |(si, segment)| match segment {
+                        crate::markdown::Segment::Prose(prose) => TextView::markdown(
+                            SharedString::from(format!("note-md-{id}-{si}")),
+                            SharedString::from(prose),
+                        )
+                        .style(crate::markdown::style(&self.theme, &mono, self.zoom))
+                        .selectable(false)
+                        .into_any_element(),
+                        crate::markdown::Segment::Code { lang, body } => {
+                            let run = self.can_run.then(|| -> crate::markdown::Run {
+                                let note = cx.entity();
+                                std::rc::Rc::new(move |code: String, cx: &mut gpui::App| {
+                                    note.update(cx, |_n, cx| cx.emit(NoteViewEvent::Run(code)));
+                                })
+                            });
+                            crate::markdown::code_block(
+                                (format!("note-code-copy-{id}-{si}"), format!("note-code-run-{id}-{si}")),
+                                &lang,
+                                &body,
+                                &self.theme,
+                                self.zoom,
+                                run,
+                            )
+                        }
+                    },
+                ))
                 .into_any_element()
         } else {
             body.text_size(px(self.text_size * self.zoom))

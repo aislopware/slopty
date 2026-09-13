@@ -381,7 +381,9 @@ one a find in every card (the palette lists the cards with hits, ↩ opens that 
 walking the cards in reading order; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
-draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), and a
+draws that text as Markdown in the conversation's own style (`slopty-ui::markdown`), its
+fenced blocks as the conversation's block element with "copy" and, given a shell, "run"
+(`markdown::code_block`, `NoteViewEvent::Run` → `run_in_shell`), and a
 click on it puts the caret back in the editor; its title bar reads the first non-empty
 line (`canvas::note_title`, heading and list marks stripped, 40 chars), "note" while empty.
 Any card takes a **name** (⌘E, or a double-click on its title bar; `CanvasItem.name`,

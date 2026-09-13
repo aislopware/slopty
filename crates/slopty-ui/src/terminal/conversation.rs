@@ -2134,63 +2134,8 @@ pub fn entry_hits(
         .collect())
 }
 
-/// A piece of an assistant turn: the prose between the fences, or one fenced code block.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Segment {
-    /// Markdown between the fences.
-    Prose(String),
-    /// One fenced block: the language after the opening fence (may be empty) and the lines
-    /// inside, without a trailing newline.
-    Code {
-        /// What followed the opening fence.
-        lang: String,
-        /// The lines inside.
-        body: String,
-    },
-}
+pub use crate::markdown::{Segment, segments};
 
-/// `markdown` split at its fences.
-///
-/// A line starting with three backticks opens a block (the rest of the line is its
-/// language), the next such line closes it, an unclosed block runs to the end. Blank prose
-/// between blocks is dropped.
-#[must_use]
-pub fn segments(markdown: &str) -> Vec<Segment> {
-    let mut out = Vec::new();
-    let mut prose: Vec<&str> = Vec::new();
-    let mut code: Option<(String, Vec<&str>)> = None;
-    for line in markdown.lines() {
-        let trimmed = line.trim_start();
-        match code.take() {
-            Some((lang, body)) if trimmed.starts_with("```") => {
-                out.push(Segment::Code { lang, body: body.join("\n") });
-            }
-            Some((lang, mut body)) => {
-                body.push(line);
-                code = Some((lang, body));
-            }
-            None if trimmed.starts_with("```") => {
-                if prose.iter().any(|l| !l.trim().is_empty()) {
-                    out.push(Segment::Prose(prose.join("\n")));
-                }
-                prose.clear();
-                code = Some((trimmed.trim_start_matches('`').trim().to_owned(), Vec::new()));
-            }
-            None => prose.push(line),
-        }
-    }
-    if let Some((lang, body)) = code {
-        out.push(Segment::Code { lang, body: body.join("\n") });
-    }
-    if prose.iter().any(|l| !l.trim().is_empty()) {
-        out.push(Segment::Prose(prose.join("\n")));
-    }
-    out
-}
-
-/// A fenced block of an assistant turn: its language, a "copy" button and — when `run` is
-/// the view to ask, which the canvas only allows while it has a plain shell to run it in —
-/// a "run" button, over the code in the mono face on the raised surface.
 /// A "copy" button at the end of an answer: the whole answer's Markdown on the clipboard
 /// (⌘⇧C copies the newest only).
 fn copy_button(ix: usize, markdown: &str, theme: &Theme) -> AnyElement {
@@ -2218,6 +2163,9 @@ fn copy_button(ix: usize, markdown: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// A fenced block of an assistant turn: its language, a "copy" button and — when `run` is
+/// the view to ask, which the canvas only allows while it has a plain shell to run it in —
+/// a "run" button, over the code in the mono face on the raised surface.
 fn code_segment(
     ix: usize,
     si: usize,
@@ -2226,71 +2174,21 @@ fn code_segment(
     run: Option<&Entity<TerminalView>>,
     theme: &Theme,
 ) -> AnyElement {
-    let s = &theme.surfaces;
-    let spacing = theme.spacing;
-    let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
-    let text = body.to_owned();
-    let copy_id = format!("conversation-code-copy-{ix}-{si}");
-    let copy = div()
-        .id(ElementId::Name(copy_id.clone().into()))
-        .debug_selector(move || copy_id)
-        .role(Role::Button)
-        .aria_label("Copy code")
-        .px(px(spacing.xs))
-        .rounded(px(theme.radii.xs))
-        .cursor_pointer()
-        .text_color(hsla(s.text_muted))
-        .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
-        .on_click(move |_ev, _window, cx| {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-        })
-        .child("copy");
-    let run = run.map(|view| {
+    let run = run.map(|view| -> crate::markdown::Run {
         let view = view.clone();
-        let code = body.to_owned();
-        let run_id = format!("conversation-code-run-{ix}-{si}");
-        div()
-            .id(ElementId::Name(run_id.clone().into()))
-            .debug_selector(move || run_id)
-            .role(Role::Button)
-            .aria_label("Run in shell")
-            .px(px(spacing.xs))
-            .rounded(px(theme.radii.xs))
-            .cursor_pointer()
-            .text_color(hsla(s.text_muted))
-            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
-            .on_click(move |_ev, _window, cx| {
-                // The view knows the code; the canvas, which is subscribed, knows the shells.
-                let code = code.clone();
-                view.update(cx, |_v, cx| cx.emit(TerminalViewEvent::RunInShell(code)));
-            })
-            .child("run")
+        Rc::new(move |code: String, cx: &mut App| {
+            // The view knows the code; the canvas, which is subscribed, knows the shells.
+            view.update(cx, |_v, cx| cx.emit(TerminalViewEvent::RunInShell(code)));
+        })
     });
-    div()
-        .flex()
-        .flex_col()
-        .rounded(px(theme.radii.xs))
-        .bg(hsla(s.raised))
-        .px(px(spacing.sm))
-        .py(px(spacing.xs))
-        .font_family(mono)
-        .text_size(px(theme.typography.small()))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .items_center()
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(lang.to_owned()))
-                .child(div().flex().items_center().gap(px(spacing.xs)).children(run).child(copy)),
-        )
-        .child(
-            div()
-                .whitespace_normal()
-                .text_color(hsla(s.text))
-                .child(SharedString::from(body.to_owned())),
-        )
-        .into_any_element()
+    crate::markdown::code_block(
+        (format!("conversation-code-copy-{ix}-{si}"), format!("conversation-code-run-{ix}-{si}")),
+        lang,
+        body,
+        theme,
+        1.0,
+        run,
+    )
 }
 
 /// The file a tool call touched, when it named one — an edit, a write or a read — and the
