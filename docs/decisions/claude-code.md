@@ -98,8 +98,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sending forgets the recall; (6) the phone's bar ↑ / ↓ are the composer's too
   (`TerminalView::bar_key`: the completion list's while it is up, else a recall) — the program
   behind a conversation card is not on show for a raw arrow to mean anything there; the other
-  bar keys, and every key in a shell, are pressed as before. Test:
-  `the_composer_recalls_sent_prompts_on_up_and_down`.
+  bar keys, and every key in a shell, are pressed as before; (7) a click on a sent prompt's
+  bubble (`conversation-reuse-<ix>`, "Edit and send again") puts it in the composer as if
+  recalled to that point (`Conversation::reuse`), so ↑ / ↓ go on from it and the draft comes
+  back past the newest — the prompt to send again is more often on screen than a count of
+  ↑ away. Test: `the_composer_recalls_sent_prompts_on_up_and_down`.
 
 - ✅ **Collapse defaults** (2026-09-05). Thinking and tool input start folded (they explain a
   step, they are not the step); a tool result shows its first 4 lines (`RESULT_PREVIEW_LINES`)

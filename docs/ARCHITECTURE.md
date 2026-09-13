@@ -562,7 +562,8 @@ closes like any other (`SessionClosed { Exited }`, the item removed).
 The **agent card** is the same `TerminalView` in *driven* mode (`set_driven`, from
 `SessionSummary.kind`): the conversation opens on its first frame with the caret in the
 composer and cannot be hidden, there is no grid behind it, ↩ in the composer sends
-`AgentSay`, ↑ / ↓ on an empty composer recall the prompts sent (`Conversation::recall`), Esc
+`AgentSay`, ↑ / ↓ on an empty composer recall the prompts sent (`Conversation::recall`; a
+click on a sent prompt's bubble does the same, `Conversation::reuse`), Esc
 and ⌃C send `AgentInterrupt`, the streamed text shows under the list
 (`conversation-partial`) until it becomes an entry, ⌘F opens the terminal's find bar as a
 row under the header and searches the entries in the client (`conversation::entry_hits`,

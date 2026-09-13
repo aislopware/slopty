@@ -547,6 +547,32 @@ impl Conversation {
         true
     }
 
+    /// A click on the prompt at `ix`: it is in the composer, the caret at its end, as if
+    /// recalled — ↑ / ↓ go on from it and ↓ past the newest puts the draft back. `false` for
+    /// an entry that is not a prompt with text.
+    pub fn reuse(&mut self, ix: usize, window: &mut Window, cx: &mut App) -> bool {
+        let entries = Rc::clone(&self.entries);
+        let Some(TranscriptBody::User { text, .. }) = entries.get(ix).map(|e| &e.body) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        // Its place in the recall order: the prompts up to and including it, repeats dropped.
+        let at = Self::prompts(entries.get(..=ix).unwrap_or_default()).len().saturating_sub(1);
+        if self.recall.is_none() {
+            self.draft = self.composer_text(cx);
+        }
+        self.recall = Some(at);
+        self.composer.update(cx, |input, cx| {
+            let end = text.len();
+            input.set_value(text.clone(), window, cx);
+            input.set_selected_range(end..end, cx);
+            input.focus(window, cx);
+        });
+        true
+    }
+
     /// Esc: hide the completions until the text changes.
     pub const fn hide_completions(&mut self) {
         self.completions_hidden = true;
@@ -1612,12 +1638,28 @@ fn entry(
             .children(time)
             .child(
                 div()
+                    .id(ElementId::NamedInteger(
+                        "conversation-reuse".into(),
+                        u64::try_from(ix).unwrap_or(0),
+                    ))
+                    .debug_selector(move || format!("conversation-reuse-{ix}"))
+                    .role(Role::Button)
+                    .aria_label("Edit and send again")
                     .max_w(px(ui_size * 40.0))
                     .px(px(spacing.md))
                     .py(px(spacing.sm))
                     .rounded(px(theme.radii.md))
                     .bg(hsla_alpha(s.accent, alpha::TINT_STRONG))
                     .line_height(prose)
+                    .cursor_pointer()
+                    .hover(move |st| st.bg(hsla_alpha(s.accent, alpha::TINT_PRESSED)))
+                    .on_click({
+                        let view = view.clone();
+                        move |_ev, window, cx| {
+                            cx.stop_propagation();
+                            view.update(cx, |v, cx| v.reuse_prompt(ix, window, cx));
+                        }
+                    })
                     .when(*images > 0, |el| {
                         // The pictures stay with the agent; the bubble says they were sent.
                         el.child(

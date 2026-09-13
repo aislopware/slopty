@@ -967,6 +967,15 @@ impl TerminalView {
         }
     }
 
+    /// A click on a sent prompt: it is in the composer again, to edit and send.
+    pub fn reuse_prompt(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(conversation) = &mut self.conversation
+            && conversation.reuse(ix, window, cx)
+        {
+            cx.notify();
+        }
+    }
+
     /// Whether the composer holds the keyboard.
     fn composer_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         self.conversation.as_ref().is_some_and(|c| c.composer_focus(cx).is_focused(window))
@@ -5120,6 +5129,33 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing went to the program");
         bar(cx, "left");
         assert!(rx.try_recv().is_ok(), "any other bar key is pressed as before");
+
+        // A click on a sent prompt puts it in the composer as if recalled: ↑ / ↓ go on from
+        // it, and the draft under way comes back past the newest.
+        up_down(cx, "cmd-a backspace d");
+        let bubble = cx.debug_bounds("conversation-reuse-2").expect("the second prompt's bubble");
+        cx.simulate_click(bubble.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(text(cx).as_deref(), Some("second"));
+        assert!(composer_focused(&view, cx));
+        up_down(cx, "up");
+        assert_eq!(text(cx).as_deref(), Some("first"));
+        up_down(cx, "down down down");
+        assert_eq!(text(cx).as_deref(), Some("d"), "the draft is back past the newest");
+        // The repeat of a prompt counts as the same step; typing after a click is the
+        // human's own text and ↑ moves the caret.
+        let again = cx.debug_bounds("conversation-reuse-3").expect("the repeated prompt");
+        cx.simulate_click(again.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        up_down(cx, "! up");
+        assert_eq!(text(cx).as_deref(), Some("second!"), "the caret was at the end");
+        up_down(cx, "cmd-a backspace up");
+        assert_eq!(text(cx).as_deref(), Some("third"), "the draft is empty again");
+        assert!(rx.try_recv().is_err(), "nothing went to the program");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Button", Some("Edit and send again"))), "{tree:#?}");
     }
 
     #[gpui::test]
