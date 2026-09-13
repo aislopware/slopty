@@ -595,6 +595,9 @@ pub struct CanvasView {
     /// The client whose viewport the camera keeps up with: every move they report is flown
     /// to, until this client moves the camera itself or they leave.
     following: Option<ClientId>,
+    /// The card the canvas this one replaces (after a reconnect) had active, made active
+    /// again once the snapshot brings it.
+    resume_active: Option<ItemId>,
     /// The toast at the top: another client's pointing on offer, or a word to this client,
     /// until a click or [`POINT_FOR`].
     toast: Option<Toast>,
@@ -671,6 +674,7 @@ impl CanvasView {
         Self {
             doc: CanvasDoc::default(),
             camera: Camera::default(),
+            resume_active: None,
             me,
             out,
             theme,
@@ -763,6 +767,18 @@ impl CanvasView {
         self.camera
     }
 
+    /// Where the canvas this one replaces was: the camera, at once and without a flight, and
+    /// the active card, once the snapshot brings it (a card gone meanwhile is nothing to
+    /// activate). The app calls this on a reconnect, so a dropped link does not send the
+    /// reader back to the origin.
+    pub fn resume_at(&mut self, camera: Camera, active: Option<ItemId>, cx: &mut Context<Self>) {
+        self.flight = None;
+        self.camera = camera;
+        self.resume_active = active;
+        cx.emit(CanvasEvent::Zoom(camera.zoom));
+        cx.notify();
+    }
+
     /// Where a canvas rect sits in the window, in points, as of the last frame.
     #[must_use]
     pub fn window_bounds(&self, rect: Rect) -> Bounds<Pixels> {
@@ -831,6 +847,14 @@ impl CanvasView {
             self.follow(client, cx);
         }
         self.reconcile(cx);
+        if let Some(id) = self.resume_active.take_if(|id| self.doc.get(*id).is_some()) {
+            // Active again as it was, its keyboard back in it; not raised — the reader did
+            // nothing to the document.
+            self.active = Some(id);
+            if let Some(ItemKind::Terminal { session }) = self.doc.get(id).map(|i| &i.kind) {
+                self.pending_focus = Some(*session);
+            }
+        }
         if let Some((id, session)) = ours {
             self.fit_to_viewport(id);
             self.active = Some(id);
@@ -6376,6 +6400,51 @@ mod tests {
     }
 
     /// With animation on, a camera action starts a flight instead of jumping: the camera is
+    /// After a reconnect the app makes a new canvas and tells it where the old one was: the
+    /// camera is there at once, and the card that was active is active again once the
+    /// snapshot brings it — or nothing is, when it has gone.
+    #[gpui::test]
+    fn a_new_canvas_resumes_where_the_last_one_was(cx: &mut TestAppContext) {
+        let (view, _rx, _me, cx) = canvas(cx);
+        let kept = ItemId::new();
+        let gone = ItemId::new();
+        let note = |id: ItemId, z: u32| CanvasItem {
+            id,
+            kind: ItemKind::Note { text: "here".to_owned() },
+            rect: Rect {
+                x: 600.0 * f32::from(u8::try_from(z).unwrap_or(1)),
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
+            z,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let camera = Camera { x: 480.0, y: -120.0, zoom: 0.5 };
+        view.update(cx, |c, cx| c.resume_at(camera, Some(kept), cx));
+        assert_eq!(view.read_with(cx, |c, _| c.camera()), camera, "at once, no flight");
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), None, "nothing to activate yet");
+        view.update(cx, |c, cx| {
+            let items = vec![note(kept, 1), note(ItemId::new(), 2)];
+            c.apply_sync(CanvasSync::Snapshot { version: 2, items }, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(kept));
+        assert_eq!(view.read_with(cx, |c, _| c.camera()), camera, "the snapshot leaves it");
+
+        // A card gone meanwhile: the camera still, nothing active.
+        let (view, _rx, _me, cx) = canvas(cx);
+        view.update(cx, |c, cx| c.resume_at(camera, Some(gone), cx));
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Snapshot { version: 2, items: vec![note(kept, 1)] }, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), None);
+        assert_eq!(view.read_with(cx, |c, _| c.camera()), camera);
+    }
+
     /// still where it was and knows where it is going. How it gets there is
     /// `slopty_client::canvas`'s flight, which has a clock of its own in its own tests.
     #[gpui::test]

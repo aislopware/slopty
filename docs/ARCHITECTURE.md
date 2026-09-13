@@ -1006,7 +1006,10 @@ resizes the session. iOS reads the same path (in its sandbox) but has no editor 
 
 **Hosts.** The app holds every paired host at once: one `HostLink` (own iroh endpoint,
 own reconnect loop, own silence check) and one `CanvasView` per host (`slopty_app::hosts`),
-because each host owns its canvas document. One canvas is on show; the host name in the top
+because each host owns its canvas document. A dropped link drops the canvas and the next
+connection makes a new one, told where the old one was (`HostSlot::resume` →
+`CanvasView::resume_at`: the camera at once, the active card once the snapshot brings it).
+One canvas is on show; the host name in the top
 bar is the switcher (status dot: green connected, amber connecting / reconnecting, red needs
 pairing; rows list every host with "forget", then "Add host…"), ⌘⌥→ / ⌘⌥← and the Host menu
 step through them, and on a phone the same tap on the name opens it. The "N need you" pill

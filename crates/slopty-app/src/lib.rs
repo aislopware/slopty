@@ -465,6 +465,9 @@ impl Workspace {
                     // change re-renders it; the workspace is a few labels, so this is cheap.
                     let changes = cx.observe(&canvas, |_ws, _canvas, cx| cx.notify());
                     let slot = ws.slot_mut(id)?;
+                    if let Some((camera, active)) = slot.resume.take() {
+                        canvas.update(cx, |c, cx| c.resume_at(camera, active, cx));
+                    }
                     slot.subscriptions = vec![events, changes];
                     slot.canvas = Some(canvas.clone());
                     slot.needs_you = 0;
@@ -1538,7 +1541,12 @@ fn apply_link_event(
         LinkEvent::Disconnected(why) => {
             let _set = this.update(cx, |ws, cx| {
                 if let Some(slot) = ws.slot_mut(id) {
-                    slot.disconnect(HostStatus::Reconnecting(format!("disconnected: {why}")));
+                    let place = slot.canvas.as_ref().map(|c| {
+                        let c = c.read(cx);
+                        (c.camera(), c.active_item())
+                    });
+                    let status = HostStatus::Reconnecting(format!("disconnected: {why}"));
+                    slot.disconnect(status, place);
                 }
                 ws.refresh_badge();
                 cx.notify();

@@ -25,6 +25,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   while the other stayed green, and restarting it turned the row green again; "forget"
   removed the row and the `client.json` entry (`slopty hosts` listed one host).
 
+- ✅ **A reconnect resumes where the reader was** (2026-09-13). A dropped link (a phone
+  changing networks, a host restart) tears the canvas down and the connect loop makes a new
+  one from the host's snapshot — which used to land at the origin with nothing active, so
+  every drop sent the reader back to zoom 1 at (0, 0). Now the workspace reads the camera and
+  the active card off the old canvas as it lets it go (`HostSlot::disconnect(status, place)`,
+  kept in `HostSlot::resume`) and hands them to the new one (`CanvasView::resume_at`): the
+  camera is set at once, without a flight, and the card is activated when the snapshot brings
+  it — a card gone meanwhile is nothing to activate. Only these two: scroll offsets, find bars
+  and reading lines are per view and a reconnect is rare enough that rebuilding them is not
+  worth the state. Test: `a_new_canvas_resumes_where_the_last_one_was`.
+
 - ✅ **Switcher is a hand-rolled overlay, not gpui-kit's popover** (2026-09-05): a
   full-window backdrop that closes on click with an occluding panel anchored under the host
   name, the same pattern as the window picker. It needs no focus handling and lays out the

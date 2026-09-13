@@ -80,6 +80,9 @@ pub struct HostSlot {
     pub link: Option<std::sync::Weak<HostLink>>,
     /// Canvas subscriptions; dropped with the canvas.
     pub subscriptions: Vec<gpui::Subscription>,
+    /// Where the last canvas was when the link dropped (camera, active card), for the next
+    /// one to resume at.
+    pub resume: Option<(slopty_client::canvas::Camera, Option<slopty_core::ItemId>)>,
 }
 
 impl std::fmt::Debug for HostSlot {
@@ -108,11 +111,20 @@ impl HostSlot {
             silent: None,
             link: None,
             subscriptions: Vec::new(),
+            resume: None,
         }
     }
 
-    /// Drop the canvas and everything that hung off the link.
-    pub fn disconnect(&mut self, status: HostStatus) {
+    /// Drop the canvas and everything that hung off the link, keeping where the canvas was
+    /// (`place`, from [`CanvasView::camera`] and `active_item`) for the next one.
+    pub fn disconnect(
+        &mut self,
+        status: HostStatus,
+        place: Option<(slopty_client::canvas::Camera, Option<slopty_core::ItemId>)>,
+    ) {
+        if place.is_some() {
+            self.resume = place;
+        }
         self.canvas = None;
         self.subscriptions.clear();
         self.link = None;
