@@ -1699,6 +1699,7 @@ fn entry(
                     })),
             )
             .children(time)
+            .child(copy_button(ix, markdown, theme))
             .into_any_element(),
         TranscriptBody::Thinking { text } => row
             .flex()
@@ -1887,6 +1888,51 @@ fn task_counts(task: &AgentTask) -> Vec<String> {
     parts
 }
 
+/// The conversation as Markdown, to paste elsewhere.
+///
+/// "You" and "Claude" headed turns, a tool call as a quoted line, a failed result's first
+/// line, a compaction as a rule with its numbers, a notice quoted in italics. Thinking and
+/// tool output stay out — they are the agent's working, folded on screen too.
+#[must_use]
+pub fn as_markdown(entries: &[TranscriptEntry]) -> String {
+    let first = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_owned();
+    let mut parts: Vec<String> = Vec::new();
+    for entry in entries {
+        let part = match &entry.body {
+            TranscriptBody::User { text, images } => {
+                let mut part = "**You**\n\n".to_owned();
+                if *images > 0 {
+                    part.push('_');
+                    part.push_str(&pictures_label(*images));
+                    part.push_str("_\n\n");
+                }
+                part.push_str(text.trim_end());
+                part
+            }
+            TranscriptBody::Assistant { markdown } => {
+                format!("**Claude**\n\n{}", markdown.trim_end())
+            }
+            TranscriptBody::ToolUse { name, summary, .. } => format!("> **{name}** {summary}"),
+            TranscriptBody::ToolResult { tool, output, is_error: true } => format!(
+                "> **{} failed:** {}",
+                tool.as_deref().unwrap_or("a tool"),
+                first(&output.text)
+            ),
+            TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
+                format!("---\n\n_{}_", compacted_label(trigger, *pre_tokens, *post_tokens))
+            }
+            TranscriptBody::Notice { text, .. } => format!("> _{}_", text.trim_end()),
+            TranscriptBody::Thinking { .. } | TranscriptBody::ToolResult { .. } => continue,
+        };
+        parts.push(part);
+    }
+    let mut out = parts.join("\n\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// One entry as a screen reader hears it: who, then the first line; a call that spawned a
 /// subagent adds the subagent's state and counts.
 #[must_use]
@@ -2059,6 +2105,33 @@ pub fn segments(markdown: &str) -> Vec<Segment> {
 /// A fenced block of an assistant turn: its language, a "copy" button and — when `run` is
 /// the view to ask, which the canvas only allows while it has a plain shell to run it in —
 /// a "run" button, over the code in the mono face on the raised surface.
+/// A "copy" button at the end of an answer: the whole answer's Markdown on the clipboard
+/// (⌘⇧C copies the newest only).
+fn copy_button(ix: usize, markdown: &str, theme: &Theme) -> AnyElement {
+    let s = &theme.surfaces;
+    let text = markdown.to_owned();
+    let id = format!("conversation-copy-{ix}");
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .debug_selector(move || id)
+        .role(Role::Button)
+        .aria_label("Copy answer")
+        .flex_none()
+        .px(px(theme.spacing.xs))
+        .rounded(px(theme.radii.xs))
+        .cursor_pointer()
+        .text_size(px(theme.typography.caption()))
+        .text_color(hsla(s.text_muted))
+        .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+        .on_click(move |_ev, _window, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        })
+        .child("copy")
+        .into_any_element()
+}
+
 fn code_segment(
     ix: usize,
     si: usize,
@@ -2585,6 +2658,48 @@ mod tests {
                 },
             },
         }
+    }
+
+    /// The export keeps what a reader would paste: the turns, the calls, the failures, the
+    /// compaction; not the thinking or the tool output.
+    #[test]
+    fn the_conversation_exports_as_markdown_turns() {
+        let entry = |body| TranscriptEntry { at: None, body };
+        let entries = [
+            entry(TranscriptBody::User { text: "fix it\n".to_owned(), images: 1 }),
+            entry(TranscriptBody::Thinking { text: Clipped::whole("hmm".to_owned()) }),
+            entry(TranscriptBody::Assistant { markdown: "On it.\n\n```sh\nls\n```\n".to_owned() }),
+            diff("/w/a.rs", &[(DiffKind::Added, "x")]),
+            entry(TranscriptBody::ToolResult {
+                tool: Some("Edit".to_owned()),
+                output: Clipped::whole("ok\nmore".to_owned()),
+                is_error: false,
+            }),
+            entry(TranscriptBody::ToolResult {
+                tool: None,
+                output: Clipped::whole("\nboom\nmore".to_owned()),
+                is_error: true,
+            }),
+            entry(TranscriptBody::Compacted {
+                trigger: "auto".to_owned(),
+                pre_tokens: 167_000,
+                post_tokens: Some(12_000),
+            }),
+            entry(TranscriptBody::Notice {
+                level: NoticeLevel::Warning,
+                text: "Stop says: red".to_owned(),
+            }),
+        ];
+        assert_eq!(
+            as_markdown(&entries),
+            "**You**\n\n_1 picture_\n\nfix it\n\n\
+             **Claude**\n\nOn it.\n\n```sh\nls\n```\n\n\
+             > **Edit** /w/a.rs\n\n\
+             > **a tool failed:** boom\n\n\
+             ---\n\n_compacted (auto): 167k → 12k_\n\n\
+             > _Stop says: red_\n"
+        );
+        assert_eq!(as_markdown(&[]), "");
     }
 
     /// Each side is parsed whole: a removed line that opens a comment does not colour the

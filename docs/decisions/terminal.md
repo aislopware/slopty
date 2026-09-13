@@ -341,7 +341,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   click on a block row — when the program has not asked for the mouse, ⇧ overriding as for
   selection — opens a small menu at the pointer (`block-menu`, role Menu; items only for what
   applies: "Copy command", "Copy output", "Rerun", always "Select block"); Esc, any click
-  or a pick closes it, and the click is not reported to the program; (4) "Rerun" is a paste of
+  or a pick closes it, and the click is not reported to the program; on the phone, which has
+  no right button, the key bar's armed ⌘ then a tap on a block row with no link or path
+  under it opens the same menu (2026-09-13; the link and the path keep their precedence, so
+  the armed tap still reads what is under it first); (4) "Rerun" is a paste of
   the command followed by ↩ as a key — the shell sees exactly what the human would have typed
   (bracketed when it asked), so aliases, history and hooks all apply; (5) it is our own small
   menu (the tokens, the a11y roles, the tab ring) rather than gpui-kit's `ContextMenu`, whose

@@ -70,6 +70,8 @@ mod actions {
             NextPrompt,
             /// Copy the output of the last command.
             CopyLastOutput,
+            /// Copy the whole conversation as Markdown.
+            CopyConversation,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
@@ -85,8 +87,8 @@ mod actions {
     );
 }
 pub use actions::{
-    ClearScreen, CloseFind, CompleteSlash, Copy, CopyLastOutput, Find, FindNext, FindPrev,
-    NextPrompt, Paste, PrevPrompt, RerunLast, ToggleConversation,
+    ClearScreen, CloseFind, CompleteSlash, Copy, CopyConversation, CopyLastOutput, Find, FindNext,
+    FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ToggleConversation,
 };
 
 /// Key bindings for the terminal context.
@@ -1645,6 +1647,20 @@ impl TerminalView {
         }
     }
 
+    /// The palette's "Copy conversation as Markdown": every turn, call and notice of the
+    /// conversation on show (nothing in a shell).
+    pub fn copy_conversation(
+        &mut self,
+        _: &CopyConversation,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conversation) = &self.conversation {
+            let text = conversation::as_markdown(conversation.entries());
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
     /// ⌘⇧↩: the last finished command again, typed as the block menu's rerun types it.
     pub fn rerun_last(&mut self, _: &RerunLast, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = self.state.last_command() {
@@ -2409,6 +2425,11 @@ impl TerminalView {
                 self.state.line(index).and_then(|line| url::path_at_col(line, col))
             {
                 self.open_path(&span, armed, cx);
+            } else if armed && let Some(block) = self.state.command_block(index) {
+                // The phone has no right button: the armed tap on a bare block row is its
+                // menu.
+                self.block_menu = Some(BlockMenu { block, at: event.position });
+                cx.notify();
             }
             return;
         }
@@ -2947,6 +2968,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::prev_prompt))
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
+            .on_action(cx.listener(Self::copy_conversation))
             .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(Self::toggle_conversation_action))
@@ -3482,6 +3504,27 @@ mod tests {
         cx.simulate_click(elsewhere, gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("block-menu").is_none(), "a click elsewhere closes it");
+
+        // The phone's armed ⌘ then a tap on a block row with no link or path under it opens
+        // the same menu, one tap, nothing to the program.
+        drain_input(&mut rx);
+        view.update(cx, |v, cx| v.set_sticky_command(true, cx));
+        cx.simulate_click(at, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-menu").is_some(), "the armed tap opens the menu");
+        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
+        let tapped = view.read_with(cx, |v, _| v.block_menu.as_ref().map(|m| m.block.clone()));
+        assert_eq!(
+            tapped.map(|b| block_markdown(&b)).as_deref(),
+            Some("```\n$ seq 2\n1\n2\n```\n\n")
+        );
+        assert!(drain_input(&mut rx).is_empty(), "the tap is not reported");
+        pick(cx, "copy-command");
+        assert_eq!(clipboard(cx).as_deref(), Some("seq 2"));
+        // Disarmed, a tap on the same row is a plain click: no menu.
+        cx.simulate_click(at, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-menu").is_none());
     }
 
     #[test]
@@ -3881,6 +3924,22 @@ mod tests {
         cx.run_until_parked();
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("cargo test"));
+        // The answer's own copy button takes the whole answer; the palette's action the whole
+        // conversation as Markdown.
+        let copy = cx.debug_bounds("conversation-copy-1").expect("the answer's copy button");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("On it.\n\n```sh\ncargo test\n```\n\nthen look."));
+        cx.update(|window, cx| window.dispatch_action(Box::new(CopyConversation), cx));
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(
+            copied.as_deref(),
+            Some(
+                "**You**\n\nfix it\n\n**Claude**\n\nOn it.\n\n```sh\ncargo test\n```\n\nthen look.\n\n> **Bash** cargo test\n"
+            )
+        );
         assert_eq!(
             conversation::segments("a\n```sh\nx\n```\nb"),
             [

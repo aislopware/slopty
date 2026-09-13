@@ -216,7 +216,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
     use crate::terminal::{
-        ClearScreen, CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast, ToggleConversation,
+        ClearScreen, CopyConversation, CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast,
+        ToggleConversation,
     };
     let canvas = key_bindings();
     let terminal = crate::terminal::key_bindings();
@@ -250,6 +251,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Previous prompt", Box::new(PrevPrompt)),
         t("Next prompt", Box::new(NextPrompt)),
         t("Copy last output", Box::new(CopyLastOutput)),
+        t("Copy conversation as Markdown", Box::new(CopyConversation)),
         t("Rerun last command", Box::new(RerunLast)),
         t("Clear the screen and history", Box::new(ClearScreen)),
         t("Show or hide the conversation", Box::new(ToggleConversation)),

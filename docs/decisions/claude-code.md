@@ -104,6 +104,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   back past the newest — the prompt to send again is more often on screen than a count of
   ↑ away. Test: `the_composer_recalls_sent_prompts_on_up_and_down`.
 
+- ✅ **A conversation copies out as Markdown** (2026-09-13). What an agent said is often
+  pasted into a review, an issue or a note, and one answer more often than the lot. Rulings:
+  (1) every answer ends in a "copy" button (`conversation-copy-<ix>`, "Copy answer") that
+  puts its Markdown on the clipboard, as a fenced block's "copy" puts the code; ⌘⇧C keeps
+  copying the newest answer; (2) the palette's "Copy conversation as Markdown"
+  (`CopyConversation`, Terminal context, no key) writes `conversation::as_markdown`: "**You**"
+  / "**Claude**" headed turns, a tool call as a quoted `> **Name** summary` line, a failed
+  result's first line, a compaction as a rule with its token numbers, a notice quoted in
+  italics — thinking and tool output stay out, as they are folded on screen; (3) no file
+  export: the clipboard reaches every editor, and the transcript file itself is the agent's.
+  Tests: `the_conversation_exports_as_markdown_turns`,
+  `the_conversation_replaces_the_grid_and_follows_the_transcript`.
+
 - ✅ **Collapse defaults** (2026-09-05). Thinking and tool input start folded (they explain a
   step, they are not the step); a tool result shows its first 4 lines (`RESULT_PREVIEW_LINES`)
   because the head of a result is usually the verdict ("running 2 tests", "error[E0308]"), and
