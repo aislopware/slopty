@@ -21,10 +21,7 @@ use slopty_core::SessionId;
 use slopty_grid::{Cursor, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{
-    AgentInfo, AgentSet, AgentStatus, AgentTask, BlockReason, PermissionRequest, QuestionAnswer,
-    ToolDetail, TranscriptFollow, TranscriptUpdate,
-};
+use slopty_proto::agent::AgentStatus;
 use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{Placement, SearchMatch, TermEvent, TermRequest, TermSize};
 use slopty_theme::{Theme, alpha};
@@ -32,7 +29,6 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
-use crate::terminal::conversation::{self, Attention, Conversation};
 use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
 use crate::terminal::{latency, url};
 
@@ -99,28 +95,19 @@ mod actions {
             SelectAll,
             /// Copy the output of the last command.
             CopyLastOutput,
-            /// Copy the whole conversation as Markdown.
-            CopyConversation,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
             /// Save the last command and its output as a note card beside the shell.
             NoteLastBlock,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
-            /// Show the agent's conversation instead of the grid, or the grid again.
-            ToggleConversation,
-            /// Tab in a driven composer with the slash list up: take the selected
-            /// completion. Bound in the Terminal context so it is tried before gpui-kit's
-            /// root `Tab` (which moves the focus ring); it propagates when there is
-            /// nothing to complete.
-            CompleteSlash,
         ]
     );
 }
 pub use actions::{
-    ClearScreen, CloseFind, CompleteSlash, Copy, CopyConversation, CopyLastOutput, Find, FindNext,
-    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, ToggleConversation,
+    ClearScreen, CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt,
+    NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, SelectAll,
 };
 
 /// Key bindings for the terminal context.
@@ -146,8 +133,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
         KeyBinding::new("cmd-shift-enter", RerunLast, CTX),
         KeyBinding::new("cmd-k", ClearScreen, CTX),
-        KeyBinding::new("cmd-shift-l", ToggleConversation, CTX),
-        KeyBinding::new("tab", CompleteSlash, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
         KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
     ]
@@ -246,24 +231,6 @@ pub enum TerminalViewEvent {
     Bell,
     /// The child exited.
     Exited(i32),
-    /// The conversation's Allow / Deny row was pressed: the canvas types the answer, as for
-    /// the title-bar badge.
-    Answered {
-        /// Allow (Enter) or deny (Esc).
-        allowed: bool,
-    },
-    /// A driven session's Allow / Deny row was pressed, or its question answered: the
-    /// canvas answers the host's permission request by id.
-    AgentAnswered {
-        /// The request id (`PermissionRequest::id`).
-        request: String,
-        /// Allow or deny.
-        allowed: bool,
-        /// The answers when the request was a question; empty otherwise.
-        answers: Vec<QuestionAnswer>,
-        /// Allow and take the agent's suggestion for not asking again.
-        always: bool,
-    },
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
     /// The human confirmed closing this shell while its command runs: the canvas sends
@@ -280,13 +247,6 @@ pub enum TerminalViewEvent {
         /// How long it ran.
         elapsed: Duration,
     },
-    /// The "run" button on a fenced block in an answer was pressed: the canvas reveals the
-    /// shell it picked and types the code into it. The payload is the block's body, lines
-    /// joined with `\n`.
-    RunInShell(String),
-    /// "Ask the agent" on a block's menu: the block as a Markdown fence for a driven agent's
-    /// composer. The canvas picks the agent card (or opens one) and puts it there.
-    AskAgent(String),
     /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
     /// canvas puts a note card with it beside the shell.
     NoteBlock(String),
@@ -380,10 +340,6 @@ pub struct TerminalView {
     wheel_remainder: f32,
     /// The command-block menu a right click opened, and where.
     block_menu: Option<BlockMenu>,
-    /// The host's answer to the composer's `@` word: the query asked and the paths found.
-    files: Option<(String, Vec<String>)>,
-    /// The `@` query last asked of the host, so a keystroke that leaves it alone asks nothing.
-    files_asked: Option<String>,
     /// When the running shell command left its prompt.
     command_started: Option<Instant>,
     /// How long each finished command took, by the row it was typed at, for the caption at
@@ -401,49 +357,13 @@ pub struct TerminalView {
     touch_selecting: bool,
     /// The search bar, while open.
     search: Option<Search>,
-    /// The agent's conversation shown in place of the grid (see [`Conversation`]).
-    conversation: Option<Conversation>,
     /// The agent's state in this session, as the host last reported it.
     agent: Option<AgentStatus>,
-    /// The conversation's row answered a permission; cleared by the host's next report.
-    answered: Option<bool>,
-    /// Put the caret in the composer on the next frame (the agent asked something).
-    focus_composer: bool,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
-    /// The host drives this session's agent over its structured protocol: the conversation
-    /// is the whole view (there is no grid), the composer speaks to the agent, and the answers
-    /// go back by request id.
-    driven: bool,
-    /// Open the conversation on the next frame (a driven view is born without a window).
-    open_conversation: bool,
-    /// Text for the composer once the conversation exists (a driven view opens it on its
-    /// first frame, so a block asked of a card that was just opened has to wait).
-    pending_compose: Option<String>,
     /// What waits on a confirmation at the card's foot: a paste held back by paste
     /// protection, or the close of a shell whose command is still running.
     pending: Option<Pending>,
-    /// A window whose picture waits for the conversation to exist before it is attached.
-    pending_snapshot: Option<(slopty_proto::screen::CaptureTarget, String)>,
-    /// The permission the driven agent waits on, with the input it would run with.
-    permission: Option<PermissionRequest>,
-    /// The labels picked so far for each question of a pending `AskUserQuestion`.
-    chosen: Vec<Vec<String>>,
-    /// Pictures pasted into the composer, going with the next prompt.
-    attachments: Vec<slopty_proto::agent::Image>,
-    /// Host windows or displays whose picture the host attaches as the next prompt goes,
-    /// with their titles for the chips.
-    snapshots: Vec<(slopty_proto::screen::CaptureTarget, String)>,
-    /// Pictures being made fit off the UI thread, not yet in `attachments`.
-    preparing: usize,
-    /// The text the driven agent is writing now, ahead of its next entry.
-    partial: String,
-    /// What the driven agent said about itself (model, mode, slash commands, turns, cost).
-    info: AgentInfo,
-    /// The canvas has a plain shell to run a fenced block in: the "run" button beside "copy"
-    /// is drawn. Set by the canvas whenever its set of shells changes, so the conversation's
-    /// render stays a pure function of the view's own state.
-    can_run_in_shell: bool,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -499,8 +419,6 @@ impl TerminalView {
             sticky_control: false,
             sticky_command: false,
             block_menu: None,
-            files: None,
-            files_asked: None,
             command_started: None,
             took: HashMap::new(),
             took_epoch: None,
@@ -523,63 +441,10 @@ impl TerminalView {
             thumb_drag: None,
             wheel_remainder: 0.0,
             search: None,
-            conversation: None,
             agent: None,
-            answered: None,
-            focus_composer: false,
             search_regex: false,
-            driven: false,
-            chosen: Vec::new(),
-            attachments: Vec::new(),
-            snapshots: Vec::new(),
-            preparing: 0,
-            open_conversation: false,
-            pending_compose: None,
             pending: None,
-            pending_snapshot: None,
-            permission: None,
-            partial: String::new(),
-            info: AgentInfo::default(),
-            can_run_in_shell: false,
         }
-    }
-
-    /// Make this the view of a session the host drives (`SessionKind::Agent`): the
-    /// conversation opens on the first frame and stays; there is nothing else to show.
-    pub fn set_driven(&mut self, cx: &mut Context<Self>) {
-        self.driven = true;
-        self.open_conversation = true;
-        cx.notify();
-    }
-
-    /// Put `text` into the conversation's composer, now or as soon as the conversation
-    /// exists.
-    pub fn compose(&mut self, text: String, cx: &mut Context<Self>) {
-        self.pending_compose = Some(text);
-        cx.notify();
-    }
-
-    /// Whether the host drives this session's agent (the conversation is the whole view).
-    #[must_use]
-    pub const fn is_driven(&self) -> bool {
-        self.driven
-    }
-
-    /// The canvas says whether it has a plain shell to run a fenced block in: while it has
-    /// none, the "run" button beside "copy" is not drawn, because there is nowhere to send
-    /// the code.
-    pub fn set_can_run_in_shell(&mut self, can: bool, cx: &mut Context<Self>) {
-        if self.can_run_in_shell == can {
-            return;
-        }
-        self.can_run_in_shell = can;
-        cx.notify();
-    }
-
-    /// Whether the canvas has a shell for the "run" button.
-    #[must_use]
-    pub const fn can_run_in_shell(&self) -> bool {
-        self.can_run_in_shell
     }
 
     /// Type `text` into this session and run it: a paste (bracketed when the shell asks, as
@@ -592,581 +457,16 @@ impl TerminalView {
         }
     }
 
-    /// The text the driven agent is writing now.
-    #[must_use]
-    pub fn partial(&self) -> &str {
-        &self.partial
-    }
-
-    /// The permission the driven agent waits on.
-    #[must_use]
-    pub const fn permission(&self) -> Option<&PermissionRequest> {
-        self.permission.as_ref()
-    }
-
-    /// A slice of what the driven agent is writing, replacing the last one; empty once the
-    /// text became an entry.
-    pub fn agent_partial(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.partial != text {
-            self.partial = text;
-            cx.notify();
-        }
-    }
-
-    /// The driven agent asks to run a tool; shown above the composer with Allow / Deny, or
-    /// as the question's options when the tool is `AskUserQuestion`.
-    pub fn agent_permission(&mut self, request: PermissionRequest, cx: &mut Context<Self>) {
-        self.chosen = match &request.detail {
-            ToolDetail::Question { questions } => vec![Vec::new(); questions.len()],
-            _ => Vec::new(),
-        };
-        self.permission = Some(request);
-        self.answered = None;
-        cx.notify();
-    }
-
-    /// An option of a pending question was tapped: picked (or, for a multi-select question,
-    /// toggled). When every question has its pick and none is multi-select, the answer goes
-    /// out at once — one tap is the whole exchange; otherwise the Answer button sends it.
-    pub fn choose(&mut self, question: usize, label: &str, cx: &mut Context<Self>) {
-        if self.answered.is_some() {
-            return;
-        }
-        let Some(ToolDetail::Question { questions }) = self.permission.as_ref().map(|p| &p.detail)
-        else {
-            return;
-        };
-        let Some(q) = questions.get(question) else { return };
-        let multi = q.multi;
-        let all_single = questions.iter().all(|q| !q.multi);
-        let Some(picked) = self.chosen.get_mut(question) else { return };
-        if multi {
-            if let Some(ix) = picked.iter().position(|l| l == label) {
-                picked.remove(ix);
-            } else {
-                picked.push(label.to_owned());
-            }
-        } else {
-            *picked = vec![label.to_owned()];
-        }
-        if all_single && self.chosen.iter().all(|c| !c.is_empty()) {
-            self.answer_question(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    /// Send the pending question's answers, when every question has one: each question's
-    /// picks joined with ", ", under the question's own text.
-    pub fn answer_question(&mut self, cx: &mut Context<Self>) {
-        if self.answered.is_some() {
-            return;
-        }
-        let Some(request) = self.permission.as_ref() else { return };
-        let ToolDetail::Question { questions } = &request.detail else { return };
-        if questions.len() != self.chosen.len() || self.chosen.iter().any(Vec::is_empty) {
-            cx.notify();
-            return;
-        }
-        let answers = questions
-            .iter()
-            .zip(&self.chosen)
-            .map(|(q, picks)| QuestionAnswer { question: q.text.clone(), answer: picks.join(", ") })
-            .collect();
-        let request = request.id.clone();
-        self.answered = Some(true);
-        cx.emit(TerminalViewEvent::AgentAnswered {
-            request,
-            allowed: true,
-            answers,
-            always: false,
-        });
-        cx.notify();
-    }
-
-    /// Typed text as the answer to the first question still without one; `false` when no
-    /// question is pending.
-    fn answer_question_with(&mut self, text: String, cx: &mut Context<Self>) -> bool {
-        let pending = self.answered.is_none()
-            && matches!(
-                self.permission.as_ref().map(|p| &p.detail),
-                Some(ToolDetail::Question { .. })
-            );
-        if !pending {
-            return false;
-        }
-        if let Some(picks) = self.chosen.iter_mut().find(|c| c.is_empty()) {
-            picks.push(text);
-        }
-        self.answer_question(cx);
-        true
-    }
-
-    /// The labels picked so far, per question of the pending `AskUserQuestion`.
-    #[must_use]
-    pub fn chosen(&self) -> &[Vec<String>] {
-        &self.chosen
-    }
-
-    /// What the driven agent says about itself, whole.
-    pub fn agent_info(&mut self, info: AgentInfo, cx: &mut Context<Self>) {
-        if self.info != info {
-            self.info = info;
-            cx.notify();
-        }
-    }
-
-    /// A subagent the driven agent spawned: shown under the call that spawned it.
-    pub fn agent_task(&mut self, task: AgentTask, cx: &mut Context<Self>) {
-        if let Some(conversation) = &mut self.conversation {
-            conversation.set_task(task);
-            cx.notify();
-        }
-    }
-
-    /// "View" on a tool call: a file card for its path, made absolute against the agent's
-    /// working directory when the agent gave it relative (Claude Code's tools take absolute
-    /// paths, but a fake or a hook may not).
-    pub fn view_file(&self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
-        let absolute = if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            match &self.info.cwd {
-                Some(cwd) => format!("{}/{path}", cwd.trim_end_matches('/')),
-                None => path.to_owned(),
-            }
-        };
-        cx.emit(TerminalViewEvent::ViewFile { path: absolute, line });
-    }
-
-    /// What the driven agent last said about itself.
-    #[must_use]
-    pub const fn info(&self) -> &AgentInfo {
-        &self.info
-    }
-
-    /// What completes the composer's text right now, as Tab would insert it: slash
-    /// commands by name, paths as `@path`.
-    #[must_use]
-    pub fn completions(&self, cx: &gpui::App) -> Vec<String> {
-        if !self.driven {
-            return Vec::new();
-        }
-        self.conversation
-            .as_ref()
-            .map(|c| c.completions(&self.info.slash_commands, self.files.as_ref(), cx))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|c| c.insert)
-            .collect()
-    }
-
-    /// The host's answer to a `ListFiles`: kept when its query is still the `@` word the
-    /// composer ends in, dropped as stale otherwise.
-    pub fn files(&mut self, query: String, paths: Vec<String>, cx: &mut Context<Self>) {
-        let current = self
-            .conversation
-            .as_ref()
-            .and_then(|c| conversation::file_query(&c.composer_text(cx)).map(str::to_owned));
-        if current.as_deref() == Some(query.as_str()) {
-            self.files = Some((query, paths));
-            cx.notify();
-        }
-    }
-
-    /// The model chip: open or close the menu of models.
-    pub fn toggle_model_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.conversation.as_mut() {
-            c.set_model_menu(!c.model_menu_open());
-            cx.notify();
-        }
-    }
-
-    /// A model from the menu: ask the host to switch the agent to it; the header changes
-    /// when the agent confirms.
-    pub fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
-        if let Some(c) = self.conversation.as_mut() {
-            c.set_model_menu(false);
-        }
-        self.say(ClientMsg::AgentSet(AgentSet {
-            session: self.session,
-            model: Some(model.to_owned()),
-            permission_mode: None,
-        }));
-        cx.notify();
-    }
-
-    /// The mode chip: ask the host for the next permission mode.
-    pub fn cycle_permission_mode(&self, cx: &mut Context<Self>) {
-        let next =
-            conversation::next_mode(self.info.permission_mode.as_deref().unwrap_or("default"));
-        self.say(ClientMsg::AgentSet(AgentSet {
-            session: self.session,
-            model: None,
-            permission_mode: Some(next.to_owned()),
-        }));
-        cx.notify();
-    }
-
-    /// The composer's text changed: the completion list starts over from its first match,
-    /// and an `@` word the text now ends in is asked of the host (once per query).
-    pub fn composer_changed(&mut self, cx: &mut Context<Self>) {
-        let query = self
-            .conversation
-            .as_ref()
-            .and_then(|c| conversation::file_query(&c.composer_text(cx)).map(str::to_owned))
-            .filter(|q| !q.is_empty());
-        if let Some(c) = self.conversation.as_mut() {
-            c.composer_changed();
-        }
-        if query != self.files_asked {
-            self.files_asked.clone_from(&query);
-            if let Some(query) = query {
-                self.say(ClientMsg::ListFiles { session: self.session, query });
-            } else {
-                self.files = None;
-            }
-        }
-        cx.notify();
-    }
-
-    /// Keys for the slash-completion list and the model menu, taken in the capture phase so
-    /// the composer's own bindings (↑/↓ move its caret, Esc clears it) never see them while
-    /// the list is up: Tab takes the selected completion, ↑/↓ choose, Esc hides the list or
-    /// closes the menu.
-    fn completion_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let k = &event.keystroke;
-        if !k.modifiers.modified() && self.completion_nav(&k.key, window, cx) {
-            cx.stop_propagation();
-        }
-    }
-
-    /// The composer's own ↑ / ↓ / Esc actions arrive before any key event; while the
-    /// completion list or the model menu is up they belong to it, so they are caught in the
-    /// capture phase and stopped there.
-    fn composer_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.completion_nav(key, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        // ↑ / ↓ with nothing to complete: a sent prompt back, as a shell's history.
-        let delta = match key {
-            "up" => -1,
-            "down" => 1,
-            _ => return,
-        };
-        if self.driven
-            && self.composer_focused(window, cx)
-            && self.conversation.as_mut().is_some_and(|c| c.recall(delta, window, cx))
-        {
-            cx.stop_propagation();
-            cx.notify();
-        }
-    }
-
-    /// `key` as the completion list or the model menu takes it; `false` when neither is up
-    /// or the key is not theirs.
-    fn completion_nav(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.driven || !self.composer_focused(window, cx) {
-            return false;
-        }
-        if key == "escape" && self.conversation.as_ref().is_some_and(Conversation::model_menu_open)
-        {
-            self.toggle_model_menu(cx);
-            return true;
-        }
-        let completions = self.completions(cx);
-        if completions.is_empty() {
-            return false;
-        }
-        let handled = match key {
-            "tab" => {
-                let at = self.conversation.as_ref().map_or(0, Conversation::selected_completion);
-                if let Some(insert) =
-                    completions.get(at.min(completions.len().saturating_sub(1))).cloned()
-                {
-                    self.complete_with(&insert, window, cx);
-                }
-                true
-            }
-            "down" | "up" => {
-                let delta = if key == "down" { 1 } else { -1 };
-                if let Some(c) = self.conversation.as_mut() {
-                    c.step_completion(delta, completions.len());
-                }
-                true
-            }
-            "escape" => {
-                if let Some(c) = self.conversation.as_mut() {
-                    c.hide_completions();
-                }
-                true
-            }
-            _ => false,
-        };
-        if handled {
-            cx.notify();
-        }
-        handled
-    }
-
-    /// Put a completion in the composer (Tab, or a click on one): a slash command, or an
-    /// `@path` in place of the `@` word.
-    pub fn complete_with(&mut self, insert: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(c) = self.conversation.as_mut() {
-            c.complete(insert, window, cx);
-            c.focus_composer(window, cx);
-            cx.notify();
-        }
-    }
-
-    fn say(&self, msg: ClientMsg) {
-        if let Err(e) = self.out.try_send(msg) {
-            tracing::warn!(session = %self.session, error = %e, "outbound queue");
-        }
-    }
-
-    /// Esc or ⌃C in a driven conversation: stop the agent's turn.
-    pub fn interrupt_agent(&self) {
-        self.say(ClientMsg::AgentInterrupt { session: self.session });
-    }
-
-    /// ⌘⇧L or the title-bar pill: show the agent's conversation instead of the grid, or the
-    /// grid again. The host is told to start or stop tailing the transcript. The composer
-    /// takes the keyboard with the conversation; the grid takes it back.
-    pub fn toggle_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.driven {
-            // The conversation is the whole view.
-            return;
-        }
-        let follow = self.conversation.is_none();
-        if follow {
-            let conversation = Conversation::new(window, cx);
-            conversation.focus_composer(window, cx);
-            self.conversation = Some(conversation);
-        } else {
-            self.conversation = None;
-            self.focus.focus(window, cx);
-        }
-        let msg = ClientMsg::Transcript(TranscriptFollow { session: self.session, follow });
-        if let Err(e) = self.out.try_send(msg) {
-            tracing::warn!(session = %self.session, error = %e, "outbound queue");
-        }
-        cx.notify();
-    }
-
-    /// ↩ in the composer (or its send button): the text goes into the session as a paste,
-    /// then Enter; an empty composer sends the bare Enter, which accepts whatever the agent
-    /// is offering.
-    pub fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(conversation) = self.conversation.as_mut() else { return };
-        let text = conversation.take_composer_text(window, cx);
-        if self.driven {
-            if text.trim().is_empty() && self.attachments.is_empty() && self.snapshots.is_empty() {
-                return;
-            }
-            // While the agent asks a question, the typed text is its answer ("Other"), not
-            // a new prompt; the pictures wait for the next prompt.
-            if text.trim().is_empty() || !self.answer_question_with(text.clone(), cx) {
-                let images = std::mem::take(&mut self.attachments);
-                let snapshots =
-                    std::mem::take(&mut self.snapshots).into_iter().map(|(t, _)| t).collect();
-                // Sent mid-turn, the prompt waits in the agent's queue: shown as queued here.
-                let queued = (self.agent_busy() && !text.trim().is_empty()).then(|| text.clone());
-                self.say(ClientMsg::AgentSay { session: self.session, text, images, snapshots });
-                if let Some(text) = queued
-                    && let Some(conversation) = self.conversation.as_mut()
-                {
-                    conversation.queue(text);
-                }
-                cx.notify();
-            }
-            return;
-        }
-        if !text.trim().is_empty() {
-            self.send(TermRequest::Paste(text));
-        }
-        let enter = Keystroke {
-            modifiers: gpui::Modifiers::default(),
-            key: "enter".to_owned(),
-            key_char: None,
-        };
-        self.press(enter, cx);
-    }
-
-    /// The conversation's Allow / Deny: remembered until the host reports the agent's next
-    /// state, and handed to the canvas, which types the same key as the title-bar badge.
-    pub fn answer(&mut self, allowed: bool, cx: &mut Context<Self>) {
-        if self.answered.is_some() {
-            return;
-        }
-        if self.driven {
-            let Some(request) = self.permission.as_ref().map(|p| p.id.clone()) else { return };
-            self.answered = Some(allowed);
-            cx.emit(TerminalViewEvent::AgentAnswered {
-                request,
-                allowed,
-                answers: Vec::new(),
-                always: false,
-            });
-            cx.notify();
-            return;
-        }
-        self.answered = Some(allowed);
-        cx.emit(TerminalViewEvent::Answered { allowed });
-        cx.notify();
-    }
-
-    /// The conversation's Always: allow, and take the agent's suggestion for not asking
-    /// again (`PermissionRequest::always`). Only a driven view has one.
-    pub fn answer_always(&mut self, cx: &mut Context<Self>) {
-        if self.answered.is_some() || !self.driven {
-            return;
-        }
-        let Some(request) = self.permission.as_ref().filter(|p| p.always.is_some()) else {
-            return;
-        };
-        let request = request.id.clone();
-        self.answered = Some(true);
-        cx.emit(TerminalViewEvent::AgentAnswered {
-            request,
-            allowed: true,
-            answers: Vec::new(),
-            always: true,
-        });
-        cx.notify();
-    }
-
-    /// The host's word on the agent in this session (`None`: no agent). A question or an
-    /// elicitation puts the caret in the composer when the conversation is on.
+    /// The host's word on the agent in this session (`None`: no agent).
     pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
-        self.answered = None;
-        if !matches!(
-            status,
-            Some(AgentStatus::Blocked(BlockReason::Permission { .. } | BlockReason::Question))
-        ) {
-            self.permission = None;
-            self.chosen.clear();
-        }
-        if self.conversation.is_some()
-            && matches!(
-                status,
-                Some(AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation))
-            )
-        {
-            self.focus_composer = true;
-        }
         self.agent = status;
-        // A turn that ended, or an agent gone: nothing of what was queued waits any more
-        // (a prompt the agent took starts a turn of its own and arrives as an entry).
-        if !self.agent_busy()
-            && !matches!(self.agent, Some(AgentStatus::Blocked(_)))
-            && let Some(conversation) = self.conversation.as_mut()
-        {
-            conversation.clear_queued();
-        }
         cx.notify();
-    }
-
-    /// Whether the agent is in a turn: working, or in a tool.
-    const fn agent_busy(&self) -> bool {
-        matches!(self.agent, Some(AgentStatus::Working | AgentStatus::Tool { .. }))
     }
 
     /// The agent's state as last reported.
     #[must_use]
     pub const fn agent_status(&self) -> Option<&AgentStatus> {
         self.agent.as_ref()
-    }
-
-    /// What the conversation shows above its composer: the pending permission with its
-    /// answers, or that the agent waits for a reply.
-    #[must_use]
-    pub fn attention(&self) -> Option<Attention> {
-        match self.agent.as_ref()? {
-            AgentStatus::Blocked(BlockReason::Permission { tool }) => Some(Attention::Permission {
-                tool: tool.clone(),
-                answered: self.answered,
-                detail: self.permission.as_ref().map(|p| p.summary.clone()),
-                always: self.permission.as_ref().and_then(|p| p.always.clone()),
-            }),
-            AgentStatus::Blocked(BlockReason::Question) => match &self.permission {
-                Some(PermissionRequest { detail: ToolDetail::Question { questions }, .. }) => {
-                    Some(Attention::Question {
-                        questions: questions.clone(),
-                        chosen: self.chosen.clone(),
-                        answered: self.answered.is_some(),
-                    })
-                }
-                _ => Some(Attention::Prompt),
-            },
-            AgentStatus::Blocked(BlockReason::Elicitation) => Some(Attention::Prompt),
-            _ => None,
-        }
-    }
-
-    /// Open or fold an entry's long part (thinking, tool input, the rest of a result).
-    pub fn toggle_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(conversation) = &mut self.conversation {
-            conversation.toggle(ix);
-            cx.notify();
-        }
-    }
-
-    /// A click on a sent prompt: it is in the composer again, to edit and send.
-    pub fn reuse_prompt(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = &mut self.conversation
-            && conversation.reuse(ix, window, cx)
-        {
-            cx.notify();
-        }
-    }
-
-    /// Whether the composer holds the keyboard.
-    fn composer_focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        self.conversation.as_ref().is_some_and(|c| c.composer_focus(cx).is_focused(window))
-    }
-
-    /// The conversation on show, if any.
-    #[must_use]
-    pub const fn conversation(&self) -> Option<&Conversation> {
-        self.conversation.as_ref()
-    }
-
-    /// The conversation on show, to change.
-    #[must_use]
-    pub const fn conversation_mut(&mut self) -> Option<&mut Conversation> {
-        self.conversation.as_mut()
-    }
-
-    /// A slice of the transcript from the host; ignored once the conversation is hidden.
-    pub fn transcript_update(&mut self, update: TranscriptUpdate, cx: &mut Context<Self>) {
-        if let Some(conversation) = &mut self.conversation {
-            conversation.apply(update);
-            // An open find bar keeps its hits true to the transcript, staying on its entry.
-            let keep = self
-                .search
-                .as_ref()
-                .and_then(|s| s.current.and_then(|c| conversation.hits().0.get(c).copied()));
-            if self.search.is_some() {
-                self.search_conversation(Some(keep.unwrap_or(usize::MAX)), cx);
-            }
-            cx.notify();
-        }
-    }
-
-    fn toggle_conversation_action(
-        &mut self,
-        _: &ToggleConversation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_conversation(window, cx);
     }
 
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.
@@ -1235,13 +535,7 @@ impl TerminalView {
     /// Esc in the search field: close it and give the keys back to the program.
     pub fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.take().is_some() {
-            match &mut self.conversation {
-                Some(conversation) => {
-                    conversation.set_hits(Vec::new(), None);
-                    conversation.focus_composer(window, cx);
-                }
-                None => self.focus.focus(window, cx),
-            }
+            self.focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -1276,40 +570,7 @@ impl TerminalView {
         search.current = None;
         search.invalid = None;
         search.reveal = true;
-        if self.conversation.is_some() {
-            self.search_conversation(None, cx);
-        } else {
-            self.send_search(cx);
-        }
-    }
-
-    /// Find the needle in the conversation's entries here, no host involved: the hits land
-    /// on the newest (`keep`: the entry to stay on when it is still a hit, once the
-    /// transcript grew under an open bar), and the list scrolls to it.
-    fn search_conversation(&mut self, keep: Option<usize>, cx: &mut Context<Self>) {
-        let (Some(search), Some(conversation)) = (&mut self.search, &mut self.conversation) else {
-            return;
-        };
-        match conversation::entry_hits(conversation.entries(), &search.needle, search.regex) {
-            Ok(hits) => {
-                search.total = u32::try_from(hits.len()).unwrap_or(u32::MAX);
-                search.current = keep
-                    .and_then(|entry| hits.iter().position(|&h| h == entry))
-                    .or_else(|| hits.len().checked_sub(1));
-                search.invalid = None;
-                conversation.set_hits(hits, search.current);
-            }
-            Err(message) => {
-                search.total = 0;
-                search.current = None;
-                search.invalid = Some(message);
-                conversation.set_hits(Vec::new(), None);
-            }
-        }
-        if keep.is_none() {
-            self.reveal_current(cx);
-        }
-        cx.notify();
+        self.send_search(cx);
     }
 
     /// Flip the search between plain text and regex; remembered for the next search bar.
@@ -1348,7 +609,7 @@ impl TerminalView {
     /// Move `by` hits (wrapping) and scroll the new one into view.
     fn step_match(&mut self, by: i64, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        let n = self.conversation.as_ref().map_or(search.matches.len(), |c| c.hits().0.len());
+        let n = search.matches.len();
         if n == 0 {
             return;
         }
@@ -1366,15 +627,6 @@ impl TerminalView {
 
     /// Scroll so the current hit sits in the viewport (centred when it was off screen).
     fn reveal_current(&mut self, cx: &mut Context<Self>) {
-        if let (Some(search), Some(conversation)) = (&self.search, &mut self.conversation) {
-            let hit = search.current.and_then(|c| conversation.hits().0.get(c).copied());
-            conversation.set_hits(conversation.hits().0.to_vec(), search.current);
-            if let Some(ix) = hit {
-                conversation.reveal_entry(ix);
-            }
-            cx.notify();
-            return;
-        }
         let Some(hit) =
             self.search.as_ref().and_then(|s| s.current.and_then(|c| s.matches.get(c))).copied()
         else {
@@ -1763,14 +1015,12 @@ impl TerminalView {
             if block.command.is_some() {
                 items.push(BlockMenuItem::Rerun);
             }
-            items.push(BlockMenuItem::Ask);
             items.push(BlockMenuItem::Note);
             items.push(BlockMenuItem::SelectBlock);
         }
         if has_selection {
             items.push(BlockMenuItem::Copy);
             if block.is_none() {
-                items.push(BlockMenuItem::Ask);
                 items.push(BlockMenuItem::Note);
             }
         }
@@ -1793,16 +1043,6 @@ impl TerminalView {
             BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
             BlockMenuItem::Find => self.find(&Find, window, cx),
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
-            BlockMenuItem::Ask => {
-                // A selection is what the human meant; the block is the default.
-                let selected = self.selected_text().filter(|t| !t.trim().is_empty());
-                let text = match (selected, menu.block) {
-                    (Some(t), _) => format!("```\n{t}\n```\n\n"),
-                    (None, Some(block)) => block_markdown(&block),
-                    (None, None) => return,
-                };
-                cx.emit(TerminalViewEvent::AskAgent(text));
-            }
             BlockMenuItem::Note => {
                 let text = match menu.block {
                     Some(block) => block_note(&block),
@@ -1859,7 +1099,6 @@ impl TerminalView {
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
             | BlockMenuItem::ClearScreen
-            | BlockMenuItem::Ask
             | BlockMenuItem::Note => {}
         }
     }
@@ -2018,33 +1257,14 @@ impl TerminalView {
             .into_any_element()
     }
 
-    /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard; in a
-    /// conversation, the newest answer's Markdown.
+    /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
     pub fn copy_last_output(
         &mut self,
         _: &CopyLastOutput,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = match &self.conversation {
-            Some(conversation) => conversation.last_answer().map(str::to_owned),
-            None => self.state.last_command_output(),
-        };
-        if let Some(text) = text {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        }
-    }
-
-    /// The palette's "Copy conversation as Markdown": every turn, call and notice of the
-    /// conversation on show (nothing in a shell).
-    pub fn copy_conversation(
-        &mut self,
-        _: &CopyConversation,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(conversation) = &self.conversation {
-            let text = conversation::as_markdown(conversation.entries());
+        if let Some(text) = self.state.last_command_output() {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
@@ -2076,8 +1296,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// ⌘↑: the prompt above the viewport's top row, scrolled to the top. In a conversation
-    /// the prompts are the `User` entries.
+    /// ⌘↑: the prompt above the viewport's top row, scrolled to the top.
     pub fn prev_prompt(&mut self, _: &PrevPrompt, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_prompt(-1, cx);
     }
@@ -2141,15 +1360,6 @@ impl TerminalView {
 
     /// ⌘↑ (`delta` −1) / ⌘↓ (+1), also the phone's armed ⌘ with the bar's ↑ / ↓.
     fn step_prompt(&mut self, delta: i8, cx: &mut Context<Self>) {
-        if let Some(conversation) = &self.conversation {
-            match conversation.prompt_from_top(delta) {
-                Some(ix) => conversation.scroll_to_entry(ix),
-                None if delta > 0 => conversation.pin(),
-                None => return,
-            }
-            cx.notify();
-            return;
-        }
         let top = self.state.index_at_row(0);
         let target =
             if delta < 0 { self.state.prompt_before(top) } else { self.state.prompt_after(top) };
@@ -2172,190 +1382,10 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// ⌘V in a driven composer with a picture on the clipboard: the picture becomes an
-    /// attachment of the next prompt instead of text (a text clipboard pastes as text).
-    fn composer_paste(
-        &mut self,
-        _: &gpui_kit::component::input::Paste,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.driven || !self.composer_focused(window, cx) {
-            return;
-        }
-        let Some(item) = cx.read_from_clipboard() else { return };
-        let pictures: Vec<slopty_proto::agent::Image> = item
-            .into_entries()
-            .filter_map(|entry| match entry {
-                gpui::ClipboardEntry::Image(image) => Some(slopty_proto::agent::Image {
-                    media_type: image.format.mime_type().to_owned(),
-                    data: image.bytes,
-                }),
-                gpui::ClipboardEntry::String(_) | gpui::ClipboardEntry::ExternalPaths(_) => None,
-            })
-            .collect();
-        if pictures.is_empty() {
-            return;
-        }
-        cx.stop_propagation();
-        for picture in pictures {
-            self.attach_image(picture, cx);
-        }
-    }
-
-    /// Attach a picture to the next prompt. It is made fit off the UI thread
-    /// (`attachment::fit`: shrunk and re-encoded when over the model's size or the wire's
-    /// cap) and shows as a "preparing" chip meanwhile; a picture the model cannot read, or
-    /// one too many, is refused with a notice in the top bar, never sent half.
-    pub fn attach_image(&mut self, image: slopty_proto::agent::Image, cx: &mut Context<Self>) {
-        use slopty_proto::agent::IMAGES_MAX;
-        if self.attachments.len().saturating_add(self.preparing) >= IMAGES_MAX {
-            cx.emit(TerminalViewEvent::Notice(format!("At most {IMAGES_MAX} pictures per prompt")));
-            return;
-        }
-        self.preparing = self.preparing.saturating_add(1);
-        cx.notify();
-        let fitting = cx.background_spawn(async move { super::attachment::fit(image) });
-        cx.spawn(async move |this, cx| {
-            let fitted = fitting.await;
-            let _updated = this.update(cx, |view, cx| {
-                view.preparing = view.preparing.saturating_sub(1);
-                match fitted {
-                    Ok(picture) => view.attachments.push(picture),
-                    Err(refused) => {
-                        tracing::warn!(session = %view.session, %refused, "picture not attached");
-                        cx.emit(TerminalViewEvent::Notice(refused.to_string()));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Files dropped on the card from the desktop. On a driven card a picture is read off
-    /// the UI thread and attached to the next prompt like a pasted one; anything else is
-    /// refused by name in the top bar. A shell card takes no files: the paths are this
-    /// machine's and the shell runs on the host.
-    pub fn drop_paths(&self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        if !self.driven {
-            return;
-        }
-        for path in paths {
-            let name = path
-                .file_name()
-                .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-            let Some(media_type) = picture_type(path) else {
-                cx.emit(TerminalViewEvent::Notice(format!(
-                    "{name}: not a picture (PNG, JPEG, GIF or WebP)"
-                )));
-                continue;
-            };
-            let reading = cx.background_spawn({
-                let path = path.clone();
-                async move { std::fs::read(&path) }
-            });
-            cx.spawn(async move |this, cx| {
-                let read = reading.await;
-                let _updated = this.update(cx, |view, cx| match read {
-                    Ok(data) => view.attach_image(
-                        slopty_proto::agent::Image { media_type: media_type.to_owned(), data },
-                        cx,
-                    ),
-                    Err(e) => cx.emit(TerminalViewEvent::Notice(format!("{name}: {e}"))),
-                });
-            })
-            .detach();
-        }
-    }
-
-    /// Pictures being made fit right now, not yet attached.
-    #[must_use]
-    pub const fn preparing(&self) -> usize {
-        self.preparing
-    }
-
-    /// Attach a host window's (or display's) picture to the next prompt: the host takes it as
-    /// the prompt is sent, so nothing is copied here; `title` names it on the chip. Waits for
-    /// the conversation when the card has none yet.
-    pub fn attach_snapshot(
-        &mut self,
-        target: slopty_proto::screen::CaptureTarget,
-        title: String,
-        cx: &mut Context<Self>,
-    ) {
-        use slopty_proto::agent::IMAGES_MAX;
-        let pictures = self.attachments.len().saturating_add(self.preparing);
-        if pictures.saturating_add(self.snapshots.len()) >= IMAGES_MAX {
-            cx.emit(TerminalViewEvent::Notice(format!("At most {IMAGES_MAX} pictures per prompt")));
-            return;
-        }
-        if self.snapshots.iter().any(|(t, _)| *t == target) {
-            return;
-        }
-        if self.conversation.is_some() {
-            self.snapshots.push((target, title));
-            self.focus_composer = true;
-        } else {
-            self.pending_snapshot = Some((target, title));
-        }
-        cx.notify();
-    }
-
-    /// Drop the `i`th window attachment (its chip was tapped).
-    pub fn remove_snapshot(&mut self, i: usize, cx: &mut Context<Self>) {
-        if i < self.snapshots.len() {
-            self.snapshots.remove(i);
-            cx.notify();
-        }
-    }
-
-    /// The windows whose pictures go with the next prompt, with their titles.
-    #[must_use]
-    pub fn snapshots(&self) -> &[(slopty_proto::screen::CaptureTarget, String)] {
-        &self.snapshots
-    }
-
-    /// Drop the `i`th attachment (its chip was tapped).
-    pub fn remove_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
-        if i < self.attachments.len() {
-            self.attachments.remove(i);
-            cx.notify();
-        }
-    }
-
-    /// The pictures waiting to go with the next prompt.
-    #[must_use]
-    pub fn attachments(&self) -> &[slopty_proto::agent::Image] {
-        &self.attachments
-    }
-
     /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the host brackets
-    /// it when the program asked). On a driven card there is no session to paste into: a
-    /// picture becomes an attachment of the next prompt and text goes into the composer.
-    pub fn paste_clipboard(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+    /// it when the program asked).
+    pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
-        if self.driven {
-            let mut text = None;
-            for entry in item.into_entries() {
-                match entry {
-                    gpui::ClipboardEntry::Image(image) => self.attach_image(
-                        slopty_proto::agent::Image {
-                            media_type: image.format.mime_type().to_owned(),
-                            data: image.bytes,
-                        },
-                        cx,
-                    ),
-                    gpui::ClipboardEntry::String(string) => text = Some(string.text().to_owned()),
-                    gpui::ClipboardEntry::ExternalPaths(_) => {}
-                }
-            }
-            if let (Some(text), Some(conversation)) = (text, &self.conversation) {
-                conversation.insert_composer_text(&text, window, cx);
-            }
-            cx.notify();
-            return;
-        }
         let Some(text) = item.text() else { return };
         self.selection = None;
         self.state.scroll_to_bottom();
@@ -2397,9 +1427,9 @@ impl TerminalView {
 
     /// The canvas is about to close this shell: with a command running and the setting
     /// on, the bar asks first and this says so (`true`); otherwise nothing stands in the
-    /// way. A driven agent has no grid to read a command from and closes at once.
+    /// way.
     pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.driven || !self.theme.behaviour.confirm_close || !self.state.command_running() {
+        if !self.theme.behaviour.confirm_close || !self.state.command_running() {
             return false;
         }
         let command = self
@@ -2591,28 +1621,8 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// A key of the phone's bar. In a conversation the bar's ↑ / ↓ are the composer's, as a
-    /// hardware keyboard's would be — the completion list's while it is up, else a prompt
-    /// sent back ([`Conversation::recall`]) — since the program behind the card is not on
-    /// show for a raw arrow to mean anything there; everything else is [`Self::press`].
-    pub fn bar_key(&mut self, keystroke: Keystroke, window: &mut Window, cx: &mut Context<Self>) {
-        let delta = match keystroke.key.as_str() {
-            "up" => -1,
-            "down" => 1,
-            _ => 0,
-        };
-        if delta != 0 && !self.sticky_command && self.conversation.is_some() {
-            let completions = self.completions(cx);
-            if let Some(c) = self.conversation.as_mut() {
-                if completions.is_empty() {
-                    let _recalled = c.recall(delta, window, cx);
-                } else {
-                    c.step_completion(i32::from(delta), completions.len());
-                }
-            }
-            cx.notify();
-            return;
-        }
+    /// A key of the phone's bar: [`Self::press`].
+    pub fn bar_key(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
         self.press(keystroke, cx);
     }
 
@@ -2967,9 +1977,8 @@ impl TerminalView {
             return;
         }
         // The Mac's line-editing chords, sent as readline's bytes (ghostty's macOS "natural
-        // text editing" keybinds); the composer keeps its own.
+        // text editing" keybinds).
         if self.theme.behaviour.natural_editing
-            && !self.composer_focused(window, cx)
             && let Some(bytes) = keys::natural_editing(&event.keystroke)
         {
             self.selection = None;
@@ -2986,31 +1995,6 @@ impl TerminalView {
         if event.keystroke.modifiers.platform {
             tracing::debug!(session = %self.session, key = %event.keystroke.key, "cmd key passed up");
             return;
-        }
-        // Typing in the composer stays there; Esc and Control keys (⌃C above all) keep their
-        // terminal meaning, so the agent can be interrupted without leaving the chat.
-        if self.composer_focused(window, cx) {
-            let k = &event.keystroke;
-            if self.driven {
-                // No grid behind the chat: Esc and ⌃C interrupt the agent, nothing else leaves
-                // the composer. (The completion list's keys were taken in the capture phase,
-                // see `completion_key`.)
-                if k.key == "escape" || (k.modifiers.control && k.key == "c") {
-                    self.interrupt_agent();
-                    cx.stop_propagation();
-                } else if k.key == "enter" && !k.modifiers.shift {
-                    cx.stop_propagation();
-                }
-                return;
-            }
-            if !(k.key == "escape" || k.modifiers.control) {
-                if k.key == "enter" && !k.modifiers.shift {
-                    // The composer's Enter action submitted and let the action through; the
-                    // key must not also type a newline into it.
-                    cx.stop_propagation();
-                }
-                return;
-            }
         }
         // ⇧-arrows move a selection's head (ghostty's `adjust_selection`); with nothing
         // selected they are the program's, as every other key.
@@ -3044,10 +2028,6 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The conversation's list scrolls itself.
-        if self.conversation.is_some() {
-            return;
-        }
         let lines = match event.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => {
@@ -3114,10 +2094,6 @@ impl TerminalView {
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The conversation's controls (composer, folds, buttons) take their own clicks.
-        if self.conversation.is_some() {
-            return;
-        }
         self.focus.focus(window, cx);
         if self.block_menu.take().is_some() {
             cx.notify();
@@ -3227,9 +2203,6 @@ impl TerminalView {
     /// [`Self::drag_move`], which the element registers on the window so the drag can leave
     /// the card).
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.conversation.is_some() {
-            return;
-        }
         let shown = self.scrollbar_shown();
         let hover = self.metrics.and_then(|m| m.cell_at(event.position));
         self.set_pointer(hover, event.modifiers, cx);
@@ -3534,7 +2507,6 @@ impl TerminalView {
         &self,
         search: &Search,
         focused: bool,
-        floating: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -3566,16 +2538,12 @@ impl TerminalView {
             .id("terminal-search")
             .debug_selector(|| "terminal-search".to_owned())
             .key_context("TerminalSearch")
-            .when(floating, |bar| {
-                bar.absolute()
-                    .top(px(spacing.sm))
-                    // A phone-wide terminal can be wider than the screen; its left edge is
-                    // the part that is on screen (the "take" pill sits there for the same
-                    // reason).
-                    .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
-                    .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
-            })
-            .when(!floating, |bar| bar.flex_none().mx(px(spacing.sm)).mt(px(spacing.xs)))
+            .absolute()
+            .top(px(spacing.sm))
+            // A phone-wide terminal can be wider than the screen; its left edge is the part
+            // that is on screen (the "take" pill sits there for the same reason).
+            .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
+            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
             .flex()
             .items_center()
             .gap(px(spacing.sm))
@@ -3648,80 +2616,12 @@ impl Render for TerminalView {
         if zooming {
             self.motion_frames = self.motion_frames.saturating_add(1);
         }
-        let opened = std::mem::take(&mut self.open_conversation) && self.conversation.is_none();
-        if opened {
-            // A driven view opens its chat on its first frame (it needs the window) and asks
-            // for the conversation so far, which may have arrived before there was a chat.
-            self.conversation = Some(Conversation::new(window, cx));
-            self.focus_composer = true;
-            self.say(ClientMsg::Transcript(TranscriptFollow {
-                session: self.session,
-                follow: true,
-            }));
-            cx.notify();
-        } else if let Some(conversation) = &self.conversation
-            && let Some(text) = self.pending_compose.take()
-        {
-            // The frame after the composer first drew: an insert into an input that has never
-            // been laid out is lost.
-            conversation.append_composer_text(&text, window, cx);
-            self.focus_composer = true;
-        }
-        if self.conversation.is_some()
-            && let Some(snapshot) = self.pending_snapshot.take()
-        {
-            self.snapshots.push(snapshot);
-            self.focus_composer = true;
-            cx.notify();
-        }
-        if self.driven && focused && self.conversation.is_some() {
-            // The canvas gives the view the keyboard; in a driven view that is the composer.
-            self.focus_composer = true;
-        }
-        if std::mem::take(&mut self.focus_composer) && self.conversation.is_some() {
-            // Focus moves after this update, not from inside the render.
-            cx.defer_in(window, |this, window, cx| {
-                if let Some(conversation) = &this.conversation {
-                    conversation.focus_composer(window, cx);
-                }
-            });
-        }
-        let attention = self.attention();
-        let composer_focused = self.composer_focused(window, cx);
-        let info = self.driven.then_some(&self.info);
-        let working = self.driven && matches!(self.agent_status(), Some(AgentStatus::Working));
         let search_focused = self
             .search
             .as_ref()
             .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window));
-        // Over the grid the bar floats in a corner; in a conversation it is a row under the
-        // header, so it covers no chip and no line of the chat.
-        let floating = self.conversation.is_none();
-        let mut search =
-            self.search.as_ref().map(|s| self.render_search(s, search_focused, floating, cx));
-        let conversation = self.conversation.as_ref().map(|c| {
-            c.render(
-                info,
-                attention.as_ref(),
-                &self.partial,
-                &self.attachments,
-                &self.snapshots,
-                self.preparing,
-                composer_focused,
-                working,
-                self.files.as_ref(),
-                self.can_run_in_shell,
-                search.take(),
-                &self.theme,
-                cx,
-            )
-        });
-        let header = self
-            .conversation
-            .is_none()
-            .then(|| self.block_header())
-            .flatten()
-            .and_then(|block| self.render_block_header(&block, cx));
+        let search = self.search.as_ref().map(|s| self.render_search(s, search_focused, cx));
+        let header = self.block_header().and_then(|block| self.render_block_header(&block, cx));
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
@@ -3730,9 +2630,6 @@ impl Render for TerminalView {
             .role(gpui::accesskit::Role::Group)
             .relative()
             .size_full()
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _window, cx| {
-                this.drop_paths(paths.paths(), cx);
-            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::find))
@@ -3741,7 +2638,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::prev_prompt))
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
-            .on_action(cx.listener(Self::copy_conversation))
             .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::note_last_block))
             .on_action(cx.listener(Self::clear_screen))
@@ -3750,63 +2646,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_top))
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::toggle_conversation_action))
-            .on_action(cx.listener(|this, _: &CompleteSlash, window, cx| {
-                if !this.completion_nav("tab", window, cx) {
-                    // A grid, or nothing to complete: the key goes on to whoever is next.
-                    cx.propagate();
-                }
-            }))
-            .capture_key_down(cx.listener(Self::completion_key))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
-                    this.composer_action("down", window, cx);
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
-                    this.composer_action("up", window, cx);
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::Escape, window, cx| {
-                    this.composer_action("escape", window, cx);
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
-                    this.composer_action("tab", window, cx);
-                },
-            ))
-            // ⌘F with the caret in the composer: the input's own search action would take
-            // it; the card's find bar is what a reader means.
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::Search, window, cx| {
-                    if this.conversation.is_some() {
-                        this.find(&Find, window, cx);
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            // ⌘↑ / ⌘↓ with the caret in the composer: the input's own start/end actions
-            // would take them; between prompts is what a reader means.
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveToStart, window, cx| {
-                    if this.conversation.is_some() {
-                        this.prev_prompt(&PrevPrompt, window, cx);
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveToEnd, window, cx| {
-                    if this.conversation.is_some() {
-                        this.next_prompt(&NextPrompt, window, cx);
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .capture_action(cx.listener(Self::composer_paste))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -3816,9 +2655,6 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .map(|el| {
-                if let Some(conversation) = conversation {
-                    return el.cursor(CursorStyle::Arrow).child(conversation);
-                }
                 let el = el.cursor(self.pointer());
                 let mut grid =
                     TerminalElement::new(cx.entity(), focused).zoom(self.zoom).zooming(zooming);
@@ -3863,8 +2699,6 @@ enum BlockMenuItem {
     CopyOutput,
     /// Type the command again and press ↩.
     Rerun,
-    /// The block, as a fence, into the agent's composer.
-    Ask,
     /// The block as a note card beside the shell: the command runnable, the output under it.
     Note,
     /// Select the whole block, prompt to last output row.
@@ -3896,24 +2730,6 @@ pub fn took_label(elapsed: Duration) -> String {
     }
 }
 
-/// A command block as the agent should read it: the command on a `$` line and its output,
-/// fenced, with a blank line after for the question.
-#[must_use]
-pub fn block_markdown(block: &CommandBlock) -> String {
-    let mut text = String::from("```\n");
-    if let Some(command) = &block.command {
-        text.push_str("$ ");
-        text.push_str(command);
-        text.push('\n');
-    }
-    if !block.output.is_empty() {
-        text.push_str(&block.output);
-        text.push('\n');
-    }
-    text.push_str("```\n\n");
-    text
-}
-
 /// A command block as a note: the command as a heading and a runnable `sh` fence, the
 /// output as a plain fence under it; either half alone when the block has only that.
 #[must_use]
@@ -3943,7 +2759,6 @@ impl BlockMenuItem {
             Self::CopyCommand => "copy-command",
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
-            Self::Ask => "ask",
             Self::Note => "note",
             Self::SelectBlock => "select-block",
             Self::Copy => "copy",
@@ -3958,7 +2773,6 @@ impl BlockMenuItem {
             Self::CopyCommand => "Copy command",
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
-            Self::Ask => "Ask the agent",
             Self::Note => "Save as note",
             Self::SelectBlock => "Select block",
             Self::Copy => "Copy",
@@ -3966,20 +2780,6 @@ impl BlockMenuItem {
             Self::Find => "Find…",
             Self::ClearScreen => "Clear screen",
         }
-    }
-}
-
-/// The media type of a picture file the model reads, from its extension; `None` for any
-/// other file.
-#[must_use]
-pub fn picture_type(path: &std::path::Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        _ => None,
     }
 }
 
@@ -4005,11 +2805,9 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
-    use slopty_proto::agent::{Clipped, SlashCommand, ToolDetail, TranscriptBody, TranscriptEntry};
     use slopty_proto::terminal::{Frame, TermRequest};
 
     use super::*;
-    use crate::terminal::conversation::attachment_label;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
     fn terminal(
@@ -4029,45 +2827,6 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
-    }
-
-    /// A real picture of `width`×`height` encoded as `format`, for pasting.
-    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
-        let buffer = image::ImageBuffer::from_fn(width, height, |x, y| {
-            image::Rgb([u8::try_from(x % 256).unwrap_or(0), u8::try_from(y % 256).unwrap_or(0), 90])
-        });
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(buffer).write_to(&mut out, format).expect("encodes");
-        out.into_inner()
-    }
-
-    fn user(text: &str) -> TranscriptEntry {
-        TranscriptEntry {
-            at: None,
-            body: TranscriptBody::User { text: text.to_owned(), images: 0 },
-        }
-    }
-
-    fn assistant(markdown: &str) -> TranscriptEntry {
-        TranscriptEntry {
-            at: None,
-            body: TranscriptBody::Assistant { markdown: markdown.to_owned() },
-        }
-    }
-
-    fn tool(command: &str) -> TranscriptEntry {
-        TranscriptEntry {
-            at: None,
-            body: TranscriptBody::ToolUse {
-                call: format!("toolu_{command}"),
-                name: "Bash".to_owned(),
-                summary: command.to_owned(),
-                detail: ToolDetail::Command {
-                    command: Clipped::whole(command.to_owned()),
-                    description: None,
-                },
-            },
-        }
     }
 
     fn marked(text: &str, mark: SemanticMark) -> Line {
@@ -4807,7 +3566,6 @@ mod tests {
             "Copy command",
             "Copy output",
             "Rerun",
-            "Ask the agent",
             "Save as note",
             "Select block",
             "Paste",
@@ -4819,7 +3577,8 @@ mod tests {
         assert!(!tree.iter().any(|n| n.is("MenuItem", Some("Copy"))), "nothing selected yet");
         let block = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
         let block = block.expect("the menu holds its block");
-        assert_eq!(block_markdown(&block), "```\n$ seq 2\n1\n2\n```\n\n");
+        assert_eq!(block.command.as_deref(), Some("seq 2"));
+        assert_eq!(block.output, "1\n2");
         assert!(drain_input(&mut rx).is_empty(), "a right click on a block is not reported");
         pick(cx, "copy-output");
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
@@ -4880,10 +3639,7 @@ mod tests {
         assert!(cx.debug_bounds("block-menu").is_some(), "the armed tap opens the menu");
         assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
         let tapped = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
-        assert_eq!(
-            tapped.map(|b| block_markdown(&b)).as_deref(),
-            Some("```\n$ seq 2\n1\n2\n```\n\n")
-        );
+        assert_eq!(tapped.and_then(|b| b.command).as_deref(), Some("seq 2"));
         assert!(drain_input(&mut rx).is_empty(), "the tap is not reported");
         pick(cx, "copy-command");
         assert_eq!(clipboard(cx).as_deref(), Some("seq 2"));
@@ -4969,36 +3725,25 @@ mod tests {
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let items: Vec<_> =
             tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
-        assert_eq!(
-            items,
-            ["Copy", "Ask the agent", "Save as note", "Paste", "Find…", "Clear screen"]
-        );
+        assert_eq!(items, ["Copy", "Save as note", "Paste", "Find…", "Clear screen"]);
         pick(cx, "copy");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(text.as_deref(), Some("second"));
 
-        // The selection, fenced, is what the agent is asked about and what the note keeps.
+        // The selection, fenced, is what the note keeps.
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let seen = std::rc::Rc::clone(&events);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                let line = match event {
-                    TerminalViewEvent::AskAgent(text) => format!("ask:{text}"),
-                    TerminalViewEvent::NoteBlock(text) => format!("note:{text}"),
-                    _ => return,
-                };
-                seen.borrow_mut().push(line);
+                if let TerminalViewEvent::NoteBlock(text) = event {
+                    seen.borrow_mut().push(format!("note:{text}"));
+                }
             })
             .detach();
         });
         right_click(cx);
-        pick(cx, "ask");
-        right_click(cx);
         pick(cx, "note");
-        assert_eq!(
-            events.borrow().as_slice(),
-            ["ask:```\nsecond\n```\n\n", "note:```\nsecond\n```\n"]
-        );
+        assert_eq!(events.borrow().as_slice(), ["note:```\nsecond\n```\n"]);
 
         // ⇧-arrows move the selection's head; the shell sees none of them. Without a
         // selection the same keys are the shell's.
@@ -5036,40 +3781,6 @@ mod tests {
         assert_eq!(took_label(Duration::from_secs(3_599)), "59 m 59 s");
         assert_eq!(took_label(Duration::from_secs(3_600)), "1 h 00 m");
         assert_eq!(took_label(Duration::from_mins(362)), "6 h 02 m");
-    }
-
-    /// The answer that closes a turn carries how long the turn took, from the records' own
-    /// stamps; an answer more answers follow, or one without a stamp, carries nothing.
-    #[gpui::test]
-    fn a_turns_closing_answer_is_captioned_with_its_time(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        let session = view.read_with(cx, |v, _| v.session);
-        let at = |at: u64, mut entry: TranscriptEntry| {
-            entry.at = Some(at);
-            entry
-        };
-        view.update(cx, |v, cx| {
-            let entries = vec![
-                at(1_000, user("fix it")),
-                at(20_000, assistant("looking")),
-                at(43_400, assistant("done")),
-                at(50_000, user("thanks")),
-                assistant("welcome"),
-            ];
-            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-took-1").is_none(), "another answer follows");
-        assert!(cx.debug_bounds("conversation-took-2").is_some(), "the turn's last answer");
-        assert!(cx.debug_bounds("conversation-took-4").is_none(), "no stamp");
-        assert_eq!(
-            view.read_with(cx, |v, _| {
-                v.conversation().and_then(|c| conversation::turn_took(c.entries(), 2))
-            }),
-            Some(Duration::from_millis(42_400))
-        );
     }
 
     /// A finished command's row says how long it took, at its right end, once it took a
@@ -5711,112 +4422,6 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the thumb does not select");
     }
 
-    /// ⌘⇧L swaps the grid for the conversation and asks the host to follow the transcript;
-    /// the host's slices fill it (a reset replaces, an append extends); ⌘⇧L again brings the
-    /// grid back and stops the follow.
-    #[gpui::test]
-    fn the_conversation_replaces_the_grid_and_follows_the_transcript(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        while rx.try_recv().is_ok() {}
-        assert!(cx.debug_bounds("conversation").is_none());
-
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ClientMsg::Transcript(TranscriptFollow { session: s, follow: true })) if s == session
-        ));
-        assert!(cx.debug_bounds("conversation").is_some(), "the conversation is drawn");
-
-        let snapshot = TranscriptUpdate {
-            session,
-            reset: true,
-            entries: vec![
-                user("fix it"),
-                assistant("On it.\n\n```sh\ncargo test\n```\n\nthen look."),
-            ],
-        };
-        view.update(cx, |v, cx| v.transcript_update(snapshot, cx));
-        let more = TranscriptUpdate { session, reset: false, entries: vec![tool("cargo test")] };
-        view.update(cx, |v, cx| v.transcript_update(more, cx));
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.conversation().map(|c| c.entries().len())), Some(3));
-        let bounds = cx.debug_bounds("conversation").expect("drawn");
-        assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
-
-        // The fenced block in the answer is its own element with a copy button: a click puts
-        // the code alone on the clipboard.
-        let copy = cx.debug_bounds("conversation-code-copy-1-1").expect("the block's copy button");
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Button", Some("Copy code"))), "{tree:#?}");
-        cx.simulate_click(copy.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        let copied = cx.read_from_clipboard().and_then(|item| item.text());
-        assert_eq!(copied.as_deref(), Some("cargo test"));
-        // The answer's own copy button takes the whole answer; the palette's action the whole
-        // conversation as Markdown.
-        let copy = cx.debug_bounds("conversation-copy-1").expect("the answer's copy button");
-        cx.simulate_click(copy.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        let copied = cx.read_from_clipboard().and_then(|item| item.text());
-        assert_eq!(copied.as_deref(), Some("On it.\n\n```sh\ncargo test\n```\n\nthen look."));
-        // Its "note" button asks the canvas for a card with the answer, as a block's does.
-        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&notes);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::NoteBlock(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        let note = cx.debug_bounds("conversation-note-1").expect("the answer's note button");
-        cx.simulate_click(note.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            notes.borrow().as_slice(),
-            ["On it.\n\n```sh\ncargo test\n```\n\nthen look."],
-            "the answer's Markdown, as copied"
-        );
-        cx.update(|window, cx| window.dispatch_action(Box::new(CopyConversation), cx));
-        cx.run_until_parked();
-        let copied = cx.read_from_clipboard().and_then(|item| item.text());
-        assert_eq!(
-            copied.as_deref(),
-            Some(
-                "**You**\n\nfix it\n\n**Claude**\n\nOn it.\n\n```sh\ncargo test\n```\n\nthen look.\n\n> **Bash** cargo test\n"
-            )
-        );
-        assert_eq!(
-            conversation::segments("a\n```sh\nx\n```\nb"),
-            [
-                conversation::Segment::Prose("a".to_owned()),
-                conversation::Segment::Code { lang: "sh".to_owned(), body: "x".to_owned() },
-                conversation::Segment::Prose("b".to_owned()),
-            ]
-        );
-        assert_eq!(
-            conversation::segments("```\nopen"),
-            [conversation::Segment::Code { lang: String::new(), body: "open".to_owned() }],
-            "an unclosed fence runs to the end"
-        );
-        assert_eq!(
-            conversation::segments("just prose"),
-            [conversation::Segment::Prose("just prose".to_owned())]
-        );
-
-        cx.simulate_keystrokes("cmd-shift-l");
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ClientMsg::Transcript(TranscriptFollow { follow: false, .. }))
-        ));
-        assert!(cx.debug_bounds("conversation").is_none(), "the grid is back");
-        assert!(view.read_with(cx, |v, _| v.conversation().is_none()));
-    }
-
     /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes; with the setting off the
     /// chords are not the terminal's (⌘← goes up to the app, ⌥⌫ to the encoder as a key).
     #[gpui::test]
@@ -5858,11 +4463,6 @@ mod tests {
         assert_eq!(raw(&mut rx), [b"key:Backspace".to_vec()], "off: ⌘← passes up, ⌥⌫ is a key");
     }
 
-    /// Whether the composer has the window's focus.
-    fn composer_focused(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> bool {
-        cx.update(|window, cx| view.read(cx).composer_focused(window, cx))
-    }
-
     /// Every key the terminal received, oldest first, with the paste texts in between.
     fn drain_input(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
         let mut out = Vec::new();
@@ -5885,447 +4485,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// With the conversation on, typing lands in the composer and ↩ sends the text into the
-    /// session as a paste followed by Enter, then clears it; ⇧↩ breaks a line instead; an
-    /// empty ↩ is a bare Enter; Esc and ⌃C keep their terminal meaning; ⌘⇧L brings the grid
-    /// back with the keyboard.
-    #[gpui::test]
-    fn the_composer_types_into_the_session(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        cx.simulate_keystrokes("cmd-shift-l");
-        cx.run_until_parked();
-        let _follow = drain_input(&mut rx);
-        assert!(cx.debug_bounds("composer").is_some(), "the composer is drawn");
-        assert!(composer_focused(&view, cx));
-
-        cx.simulate_keystrokes("h i shift-enter y");
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("hi\ny"));
-        assert!(drain_input(&mut rx).is_empty(), "typing stays in the composer");
-
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(drain_input(&mut rx), ["paste:hi\ny", "enter"]);
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some(""), "the composer is empty again");
-
-        cx.simulate_keystrokes("enter");
-        assert_eq!(drain_input(&mut rx), ["enter"], "an empty submit is a bare Enter");
-
-        cx.simulate_keystrokes("escape ctrl-c");
-        assert_eq!(drain_input(&mut rx), ["escape", "ctrl-c"], "terminal keys pass through");
-        assert!(composer_focused(&view, cx), "and keep the caret");
-
-        cx.simulate_keystrokes("cmd-shift-l");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("composer").is_none());
-        assert!(!composer_focused(&view, cx));
-        cx.simulate_keystrokes("x");
-        assert!(drain_input(&mut rx).contains(&"x".to_owned()), "the grid has the keys");
-    }
-
-    /// The border painted around the element with `selector`, from the scene.
-    fn border_color_of(cx: &mut VisualTestContext, selector: &'static str) -> Option<gpui::Hsla> {
-        let bounds = cx.debug_bounds(selector)?;
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 1.0
-        };
-        quads
-            .iter()
-            .find(|q| {
-                near(q.bounds.origin.x, bounds.origin.x)
-                    && near(q.bounds.origin.y, bounds.origin.y)
-                    && near(q.bounds.size.width, bounds.size.width)
-                    && q.border_widths.top.0 > 0.0
-            })
-            .map(|q| q.border_color)
-    }
-
-    /// The composer's field wears the accent ring while it has the caret and a hairline
-    /// once the grid takes the keyboard back; the row above it is the warn tint.
-    #[gpui::test]
-    fn the_composer_wears_a_focus_ring_only_while_focused(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let theme = Theme::default();
-        cx.simulate_keystrokes("cmd-shift-l");
-        cx.run_until_parked();
-        assert!(composer_focused(&view, cx));
-        assert_eq!(border_color_of(cx, "composer-field"), Some(hsla(theme.surfaces.accent)));
-
-        cx.update(|window, cx| {
-            let grid = view.read(cx).focus.clone();
-            window.focus(&grid, cx);
-        });
-        cx.run_until_parked();
-        assert!(!composer_focused(&view, cx));
-        assert_eq!(border_color_of(cx, "composer-field"), Some(hsla(theme.surfaces.border)));
-
-        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-        view.update(cx, |v, cx| v.set_agent_status(Some(blocked), cx));
-        cx.run_until_parked();
-        let row = cx.debug_bounds("conversation-attention").expect("the attention row");
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let fill = quads
-            .iter()
-            .find(|q| {
-                f32::from(row.origin.y).mul_add(-scale, q.bounds.origin.y.0).abs() < 1.0
-                    && f32::from(row.size.height).mul_add(-scale, q.bounds.size.height.0).abs()
-                        < 1.0
-            })
-            .and_then(|q| q.background.as_solid());
-        assert_eq!(fill, Some(hsla_alpha(theme.surfaces.warn, alpha::TINT)));
-    }
-
-    /// A permission puts an Allow / Deny row above the composer; pressing one raises
-    /// `Answered` (the canvas types the key) and the row says so until the host reports the
-    /// next state; a question puts the caret in the composer.
-    #[gpui::test]
-    fn the_attention_row_answers_a_permission(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&answers);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Answered { allowed } = event {
-                    seen.borrow_mut().push(*allowed);
-                }
-            })
-            .detach();
-        });
-        cx.simulate_keystrokes("cmd-shift-l");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-attention").is_none());
-
-        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-        view.update(cx, |v, cx| v.set_agent_status(Some(blocked), cx));
-        cx.run_until_parked();
-        let allow = cx.debug_bounds("conversation-allow").expect("Allow is drawn");
-        assert!(cx.debug_bounds("conversation-deny").is_some());
-        cx.simulate_click(allow.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(*answers.borrow(), [true]);
-        assert!(cx.debug_bounds("conversation-allow").is_none(), "one tap, one answer");
-        assert!(cx.debug_bounds("conversation-attention").is_some(), "the row says allowed");
-        assert_eq!(
-            view.read_with(cx, |v, _| v.attention()),
-            Some(Attention::Permission {
-                tool: "Bash".to_owned(),
-                answered: Some(true),
-                detail: None,
-                always: None,
-            })
-        );
-
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-attention").is_none(), "the next state clears it");
-
-        // The grid has the focus; a question moves the caret to the composer.
-        cx.update(|window, cx| {
-            let grid = view.read(cx).focus.clone();
-            window.focus(&grid, cx);
-        });
-        cx.run_until_parked();
-        assert!(!composer_focused(&view, cx));
-        let question = AgentStatus::Blocked(BlockReason::Question);
-        view.update(cx, |v, cx| v.set_agent_status(Some(question), cx));
-        cx.run_until_parked();
-        cx.run_until_parked();
-        assert!(composer_focused(&view, cx));
-        assert_eq!(view.read_with(cx, |v, _| v.attention()), Some(Attention::Prompt));
-    }
-
-    /// The list follows the tail until the reader scrolls up; then new entries leave the view
-    /// where it is and a "↓ latest" pill appears, which pins it again; a reset pins too.
-    #[gpui::test]
-    fn the_list_stays_pinned_until_the_reader_scrolls_up(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        let many: Vec<TranscriptEntry> = (0..60).map(|i| assistant(&format!("line {i}"))).collect();
-        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
-            session,
-            reset,
-            entries,
-        };
-        view.update(cx, |v, cx| v.transcript_update(update(true, many.clone()), cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
-        assert!(cx.debug_bounds("conversation-latest").is_none());
-        let last = cx.debug_bounds("conversation-entry-59").expect("the last entry is in view");
-        let list = cx.debug_bounds("conversation").expect("drawn");
-        assert!(last.bottom() <= list.bottom());
-
-        // Wheel up (positive y) over the list.
-        let at = list.center();
-        cx.simulate_event(ScrollWheelEvent {
-            position: at,
-            delta: ScrollDelta::Lines(point(0.0, 6.0)),
-            modifiers: gpui::Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-        });
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
-        assert!(cx.debug_bounds("conversation-latest").is_some(), "the pill offers the way back");
-        assert!(cx.debug_bounds("conversation-entry-59").is_none(), "the tail scrolled away");
-
-        view.update(cx, |v, cx| v.transcript_update(update(false, vec![user("more")]), cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
-        assert!(cx.debug_bounds("conversation-entry-60").is_none(), "no yank");
-
-        let pill = cx.debug_bounds("conversation-latest").expect("pill");
-        cx.simulate_click(pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
-        assert!(cx.debug_bounds("conversation-latest").is_none());
-        assert!(cx.debug_bounds("conversation-entry-60").is_some(), "back at the bottom");
-
-        // Scroll up again, then a reset (new transcript) pins.
-        cx.simulate_event(ScrollWheelEvent {
-            position: at,
-            delta: ScrollDelta::Lines(point(0.0, 6.0)),
-            modifiers: gpui::Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-        });
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.pinned())));
-        view.update(cx, |v, cx| v.transcript_update(update(true, many), cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned)));
-        assert!(cx.debug_bounds("conversation-entry-59").is_some());
-    }
-
-    /// Thinking and a tool's input start folded and open on a click; a result shows its
-    /// first lines and the rest on a click; the fold state survives appends and not resets.
-    #[gpui::test]
-    fn folds_open_on_a_click(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        let thinking = TranscriptEntry {
-            at: None,
-            body: TranscriptBody::Thinking { text: Clipped::whole("deep\nthought".to_owned()) },
-        };
-        let result = TranscriptEntry {
-            at: Some(1_788_602_400_000),
-            body: TranscriptBody::ToolResult {
-                tool: Some("Bash".to_owned()),
-                output: Clipped { text: "1\n2\n3\n4\n5\n6".to_owned(), more_lines: 7 },
-                is_error: false,
-            },
-        };
-        let update = TranscriptUpdate {
-            session,
-            reset: true,
-            entries: vec![thinking, tool("cargo test"), result],
-        };
-        view.update(cx, |v, cx| v.transcript_update(update, cx));
-        cx.run_until_parked();
-        let folded = cx.debug_bounds("conversation-entry-0").expect("thinking");
-        let tool_folded = cx.debug_bounds("conversation-entry-1").expect("tool");
-        let result_folded = cx.debug_bounds("conversation-entry-2").expect("result");
-
-        cx.simulate_click(folded.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(0))));
-        let open = cx.debug_bounds("conversation-entry-0").expect("thinking");
-        assert!(open.size.height > folded.size.height, "{open:?} vs {folded:?}");
-
-        // The tool's header is its first line; the input opens under it.
-        let header = point(tool_folded.center().x, tool_folded.top() + px(6.0));
-        cx.simulate_click(header, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(1))));
-        let open = cx.debug_bounds("conversation-entry-1").expect("tool");
-        assert!(open.size.height > tool_folded.size.height);
-
-        let header = point(result_folded.center().x, result_folded.top() + px(6.0));
-        cx.simulate_click(header, gpui::Modifiers::default());
-        cx.run_until_parked();
-        let open = cx.debug_bounds("conversation-entry-2").expect("result");
-        assert!(open.size.height > result_folded.size.height);
-
-        // Clicking the header again folds; an append keeps the folds, a reset drops them.
-        let header = point(open.center().x, open.top() + px(6.0));
-        cx.simulate_click(header, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(2))));
-        let more = TranscriptUpdate { session, reset: false, entries: vec![user("ok")] };
-        view.update(cx, |v, cx| v.transcript_update(more, cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.is_open(0))));
-        let again = TranscriptUpdate { session, reset: true, entries: vec![user("ok")] };
-        view.update(cx, |v, cx| v.transcript_update(again, cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(0))));
-    }
-
-    /// An edit shows as its diff unasked — added lines tinted in the success tone, removed
-    /// in the error tone, the counts in the header — folded past its preview until a click;
-    /// a todo list shows whole, with what is done struck through; a screen reader hears the
-    /// counts.
-    #[gpui::test]
-    fn an_edit_shows_its_diff_and_a_todo_list_its_checklist(cx: &mut TestAppContext) {
-        use slopty_proto::agent::{DiffKind, DiffLine, Todo, TodoStatus};
-        let (view, _rx, cx) = terminal(cx);
-        // Tall enough for the whole open diff: the list is bottom-aligned and would scroll
-        // the top rows out of the scene otherwise.
-        cx.simulate_resize(size(px(400.0), px(900.0)));
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        let line = |kind, text: &str| DiffLine { kind, text: text.to_owned() };
-        let mut lines = vec![line(DiffKind::Context, "fn a() {")];
-        lines.extend((0..10).map(|i| line(DiffKind::Removed, &format!("    old {i}"))));
-        lines.extend((0..10).map(|i| line(DiffKind::Added, &format!("    new {i}"))));
-        lines.push(line(DiffKind::Context, "}"));
-        let edit = TranscriptEntry {
-            at: None,
-            body: TranscriptBody::ToolUse {
-                call: "toolu_e".to_owned(),
-                name: "Edit".to_owned(),
-                summary: "src/a.rs".to_owned(),
-                detail: ToolDetail::Diff {
-                    path: "src/a.rs".to_owned(),
-                    line: None,
-                    lines,
-                    more_lines: 0,
-                    replace_all: false,
-                },
-            },
-        };
-        let todos = TranscriptEntry {
-            at: None,
-            body: TranscriptBody::ToolUse {
-                call: "toolu_t".to_owned(),
-                name: "TodoWrite".to_owned(),
-                summary: String::new(),
-                detail: ToolDetail::Todos {
-                    items: vec![
-                        Todo { text: "read".to_owned(), status: TodoStatus::Completed },
-                        Todo { text: "write".to_owned(), status: TodoStatus::InProgress },
-                        Todo { text: "test".to_owned(), status: TodoStatus::Pending },
-                    ],
-                },
-            },
-        };
-        let update = TranscriptUpdate { session, reset: true, entries: vec![edit, todos] };
-        view.update(cx, |v, cx| v.transcript_update(update, cx));
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-
-        let theme = view.read_with(cx, |v, _| v.theme().clone());
-        let s = &theme.surfaces;
-        let tinted = |cx: &mut VisualTestContext, tone| {
-            let want = hsla_alpha(tone, alpha::TINT);
-            let quads = cx.update(|window, _| window.painted_quads());
-            quads.iter().filter(|q| q.background.as_solid().is_some_and(|c| c == want)).count()
-        };
-        // Folded: the preview's lines, ten removed and two added.
-        assert_eq!(tinted(cx, s.error), 10, "removed lines in the error tint");
-        assert_eq!(tinted(cx, s.success), 1, "added lines in the success tint, folded");
-        let folded = cx.debug_bounds("conversation-entry-0").expect("the edit");
-        let header = point(folded.center().x, folded.top() + px(6.0));
-        cx.simulate_click(header, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(tinted(cx, s.success), 10, "every added line once open");
-        let open = cx.debug_bounds("conversation-entry-0").expect("the edit");
-        assert!(open.size.height > folded.size.height);
-        assert!(cx.debug_bounds("conversation-entry-1").is_some(), "the todo list is drawn");
-
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let labels: Vec<String> =
-            tree.iter().filter(|n| n.role == "ListItem").filter_map(|n| n.label.clone()).collect();
-        assert_eq!(
-            labels,
-            ["Tool Edit: src/a.rs, 10 added, 10 removed", "Tool TodoWrite: 1 of 3 done"],
-            "{tree:#?}"
-        );
-
-        // The list's "note" button asks the canvas for a checklist card of it.
-        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&notes);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::NoteBlock(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        assert!(cx.debug_bounds("conversation-note-0").is_none(), "an edit has no list to keep");
-        let note = cx.debug_bounds("conversation-note-1").expect("the todo list's note button");
-        cx.simulate_click(note.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            notes.borrow().as_slice(),
-            ["# Tasks\n\n- [x] read\n- [ ] write\n- [ ] test\n"],
-            "done ticked, the rest open, in the agent's order"
-        );
-        assert!(
-            view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(1))),
-            "the press was the button's, not the header's fold"
-        );
-    }
-
-    /// A subagent's progress shows under the call that spawned it — the kind, the tool
-    /// count, the time, the last tool, then "done" — and a screen reader hears the same;
-    /// the subagent's own records never become entries (that is the host's rule, tested
-    /// in `slopty_agent`), so the card stays the agent's conversation.
-    #[gpui::test]
-    fn a_subagent_progresses_under_its_call(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        let spawn = TranscriptEntry {
-            at: None,
-            body: TranscriptBody::ToolUse {
-                call: "toolu_p".to_owned(),
-                name: "Agent".to_owned(),
-                summary: "List files".to_owned(),
-                detail: ToolDetail::Agent {
-                    description: "List files".to_owned(),
-                    kind: Some("Explore".to_owned()),
-                    prompt: Clipped::whole("ls".to_owned()),
-                },
-            },
-        };
-        let update = TranscriptUpdate { session, reset: true, entries: vec![spawn] };
-        view.update(cx, |v, cx| v.transcript_update(update, cx));
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let label = |cx: &mut VisualTestContext| {
-            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-            tree.iter()
-                .find(|n| n.role == "ListItem")
-                .and_then(|n| n.label.clone())
-                .unwrap_or_default()
-        };
-        assert_eq!(label(cx), "Tool Agent: List files");
-        let task = |tool_uses, duration_ms, done| AgentTask {
-            call: "toolu_p".to_owned(),
-            description: "Running List files".to_owned(),
-            kind: Some("Explore".to_owned()),
-            tool_uses,
-            duration_ms,
-            last_tool: Some("Bash".to_owned()),
-            done,
-        };
-        view.update(cx, |v, cx| v.agent_task(task(1, 2_525, false), cx));
-        cx.run_until_parked();
-        assert_eq!(label(cx), "Tool Agent: List files, Explore running, 1 tool use, 3 s, Bash");
-        assert!(cx.debug_bounds("tool-task").is_some(), "the progress line is drawn");
-        view.update(cx, |v, cx| v.agent_task(task(3, 12_000, true), cx));
-        cx.run_until_parked();
-        assert_eq!(label(cx), "Tool Agent: List files, Explore done, 3 tool uses, 12 s, Bash");
-        // A reset (a new conversation) forgets the tasks.
-        let again = TranscriptUpdate { session, reset: true, entries: vec![user("ok")] };
-        view.update(cx, |v, cx| v.transcript_update(again, cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.conversation().is_some_and(|c| c.tasks().is_empty())));
     }
 
     /// An input method previews its composition at the cursor and nothing reaches the host
@@ -6423,73 +4582,6 @@ mod tests {
         assert!(!sent[1].mods.contains(slopty_proto::input::Mods::CTRL));
     }
 
-    /// The conversation's attention row and composer are read with roles and labels, in
-    /// reading order; Allow and Deny sit in the Tab ring and Enter answers.
-    #[gpui::test]
-    fn the_attention_row_and_the_composer_are_read_and_tabbed(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&answers);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Answered { allowed } = event {
-                    seen.borrow_mut().push(*allowed);
-                }
-            })
-            .detach();
-        });
-        cx.simulate_keystrokes("cmd-shift-l");
-        view.update(cx, |v, cx| {
-            let session = v.session;
-            let update = TranscriptUpdate {
-                session,
-                reset: true,
-                entries: vec![user("hello"), assistant("hi")],
-            };
-            v.transcript_update(update, cx);
-            let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-            v.set_agent_status(Some(blocked), cx);
-        });
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let at = |role: &str, label: &str| {
-            tree.iter()
-                .position(|n| n.is(role, Some(label)))
-                .unwrap_or_else(|| panic!("{role} {label:?} in {tree:#?}"))
-        };
-        assert!(at("Group", "Conversation") < at("ListItem", "You: hello"));
-        assert!(at("ListItem", "You: hello") < at("ListItem", "Claude: hi"));
-        assert!(at("ListItem", "Claude: hi") < at("Status", "Claude wants to use Bash"));
-        assert!(at("Status", "Claude wants to use Bash") < at("Button", "Allow"));
-        assert!(at("Button", "Allow") < at("Button", "Deny"));
-        assert!(at("Button", "Deny") < at("Group", "Composer"));
-        assert!(at("Group", "Composer") < at("MultilineTextInput", "Message to Claude"));
-        assert!(at("MultilineTextInput", "Message to Claude") < at("Button", "Send"));
-
-        // From the grid, the first stop is Allow, then Deny; Enter on Deny answers.
-        cx.update(|window, cx| {
-            let grid = view.read(cx).focus.clone();
-            window.focus(&grid, cx);
-            window.focus_next(cx);
-        });
-        cx.run_until_parked();
-        let focused_label = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| crate::a11y::tree(window))
-                .into_iter()
-                .find(|n| n.focused)
-                .and_then(|n| n.label)
-        };
-        assert_eq!(focused_label(cx).as_deref(), Some("Allow"));
-        cx.simulate_keystrokes("tab");
-        cx.run_until_parked();
-        assert_eq!(focused_label(cx).as_deref(), Some("Deny"));
-        cx.simulate_keystrokes("enter");
-        cx.simulate_event(gpui::KeyUpEvent { keystroke: Keystroke::parse("enter").unwrap() });
-        cx.run_until_parked();
-        assert_eq!(*answers.borrow(), [false]);
-    }
-
     /// ⌘-click on a path a compiler printed types the editor command at the prompt, with the
     /// line; a plain word nearby does nothing.
     #[gpui::test]
@@ -6544,66 +4636,6 @@ mod tests {
         }
         assert_eq!(pastes, ["${EDITOR:-vi} +12 'src/main.rs'"]);
         assert_eq!(keys, 1, "then ↩");
-    }
-
-    /// A tool result's lines that name a file — a grep hit, a compiler's location — are
-    /// buttons that view the file on the canvas at that line, relative to the agent's cwd.
-    #[gpui::test]
-    fn a_results_path_lines_view_the_file(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&viewed);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::ViewFile { path, line } = event {
-                    seen.borrow_mut().push((path.clone(), *line));
-                }
-            })
-            .detach();
-        });
-        cx.simulate_keystrokes("cmd-shift-l");
-        let session = view.read_with(cx, |v, _| v.session);
-        let result = TranscriptEntry {
-            at: None,
-            body: TranscriptBody::ToolResult {
-                tool: Some("Grep".to_owned()),
-                output: Clipped::whole(
-                    "src/a.rs:12:fn x() {\nno path here\n  --> src/b.rs:3:5".to_owned(),
-                ),
-                is_error: false,
-            },
-        };
-        view.update(cx, |v, cx| {
-            v.agent_info(AgentInfo { cwd: Some("/w".to_owned()), ..AgentInfo::default() }, cx);
-            v.transcript_update(
-                TranscriptUpdate { session, reset: true, entries: vec![tool("grep"), result] },
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let buttons: Vec<&str> = tree
-            .iter()
-            .filter(|n| {
-                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("View "))
-            })
-            .filter_map(|n| n.label.as_deref())
-            .collect();
-        assert_eq!(
-            buttons,
-            ["View src/a.rs:12 on the canvas", "View src/b.rs:3 on the canvas"],
-            "{tree:#?}"
-        );
-        assert!(cx.debug_bounds("result-path-1-1").is_none(), "a line without a path is text");
-        let hit = cx.debug_bounds("result-path-1-2").expect("the compiler's location");
-        cx.simulate_click(hit.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(viewed.borrow().as_slice(), [("/w/src/b.rs".to_owned(), Some(3))]);
-        assert!(
-            view.read_with(cx, |v, _| v.conversation().is_some_and(|c| !c.is_open(1))),
-            "the click did not toggle the fold"
-        );
     }
 
     /// While a command runs there is no prompt to type at: ⌘-click on a path asks the canvas
@@ -6880,1060 +4912,18 @@ mod tests {
         }
     }
 
-    /// Every message the host received that speaks to or about the agent, oldest first, as
-    /// one word each.
+    /// Every message the host received that types or clears, oldest first, as one word each.
     fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             out.push(match msg {
-                ClientMsg::Transcript(TranscriptFollow { follow, .. }) => {
-                    format!("follow:{follow}")
-                }
-                ClientMsg::AgentSay { text, .. } => format!("say:{text}"),
-                ClientMsg::AgentAnswer(answer) => {
-                    let filed: Vec<String> = answer
-                        .answers
-                        .iter()
-                        .map(|a| format!(":{}={}", a.question, a.answer))
-                        .collect();
-                    let tail = if answer.always { ":always" } else { "" };
-                    format!("answer:{}:{}{}{tail}", answer.request, answer.allowed, filed.concat())
-                }
-                ClientMsg::AgentInterrupt { .. } => "interrupt".to_owned(),
-                ClientMsg::AgentSet(AgentSet { model, permission_mode, .. }) => format!(
-                    "set:{}{}",
-                    model.map(|m| format!("model={m}")).unwrap_or_default(),
-                    permission_mode.map(|m| format!("mode={m}")).unwrap_or_default()
-                ),
                 ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
                 ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
                 ClientMsg::Term { req: TermRequest::Clear, .. } => "clear".to_owned(),
-                ClientMsg::ListFiles { query, .. } => format!("files:{query}"),
                 // Resizes and the like: not what these tests are about.
                 _ => continue,
             });
         }
         out
-    }
-
-    /// A driven view (the host speaks Claude Code's stream-json protocol) opens its
-    /// conversation on its first frame with the keyboard in the composer and asks the host for
-    /// the conversation so far; ↩ speaks to the agent rather than pasting into a grid; the
-    /// agent's streamed text shows under the list until it becomes an entry; a permission
-    /// request shows what the tool would do and is answered by request id, never by a key;
-    /// Esc interrupts; ⌘⇧L cannot hide the conversation.
-    #[gpui::test]
-    fn a_driven_view_speaks_to_the_agent(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&answers);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AgentAnswered { request, allowed, always, .. } = event {
-                    let tail = if *always { ":always" } else { "" };
-                    seen.borrow_mut().push(format!("{request}:{allowed}{tail}"));
-                }
-            })
-            .detach();
-        });
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation").is_some(), "the conversation is the view");
-        assert!(composer_focused(&view, cx), "with the caret in the composer");
-        assert_eq!(drain_words(&mut rx), ["follow:true"]);
-
-        cx.simulate_keystrokes("h i enter");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["say:hi"], "↩ speaks to the agent");
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some(""));
-        cx.simulate_keystrokes("enter");
-        assert!(drain_words(&mut rx).is_empty(), "an empty ↩ says nothing");
-
-        view.update(cx, |v, cx| v.agent_partial("Hello, so far".to_owned(), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-partial").is_some(), "the partial shows");
-        view.update(cx, |v, cx| v.agent_partial(String::new(), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-partial").is_none());
-
-        let request = PermissionRequest {
-            id: "req_1".to_owned(),
-            tool_use: "toolu_1".to_owned(),
-            tool: "Write".to_owned(),
-            summary: "note.txt".to_owned(),
-            detail: ToolDetail::Json { input: Clipped::whole("{}".to_owned()) },
-            always: Some("accept edits for this session".to_owned()),
-        };
-        view.update(cx, |v, cx| {
-            v.agent_permission(request, cx);
-            let blocked =
-                AgentStatus::Blocked(BlockReason::Permission { tool: "Write".to_owned() });
-            v.set_agent_status(Some(blocked), cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(cx, |v, _| v.attention()),
-            Some(Attention::Permission {
-                tool: "Write".to_owned(),
-                answered: None,
-                detail: Some("note.txt".to_owned()),
-                always: Some("accept edits for this session".to_owned()),
-            })
-        );
-        // Always sits between Allow and Deny and says what it would do; a tap on it allows
-        // with the agent's suggestion taken.
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let at = |role: &str, label: &str| {
-            tree.iter()
-                .position(|n| n.is(role, Some(label)))
-                .unwrap_or_else(|| panic!("{role} {label:?} in {tree:#?}"))
-        };
-        assert!(at("Button", "Allow") < at("Button", "Always: accept edits for this session"));
-        assert!(at("Button", "Always: accept edits for this session") < at("Button", "Deny"));
-        let always = cx.debug_bounds("conversation-always").expect("Always is drawn");
-        cx.simulate_click(always.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(*answers.borrow(), ["req_1:true:always"], "answered by request id, for good");
-        assert!(drain_words(&mut rx).is_empty(), "no key was typed");
-        assert!(cx.debug_bounds("conversation-allow").is_none(), "one tap, one answer");
-        assert!(cx.debug_bounds("conversation-always").is_none());
-
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.permission().is_none()), "the request is spent");
-        cx.simulate_keystrokes("escape");
-        assert_eq!(drain_words(&mut rx), ["interrupt"], "Esc interrupts the turn");
-        cx.simulate_keystrokes("ctrl-c");
-        assert_eq!(drain_words(&mut rx), ["interrupt"], "so does ⌃C");
-        assert!(composer_focused(&view, cx), "and the caret stays");
-        // While the agent works the button next to the field is Stop, one tap to interrupt;
-        // once it is idle again it is Send.
-        assert!(cx.debug_bounds("composer-send").is_none(), "no Send while working");
-        let stop = cx.debug_bounds("composer-stop").expect("Stop is drawn while working");
-        cx.simulate_click(stop.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["interrupt"], "Stop interrupts the turn");
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Idle), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("composer-stop").is_none(), "no Stop when idle");
-        assert!(cx.debug_bounds("composer-send").is_some(), "Send is back");
-
-        cx.simulate_keystrokes("cmd-shift-l");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation").is_some(), "the conversation cannot be hidden");
-        assert!(drain_words(&mut rx).is_empty());
-    }
-
-    /// ⌘F in a driven card searches the conversation itself, no host round trip: the bar sits
-    /// under the header, the hits are the entries holding the needle (newest first on
-    /// show), ⌘G / ↩ / ⇧↩ step and wrap, `.*` makes the needle a regex (a bad one says so),
-    /// new entries keep the hits true, and Esc closes the bar with the caret back in the
-    /// composer.
-    /// ↩ while the agent works still sends (Claude Code queues the prompt for its next turn),
-    /// and the conversation shows it as queued until its entry arrives or the turn ends.
-    #[gpui::test]
-    fn a_prompt_sent_while_the_agent_works_waits_as_queued(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        let session = view.read_with(cx, |v, _| v.session);
-        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
-            session,
-            reset,
-            entries,
-        };
-        view.update(cx, |v, cx| {
-            v.transcript_update(update(true, vec![user("first"), assistant("one")]), cx);
-            v.set_agent_status(Some(AgentStatus::Working), cx);
-        });
-        cx.run_until_parked();
-        let queued = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, _| v.conversation().map(|c| c.queued().to_vec()))
-        };
-        cx.simulate_keystrokes("l a t e r enter");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["say:later"], "sent, not held back");
-        assert_eq!(queued(cx).as_deref(), Some(&["later".to_owned()][..]));
-        assert!(cx.debug_bounds("conversation-queued-0").is_some(), "drawn as queued");
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Status", Some("Queued: later"))), "{tree:#?}");
-        view.update(cx, |v, cx| {
-            v.set_agent_status(Some(AgentStatus::Tool { tool: "Bash".to_owned() }), cx);
-        });
-        cx.simulate_keystrokes("m o r e enter");
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        assert_eq!(queued(cx).map(|q| q.len()), Some(2), "a tool is still the turn");
-        // Its entry arrives: that one is off the queue, the other still waits.
-        view.update(cx, |v, cx| {
-            v.transcript_update(update(false, vec![user("later"), assistant("two")]), cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(queued(cx).as_deref(), Some(&["more".to_owned()][..]));
-        assert!(cx.debug_bounds("conversation-queued-1").is_none());
-        // Blocked on the human mid-turn keeps the queue; the turn's end clears it.
-        view.update(cx, |v, cx| {
-            v.set_agent_status(Some(AgentStatus::Blocked(BlockReason::Question)), cx);
-        });
-        assert_eq!(queued(cx).map(|q| q.len()), Some(1));
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Done), cx));
-        cx.run_until_parked();
-        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
-        assert!(cx.debug_bounds("conversation-queued-0").is_none());
-        // Sent while idle: nothing is queued.
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Idle), cx));
-        cx.simulate_keystrokes("n o w enter");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["say:now"]);
-        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
-        // A reset (a resumed card) drops whatever was queued.
-        view.update(cx, |v, cx| v.set_agent_status(Some(AgentStatus::Working), cx));
-        cx.simulate_keystrokes("x enter");
-        cx.run_until_parked();
-        assert_eq!(queued(cx).map(|q| q.len()), Some(1));
-        view.update(cx, |v, cx| v.transcript_update(update(true, vec![user("first")]), cx));
-        assert_eq!(queued(cx).map(|q| q.len()), Some(0));
-    }
-
-    #[gpui::test]
-    fn the_composer_recalls_sent_prompts_on_up_and_down(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        let session = view.read_with(cx, |v, _| v.session);
-        view.update(cx, |v, cx| {
-            let entries = vec![
-                user("first"),
-                assistant("one"),
-                user("second"),
-                user("second"),
-                assistant("two"),
-                user("third"),
-                assistant("three"),
-            ];
-            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
-        });
-        cx.run_until_parked();
-        let text = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)))
-        };
-        let up_down = |cx: &mut VisualTestContext, keys: &str| {
-            cx.simulate_keystrokes(keys);
-            cx.run_until_parked();
-        };
-        assert!(composer_focused(&view, cx));
-        // ↑ on the empty composer: the newest prompt; ↑ again the older ones, the oldest
-        // stays; a prompt sent twice in a row is one step.
-        up_down(cx, "up");
-        assert_eq!(text(cx).as_deref(), Some("third"));
-        up_down(cx, "up");
-        assert_eq!(text(cx).as_deref(), Some("second"));
-        up_down(cx, "up up");
-        assert_eq!(text(cx).as_deref(), Some("first"));
-        // ↓ back down; past the newest the draft (empty) is back.
-        up_down(cx, "down down");
-        assert_eq!(text(cx).as_deref(), Some("third"));
-        up_down(cx, "down");
-        assert_eq!(text(cx).as_deref(), Some(""));
-        // A draft is kept aside while recalling and put back past the newest.
-        up_down(cx, "d r a f t up");
-        assert_eq!(text(cx).as_deref(), Some("draft"), "↑ in the human's own text moves the caret");
-        up_down(cx, "cmd-a backspace up down");
-        assert_eq!(text(cx).as_deref(), Some(""));
-        up_down(cx, "d up");
-        assert_eq!(text(cx).as_deref(), Some("d"));
-        up_down(cx, "backspace up");
-        assert_eq!(text(cx).as_deref(), Some("third"));
-        // Typing into a recalled prompt makes it the human's own: ↑ moves the caret.
-        up_down(cx, "x up");
-        assert_eq!(text(cx).as_deref(), Some("thirdx"), "the caret was at the end");
-        // Sending forgets the recall: ↑ starts from the newest again.
-        up_down(cx, "enter");
-        assert_eq!(text(cx).as_deref(), Some(""));
-        drain_words(&mut rx);
-        up_down(cx, "up");
-        assert_eq!(text(cx).as_deref(), Some("third"), "the transcript has not grown yet");
-
-        // The phone's bar ↑ / ↓ are the composer's too, not raw keys to the program.
-        let bar = |cx: &mut VisualTestContext, key: &str| {
-            let stroke = Keystroke {
-                modifiers: gpui::Modifiers::default(),
-                key: key.into(),
-                key_char: None,
-            };
-            view.update_in(cx, |v, window, cx| v.bar_key(stroke, window, cx));
-            cx.run_until_parked();
-        };
-        bar(cx, "up");
-        assert_eq!(text(cx).as_deref(), Some("second"));
-        bar(cx, "down");
-        assert_eq!(text(cx).as_deref(), Some("third"));
-        assert!(rx.try_recv().is_err(), "nothing went to the program");
-        bar(cx, "left");
-        assert!(rx.try_recv().is_ok(), "any other bar key is pressed as before");
-
-        // A click on a sent prompt puts it in the composer as if recalled: ↑ / ↓ go on from
-        // it, and the draft under way comes back past the newest.
-        up_down(cx, "cmd-a backspace d");
-        let bubble = cx.debug_bounds("conversation-reuse-2").expect("the second prompt's bubble");
-        cx.simulate_click(bubble.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(text(cx).as_deref(), Some("second"));
-        assert!(composer_focused(&view, cx));
-        up_down(cx, "up");
-        assert_eq!(text(cx).as_deref(), Some("first"));
-        up_down(cx, "down down down");
-        assert_eq!(text(cx).as_deref(), Some("d"), "the draft is back past the newest");
-        // The repeat of a prompt counts as the same step; typing after a click is the
-        // human's own text and ↑ moves the caret.
-        let again = cx.debug_bounds("conversation-reuse-3").expect("the repeated prompt");
-        cx.simulate_click(again.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        up_down(cx, "! up");
-        assert_eq!(text(cx).as_deref(), Some("second!"), "the caret was at the end");
-        up_down(cx, "cmd-a backspace up");
-        assert_eq!(text(cx).as_deref(), Some("third"), "the draft is empty again");
-        assert!(rx.try_recv().is_err(), "nothing went to the program");
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Button", Some("Edit and send again"))), "{tree:#?}");
-    }
-
-    #[gpui::test]
-    fn a_driven_view_steps_between_its_prompts(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        let session = view.read_with(cx, |v, _| v.session);
-        let mut entries = Vec::new();
-        for turn in 0..8 {
-            entries.push(user(&format!("prompt {turn}")));
-            entries.push(assistant(&format!("answer {turn}\n\nwith a second paragraph")));
-        }
-        view.update(cx, |v, cx| {
-            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
-        });
-        cx.run_until_parked();
-        let top = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, _| v.conversation().and_then(Conversation::top_entry))
-        };
-        let pinned = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, _| v.conversation().is_some_and(Conversation::pinned))
-        };
-        assert!(pinned(cx), "the list follows the tail to begin with");
-        // ⌘↓ while following the tail has nowhere to go and keeps following.
-        cx.simulate_keystrokes("cmd-down");
-        cx.run_until_parked();
-        assert!(pinned(cx));
-
-        // ⌘↑ from the composer: the prompt above the viewport's top (or the top one, when the
-        // reader is part-way through it), well past the first ones — sixteen entries overflow
-        // the card — and it stops following the tail.
-        cx.simulate_keystrokes("cmd-up");
-        cx.run_until_parked();
-        let (first, cut) = top(cx).expect("drawn");
-        assert!(first % 2 == 0 && (4..16).contains(&first) && !cut, "{first} {cut}");
-        assert!(!pinned(cx), "stepping up stops following the tail");
-        // Every prompt is two entries up; the first stays put.
-        cx.simulate_keystrokes("cmd-up");
-        cx.run_until_parked();
-        assert_eq!(top(cx), Some((first.saturating_sub(2), false)));
-        for _ in 0..8 {
-            cx.simulate_keystrokes("cmd-up");
-            cx.run_until_parked();
-        }
-        assert_eq!(top(cx), Some((0, false)));
-        // ⌘↓ steps down a prompt at a time; past the last one the list follows again.
-        cx.simulate_keystrokes("cmd-down");
-        cx.run_until_parked();
-        assert_eq!(top(cx), Some((2, false)));
-        for _ in 0..8 {
-            cx.simulate_keystrokes("cmd-down");
-            cx.run_until_parked();
-        }
-        assert!(pinned(cx), "past the last prompt the list follows the tail again");
-
-        // The phone's armed ⌘ with the bar's ↑ is ⌘↑: it steps up a prompt and disarms.
-        drain_words(&mut rx);
-        view.update(cx, |v, cx| {
-            v.set_sticky_command(true, cx);
-            let up = Keystroke {
-                modifiers: gpui::Modifiers::default(),
-                key: "up".into(),
-                key_char: None,
-            };
-            v.press(up, cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(top(cx), Some((first, false)));
-        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one press");
-        assert!(rx.try_recv().is_err(), "nothing went to the program");
-
-        // ⌘⇧C copies the newest answer, as the grid copies the newest block's output.
-        cx.simulate_keystrokes("cmd-shift-c");
-        cx.run_until_parked();
-        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
-        assert_eq!(copied.as_deref(), Some("answer 7\n\nwith a second paragraph"));
-    }
-
-    #[gpui::test]
-    fn a_driven_view_finds_in_its_conversation(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        let session = view.read_with(cx, |v, _| v.session);
-        let update = |reset: bool, entries: Vec<TranscriptEntry>| TranscriptUpdate {
-            session,
-            reset,
-            entries,
-        };
-        view.update(cx, |v, cx| {
-            v.transcript_update(
-                update(
-                    true,
-                    vec![
-                        user("where is the alpha path read?"),
-                        assistant("In `beta.rs`, by `read_alpha`."),
-                        tool("rg alpha"),
-                        assistant("Done."),
-                    ],
-                ),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        let hits = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, _| v.conversation().map(|c| (c.hits().0.to_vec(), c.hits().1)))
-        };
-
-        cx.simulate_keystrokes("cmd-f");
-        cx.run_until_parked();
-        let bar = cx.debug_bounds("terminal-search").expect("the bar is up");
-        let header = cx.debug_bounds("conversation").expect("the conversation");
-        assert!(bar.origin.y > header.origin.y, "the bar is a row in the card, not over it");
-        cx.simulate_keystrokes("shift-a l p h a");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![], None)), "a capital is as typed: smart case");
-        cx.simulate_keystrokes("cmd-a a l p h a");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(2))), "three entries, on the newest");
-        assert!(drain_words(&mut rx).is_empty(), "nothing asked of the host");
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let matches = |cx: &mut VisualTestContext| {
-            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-            tree.iter().find(|n| n.is("Label", Some("Matches"))).and_then(|n| n.value.clone())
-        };
-        assert_eq!(matches(cx).as_deref(), Some("3/3"), "the count reads the entries found");
-
-        cx.simulate_keystrokes("cmd-g");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(0))), "⌘G wraps to the oldest");
-        cx.simulate_keystrokes("shift-enter");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(2))), "⇧↩ back around");
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2], Some(0))));
-
-        // The transcript grows under the open bar: the hits follow, the reader stays put.
-        view.update(cx, |v, cx| v.transcript_update(update(false, vec![user("alpha again")]), cx));
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2, 4], Some(0))));
-
-        // `.*`: the needle is a regex; one that does not compile finds nothing and says so.
-        let regex = cx.debug_bounds("terminal-search-regex").expect("the regex toggle");
-        cx.simulate_click(regex.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![0, 1, 2, 4], Some(3))), "the same hits, newest first");
-        cx.simulate_keystrokes("cmd-a");
-        cx.simulate_keystrokes("r e a d _ a l . h a");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![1], Some(0))));
-        cx.simulate_keystrokes("(");
-        cx.run_until_parked();
-        assert_eq!(hits(cx), Some((vec![], None)));
-        assert!(view.read_with(cx, |v, _| v.search.as_ref().unwrap().invalid.is_some()));
-        assert_eq!(matches(cx).as_deref(), Some("bad regex"));
-        cx.simulate_keystrokes("cmd-a");
-        cx.simulate_keystrokes("z z z");
-        cx.run_until_parked();
-        assert_eq!(matches(cx).as_deref(), Some("none"), "a needle nothing holds");
-
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("terminal-search").is_none(), "closed");
-        assert_eq!(hits(cx), Some((vec![], None)), "no tint left behind");
-        assert!(composer_focused(&view, cx), "the caret is back in the composer");
-    }
-
-    /// A picture dropped from the desktop onto a driven card is attached like a pasted one,
-    /// read off the UI thread; a file that is not a picture is refused by name; a shell card
-    /// takes nothing, since the path is this machine's and the shell runs on the host.
-    #[gpui::test]
-    fn a_picture_dropped_on_a_driven_card_is_attached(cx: &mut TestAppContext) {
-        assert_eq!(picture_type(std::path::Path::new("a/Shot.PNG")), Some("image/png"));
-        assert_eq!(picture_type(std::path::Path::new("p.jpeg")), Some("image/jpeg"));
-        assert_eq!(picture_type(std::path::Path::new("p.jpg")), Some("image/jpeg"));
-        assert_eq!(picture_type(std::path::Path::new("p.gif")), Some("image/gif"));
-        assert_eq!(picture_type(std::path::Path::new("p.webp")), Some("image/webp"));
-        assert_eq!(picture_type(std::path::Path::new("p.tiff")), None);
-        assert_eq!(picture_type(std::path::Path::new("png")), None, "no extension");
-
-        let dir = tempfile::tempdir().unwrap();
-        let shot = dir.path().join("shot.png");
-        let small = encoded(64, 48, image::ImageFormat::Png);
-        std::fs::write(&shot, &small).unwrap();
-        let notes = dir.path().join("notes.txt");
-        std::fs::write(&notes, "hue").unwrap();
-        let gone = dir.path().join("gone.png");
-
-        let (view, mut rx, cx) = terminal(cx);
-        let notices = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&notices);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Notice(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        let drop = |cx: &mut VisualTestContext, paths: &[&std::path::Path]| {
-            let position = cx.debug_bounds("terminal").expect("the card").center();
-            let paths = gpui::ExternalPaths(paths.iter().map(|p| p.to_path_buf()).collect());
-            cx.simulate_event(gpui::FileDropEvent::Entered { position, paths });
-            cx.simulate_event(gpui::FileDropEvent::Pending { position });
-            cx.simulate_event(gpui::FileDropEvent::Submit { position });
-            cx.run_until_parked();
-        };
-
-        // A shell card: nothing happens, not even a notice.
-        drop(cx, &[&shot]);
-        assert_eq!(view.read_with(cx, |v, _| (v.preparing(), v.attachments().len())), (0, 0));
-        assert!(notices.borrow().is_empty(), "{notices:?}");
-
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["follow:true"]);
-        drop(cx, &[&shot, &notes, &gone]);
-        let attached = view.read_with(cx, |v, _| v.attachments().to_vec());
-        assert_eq!(attached.len(), 1, "{attached:?}");
-        assert_eq!((attached[0].media_type.as_str(), &attached[0].data), ("image/png", &small));
-        let noticed = notices.borrow().clone();
-        assert_eq!(noticed.len(), 2, "{noticed:?}");
-        assert_eq!(noticed[0], "notes.txt: not a picture (PNG, JPEG, GIF or WebP)");
-        assert!(noticed[1].starts_with("gone.png: No such file"), "{noticed:?}");
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let label = attachment_label(&attached[0]);
-        assert!(
-            tree.iter().any(|n| n.is("Button", Some(&format!("Remove picture 1: {label}")))),
-            "the chip names the picture: {tree:#?}"
-        );
-    }
-
-    /// ⌘V with a picture on the clipboard attaches it to the next prompt: a chip above the
-    /// composer names it, its tap drops it, ↩ sends it with the text (or alone) and clears
-    /// the chips; a text clipboard still pastes as text, and a type the model cannot read
-    /// is not attached.
-    #[gpui::test]
-    fn a_picture_pasted_into_the_composer_goes_with_the_prompt(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        assert!(composer_focused(&view, cx));
-        assert_eq!(drain_words(&mut rx), ["follow:true"]);
-        let picture = |format, bytes: &[u8]| {
-            gpui::ClipboardItem::new_image(&gpui::Image { format, bytes: bytes.to_vec(), id: 1 })
-        };
-
-        let notices = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&notices);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Notice(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        let small = encoded(64, 48, image::ImageFormat::Png);
-        let small_label = attachment_label(&slopty_proto::agent::Image {
-            media_type: "image/png".to_owned(),
-            data: small.clone(),
-        });
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(
-            tree.iter().any(|n| n.is("Button", Some(&format!("Remove picture 1: {small_label}")))),
-            "the chip names the picture: {tree:#?}"
-        );
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some(""), "nothing pasted as text");
-
-        // A second picture, a screenshot too big for the model, is made fit off the UI
-        // thread (a "preparing" chip meanwhile) and lands shrunk as a JPEG; then the first's
-        // chip is tapped away.
-        let big = encoded(3200, 1400, image::ImageFormat::Png);
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &big)));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| (v.preparing(), v.attachments().len())), (0, 2));
-        let fitted = view.read_with(cx, |v, _| v.attachments()[1].clone());
-        assert_eq!(fitted.media_type, "image/jpeg", "shrunk and recompressed");
-        let shrunk = image::load_from_memory(&fitted.data).expect("decodes");
-        assert_eq!((shrunk.width(), shrunk.height()), (1568, 686), "long side clamped");
-        let chip = cx.debug_bounds("composer-attachment-0").expect("the first chip");
-        cx.simulate_click(chip.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        let left: Vec<String> =
-            view.read_with(cx, |v, _| v.attachments().iter().map(attachment_label).collect());
-        assert_eq!(left, [attachment_label(&fitted)]);
-
-        // Text still pastes as text; a TIFF is not something the model reads, and says so.
-        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hue".into())));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("hue"));
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Tiff, &[0x4d; 10])));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1, "TIFF not attached");
-        assert_eq!(notices.borrow().as_slice(), ["image/tiff is not a picture the agent can read"]);
-        notices.borrow_mut().clear();
-
-        // Past the cap the fifth is refused before any work is done.
-        for _ in 0..3 {
-            cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
-            cx.simulate_keystrokes("cmd-v");
-        }
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 4);
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 4);
-        assert_eq!(notices.borrow().as_slice(), ["At most 4 pictures per prompt"]);
-        for _ in 0..3 {
-            view.update(cx, |v, cx| v.remove_attachment(1, cx));
-        }
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1);
-
-        // ↩ sends the text with the picture and clears the chips.
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        let sent: Vec<(String, Vec<String>)> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|msg| match msg {
-                ClientMsg::AgentSay { text, images, .. } => {
-                    Some((text, images.iter().map(|i| i.media_type.clone()).collect()))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sent, [("hue".to_owned(), vec!["image/jpeg".to_owned()])]);
-        assert!(view.read_with(cx, |v, _| v.attachments().is_empty()));
-        assert!(cx.debug_bounds("composer-attachments").is_none(), "no chips left");
-
-        // A picture alone is a prompt too (↩ once it is fit: the chip is what says so).
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        let sent: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|msg| match msg {
-                ClientMsg::AgentSay { text, images, .. } => {
-                    Some(format!("{text}+{}", images.len()))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sent, ["+1"]);
-
-        // The phone key bar's "paste" (no ⌘V on glass) reaches the same place: a picture is
-        // attached, text lands in the composer, nothing goes to a session.
-        cx.update(|_, cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &small)));
-        view.update_in(cx, |v, window, cx| v.paste_clipboard(&Paste, window, cx));
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.attachments().len()), 1);
-        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("tint".into())));
-        view.update_in(cx, |v, window, cx| v.paste_clipboard(&Paste, window, cx));
-        cx.run_until_parked();
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("tint"));
-        assert!(drain_words(&mut rx).is_empty(), "no session paste from a driven card");
-    }
-
-    /// A driven agent's question is answered in place: the options are buttons, one tap on
-    /// a single-select question is the whole answer (by request id, filed under the
-    /// question's text); a multi-select question toggles and sends on Answer; typed text
-    /// in the composer is the "Other" answer, not a prompt.
-    #[gpui::test]
-    fn a_driven_view_answers_a_question_in_place(cx: &mut TestAppContext) {
-        use slopty_proto::agent::{Choice, Question};
-        let (view, mut rx, cx) = terminal(cx);
-        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&answers);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AgentAnswered { request, allowed, answers, .. } = event {
-                    let filed: Vec<String> =
-                        answers.iter().map(|a| format!("{}={}", a.question, a.answer)).collect();
-                    seen.borrow_mut().push(format!("{request}:{allowed}:{}", filed.join(";")));
-                }
-            })
-            .detach();
-        });
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        let _follow = drain_words(&mut rx);
-        let choice = |label: &str, description: &str| Choice {
-            label: label.to_owned(),
-            description: description.to_owned(),
-        };
-        let colour = Question {
-            text: "Which colour?".to_owned(),
-            header: "Colour".to_owned(),
-            multi: false,
-            options: vec![choice("Red", "warm"), choice("Blue", "cool")],
-        };
-        let ask = |id: &str, questions: Vec<Question>| PermissionRequest {
-            id: id.to_owned(),
-            tool_use: "toolu_q".to_owned(),
-            tool: "AskUserQuestion".to_owned(),
-            summary: "Which colour?".to_owned(),
-            detail: ToolDetail::Question { questions },
-            always: None,
-        };
-        let blocked = || AgentStatus::Blocked(BlockReason::Question);
-        view.update(cx, |v, cx| {
-            v.agent_permission(ask("req_q1", vec![colour.clone()]), cx);
-            v.set_agent_status(Some(blocked()), cx);
-        });
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        assert!(matches!(
-            view.read_with(cx, |v, _| v.attention()),
-            Some(Attention::Question { answered: false, .. })
-        ));
-        assert!(cx.debug_bounds("conversation-allow").is_none(), "a question has no Allow");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Button", Some("Red"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("Button", Some("Blue"))), "{tree:#?}");
-        assert!(
-            tree.iter().any(|n| n.is("Status", Some("Claude asks: Which colour?"))),
-            "{tree:#?}"
-        );
-        let blue = cx.debug_bounds("question-option-0-1").expect("Blue is drawn");
-        cx.simulate_click(blue.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(*answers.borrow(), ["req_q1:true:Which colour?=Blue"], "one tap answers");
-        assert!(drain_words(&mut rx).is_empty(), "nothing typed, nothing said");
-        assert!(cx.debug_bounds("question-option-0-1").is_none(), "one tap, one answer");
-
-        // Two questions, the second multi-select: taps pick and toggle, Answer sends both.
-        let sizes = Question {
-            text: "Which sizes?".to_owned(),
-            header: "Sizes".to_owned(),
-            multi: true,
-            options: vec![choice("S", ""), choice("M", ""), choice("L", "")],
-        };
-        view.update(cx, |v, cx| {
-            v.set_agent_status(Some(AgentStatus::Working), cx);
-            v.agent_permission(ask("req_q2", vec![colour.clone(), sizes]), cx);
-            v.set_agent_status(Some(blocked()), cx);
-        });
-        cx.run_until_parked();
-        let answer = cx.debug_bounds("question-answer").expect("Answer is drawn");
-        cx.simulate_click(answer.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(answers.borrow().len(), 1, "nothing sent before every question has a pick");
-        for id in ["question-option-0-0", "question-option-1-0", "question-option-1-2"] {
-            let b = cx.debug_bounds(id).expect(id);
-            cx.simulate_click(b.center(), gpui::Modifiers::default());
-            cx.run_until_parked();
-        }
-        assert_eq!(
-            view.read_with(cx, |v, _| v.chosen().to_vec()),
-            [vec!["Red".to_owned()], vec!["S".to_owned(), "L".to_owned()]]
-        );
-        let s = cx.debug_bounds("question-option-1-0").expect("S");
-        cx.simulate_click(s.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.chosen()[1].clone()), ["L"], "toggled off");
-        assert_eq!(answers.borrow().len(), 1, "a multi-select question waits for Answer");
-        let answer = cx.debug_bounds("question-answer").expect("Answer is drawn");
-        cx.simulate_click(answer.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(answers.borrow()[1], "req_q2:true:Which colour?=Red;Which sizes?=L");
-
-        // Typed text is the answer to the question, not a prompt.
-        view.update(cx, |v, cx| {
-            v.set_agent_status(Some(AgentStatus::Working), cx);
-            v.agent_permission(ask("req_q3", vec![colour]), cx);
-            v.set_agent_status(Some(blocked()), cx);
-        });
-        cx.run_until_parked();
-        assert!(composer_focused(&view, cx), "a question puts the caret in the composer");
-        cx.simulate_keystrokes("g r e e n enter");
-        cx.run_until_parked();
-        assert_eq!(answers.borrow()[2], "req_q3:true:Which colour?=green");
-        assert!(drain_words(&mut rx).is_empty(), "not said as a prompt");
-    }
-
-    /// A driven view shows what the agent said about itself over the list — the model as a
-    /// chip whose menu switches it, the permission mode as a chip that cycles, the turns and
-    /// the cost — and its composer completes the slash commands the agent announced: `/`
-    /// lists the matches, ↓ moves, Tab takes one, Esc hides the list without interrupting.
-    #[gpui::test]
-    fn a_driven_view_shows_the_agent_and_retunes_it(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        view.update(cx, TerminalView::set_driven);
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        assert!(cx.debug_bounds("conversation-header").is_some(), "the header is there at once");
-        view.update(cx, |v, cx| {
-            v.agent_info(
-                AgentInfo {
-                    agent_session: Some("s1".to_owned()),
-                    cwd: Some("/w/slopty/.claude/worktrees/fix-x".to_owned()),
-                    model: Some("claude-sonnet-5".to_owned()),
-                    permission_mode: Some("default".to_owned()),
-                    slash_commands: vec![
-                        SlashCommand {
-                            name: "/compact".to_owned(),
-                            description: "Summarise the conversation".to_owned(),
-                            hint: "[instructions]".to_owned(),
-                        },
-                        SlashCommand::named("clear"),
-                        SlashCommand {
-                            name: "/cost".to_owned(),
-                            description: "Show the total cost".to_owned(),
-                            hint: String::new(),
-                        },
-                    ],
-                    turns: 2,
-                    cost_micro_usd: 12_500,
-                    usage: Some(slopty_proto::agent::Usage {
-                        limited: false,
-                        five_hour: Some(slopty_proto::agent::UsageWindow {
-                            percent: 23,
-                            resets_at: 1_789_195_800,
-                        }),
-                        seven_day: Some(slopty_proto::agent::UsageWindow {
-                            percent: 74,
-                            resets_at: 1_789_257_600,
-                        }),
-                    }),
-                    context: Some(slopty_proto::agent::Context {
-                        tokens: 31_000,
-                        window: Some(200_000),
-                    }),
-                },
-                cx,
-            );
-        });
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Status", Some("Usage: 5h 23% · 7d 74%"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("Status", Some("Context: ctx 16%"))), "{tree:#?}");
-        let context = |tokens, window| {
-            conversation::context_label(&slopty_proto::agent::Context { tokens, window })
-        };
-        assert_eq!(context(900, None), "ctx 900");
-        assert_eq!(context(31_000, None), "ctx 31k");
-        assert_eq!(context(1_250_000, None), "ctx 1.3M");
-        assert_eq!(context(200_000, Some(200_000)), "ctx 100%");
-        assert_eq!(context(1, Some(200_000)), "ctx 1%");
-        assert!(tree.iter().any(|n| n.is("Button", Some("Model: sonnet-5"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("Button", Some("Permission mode: Ask"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("Button", Some("Worktree: fix-x"))), "{tree:#?}");
-        assert_eq!(conversation::worktree_name("/w/slopty"), None);
-        assert_eq!(conversation::worktree_name("/w/.claude/worktrees/a/src"), Some("a"));
-        assert_eq!(conversation::cost_label(12_500), "1¢");
-        assert_eq!(conversation::cost_label(1_234_567), "$1.23");
-
-        // The model chip opens the menu; a model in it is asked of the host, and the chip
-        // only changes when the host confirms.
-        let chip = cx.debug_bounds("conversation-model").expect("the model chip");
-        cx.simulate_click(chip.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-model-opus").is_some(), "the menu opened");
-        cx.simulate_click(chip.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("conversation-model-opus").is_none(), "the chip again closes it");
-        cx.simulate_click(chip.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        let opus = cx.debug_bounds("conversation-model-opus").expect("the menu opened");
-        cx.simulate_click(opus.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["set:model=opus"]);
-        assert!(cx.debug_bounds("conversation-models").is_none(), "one pick closes the menu");
-        assert_eq!(
-            view.read_with(cx, |v, _| v.info().model.clone()).as_deref(),
-            Some("claude-sonnet-5")
-        );
-        view.update(cx, |v, cx| {
-            let mut info = v.info().clone();
-            info.model = Some("opus".to_owned());
-            v.agent_info(info, cx);
-        });
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Button", Some("Model: Opus 5"))), "{tree:#?}");
-
-        // The mode chip asks for the next mode.
-        let chip = cx.debug_bounds("conversation-mode").expect("the mode chip");
-        cx.simulate_click(chip.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["set:mode=acceptEdits"]);
-        assert_eq!(conversation::next_mode("plan"), "default", "the cycle wraps");
-
-        // Slash completion in the composer.
-        assert!(composer_focused(&view, cx));
-        cx.simulate_keystrokes("/ c");
-        cx.run_until_parked();
-        let completions =
-            |cx: &mut VisualTestContext| view.read_with(cx, TerminalView::completions);
-        assert_eq!(completions(cx), ["/compact", "/clear", "/cost"]);
-        assert!(cx.debug_bounds("conversation-completions").is_some(), "listed above the composer");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        for label in [
-            "/compact [instructions] — Summarise the conversation",
-            "/clear",
-            "/cost — Show the total cost",
-        ] {
-            assert!(tree.iter().any(|n| n.is("ListBoxOption", Some(label))), "{label}: {tree:#?}");
-        }
-        cx.simulate_keystrokes("down tab");
-        cx.run_until_parked();
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("/clear "), "Tab takes the selected one");
-        assert!(completions(cx).is_empty(), "a completed command lists nothing");
-        assert!(drain_words(&mut rx).is_empty(), "nothing was sent");
-
-        view.update_in(cx, |v, window, cx| {
-            if let Some(c) = v.conversation_mut() {
-                let _taken = c.take_composer_text(window, cx);
-            }
-        });
-        cx.simulate_keystrokes("/ c o");
-        cx.run_until_parked();
-        assert_eq!(completions(cx), ["/compact", "/cost"]);
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert!(completions(cx).is_empty(), "Esc hides the list");
-        assert!(drain_words(&mut rx).is_empty(), "and does not interrupt the agent");
-        cx.simulate_keystrokes("s t");
-        cx.run_until_parked();
-        assert!(completions(cx).is_empty(), "the one match is the text itself");
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["say:/cost"], "↩ sends the command as a prompt");
-
-        // `@` completion: the word is asked of the host once per query, the answer lists
-        // the paths while the word is still that query, Tab replaces the word alone.
-        view.update_in(cx, |v, window, cx| {
-            if let Some(c) = v.conversation_mut() {
-                let _taken = c.take_composer_text(window, cx);
-            }
-        });
-        cx.simulate_keystrokes("s e e space @ m a");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["files:m", "files:ma"], "asked as the word grows");
-        view.update(cx, |v, cx| {
-            v.files("m".to_owned(), vec!["Makefile".to_owned()], cx);
-            v.files("ma".to_owned(), vec!["src/main.rs".to_owned(), "docs/manual/".to_owned()], cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(completions(cx), ["@src/main.rs", "@docs/manual/"], "the current answer only");
-        // The word grows past the answer: the stale list hides until the host answers again.
-        cx.simulate_keystrokes("i");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["files:mai"]);
-        assert!(completions(cx).is_empty(), "an answer for `ma` is not one for `mai`");
-        view.update(cx, |v, cx| v.files("mai".to_owned(), vec!["src/main.rs".to_owned()], cx));
-        cx.run_until_parked();
-        assert_eq!(completions(cx), ["@src/main.rs"]);
-        cx.simulate_keystrokes("tab");
-        cx.run_until_parked();
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("see @src/main.rs "), "the word alone is replaced");
-        assert!(completions(cx).is_empty(), "the space ends the word");
-        assert!(drain_words(&mut rx).is_empty(), "no word: nothing asked");
-        // A directory gets no space: the word goes on, and the host is asked for what is in it.
-        cx.simulate_keystrokes("@ d");
-        cx.run_until_parked();
-        assert_eq!(drain_words(&mut rx), ["files:d"]);
-        view.update(cx, |v, cx| v.files("d".to_owned(), vec!["docs/".to_owned()], cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("tab");
-        cx.run_until_parked();
-        let text = view.read_with(cx, |v, cx| v.conversation().map(|c| c.composer_text(cx)));
-        assert_eq!(text.as_deref(), Some("see @src/main.rs @docs/"), "no space after a directory");
-        assert_eq!(drain_words(&mut rx), ["files:docs/"], "its contents are asked for");
-        assert_eq!(conversation::file_query("look at @src/ma"), Some("src/ma"));
-        assert_eq!(conversation::file_query("@"), Some(""));
-        assert_eq!(conversation::file_query("mail@x y"), None);
-        let named =
-            |names: &[&str]| names.iter().map(|n| SlashCommand::named(n)).collect::<Vec<_>>();
-        let names =
-            |matches: Vec<SlashCommand>| matches.into_iter().map(|c| c.name).collect::<Vec<_>>();
-        assert_eq!(
-            names(conversation::slash_matches("/C", &named(&["/compact", "/clear"]))),
-            ["/compact", "/clear"],
-            "matching ignores case"
-        );
-        assert!(conversation::slash_matches("/co x", &named(&["/compact"])).is_empty());
-        assert!(conversation::slash_matches("hello", &named(&["/help"])).is_empty());
-        assert!(conversation::slash_matches("hello x", &named(&["/help"])).is_empty());
-        assert!(
-            conversation::slash_matches("/Compact", &named(&["/compact"])).is_empty(),
-            "the only match typed out in full leaves nothing to complete"
-        );
-        assert_eq!(
-            names(conversation::slash_matches("/comp", &named(&["/compact"]))),
-            ["/compact"],
-            "one match not yet typed out still completes"
-        );
-        let label = |bytes: usize| {
-            attachment_label(&slopty_proto::agent::Image {
-                media_type: "image/png".to_owned(),
-                data: vec![0; bytes],
-            })
-        };
-        assert_eq!(label(999), "PNG · 999 B");
-        assert_eq!(label(1024), "PNG · 1 KB");
-        assert_eq!(label(1024 * 1024 - 1), "PNG · 1023 KB");
-        assert_eq!(label(1024 * 1024), "PNG · 1.0 MB");
-        assert_eq!(label(1024 * 1024 * 3 / 2), "PNG · 1.5 MB");
-        let many: Vec<String> = (0..12).map(|i| format!("/cmd{i}")).collect();
-        let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        assert_eq!(
-            conversation::slash_matches("/", &named(&many)).len(),
-            conversation::SLASH_MAX,
-            "the list is capped"
-        );
-        assert_eq!(conversation::model_label("claude-fable-5-1"), "fable-5-1");
-        assert_eq!(conversation::model_label("fable"), "Fable 5.1");
     }
 }

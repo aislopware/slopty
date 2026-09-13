@@ -67,18 +67,8 @@ pub enum Command {
         text: String,
     },
     /// Put a picture on the app's clipboard through GPUI, as a screenshot would be. For the
-    /// simulator, whose pasteboard is its own: the Mac's is shared with every other app, so
-    /// the Mac scenario uses `Attach` instead.
+    /// simulator, whose pasteboard is its own (the Mac's is shared with every other app).
     Clipboard {
-        /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
-        media_type: String,
-        /// The encoded picture, base64.
-        data: String,
-    },
-    /// Attach a picture to the active driven conversation's next prompt, as pasting one into
-    /// its composer would (the paste itself reads the system clipboard, which a test must
-    /// not touch; the headless layer covers that read).
-    Attach {
         /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
         media_type: String,
         /// The encoded picture, base64.
@@ -150,16 +140,6 @@ pub enum Command {
         #[serde(default)]
         line: Option<u32>,
     },
-    /// Open a Claude Code agent the host drives over its structured protocol (a conversation
-    /// card, `kind: agent`), as ⌘⌥T does, in `cwd` or the host's default.
-    OpenAgent {
-        /// Working directory.
-        #[serde(default)]
-        cwd: Option<String>,
-        /// A Claude Code session id to resume, as the resume picker would.
-        #[serde(default)]
-        resume: Option<String>,
-    },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
     /// Bring a session's terminal into view, make it active and give it the keyboard, as
@@ -172,17 +152,14 @@ pub enum Command {
     /// Add the host's first display to the active canvas, as picking it would (the host
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
-    /// Drive the app's system-notification response path with `tag` (a session UUID) and an
-    /// optional `action`, exactly as `cx.on_system_notification_response` would when the user
-    /// activates an agent banner: find the host whose canvas holds the session, switch to it,
-    /// then reveal the session (no action) or answer its prompt (`allow` / `deny`). System
-    /// notifications are disabled outside a bundle, so this is the only way to test the path.
+    /// Drive the app's system-notification response path with `tag` (a session UUID),
+    /// exactly as `cx.on_system_notification_response` would when the user activates an
+    /// agent banner: find the host whose canvas holds the session, switch to it, then reveal
+    /// the session. System notifications are disabled outside a bundle, so this is the only
+    /// way to test the path.
     NotificationResponse {
         /// The banner's tag, which is the session UUID.
         tag: String,
-        /// The button pressed: `allow`, `deny`, or none to reveal (the banner body).
-        #[serde(default)]
-        action: Option<String>,
     },
     /// Resize the window's content area.
     Resize {
@@ -589,8 +566,7 @@ pub struct FileItemInfo {
 pub struct TerminalInfo {
     /// Session id.
     pub session: String,
-    /// `terminal` (a grid), or `agent` (a session the host drives: the conversation is the
-    /// whole card).
+    /// Always `terminal`.
     pub kind: String,
     /// What the title bar says: the program's title, else the session's, else "shell".
     pub title: Option<String>,
@@ -614,8 +590,6 @@ pub struct TerminalInfo {
     /// Which signal the host read the agent's state from: `process`, `title`, `transcript`
     /// or `hook`; `None` without an agent.
     pub agent_source: Option<String>,
-    /// The agent's conversation, while it is shown in place of the grid.
-    pub conversation: Option<ConversationInfo>,
     /// Keystroke → paint, for keys typed into this terminal.
     pub latency: LatencyInfo,
     /// What the terminal font said about itself, once the grid has been laid out.
@@ -780,68 +754,6 @@ pub struct RecoveryInfo {
     pub audio_lost: u64,
     /// Lost packets papered over with the previous one fading out.
     pub audio_concealed: u64,
-}
-
-/// A terminal's conversation view.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub struct ConversationInfo {
-    /// One line per entry, oldest first: `user: …`, `assistant: …`, `thinking`,
-    /// `tool <name>: <summary>`, `result <name>: <first line>` (`failed` after the name of a
-    /// failed one).
-    pub entries: Vec<String>,
-    /// What is written in the composer.
-    pub composer: String,
-    /// The composer holds the keyboard.
-    pub composer_focused: bool,
-    /// The list follows new entries (the reader has not scrolled up).
-    pub pinned: bool,
-    /// The row above the composer: `permission:<tool>`, `allowed`, `denied`, `question`,
-    /// `answered`, `prompt`.
-    pub attention: Option<String>,
-    /// What a driven agent is writing now (empty otherwise).
-    pub partial: String,
-    /// The permission a driven agent waits on, `<tool>:<summary>`.
-    pub permission: Option<String>,
-    /// The model the driven agent named (`AgentInfo::model`).
-    #[serde(default)]
-    pub model: Option<String>,
-    /// The permission mode the driven agent named.
-    #[serde(default)]
-    pub permission_mode: Option<String>,
-    /// Claude Code's own session id, once the agent said it.
-    #[serde(default)]
-    pub agent_session: Option<String>,
-    /// The slash commands the driven agent announced.
-    #[serde(default)]
-    pub slash_commands: Vec<String>,
-    /// Turns so far.
-    #[serde(default)]
-    pub turns: u32,
-    /// The slash commands completing the composer's text right now, as listed above it.
-    #[serde(default)]
-    pub completions: Vec<String>,
-    /// The model menu is open under the header.
-    #[serde(default)]
-    pub model_menu: bool,
-    /// The option labels of a pending question, every question's in order.
-    #[serde(default)]
-    pub question_options: Vec<String>,
-    /// What the pending permission's "Always" would do, when the agent suggested one.
-    #[serde(default)]
-    pub always: Option<String>,
-    /// The subagents the agent spawned, `<call>:<description>:<tool uses>:<running|done>`.
-    #[serde(default)]
-    pub tasks: Vec<String>,
-    /// The subscription's windows as the header shows them ("5h 23% · 7d 74%").
-    #[serde(default)]
-    pub usage: Option<String>,
-    /// The context window's fill as the header shows it ("ctx 16%", "ctx 31k").
-    #[serde(default)]
-    pub context: Option<String>,
-    /// The pictures waiting to go with the next prompt, as their chips name them
-    /// ("PNG · 70 B").
-    #[serde(default)]
-    pub attachments: Vec<String>,
 }
 
 impl Dump {

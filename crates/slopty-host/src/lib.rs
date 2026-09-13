@@ -10,6 +10,7 @@
 pub mod canvas;
 pub mod ctl;
 pub mod file;
+pub mod find;
 pub mod manager;
 pub mod presence;
 pub mod repo;

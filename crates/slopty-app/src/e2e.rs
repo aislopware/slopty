@@ -27,17 +27,13 @@ use gpui::{
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
-    Button, Command, ConversationInfo, Dump, FaceInfo, FileItemInfo, FrameInfo, HostInfo, ItemInfo,
-    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo,
+    Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
+    Reply, ScreenInfo, TerminalInfo, WindowInfo,
 };
-use slopty_proto::agent::{
-    AgentSource, AgentStatus, BlockReason, DiffKind, NoticeLevel, TodoStatus, ToolDetail,
-    TranscriptBody, TranscriptEntry,
-};
+use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::canvas::ItemKind;
 use slopty_ui::canvas::KeyTarget;
 use slopty_ui::screen::ScreenView;
-use slopty_ui::terminal::conversation::Attention;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
@@ -378,20 +374,6 @@ fn apply(
             }));
             Reply::Ok
         }
-        Command::Attach { media_type, data } => {
-            let Ok(data) = data_encoding::BASE64.decode(data.as_bytes()) else {
-                return Reply::Error { message: "attach: data is not base64".into() };
-            };
-            let Some(view) =
-                workspace.read(cx).active_canvas().and_then(|c| c.read(cx).active_terminal())
-            else {
-                return Reply::Error { message: "no active terminal".into() };
-            };
-            view.update(cx, |view, cx| {
-                view.attach_image(slopty_proto::agent::Image { media_type, data }, cx);
-            });
-            Reply::Ok
-        }
         Command::Type { text } => {
             for ch in text.chars() {
                 let keystroke = Keystroke {
@@ -509,25 +491,6 @@ fn apply(
             canvas.update(cx, |canvas, cx| canvas.open_file(&path, line, cx));
             Reply::Ok
         }
-        Command::OpenAgent { cwd, resume } => {
-            let Some(canvas) = workspace.read(cx).active_canvas() else {
-                return Reply::Error { message: "no active canvas".into() };
-            };
-            canvas.update(cx, |canvas, cx| match resume {
-                None => canvas.open_agent(cwd, cx),
-                Some(id) => canvas.open_agent_with(
-                    slopty_proto::agent::OpenAgent {
-                        cwd,
-                        resume: Some(id),
-                        worktree: false,
-                        model: None,
-                        title: Some("resumed".to_owned()),
-                    },
-                    cx,
-                ),
-            });
-            Reply::Ok
-        }
         Command::FramesReset => {
             slopty_ui::frames::reset(cx);
             Reply::Ok
@@ -549,12 +512,12 @@ fn apply(
             canvas.update(cx, slopty_ui::canvas::CanvasView::add_first_display);
             Reply::Ok
         }
-        Command::NotificationResponse { tag, action } => {
+        Command::NotificationResponse { tag } => {
             let Ok(session) = tag.parse::<SessionId>() else {
                 return Reply::Error { message: format!("not a session id: {tag}") };
             };
             workspace.update(cx, |ws, cx| {
-                ws.notification_response(session, action.as_deref(), window, cx);
+                ws.notification_response(session, window, cx);
             });
             Reply::Ok
         }
@@ -721,48 +684,6 @@ fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
     }
 }
 
-/// One line for a conversation entry, as the dump lists them.
-fn entry_line(entry: &TranscriptEntry) -> String {
-    let first = |text: &str| text.lines().next().unwrap_or_default().to_owned();
-    match &entry.body {
-        TranscriptBody::User { text, images } if *images > 0 => {
-            format!("user: {} [+{images}]", first(text))
-        }
-        TranscriptBody::User { text, .. } => format!("user: {}", first(text)),
-        TranscriptBody::Assistant { markdown } => format!("assistant: {}", first(markdown)),
-        TranscriptBody::Thinking { .. } => "thinking".to_owned(),
-        TranscriptBody::ToolUse { name, summary, detail, .. } => match detail {
-            ToolDetail::Diff { lines, .. } => {
-                let added = lines.iter().filter(|l| l.kind == DiffKind::Added).count();
-                let removed = lines.iter().filter(|l| l.kind == DiffKind::Removed).count();
-                format!("tool {name}: {summary} (+{added} -{removed})")
-            }
-            ToolDetail::Todos { items } => {
-                let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
-                format!("tool {name}: {done}/{} done", items.len())
-            }
-            _ => format!("tool {name}: {summary}"),
-        },
-        TranscriptBody::ToolResult { tool, output, is_error } => format!(
-            "result {}{}: {}",
-            tool.as_deref().unwrap_or("?"),
-            if *is_error { " failed" } else { "" },
-            first(&output.text)
-        ),
-        TranscriptBody::Compacted { trigger, pre_tokens, post_tokens } => {
-            slopty_ui::terminal::conversation::compacted_label(trigger, *pre_tokens, *post_tokens)
-        }
-        TranscriptBody::Notice { level, text } => {
-            let level = match level {
-                NoticeLevel::Notice => "notice",
-                NoticeLevel::Suggestion => "suggestion",
-                NoticeLevel::Warning => "warning",
-            };
-            format!("{level}: {}", first(text))
-        }
-    }
-}
-
 impl Workspace {
     /// Everything a test may want to know, read from the entities.
     fn dump(&self, window: &Window, cx: &App) -> Dump {
@@ -868,75 +789,9 @@ impl Workspace {
                 }
                 let size = view.size();
                 let cursor = view.cursor();
-                let conversation = view.conversation().map(|c| ConversationInfo {
-                    entries: c.entries().iter().map(entry_line).collect(),
-                    composer: c.composer_text(cx),
-                    composer_focused: c.composer_focus(cx).is_focused(window),
-                    pinned: c.pinned(),
-                    partial: view.partial().to_owned(),
-                    permission: view.permission().map(|p| format!("{}:{}", p.tool, p.summary)),
-                    always: view.permission().and_then(|p| p.always.clone()),
-                    usage: view
-                        .info()
-                        .usage
-                        .as_ref()
-                        .map(slopty_ui::terminal::conversation::usage_label),
-                    context: view
-                        .info()
-                        .context
-                        .as_ref()
-                        .map(slopty_ui::terminal::conversation::context_label),
-                    attachments: view
-                        .attachments()
-                        .iter()
-                        .map(slopty_ui::terminal::conversation::attachment_label)
-                        .collect(),
-                    tasks: c
-                        .tasks()
-                        .iter()
-                        .map(|t| {
-                            format!(
-                                "{}:{}:{}:{}",
-                                t.call,
-                                t.description,
-                                t.tool_uses,
-                                if t.done { "done" } else { "running" }
-                            )
-                        })
-                        .collect(),
-                    model: view.info().model.clone(),
-                    permission_mode: view.info().permission_mode.clone(),
-                    agent_session: view.info().agent_session.clone(),
-                    slash_commands: view
-                        .info()
-                        .slash_commands
-                        .iter()
-                        .map(|c| c.name.clone())
-                        .collect(),
-                    turns: view.info().turns,
-                    completions: view.completions(cx),
-                    model_menu: c.model_menu_open(),
-                    attention: view.attention().map(|a| match a {
-                        Attention::Permission { tool, answered: None, .. } => {
-                            format!("permission:{tool}")
-                        }
-                        Attention::Permission { answered: Some(true), .. } => "allowed".to_owned(),
-                        Attention::Permission { answered: Some(false), .. } => "denied".to_owned(),
-                        Attention::Question { answered: false, .. } => "question".to_owned(),
-                        Attention::Question { answered: true, .. } => "answered".to_owned(),
-                        Attention::Prompt => "prompt".to_owned(),
-                    }),
-                    question_options: match view.attention() {
-                        Some(Attention::Question { questions, answered: false, .. }) => questions
-                            .iter()
-                            .flat_map(|q| q.options.iter().map(|o| o.label.clone()))
-                            .collect(),
-                        _ => Vec::new(),
-                    },
-                });
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
-                    kind: if view.is_driven() { "agent" } else { "terminal" }.to_owned(),
+                    kind: "terminal".to_owned(),
                     title: Some(canvas.terminal_title(session, cx)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
@@ -951,10 +806,8 @@ impl Workspace {
                             AgentSource::Title => "title",
                             AgentSource::Transcript => "transcript",
                             AgentSource::Hook => "hook",
-                            AgentSource::Driven => "driven",
                         })
                         .map(str::to_owned),
-                    conversation,
                     latency: latency_info(view.latency()),
                     face: view.metrics().map(|m| face_info(&m)),
                     driving: view.driving(),

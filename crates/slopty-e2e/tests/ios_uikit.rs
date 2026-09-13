@@ -109,7 +109,7 @@ mod tests {
     }
 
     /// A hardware keyboard through `pressesBegan:` / `pressesEnded:` on the metal view: a
-    /// ⌘⇧ chord reaches the keymaps (the conversation view toggles), arrows and Escape reach
+    /// ⌘⇧ chord reaches the keymaps (a note card opens), arrows and Escape reach
     /// the shell as their escape sequences, and a plain key while the terminal is editing is
     /// left to the text system, which types it.
     #[tokio::test]
@@ -169,20 +169,16 @@ mod tests {
         drv.wait_for("cat to exit", STEP, |d| !d.rows_containing("^C").is_empty()).await.unwrap();
         assert_eq!(dump.focused, format!("terminal:{session}"), "{dump:#?}");
 
-        // ⌘⇧L: command and shift from the press's flags, `l` from its usage.
-        drv.ui_key("cmd-shift-l").await.unwrap();
-        let dump = drv
-            .wait_for("the conversation view", STEP, |d| {
-                d.terminals.iter().any(|t| t.conversation.is_some())
-            })
-            .await
-            .unwrap();
-        let conversation = dump.terminals[0].conversation.as_ref().unwrap();
-        assert!(conversation.composer_focused, "{conversation:?}");
-        drv.ui_key("cmd-shift-l").await.unwrap();
-        drv.wait_for("the grid back", STEP, |d| d.terminals[0].conversation.is_none())
-            .await
-            .unwrap();
+        // ⌘⇧N: command and shift from the press's flags, `n` from its usage; ⌘W takes the
+        // note away again and the shell has the keyboard back.
+        drv.ui_key("cmd-shift-n").await.unwrap();
+        drv.wait_for("a note card", STEP, |d| d.item("note").is_some()).await.unwrap();
+        drv.ui_key("cmd-w").await.unwrap();
+        drv.wait_for("the note gone and the shell focused", STEP, |d| {
+            d.item("note").is_none() && d.focused == format!("terminal:{session}")
+        })
+        .await
+        .unwrap();
         // A cancelled chord leaves no stuck modifier: the next plain key types plainly.
         drv.ok(&slopty_e2e::Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("a").unwrap(),

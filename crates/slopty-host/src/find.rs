@@ -1,4 +1,4 @@
-//! Paths under an agent's working directory for the composer's `@file` completion.
+//! Paths under a directory that a typed query matches, for the palette's quick open.
 
 use std::path::Path;
 

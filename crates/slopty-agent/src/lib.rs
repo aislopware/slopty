@@ -22,16 +22,14 @@
 //! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
 //! said and hooks stay authoritative once they speak.
 //!
-//! An agent Slopty starts itself is not observed at all: it is driven over Claude Code's
-//! stream-json protocol ([`stream`]), which reports every record and permission directly.
+//! That is all Slopty knows of an agent: it is used through its own TUI in the terminal, and
+//! nothing here drives it or answers for the human.
 
 #![forbid(unsafe_code)]
 
 pub mod detect;
 pub mod discover;
-pub mod files;
 pub mod hooks;
-pub mod stream;
 pub mod title;
 pub mod transcript;
 

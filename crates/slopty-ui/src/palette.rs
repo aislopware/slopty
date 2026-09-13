@@ -40,7 +40,7 @@ pub enum PaletteRun {
         /// As typed, without its trailing slash.
         cwd: String,
     },
-    /// Open a driven agent in the directory the field holds.
+    /// Open a terminal running the agent in the directory the field holds.
     OpenAgent {
         /// As typed, without its trailing slash.
         cwd: String,
@@ -205,7 +205,7 @@ impl PaletteItem {
             run: PaletteRun::OpenShell { cwd: cwd.clone() },
         };
         let agent = Self {
-            label: format!("New conversation in {}", relative.trim_end_matches('/')),
+            label: format!("New agent in {}", relative.trim_end_matches('/')),
             keys: "agent".to_owned(),
             run: PaletteRun::OpenAgent { cwd },
         };
@@ -240,11 +240,11 @@ impl PaletteItem {
         }
     }
 
-    /// `New conversation in <dir>` for a directory typed into the field, `agent` on the right.
+    /// `New agent in <dir>` for a directory typed into the field, `agent` on the right.
     #[must_use]
     pub fn open_agent(cwd: &str) -> Self {
         Self {
-            label: format!("New conversation in {cwd}"),
+            label: format!("New agent in {cwd}"),
             keys: "agent".to_owned(),
             run: PaletteRun::OpenAgent { cwd: cwd.to_owned() },
         }
@@ -707,9 +707,9 @@ mod tests {
         };
         assert_eq!(
             labels("~/proj/"),
-            ["New terminal in ~/proj shell", "New conversation in ~/proj agent"]
+            ["New terminal in ~/proj shell", "New agent in ~/proj agent"]
         );
-        assert_eq!(labels("/"), ["New terminal in / shell", "New conversation in / agent"]);
+        assert_eq!(labels("/"), ["New terminal in / shell", "New agent in / agent"]);
         assert!(
             matches!(&path_items("/srv/a/")[0].run, PaletteRun::OpenShell { cwd } if cwd == "/srv/a")
         );
@@ -739,7 +739,7 @@ mod tests {
             ("New terminal in docs/manual", "shell")
         );
         assert!(matches!(&shell.run, PaletteRun::OpenShell { cwd } if cwd == "~/docs/manual"));
-        assert_eq!(agent.label, "New conversation in docs/manual");
+        assert_eq!(agent.label, "New agent in docs/manual");
         assert!(matches!(&agent.run, PaletteRun::OpenAgent { cwd } if cwd == "~/docs/manual"));
         let found = PaletteItem::found_file("/tmp/work/", "src/main.rs");
         assert_eq!(found.label, "Open src/main.rs");

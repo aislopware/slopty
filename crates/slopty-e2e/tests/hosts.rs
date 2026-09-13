@@ -193,7 +193,7 @@ mod tests {
         // The banner's tag is the session UUID: a notification response for it resolves to host
         // B and reveals the session, from host A on show.
         show_host(&mut stack, "studio").await;
-        stack.driver.notification_response(&session_b, None).await.unwrap();
+        stack.driver.notification_response(&session_b).await.unwrap();
         stack
             .driver
             .wait_for("the notification response to route to host B", STEP, |d| {

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use slopty_agent::transcript::Tail;
 use slopty_core::{ClientId, SessionId, StreamId};
 use slopty_host::HostError;
 use slopty_host::screen::{
@@ -12,7 +11,6 @@ use slopty_host::session::ClientSink;
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
-use slopty_proto::agent::{TranscriptFollow, TranscriptUpdate};
 use slopty_proto::canvas::CanvasSync;
 use slopty_proto::handshake::{Caps, ClientKind, HelloAck};
 use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
@@ -27,10 +25,8 @@ use crate::Daemon;
 /// one period plus ScreenCaptureKit's ~20 ms configuration update (MEASUREMENTS.md, "capture
 /// floor"), during which one edge of the picture shows the desktop the window left.
 const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
-/// How often followed transcripts are re-read for new lines.
-const TRANSCRIPT_PERIOD: std::time::Duration = std::time::Duration::from_millis(400);
-/// Entries the first snapshot of a conversation carries (older ones are not sent).
-const TRANSCRIPT_SNAPSHOT: usize = 200;
+/// Paths the palette's quick open is answered with at most.
+const FILES_LISTED: usize = 8;
 /// How often the files behind a client's file cards are looked at for a change.
 const FILES_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
 
@@ -69,11 +65,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         name: daemon.name.clone(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         caps: Caps::empty(),
-        sessions: {
-            let mut sessions = daemon.host.summaries().await;
-            sessions.extend(daemon.driven.summaries());
-            sessions
-        },
+        sessions: daemon.host.summaries().await,
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
     out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
@@ -82,8 +74,8 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     for presence in lookers {
         out.send(HostMsg::Canvas(presence)).await.map_err(|_gone| NetError::Closed)?;
     }
-    let mut agents = daemon.agents.lock().snapshot();
-    agents.extend(daemon.driven.events());
+    // Collected first: the lock must not be held across the sends.
+    let agents = daemon.agents.lock().snapshot();
     for event in agents {
         out.send(HostMsg::Agent(event)).await.map_err(|_gone| NetError::Closed)?;
     }
@@ -112,7 +104,6 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         paths,
         health,
         feedback,
-        transcripts: HashMap::new(),
         watched: HashMap::new(),
     };
     daemon.wake.lock().client_joined();
@@ -121,8 +112,6 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     // size until the capture is reconfigured.
     let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
     geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut transcripts = tokio::time::interval(TRANSCRIPT_PERIOD);
-    transcripts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut files = tokio::time::interval(FILES_PERIOD);
     files.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -134,11 +123,6 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
             }
             _ = geometry.tick(), if !peer.screens.is_empty() => {
                 if !peer.check_geometry().await {
-                    break Ok("writer gone");
-                }
-            }
-            _ = transcripts.tick(), if !peer.transcripts.is_empty() => {
-                if !peer.poll_transcripts().await {
                     break Ok("writer gone");
                 }
             }
@@ -459,8 +443,6 @@ struct Peer<'d> {
     /// The periodic congestion-window sample; a no-op task unless the trace is on.
     health: JoinHandle<()>,
     feedback: JoinHandle<()>,
-    /// Conversations this client follows, with the reader's position in each file.
-    transcripts: HashMap<SessionId, Tail>,
     /// Files behind this client's file cards, each with the stamp it was last seen with.
     watched: HashMap<String, Option<(u64, u128)>>,
 }
@@ -541,93 +523,6 @@ impl Peer<'_> {
                 Err(e) => self.report(SessionId::nil(), &e).await,
             },
             ClientMsg::Screen(req) => self.screen(req).await,
-            ClientMsg::Transcript(TranscriptFollow { session, follow }) => {
-                if self.daemon.driven.contains(session) {
-                    if follow {
-                        let _alive = self.send_driven_snapshot(session).await;
-                    }
-                } else if follow {
-                    self.transcripts.insert(session, Tail::default());
-                    let _alive = self.poll_transcripts().await;
-                } else {
-                    self.transcripts.remove(&session);
-                }
-            }
-            ClientMsg::OpenAgent(req) => match self.daemon.driven.open(self.daemon, &req) {
-                Ok(summary) => {
-                    let session = summary.id;
-                    tracing::info!(client = %self.client, %session, cwd = ?summary.cwd, "agent opened");
-                    let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));
-                    if let Some(delta) = self.daemon.canvas.ensure_terminal(session, self.client) {
-                        let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(client = %self.client, error = %e, "open agent");
-                    let event = TermEvent::Error(e.to_string());
-                    let _sent =
-                        self.out.send(HostMsg::Term { session: SessionId::nil(), event }).await;
-                }
-            },
-            ClientMsg::AgentSay { session, text, images, snapshots } => {
-                if snapshots.is_empty() {
-                    if let Err(e) = self.daemon.driven.say(session, text, images) {
-                        tracing::debug!(client = %self.client, %session, error = %e, "agent say");
-                    }
-                } else {
-                    // The pictures take a screenshot each (tens of milliseconds): off the
-                    // connection's loop, then the prompt goes as one.
-                    let driven = self.daemon.driven.clone();
-                    let client = self.client;
-                    tokio::spawn(async move {
-                        let mut images = images;
-                        images.extend(crate::snapshot::pictures(&snapshots).await);
-                        if let Err(e) = driven.say(session, text, images) {
-                            tracing::debug!(%client, %session, error = %e, "agent say");
-                        }
-                    });
-                }
-            }
-            ClientMsg::AgentAnswer(answer) => {
-                let session = answer.session;
-                if let Err(e) = self.daemon.driven.answer(answer) {
-                    tracing::debug!(client = %self.client, %session, error = %e, "agent answer");
-                }
-            }
-            ClientMsg::AgentInterrupt { session } => {
-                if let Err(e) = self.daemon.driven.interrupt(session) {
-                    tracing::debug!(client = %self.client, %session, error = %e, "agent interrupt");
-                }
-            }
-            ClientMsg::AgentSet(set) => {
-                let session = set.session;
-                if let Err(e) = self.daemon.driven.set(session, set.model, set.permission_mode) {
-                    tracing::debug!(client = %self.client, %session, error = %e, "agent set");
-                }
-            }
-            ClientMsg::ListAgentSessions { cwd } => {
-                let (cwd, sessions) = crate::driven::Driven::sessions(cwd.as_deref());
-                tracing::debug!(client = %self.client, ?cwd, found = sessions.len(), "agent sessions");
-                let _sent = self.out.send(HostMsg::AgentSessions { cwd, sessions }).await;
-            }
-            ClientMsg::ListFiles { session, query } => {
-                let paths = match self.daemon.driven.cwd(session) {
-                    Some(cwd) if !query.is_empty() => {
-                        let needle = query.clone();
-                        tokio::task::spawn_blocking(move || {
-                            slopty_agent::files::matching(
-                                std::path::Path::new(&cwd),
-                                &needle,
-                                crate::driven::FILES_LISTED,
-                            )
-                        })
-                        .await
-                        .unwrap_or_default()
-                    }
-                    _ => Vec::new(),
-                };
-                let _sent = self.out.send(HostMsg::Files { session, query, paths }).await;
-            }
             ClientMsg::FindFiles { root, query } => {
                 let paths = if query.is_empty() {
                     Vec::new()
@@ -635,7 +530,7 @@ impl Peer<'_> {
                     let (dir, needle) = (root.clone(), query.clone());
                     tokio::task::spawn_blocking(move || {
                         let dir = slopty_host::file::expand_home(std::path::Path::new(&dir));
-                        slopty_agent::files::matching(&dir, &needle, crate::driven::FILES_LISTED)
+                        slopty_host::find::matching(&dir, &needle, FILES_LISTED)
                     })
                     .await
                     .unwrap_or_default()
@@ -715,48 +610,6 @@ impl Peer<'_> {
             }
             *seen = stamp;
             if !self.send_file(path).await {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Read every followed transcript for new lines and send what appeared. The first read of
-    /// a file (and a read after the file was replaced) is a snapshot of its last entries.
-    /// Returns `false` when the client's writer is gone.
-    async fn poll_transcripts(&mut self) -> bool {
-        let sessions: Vec<SessionId> = self.transcripts.keys().copied().collect();
-        for session in sessions {
-            let Some(path) = self.daemon.agents.lock().transcript_path(session) else {
-                // No hook has named the file yet; try again on the next tick.
-                continue;
-            };
-            let Some(mut tail) = self.transcripts.remove(&session) else { continue };
-            let first = tail == Tail::default();
-            let read = tokio::task::spawn_blocking(move || {
-                let read = tail.read(&path);
-                (tail, read)
-            })
-            .await;
-            let Ok((tail, read)) = read else { continue };
-            self.transcripts.insert(session, tail);
-            let read = match read {
-                Ok(read) => read,
-                Err(e) => {
-                    tracing::warn!(%session, error = %e, "transcript read");
-                    continue;
-                }
-            };
-            let reset = first || read.restarted;
-            if read.entries.is_empty() && !reset {
-                continue;
-            }
-            let mut entries = read.entries;
-            if reset && entries.len() > TRANSCRIPT_SNAPSHOT {
-                entries.drain(..entries.len().saturating_sub(TRANSCRIPT_SNAPSHOT));
-            }
-            let update = TranscriptUpdate { session, reset, entries };
-            if self.out.send(HostMsg::Transcript(update)).await.is_err() {
                 return false;
             }
         }
@@ -964,52 +817,7 @@ impl Peer<'_> {
         }
     }
 
-    /// What a client attaching to or following a driven agent is shown: the conversation so
-    /// far, the text being streamed, the tools waiting on it, and the status. Returns `false`
-    /// when the client's writer is gone.
-    async fn send_driven_snapshot(&self, session: SessionId) -> bool {
-        let Some(snapshot) = self.daemon.driven.snapshot(session) else { return true };
-        let update = TranscriptUpdate { session, reset: true, entries: snapshot.entries };
-        if self.out.send(HostMsg::Transcript(update)).await.is_err() {
-            return false;
-        }
-        if !snapshot.partial.is_empty() {
-            let partial = HostMsg::AgentPartial { session, text: snapshot.partial };
-            if self.out.send(partial).await.is_err() {
-                return false;
-            }
-        }
-        for request in snapshot.pending {
-            if self.out.send(HostMsg::AgentPermission { session, request }).await.is_err() {
-                return false;
-            }
-        }
-        if self.out.send(HostMsg::AgentInfo { session, info: snapshot.info }).await.is_err() {
-            return false;
-        }
-        for task in snapshot.tasks {
-            if self.out.send(HostMsg::AgentTask { session, task }).await.is_err() {
-                return false;
-            }
-        }
-        self.out.send(HostMsg::Agent(snapshot.event)).await.is_ok()
-    }
-
     async fn term(&mut self, session: SessionId, req: TermRequest) {
-        if self.daemon.driven.contains(session) {
-            match req {
-                TermRequest::Attach { .. } => {
-                    let _alive = self.send_driven_snapshot(session).await;
-                }
-                TermRequest::Close => {
-                    if let Err(e) = self.daemon.driven.close(session) {
-                        tracing::debug!(client = %self.client, %session, error = %e, "agent close");
-                    }
-                }
-                _other => {}
-            }
-            return;
-        }
         match req {
             TermRequest::Attach { size } => self.attach(session, size).await,
             TermRequest::Detach => {

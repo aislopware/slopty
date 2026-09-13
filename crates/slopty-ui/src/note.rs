@@ -2,12 +2,11 @@
 //! shared document.
 //!
 //! The text lives in the canvas item (`ItemKind::Note`), so every client sees it. A note that
-//! is not being edited draws its text as Markdown ([`crate::markdown::style`], the tokens the
-//! conversation reads by); a click or the canvas putting the caret in it swaps in the editor,
-//! and blur swaps back. Edits are committed to the host after a short pause in typing and on
-//! blur; a remote change is taken only while this client is not editing (last writer wins, no
-//! merge). A task line (`- [ ] …`) is read as a row whose box ticks on a click, the one edit
-//! that needs no editor.
+//! is not being edited draws its text as Markdown ([`crate::markdown::style`]); a click or the
+//! canvas putting the caret in it swaps in the editor, and blur swaps back. Edits are committed to
+//! the host after a short pause in typing and on blur; a remote change is taken only while this
+//! client is not editing (last writer wins, no merge). A task line (`- [ ] …`) is read as a row
+//! whose box ticks on a click, the one edit that needs no editor.
 
 use std::time::Duration;
 
@@ -240,8 +239,8 @@ impl Render for NoteView {
                 .flex()
                 .flex_col()
                 .gap(px(self.theme.spacing.xs * self.zoom))
-                // Fenced blocks are their own elements, with the conversation's copy and run
-                // buttons: a note of commands is a runbook.
+                // Fenced blocks are their own elements, with copy and run buttons: a note of
+                // commands is a runbook.
                 .children(crate::markdown::segments(&text).into_iter().enumerate().map(
                     |(si, segment)| match segment {
                         crate::markdown::Segment::Prose(prose) => TextView::markdown(

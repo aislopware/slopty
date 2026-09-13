@@ -5,9 +5,6 @@
 //! first, and among them the ones whose agent is waiting on the human, so a wall of terminals
 //! is searched by what needs doing rather than by position. A field at the top filters the
 //! rows by every word typed, ↑/↓ choose one and ↩ picks it, as the palette does.
-//!
-//! The same modal lists past Claude Code conversations the host found on disk
-//! (`AgentSessions`), for resuming one as a driven agent.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -17,7 +14,6 @@ use gpui::{
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
-use slopty_proto::agent::AgentSessionInfo;
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_theme::{Theme, alpha};
 
@@ -38,10 +34,6 @@ pub enum PickerEvent {
     },
     /// Reveal and focus this session's terminal.
     Jump(SessionId),
-    /// Resume a past Claude Code conversation as a driven agent.
-    Resume(AgentSessionInfo),
-    /// List the conversations of every directory on the host, not just this one's.
-    Everywhere,
     /// Closed without choosing.
     Dismiss,
 }
@@ -79,8 +71,6 @@ impl Line {
 enum Section {
     Sessions,
     Screens,
-    Agents,
-    Everywhere,
 }
 
 /// One pickable row, before the filter.
@@ -108,12 +98,6 @@ pub struct WindowPicker {
     sessions: Vec<SessionRow>,
     windows: Vec<WindowInfo>,
     displays: Vec<DisplayInfo>,
-    /// Past conversations to resume (the picker's resume form), newest first.
-    agents: Vec<AgentSessionInfo>,
-    /// The picker is the resume form: only `agents` are listed, under that title.
-    resume: bool,
-    /// The resume form lists one directory (`Some`) or every directory on the host.
-    scope: Option<String>,
     theme: Theme,
     focus: FocusHandle,
     /// The filter field, made on the first frame (it needs the window) and given the keyboard
@@ -163,33 +147,6 @@ impl WindowPicker {
             sessions,
             windows,
             displays,
-            agents: Vec::new(),
-            resume: false,
-            scope: None,
-            theme,
-            focus: cx.focus_handle(),
-            input: None,
-            events: None,
-            query: String::new(),
-            selected: 0,
-        }
-    }
-
-    /// The resume form: the conversations the host has on disk for a directory (`scope`),
-    /// or for every directory on the host when `None`.
-    pub fn resume(
-        agents: Vec<AgentSessionInfo>,
-        scope: Option<String>,
-        theme: Theme,
-        cx: &Context<Self>,
-    ) -> Self {
-        Self {
-            sessions: Vec::new(),
-            windows: Vec::new(),
-            displays: Vec::new(),
-            agents,
-            resume: true,
-            scope,
             theme,
             focus: cx.focus_handle(),
             input: None,
@@ -200,7 +157,7 @@ impl WindowPicker {
     }
 
     /// Every row in its order, before the filter: sessions, then the host's displays and
-    /// windows, then the conversations, then the "Every directory" row of a one-directory list.
+    /// windows.
     fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         for (i, s) in self.sessions.iter().enumerate() {
@@ -240,38 +197,15 @@ impl WindowPicker {
                 },
             });
         }
-        for (i, a) in self.agents.iter().enumerate() {
-            let title = if a.title.is_empty() { a.id.clone() } else { a.title.clone() };
-            rows.push(Row {
-                id: ("agent", i),
-                section: Section::Agents,
-                line: Line::new(title, format!("{} · {}", ago(a.modified_ms), a.cwd)),
-                on_pick: PickerEvent::Resume(a.clone()),
-            });
-        }
-        if self.resume && self.scope.is_some() {
-            // A list for one directory offers the whole host; the answer replaces the picker.
-            rows.push(Row {
-                id: ("everywhere", 0),
-                section: Section::Everywhere,
-                line: Line::new(
-                    "Every directory".to_owned(),
-                    "the conversations of every project on the host".to_owned(),
-                ),
-                on_pick: PickerEvent::Everywhere,
-            });
-        }
         rows
     }
 
-    /// The rows the field lets through: every word typed is in the row's text. The "Every
-    /// directory" row is a way out, not a match, and always shows.
+    /// The rows the field lets through: every word typed is in the row's text.
     fn visible(&self) -> Vec<Row> {
         self.rows()
             .into_iter()
             .filter(|row| {
-                row.section == Section::Everywhere
-                    || matches(&self.query, &format!("{} {}", row.line.primary, row.line.secondary))
+                matches(&self.query, &format!("{} {}", row.line.primary, row.line.secondary))
             })
             .collect()
     }
@@ -412,25 +346,19 @@ impl Render for WindowPicker {
                     Section::Screens if has_sessions && has_screens => {
                         rows.push(self.heading("Windows").into_any_element());
                     }
-                    Section::Screens | Section::Agents | Section::Everywhere => {}
+                    Section::Screens => {}
                 }
             }
             let Row { id, line, on_pick, .. } = row;
             rows.push(self.row(id, line, on_pick, ix == chosen, cx).into_any_element());
         }
         let empty = rows.is_empty();
-        let (title, nothing): (&'static str, &'static str) =
-            match (self.resume, self.query.is_empty()) {
-                (true, true) => ("Resume a conversation", "no conversation on the host"),
-                (true, false) => ("Resume a conversation", "no conversation matches"),
-                (false, true) => (
-                    "Jump to a session, or add a window from the host",
-                    "nothing on the canvas or shareable on the host",
-                ),
-                (false, false) => {
-                    ("Jump to a session, or add a window from the host", "nothing matches")
-                }
-            };
+        let title = "Jump to a session, or add a window from the host";
+        let nothing = if self.query.is_empty() {
+            "nothing on the canvas or shareable on the host"
+        } else {
+            "nothing matches"
+        };
 
         div()
             .id("picker-backdrop")
@@ -463,8 +391,10 @@ impl Render for WindowPicker {
                     .debug_selector(|| "picker".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label(title)
-                    // The desktop width, or what a phone leaves after a margin each side.
+                    // The desktop width, or what a phone leaves after a margin each side
+                    // (`min_w_0`: the title's unwrapped width must not hold the box open).
                     .w_full()
+                    .min_w_0()
                     .max_w(px(560.0))
                     .mx(px(theme.spacing.md))
                     .max_h(px(520.0))
@@ -512,23 +442,6 @@ impl Render for WindowPicker {
                             }),
                     ),
             )
-    }
-}
-
-/// How long ago a transcript was written, in the coarsest unit that is not zero.
-#[must_use]
-pub fn ago(modified_ms: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| u64::try_from(d.as_millis()).ok())
-        .unwrap_or(0);
-    let secs = now.saturating_sub(modified_ms) / 1000;
-    match secs {
-        0..60 => "just now".to_owned(),
-        60..3600 => format!("{} min ago", secs / 60),
-        3600..86_400 => format!("{} h ago", secs / 3600),
-        _ => format!("{} d ago", secs / 86_400),
     }
 }
 
@@ -680,44 +593,5 @@ mod tests {
             ),
             "{events:?}"
         );
-    }
-
-    /// The resume form lists the conversations newest first as given, and a one-directory
-    /// list ends with the "Every directory" way out, which no filter hides; a whole-host list
-    /// has no such row.
-    #[gpui::test]
-    fn the_resume_form_keeps_its_way_out_under_any_filter(cx: &mut gpui::TestAppContext) {
-        let agent = |id: &str, title: &str| AgentSessionInfo {
-            id: id.to_owned(),
-            cwd: "/w/slopty".to_owned(),
-            title: title.to_owned(),
-            modified_ms: 0,
-        };
-        let scoped = cx.new(|cx| {
-            WindowPicker::resume(
-                vec![agent("a1", "fix the build"), agent("a2", "")],
-                Some("/w/slopty".to_owned()),
-                Theme::default(),
-                cx,
-            )
-        });
-        scoped.update(cx, |p, _| {
-            let ids = |p: &WindowPicker| p.visible().iter().map(|r| r.id).collect::<Vec<_>>();
-            assert_eq!(ids(p), vec![("agent", 0), ("agent", 1), ("everywhere", 0)]);
-            let rows = p.visible();
-            assert_eq!(rows[1].line.primary, "a2", "an untitled conversation shows its id");
-            assert!(rows[0].line.secondary.ends_with("· /w/slopty"), "{}", rows[0].line.secondary);
-            p.query = "build".to_owned();
-            assert_eq!(ids(p), vec![("agent", 0), ("everywhere", 0)]);
-            p.query = "zzz".to_owned();
-            assert_eq!(ids(p), vec![("everywhere", 0)]);
-            assert!(matches!(p.visible()[0].on_pick, PickerEvent::Everywhere));
-        });
-        let whole = cx.new(|cx| {
-            WindowPicker::resume(vec![agent("a1", "fix the build")], None, Theme::default(), cx)
-        });
-        whole.read_with(cx, |p, _| {
-            assert_eq!(p.visible().iter().map(|r| r.id).collect::<Vec<_>>(), vec![("agent", 0)]);
-        });
     }
 }

@@ -1,7 +1,8 @@
 # Slopty
 
 A remote-coding app: terminals and Parsec-class remote desktop from many clients to one host,
-on an infinite canvas, with Claude Code driven in place. macOS and iOS, pure Rust on GPUI.
+on an infinite canvas, with the status of the agent in each terminal read and shown. macOS and
+iOS, pure Rust on GPUI.
 
 Maps: `docs/ARCHITECTURE.md` (how it is built), `docs/decisions/` (rulings with their
 evidence; `docs/DECISIONS.md` is the index), `docs/MEASUREMENTS.md` (numbers and the commands

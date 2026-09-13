@@ -911,3 +911,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   session id on the payload, so a Claude session owning the terminal is not displaced. Tests:
   tracker `a_report_from_any_program_drives_the_pill`, CLI
   `a_report_is_a_hook_payload_the_tracker_reads`.
+
+- ✅ **The agent is used through its TUI; Slopty only reads its status** (2026-09-15, protocol
+  48). Claude Code has no public API and its stream-json shape, slash commands, transcript
+  records and prompt menus move between releases; a GUI of Slopty's own over it was a second
+  client to keep in step with every one of them, and the agents Slopty will meet next (codex,
+  gemini, opencode) are TUIs too. Ruled: an agent is a program in a terminal, nothing more.
+  Slopty keeps what reads its state — the hook relay, the process, title and transcript
+  signals, the tracker, the pill, the attention outline, ⌘⇧A / "N need you", the Dock badge
+  and the banner — and drops everything that spoke for the human or drew for the agent: the
+  driven card and its stream-json pump (`hostd::driven`, `slopty_agent::stream`,
+  `ClientMsg::OpenAgent/AgentSay/AgentAnswer/AgentInterrupt/AgentSet`, `HostMsg::AgentPartial/
+  AgentPermission/AgentInfo/AgentTask/AgentSessions/Transcript/Files`, `SessionKind::Agent`,
+  `CloseReason::Failed`), the conversation view (⌘⇧L, `terminal::conversation`), the composer
+  with its attachments, window snapshots, `@` file and slash completions, the resume picker
+  (⌘⌥R), "Ask the agent" on the block menu and the "ask" pills on window, file and note cards,
+  and the badge's and the banner's allow / deny / answer buttons (a blocked badge now carries
+  one "go", which reveals the terminal: the human answers Claude Code's own prompt there).
+  The "+ agent" pill is ⌘⇧T again, no menu. Superseded by this: "Answering a permission
+  prompt from the badge", "Conversation view from the transcript, not from hooks" and
+  "Structured driving is Claude Code's own stream-json protocol" (video.md), the "+ agent" menu,
+  the ask pills, the block menu's "Ask the agent", the palette's "New conversation in …"
+  (canvas.md, now "New agent in …"). What stays sound in those entries is the evidence about
+  Claude Code's prompts and files; the code they describe is gone (no compatibility layer,
+  pre-release). Tests removed with it: the driven and conversation headless tests, the app
+  self-test's `the_conversation_view_reads_and_answers_the_agent` and
+  `a_driven_agent_talks_over_stream_json` with the `slopty-fake-claude` binary and the
+  conversation goldens, the simulator's conversation and driven tests. Kept and retuned: the
+  status pipeline's unit tests, `an_agent_seen_without_hooks_gets_the_pill_and_offers_the_hooks`,
+  `an_agent_started_without_hooks_is_attributed_from_what_the_host_can_see` (shell-script fake
+  `claude`), the title-bar a11y order (`Heading < Status < Button "go" < Terminal`) and the
+  find-everywhere and palette-directory tests without their agent lines.

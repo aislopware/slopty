@@ -162,7 +162,6 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                         CloseReason::Requested => "closed",
                         CloseReason::Exited => "exited",
                         CloseReason::HostShutdown => "host shut down",
-                        CloseReason::Failed { .. } => "failed",
                     });
                 }
                 Some(LinkEvent::Control(_) | LinkEvent::Term { .. }) => {}

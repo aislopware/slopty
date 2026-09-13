@@ -1,8 +1,7 @@
 //! One markdown look for every surface that draws it with gpui-kit's `TextView`.
 //!
-//! An assistant's turn in a conversation ([`crate::terminal::conversation`]) and a note on the
-//! canvas ([`crate::note`]) read the same, because both take their sizes, colours and corners
-//! from the theme through [`style`].
+//! A note on the canvas ([`crate::note`]) and a file card read the same, because both take
+//! their sizes, colours and corners from the theme through [`style`].
 
 use std::rc::Rc;
 

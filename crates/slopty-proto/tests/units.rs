@@ -1,12 +1,11 @@
-//! The wire crate's arithmetic and names, pinned: constants a peer relies on, the context
-//! window's percent, the media header's kinds and flags, the codec's limit, and the variant
+//! The wire crate's arithmetic and names, pinned: constants a peer relies on, the media
+//! header's kinds and flags, the codec's limit, and the variant
 //! names logs use.
 
 #[cfg(test)]
 mod units {
     use bytes::{BufMut as _, BytesMut};
     use slopty_core::{ClientId, ItemId};
-    use slopty_proto::agent::{Context, IMAGE_BYTES_MAX};
     use slopty_proto::canvas::CanvasSync;
     use slopty_proto::codec::{self, CodecError, MAX_FRAME_BYTES};
     use slopty_proto::file::FILE_BYTES;
@@ -20,7 +19,6 @@ mod units {
 
     #[test]
     fn the_limits_are_the_numbers_the_docs_name() {
-        assert_eq!(IMAGE_BYTES_MAX, 4_194_304);
         assert_eq!(FILE_BYTES, 524_288);
         assert_eq!(MAX_CLIPBOARD_BYTES, 262_144);
         assert_eq!(MAX_FRAME_BYTES, 16_777_216);
@@ -30,18 +28,6 @@ mod units {
             metrics: CellMetrics { cell_width: 8, cell_height: 16 },
         };
         assert_eq!((size.width_px(), size.height_px()), (640, 384));
-    }
-
-    #[test]
-    fn the_context_percent_rounds_up_and_caps_at_a_hundred() {
-        let at = |tokens, window| Context { tokens, window }.percent();
-        assert_eq!(at(50, None), None, "no window yet");
-        assert_eq!(at(50, Some(0)), None, "an empty window is no window");
-        assert_eq!(at(0, Some(100)), Some(0));
-        assert_eq!(at(1, Some(100)), Some(1));
-        assert_eq!(at(50, Some(200)), Some(25));
-        assert_eq!(at(1, Some(3)), Some(34), "the smallest integer not below the fraction");
-        assert_eq!(at(201, Some(200)), Some(100), "capped");
     }
 
     #[test]

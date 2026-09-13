@@ -8004,12 +8004,8 @@ dependencies = [
 name = "slopty-agent"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "data-encoding",
- "ignore",
  "serde",
  "serde_json",
- "similar 3.2.0",
  "slopty-core",
  "slopty-proto",
  "tempfile",
@@ -8185,6 +8181,7 @@ name = "slopty-host"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ignore",
  "objc2-core-foundation",
  "objc2-core-video",
  "objc2-video-toolbox",
@@ -8214,7 +8211,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "image",
  "libc",
  "objc2-application-services",
  "objc2-core-foundation",
@@ -8233,7 +8229,6 @@ dependencies = [
  "slopty-platform",
  "slopty-proto",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8409,13 +8404,11 @@ name = "slopty-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "core-foundation 0.10.1",
  "core-video",
  "gpui",
  "gpui-kit",
  "image",
- "regex",
  "similar 3.2.0",
  "slopty-client",
  "slopty-core",
@@ -8425,7 +8418,6 @@ dependencies = [
  "slopty-proto",
  "slopty-theme",
  "syntect",
- "tempfile",
  "tokio",
  "tracing",
 ]

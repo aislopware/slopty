@@ -29,13 +29,12 @@ use slopty_client::LinkEvent;
 use slopty_core::SessionId;
 use slopty_net::EndpointId;
 use slopty_proto::HostMsg;
-use slopty_proto::terminal::CloseReason;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Theme, alpha};
 use slopty_ui::a11y::{key_name, tab_stop};
 use slopty_ui::canvas::{
-    AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewDrivenAgent, NewNote,
-    NewTerminal, NextAttention, OpenPalette, ResumeAgent,
+    AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
+    NextAttention, OpenPalette,
 };
 use slopty_ui::colors::{hsla, hsla_alpha};
 use slopty_ui::screen::{ScreenView, Sticky};
@@ -138,8 +137,6 @@ pub struct Workspace {
     active: Option<EndpointId>,
     /// The host switcher is open.
     switcher: bool,
-    /// The "+ agent" menu is open.
-    agent_menu: bool,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
     hardware_keyboard: bool,
     theme: Theme,
@@ -272,7 +269,7 @@ impl Workspace {
         if theme == self.theme {
             return;
         }
-        // gpui-kit widgets (inputs, the composer, Markdown) read gpui-kit's theme: keep it on
+        // gpui-kit widgets (inputs, Markdown) read gpui-kit's theme: keep it on
         // the same tokens.
         slopty_ui::kit::sync(&theme, cx);
         let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
@@ -348,13 +345,12 @@ impl Workspace {
             .map(|h| h.id)
     }
 
-    /// A banner for `session` was activated: switch to whichever host holds it and reveal it
-    /// (no `action`) or answer its prompt (`allow` / `deny`). The banner's tag is only the
-    /// session UUID, so the host is found by asking each canvas `has_session`.
+    /// A banner for `session` was activated: switch to whichever host holds it and reveal it.
+    /// The banner's tag is only the session UUID, so the host is found by asking each canvas
+    /// `has_session`.
     fn notification_response(
         &mut self,
         session: SessionId,
-        action: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -363,7 +359,7 @@ impl Workspace {
             self.activate(host, window, cx);
         }
         if let Some(canvas) = self.active_canvas() {
-            canvas.update(cx, |c, cx| c.notification_response(session, action, cx));
+            canvas.update(cx, |c, cx| c.notification_response(session, cx));
         }
     }
 
@@ -950,7 +946,7 @@ impl Workspace {
                 .role(Role::Button)
                 .aria_label(SharedString::from(key_label(label, lit)))
                 .child(SharedString::from(label));
-            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, window, cx| {
+            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
                 target.update(cx, |t, cx| {
                     if is_control {
                         let on = !t.sticky_control();
@@ -965,7 +961,6 @@ impl Workspace {
                                 key: key.to_owned(),
                                 key_char: typed.map(str::to_owned),
                             },
-                            window,
                             cx,
                         );
                     }
@@ -1063,13 +1058,11 @@ impl Workspace {
                 }
             },
         ));
-        // "+ agent" opens a menu: the agent's own terminal, a conversation card the host
-        // drives, or a past conversation to resume — the phone's only way to the last two.
         let agent_button =
-            button("new-agent", "+ agent", "▾").on_click(cx.listener(|this, _ev, _window, cx| {
-                this.agent_menu = !this.agent_menu;
-                this.switcher = false;
-                cx.notify();
+            button("new-agent", "+ agent", "⌘⇧T").on_click(cx.listener(|this, _ev, window, cx| {
+                if let Some(canvas) = this.active_canvas() {
+                    canvas.update(cx, |c, cx| c.new_agent(&NewAgent, window, cx));
+                }
             }));
         let note_button =
             button("new-note", "+ note", "⌘⇧N").on_click(cx.listener(|this, _ev, window, cx| {
@@ -1171,7 +1164,6 @@ impl Workspace {
             })
             .on_click(cx.listener(|this, _ev, _window, cx| {
                 this.switcher = !this.switcher;
-                this.agent_menu = false;
                 cx.notify();
             }));
         let host_button = tab_stop(host_button, s.accent);
@@ -1346,104 +1338,6 @@ impl Workspace {
     }
 }
 
-impl Workspace {
-    /// The "+ agent" menu: the three ways to a Claude Code agent on the canvas, each the
-    /// same action its shortcut runs. Anchored under the pill; a click anywhere else closes it.
-    fn agent_menu(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let ui = theme.typography.ui_size;
-        let small = theme.typography.small();
-        let row = move |id: &'static str, text: &'static str, hint: &'static str| {
-            let row = div()
-                .id(id)
-                .role(Role::MenuItem)
-                .aria_label(text)
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(spacing.lg))
-                .px(px(spacing.md))
-                .py(px(spacing.sm))
-                .text_size(px(ui))
-                .text_color(hsla(s.text))
-                .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
-                .active(move |el| el.bg(hsla(s.overlay)))
-                .child(SharedString::from(text))
-                .when(SHORTCUT_HINTS, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(small))
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(hint)),
-                    )
-                });
-            tab_stop(row, s.accent)
-        };
-        let panel = div()
-            .id("agent-menu")
-            .role(Role::Menu)
-            .aria_label("Agent")
-            .occlude()
-            .flex()
-            .flex_col()
-            .py(px(spacing.xs))
-            .rounded(px(radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
-            .font_family(self.theme.typography.ui_family.clone())
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .child(row("agent-terminal", "Terminal agent", "⌘⇧T").on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.agent_menu = false;
-                    if let Some(canvas) = this.active_canvas() {
-                        canvas.update(cx, |c, cx| c.new_agent(&NewAgent, window, cx));
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(row("agent-conversation", "Conversation", "⌘⌥T").on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.agent_menu = false;
-                    if let Some(canvas) = this.active_canvas() {
-                        canvas.update(cx, |c, cx| c.new_driven_agent(&NewDrivenAgent, window, cx));
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(row("agent-resume", "Resume conversation…", "⌘⌥R").on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.agent_menu = false;
-                    if let Some(canvas) = this.active_canvas() {
-                        canvas.update(cx, |c, cx| c.resume_agent(&ResumeAgent, window, cx));
-                    }
-                    cx.notify();
-                },
-            )));
-        div()
-            .id("agent-menu-backdrop")
-            .absolute()
-            .inset_0()
-            .pt(px(TOP_BAR) + safe_top)
-            .pr(px(spacing.md))
-            .flex()
-            .flex_col()
-            .items_end()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _ev, _window, cx| {
-                    this.agent_menu = false;
-                    cx.notify();
-                }),
-            )
-            .child(panel)
-    }
-}
-
 /// A key-bar key as a screen reader names it; an armed modifier says so.
 fn key_label(label: &str, lit: bool) -> String {
     let name = key_name(label);
@@ -1500,7 +1394,6 @@ impl Render for Workspace {
         }
         let settings_editor = self.settings_editor.clone();
         let switcher = self.switcher.then(|| self.switcher(insets.top, cx));
-        let agent_menu = self.agent_menu.then(|| self.agent_menu(insets.top, cx));
         div()
             .size_full()
             .flex()
@@ -1531,7 +1424,6 @@ impl Render for Workspace {
                     .when_some(key_bar, gpui::ParentElement::child),
             )
             .when_some(switcher, gpui::ParentElement::child)
-            .when_some(agent_menu, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
             .child(slopty_ui::frames::probe())
     }
@@ -1576,13 +1468,7 @@ fn apply_link_event(
         LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
             canvas.update(cx, |c, cx| c.session_opened(summary, cx));
         }
-        LinkEvent::Control(HostMsg::SessionClosed { session, reason }) => {
-            if let CloseReason::Failed { status, detail } = reason {
-                let why = if detail.is_empty() { String::new() } else { format!(": {detail}") };
-                let _shown = this.update(cx, |ws, cx| {
-                    ws.show_notice(format!("Claude Code exited with status {status}{why}"), cx);
-                });
-            }
+        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
             canvas.update(cx, |c, cx| c.session_closed(session, cx));
         }
         LinkEvent::Control(HostMsg::Term { session, event }) => {
@@ -1593,27 +1479,6 @@ fn apply_link_event(
         }
         LinkEvent::Control(HostMsg::Agent(event)) => {
             canvas.update(cx, |c, cx| c.agent_event(event, cx));
-        }
-        LinkEvent::Control(HostMsg::Transcript(update)) => {
-            canvas.update(cx, |c, cx| c.transcript_update(update, cx));
-        }
-        LinkEvent::Control(HostMsg::AgentPartial { session, text }) => {
-            canvas.update(cx, |c, cx| c.agent_partial(session, text, cx));
-        }
-        LinkEvent::Control(HostMsg::AgentPermission { session, request }) => {
-            canvas.update(cx, |c, cx| c.agent_permission(session, request, cx));
-        }
-        LinkEvent::Control(HostMsg::AgentInfo { session, info }) => {
-            canvas.update(cx, |c, cx| c.agent_info(session, info, cx));
-        }
-        LinkEvent::Control(HostMsg::AgentTask { session, task }) => {
-            canvas.update(cx, |c, cx| c.agent_task(session, task, cx));
-        }
-        LinkEvent::Control(HostMsg::AgentSessions { cwd, sessions }) => {
-            canvas.update(cx, |c, cx| c.agent_sessions(cwd, sessions, cx));
-        }
-        LinkEvent::Control(HostMsg::Files { session, query, paths }) => {
-            canvas.update(cx, |c, cx| c.agent_files(session, query, paths, cx));
         }
         LinkEvent::Control(HostMsg::File { path, read }) => {
             canvas.update(cx, |c, cx| c.file_read(&path, &read, cx));
@@ -1714,7 +1579,6 @@ pub fn open_workspace(
         hosts: Vec::new(),
         active: None,
         switcher: false,
-        agent_menu: false,
         hardware_keyboard: hardware_keyboard_attached(),
         theme: Theme::default(),
         settings: Settings::default(),
@@ -1747,15 +1611,14 @@ pub fn open_workspace(
     })?;
     watch_settings(settings_path, workspace.clone(), cx);
     // A tap on an agent banner brings the app and that session forward, on whichever host
-    // the session lives; its buttons answer.
+    // the session lives.
     let for_notifications = workspace.clone();
     cx.on_system_notification_response(move |response, cx| {
         let Ok(session) = response.tag.parse::<SessionId>() else { return };
         cx.activate(true);
-        let action = response.action_id;
         let _handled = window.update(cx, |_root, window, cx| {
             for_notifications.update(cx, |ws, cx| {
-                ws.notification_response(session, action.as_deref(), window, cx);
+                ws.notification_response(session, window, cx);
             });
         });
     });

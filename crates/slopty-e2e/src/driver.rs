@@ -108,19 +108,6 @@ impl Driver {
         .await
     }
 
-    /// Attach a picture to the active driven conversation's next prompt.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks or no driven conversation is active.
-    pub async fn attach(&mut self, media_type: &str, data: &[u8]) -> Result<()> {
-        self.ok(&Command::Attach {
-            media_type: media_type.to_owned(),
-            data: data_encoding::BASE64.encode(data),
-        })
-        .await
-    }
-
     /// Left click at a window point.
     ///
     /// # Errors
@@ -259,28 +246,6 @@ impl Driver {
         self.ok(&Command::OpenFile { path: path.to_owned(), line }).await
     }
 
-    /// Open a driven Claude Code agent (a conversation card) in `cwd`.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks or there is no canvas.
-    pub async fn open_agent(&mut self, cwd: Option<&str>) -> Result<()> {
-        self.ok(&Command::OpenAgent { cwd: cwd.map(str::to_owned), resume: None }).await
-    }
-
-    /// Resume a Claude Code conversation as a driven agent, as picking it in ⌘⌥R's list would.
-    ///
-    /// # Errors
-    ///
-    /// When the app answers with an error.
-    pub async fn resume_agent(&mut self, cwd: Option<&str>, session: &str) -> Result<()> {
-        self.ok(&Command::OpenAgent {
-            cwd: cwd.map(str::to_owned),
-            resume: Some(session.to_owned()),
-        })
-        .await
-    }
-
     /// Add the host's first display to the canvas.
     ///
     /// # Errors
@@ -309,18 +274,14 @@ impl Driver {
         self.ok(&Command::Reveal { session: session.to_owned() }).await
     }
 
-    /// Activate an agent banner: reveal `tag`'s session (no action) or answer its prompt
-    /// (`allow` / `deny`), switching hosts as the response handler does.
+    /// Activate an agent banner: reveal `tag`'s session, switching hosts as the response
+    /// handler does.
     ///
     /// # Errors
     ///
     /// When the socket breaks or the session is on no host.
-    pub async fn notification_response(&mut self, tag: &str, action: Option<&str>) -> Result<()> {
-        self.ok(&Command::NotificationResponse {
-            tag: tag.to_owned(),
-            action: action.map(str::to_owned),
-        })
-        .await
+    pub async fn notification_response(&mut self, tag: &str) -> Result<()> {
+        self.ok(&Command::NotificationResponse { tag: tag.to_owned() }).await
     }
 
     /// The app's state.

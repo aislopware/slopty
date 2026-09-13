@@ -98,14 +98,10 @@ pub enum SessionKind {
     /// A program in a PTY: the grid, keys, the whole terminal.
     #[default]
     Terminal,
-    /// A coding agent the host drives over its structured protocol: a conversation, no grid.
-    /// Prompts go through `ClientMsg::AgentSay`, permissions through `AgentAnswer`, Esc
-    /// through `AgentInterrupt`; `TermRequest::Close` still closes it.
-    Agent,
 }
 
 /// Why a session closed.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CloseReason {
     /// A client asked.
     Requested,
@@ -113,14 +109,6 @@ pub enum CloseReason {
     Exited,
     /// The host is shutting down.
     HostShutdown,
-    /// A driven agent died on its own: nobody asked it to close and it left a non-zero
-    /// status. The client shows the reason so a lost conversation is not a mystery.
-    Failed {
-        /// The process's exit status (`-1` when killed by a signal).
-        status: i32,
-        /// Its last line of stderr ("Not logged in"), empty when it said nothing.
-        detail: String,
-    },
 }
 
 /// Client → host, scoped to one session.

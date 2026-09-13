@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
@@ -21,7 +20,6 @@ gpui-kit.workspace = true
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 # The find bar's regular expressions in a conversation card (`terminal::conversation`).
-regex.workspace = true
 # Which lines an agent's edit changed, when a file card reads its file again (`file`).
 similar.workspace = true
 slopty-client.workspace = true
@@ -43,4 +41,3 @@ e2e = [ "gpui/test-support" ]
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
 slopty-client = { workspace = true, features = [ "headless" ] }
-tempfile.workspace = true

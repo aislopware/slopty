@@ -11,6 +11,7 @@ description = "Slopty host core: session actors (engine + PTY), fan-out, session
 workspace = true
 
 [dependencies]
+ignore.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
