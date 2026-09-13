@@ -971,7 +971,7 @@ alone): a command is running once the cursor has left the rows it was typed on
 (`Effect::CommandStarted`) and finished when a newer prompt starts, whose `exit` is its
 status (`Effect::CommandFinished`); the view times the two and emits
 `TerminalViewEvent::CommandFinished { command, exit, elapsed }`, and the canvas badges the
-item's title bar ("done 12.3 s", "failed (1) 1 min 4 s" in the success or warn tone,
+item's title bar ("done 12.3 s", "failed (1) 1 m 04 s" — `took_label`'s clock — in the success or warn tone,
 `finished-<uuid>`, role Button) when the command ran at least `SLOW_COMMAND` (5 s) and its
 item was not the active one — the shell's answer to the agent attention badge. The badge
 goes when the item is activated (a press on it does that).

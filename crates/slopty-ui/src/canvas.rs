@@ -416,16 +416,10 @@ pub struct Finished {
 }
 
 impl Finished {
-    /// The badge text: "done 3.2 s", "failed (1) 1 min 4 s".
+    /// The badge text: "done 3.2 s", "failed (1) 1 m 04 s" (the row caption's clock).
     #[must_use]
     pub fn label(&self) -> String {
-        let secs = self.elapsed.as_secs_f64();
-        let took = if secs < 60.0 {
-            format!("{secs:.1} s")
-        } else {
-            let whole = self.elapsed.as_secs();
-            format!("{} min {} s", whole / 60, whole % 60)
-        };
+        let took = crate::terminal::took_label(self.elapsed);
         match self.exit {
             Some(0) | None => format!("done {took}"),
             Some(code) => format!("failed ({code}) {took}"),
@@ -5106,7 +5100,7 @@ mod tests {
             |exit, secs| Finished { command: "x".into(), exit, elapsed: Duration::from_secs(secs) };
         assert_eq!(done(Some(0), 7).label(), "done 7.0 s");
         assert_eq!(done(None, 7).label(), "done 7.0 s");
-        assert_eq!(done(Some(1), 65).label(), "failed (1) 1 min 5 s");
+        assert_eq!(done(Some(1), 65).label(), "failed (1) 1 m 05 s", "as the row caption reads");
     }
 
     /// Another client's viewport is an outline labelled with its name, placed where the

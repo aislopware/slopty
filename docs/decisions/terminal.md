@@ -450,7 +450,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   when the command ran at least `SLOW_COMMAND` (5 s: shorter commands end before anyone has
   looked away) and its item is not the active one; `set_slow_command` exists for tests and a
   future setting; (5) the badge is a Button in the success tone ("done 12.3 s") or the warn
-  tone on a non-zero status ("failed (1) 1 min 4 s"), between the chat pill and the agent
+  tone on a non-zero status ("failed (1) 1 m 04 s", the row caption's `took_label` since 2026-09-14), between the chat pill and the agent
   badge, and a press activates the item, which is also what clears it (`activate`), so the
   human's look is the acknowledgement; (6) no system notification and no `needs-you` count:
   those mean an agent is waiting on the human, and a finished command is waiting on nobody.
