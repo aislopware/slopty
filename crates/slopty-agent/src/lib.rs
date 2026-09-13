@@ -35,7 +35,7 @@ pub mod stream;
 pub mod title;
 pub mod transcript;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -78,6 +78,9 @@ pub struct Hook {
     /// Tool events.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// The call's own id on tool and permission events, what its result names.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
     /// Tool arguments.
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
@@ -253,6 +256,9 @@ pub struct Tracker {
     absent: u8,
     /// The agent process this tracker follows (`pid`, start time), when the platform said.
     process: Option<(i32, Option<SystemTime>)>,
+    /// Calls waiting on the human (a permission, a question) by `tool_use_id`: the agent
+    /// fires calls in batches, so a result from beside one of these does not release it.
+    blocks: BTreeSet<String>,
 }
 
 impl Default for Tracker {
@@ -268,6 +274,7 @@ impl Default for Tracker {
             cwd: None,
             absent: 0,
             process: None,
+            blocks: BTreeSet::new(),
         }
     }
 }
@@ -300,7 +307,15 @@ impl Tracker {
     }
 
     /// Apply one hook; the resulting event when the visible state changed.
+    ///
+    /// A hook from another agent session is dropped while this one is busy: a nested
+    /// `claude -p` run by the agent's own Bash call inherits the terminal's session and would
+    /// otherwise post its whole hook set here. It takes over only when this agent is at rest
+    /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
+        if !self.owns(hook) {
+            return None;
+        }
         self.hooked = true;
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
@@ -308,7 +323,12 @@ impl Tracker {
         if hook.transcript_path.is_some() {
             self.transcript_path.clone_from(&hook.transcript_path);
         }
+        self.ledger(hook);
         let (status, detail) = self.next(hook)?;
+        if !self.blocks.is_empty() && !matches!(status, AgentStatus::Blocked(_)) {
+            // A call beside the blocked one started or finished; the human is still needed.
+            return None;
+        }
         let was_blocked = matches!(self.status, AgentStatus::Blocked(_));
         let attention = match status {
             AgentStatus::Blocked(_) => !was_blocked,
@@ -446,6 +466,48 @@ impl Tracker {
         }
         self.detail = detail;
         true
+    }
+
+    /// Whether a hook speaks for the agent this tracker follows (see [`Self::apply`]).
+    fn owns(&self, hook: &Hook) -> bool {
+        let (Some(mine), Some(theirs)) = (&self.agent_session, &hook.session_id) else {
+            return true;
+        };
+        if mine == theirs {
+            return true;
+        }
+        let at_rest =
+            matches!(self.status, AgentStatus::None | AgentStatus::Idle | AgentStatus::Done);
+        let by_the_human =
+            hook.event == "SessionStart" && hook.source.as_deref() != Some("startup");
+        at_rest || by_the_human
+    }
+
+    /// Keep the set of calls waiting on the human: a permission request or a question opens
+    /// one, the call starting (permitted), ending, failing or being denied closes it, and a
+    /// turn boundary clears them all (an interrupted turn fires no `Stop`).
+    fn ledger(&mut self, hook: &Hook) {
+        let Some(id) = hook.tool_use_id.as_ref() else {
+            if matches!(
+                hook.event.as_str(),
+                "SessionStart" | "SessionEnd" | "UserPromptSubmit" | "Stop"
+            ) {
+                self.blocks.clear();
+            }
+            return;
+        };
+        match hook.event.as_str() {
+            "PermissionRequest" => {
+                self.blocks.insert(id.clone());
+            }
+            "PreToolUse" if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
+                self.blocks.insert(id.clone());
+            }
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+                self.blocks.remove(id);
+            }
+            _ => {}
+        }
     }
 
     /// The transition for a hook, if it means anything to us.
@@ -687,6 +749,134 @@ mod tests {
             .expect("end");
         assert_eq!(e.status, AgentStatus::None);
         assert_eq!(e.agent_session, None);
+    }
+
+    /// A `claude -p` the agent runs from its own Bash call inherits the terminal's session
+    /// and posts its own hooks: they are dropped while the agent is busy, so its start does
+    /// not clear the tool and its stop does not mint a "finished". A new session id is taken
+    /// once the agent is at rest (a restart), or at once when the human started it.
+    #[test]
+    fn a_nested_run_does_not_take_over_a_busy_agent() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.apply(
+            sid,
+            &hook(r#"{"session_id":"abc","hook_event_name":"SessionStart","source":"startup"}"#),
+        );
+        t.apply(
+            sid,
+            &hook(r#"{"session_id":"abc","hook_event_name":"UserPromptSubmit","prompt":"go"}"#),
+        );
+        t.apply(sid, &hook(r#"{"session_id":"abc","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"claude -p hi"},"tool_use_id":"t1"}"#));
+        for nested in [
+            r#"{"session_id":"def","hook_event_name":"SessionStart","source":"startup"}"#,
+            r#"{"session_id":"def","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            r#"{"session_id":"def","hook_event_name":"Stop","last_assistant_message":"hello"}"#,
+            r#"{"session_id":"def","hook_event_name":"SessionEnd","end_reason":"other"}"#,
+        ] {
+            assert_eq!(t.apply(sid, &hook(nested)), None, "{nested}");
+        }
+        assert_eq!(t.status, AgentStatus::Tool { tool: "Bash".into() });
+        assert_eq!(t.agent_session.as_deref(), Some("abc"));
+        let e = t
+            .apply(sid, &hook(r#"{"session_id":"abc","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"t1"}"#))
+            .expect("the agent's own result");
+        assert_eq!(e.status, AgentStatus::Working);
+        t.apply(sid, &hook(r#"{"session_id":"abc","hook_event_name":"Stop"}"#));
+
+        let e = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"session_id":"ghi","hook_event_name":"SessionStart","source":"startup"}"#,
+                ),
+            )
+            .expect("a restart while done");
+        assert_eq!(e.status, AgentStatus::Idle);
+        assert_eq!(e.agent_session.as_deref(), Some("ghi"));
+
+        t.apply(
+            sid,
+            &hook(r#"{"session_id":"ghi","hook_event_name":"UserPromptSubmit","prompt":"go"}"#),
+        );
+        let e = t
+            .apply(
+                sid,
+                &hook(r#"{"session_id":"jkl","hook_event_name":"SessionStart","source":"resume"}"#),
+            )
+            .expect("the human resumed another conversation");
+        assert_eq!(e.status, AgentStatus::Idle);
+        assert_eq!(e.agent_session.as_deref(), Some("jkl"));
+    }
+
+    /// Calls come in batches: a permission or a question waits on the human while a call
+    /// beside it runs, and that call's result does not release the block. The block ends
+    /// when its own call is permitted (it starts), denied or answered.
+    #[test]
+    fn a_block_stands_while_a_call_beside_it_finishes() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.apply(sid, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#));
+        t.apply(sid, &hook(r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/a/b.rs"},"tool_use_id":"r1"}"#));
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm x"},"tool_use_id":"b1"}"#))
+            .expect("blocked");
+        assert!(matches!(e.status, AgentStatus::Blocked(BlockReason::Permission { .. })));
+        assert!(e.attention);
+        assert_eq!(
+            t.apply(
+                sid,
+                &hook(r#"{"hook_event_name":"PostToolUse","tool_name":"Read","tool_use_id":"r1"}"#)
+            ),
+            None,
+            "the read finishing does not release the permission"
+        );
+        assert!(matches!(t.status, AgentStatus::Blocked(BlockReason::Permission { .. })));
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm x"},"tool_use_id":"b1"}"#))
+            .expect("permitted: the call starts");
+        assert_eq!(e.status, AgentStatus::Tool { tool: "Bash".into() });
+
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PermissionRequest","tool_name":"Edit","tool_input":{"file_path":"/a/c.rs"},"tool_use_id":"e1"}"#))
+            .expect("blocked again");
+        assert!(matches!(e.status, AgentStatus::Blocked(BlockReason::Permission { .. })));
+        assert_eq!(
+            t.apply(
+                sid,
+                &hook(r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"b1"}"#)
+            ),
+            None
+        );
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PermissionDenied","tool_name":"Edit","tool_use_id":"e1"}"#))
+            .expect("denied: released");
+        assert_eq!(e.status, AgentStatus::Working);
+
+        t.apply(sid, &hook(r#"{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"pattern":"x"},"tool_use_id":"g1"}"#));
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which?"}]},"tool_use_id":"q1"}"#))
+            .expect("a question");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
+        assert_eq!(
+            t.apply(
+                sid,
+                &hook(r#"{"hook_event_name":"PostToolUse","tool_name":"Grep","tool_use_id":"g1"}"#)
+            ),
+            None
+        );
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_use_id":"q1"}"#))
+            .expect("answered");
+        assert_eq!(e.status, AgentStatus::Working);
+
+        // An interrupted turn fires no Stop; the next prompt clears what was left.
+        t.apply(sid, &hook(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"b2"}"#));
+        let e = t
+            .apply(sid, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"never mind"}"#))
+            .expect("a new turn");
+        assert_eq!(e.status, AgentStatus::Working);
+        assert!(t.blocks.is_empty());
     }
 
     #[test]

@@ -861,3 +861,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   first draw and kept by entry index (`Conversation::diffs`, entries only append; a reset
   clears it). No wire change. Test:
   `conversation::tests::a_diff_is_coloured_side_by_side_and_cached_by_entry`.
+
+- ✅ **A block is a ledger of calls, and a session owns its terminal** (2026-09-15). Two
+  slop-desk lessons (`docs/knowledge-from-slop-desk.md` §5) the tracker had not taken. (1)
+  Claude Code fires tool calls in batches and runs the read-only ones concurrently, so a
+  `PermissionRequest` for a Bash call could be followed by the `PostToolUse` of a Read beside
+  it, which read as "Working" and took the badge down while the permission still waited.
+  Ruled: `Tracker::blocks` is a set of `tool_use_id`s waiting on the human — a permission
+  request or an `AskUserQuestion` opens one, and only that call's own `PreToolUse` (it was
+  permitted and starts), `PostToolUse`, `PostToolUseFailure` or `PermissionDenied` closes it;
+  while the set is non-empty a transition to `Working` or `Tool` is not applied. A turn
+  boundary (`UserPromptSubmit`, `Stop`, `SessionStart`, `SessionEnd`) clears the set, since an
+  Esc-interrupted prompt fires no hook at all. Events without an id (the `Notification`
+  family) never touch the ledger. (2) A `claude -p` the agent runs from its own Bash call
+  inherits `SLOPTY_SESSION` and posts its full hook set to the parent's session: its
+  `SessionStart` cleared the parent's tool, its `Stop` minted a false "finished" with a sound.
+  Ruled: a hook naming a different `session_id` is dropped while the tracker is busy
+  (`Working`, `Tool`, `Blocked`); it takes over when the tracker is at rest (`None`, `Idle`,
+  `Done` — a restart after a crash, since a nested run can only be spawned while the parent is
+  busy) or when it is a `SessionStart` whose `source` is not `startup` (`/clear`, `/resume`,
+  `/compact`, a fork: the human's own doing in that terminal, whatever the parent was up to).
+  `Hook` gained `tool_use_id`. Not taken: the dissent watchdog (screen rules overriding
+  stale hooks) — Slopty's transcript follower and the foreground-process probe already end a
+  session whose hooks stopped. Tests: `a_block_stands_while_a_call_beside_it_finishes`,
+  `a_nested_run_does_not_take_over_a_busy_agent`.

@@ -526,7 +526,10 @@ The host spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_HOSTD_SOCKE
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
 exits 0. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
 `AgentStatus` (`Idle`, `Working`, `Tool`, `Blocked{Permission|Question|Elicitation|IdlePrompt}`,
-`Done`) and flags `attention` on the transitions worth a sound. `AgentEvent.detail` says what
+`Done`) and flags `attention` on the transitions worth a sound. A block is a ledger of the
+calls waiting on the human (`tool_use_id`s), so a concurrent call finishing beside a pending
+permission does not release it; and a hook naming another agent session (a nested `claude -p`
+inherits the terminal's session) is dropped while the tracker is busy. `AgentEvent.detail` says what
 the agent wants: the tool call awaiting permission, the question it asked, the elicitation's
 message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload;
 when a payload has none of these but names a transcript, the daemon reads the JSONL tail —
