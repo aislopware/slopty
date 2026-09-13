@@ -3697,6 +3697,40 @@ mod tests {
         assert_eq!(took_label(Duration::from_mins(362)), "6 h 02 m");
     }
 
+    /// The answer that closes a turn carries how long the turn took, from the records' own
+    /// stamps; an answer more answers follow, or one without a stamp, carries nothing.
+    #[gpui::test]
+    fn a_turns_closing_answer_is_captioned_with_its_time(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update(cx, TerminalView::set_driven);
+        cx.run_until_parked();
+        let session = view.read_with(cx, |v, _| v.session);
+        let at = |at: u64, mut entry: TranscriptEntry| {
+            entry.at = Some(at);
+            entry
+        };
+        view.update(cx, |v, cx| {
+            let entries = vec![
+                at(1_000, user("fix it")),
+                at(20_000, assistant("looking")),
+                at(43_400, assistant("done")),
+                at(50_000, user("thanks")),
+                assistant("welcome"),
+            ];
+            v.transcript_update(TranscriptUpdate { session, reset: true, entries }, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-took-1").is_none(), "another answer follows");
+        assert!(cx.debug_bounds("conversation-took-2").is_some(), "the turn's last answer");
+        assert!(cx.debug_bounds("conversation-took-4").is_none(), "no stamp");
+        assert_eq!(
+            view.read_with(cx, |v, _| {
+                v.conversation().and_then(|c| conversation::turn_took(c.entries(), 2))
+            }),
+            Some(Duration::from_millis(42_400))
+        );
+    }
+
     /// A finished command's row says how long it took, at its right end, once it took a
     /// second or more; the caption follows the row through history and a new epoch (a
     /// reflow renumbers the rows) forgets them all.

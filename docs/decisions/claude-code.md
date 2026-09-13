@@ -73,6 +73,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   "HH:MM" (`chrono`, already in the tree). Goldens `host_transcript` (every variant) and
   `client_hello` re-accepted; PROTOCOL_VERSION 10 → 11.
 
+- ✅ **The answer that closes a turn says how long the turn took** (2026-09-14). Claude
+  Code's own screen ends a turn with "worked for 42s"; a card showed only the clock stamps,
+  so the length of a turn was a subtraction. Rulings: (1) the last answer before the next
+  prompt (or the end of the transcript) carries "took 42 s" beside its stamp
+  (`conversation-took-<ix>`, `conversation::turn_took` / `turn_label`: whole seconds under a
+  minute, then `2 m 10 s`, then `1 h 02 m`), from the records' own stamps at both ends — the
+  host's clock, so no client clock and no wire change; (2) an answer more answers follow says
+  nothing (the turn is not over at it), nor does one whose prompt or self has no stamp, nor a
+  pair whose clock went backwards. Tests: `a_turns_last_answer_says_how_long_the_turn_took`
+  (pure), headless `a_turns_closing_answer_is_captioned_with_its_time`.
+
 - ✅ **The composer types into the pty; no new wire message** (2026-09-05). ↩ sends the text
   as `TermRequest::Paste` (the host brackets it when the program asked, so Claude Code takes a
   multi-line message as one prompt) followed by the same `TermRequest::Key` Enter the keyboard

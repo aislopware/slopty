@@ -774,7 +774,8 @@ a11y "Copy code") over the code, beside a "run" button
 (`conversation-code-run-<entry>-<segment>`, a11y "Run in shell") drawn only while the canvas
 has a plain shell to run it in, which reveals that shell — the one most recently activated,
 else the newest — and types the block into it as a paste and one ↩ —
-"HH:MM" local-time stamps on prompts and answers, and folds that open on a click — thinking
+"HH:MM" local-time stamps on prompts and answers (the answer that closes a turn adds "took
+42 s" from the stamps at both ends, `conversation::turn_took`), and folds that open on a click — thinking
 starts folded, a result shows its first 4 lines, and a tool call draws its `ToolDetail`
 (`conversation::tool_body`): an edit's diff shows unasked as rows tinted in the success tone
 (added) and the error tone (removed) with a sign column and "+a −r" in the header

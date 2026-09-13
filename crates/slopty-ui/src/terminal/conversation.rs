@@ -18,6 +18,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -837,6 +838,7 @@ impl Conversation {
                                                 .is_ok()
                                                 .then_some(current == Some(ix));
                                             let diff = diff_spans_cached(&diffs, ix, e);
+                                            let took = turn_took(&entries, ix);
                                             entry(
                                                 ix,
                                                 e,
@@ -845,6 +847,7 @@ impl Conversation {
                                                 run,
                                                 hit,
                                                 diff.as_deref(),
+                                                took,
                                                 &view,
                                                 &theme,
                                             )
@@ -1681,6 +1684,7 @@ fn entry(
     run: Option<&Entity<TerminalView>>,
     hit: Option<bool>,
     diff: Option<&[Vec<Span>]>,
+    took: Option<Duration>,
     view: &Entity<TerminalView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -1785,6 +1789,14 @@ fn entry(
                     })),
             )
             .children(time)
+            .children(took.map(|elapsed| {
+                div()
+                    .debug_selector(move || format!("conversation-took-{ix}"))
+                    .flex_none()
+                    .text_size(px(theme.typography.caption()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(format!("took {}", turn_label(elapsed))))
+            }))
             .child(copy_button(ix, markdown, theme))
             .child(note_button(ix, markdown, view, theme))
             .into_any_element(),
@@ -2645,6 +2657,47 @@ fn preview(output: &Clipped, open: bool) -> (Clipped, usize) {
     (Clipped { text: head.join("\n"), more_lines: more }, hidden)
 }
 
+/// How long the turn that entry `ix` closes took.
+///
+/// `ix` is an answer that no further entry follows before the next prompt (or the end), and
+/// the prompt it answers carries a time too: the time between them, from the records' own
+/// stamps (the host's clock at both ends).
+#[must_use]
+pub fn turn_took(entries: &[TranscriptEntry], ix: usize) -> Option<Duration> {
+    let entry = entries.get(ix)?;
+    if !matches!(entry.body, TranscriptBody::Assistant { .. }) {
+        return None;
+    }
+    let closes = entries
+        .get(ix.checked_add(1)?)
+        .is_none_or(|next| matches!(next.body, TranscriptBody::User { .. }));
+    if !closes {
+        return None;
+    }
+    let end = entry.at?;
+    let start = entries
+        .get(..ix)?
+        .iter()
+        .rev()
+        .find(|e| matches!(e.body, TranscriptBody::User { .. }))?
+        .at?;
+    (end >= start).then(|| Duration::from_millis(end.saturating_sub(start)))
+}
+
+/// A turn's duration for its caption: whole seconds under a minute (`42 s`), then
+/// `2 m 03 s`, then `1 h 02 m`.
+#[must_use]
+pub fn turn_label(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs} s")
+    } else if secs < 3600 {
+        format!("{} m {:02} s", secs / 60, secs % 60)
+    } else {
+        format!("{} h {:02} m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// A record's time of day in the local zone, "HH:MM".
 #[must_use]
 pub fn clock(at: Option<u64>) -> Option<String> {
@@ -2719,6 +2772,40 @@ mod tests {
 
     /// The export keeps what a reader would paste: the turns, the calls, the failures, the
     /// compaction; not the thinking or the tool output.
+    #[test]
+    fn a_turns_last_answer_says_how_long_the_turn_took() {
+        let at = |at: u64, body: TranscriptBody| TranscriptEntry { at: Some(at), body };
+        let user = |text: &str| TranscriptBody::User { text: text.to_owned(), images: 0 };
+        let answer = |text: &str| TranscriptBody::Assistant { markdown: text.to_owned() };
+        let entries = vec![
+            at(1_000, user("fix it")),
+            at(20_000, answer("looking")),
+            at(43_400, answer("done")),
+            at(50_000, user("thanks")),
+            TranscriptEntry { at: None, body: answer("welcome") },
+            at(60_000, user("more")),
+            at(190_000, answer("ok")),
+        ];
+        assert_eq!(turn_took(&entries, 0), None, "a prompt closes nothing");
+        assert_eq!(turn_took(&entries, 1), None, "another answer follows");
+        assert_eq!(turn_took(&entries, 2), Some(Duration::from_millis(42_400)));
+        assert_eq!(turn_took(&entries, 4), None, "no stamp on the answer");
+        assert_eq!(turn_took(&entries, 6), Some(Duration::from_secs(130)), "the last entry");
+        assert_eq!(turn_took(&entries, 7), None);
+        let unstamped = vec![TranscriptEntry { at: None, body: user("x") }, at(5_000, answer("y"))];
+        assert_eq!(turn_took(&unstamped, 1), None, "no stamp on the prompt");
+        let backwards = vec![at(9_000, user("x")), at(5_000, answer("y"))];
+        assert_eq!(turn_took(&backwards, 1), None, "a clock that went backwards says nothing");
+        let alone = vec![at(5_000, answer("y"))];
+        assert_eq!(turn_took(&alone, 0), None, "no prompt before it");
+
+        assert_eq!(turn_label(Duration::from_millis(42_400)), "42 s");
+        assert_eq!(turn_label(Duration::from_secs(59)), "59 s");
+        assert_eq!(turn_label(Duration::from_secs(130)), "2 m 10 s");
+        assert_eq!(turn_label(Duration::from_secs(3_599)), "59 m 59 s");
+        assert_eq!(turn_label(Duration::from_mins(62)), "1 h 02 m");
+    }
+
     #[test]
     fn the_conversation_exports_as_markdown_turns() {
         let entry = |body| TranscriptEntry { at: None, body };
