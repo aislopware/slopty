@@ -1026,6 +1026,22 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Open the find bar on `needle` (a find in every card chose this one): the field holds
+    /// it and the newest hit is revealed when the host answers.
+    pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.find(&Find, window, cx);
+        let Some(search) = &mut self.search else { return };
+        search.input.update(cx, |input, cx| input.set_value(needle.to_owned(), window, cx));
+        needle.clone_into(&mut search.needle);
+        self.restart_search(cx);
+    }
+
+    /// The find bar's needle, when the bar is open.
+    #[must_use]
+    pub fn search_needle(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.needle.as_str())
+    }
+
     /// ⌘G / Enter.
     pub fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_match(1, cx);

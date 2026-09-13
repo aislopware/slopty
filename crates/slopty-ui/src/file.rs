@@ -249,6 +249,22 @@ impl FileView {
         cx.notify();
     }
 
+    /// Open the find bar on `needle` (a find in every card chose this one): the field holds
+    /// it and the card lands on the first hit.
+    pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.find(window, cx);
+        let Some(search) = &mut self.search else { return };
+        search.input.update(cx, |input, cx| input.set_value(needle.to_owned(), window, cx));
+        needle.clone_into(&mut search.needle);
+        self.refresh_hits(cx);
+    }
+
+    /// The text's lines as drawn (empty until the host answers).
+    #[must_use]
+    pub fn lines(&self) -> &[SharedString] {
+        &self.lines
+    }
+
     /// Esc or ✕ in the find bar: close it; the canvas takes the keyboard back.
     pub fn close_find(&mut self, cx: &mut Context<Self>) {
         if self.search.take().is_some() {

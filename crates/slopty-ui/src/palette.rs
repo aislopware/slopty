@@ -45,6 +45,20 @@ pub enum PaletteRun {
         /// As typed, without its trailing slash.
         cwd: String,
     },
+    /// Reveal this session and open its find bar on `needle` (find in every card).
+    FindIn {
+        /// The card's session.
+        session: SessionId,
+        /// What was typed.
+        needle: String,
+    },
+    /// Reveal this file card and open its find bar on `needle` (find in every card).
+    FindInFile {
+        /// The card.
+        item: slopty_core::ItemId,
+        /// What was typed.
+        needle: String,
+    },
 }
 
 impl Clone for PaletteRun {
@@ -57,6 +71,12 @@ impl Clone for PaletteRun {
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
+            Self::FindIn { session, needle } => {
+                Self::FindIn { session: *session, needle: needle.clone() }
+            }
+            Self::FindInFile { item, needle } => {
+                Self::FindInFile { item: *item, needle: needle.clone() }
+            }
         }
     }
 }
@@ -73,6 +93,12 @@ impl std::fmt::Debug for PaletteRun {
             }
             Self::OpenShell { cwd } => f.debug_struct("OpenShell").field("cwd", cwd).finish(),
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
+            Self::FindIn { session, needle } => {
+                f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
+            }
+            Self::FindInFile { item, needle } => {
+                f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
+            }
         }
     }
 }
@@ -154,6 +180,14 @@ impl PaletteItem {
             run: PaletteRun::OpenAgent { cwd },
         };
         [shell, agent]
+    }
+
+    /// `<title>` with `N hits` on the right for a card the needle was found in; ↩ does
+    /// `run` (the card's own find bar, or the card itself).
+    #[must_use]
+    pub fn hits(title: &str, total: u32, run: PaletteRun) -> Self {
+        let keys = if total == 1 { "1 hit".to_owned() } else { format!("{total} hits") };
+        Self { label: title.to_owned(), keys, run }
     }
 
     /// `Open <path>` for a path typed into the field, `line N` or `file` on the right.
@@ -341,6 +375,8 @@ pub struct CommandPalette {
     input: Entity<InputState>,
     /// Which match ↑/↓ have selected.
     selected: usize,
+    /// A find in every card: the field's text is a needle, never a path.
+    finding: bool,
     theme: Theme,
     _events: Subscription,
 }
@@ -370,12 +406,29 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
+        Self::with_field(items, "Type a command", false, theme, window, cx)
+    }
+
+    /// The palette as a search across every card: no commands, no path lines, the field
+    /// says what it is for, and the lines are what the canvas sets from the hits.
+    pub fn find(theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_field(Vec::new(), "Find in every card", true, theme, window, cx)
+    }
+
+    fn with_field(
+        items: Vec<PaletteItem>,
+        placeholder: &'static str,
+        finding: bool,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let events = cx.subscribe(&input, |this, _input, event, cx| match event {
             InputEvent::Change => {
                 this.selected = 0;
                 let text = this.input.read(cx).value().to_string();
-                this.path_items = path_items(&text);
+                this.path_items = if this.finding { Vec::new() } else { path_items(&text) };
                 this.found.clear();
                 cx.emit(PaletteEvent::Changed(text));
                 cx.notify();
@@ -389,9 +442,16 @@ impl CommandPalette {
             found: Vec::new(),
             input,
             selected: 0,
+            finding,
             theme,
             _events: events,
         }
+    }
+
+    /// Replace the lines under the commands (the hits of a find in every card).
+    pub fn set_lines(&mut self, lines: Vec<PaletteItem>, cx: &mut Context<Self>) {
+        self.found = lines;
+        cx.notify();
     }
 
     /// The host found `paths` under `root` for `query`: they are `Open <path>` lines after

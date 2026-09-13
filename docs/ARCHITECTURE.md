@@ -376,7 +376,8 @@ document synced through the host so every client sees the same canvas — item g
 and note text are host state; the camera `{x, y, zoom}` is per client, so panning and zoom on one
 client do not move another (`slopty-host::canvas` owns the document,
 `slopty-client::canvas` mirrors it with optimistic local ops, `slopty-ui::canvas` draws it: two-finger scroll pans, pinch / ⌘-scroll zooms about the pointer, title bar drags, corner
-grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[ are the keyboard surface, the last two
+grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/⌘⇧F are the keyboard surface, the last
+one a find in every card (the palette lists the cards with hits, ↩ opens that card's find bar), the two before it
 walking the cards in reading order; a minimap in the corner
 shows every item and the viewport and scrubs the camera). Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing

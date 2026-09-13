@@ -8,7 +8,7 @@
 //! dragging a title bar moves, the corner grip resizes, dragging empty space pans. Every
 //! geometry change is applied locally first and proposed to the host on release.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -115,6 +115,9 @@ pub mod actions {
             /// Point the other clients at the active card: each of them is offered a jump
             /// to it.
             PointOthers,
+            /// Find text in every card: the palette lists the cards it is in with their hit
+            /// counts, and ↩ opens that card's find bar on it.
+            FindEverywhere,
             /// Activate and reveal the next card in reading order (rows top to bottom, left
             /// to right), wrapping; nothing active starts at the first.
             NextCard,
@@ -136,11 +139,11 @@ pub mod actions {
     );
 }
 pub use actions::{
-    AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FitAll, FocusNext, FocusPrev,
-    LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote, NewTerminal,
-    NewWorktreeAgent, NextAttention, NextCard, OpenPalette, PageDown, PageUp, PointOthers,
-    PrevCard, RenameItem, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
-    ZoomToItem,
+    AddWindow, ArrangeByRepo, AskAgentAboutWindow, CloseItem, FindEverywhere, FitAll, FocusNext,
+    FocusPrev, LineDown, LineFirst, LineLast, LineUp, NewAgent, NewDrivenAgent, NewNote,
+    NewTerminal, NewWorktreeAgent, NextAttention, NextCard, OpenPalette, PageDown, PageUp,
+    PointOthers, PrevCard, RenameItem, ResumeAgent, ToggleMute, ToggleStats, ZoomIn, ZoomOut,
+    ZoomReset, ZoomToItem,
 };
 
 /// Where the phone key bar sends its keys (see [`CanvasView::active_key_target`]).
@@ -184,6 +187,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
         KeyBinding::new("cmd-e", RenameItem, CTX),
         KeyBinding::new("cmd-shift-o", PointOthers, CTX),
+        KeyBinding::new("cmd-shift-f", FindEverywhere, CTX),
+        // A focused field (a find bar, the palette, a note) is a gpui-kit input, whose own
+        // ⌘⇧F is replace; ours is bound in its context after it, so it wins there too.
+        KeyBinding::new("cmd-shift-f", FindEverywhere, Some("Input")),
         KeyBinding::new("cmd-]", NextCard, CTX),
         KeyBinding::new("cmd-[", PrevCard, CTX),
         // The active file card's reading line. Only while a file card is active (the canvas
@@ -236,6 +243,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         c("Stream stats", Box::new(ToggleStats)),
         c("Name this card", Box::new(RenameItem)),
         c("Point the others at this card", Box::new(PointOthers)),
+        c("Find in every card", Box::new(FindEverywhere)),
         c("Next card", Box::new(NextCard)),
         c("Previous card", Box::new(PrevCard)),
         t("Find in terminal, conversation or file", Box::new(Find)),
@@ -536,6 +544,16 @@ pub struct CanvasView {
     picker_wanted: bool,
     /// The command palette, while ⌘⇧P has it up.
     palette: Option<Entity<CommandPalette>>,
+    /// The needle of a find in every card while its palette is up.
+    find_needle: Option<String>,
+    /// Hit counts per session for `find_needle`, as the hosts answer.
+    find_hits: BTreeMap<SessionId, u32>,
+    /// A card to open its find bar on a needle once revealed (needs the window: from render).
+    pending_find: Option<(SessionId, String)>,
+    /// A file card to open its find bar on a needle once revealed.
+    pending_find_file: Option<(ItemId, String)>,
+    /// The notes and file cards holding `find_needle`, counted on this client.
+    find_local: Vec<PaletteItem>,
     /// The field naming a card, while one is open in a title bar.
     rename: Option<Rename>,
     /// Where the keyboard goes once the name field closed (applied from `render`).
@@ -679,6 +697,11 @@ impl CanvasView {
             rename_return: None,
             pending_focus_rename: false,
             palette_return: None,
+            find_needle: None,
+            find_hits: BTreeMap::new(),
+            pending_find: None,
+            pending_find_file: None,
+            find_local: Vec::new(),
             palette_action: None,
             palette_extra: Vec::new(),
             pending_focus_palette: false,
@@ -1632,16 +1655,51 @@ impl CanvasView {
         if self.palette.is_some() {
             return;
         }
-        self.palette_return = window.focused(cx);
         let items = self.palette_lines(cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
+        self.show_palette(palette, window, cx);
+    }
+
+    /// ⌘⇧F: the palette as a find in every card. What is typed goes to every live terminal
+    /// as a search; the cards it is found in are the lines, newest hit counts first as they
+    /// answer, and ↩ reveals that card with its find bar on the needle.
+    pub fn find_everywhere(
+        &mut self,
+        _: &FindEverywhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() {
+            return;
+        }
+        let theme = self.theme.clone();
+        let palette = cx.new(|cx| CommandPalette::find(theme, window, cx));
+        self.find_needle = Some(String::new());
+        self.find_hits.clear();
+        self.show_palette(palette, window, cx);
+    }
+
+    fn show_palette(
+        &mut self,
+        palette: Entity<CommandPalette>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette_return = window.focused(cx);
         self.subscriptions.push(cx.subscribe(&palette, |this, _palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
-                this.palette_changed(text);
+                if this.find_needle.is_some() {
+                    this.find_changed(text, cx);
+                } else {
+                    this.palette_changed(text);
+                }
                 return;
             }
             this.palette = None;
+            this.find_needle = None;
+            this.find_hits.clear();
+            this.find_local.clear();
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
                     this.palette_action = Some(action.boxed_clone());
@@ -1663,6 +1721,16 @@ impl CanvasView {
                 PaletteEvent::Run(PaletteRun::OpenAgent { cwd }) => {
                     this.open_agent(Some(cwd.clone()), cx);
                 }
+                PaletteEvent::Run(PaletteRun::FindIn { session, needle }) => {
+                    this.palette_return = None;
+                    this.reveal_session(*session, cx);
+                    this.pending_find = Some((*session, needle.clone()));
+                }
+                PaletteEvent::Run(PaletteRun::FindInFile { item, needle }) => {
+                    this.palette_return = None;
+                    this.go_to(*item, cx);
+                    this.pending_find_file = Some((*item, needle.clone()));
+                }
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
             cx.notify();
@@ -1670,6 +1738,84 @@ impl CanvasView {
         self.pending_focus_palette = true;
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// The find-everywhere field changed: every live terminal is asked for the needle (one
+    /// hit each is enough: the count is what the line says), the notes and file cards are
+    /// counted here, where their text is, and the lines start over.
+    fn find_changed(&mut self, text: &str, cx: &mut Context<Self>) {
+        let needle = text.trim().to_owned();
+        self.find_needle = Some(needle.clone());
+        self.find_hits.clear();
+        self.find_local.clear();
+        if needle.is_empty() {
+            self.refresh_find_lines(cx);
+            return;
+        }
+        for session in self.terminals.keys() {
+            self.send(ClientMsg::Term {
+                session: *session,
+                req: TermRequest::Search { needle: needle.clone(), max: 1, regex: false },
+            });
+        }
+        for id in self.reading_order() {
+            let Some(item) = self.doc.get(id) else { continue };
+            let (total, run) = match &item.kind {
+                ItemKind::Note { text } => {
+                    let lines: Vec<SharedString> = text.lines().map(SharedString::from).collect();
+                    (crate::file::find_hits(&lines, &needle).len(), PaletteRun::Item(id))
+                }
+                ItemKind::File { .. } => {
+                    let Some(view) = self.files.get(&id) else { continue };
+                    let total = crate::file::find_hits(view.read(cx).lines(), &needle).len();
+                    (total, PaletteRun::FindInFile { item: id, needle: needle.clone() })
+                }
+                ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                    continue;
+                }
+            };
+            if let Ok(total) = u32::try_from(total)
+                && total > 0
+            {
+                self.find_local.push(PaletteItem::hits(&self.card_title(item, cx), total, run));
+            }
+        }
+        self.refresh_find_lines(cx);
+    }
+
+    /// A card answered the find-everywhere needle: its line says how many hits it holds.
+    fn find_answered(
+        &mut self,
+        session: SessionId,
+        needle: &str,
+        total: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.find_needle.as_deref() != Some(needle) || needle.is_empty() {
+            return;
+        }
+        self.find_hits.insert(session, total);
+        self.refresh_find_lines(cx);
+    }
+
+    /// The find-everywhere lines: the terminals that answered with hits, then the notes and
+    /// file cards counted here.
+    fn refresh_find_lines(&self, cx: &mut Context<Self>) {
+        let Some(needle) = self.find_needle.as_deref() else { return };
+        let mut lines: Vec<PaletteItem> = self
+            .find_hits
+            .iter()
+            .filter(|(_, total)| **total > 0)
+            .filter_map(|(session, total)| {
+                let item = self.doc.item_for_session(*session)?;
+                let run = PaletteRun::FindIn { session: *session, needle: needle.to_owned() };
+                Some(PaletteItem::hits(&self.card_title(item, cx), *total, run))
+            })
+            .collect();
+        lines.extend(self.find_local.iter().cloned());
+        if let Some(palette) = &self.palette {
+            palette.update(cx, |p, cx| p.set_lines(lines, cx));
+        }
     }
 
     /// The palette's field changed: a word worth a lookup is asked of the host's files under
@@ -1949,7 +2095,13 @@ impl CanvasView {
     }
 
     /// A session-stream event.
-    pub fn term_event(&self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
+    pub fn term_event(&mut self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
+        if let TermEvent::Matches { needle, total, .. } = &event
+            && self.find_needle.is_some()
+        {
+            let needle = needle.clone();
+            self.find_answered(session, &needle, *total, cx);
+        }
         match (self.terminals.get(&session), event) {
             (Some(view), event) => view.update(cx, |v, cx| v.apply(event, cx)),
             (None, TermEvent::Error(e)) => tracing::warn!(%session, error = %e, "host"),
@@ -3716,6 +3868,22 @@ impl Render for CanvasView {
             let handle = view.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        if let Some((session, needle)) = self.pending_find.take()
+            && let Some(view) = self.terminals.get(&session).cloned()
+        {
+            // After this frame: the card is drawn and focused first, then its find bar takes
+            // the keyboard.
+            window.defer(cx, move |window, cx| {
+                view.update(cx, |v, cx| v.find_with(&needle, window, cx));
+            });
+        }
+        if let Some((item, needle)) = self.pending_find_file.take()
+            && let Some(view) = self.files.get(&item).cloned()
+        {
+            window.defer(cx, move |window, cx| {
+                view.update(cx, |v, cx| v.find_with(&needle, window, cx));
+            });
+        }
         if std::mem::take(&mut self.pending_focus_picker)
             && let Some(picker) = &self.picker
         {
@@ -3912,6 +4080,7 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::rename_item))
             .on_action(cx.listener(Self::point_others))
+            .on_action(cx.listener(Self::find_everywhere))
             .on_action(cx.listener(Self::next_card))
             .on_action(cx.listener(Self::prev_card))
             // Esc in the name field: the input's own action, taken here so the field closes
@@ -6431,6 +6600,157 @@ mod tests {
     /// resume list, and a row opens that conversation as a driven agent in its directory,
     /// titled by its first prompt. A list for one directory offers every directory on the
     /// host; the whole-host list does not.
+    /// ⌘⇧F: what is typed goes to every card as a search; the cards it is found in are the
+    /// palette's lines with their hit counts, and ↩ reveals one with its find bar on the
+    /// needle. A card with no hit is no line.
+    #[gpui::test]
+    fn find_in_every_card_lists_the_cards_with_hits_and_opens_ones_find_bar(
+        cx: &mut TestAppContext,
+    ) {
+        use slopty_proto::terminal::SearchMatch;
+        let (view, mut rx, me, cx) = canvas(cx);
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let id_a = host_opens(&view, cx, a, me, SHELL, 1);
+        let _id_b = host_opens(&view, cx, b, me, Rect { x: 800.0, ..SHELL }, 2);
+        // A note below the shells and a file card hold the needle too; they are counted here.
+        let note = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: "Errors\nno\nan ERROR again".to_owned() },
+            rect: Rect { x: 0.0, y: 600.0, w: 300.0, h: 200.0 },
+            z: 3,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let note_id = note.id;
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 3, by: me, op: CanvasOp::Upsert(note) }, cx);
+            c.open_file("/tmp/work/log.txt", None, cx);
+        });
+        cx.run_until_parked(); // the file's view is made on the next frame
+        view.update_in(cx, |c, _window, cx| {
+            c.file_read(
+                "/tmp/work/log.txt",
+                &FileRead::Text {
+                    text: "err one\nfine\nerr two".to_owned(),
+                    more_lines: 0,
+                    size: 21,
+                    modified_ms: 1,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let file_id = view.read_with(cx, |c, _| {
+            c.items().into_iter().find(|i| matches!(i.kind, ItemKind::File { .. })).map(|i| i.id)
+        });
+        let file_id = file_id.expect("the file card");
+        let title_of = |cx: &mut VisualTestContext, id: ItemId| {
+            view.read_with(cx, |c, cx| c.card_title(c.doc.get(id).expect("the card"), cx))
+        };
+        let (file_title, note_title) = (title_of(cx, file_id), title_of(cx, note_id));
+        drain(&mut rx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
+        cx.simulate_keystrokes("e r r");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        let asked: Vec<SessionId> = sent
+            .iter()
+            .filter_map(|m| match m {
+                ClientMsg::Term {
+                    session,
+                    req: TermRequest::Search { needle, max: 1, regex: false },
+                } if needle == "err" => Some(*session),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 2, "every card is asked once for the final needle: {sent:?}");
+        assert!(asked.contains(&a) && asked.contains(&b));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(
+            options,
+            [format!("{file_title} 2 hits"), format!("{note_title} 2 hits")],
+            "the cards counted here are lines at once, in reading order: {tree:#?}"
+        );
+
+        let hit = SearchMatch { line: LineIndex(2), col: 0, len: 3 };
+        view.update_in(cx, |c, _window, cx| {
+            let answer = |total: u32| TermEvent::Matches {
+                needle: "err".to_owned(),
+                total,
+                matches: (total > 0).then_some(hit).into_iter().collect(),
+            };
+            c.term_event(a, answer(3), cx);
+            c.term_event(b, answer(0), cx);
+            // A stale answer (the needle moved on) is nothing.
+            c.term_event(
+                b,
+                TermEvent::Matches { needle: "er".into(), total: 9, matches: vec![] },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let title = view.read_with(cx, |c, cx| c.card_title(c.doc.get(id_a).unwrap(), cx));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let options: Vec<&str> = tree
+            .iter()
+            .filter(|n| n.role == "ListBoxOption")
+            .filter_map(|n| n.label.as_deref())
+            .collect();
+        assert_eq!(
+            options,
+            [
+                format!("{title} 3 hits"),
+                format!("{file_title} 2 hits"),
+                format!("{note_title} 2 hits")
+            ],
+            "{tree:#?}"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "gone after ↩");
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(id_a));
+        let needle = view.read_with(cx, |c, cx| {
+            c.terminals.get(&a).map(|v| v.read(cx).search_needle().map(str::to_owned))
+        });
+        assert_eq!(needle, Some(Some("err".to_owned())), "the card's find bar holds the needle");
+        assert!(cx.debug_bounds("terminal-search").is_some(), "the find bar is up");
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { session, req: TermRequest::Search { needle, max, .. } }
+                    if *session == a && needle == "err" && *max > 1
+            )),
+            "the card searches for its own hits: {sent:?}"
+        );
+        assert!(view.read_with(cx, |c, _| c.find_needle.is_none()), "the fan-out is over");
+
+        // ⌘⇧F again, from the terminal's find bar (a field would take it as replace): the
+        // file card's line (the first: no terminal has answered this time) opens its own find
+        // bar on the needle, on the first hit.
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_some(), "⌘⇧F works from a field");
+        cx.simulate_keystrokes("e r r enter");
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |c, _| c.active_item()), Some(file_id));
+        let hits = view.read_with(cx, |c, cx| {
+            c.files.get(&file_id).map(|v| v.read(cx).hits().map(|(h, at)| (h.to_vec(), at)))
+        });
+        assert_eq!(hits, Some(Some((vec![0, 2], Some(0)))), "finding, on the first hit");
+        assert!(cx.debug_bounds("file-search").is_some(), "the file's find bar is up");
+    }
+
     /// A directory typed into the palette, spelled from the host's root or home with a
     /// slash at the end, offers a shell and a conversation there: the phone's way to a
     /// project no card is in yet.
