@@ -152,9 +152,11 @@ function from a face — advance, ascent, descent, line gap, and the underline/s
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
 underline, the strikethrough, the overline and the cursor (which spans both columns of a
 wide character). Underlines paint under the glyphs, strikethroughs over them. Box drawing,
-block elements, sextants, octants, Braille and Powerline cells are not shaped at all: `terminal::sprite` turns
-each into rectangles, arcs and strokes from the cell size and the underline thickness, snapped
-to device pixels, so borders never seam between rows. The face comes from the font's own
+block elements, sextants, octants, the legacy computing symbols (wedges, eighth bars, shaded
+halves, checkerboards, hatching, corner diagonals), Braille and Powerline cells are not
+shaped at all: `terminal::sprite` turns each into rectangles, polygons, arcs and strokes from
+the cell size and the underline thickness, snapped to device pixels, so borders never seam
+between rows. The face comes from the font's own
 tables through the fork's `TextSystem::font_metrics` (`hhea` line gap, `post` underline
 position and thickness; Core Text on both platforms), with ghostty's estimates only where a
 font says zero; the self-test dump reports it (`terminals[].face`). The element measures the

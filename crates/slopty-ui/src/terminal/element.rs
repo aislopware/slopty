@@ -1451,7 +1451,11 @@ fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, 
                     window.paint_path(path, s.fg);
                 }
             }
-            sprite::Shape::Poly(points) => {
+            sprite::Shape::Poly { points, ink } => {
+                let color = match ink {
+                    sprite::Ink::Fg => s.fg,
+                    sprite::Ink::Shade(a) => Hsla { a: s.fg.a * a, ..s.fg },
+                };
                 let mut path = PathBuilder::fill();
                 let mut points = points.into_iter();
                 if let Some(first) = points.next() {
@@ -1462,7 +1466,7 @@ fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, 
                 }
                 path.close();
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, s.fg);
+                    window.paint_path(path, color);
                 }
             }
         }

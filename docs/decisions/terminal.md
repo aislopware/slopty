@@ -605,7 +605,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a word boundary (`drawn_here`), so the font never shapes it and the word cache never holds
   it; the row keeps a `SpriteCell` (column, character, text colour) and paints the shapes
   between the underlines and the glyphs. Not drawn here: Powerline's other private-use
-  glyphs, legacy computing symbols (U+1FB00), sextants — the font keeps those. Tests:
+  glyphs — the font keeps those (sextants and the legacy computing symbols followed, below). Tests:
   `terminal::sprite::tests` (ranges, light/heavy/double bars, corners and junctions, dashes,
   arcs, blocks, Braille, Powerline, device-pixel snapping) and element
   `a_box_drawing_cell_is_drawn_not_shaped`.
@@ -656,6 +656,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   230-entry mask table transcribed from ghostty's `octants.txt` (there is no formula: the
   block skips every pattern another character already draws). Tests:
   `sextants_and_octants_are_mosaics_of_the_cell`, the ranges test.
+
+- ✅ **The legacy computing symbols are drawn too** (2026-09-15). U+1FB3C–1FBAF and the
+  centre quarter blocks U+1FBE4–7 sit next to the sextants in every TUI's toolbox (wedge
+  triangles for smooth chart edges, eighth bars for finer gauges, shaded halves and
+  checkerboards for textures, hatching, the corner diagonals) and fonts treat them the way
+  they treat sextants: missing, or fitted with seams. `sprite::wedge` fills a polygon through
+  the ten vertices ghostty's table names (corners, thirds of the sides, centre top and bottom;
+  a 44-entry mask table derived from its patterns, collinear vertices folded as it folds
+  them); `sprite::legacy` covers the rest with rectangles, edge triangles to the snapped
+  centre, a translucent `Ink::Shade` on the shaded halves and corners (so `Shape::Poly` now
+  carries an ink), a checkerboard of four columns by as many rows as keep the tiles square,
+  and hatching whose lines are clipped to the cell (`clip_x`) since the painter does not clip
+  a sprite. U+1FBAF is a box junction (heavy stem, light bar) through `box_arms`; U+1FB93 is
+  unallocated and draws nothing; U+1FBB0 onward are symbols the font keeps. Tests:
+  `wedges_and_edge_triangles_are_polygons_through_the_cells_thirds_and_centre`,
+  `legacy_bars_blocks_and_shades_fill_their_eighths`,
+  `checkerboards_alternate_and_hatching_stays_inside_the_cell`,
+  `corner_diagonals_run_from_the_edge_midpoints`.
 
 - ✅ **The pointer says what a click would do** (2026-09-15). The grid showed the arrow
   everywhere. Now the card's root div sets the pointer from `TerminalView::pointer`: an

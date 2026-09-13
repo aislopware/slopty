@@ -26,8 +26,8 @@ pub enum Shape {
     /// A quarter circle of radius `r` from `from` to `to`, stroked at `thickness`, bulging
     /// away from the cell's centre; `sweep` is the SVG flag (clockwise on screen).
     Arc { from: (f32, f32), to: (f32, f32), r: f32, sweep: bool, thickness: f32 },
-    /// A filled polygon: a Powerline triangle.
-    Poly(Vec<(f32, f32)>),
+    /// A filled polygon: a Powerline triangle, a wedge, a shaded corner.
+    Poly { points: Vec<(f32, f32)>, ink: Ink },
 }
 
 /// Whether the cell's text is drawn here rather than by the font.
@@ -46,7 +46,8 @@ const fn is_sprite_char(c: char) -> bool {
         '\u{2500}'..='\u{259F}'
             | '\u{2800}'..='\u{28FF}'
             | '\u{E0B0}'..='\u{E0B3}'
-            | '\u{1FB00}'..='\u{1FB3B}'
+            | '\u{1FB00}'..='\u{1FBAF}'
+            | '\u{1FBE4}'..='\u{1FBE7}'
             | '\u{1CD00}'..='\u{1CDE5}'
     )
 }
@@ -137,6 +138,8 @@ fn box_arms(c: char) -> Option<Arms> {
         0x254e | 0x254f => "llnn",
         0x2550..=0x256c => DOUBLE.get(index(n, 0x2550)?)?,
         0x2574..=0x257f => HALF.get(index(n, 0x2574)?)?,
+        // BOX DRAWINGS LIGHT HORIZONTAL WITH VERTICAL STROKE: ghostty's heavy stem.
+        0x1fbaf => "hhll",
         _ => return None,
     };
     let mut arms = arms(code);
@@ -232,6 +235,8 @@ pub fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
         0x2800..=0x28ff => braille(n, cell),
         0xe0b0..=0xe0b3 => powerline(n, cell),
         0x1fb00..=0x1fb3b => sextant(n, cell),
+        0x1fb3c..=0x1fb67 => wedge(n, cell),
+        0x1fb68..=0x1fbae | 0x1fbe4..=0x1fbe7 => legacy(n, cell),
         0x1cd00..=0x1cde5 => octant(n, cell),
         _ => return None,
     })
@@ -567,12 +572,241 @@ fn powerline(n: u32, cell: Cell) -> Vec<Shape> {
     let (w, h) = (cell.w, cell.h);
     let t = cell.t();
     match n {
-        0xe0b0 => vec![Shape::Poly(vec![(0.0, 0.0), (w, h / 2.0), (0.0, h)])],
+        0xe0b0 => {
+            vec![Shape::Poly { points: vec![(0.0, 0.0), (w, h / 2.0), (0.0, h)], ink: Ink::Fg }]
+        }
         0xe0b1 => {
             vec![Shape::Stroke { points: vec![(0.0, 0.0), (w, h / 2.0), (0.0, h)], thickness: t }]
         }
-        0xe0b2 => vec![Shape::Poly(vec![(w, 0.0), (0.0, h / 2.0), (w, h)])],
+        0xe0b2 => {
+            vec![Shape::Poly { points: vec![(w, 0.0), (0.0, h / 2.0), (w, h)], ink: Ink::Fg }]
+        }
         _ => vec![Shape::Stroke { points: vec![(w, 0.0), (0.0, h / 2.0), (w, h)], thickness: t }],
+    }
+}
+
+/// A count of cell subdivisions as a float.
+const fn count(k: u32) -> f32 {
+    #[expect(clippy::cast_precision_loss, reason = "a handful of subdivisions")]
+    let k = k as f32;
+    k
+}
+
+/// Which of the ten wedge vertices each of U+1FB3C–U+1FB67 joins, clockwise from the top-left
+/// corner: top-left, upper-left, lower-left, bottom-left, bottom-centre, bottom-right,
+/// lower-right, upper-right, top-right, top-centre. Derived from ghostty's pattern table.
+const WEDGES: [u16; 44] = [
+    0x01c, 0x02c, 0x01a, 0x02a, 0x019, 0x32a, 0x12a, 0x32c, 0x12c, 0x328, 0x0ac, 0x070, 0x068,
+    0x0b0, 0x0a8, 0x130, 0x2a9, 0x0a9, 0x269, 0x069, 0x229, 0x06a, 0x135, 0x125, 0x133, 0x123,
+    0x131, 0x203, 0x103, 0x205, 0x105, 0x209, 0x185, 0x159, 0x149, 0x199, 0x189, 0x119, 0x380,
+    0x181, 0x340, 0x141, 0x320, 0x143,
+];
+
+/// Wedge-shaped triangles U+1FB3C–U+1FB67: a polygon through the cell's corners, its thirds
+/// on the sides and its centre top and bottom.
+fn wedge(n: u32, cell: Cell) -> Vec<Shape> {
+    let Some(&mask) = WEDGES.get(n.wrapping_sub(0x1fb3c) as usize) else { return Vec::new() };
+    let (w, h) = (cell.w, cell.h);
+    let (cx, upper, lower) = (cell.snap(w / 2.0), cell.snap(h / 3.0), cell.snap(h * 2.0 / 3.0));
+    let vertices = [
+        (0.0, 0.0),
+        (0.0, upper),
+        (0.0, lower),
+        (0.0, h),
+        (cx, h),
+        (w, h),
+        (w, lower),
+        (w, upper),
+        (w, 0.0),
+        (cx, 0.0),
+    ];
+    let points = vertices
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| mask & (1_u16 << i) != 0)
+        .map(|(_, &p)| p)
+        .collect();
+    vec![Shape::Poly { points, ink: Ink::Fg }]
+}
+
+/// The triangle from one edge of the cell to its centre; `edge` 0–3 = left, top, right, bottom.
+fn edge_triangle(edge: u32, cell: Cell) -> Shape {
+    let (w, h) = (cell.w, cell.h);
+    let centre = (cell.snap(w / 2.0), cell.snap(h / 2.0));
+    let (from, to) = match edge {
+        0 => ((0.0, 0.0), (0.0, h)),
+        1 => ((w, 0.0), (0.0, 0.0)),
+        2 => ((w, h), (w, 0.0)),
+        _ => ((0.0, h), (w, h)),
+    };
+    Shape::Poly { points: vec![centre, from, to], ink: Ink::Fg }
+}
+
+/// The cell minus [`edge_triangle`]: the edge's ends through the centre, then the far corners.
+fn inverse_edge_triangle(edge: u32, cell: Cell) -> Shape {
+    let (w, h) = (cell.w, cell.h);
+    let c = (cell.snap(w / 2.0), cell.snap(h / 2.0));
+    let points = match edge {
+        0 => vec![(0.0, 0.0), c, (0.0, h), (w, h), (w, 0.0)],
+        1 => vec![(0.0, 0.0), c, (w, 0.0), (w, h), (0.0, h)],
+        2 => vec![(w, 0.0), c, (w, h), (0.0, h), (0.0, 0.0)],
+        _ => vec![(0.0, h), c, (w, h), (w, 0.0), (0.0, 0.0)],
+    };
+    Shape::Poly { points, ink: Ink::Fg }
+}
+
+/// The triangle filling half the cell from `corner` (0–3 = top-left, top-right, bottom-right,
+/// bottom-left), in `ink`.
+fn corner_triangle(corner: u32, ink: Ink, cell: Cell) -> Shape {
+    let (w, h) = (cell.w, cell.h);
+    let points = match corner {
+        0 => vec![(0.0, 0.0), (0.0, h), (w, 0.0)],
+        1 => vec![(0.0, 0.0), (w, h), (w, 0.0)],
+        2 => vec![(0.0, h), (w, h), (w, 0.0)],
+        _ => vec![(0.0, 0.0), (0.0, h), (w, h)],
+    };
+    Shape::Poly { points, ink }
+}
+
+/// Four columns by however many rows keep the tiles square, every other tile filled.
+fn checkerboard(parity: u32, cell: Cell) -> Vec<Shape> {
+    let (w, h) = (cell.w, cell.h);
+    let cols = 4_u32;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "rounded")]
+    let rows = (4.0 * h / w).round().clamp(1.0, 64.0) as u32;
+    let mut out = Vec::new();
+    for x in 0..cols {
+        for y in 0..rows {
+            if x.wrapping_add(y) % 2 != parity {
+                continue;
+            }
+            let (x0, x1) = (w * count(x) / count(cols), w * count(x.wrapping_add(1)) / count(cols));
+            let (y0, y1) = (h * count(y) / count(rows), h * count(y.wrapping_add(1)) / count(rows));
+            out.push(cell.rect(x0, y0, x1, y1, Ink::Fg));
+        }
+    }
+    out
+}
+
+/// Diagonal hatching over the cell, light lines one stride apart, each clipped to the cell.
+fn hatch(rising: bool, cell: Cell) -> Vec<Shape> {
+    let (w, h, t) = (cell.w, cell.h, cell.t());
+    let lines = (w / (2.0 * t)).floor().max(1.0);
+    let stride = (w / lines).round().max(1.0);
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "floored, ≥ 1")]
+    let lines = lines.min(64.0) as u32;
+    let mut out = Vec::new();
+    for i in (0..=lines.saturating_mul(2)).map(|i| count(i) - count(lines)) {
+        let offset = i * stride;
+        let (x0, x1) = if rising { (w + offset, offset) } else { (offset, w + offset) };
+        if let Some((t0, t1)) = clip_x(x0, x1, w) {
+            let at = |t: f32| ((x1 - x0).mul_add(t, x0), h * t);
+            out.push(Shape::Stroke { points: vec![at(t0), at(t1)], thickness: t });
+        }
+    }
+    out
+}
+
+/// The parameter range of the segment `x0`→`x1` that lies within `0..=w`.
+fn clip_x(x0: f32, x1: f32, w: f32) -> Option<(f32, f32)> {
+    let dx = x1 - x0;
+    let (mut t0, mut t1) = (0.0_f32, 1.0_f32);
+    for (p, q) in [(-dx, x0), (dx, w - x0)] {
+        if p.abs() < 1e-6 {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            t0 = t0.max(r);
+        } else {
+            t1 = t1.min(r);
+        }
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
+/// Box drawings light diagonal U+1FBA0–U+1FBAE: lines from the edge midpoints to the corners'
+/// quadrants; bits 1 top-left, 2 top-right, 4 bottom-left, 8 bottom-right, in code point order.
+const CORNER_DIAGONALS: [u8; 15] = [1, 2, 4, 8, 5, 10, 12, 3, 9, 6, 14, 13, 11, 7, 15];
+
+fn corner_diagonals(n: u32, cell: Cell) -> Vec<Shape> {
+    let Some(&mask) = CORNER_DIAGONALS.get(n.wrapping_sub(0x1fba0) as usize) else {
+        return Vec::new();
+    };
+    let (w, h, t) = (cell.w, cell.h, cell.t());
+    let (cx, cy) = (cell.snap(w / 2.0), cell.snap(h / 2.0));
+    [
+        (1_u8, (cx, 0.0), (0.0, cy)),
+        (2, (cx, 0.0), (w, cy)),
+        (4, (cx, h), (0.0, cy)),
+        (8, (cx, h), (w, cy)),
+    ]
+    .into_iter()
+    .filter(|&(bit, ..)| mask & bit != 0)
+    .map(|(_, a, b)| Shape::Stroke { points: vec![a, b], thickness: t })
+    .collect()
+}
+
+/// Symbols for legacy computing U+1FB68–U+1FBAE and the centre quarter blocks U+1FBE4–U+1FBE7:
+/// edge triangles, eighth bars, more blocks, shaded halves, checkerboards, hatching and
+/// corner diagonals — ghostty's geometry.
+fn legacy(n: u32, cell: Cell) -> Vec<Shape> {
+    let (w, h) = (cell.w, cell.h);
+    let eighth = |k: u32| count(k) / 8.0;
+    let column = |k: u32| cell.rect(w * eighth(k), 0.0, w * eighth(k.wrapping_add(1)), h, Ink::Fg);
+    let bar = |k: u32| cell.rect(0.0, h * eighth(k), w, h * eighth(k.wrapping_add(1)), Ink::Fg);
+    let upper = |f: f32| cell.rect(0.0, 0.0, w, h * f, Ink::Fg);
+    let lower = |f: f32| cell.rect(0.0, h * (1.0 - f), w, h, Ink::Fg);
+    let left = |f: f32| cell.rect(0.0, 0.0, w * f, h, Ink::Fg);
+    let right = |f: f32| cell.rect(w * (1.0 - f), 0.0, w, h, Ink::Fg);
+    let shade = |x0: f32, y0: f32, x1: f32, y1: f32| cell.rect(x0, y0, x1, y1, Ink::Shade(0.5));
+    match n {
+        0x1fb68..=0x1fb6b => vec![inverse_edge_triangle(n.wrapping_sub(0x1fb68), cell)],
+        0x1fb6c..=0x1fb6f => vec![edge_triangle(n.wrapping_sub(0x1fb6c), cell)],
+        0x1fb70..=0x1fb75 => vec![column(n.wrapping_sub(0x1fb70).wrapping_add(1))],
+        0x1fb76..=0x1fb7b => vec![bar(n.wrapping_sub(0x1fb76).wrapping_add(1))],
+        0x1fb7c => vec![left(0.125), lower(0.125)],
+        0x1fb7d => vec![left(0.125), upper(0.125)],
+        0x1fb7e => vec![right(0.125), upper(0.125)],
+        0x1fb7f => vec![right(0.125), lower(0.125)],
+        0x1fb80 => vec![upper(0.125), lower(0.125)],
+        0x1fb81 => vec![bar(0), bar(2), bar(4), bar(7)],
+        0x1fb82 => vec![upper(0.25)],
+        0x1fb83 => vec![upper(0.375)],
+        0x1fb84 => vec![upper(0.625)],
+        0x1fb85 => vec![upper(0.75)],
+        0x1fb86 => vec![upper(0.875)],
+        0x1fb87 => vec![right(0.25)],
+        0x1fb88 => vec![right(0.375)],
+        0x1fb89 => vec![right(0.625)],
+        0x1fb8a => vec![right(0.75)],
+        0x1fb8b => vec![right(0.875)],
+        0x1fb8c => vec![shade(0.0, 0.0, w / 2.0, h)],
+        0x1fb8d => vec![shade(w / 2.0, 0.0, w, h)],
+        0x1fb8e => vec![shade(0.0, 0.0, w, h / 2.0)],
+        0x1fb8f => vec![shade(0.0, h / 2.0, w, h)],
+        0x1fb90 => vec![shade(0.0, 0.0, w, h)],
+        0x1fb91 => vec![shade(0.0, 0.0, w, h), upper(0.5)],
+        0x1fb92 => vec![shade(0.0, 0.0, w, h), lower(0.5)],
+        0x1fb94 => vec![shade(0.0, 0.0, w, h), right(0.5)],
+        0x1fb95 => checkerboard(0, cell),
+        0x1fb96 => checkerboard(1, cell),
+        0x1fb97 => vec![cell.rect(0.0, h / 4.0, w, h / 2.0, Ink::Fg), lower(0.25)],
+        0x1fb98 => hatch(false, cell),
+        0x1fb99 => hatch(true, cell),
+        0x1fb9a => vec![edge_triangle(1, cell), edge_triangle(3, cell)],
+        0x1fb9b => vec![edge_triangle(0, cell), edge_triangle(2, cell)],
+        0x1fb9c..=0x1fb9f => vec![corner_triangle(n.wrapping_sub(0x1fb9c), Ink::Shade(0.5), cell)],
+        0x1fba0..=0x1fbae => corner_diagonals(n, cell),
+        0x1fbe4 => vec![cell.rect(w / 4.0, 0.0, w * 0.75, h / 2.0, Ink::Fg)],
+        0x1fbe5 => vec![cell.rect(w / 4.0, h / 2.0, w * 0.75, h, Ink::Fg)],
+        0x1fbe6 => vec![cell.rect(0.0, h / 4.0, w / 2.0, h * 0.75, Ink::Fg)],
+        0x1fbe7 => vec![cell.rect(w / 2.0, h / 4.0, w, h * 0.75, Ink::Fg)],
+        // U+1FB93 is unallocated.
+        _ => Vec::new(),
     }
 }
 
@@ -705,8 +939,84 @@ mod tests {
         assert!(full.iter().all(|s| matches!(s, Shape::Rect { round: true, .. })));
         let one = shapes('⠁', CELL).expect("dot 1");
         assert!(matches!(one[0], Shape::Rect { x, y, .. } if x < 4.0 && y < 4.0), "{one:?}");
-        assert!(matches!(shapes('\u{E0B0}', CELL).expect("pl")[0], Shape::Poly(_)));
+        assert!(matches!(shapes('\u{E0B0}', CELL).expect("pl")[0], Shape::Poly { .. }));
         assert!(matches!(shapes('\u{E0B1}', CELL).expect("pl")[0], Shape::Stroke { .. }));
+    }
+
+    fn poly(c: char) -> (Vec<(f32, f32)>, Ink) {
+        match shapes(c, CELL).expect("a sprite").swap_remove(0) {
+            Shape::Poly { points, ink } => (points, ink),
+            other => panic!("not a polygon: {other:?}"),
+        }
+    }
+
+    /// U+1FB3C is the lower-left wedge below the lower-middle-left → lower-centre diagonal;
+    /// U+1FB6C the left edge's triangle, U+1FB68 the rest of the cell around it.
+    #[test]
+    fn wedges_and_edge_triangles_are_polygons_through_the_cells_thirds_and_centre() {
+        assert_eq!(poly('\u{1FB3C}'), (vec![(0.0, 11.0), (0.0, 16.0), (4.0, 16.0)], Ink::Fg));
+        // U+1FB67: the upper-right block above the upper-left → lower-right diagonal, with the
+        // collinear left-hand vertex folded in, as ghostty's table does.
+        assert_eq!(poly('\u{1FB67}').0, vec![(0.0, 0.0), (0.0, 5.0), (8.0, 11.0), (8.0, 0.0)]);
+        assert_eq!(poly('\u{1FB6C}').0, vec![(4.0, 8.0), (0.0, 0.0), (0.0, 16.0)]);
+        assert_eq!(poly('\u{1FB68}').0.len(), 5);
+        assert_eq!(shapes('\u{1FB9A}', CELL).expect("hourglass").len(), 2);
+        assert_eq!(poly('\u{1FB9C}'), (vec![(0.0, 0.0), (0.0, 16.0), (8.0, 0.0)], Ink::Shade(0.5)));
+    }
+
+    #[test]
+    fn legacy_bars_blocks_and_shades_fill_their_eighths() {
+        assert_eq!(rects('\u{1FB70}'), vec![(1.0, 0.0, 1.0, 16.0)]);
+        assert_eq!(rects('\u{1FB76}'), vec![(0.0, 2.0, 8.0, 2.0)]);
+        assert_eq!(rects('\u{1FB7C}'), vec![(0.0, 0.0, 1.0, 16.0), (0.0, 14.0, 8.0, 2.0)]);
+        assert_eq!(
+            rects('\u{1FB81}').iter().map(|r| r.1).collect::<Vec<_>>(),
+            [0.0, 4.0, 8.0, 14.0]
+        );
+        assert_eq!(rects('\u{1FB86}'), vec![(0.0, 0.0, 8.0, 14.0)]);
+        assert_eq!(rects('\u{1FB8B}'), vec![(1.0, 0.0, 7.0, 16.0)]);
+        assert_eq!(rects('\u{1FB97}'), vec![(0.0, 4.0, 8.0, 4.0), (0.0, 12.0, 8.0, 4.0)]);
+        assert_eq!(rects('\u{1FBE4}'), vec![(2.0, 0.0, 4.0, 8.0)]);
+        assert!(matches!(
+            shapes('\u{1FB8C}', CELL).expect("shade")[0],
+            Shape::Rect { x: 0.0, w: 4.0, ink: Ink::Shade(_), .. }
+        ));
+        // The half block over the medium shade: the shade first, the block on top.
+        let s = shapes('\u{1FB91}', CELL).expect("shade and block");
+        assert!(matches!(s[0], Shape::Rect { ink: Ink::Shade(_), .. }), "{s:?}");
+        assert_eq!(rects('\u{1FB91}'), vec![(0.0, 0.0, 8.0, 8.0)]);
+        assert!(shapes('\u{1FB93}', CELL).expect("unallocated").is_empty());
+    }
+
+    #[test]
+    fn checkerboards_alternate_and_hatching_stays_inside_the_cell() {
+        let even = rects('\u{1FB95}');
+        assert_eq!(even.len(), 16, "{even:?}");
+        assert_eq!(even[0], (0.0, 0.0, 2.0, 2.0));
+        assert_eq!(rects('\u{1FB96}')[0], (0.0, 2.0, 2.0, 2.0));
+        for c in ['\u{1FB98}', '\u{1FB99}'] {
+            let s = shapes(c, CELL).expect("hatch");
+            assert!(s.len() >= 5, "{s:?}");
+            for shape in &s {
+                let Shape::Stroke { points, .. } = shape else { panic!("{shape:?}") };
+                assert!(points.iter().all(|p| (-1e-3..=8.001).contains(&p.0)), "{points:?}");
+            }
+        }
+        assert_eq!(clip_x(-4.0, 4.0, 8.0), Some((0.5, 1.0)));
+        assert_eq!(clip_x(12.0, 20.0, 8.0), None);
+    }
+
+    #[test]
+    fn corner_diagonals_run_from_the_edge_midpoints() {
+        let s = shapes('\u{1FBA0}', CELL).expect("one diagonal");
+        assert_eq!(s.len(), 1);
+        assert!(
+            matches!(&s[0], Shape::Stroke { points, .. } if points == &vec![(4.0, 0.0), (0.0, 8.0)]),
+            "{s:?}"
+        );
+        assert_eq!(shapes('\u{1FBAE}', CELL).expect("all four").len(), 4);
+        // U+1FBAF is a junction: heavy stem, light bar.
+        assert!(rects('\u{1FBAF}').iter().any(|r| r.2 == 3.0));
     }
 
     #[test]
