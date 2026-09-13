@@ -1000,12 +1000,16 @@ is a synchronous trip to the font server), reads the view's rows in place — on
 inside the window's content mask, so a grid hanging off the viewport builds nothing for the
 rest — splits each into words (plain spaces and digits are the boundaries) and looks every word up in
 the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plus its per-byte
-colours) per (text, styles, family, palette, focus), never per zoom, swept once per frame — so
+colours) per (text, styles, family, palette, focus, and the blink phase for a word with an
+SGR 5 cell), never per zoom, swept once per frame — so
 a frame of streaming output shapes only the words it has never seen and a zoom step shapes
 nothing; paint puts every glyph of a word at column × cell width plus its shaped position
 scaled by the zoom, on the derived baseline, through `Window::paint_glyph` at the zoomed font
 size (the fork's `ShapedLine::layout` hands out the runs), over the row's background quads and
-under the cursor, the link underline and the prediction overlay. While the canvas zoom is **in
+under the cursor, the link underline and the prediction overlay. The cursor's blink flag and
+SGR 5 text share one 600 ms clock on the view, started by the first prepared frame that holds
+either and stopped by the first that holds neither (an unfocused cursor is a steady hollow
+block); a keystroke pins the phase on for a half. While the canvas zoom is **in
 motion** (it differs from the zoom drawn last frame, until an 80 ms settle timer fires) the
 canvas tells every terminal view and chrome label so, and they paint from the nearest rung of
 an eight-per-octave raster ladder stretched to the painted size (`fonts::raster_rung`, the

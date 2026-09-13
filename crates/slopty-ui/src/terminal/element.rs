@@ -127,6 +127,8 @@ pub struct Prepared {
     /// The size the glyphs are rasterised at: `font_size`, or the nearest rung of the size
     /// ladder while the zoom is in motion (the raster is stretched to `font_size`).
     raster_size: Pixels,
+    /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
+    blinking: bool,
 }
 
 #[derive(Debug)]
@@ -386,15 +388,30 @@ fn hash_base(focused: bool, font_size: Pixels, family: &str, palette: &TerminalP
 }
 
 /// Key of a shaped word: the base plus everything the shaped runs bake in (text, styles).
-fn segment_hash(base: u64, cells: &[Cell]) -> u64 {
+fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     base.hash(&mut h);
+    (blink_off && blinks(cells)).hash(&mut h);
     for cell in cells {
         cell.text.as_str().hash(&mut h);
         cell.style.hash(&mut h);
         (cell.width as u8).hash(&mut h);
     }
     h.finish()
+}
+
+/// What a word's colours depend on besides its cells: the font family, the palette and the
+/// blink clock's phase.
+#[derive(Clone, Copy)]
+struct Look<'a> {
+    family: &'a str,
+    palette: &'a TerminalPalette,
+    blink_off: bool,
+}
+
+/// Whether any of `cells` carries SGR 5: such a word is shaped once per blink phase.
+fn blinks(cells: &[Cell]) -> bool {
+    cells.iter().any(|cell| cell.style.flags.contains(StyleFlags::BLINK))
 }
 
 /// A cell whose glyphs paint nothing: a narrow blank (its background is a quad and any
@@ -476,9 +493,9 @@ fn shape_cells(
     cells: &[Cell],
     font_size: Pixels,
     cell_width: Pixels,
-    family: &str,
-    palette: &TerminalPalette,
+    look: Look<'_>,
 ) -> Word {
+    let Look { family, palette, blink_off } = look;
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::new();
     let mut colors: Vec<(usize, Hsla)> = Vec::new();
@@ -502,7 +519,7 @@ fn shape_cells(
             }
             _ => {
                 if let Some((style, acc)) = current.take() {
-                    let run = text_run(acc, family, &style, palette);
+                    let run = text_run(acc, family, &style, palette, blink_off);
                     colors.push((text.len().saturating_sub(len), run.color));
                     runs.push(run);
                 }
@@ -511,7 +528,7 @@ fn shape_cells(
         }
     }
     if let Some((style, acc)) = current.take() {
-        let run = text_run(acc, family, &style, palette);
+        let run = text_run(acc, family, &style, palette, blink_off);
         colors.push((text.len(), run.color));
         runs.push(run);
     }
@@ -527,15 +544,18 @@ fn mono_font(family: &str, style: &CellStyle) -> Font {
     )
 }
 
-/// The colour a cell's glyphs take, with inverse, faint and invisible applied.
-fn cell_color(style: &CellStyle, palette: &TerminalPalette) -> Hsla {
+/// The colour a cell's glyphs take, with inverse, faint and invisible applied. In the off
+/// phase of the blink clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
+fn cell_color(style: &CellStyle, palette: &TerminalPalette, blink_off: bool) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
     let fg_slot = if inverse { style.bg } else { style.fg };
     let mut color = hsla(palette.resolve(fg_slot, inverse));
     if style.flags.contains(StyleFlags::FAINT) {
         color.a = 0.6;
     }
-    if style.flags.contains(StyleFlags::INVISIBLE) {
+    if style.flags.contains(StyleFlags::INVISIBLE)
+        || (blink_off && style.flags.contains(StyleFlags::BLINK))
+    {
         color.a = 0.0;
     }
     color
@@ -551,11 +571,17 @@ fn underline_color(style: &CellStyle, palette: &TerminalPalette, text: Hsla) -> 
 
 /// A run of `len` bytes in `style`. Underlines of every kind and strikethroughs are
 /// [`Decoration`]s drawn from the cells, so the run carries only the font and the colour.
-fn text_run(len: usize, family: &str, style: &CellStyle, palette: &TerminalPalette) -> TextRun {
+fn text_run(
+    len: usize,
+    family: &str,
+    style: &CellStyle,
+    palette: &TerminalPalette,
+    blink_off: bool,
+) -> TextRun {
     TextRun {
         len,
         font: mono_font(family, style),
-        color: cell_color(style, palette),
+        color: cell_color(style, palette, blink_off),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -757,6 +783,8 @@ impl Element for TerminalElement {
             let modes = state.modes();
             let marked = view.marked();
             let selection = view.selection();
+            let blink_off = !view.blink_on();
+            let mut blinking = false;
             let top_index = state.index_at_row(0);
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
@@ -791,10 +819,10 @@ impl Element for TerminalElement {
                         let line = text_system.shape_line(
                             "~".into(),
                             base_size,
-                            &[text_run(1, &family, &CellStyle::DEFAULT, palette)],
+                            &[text_run(1, &family, &CellStyle::DEFAULT, palette, false)],
                             Some(base_cell_width),
                         );
-                        let colors = vec![(1, cell_color(&CellStyle::DEFAULT, palette))];
+                        let colors = vec![(1, cell_color(&CellStyle::DEFAULT, palette, false))];
                         Rc::new(Word { line, colors })
                     });
                     prepared_rows.push(PreparedRow {
@@ -827,7 +855,7 @@ impl Element for TerminalElement {
                     }
                     // Underline and strikethrough go where the font says, not where GPUI
                     // would put them; a curly underline is GPUI's wave at that position.
-                    let text = cell_color(&cell.style, palette);
+                    let text = cell_color(&cell.style, palette, blink_off);
                     if cell.style.underline != Underline::None {
                         let color = underline_color(&cell.style, palette, text);
                         let wavy = cell.style.underline == Underline::Curly;
@@ -868,7 +896,8 @@ impl Element for TerminalElement {
                 let segments = segments(&line.cells)
                     .into_iter()
                     .map(|(col, cells)| {
-                        let key = segment_hash(base, cells);
+                        blinking |= blinks(cells);
+                        let key = segment_hash(base, cells, blink_off);
                         cache.touched.insert(key, cache.generation);
                         let shaped = cache.lines.entry(key).or_insert_with(|| {
                             Rc::new(shape_cells(
@@ -876,8 +905,7 @@ impl Element for TerminalElement {
                                 cells,
                                 base_size,
                                 base_cell_width,
-                                &family,
-                                palette,
+                                Look { family: &family, palette, blink_off },
                             ))
                         });
                         (col, Rc::clone(shaped))
@@ -900,7 +928,8 @@ impl Element for TerminalElement {
                     if let Some(col) = grid_cols.checked_sub(width)
                         && typed < col
                     {
-                        let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
+                        let mut run =
+                            text_run(text.len(), &family, &CellStyle::DEFAULT, palette, false);
                         run.color = hsla_alpha(palette.fg, alpha::TINT_STRONG);
                         let shaped = text_system.shape_line(
                             SharedString::from(text.clone()),
@@ -932,8 +961,13 @@ impl Element for TerminalElement {
             let cursor_visible = cursor.visible
                 && view_offset == 0
                 && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
+            // A blinking cursor blinks only while focused; unfocused it is a steady hollow
+            // block (what ghostty does), so a background terminal never ticks for it.
+            let cursor_blinks = cursor_visible && cursor.blink && focused;
+            blinking |= cursor_blinks;
+            let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
             // While an input method composes, its underlined preview stands in for the cursor.
-            let cursor_prepared = (cursor_visible && marked.is_none()).then(|| {
+            let cursor_prepared = (cursor_shown && marked.is_none()).then(|| {
                 let x = origin.x + cell_width * f32::from(cursor.col);
                 let y = origin.y + line_height * f32::from(cursor.row);
                 let shape = if focused { cursor.shape } else { CursorShape::BlockHollow };
@@ -949,7 +983,8 @@ impl Element for TerminalElement {
             let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
                 .iter()
                 .map(|p| {
-                    let mut run = text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette);
+                    let mut run =
+                        text_run(p.text.len(), &family, &CellStyle::DEFAULT, palette, false);
                     run.color.a = 0.75;
                     run.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
@@ -971,7 +1006,7 @@ impl Element for TerminalElement {
                 .collect();
             // The input method's composition, underlined at the cursor (what Terminal.app does).
             if let Some(text) = marked.filter(|_| cursor_visible) {
-                let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette);
+                let mut run = text_run(text.len(), &family, &CellStyle::DEFAULT, palette, false);
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(run.color),
@@ -1006,9 +1041,12 @@ impl Element for TerminalElement {
                 }),
                 overlay,
                 shown: predicted.iter().map(|p| p.seq).collect(),
+                blinking,
             }
         };
         *cx.global_mut::<ShapeCache>() = cache;
+        // The clock ticks only while a painted frame has something to blink.
+        self.view.update(cx, |view, cx| view.blinking(prepared.blinking, cx));
         prepared
     }
 
@@ -1472,9 +1510,26 @@ mod tests {
         let a = cells("foo bar");
         let b = cells("    bar foo");
         let (wa, wb) = (segments(&a), segments(&b));
-        assert_eq!(segment_hash(1, wa[1].1), segment_hash(1, wb[0].1), "bar");
-        assert_eq!(segment_hash(1, wa[0].1), segment_hash(1, wb[1].1), "foo");
-        assert_ne!(segment_hash(1, wa[0].1), segment_hash(2, wa[0].1), "another base");
+        assert_eq!(segment_hash(1, wa[1].1, false), segment_hash(1, wb[0].1, false), "bar");
+        assert_eq!(segment_hash(1, wa[0].1, false), segment_hash(1, wb[1].1, false), "foo");
+        assert_ne!(segment_hash(1, wa[0].1, false), segment_hash(2, wa[0].1, false), "base");
+        assert_eq!(
+            segment_hash(1, wa[0].1, false),
+            segment_hash(1, wa[0].1, true),
+            "a steady word is one entry whatever the blink phase"
+        );
+        let mut blinking = wa[0].1.to_vec();
+        blinking[1].style.flags |= StyleFlags::BLINK;
+        assert_ne!(
+            segment_hash(1, &blinking, false),
+            segment_hash(1, &blinking, true),
+            "a blinking word is shaped once per phase"
+        );
+        assert!(
+            cell_color(&blinking[1].style, &Theme::default().terminal, true).a <= 0.0,
+            "off phase: the glyph is hidden"
+        );
+        assert!(cell_color(&blinking[1].style, &Theme::default().terminal, false).a > 0.5);
     }
 
     #[test]

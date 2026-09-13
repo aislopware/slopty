@@ -41,6 +41,9 @@ const SEARCH_REFRESH: Duration = Duration::from_millis(300);
 /// How often a selection dragged past the grid's edge scrolls, and the most lines one tick
 /// moves (the pointer's distance past the edge picks the pace, one line per row of distance).
 const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
+/// Half a blink: the cursor (and SGR 5 text) shows for this long, then hides for as long.
+/// Ghostty's cadence.
+const BLINK_HALF: Duration = Duration::from_millis(600);
 const AUTOSCROLL_MAX: i64 = 8;
 
 mod actions {
@@ -273,6 +276,12 @@ pub struct TerminalView {
     autoscroll: Option<(i64, u16)>,
     /// The ticking loop behind `autoscroll`; dropped (cancelled) when a new drag starts one.
     autoscroll_task: Option<gpui::Task<()>>,
+    /// The blink clock: the phase (true = shown), whether the last painted frame had anything
+    /// to blink, when a keystroke last pinned the phase on, and the ticking loop while wanted.
+    blink_on: bool,
+    blink_wanted: bool,
+    blink_pinned: Option<Instant>,
+    blink_task: Option<gpui::Task<()>>,
     /// The scrollbar's thumb is held: the pointer's offset from the thumb's top.
     thumb_drag: Option<Pixels>,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
@@ -405,6 +414,10 @@ impl TerminalView {
             touch_selecting: false,
             autoscroll: None,
             autoscroll_task: None,
+            blink_on: true,
+            blink_wanted: false,
+            blink_pinned: None,
+            blink_task: None,
             thumb_drag: None,
             wheel_remainder: 0.0,
             search: None,
@@ -2305,6 +2318,55 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The blink clock's phase: true while a blinking cursor or SGR 5 text shows.
+    #[must_use]
+    pub const fn blink_on(&self) -> bool {
+        self.blink_on
+    }
+
+    /// The element painted a frame: `wanted` says whether it held anything that blinks. The
+    /// clock starts on the first such frame and stops after the first frame without.
+    pub fn blinking(&mut self, wanted: bool, cx: &Context<Self>) {
+        self.blink_wanted = wanted;
+        if !wanted || self.blink_task.is_some() {
+            return;
+        }
+        self.blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_HALF).await;
+                let more = this.update(cx, Self::blink_tick).unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Half a blink passed: flip the phase, unless a keystroke pinned it on less than a half
+    /// ago (typing keeps the cursor solid). False ends the loop, phase on.
+    fn blink_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.blink_wanted {
+            self.blink_task = None;
+            if !self.blink_on {
+                self.blink_on = true;
+                cx.notify();
+            }
+            return false;
+        }
+        if self.blink_pinned.take().is_some_and(|at| at.elapsed() < BLINK_HALF) {
+            return true;
+        }
+        self.blink_on = !self.blink_on;
+        cx.notify();
+        true
+    }
+
+    /// A keystroke: the cursor shows solid for a full half-blink from now.
+    fn pin_blink(&mut self) {
+        self.blink_on = true;
+        self.blink_pinned = Some(Instant::now());
+    }
+
     /// Whether this client's size is the one the PTY follows.
     #[must_use]
     pub const fn driving(&self) -> bool {
@@ -2370,6 +2432,7 @@ impl TerminalView {
             }
         }
         self.selection = None;
+        self.pin_blink();
         if event.is_held {
             self.key_seq = self.key_seq.wrapping_add(1);
             let key = keys::key_event(self.key_seq, &event.keystroke, true);
@@ -3543,6 +3606,63 @@ mod tests {
         view.update_in(cx, |view, _window, cx| view.apply(frame(3, ["bar foo", "baz", ""]), cx));
         cx.run_until_parked();
         assert_eq!(words(cx), 3, "baz is new; foo and bar are kept");
+    }
+
+    /// The blink clock runs only while a painted frame blinks: a frame with SGR 5 text (or a
+    /// blinking cursor, while focused) starts it, each half-blink flips the phase, a keystroke
+    /// pins the phase on for a half, and a frame with nothing to blink stops it, phase on.
+    #[gpui::test]
+    fn the_blink_clock_ticks_only_while_something_blinks(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let frame = |seq, blink: bool, cursor_blink: bool| {
+            let mut style = Style::DEFAULT;
+            style.flags.set(slopty_grid::StyleFlags::BLINK, blink);
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor { blink: cursor_blink, visible: true, ..Cursor::default() },
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(0),
+                total_lines: 3,
+                input_ack: 0,
+                updates: vec![RowUpdate { row: 0, line: Line::from_text("hi", 10, style) }],
+            })
+        };
+        let phase = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| (v.blink_on, v.blink_task.is_some()))
+        };
+        assert_eq!(phase(cx), (true, false), "a steady frame: no clock");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(1, true, false), cx));
+        cx.run_until_parked();
+        assert_eq!(phase(cx), (true, true), "SGR 5 text starts the clock, shown first");
+        cx.background_executor.advance_clock(BLINK_HALF);
+        cx.run_until_parked();
+        assert_eq!(phase(cx), (false, true), "half a blink later: hidden");
+        cx.simulate_keystrokes("a");
+        assert!(phase(cx).0, "a keystroke shows it again");
+        cx.background_executor.advance_clock(BLINK_HALF);
+        cx.run_until_parked();
+        assert!(phase(cx).0, "and keeps it shown through the next half");
+        cx.background_executor.advance_clock(BLINK_HALF);
+        cx.run_until_parked();
+        assert_eq!(phase(cx), (false, true), "then it blinks on");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(2, false, true), cx));
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(BLINK_HALF);
+        cx.run_until_parked();
+        assert!(phase(cx).1, "a blinking cursor keeps the clock while focused");
+
+        view.update_in(cx, |view, _window, cx| view.apply(frame(3, false, false), cx));
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(BLINK_HALF);
+        cx.run_until_parked();
+        assert_eq!(phase(cx), (true, false), "nothing blinks: the clock stops, phase on");
     }
 
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.

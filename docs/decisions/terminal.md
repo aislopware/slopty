@@ -534,3 +534,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   marks change (the same walk, just less often, and the walk is wrong at any rate for a
   20 000-line cache). Tests: grid `prompts_are_indexed_through_replacement_and_eviction`,
   client `prompt_navigation_and_last_output_follow_the_marks` (unchanged, the semantics).
+
+- ✅ **One blink clock per view, running only while a frame blinks** (2026-09-13). The engine
+  reported the cursor's blink flag (DECSCUSR odd shapes, ghostty's default) and SGR 5 on a
+  cell since the first frame, and the element drew both steady. Ruling: the view keeps a
+  phase (`blink_on`), and the element, having prepared a frame, tells it whether that frame
+  held a blinking cursor or an SGR 5 cell; the first such frame starts a task that flips the
+  phase every 600 ms (ghostty's cadence) and notifies, the first frame without stops it with
+  the phase on, so twenty idle shells tick nothing and a background shell never ticks for its
+  cursor (unfocused, it draws the steady hollow block, as ghostty does). A keystroke pins the
+  phase on for a full half so the cursor stays solid while typing. SGR 5 text blinks on the
+  same clock — a divergence from ghostty, which draws it steady; a word with a blinking cell
+  is shaped once per phase (the phase joins its cache key only then), its underline and
+  strikethrough hide with the glyphs. Not the alternatives: a per-frame `request_animation_
+  frame` (the whole window repaints at 120 Hz for a cursor); a clock on the app (a view whose
+  frame has no blinking content would still be asked). Tests: element
+  `a_word_hashes_the_same_wherever_it_sits` (the phase in the key, the hidden colour), headless
+  `the_blink_clock_ticks_only_while_something_blinks`.
