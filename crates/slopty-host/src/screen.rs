@@ -1082,9 +1082,14 @@ pub enum WindowPath {
 const CROP_WINDOWS: bool = true;
 
 fn crop_windows() -> bool {
-    match std::env::var("SLOPTY_WINDOW_CAPTURE").as_deref() {
-        Ok("window") => false,
-        Ok("crop") => true,
+    crop_windows_from(std::env::var("SLOPTY_WINDOW_CAPTURE").ok().as_deref())
+}
+
+/// [`crop_windows`] for the knob's value: an unknown or missing value is the default.
+fn crop_windows_from(knob: Option<&str>) -> bool {
+    match knob {
+        Some("window") => false,
+        Some("crop") => true,
         _other => CROP_WINDOWS,
     }
 }
@@ -2347,6 +2352,41 @@ mod tests {
             "and past it, nothing"
         );
         Ok(())
+    }
+
+    #[test]
+    fn the_transport_budget_the_queue_age_and_the_crop_knob_are_plain_values() {
+        let budget = DatagramBudget::default();
+        assert_eq!((budget.get(), budget.held()), (MAX_DATAGRAM, 0));
+        budget.set(1200);
+        budget.set_held(4096);
+        assert_eq!((budget.get(), budget.held()), (1200, 4096));
+        let shared_budget = budget.clone();
+        budget.set_held(0);
+        assert_eq!(shared_budget.held(), 0, "clones share the counters");
+
+        let queued = Queued { datagram: Bytes::new(), queued_at_us: host_now_us() - 5_000 };
+        assert!(queued.waited_us() >= 5_000, "age is measured from when it was queued");
+        let future = Queued { datagram: Bytes::new(), queued_at_us: u64::MAX };
+        assert_eq!(future.waited_us(), 0, "a clock step back reads as no wait, not a wrap");
+
+        assert_eq!(send_ms_lo(0), 0);
+        assert_eq!(send_ms_lo(255_999), 255);
+        assert_eq!(send_ms_lo(256_000), 0, "the low byte of the millisecond clock wraps");
+
+        assert!(crop_windows_from(None), "the build default is the crop");
+        assert!(crop_windows_from(Some("crop")));
+        assert!(!crop_windows_from(Some("window")));
+        assert!(crop_windows_from(Some("anything else")), "an unknown value is the default");
+
+        let (shared, _rx) = shared_for_frames();
+        assert!(!shared.filter_stalled.load(Ordering::Relaxed));
+        shared.sibling_went();
+        shared.sibling_went();
+        assert!(shared.filter_stalled.load(Ordering::Relaxed), "the next tick re-filters");
+        assert_eq!(shared.stats().siblings, 2, "and it is counted, not a suspicion");
+        assert_eq!(shared.stats().suspicions, 0);
+        assert!(!shared.suspected_at(host_now_us()), "a sibling holds no frames");
     }
 
     #[test]
