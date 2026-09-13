@@ -582,3 +582,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stay over the ink; a stroke joins only a run on its own layer. Tests: element
   `the_cursor_covers_a_wide_character_whole`,
   `underlines_lie_under_the_glyphs_and_strikethroughs_over`.
+
+- ✅ **Box drawing, blocks, Braille and Powerline are drawn from the cell, not the font**
+  (2026-09-15). A font fits each of these glyphs to its own em box, so two cells cannot agree
+  on where the ink stops: a `│` border seams at every row once the line height is not the
+  font's, `─` weights change across a fallback boundary, and Claude Code's `╭──╮` prompt
+  box showed both. ghostty draws them itself (`src/font/sprite/draw/`); slop-desk ported
+  that (`docs/knowledge-from-slop-desk.md` §1). Rulings: (1) `terminal::sprite::shapes`
+  answers the geometry of one cell — rectangles, stroked polylines, a quarter arc, a polygon
+  — in points snapped to device pixels, from the cell size and the underline thickness
+  (ghostty's `box_thickness`); a heavy line is three light ones, a double line two light
+  ones a light one apart. (2) Junctions are generic, not a table of 128 drawings: each arm is
+  a bar from its edge towards the centre, and where it stops depends on what it meets — past
+  the centre by half the thickest perpendicular arm so a corner closes, at the near double
+  bar so a single stem hangs from it (`╤`), through both when it has an opposite (`╫`), and
+  for a double arm the outer bar reaches the outer perpendicular bar and the inner one stops
+  at the inner (`╔` is an L, `╬` an open square). Dashes cut the same bars into two, three or
+  four with a gap of one thickness. (3) `╭╮╯╰` are an arc of radius half the cell's shorter
+  side with two stubs; `╱╲╳` are strokes; blocks are fractions of the cell, the shades the
+  text colour at ¼ ½ ¾; Braille dots are discs on the quarter and eighth points; Powerline
+  U+E0B0–3 are the two triangles and the two chevrons. (4) The element treats such a cell as
+  a word boundary (`drawn_here`), so the font never shapes it and the word cache never holds
+  it; the row keeps a `SpriteCell` (column, character, text colour) and paints the shapes
+  between the underlines and the glyphs. Not drawn here: Powerline's other private-use
+  glyphs, legacy computing symbols (U+1FB00), sextants — the font keeps those. Tests:
+  `terminal::sprite::tests` (ranges, light/heavy/double bars, corners and junctions, dashes,
+  arcs, blocks, Braille, Powerline, device-pixel snapping) and element
+  `a_box_drawing_cell_is_drawn_not_shaped`.

@@ -15,9 +15,9 @@ use std::rc::Rc;
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, DispatchPhase, Edges, Element, ElementId,
     ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, Pixels, Point,
-    ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point,
-    px, quad, relative, size,
+    InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, PathBuilder, Pixels,
+    Point, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill,
+    point, px, quad, relative, size,
 };
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
 use slopty_proto::terminal::TermSize;
@@ -26,6 +26,7 @@ use slopty_theme::{TerminalPalette, Theme, alpha};
 use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
 use crate::terminal::metrics::{self, Grid};
+use crate::terminal::sprite;
 use crate::terminal::view::TerminalView;
 
 /// Cell geometry for one layout.
@@ -143,6 +144,16 @@ struct PreparedRow {
     link: Option<(u16, u16)>,
     /// Colour of the command-block separator drawn along the row's top edge.
     separator: Option<Hsla>,
+    /// Cells drawn from geometry rather than the font (box drawing, blocks, Braille).
+    sprites: Vec<SpriteCell>,
+}
+
+/// One cell the element draws itself (see [`sprite`]), in the cell's own colours.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct SpriteCell {
+    col: u16,
+    ch: char,
+    fg: Hsla,
 }
 
 /// One decoration stroke over a run of columns, relative to the row's top-left corner.
@@ -452,6 +463,14 @@ fn plain_space(cell: &Cell) -> bool {
     cell.width == CellWidth::Narrow && matches!(cell.text.as_str(), "" | " ")
 }
 
+/// A cell drawn from geometry rather than shaped: box drawing, blocks, Braille, Powerline.
+/// It ends a word like a space does, so the font never sees it.
+fn drawn_here(cell: &Cell) -> Option<char> {
+    (cell.width == CellWidth::Narrow && sprite::is_sprite(cell.text.as_str()))
+        .then(|| cell.text.as_str().chars().next())
+        .flatten()
+}
+
 /// A cell shaped on its own: a digit. Counters, timestamps and sizes make most of a streaming
 /// row's unique text, and no coding font ligates digits, so each digit is one cached glyph
 /// instead of a fresh word every frame.
@@ -467,7 +486,7 @@ fn segments(cells: &[Cell]) -> Vec<(u16, &[Cell])> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     for (i, cell) in cells.iter().enumerate() {
-        let space = plain_space(cell);
+        let space = plain_space(cell) || drawn_here(cell).is_some();
         let alone = stands_alone(cell);
         if (space || alone)
             && let Some(s) = start.take()
@@ -906,11 +925,13 @@ impl Element for TerminalElement {
                         segments: vec![(0, Rc::clone(filler))],
                         link: None,
                         separator: None,
+                        sprites: Vec::new(),
                     });
                     continue;
                 };
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
+                let mut sprites: Vec<SpriteCell> = Vec::new();
                 for (col, cell) in line.cells.iter().enumerate() {
                     let col = u16::try_from(col).unwrap_or(u16::MAX);
                     let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
@@ -930,6 +951,9 @@ impl Element for TerminalElement {
                     // Underline and strikethrough go where the font says, not where GPUI
                     // would put them; a curly underline is GPUI's wave at that position.
                     let text = cell_color(&cell.style, palette, blink_off);
+                    if let Some(ch) = drawn_here(cell) {
+                        sprites.push(SpriteCell { col, ch, fg: text });
+                    }
                     if cell.style.underline != Underline::None {
                         let color = underline_color(&cell.style, palette, text);
                         let wavy = cell.style.underline == Underline::Curly;
@@ -1023,6 +1047,7 @@ impl Element for TerminalElement {
                     segments,
                     link,
                     separator,
+                    sprites,
                 });
             }
 
@@ -1202,6 +1227,20 @@ impl Element for TerminalElement {
         for row in &prepared.rows {
             paint_decorations(window, &m, row, Layer::Under);
         }
+        // Box drawing, blocks, Braille and Powerline: geometry in the cell's colours, so a
+        // border never seams between rows and a heavy line keeps its weight.
+        let cell = sprite::Cell {
+            w: f32::from(m.cell_width),
+            h: f32::from(m.line_height),
+            thickness: f32::from(grid.underline.thickness),
+            scale: m.pixel_scale,
+        };
+        for row in &prepared.rows {
+            for sprite in &row.sprites {
+                let origin = point(m.origin.x + m.cell_width * f32::from(sprite.col), row.y);
+                paint_sprite(window, origin, cell, sprite);
+            }
+        }
         // The words: every glyph at the derived baseline, from the base-size shaping, at the
         // zoomed size. Nothing is shaped here and the word cache never sees the zoom. One
         // layer for all of them: a primitive outside a layer costs a bounds-tree insert of its
@@ -1276,6 +1315,62 @@ impl Element for TerminalElement {
 /// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
 const THUMB_CELLS: f32 = 0.6;
 const THUMB_MIN_ROWS: f32 = 1.5;
+
+/// Paint one cell-drawn glyph at `origin` (see [`sprite`]).
+fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, s: &SpriteCell) {
+    let Some(shapes) = sprite::shapes(s.ch, cell) else { return };
+    let at = |(x, y): (f32, f32)| point(origin.x + px(x), origin.y + px(y));
+    for shape in shapes {
+        match shape {
+            sprite::Shape::Rect { x, y, w, h, ink, round } => {
+                let color = match ink {
+                    sprite::Ink::Fg => s.fg,
+                    sprite::Ink::Shade(a) => Hsla { a: s.fg.a * a, ..s.fg },
+                };
+                let mut quad = fill(Bounds::new(at((x, y)), size(px(w), px(h))), color);
+                if round {
+                    quad.corner_radii = gpui::Corners::all(px(w / 2.0));
+                }
+                window.paint_quad(quad);
+            }
+            sprite::Shape::Stroke { points, thickness } => {
+                let mut path = PathBuilder::stroke(px(thickness));
+                let mut points = points.into_iter();
+                if let Some(first) = points.next() {
+                    path.move_to(at(first));
+                }
+                for p in points {
+                    path.line_to(at(p));
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, s.fg);
+                }
+            }
+            sprite::Shape::Arc { from, to, r, sweep, thickness } => {
+                let mut path = PathBuilder::stroke(px(thickness));
+                path.move_to(at(from));
+                path.arc_to(point(px(r), px(r)), px(0.0), false, sweep, at(to));
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, s.fg);
+                }
+            }
+            sprite::Shape::Poly(points) => {
+                let mut path = PathBuilder::fill();
+                let mut points = points.into_iter();
+                if let Some(first) = points.next() {
+                    path.move_to(at(first));
+                }
+                for p in points {
+                    path.line_to(at(p));
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, s.fg);
+                }
+            }
+        }
+    }
+}
 
 /// Paint one row's decorations on `layer`, where the font's metrics put them.
 fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, layer: Layer) {
@@ -1571,6 +1666,17 @@ mod tests {
         assert_eq!(out.len(), 2, "each layer joins its own run");
         assert_eq!((out[0].start, out[0].end, out[0].over), (0, 2, false));
         assert_eq!((out[1].start, out[1].end, out[1].over), (1, 2, true));
+    }
+
+    /// A box-drawing cell is drawn by the element, not shaped: it ends the word before it
+    /// like a space and is not a word itself.
+    #[test]
+    fn a_box_drawing_cell_is_drawn_not_shaped() {
+        assert_eq!(cols("a─b"), vec![(0, 1), (2, 1)]);
+        assert_eq!(cols("│ab│"), vec![(1, 2)]);
+        assert_eq!(cols("▄▄"), vec![]);
+        assert_eq!(drawn_here(&Cell::narrow('╭', CellStyle::DEFAULT)), Some('╭'));
+        assert_eq!(drawn_here(&Cell::narrow('a', CellStyle::DEFAULT)), None);
     }
 
     #[test]

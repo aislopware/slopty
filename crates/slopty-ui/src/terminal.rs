@@ -5,6 +5,7 @@ pub mod conversation;
 mod element;
 pub mod latency;
 pub mod metrics;
+mod sprite;
 pub mod url;
 mod view;
 
