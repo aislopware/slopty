@@ -6,7 +6,8 @@
 //! conversation reads by); a click or the canvas putting the caret in it swaps in the editor,
 //! and blur swaps back. Edits are committed to the host after a short pause in typing and on
 //! blur; a remote change is taken only while this client is not editing (last writer wins, no
-//! merge).
+//! merge). A task line (`- [ ] …`) is read as a row whose box ticks on a click, the one edit
+//! that needs no editor.
 
 use std::time::Duration;
 
@@ -163,6 +164,19 @@ impl NoteView {
         });
     }
 
+    /// Tick or untick the `ix`-th task line (the box on a rendered task row was pressed):
+    /// the text changes in place, without the editor opening, and goes to the document at
+    /// once.
+    pub fn toggle_task(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.text.read(cx).value().to_string();
+        let Some(flipped) = crate::markdown::toggle_task(&text, ix) else { return };
+        self.generation = self.generation.wrapping_add(1);
+        self.text.update(cx, |state, cx| state.set_value(flipped.clone(), window, cx));
+        self.synced.clone_from(&flipped);
+        cx.emit(NoteViewEvent::Commit(flipped));
+        cx.notify();
+    }
+
     fn schedule_commit(&mut self, cx: &Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
@@ -237,6 +251,21 @@ impl Render for NoteView {
                         .style(crate::markdown::style(&self.theme, &mono, self.zoom))
                         .selectable(false)
                         .into_any_element(),
+                        crate::markdown::Segment::Task(task) => {
+                            let note = cx.entity();
+                            let toggle: crate::markdown::Toggle =
+                                std::rc::Rc::new(move |ix, window, cx: &mut gpui::App| {
+                                    note.update(cx, |n, cx| n.toggle_task(ix, window, cx));
+                                });
+                            crate::markdown::task_row(
+                                format!("note-task-{id}-{}", task.ix),
+                                &task,
+                                &self.theme,
+                                &mono,
+                                self.zoom,
+                                Some(toggle),
+                            )
+                        }
                         crate::markdown::Segment::Code { lang, body } => {
                             let run = self.can_run.then(|| -> crate::markdown::Run {
                                 let note = cx.entity();

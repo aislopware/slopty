@@ -1785,6 +1785,14 @@ fn entry(
                             Segment::Code { lang, body } => {
                                 code_segment(ix, si, &lang, &body, run, theme)
                             }
+                            Segment::Task(task) => crate::markdown::task_row(
+                                format!("conversation-task-{ix}-{si}"),
+                                &task,
+                                theme,
+                                &mono,
+                                1.0,
+                                None,
+                            ),
                         }
                     })),
             )

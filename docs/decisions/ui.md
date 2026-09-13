@@ -653,7 +653,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   decorations and skipping link/overlay work during a flight — the per-cell loop they would
   save is ≈ 0.4 % of the thread.
 
-- 🔬 **What the zoom p99 is now, and whose**: with the element at 4 % (prepaint) + 12 % (paint,
+- ✅ **What the zoom p99 is now, and whose** (asked 2026-09-06, answered by the 2026-09-14
+  smooth probe at `c689d06`, MEASUREMENTS "the smooth probe after the week's element work":
+  the 20-shell zoom cycle's draw p99 is 2.8 ms and its max 10.2 ms, 0 dropped, after the
+  raster ladder, the shaped chrome and the prompt-walk fix; the paragraph below is the
+  state that ruled it worth chasing). With the element at 4 % (prepaint) + 12 % (paint,
   all `paint_glyph`), the after-sample's draw is 48 % paint (terminal glyphs 28 %, the items'
   titles and pills 7 %), 29 % GPUI layout (`Div::request_layout` and taffy over twenty item
   trees whose every size changes per zoom step) and 7 % scene + Metal; between draws the

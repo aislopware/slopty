@@ -8746,4 +8746,67 @@ mod tests {
         });
         assert_eq!(stored, edited, "the document holds the text the editor typed");
     }
+
+    #[gpui::test]
+    fn a_notes_task_ticks_on_a_click_without_opening_the_editor(cx: &mut TestAppContext) {
+        const TEXT: &str = "# Plan\n- [ ] ship\n- [x] test\n";
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let item = CanvasItem {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: TEXT.to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        let id = item.id;
+        view.update_in(cx, |c, _window, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+        });
+        cx.run_until_parked();
+        let first = selector("note-task", id);
+        let first: &'static str = Box::leak(format!("{first}-0").into_boxed_str());
+        let second: &'static str =
+            Box::leak(format!("{}-1", selector("note-task", id)).into_boxed_str());
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(
+            tree.iter().any(|n| n.is("CheckBox", Some("To do: ship"))),
+            "the open task reads as a box to tick: {tree:#?}"
+        );
+        assert!(tree.iter().any(|n| n.is("CheckBox", Some("Done: test"))), "{tree:#?}");
+        assert!(cx.debug_bounds(second).is_some(), "each task line is its own row");
+
+        drain(&mut rx);
+        let bounds = cx.debug_bounds(first).expect("the first task's box");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        let editing = cx.update(|window, cx| {
+            view.read(cx).notes.get(&id).is_some_and(|n| n.read(cx).editing(window, cx))
+        });
+        assert!(!editing, "a tick is not a click into the note");
+        let ticked = "# Plan\n- [x] ship\n- [x] test\n";
+        let sent = drain(&mut rx).into_iter().find_map(|m| match m {
+            ClientMsg::Canvas(CanvasOp::Upsert(i)) if i.id == id => match i.kind {
+                ItemKind::Note { text } => Some(text),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(sent.as_deref(), Some(ticked), "the tick went to the document at once");
+        let synced =
+            view.read_with(cx, |c, cx| c.notes.get(&id).map(|n| n.read(cx).synced().to_owned()));
+        assert_eq!(synced.as_deref(), Some(ticked));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("CheckBox", Some("Done: ship"))), "{tree:#?}");
+
+        // Off again from the same box.
+        let bounds = cx.debug_bounds(first).expect("the box stays where it was");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        let synced =
+            view.read_with(cx, |c, cx| c.notes.get(&id).map(|n| n.read(cx).synced().to_owned()));
+        assert_eq!(synced.as_deref(), Some(TEXT), "a second click unticks it");
+    }
 }

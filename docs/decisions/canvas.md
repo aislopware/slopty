@@ -444,6 +444,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   does not send; (2) an empty note asks nothing; (3) no wire change. Test:
   `a_notes_ask_pill_puts_it_in_the_agents_composer`.
 
+- ✅ **A note's task line ticks on a click** (2026-09-14). A note of `- [ ]` lines is a
+  checklist, and gpui-kit draws the boxes, but a click on one opened the editor: the tick
+  was a caret trip and two keystrokes. Rulings: (1) `markdown::segments` lifts each task
+  line (a list mark, `[ ]` or `[x]`, outside a fence; `markdown::task_line`) out of the
+  prose as its own `Segment::Task`, drawn by `markdown::task_row` — a box (`CheckBox`,
+  "To do: …"/"Done: …", `aria_toggled`) before the line's Markdown, the same style as the
+  prose around it; (2) in a note the box is a button: `NoteView::toggle_task` flips that
+  line in the text (`markdown::toggle_task`, the n-th task line counted the same way,
+  fences skipped), sets the editor's value and commits at once — no editor, no typing
+  pause — and stops the press, so the note does not open for editing (`note-task-<item>-<n>`);
+  (3) in an answer the same row shows and does nothing: an assistant's checklist is its
+  report, not the user's to edit; (4) only the line's box changes — indentation, the mark
+  and the text stay, and a capital `[X]` unticks like a small one — so a toggle undoes
+  itself and a diff of the note is one character. Tests: `markdown::tests` (the line
+  grammar, segments with a fence hiding a task, the n-th toggle and its inverse) and
+  headless `a_notes_task_ticks_on_a_click_without_opening_the_editor` (the boxes read out,
+  each line its own row, the click sends the ticked text as an upsert without the editor
+  opening, a second click unticks).
+
 - ✅ **A note reads as Markdown until it is edited** (2026-09-12). A note is where a canvas
   keeps prose — a checklist, a link, a heading over a paragraph — and it was drawing that prose
   as the characters typed, in a textarea that never stopped being an editor. Rulings: (1) a note
