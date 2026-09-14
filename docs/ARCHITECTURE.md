@@ -413,8 +413,9 @@ for the stats overlay and the bench; pure, no clocks, tested; `heartbeat_datagra
 `Kind::Heartbeat` header the host sends after `HEARTBEAT_AFTER` of silence so a still screen
 or a capture gap does not read as a link stall at the receiver), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
-path's datagram limit and how many bytes QUIC is holding in its send buffer, and a captured
-frame is dropped rather than encoded while more than two frames' worth wait there
+path's datagram limit, how many bytes QUIC is holding in its send buffer and how wide the
+congestion window is, and a captured frame is dropped rather than encoded while more than two
+frames' worth at the rate in force wait there, or one window, whichever is larger
 (`frame_fits`); `warm_up` runs one throwaway capture when hostd comes online and `shareable()`
 keeps its enumeration for 2 s; a cursor sampler whose window-server calls all go through the
 blocking pool, and a heartbeat on its own task beside it — a promise about time must not share a

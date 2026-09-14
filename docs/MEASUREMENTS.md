@@ -2857,3 +2857,36 @@ MEASURE (d) mac, SLOPTY_PREDICT=always: echo 11.4 / 18.3 / 22.8 ms (60 keys) · 
 
 Nothing to optimise from this run: the p90 draw stays under 7 ms everywhere and the
 prediction path still answers a key in under 5 ms at p90.
+
+## 2026-09-14 — owed: the capture guard's held-bytes budget, before and after
+
+Not a measurement. The change that removed `HELD_FLOOR` (transport.md, "the capture guard's
+held-bytes budget is two frames at the rate in force") rests on the 2026-09-06 mesh run above and
+on arithmetic; the confirming run could not be taken because the second machine was off the mesh.
+Loopback cannot stand in: BBR3's four-packet floor there is 5 808 B at a 1–6 ms round trip, so the
+target sits near the 30 Mbit/s ceiling, `per_frame × 2` is 29–125 kB and the old 32 kB floor never
+bound. The case needs the mesh's 1 230 B MTU, 20 ms round trip and real loss.
+
+The change is hostd-only, so build once at the parent commit, keep that `target/debug/slopty-hostd`
+aside, build the change, and **alternate the two binaries against one client** — the mesh drifted
+monotonically over two hours on 09-06, so A-then-B would read drift as effect.
+
+```sh
+# mac-studio, per arm, exactly the harness of "start-up over the mesh" above
+export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
+target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
+RUST_LOG=info,slopty_host=debug,slopty_hostd=debug SLOPTY_PORT=45560 <hostd-under-test> --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock \
+  --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/hostd.log 2>&1 &
+open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
+# macbook-pro
+/tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20
+# host side
+grep -E 'held_ms=[0-9]{3,}|keyframe encoded' $SLOPTY_DATA_DIR/hostd.log
+```
+
+Read per run: capture→decoded p50 / p90 (the win), stalls and worst gap (the cost, paid as more
+frequent short drops), and the hold that follows each `keyframe encoded` (whether the deferred
+keyframe rule is still owed). Predicted: budget 7.4 kB against 32 kB on a collapsed window, so
+`max_bytes` peaks near 7 kB + a frame instead of 37 kB, and a post-keyframe hold of keyframe +
+~7 kB rather than keyframe + 32 kB. Kill the ptyd/hostd of each arm before starting the next.

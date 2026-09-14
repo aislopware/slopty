@@ -362,10 +362,24 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Queued>, budget
             );
         }
         queued_before = queued;
+        // The capture guard sizes its budget from the window (`frame_fits`), so it is sampled
+        // when a hold starts, when the hold deepens, and on a poll turn — one that woke on
+        // `HOLD_POLL` with no datagram, which is exactly a hold that is long and quiet, the
+        // only case where the reading would otherwise go stale. Not on every turn: reading the
+        // path takes the connection's lock the QUIC driver wants, and a 30 Mbit/s frame is
+        // ~50 datagrams, so "every turn" would be thousands of samples a second.
+        let deepening = hold.as_ref().is_some_and(|h: &Hold| held > h.max_bytes);
+        let sample = held > 0 && (hold.is_none() || deepening || datagram.is_none());
+        let cwnd = if sample {
+            let (_rtt, cwnd) = slopty_net::endpoint::selected_path(&conn).unwrap_or_default();
+            budget.set_cwnd(cwnd);
+            cwnd
+        } else {
+            0
+        };
         match (&mut hold, held) {
             (None, 0) => {}
             (None, bytes) => {
-                let (_rtt, cwnd) = slopty_net::endpoint::selected_path(&conn).unwrap_or_default();
                 hold = Some(Hold {
                     since: std::time::Instant::now(),
                     max_bytes: bytes,
@@ -384,8 +398,7 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Queued>, budget
             (Some(h), bytes) => {
                 if bytes > h.max_bytes {
                     h.max_bytes = bytes;
-                    h.cwnd_at_max =
-                        slopty_net::endpoint::selected_path(&conn).map_or(0, |(_rtt, cwnd)| cwnd);
+                    h.cwnd_at_max = cwnd;
                 }
             }
         }

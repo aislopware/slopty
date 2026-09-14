@@ -564,3 +564,59 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ~33 ms at this path's 11 ms rtt — but start-up here is dominated by the 217–304 ms to the first
   datagram and 40 ms of encode, not by the window. Keep it for LAN and loopback, where it is
   cheap and the arithmetic is the same; do not claim a Wi-Fi start-up win for it.
+
+- ✅ **The capture guard's held-bytes budget is two frames at the rate in force, floored at one
+  congestion window; the fixed 32 kB floor is gone** (2026-09-14, from the 2026-09-06 mesh
+  measurement above). `HELD_FRAMES` was always a *time* budget written in bytes: at 30 Mbit/s and
+  60 fps it is 125 kB, at the 1 Mbit/s floor 4 kB. `HELD_FLOOR` pinned it at 32 kB from below, so
+  as the path slowed the budget became a queue measured in seconds — 33 ms of standing latency at
+  8 Mbit/s, 145 ms at the 1.8 Mbit/s the mesh's collapsed window sustains, charged to every frame
+  behind it. The 🔬 entry above measured exactly that: BBR3 holding 37 kB, which is the floor plus
+  a frame in flight, with the guard dropping frames the whole time. The floor's stated reason —
+  that a low target must not drop every frame behind a beat — is the wrong medicine: at 1.8 Mbit/s
+  a link cannot carry 60 fps, and turning a drop into a 145 ms delay is the worse of the two
+  answers for a remote desktop.
+
+  **This is the BBR3 half of that entry only.** The Cubic half is barely touched: a 267–347 kB peak
+  under a 32 kB floor means the keyframe itself was 235–315 kB, and at Cubic's collapsed
+  1.6–7.9 Mbit/s target with a 10–17 kB window the new limit is 13–33 kB — within a few kB of the
+  floor it replaces. Sizing the budget correctly does not answer a frame that is ten times the
+  budget whatever the budget is; only the keyframe rule below does.
+
+  One congestion window replaces it as the floor. Bytes inside the window are not a standing queue
+  — QUIC sends them on the next acknowledgement — so refusing a frame while `held` is under `cwnd`
+  drops a frame the link would have carried. That case is reachable rather than theoretical: two
+  frames fall under one window once `rtt × fps` passes 1.8, which at 60 fps is any path past a
+  30 ms round trip. `DatagramBudget` carries the window beside the held bytes and hostd's pump
+  samples the selected path when a hold starts, when it deepens, and on a poll turn — one that woke
+  on `HOLD_POLL` with no datagram to send, which is exactly a hold that is long and quiet, the only
+  case where the reading would otherwise go stale. Not on every turn: reading the path takes the
+  connection lock the QUIC driver wants, and one 30 Mbit/s frame is ~50 datagrams.
+
+  The NACK path shares the budget and so refuses retransmits earlier than it did. That is the
+  intent rather than a side effect: a fragment pushed into a queue that is already two frames deep
+  arrives after the frame it would have completed is stale, and the client's own refresh request
+  comes back through the capture guard, which is the path that can actually answer it.
+
+  Sampling during BBR3's `ProbeRTT` cannot hurt: `cwnd` only ever raises the limit, and the
+  bitrate the other term comes from is capped by the *widest* path sample of its window, so a
+  200 ms dip to four packets narrows neither term.
+
+  **Measured before, not after.** The 2026-09-06 mesh run is what licenses this; the confirming
+  run is owed and was not possible on 2026-09-14 (the second machine was off the mesh, so the
+  documented harness could not run, and loopback cannot reproduce the case — BBR3's four-packet
+  floor there is 5 808 B at a 1–6 ms round trip, which puts the target near the 30 Mbit/s ceiling
+  and the old floor never bound). What the run should read, interleaving the two hostd binaries
+  against one client: capture→decoded p50/p90 as the win, stall count and worst gap as the cost.
+  The prediction is a 4× tighter budget on a collapsed mesh window (7.4 kB against 32 kB), bought
+  with more frequent short drops.
+
+- ⏸ **Gating a keyframe on its own headroom** (2026-09-14). The Cubic half of the 🔬 entry —
+  `frame_fits` runs before the frame is encoded, so it bounds what is queued *ahead* of a keyframe
+  and never the keyframe itself — is only partly answered by the budget above, which shrinks the
+  peak without removing it. A keyframe rule needs a safety valve (admit it after N refusals or
+  T ms) or a permanently congested link never gets one and the client sits on a hole for good,
+  which is worse than the stall it would prevent. Deferred until the run above says whether the
+  hold after a `keyframe encoded` is still hundreds of milliseconds. Out of scope in either case:
+  at 2 Mbit/s 60 fps HEVC is not viable whatever the guard does, and the answer there is frame
+  rate adaptation.

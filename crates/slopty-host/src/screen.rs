@@ -126,12 +126,13 @@ pub enum ScreenError {
 /// What the transport reports about the connection, shared by every stream on it.
 ///
 /// The bytes one datagram may carry (starts at the protocol maximum; lowered while QUIC's
-/// path MTU is still 1200 bytes) and how many bytes of datagrams QUIC is holding in its send
-/// buffer, waiting for the congestion window.
+/// path MTU is still 1200 bytes), how many bytes of datagrams QUIC is holding in its send
+/// buffer waiting for the congestion window, and how wide that window is.
 #[derive(Clone, Debug)]
 pub struct DatagramBudget {
     max_datagram: Arc<AtomicUsize>,
     held: Arc<AtomicUsize>,
+    cwnd: Arc<AtomicU64>,
 }
 
 impl Default for DatagramBudget {
@@ -141,12 +142,13 @@ impl Default for DatagramBudget {
 }
 
 impl DatagramBudget {
-    /// Protocol maximum, nothing held.
+    /// Protocol maximum, nothing held, no window sampled yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
             max_datagram: Arc::new(AtomicUsize::new(MAX_DATAGRAM)),
             held: Arc::new(AtomicUsize::new(0)),
+            cwnd: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -171,6 +173,17 @@ impl DatagramBudget {
     pub fn held(&self) -> usize {
         self.held.load(Ordering::Relaxed)
     }
+
+    /// Record the selected path's congestion window.
+    pub fn set_cwnd(&self, bytes: u64) {
+        self.cwnd.store(bytes, Ordering::Relaxed);
+    }
+
+    /// The congestion window as last sampled; `0` until the pump has held something.
+    #[must_use]
+    pub fn cwnd(&self) -> u64 {
+        self.cwnd.load(Ordering::Relaxed)
+    }
 }
 
 /// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
@@ -181,13 +194,25 @@ impl DatagramBudget {
 /// the mesh"). Two frames keep a keyframe's tail flowing and stop the queue there: the next
 /// capture is fresher than anything that would wait behind it.
 const HELD_FRAMES: u64 = 2;
-/// Floor for the held-bytes limit, so a low target does not drop every frame behind a beat.
-const HELD_FLOOR: u64 = 32 * 1024;
 
-/// Whether a captured frame should be encoded given what is queued ahead of it: `free` slots
-/// in the datagram queue, `held` bytes in QUIC's send buffer, at `target_bps` and `fps`.
+/// Whether a captured frame should be encoded given what is queued ahead of it.
+///
+/// `free` slots in the datagram queue, `held` bytes in QUIC's send buffer against a congestion
+/// window of `cwnd`, at `target_bps` and `fps`.
+///
+/// Two frames' worth is a *time* budget written in bytes, so it has to be recomputed from the
+/// rate actually in force: at 30 Mbit/s and 60 fps it is 125 KB, at the 1 Mbit/s floor it is
+/// 4 KB. A fixed byte floor under it turns into a fixed queue of *seconds* as the path slows —
+/// 32 KB is 33 ms at 8 Mbit/s and 260 ms at 1 Mbit/s, charged to every frame behind it
+/// (MEASUREMENTS.md and `docs/decisions/transport.md`, "the two controllers fail in opposite
+/// ways": holds peaking at the floor plus one frame with the guard dropping throughout).
+///
+/// One congestion window is the floor instead. Bytes inside the window are not a standing
+/// queue — QUIC sends them on the next acknowledgement — so refusing a frame below `cwnd`
+/// drops one the link would have carried. That case is real where the round trip is long:
+/// `per_frame × 2` falls under one window once `rtt × fps` passes 1.8.
 #[must_use]
-pub const fn frame_fits(free: usize, held: usize, target_bps: u64, fps: u16) -> bool {
+pub const fn frame_fits(free: usize, held: usize, cwnd: u64, target_bps: u64, fps: u16) -> bool {
     if free < LOW_WATER {
         return false;
     }
@@ -196,8 +221,8 @@ pub const fn frame_fits(free: usize, held: usize, target_bps: u64, fps: u16) -> 
         Some(bytes) => bytes,
         None => 0,
     };
-    let limit = per_frame.saturating_mul(HELD_FRAMES);
-    let limit = if limit < HELD_FLOOR { HELD_FLOOR } else { limit };
+    let frames = per_frame.saturating_mul(HELD_FRAMES);
+    let limit = if frames < cwnd { cwnd } else { frames };
     (held as u64) <= limit
 }
 
@@ -885,6 +910,7 @@ impl Shared {
         let fits = frame_fits(
             self.out.capacity(),
             self.budget.held(),
+            self.budget.cwnd(),
             self.counters.bitrate_bps.load(Ordering::Relaxed),
             self.fps.load(Ordering::Relaxed),
         );
@@ -1052,6 +1078,7 @@ impl Shared {
         let fits = frame_fits(
             self.out.capacity(),
             self.budget.held(),
+            self.budget.cwnd(),
             self.counters.bitrate_bps.load(Ordering::Relaxed),
             self.fps.load(Ordering::Relaxed),
         );
@@ -2498,13 +2525,15 @@ mod tests {
     #[test]
     fn the_transport_budget_the_queue_age_and_the_crop_knob_are_plain_values() {
         let budget = DatagramBudget::default();
-        assert_eq!((budget.get(), budget.held()), (MAX_DATAGRAM, 0));
+        assert_eq!((budget.get(), budget.held(), budget.cwnd()), (MAX_DATAGRAM, 0, 0));
         budget.set(1200);
         budget.set_held(4096);
-        assert_eq!((budget.get(), budget.held()), (1200, 4096));
+        budget.set_cwnd(4920);
+        assert_eq!((budget.get(), budget.held(), budget.cwnd()), (1200, 4096, 4920));
         let shared_budget = budget.clone();
         budget.set_held(0);
         assert_eq!(shared_budget.held(), 0, "clones share the counters");
+        assert_eq!(shared_budget.cwnd(), 4920, "the window too");
 
         let queued = Queued { datagram: Bytes::new(), queued_at_us: host_now_us() - 5_000 };
         assert!(queued.waited_us() >= 5_000, "age is measured from when it was queued");
@@ -2533,15 +2562,22 @@ mod tests {
     #[test]
     fn a_frame_fits_unless_the_queue_or_quic_holds_too_much() {
         // 30 Mbit/s at 60 fps: 62.5 KB per frame, two frames may be held.
-        assert!(frame_fits(DATAGRAM_QUEUE, 0, 30_000_000, 60));
-        assert!(frame_fits(DATAGRAM_QUEUE, 125_000, 30_000_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 125_001, 30_000_000, 60));
+        assert!(frame_fits(DATAGRAM_QUEUE, 0, 5_808, 30_000_000, 60));
+        assert!(frame_fits(DATAGRAM_QUEUE, 125_000, 5_808, 30_000_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 125_001, 5_808, 30_000_000, 60));
         // The datagram queue's low-water mark still applies.
-        assert!(!frame_fits(LOW_WATER - 1, 0, 30_000_000, 60));
-        // At the 1 Mbit/s floor two frames are 4 KB; the 32 KB floor keeps beats and a
-        // small keyframe from dropping everything behind them.
-        assert!(frame_fits(DATAGRAM_QUEUE, 32 * 1024, 1_000_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 32 * 1024 + 1, 1_000_000, 60));
-        assert!(frame_fits(DATAGRAM_QUEUE, 0, 0, 0), "no rate known: the floor");
+        assert!(!frame_fits(LOW_WATER - 1, 0, 5_808, 30_000_000, 60));
+        // A collapsed path: 1.8 Mbit/s at 60 fps is 3.7 KB a frame, so the budget is 7.4 KB —
+        // 33 ms of queue against the 146 ms a fixed 32 KB floor would have allowed at this
+        // rate, which is the whole point of sizing it from the rate in force.
+        assert!(frame_fits(DATAGRAM_QUEUE, 7_500, 4_920, 1_800_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 7_501, 4_920, 1_800_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 32 * 1024, 4_920, 1_800_000, 60));
+        // One window is the floor: past `rtt × fps` of 1.8 two frames fall under it, and bytes
+        // inside the window leave on the next acknowledgement rather than standing in a queue.
+        // 1 Mbit/s at 60 fps is 2 083 B a frame, two of them 4 166, under a 4 920 B window.
+        assert!(frame_fits(DATAGRAM_QUEUE, 4_920, 4_920, 1_000_000, 60));
+        assert!(!frame_fits(DATAGRAM_QUEUE, 4_921, 4_920, 1_000_000, 60));
+        assert!(frame_fits(DATAGRAM_QUEUE, 0, 0, 0, 0), "nothing known, nothing held");
     }
 }
