@@ -238,6 +238,9 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSApplication",
     "NSDockTile",
     "NSResponder",
+    # `NSWorkspace` carries the accessibility display settings; `reduce_motion` reads one.
+    "NSWorkspace",
+    "NSAccessibility",
     "libc",
 ] }
 objc2-audio-toolbox = { version = "=0.3.2", default-features = false, features = [
@@ -260,6 +263,8 @@ objc2-game-controller = { version = "=0.3.2", default-features = false, features
 ] }
 objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
+    # `UIAccessibilityIsReduceMotionEnabled`, the iOS half of `reduce_motion`.
+    "UIAccessibility",
     "UIFeedbackGenerator",
     "UINotificationFeedbackGenerator",
 ] }

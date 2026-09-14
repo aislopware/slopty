@@ -218,6 +218,31 @@ pub fn playback_audio_session() {
     }
 }
 
+/// Whether the system asks for motion to be reduced.
+///
+/// Read fresh at each use rather than cached: both platforms let it change while the app runs, and
+/// the call is a property read. The canvas is what it governs — pan momentum and zoom settling are
+/// the only motion Slopty invents, and a person who turned this on wants the view where they put
+/// it rather than gliding there.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios")),
+    expect(clippy::missing_const_for_fn, reason = "constant only off Apple platforms")
+)]
+pub fn reduce_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    }
+    #[cfg(target_os = "ios")]
+    {
+        objc2_ui_kit::UIAccessibilityIsReduceMotionEnabled()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    {
+        false
+    }
+}
+
 /// Whether a physical keyboard is attached. On iOS this is `GameController`'s coalesced keyboard
 /// (nil until one connects over Smart Connector, Bluetooth or USB); a Mac always has one.
 #[cfg_attr(not(target_os = "ios"), expect(clippy::missing_const_for_fn, reason = "constant here"))]

@@ -283,6 +283,29 @@ const TITLE_H: f32 = 28.0;
 const RERUN_LINES: usize = 5;
 /// Resize grip size at zoom 1.
 const GRIP: f32 = 14.0;
+/// Whether the system asks for motion to be reduced, read afresh so a change takes effect on the
+/// next camera move rather than the next launch.
+///
+/// Camera flight is the one thing on the canvas that moves on its own: a jump to a card glides
+/// across the whole board, which is the motion someone turns this setting on to stop. Everything
+/// else follows the pointer or the finger one to one and has nothing to reduce.
+///
+/// Always false under test. A flight assertion must not turn on whether the machine running it
+/// has the setting on.
+fn reduced_motion() -> bool {
+    !cfg!(test) && slopty_platform::reduce_motion()
+}
+
+/// Whether a camera move lands at once instead of flying there.
+///
+/// Split from [`CanvasView::fly`] so the policy can be asserted without an accessibility setting
+/// or a window: the reasons are the self-test holding animation off, the system asking for reduced
+/// motion, and a viewport that has not been laid out yet (a flight needs a size to interpolate
+/// against, and zero would divide by it).
+const fn lands_at_once(animate: bool, reduced: bool, viewport: (f32, f32)) -> bool {
+    !animate || reduced || viewport.0 <= 0.0 || viewport.1 <= 0.0
+}
+
 /// How long after the last zoom change the settled frame (exact rasters) is asked for. A
 /// gesture reports every few milliseconds; a frame per report and one more after the pause.
 const SETTLE: Duration = Duration::from_millis(80);
@@ -3121,7 +3144,7 @@ impl CanvasView {
     /// Move the camera to `target`, over [`FLIGHT`] seconds unless animation is off.
     fn fly(&mut self, target: Camera, cx: &mut Context<Self>) {
         let viewport = self.viewport_size();
-        if !self.animate || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+        if lands_at_once(self.animate, reduced_motion(), viewport) {
             self.flight = None;
             self.camera = target;
         } else {
@@ -7286,6 +7309,22 @@ mod tests {
         let rows = grid_rows(&view, cx, low).expect("laid out");
         let prepared = rows_prepared(cx);
         assert!(prepared >= 1 && prepared < usize::from(rows) / 2, "{prepared} of {rows}");
+    }
+
+    /// A camera move flies only when nothing says otherwise: the system asking for reduced motion
+    /// lands it at once, as does the self-test's own switch and a viewport with no size yet.
+    #[test]
+    fn reduced_motion_lands_the_camera_instead_of_flying_it() {
+        let laid_out = (1920.0, 1080.0);
+        assert!(!lands_at_once(true, false, laid_out), "the ordinary case flies");
+        assert!(lands_at_once(true, true, laid_out), "reduced motion is honoured");
+        assert!(lands_at_once(false, false, laid_out), "the self-test's switch still wins");
+        // Before layout there is no size to interpolate against, whatever the settings say.
+        assert!(lands_at_once(true, false, (0.0, 1080.0)));
+        assert!(lands_at_once(true, false, (1920.0, 0.0)));
+        // Under test the accessibility setting is never read, so a flight assertion anywhere in
+        // this file does not depend on the machine running it.
+        assert!(!reduced_motion());
     }
 
     /// A zoom step is one frame in motion (terminals and chrome paint from the raster ladder)
