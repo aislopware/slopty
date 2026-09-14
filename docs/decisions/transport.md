@@ -602,17 +602,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   bitrate the other term comes from is capped by the *widest* path sample of its window, so a
   200 ms dip to four packets narrows neither term.
 
-  **Measured before, not after.** The 2026-09-06 mesh run is what licenses this; the confirming
-  run is owed. Loopback cannot reproduce the case — BBR3's four-packet floor there is 5 808 B at a
-  1–6 ms round trip, which puts the target near the 30 Mbit/s ceiling and the old floor never
-  bound — and the mesh attempt on 2026-09-14 got as far as a paired client on the direct path
-  before ScreenCaptureKit refused every capture with `-3801`: `cargo build` ad-hoc signs, so each
-  rebuild is a new executable and loses the Screen Recording grant. Both arms are now signed with
-  one Developer ID identity so one approval covers every rebuild, and that approval is the only
-  thing left (MEASUREMENTS.md). What the run should read, interleaving the two hostd binaries
-  against one client: capture→decoded p50/p90 as the win, stall count and worst gap as the cost.
-  The prediction is a 4× tighter budget on a collapsed mesh window (7.4 kB against 32 kB), bought
-  with more frequent short drops.
+  **Measured on a good path, still owed on a bad one.** The 2026-09-06 mesh run is what licenses
+  this. The 2026-09-14 run (MEASUREMENTS.md) got a real 20 s stream at last — the host has to run
+  under launchd for TCC to grant it capture at all — and read 57.9 fps, 0 stalls, 0 lost, 1236
+  holds at p50 2 ms with a worst of 15 ms on the 74 kB keyframe. It settles the cheap half: on a
+  9.5 ms link `per_frame × 2` is 56–125 kB while `cwnd` never fell below 23.7 kB and the old floor
+  was 32 kB, so neither floor is ever the larger term and the two builds admit the same frames.
+  The change is inert on a good path; nothing was traded away for the collapsed-path win.
+
+  The expensive half is untouched: `per_frame × 2` only falls under one window once `rtt × fps`
+  passes 1.8, which a 9.5 ms link cannot reach. That needs a day like 09-06 (25–30 % loss, the
+  window pinned at its floor, the target cut to 1 Mbit/s) or a conditioned link. Prediction
+  unchanged: `max_bytes` peaking near `cwnd + one frame` rather than 32 kB + one frame, bought with
+  more frequent short drops. Interleave the arms — the mesh drifted monotonically over two hours on
+  09-06, and on 09-14 the second machine left the mesh mid-run, which costs a whole arm either way.
 
 - ⏸ **Gating a keyframe on its own headroom** (2026-09-14). The Cubic half of the 🔬 entry —
   `frame_fits` runs before the frame is encoded, so it bounds what is queued *ahead* of a keyframe

@@ -2858,58 +2858,61 @@ MEASURE (d) mac, SLOPTY_PREDICT=always: echo 11.4 / 18.3 / 22.8 ms (60 keys) · 
 Nothing to optimise from this run: the p90 draw stays under 7 ms everywhere and the
 prediction path still answers a key in under 5 ms at p90.
 
-## 2026-09-14 — owed: the capture guard's held-bytes budget, before and after
+## 2026-09-14 — the capture guard on a healthy mesh link: the change is a no-op, as predicted
 
-Not a measurement. The change that removed `HELD_FLOOR` (transport.md, "the capture guard's
-held-bytes budget is two frames at the rate in force") rests on the 2026-09-06 mesh run above and
-on arithmetic. Loopback cannot stand in: BBR3's four-packet floor there is 5 808 B at a 1–6 ms
-round trip, so the target sits near the 30 Mbit/s ceiling, `per_frame × 2` is 29–125 kB and the old
-32 kB floor never bound. The case needs the mesh's 1 230 B MTU, 20 ms round trip and real loss.
+Setup: mac-studio hosting `display 6` (1920×1080 @1x 60 Hz) with a Ghostty window scrolling `seq`,
+`slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, debug
+build, direct path, MTU 1230. **The host ran under launchd** (`slopty host install`), not from a
+shell: a shell-spawned daemon is attributed to whatever launched it for TCC purposes, so it never
+gets Screen Recording however the binary is signed. The link was in its best state yet — rtt 9.5 ms,
+0 lost packets, 0 congestion events, the host's window reaching 12.5 MB.
 
-**What blocks it, and the one-time fix.** The mesh itself is fine — macbook-pro answered at
-8.1 / 8.6 / 9.3 ms, the client paired over the direct path and warmed its decoder in 71 ms. The host
-never got a frame to send: every capture call returned ScreenCaptureKit `-3801`
-(`SCStreamErrorUserDeclined`), for both arms and from every path tried. `cargo build` ad-hoc
-(linker-)signs each binary, so a rebuilt `slopty-hostd` has a new cdhash and the Screen Recording
-grant a human gave the 09-06 build does not carry over — a grant is per executable
-(ARCHITECTURE.md, `slopty host doctor`), and for an ad-hoc binary "per executable" means per build.
-Signing with one Developer ID identity under one identifier fixes that for good, because the
-designated requirement is then the identifier and the certificate rather than the hash. That is what
-`cargo xtask sign` does, and `xtask run host` calls it after every build (`docs/decisions/input.md`,
-the host-daemon signing entry). Both arms carry the same signature:
+Arm: `HELD_FLOOR` still in (the parent of `d58dfa0`).
+
+| metric | value |
+| --------------------------------- | ----------------------------- |
+| frames decoded / fps              | 1155 in 19.96 s = 57.9 fps    |
+| stalls                            | 0 (0 ms stalled)              |
+| arrival gap p50 / p90 / max       | 17.1 / 21.0 / 45.9 ms         |
+| worst gap, worst doze             | 0 ms, 0 ms                    |
+| hold (client report) p50 / p95    | 2.1 / 3.9 ms                  |
+| datagrams / lost / nacks / refresh| 11757 / 0 / 84 / 0            |
+| host target                       | 13.5 → 30.0 Mbit/s by 10.1 s  |
+| keyframe spread                   | 15.3 ms                       |
+
+Host side, 1236 holds logged: `held_ms` p50 2, p90 3, worst 15; `max_bytes` worst 74 340 (the
+keyframe), second 43 216; `cwnd` ranged 23 734 B to 12 465 747 B.
+
+**What this settles.** The guard's limit is `max(per_frame × 2, cwnd)`, and the old rule was
+`max(per_frame × 2, 32 768)`. On this link `per_frame × 2` dominates both floors at every sampled
+moment: 56 250 B at the 13.5 Mbit/s the run opened with, 125 000 B at the 30 Mbit/s it reached,
+against a `cwnd` that never fell below 23.7 kB and a fixed floor of 32 kB. Neither floor is ever the
+larger term, so the two builds admit exactly the same frames and the arms are identical by
+construction — which is what was predicted, and why the second arm adds nothing here. It is a
+negative result worth the run: it shows the change is inert on a good path, so nothing was traded
+away for the collapsed-path win.
+
+**Still owed: the collapsed path.** The case the change exists for — `per_frame × 2` under one
+window, which needs `rtt × fps` past 1.8 — did not occur, and cannot be conjured on a 9.5 ms link.
+It needs a day like 2026-09-06 (25–30 % loss, the window pinned at its floor, the target cut to
+1 Mbit/s) or a deliberately conditioned link. The prediction stands: `max_bytes` peaking near
+`cwnd + one frame` instead of 32 kB + one frame, bought with more frequent short drops. Interleave
+the arms when it happens — the mesh drifted monotonically over two hours on 09-06, so A-then-B
+would read drift as effect. The second arm of this run was lost to macbook-pro leaving the mesh
+mid-measurement, which is the other reason to interleave.
 
 ```sh
-codesign --force --options runtime --timestamp=none \
-  --identifier dev.aislopware.slopty.hostd \
-  --sign 'Developer ID Application: …' /tmp/slopty-arms/hostd-before
-```
-
-So one approval of `dev.aislopware.slopty.hostd` under System Settings → Privacy & Security →
-Screen Recording covers both arms and every future dev build. That approval is a click nobody can
-make from a shell, so the run stays owed until someone gives it once.
-
-The change is hostd-only, so build once at the parent commit, keep that `target/debug/slopty-hostd`
-aside, build the change, sign both as above, and **alternate the two binaries against one client** —
-the mesh drifted monotonically over two hours on 09-06, so A-then-B would read drift as effect.
-
-```sh
-# mac-studio, per arm, exactly the harness of "start-up over the mesh" above
-export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
-target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
-RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_net=debug \
-  SLOPTY_PATH_TRACE_MS=100 SLOPTY_PORT=45560 <hostd-under-test> --direct-only \
-  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock \
-  --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/hostd.log 2>&1 &
+# mac-studio: the host must be the launchd one, or TCC denies capture with -3801
+cargo xtask sign && slopty host install --direct-only --port 45560
+# per arm: swap the binary under test into place, keep the identity, restart
+cp <hostd-under-test> ~/Library/Application\ Support/Slopty/bin/slopty-hostd
+cargo xtask sign            # re-sign the copy under dev.aislopware.slopty.hostd
+launchctl kickstart -k gui/$(id -u)/dev.aislopware.slopty.hostd
+slopty host doctor          # must show two ticks before the arm counts
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
 # macbook-pro
-/tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20
+slopty bench screen --host <id> --display 6 --seconds 20
 # host side
-grep -E 'held_ms=[0-9]{3,}|keyframe encoded' $SLOPTY_DATA_DIR/hostd.log
-grep 'path health' $SLOPTY_DATA_DIR/hostd.log          # the window as a series, not one reading
+grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-hostd.log
 ```
 
-Read per run: capture→decoded p50 / p90 (the win), stalls and worst gap (the cost, paid as more
-frequent short drops), and the hold that follows each `keyframe encoded` (whether the deferred
-keyframe rule is still owed). Predicted: budget 7.4 kB against 32 kB on a collapsed window, so
-`max_bytes` peaks near 7 kB + a frame instead of 37 kB, and a post-keyframe hold of keyframe +
-~7 kB rather than keyframe + 32 kB. Kill the ptyd/hostd of each arm before starting the next.
