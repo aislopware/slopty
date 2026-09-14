@@ -230,7 +230,11 @@ installed socket by itself, so `slopty host ticket` works without launchd's envi
 `slopty host doctor` asks the running daemon about itself (`CtlRequest::Doctor` →
 `Health`): Screen Recording and Accessibility as *that binary* sees them (TCC grants are per
 executable, so the report names the path to add), reach, port, connected clients, sessions;
-exit status 1 while a permission is missing, so it can gate a setup script.
+exit status 1 while a permission is missing, so it can gate a setup script. For an ad-hoc
+(`cargo build`) binary "per executable" means per build: the cdhash changes and the grant is gone,
+silently. `cargo xtask sign` (and `xtask run host`, which calls it) signs both daemons under
+`dev.aislopware.slopty.hostd` and `….ptyd` with a Developer ID certificate, which makes the
+requirement the identifier rather than the hash and one approval enough for good.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),

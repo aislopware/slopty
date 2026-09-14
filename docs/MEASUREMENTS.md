@@ -2862,20 +2862,42 @@ prediction path still answers a key in under 5 ms at p90.
 
 Not a measurement. The change that removed `HELD_FLOOR` (transport.md, "the capture guard's
 held-bytes budget is two frames at the rate in force") rests on the 2026-09-06 mesh run above and
-on arithmetic; the confirming run could not be taken because the second machine was off the mesh.
-Loopback cannot stand in: BBR3's four-packet floor there is 5 808 B at a 1–6 ms round trip, so the
-target sits near the 30 Mbit/s ceiling, `per_frame × 2` is 29–125 kB and the old 32 kB floor never
-bound. The case needs the mesh's 1 230 B MTU, 20 ms round trip and real loss.
+on arithmetic. Loopback cannot stand in: BBR3's four-packet floor there is 5 808 B at a 1–6 ms
+round trip, so the target sits near the 30 Mbit/s ceiling, `per_frame × 2` is 29–125 kB and the old
+32 kB floor never bound. The case needs the mesh's 1 230 B MTU, 20 ms round trip and real loss.
+
+**What blocks it, and the one-time fix.** The mesh itself is fine — macbook-pro answered at
+8.1 / 8.6 / 9.3 ms, the client paired over the direct path and warmed its decoder in 71 ms. The host
+never got a frame to send: every capture call returned ScreenCaptureKit `-3801`
+(`SCStreamErrorUserDeclined`), for both arms and from every path tried. `cargo build` ad-hoc
+(linker-)signs each binary, so a rebuilt `slopty-hostd` has a new cdhash and the Screen Recording
+grant a human gave the 09-06 build does not carry over — a grant is per executable
+(ARCHITECTURE.md, `slopty host doctor`), and for an ad-hoc binary "per executable" means per build.
+Signing with one Developer ID identity under one identifier fixes that for good, because the
+designated requirement is then the identifier and the certificate rather than the hash. That is what
+`cargo xtask sign` does, and `xtask run host` calls it after every build (`docs/decisions/input.md`,
+the host-daemon signing entry). Both arms carry the same signature:
+
+```sh
+codesign --force --options runtime --timestamp=none \
+  --identifier dev.aislopware.slopty.hostd \
+  --sign 'Developer ID Application: …' /tmp/slopty-arms/hostd-before
+```
+
+So one approval of `dev.aislopware.slopty.hostd` under System Settings → Privacy & Security →
+Screen Recording covers both arms and every future dev build. That approval is a click nobody can
+make from a shell, so the run stays owed until someone gives it once.
 
 The change is hostd-only, so build once at the parent commit, keep that `target/debug/slopty-hostd`
-aside, build the change, and **alternate the two binaries against one client** — the mesh drifted
-monotonically over two hours on 09-06, so A-then-B would read drift as effect.
+aside, build the change, sign both as above, and **alternate the two binaries against one client** —
+the mesh drifted monotonically over two hours on 09-06, so A-then-B would read drift as effect.
 
 ```sh
 # mac-studio, per arm, exactly the harness of "start-up over the mesh" above
 export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
-RUST_LOG=info,slopty_host=debug,slopty_hostd=debug SLOPTY_PORT=45560 <hostd-under-test> --direct-only \
+RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_net=debug \
+  SLOPTY_PATH_TRACE_MS=100 SLOPTY_PORT=45560 <hostd-under-test> --direct-only \
   --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock \
   --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/hostd.log 2>&1 &
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
@@ -2883,6 +2905,7 @@ open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 
 /tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20
 # host side
 grep -E 'held_ms=[0-9]{3,}|keyframe encoded' $SLOPTY_DATA_DIR/hostd.log
+grep 'path health' $SLOPTY_DATA_DIR/hostd.log          # the window as a series, not one reading
 ```
 
 Read per run: capture→decoded p50 / p90 (the win), stalls and worst gap (the cost, paid as more

@@ -76,9 +76,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Magnify is ignored** for now: there is no public constructor for gesture `CGEvent`s.
 
-- 🔬 Host daemon ships non-sandboxed and Developer-ID signed (App Sandbox blocks
-  `CGEventPost`; slop-desk claims macOS 26 drops modifier combos from unsigned processes —
-  unverified; verify with a ⌘ chord once the daemon is signed).
+- ✅ **The host daemon ships non-sandboxed and Developer-ID signed, and the dev daemon is signed
+  too** (2026-09-14). App Sandbox blocks `CGEventPost`, which settled the sandbox half from the
+  start. The signing half had only slop-desk's unverified claim behind it until a second reason
+  turned up on its own: a TCC grant is per executable, and `cargo build` ad-hoc (linker-)signs, so
+  every rebuild is a new executable and the Screen Recording approval the last build was given is
+  gone. It fails silently — ScreenCaptureKit returns `-3801` (`SCStreamErrorUserDeclined`) with no
+  prompt, which reads as a broken link rather than a missing permission, and it cost the capture
+  guard's confirming mesh run a whole session (MEASUREMENTS.md). Signing with a Developer ID
+  certificate under a fixed identifier makes the designated requirement the identifier plus the
+  certificate instead of the hash, so one approval covers every later build. Ruling: the daemons
+  are signed as `dev.aislopware.slopty.hostd` and `….ptyd`, the same strings the LaunchAgents are
+  labelled with, by `cargo xtask sign`; `xtask run host` calls it after the build so nobody has to
+  remember, and reports rather than fails when there is no certificate, because an unsigned daemon
+  still runs. Only a Developer ID certificate is accepted: an Apple Development one expires within
+  the year and takes the approval with it. Tests `xtask::sign::tests`.
+
+- ✅ **The daemon asks for Screen Recording, it does not only preflight** (2026-09-14). Start-up
+  checked `CGPreflightScreenCaptureAccess`, logged that capture would fail and carried on, which is
+  a dead end: a process that never *requests* the permission is never prompted for it and never
+  appears under Screen Recording at all, so there is nothing for anyone to switch on and every
+  stream keeps failing with `-3801`. The Accessibility path had asked (`CGRequestPostEventAccess`)
+  since the first cut; this is the same three lines for the other permission
+  (`slopty_capture::request_capture`), logged at `warn` beside it. Costs one prompt, once, per
+  signed identity — which is exactly one now that the identity is stable. `slopty host doctor`
+  still reports both, so a headless install can gate on it.
+
+- 🔬 Whether macOS 26 drops modifier combos from unsigned processes — slop-desk claims it, we have
+  never seen it. Verify with a ⌘ chord through an unsigned daemon against a signed one.
 
 - ✅ **Modifier keys reach the host on their own** (2026-09-13). The injector has posted a bare
   modifier as `FlagsChanged` since the first cut, but the client never sent one: GPUI reports

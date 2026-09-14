@@ -103,6 +103,9 @@ fn host(sh: &Shell, opts: &RunOpts) -> Result<()> {
         "build host daemons",
         &cmd!(sh, "cargo build {flags...} -p slopty-ptyd -p slopty-hostd -p slopty-cli"),
     )?;
+    // The build just ad-hoc signed both daemons, which throws away yesterday's Screen Recording
+    // and Accessibility approvals; re-sign them under their stable identifiers before they start.
+    crate::sign::sign_if_possible(sh, opts.release);
     let mut ptyd = spawn(sh, "slopty-ptyd", &[], opts)?;
     wait_for_socket(&ptyd_socket(opts), &mut ptyd)?;
     let mut hostd = spawn(sh, "slopty-hostd", &["--print-ticket"], opts)?;

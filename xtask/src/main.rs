@@ -15,6 +15,7 @@ mod ios;
 mod release;
 mod run;
 mod setup;
+mod sign;
 mod tools;
 mod upstream;
 
@@ -112,6 +113,8 @@ enum Cmd {
     },
     /// macOS: build `Slopty.app` (app + host daemons + CLI inside) and sign it.
     Bundle(bundle::BundleOpts),
+    /// macOS: codesign the dev daemons so their TCC grants survive the next `cargo build`.
+    Sign(sign::SignOpts),
     /// Render `assets/icon.svg` into PNG files and an `.icns` under a directory, for a look.
     Icon {
         /// Output directory.
@@ -165,6 +168,7 @@ fn main() -> Result<()> {
         Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
         Cmd::Run { cmd } => run::run(&sh, &cmd),
         Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
+        Cmd::Sign(opts) => sign::run(&sh, &opts),
         Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
