@@ -9,9 +9,10 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGGetDisplaysWithRect, CGPreflightScreenCaptureAccess,
-    CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo,
-    CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGWindowAlpha, kCGWindowBounds,
-    kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerPID,
+    CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess,
+    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption,
+    kCGWindowAlpha, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName,
+    kCGWindowNumber, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
@@ -301,6 +302,15 @@ pub fn window_owner_pid(id: WindowId) -> Option<i32> {
 #[must_use]
 pub fn can_capture() -> bool {
     CGPreflightScreenCaptureAccess()
+}
+
+/// Ask macOS for Screen Recording access; shows the system prompt once and returns the state.
+///
+/// Preflighting alone is not enough to get the permission: until a process *requests* it, macOS
+/// neither prompts nor lists the binary under Screen Recording, so ScreenCaptureKit keeps failing
+/// with `-3801` and there is nothing for anyone to switch on (`docs/decisions/input.md`).
+pub fn request_capture() -> bool {
+    CGRequestScreenCaptureAccess()
 }
 
 #[cfg(test)]

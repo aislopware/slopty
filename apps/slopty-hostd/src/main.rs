@@ -230,6 +230,16 @@ async fn main() -> Result<()> {
         );
         let _granted = slopty_input::request_post();
     }
+    // Preflighting is not enough: until a process asks, macOS neither prompts nor lists the
+    // binary under Screen Recording, so every stream fails with -3801 and there is nothing to
+    // switch on. Asking costs one prompt, once, per signed identity.
+    if !slopty_capture::can_capture() {
+        tracing::warn!(
+            "no Screen Recording access: windows and displays cannot be streamed; \
+             asking macOS now"
+        );
+        let _granted = slopty_capture::request_capture();
+    }
     if args.print_ticket {
         #[expect(clippy::print_stdout, reason = "the ticket is the program's output")]
         {
