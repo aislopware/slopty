@@ -150,6 +150,88 @@ mod tests {
         assert!(decoder.ready());
     }
 
+    /// What a forced LTR refresh actually costs once its reference is acknowledged.
+    ///
+    /// The host's congestion guard asks for a refresh on every frame it drops, so on a collapsed
+    /// link that is most of them (`docs/decisions/transport.md`). Whether that is cheap or ruinous
+    /// turns on one thing: if VideoToolbox answers with a delta off an acknowledged long-term
+    /// reference it is a small frame, and if it falls back to an IDR the guard is demanding a full
+    /// keyframe from a link that cannot carry one.
+    #[test]
+    fn a_forced_ltr_refresh_is_a_delta_not_an_idr() {
+        let (ptx, prx) = mpsc::channel();
+        let encoder = Encoder::new(
+            EncoderConfig {
+                width: W as u32,
+                height: H as u32,
+                codec: VideoCodec::Hevc,
+                fps: 60,
+                bitrate_bps: 4_000_000,
+                rate_control: slopty_codec::RateControl::LowLatency,
+            },
+            move |packet| {
+                let _sent = ptx.send(packet);
+            },
+        )
+        .expect("hardware HEVC encoder");
+        if !encoder.ltr_enabled() {
+            eprintln!("no LTR on this encoder; nothing to measure");
+            return;
+        }
+
+        // A run of ordinary frames, so the encoder has long-term references to offer.
+        let lead = 15;
+        for i in 0..lead {
+            let opts = FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+            encoder.encode(&frame(i), (i as u64) * 16_667, &opts).expect("encode");
+        }
+        let mut packets = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while packets.len() < lead {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match prx.recv_timeout(left) {
+                Ok(p) => packets.push(p),
+                Err(_) => break,
+            }
+        }
+        assert!(packets.len() >= lead - 1, "got {} packets", packets.len());
+        let idr = packets[0].data.len();
+        let tokens: Vec<u64> = packets.iter().filter_map(|p| p.ltr_token).collect();
+        assert!(!tokens.is_empty(), "the encoder offered no LTR tokens to acknowledge");
+
+        // Acknowledge every token the way the client does, then ask for the refresh.
+        let opts = FrameOptions {
+            force_keyframe: false,
+            force_ltr_refresh: true,
+            acked_ltr: tokens.clone(),
+        };
+        encoder.encode(&frame(lead), (lead as u64) * 16_667, &opts).expect("encode");
+        encoder.flush().expect("flush");
+        let refresh = prx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the refresh frame came back from the encoder");
+        eprintln!(
+            "{} LTR tokens acknowledged; IDR {idr} B, refresh {} B, keyframe {}, ltr_refresh {}",
+            tokens.len(),
+            refresh.data.len(),
+            refresh.keyframe,
+            refresh.ltr_refresh
+        );
+        assert!(
+            !refresh.keyframe,
+            "a refresh off {} acknowledged LTR tokens still came back as an IDR of {} B \
+             (the plain IDR was {idr} B): the host's guard is asking a collapsed link for a full \
+             keyframe on every dropped frame",
+            tokens.len(),
+            refresh.data.len()
+        );
+        assert!(
+            refresh.data.len() < idr,
+            "a refresh that is not an IDR should still be cheaper than one: {} B vs {idr} B",
+            refresh.data.len()
+        );
+    }
+
     #[test]
     fn decoder_rejects_p_frames_before_parameter_sets() {
         let mut decoder = Decoder::new(VideoCodec::Hevc, |_f| {});

@@ -416,6 +416,14 @@ pub struct ScreenStats {
     /// rather than through the window filter). Frames the crop delivered after it stopped holding
     /// the target are not among them — those are [`Self::withheld`].
     pub cropped: u64,
+    /// Whether the client has ever acknowledged a long-term reference on this stream.
+    ///
+    /// What it costs to ask for a refresh. With a reference acknowledged the encoder answers
+    /// `force_ltr_refresh` with a delta off it — 733 B against a 3 998 B IDR in
+    /// `a_forced_ltr_refresh_is_a_delta_not_an_idr` — and without one it falls back to a full
+    /// keyframe. The congestion guard asks for a refresh on every frame it drops, so on a link
+    /// where this stays false every drop is a demand for a keyframe.
+    pub ltr_acked: bool,
     /// Whether the stream is on the display-crop path *right now*. The counter above says how
     /// many frames came that way; this says where the next one will come from, which is what a
     /// test asking "did the crop go away when the window did" has to look at.
@@ -772,6 +780,8 @@ impl Counters {
             dropped: self.dropped.load(Ordering::Relaxed),
             withheld: self.withheld.load(Ordering::Relaxed),
             keyframes_deferred: self.keyframes_deferred.load(Ordering::Relaxed),
+            // Placeholder: `Shared::stats` is the only reader and fills it from the stream.
+            ltr_acked: false,
             suspected: self.suspected.load(Ordering::Relaxed),
             suspicions: self.suspicions.load(Ordering::Relaxed),
             siblings: self.siblings.load(Ordering::Relaxed),
@@ -894,7 +904,11 @@ impl Shared {
     /// being served right now. Every reader goes through here, so no caller can publish the
     /// snapshot's placeholder and report the window filter for a stream on the crop.
     fn stats(&self) -> ScreenStats {
-        ScreenStats { on_crop: self.cropped.load(Ordering::Relaxed), ..self.counters.snapshot() }
+        ScreenStats {
+            on_crop: self.cropped.load(Ordering::Relaxed),
+            ltr_acked: self.ltr_acked.load(Ordering::Relaxed),
+            ..self.counters.snapshot()
+        }
     }
 
     /// Point the live encoder at `bps` (a rebuild picks the controller's target up again).
@@ -1157,10 +1171,11 @@ impl Shared {
     fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
         let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
         self.pending.lock().acked.extend(acked);
-        if report.acked_ltr_len > 0 {
-            // From here a refresh is a picture, so a keyframe can be deferred
-            // (`keyframe_admitted`).
-            self.ltr_acked.store(true, Ordering::Relaxed);
+        if report.acked_ltr_len > 0 && !self.ltr_acked.swap(true, Ordering::Relaxed) {
+            // From here a refresh is a delta off the reference rather than an IDR, so it is cheap
+            // to ask for and a keyframe can be deferred for one (`keyframe_admitted`). Logged
+            // once: the stream's whole refresh policy turns on whether this ever happens.
+            tracing::debug!(stream = %self.id, tokens = report.acked_ltr_len, "first LTR ack");
         }
         let sent_total = self.packetizer.lock().datagrams_sent();
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
