@@ -309,7 +309,7 @@ mod tests {
         );
         assert!(da.terminal(&session).unwrap().driving, "the opener drives: {da:#?}");
         assert!(!db.terminal(&session).unwrap().driving, "the other client does not: {db:#?}");
-        assert!(button_in(&db, "take over", ib).is_some(), "B offers take over: {:#?}", db.a11y);
+        assert!(button_in(&db, "Take over", ib).is_some(), "B offers take over: {:#?}", db.a11y);
 
         // A starts a comment so the shell runs nothing.
         a.type_text("# ").await.unwrap();
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(from_b, FROM_B, "B's keys in order, none lost: {line:?}");
 
         // B takes over: B drives, A wears the pill; the PTY keeps one size for both.
-        let (tx, ty) = button_in(&db, "take over", ib).unwrap();
+        let (tx, ty) = button_in(&db, "Take over", ib).unwrap();
         b.click(tx, ty).await.unwrap();
         let db = b
             .wait_for("B to drive", STEP, |d| d.terminal(&session).is_some_and(|t| t.driving))
@@ -349,7 +349,7 @@ mod tests {
             .wait_for("A to stop driving", STEP, |d| {
                 d.terminal(&session).is_some_and(|t| !t.driving)
                     && d.item_for_session(&session)
-                        .is_some_and(|i| button_in(d, "take over", i.bounds).is_some())
+                        .is_some_and(|i| button_in(d, "Take over", i.bounds).is_some())
             })
             .await
             .unwrap();

@@ -20,6 +20,13 @@ use slopty_theme::{Theme, alpha};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 
+/// What the field says before anything is typed.
+pub(crate) const FILTER_PLACEHOLDER: &str = "Type to filter";
+
+/// The picker's empty states: nothing to offer at all, and nothing left after the query.
+pub(crate) const NOTHING_TO_JUMP_TO: &str = "Nothing on the canvas or shareable on the host";
+pub(crate) const NOTHING_MATCHES: &str = "Nothing matches";
+
 /// What the user chose.
 #[derive(Clone, Debug)]
 pub enum PickerEvent {
@@ -180,7 +187,7 @@ impl WindowPicker {
                 on_pick: PickerEvent::Pick {
                     target: CaptureTarget::Display(d.id),
                     size: (d.w, d.h),
-                    title: format!("display {}", d.id),
+                    title: format!("Display {}", d.id),
                 },
             });
         }
@@ -240,7 +247,7 @@ impl WindowPicker {
         if self.input.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type to filter"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(FILTER_PLACEHOLDER));
         self.events = Some(cx.subscribe(&input, |this, input, event, cx| match event {
             InputEvent::Change => {
                 this.query = input.read(cx).value().to_string();
@@ -354,11 +361,7 @@ impl Render for WindowPicker {
         }
         let empty = rows.is_empty();
         let title = "Jump to a session, or add a window from the host";
-        let nothing = if self.query.is_empty() {
-            "nothing on the canvas or shareable on the host"
-        } else {
-            "nothing matches"
-        };
+        let nothing = if self.query.is_empty() { NOTHING_TO_JUMP_TO } else { NOTHING_MATCHES };
 
         crate::kit::backdrop(&theme)
             .id("picker-backdrop")
@@ -563,7 +566,7 @@ mod tests {
             matches!(
                 &events[1],
                 PickerEvent::Pick { target: CaptureTarget::Display(2), size, title }
-                    if *size == (1728.0, 1117.0) && title == "display 2"
+                    if *size == (1728.0, 1117.0) && title == "Display 2"
             ),
             "{events:?}"
         );

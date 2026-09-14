@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
+use crate::kit::FIND_PLACEHOLDER;
 use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
 use crate::terminal::{latency, url};
 
@@ -472,7 +473,7 @@ impl TerminalView {
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.
     pub fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("find"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
             let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
                 InputEvent::Change => this.search_changed(cx),
                 InputEvent::PressEnter { shift, .. } => {

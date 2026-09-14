@@ -290,8 +290,8 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
 #[must_use]
 pub const fn waiting_text(source: SourceState) -> &'static str {
     match source {
-        SourceState::Live => "waiting for the first frame…",
-        SourceState::Idle => "waiting for the window to draw…",
+        SourceState::Live => "Waiting for the first frame…",
+        SourceState::Idle => "Waiting for the window to draw…",
     }
 }
 
@@ -542,7 +542,7 @@ impl ScreenView {
 
     /// The host said whether its capture target is drawing. While it is not, the receiver stops
     /// asking for refreshes (a hidden window has nothing to refresh from) and the placeholder
-    /// says so instead of "waiting for the first frame".
+    /// says so instead of "Waiting for the first frame".
     pub fn set_source_state(&mut self, state: SourceState, cx: &mut Context<Self>) {
         if self.source != state {
             self.source = state;
@@ -1312,8 +1312,8 @@ mod tests {
     /// it, so the wait must not read like a stall.
     #[test]
     fn the_placeholder_says_which_end_is_waiting() {
-        assert_eq!(waiting_text(SourceState::Live), "waiting for the first frame…");
-        assert_eq!(waiting_text(SourceState::Idle), "waiting for the window to draw…");
+        assert_eq!(waiting_text(SourceState::Live), "Waiting for the first frame…");
+        assert_eq!(waiting_text(SourceState::Idle), "Waiting for the window to draw…");
     }
 
     /// The overlay names every number a human needs to judge a stream: age of the picture,

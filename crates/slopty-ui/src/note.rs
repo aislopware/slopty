@@ -24,6 +24,9 @@ use slopty_theme::Theme;
 /// Typing pause before the text is sent to the host.
 const COMMIT_AFTER: Duration = Duration::from_millis(400);
 
+/// What an empty note says.
+pub(crate) const WRITE_PLACEHOLDER: &str = "Write…";
+
 /// What a note tells the canvas.
 #[derive(Clone, Debug)]
 pub enum NoteViewEvent {
@@ -73,7 +76,9 @@ impl NoteView {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("write…").default_value(text.to_owned())
+            TextareaState::new(window, cx)
+                .placeholder(WRITE_PLACEHOLDER)
+                .default_value(text.to_owned())
         });
         let subscription = cx.subscribe(&state, |this, _state, event, cx| match event {
             InputEvent::Change => this.schedule_commit(cx),

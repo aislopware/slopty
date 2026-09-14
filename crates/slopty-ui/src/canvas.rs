@@ -1390,7 +1390,7 @@ impl CanvasView {
                     self.add_screen_item(
                         CaptureTarget::Display(d.id),
                         (d.w, d.h),
-                        format!("display {}", d.id),
+                        format!("Display {}", d.id),
                     );
                 }
                 if self.picker_wanted {
@@ -1545,15 +1545,15 @@ impl CanvasView {
         }
     }
 
-    /// What a card's title bar says without a name: the shell's title, the window's, "display
+    /// What a card's title bar says without a name: the shell's title, the window's, "Display
     /// N", a note's first line, a file's `name · parent`.
     fn derived_title(&self, item: &CanvasItem, cx: &App) -> String {
         match &item.kind {
             ItemKind::Terminal { session } => self.terminal_title(*session, cx),
             ItemKind::Window { window } => {
-                self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("window {}", window.0))
+                self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("Window {}", window.0))
             }
-            ItemKind::Display { display } => format!("display {display}"),
+            ItemKind::Display { display } => format!("Display {display}"),
             ItemKind::Note { text } => note_title(text),
             ItemKind::File { path } => file_title(path),
         }
@@ -4272,6 +4272,9 @@ fn mute_button(
         .into_any_element()
 }
 
+/// The accessible name of the "take" pill.
+pub(crate) const TAKE_OVER: &str = "Take over";
+
 /// The "take" pill in a terminal's title bar (see [`CanvasView::take_over`]).
 fn take_button(
     id: ItemId,
@@ -4281,7 +4284,7 @@ fn take_button(
 ) -> gpui::AnyElement {
     let pill = pill("take", id, "take", theme.surfaces.accent, theme, chrome)
         .role(Role::Button)
-        .aria_label("take over");
+        .aria_label(TAKE_OVER);
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| this.take_over(id, cx)))
         .into_any_element()
@@ -4337,6 +4340,9 @@ fn pill(
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
+/// The accessible name of the "hooks" pill.
+pub(crate) const INSTALL_HOOKS: &str = "Install hooks";
+
 /// The "hooks" pill on an agent the host had to guess at: `slopty hook install` on the host,
 /// so the pill stops being a guess. Shown once, on the first such session.
 fn hooks_button(
@@ -4347,7 +4353,7 @@ fn hooks_button(
 ) -> gpui::AnyElement {
     let pill = pill("hooks", id, "hooks", theme.surfaces.warn, theme, chrome)
         .role(Role::Button)
-        .aria_label("install hooks");
+        .aria_label(INSTALL_HOOKS);
     tab_stop(pill, theme.surfaces.accent)
         .on_click(cx.listener(move |this, _ev, _w, cx| this.install_hooks(cx)))
         .into_any_element()
@@ -6619,7 +6625,7 @@ mod tests {
                 break;
             }
         }
-        order.retain(|l| l != "take over");
+        order.retain(|l| l != TAKE_OVER);
         assert_eq!(order, ["go"], "Tab order");
 
         // Enter (down, then up) on "go" is the click: the terminal has the keyboard again,
@@ -6665,7 +6671,7 @@ mod tests {
         // and reaches the offer as a button.
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Status", Some("claude"))), "{tree:#?}");
-        assert!(tree.iter().any(|n| n.is("Button", Some("install hooks"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Button", Some(INSTALL_HOOKS))), "{tree:#?}");
 
         // Its title said a turn started: the pill follows, the offer stays.
         view.update_in(cx, |c, _window, cx| {

@@ -13,6 +13,10 @@ use slopty_theme::{Theme, Variant, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
+/// What a find bar says before anything is typed. The terminal and the file card share it: the
+/// same bar, the same word.
+pub const FIND_PLACEHOLDER: &str = "Find";
+
 /// How large an overlay grows on a desktop.
 ///
 /// A phone gets whatever the margins leave. Two sizes, because a list of commands and a file
@@ -130,6 +134,31 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
+
+    /// Chrome text is sentence case, whatever it is doing: a label, a button's accessible name,
+    /// a field's placeholder and an empty state are all written the same way. The stream HUD and
+    /// the agent pill are readouts of a number or a state, not chrome, and stay lowercase.
+    #[test]
+    fn chrome_text_is_sentence_case() {
+        let chrome = [
+            FIND_PLACEHOLDER,
+            crate::canvas::INSTALL_HOOKS,
+            crate::canvas::TAKE_OVER,
+            crate::note::WRITE_PLACEHOLDER,
+            crate::palette::NO_COMMAND_MATCHES,
+            crate::picker::FILTER_PLACEHOLDER,
+            crate::picker::NOTHING_MATCHES,
+            crate::picker::NOTHING_TO_JUMP_TO,
+            crate::screen::waiting_text(slopty_proto::screen::SourceState::Idle),
+            crate::screen::waiting_text(slopty_proto::screen::SourceState::Live),
+        ];
+        for text in chrome {
+            let first = text.chars().next().unwrap_or(' ');
+            assert!(first.is_uppercase(), "chrome text starts lowercase: {text:?}");
+            let rest: String = text.chars().skip(1).collect();
+            assert!(!rest.contains(char::is_uppercase), "chrome text is title case: {text:?}");
+        }
+    }
 
     /// Both variants land in gpui-kit's theme: mode and the token colours.
     #[gpui::test]

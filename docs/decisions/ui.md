@@ -809,6 +809,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   glow, no second elevation; no emoji and no decorative glyph in chrome text; motion only where it
   carries meaning (the camera flights, the take-back offer), never as decoration. Microcopy is a
   noun phrase or a verb in the imperative, never a sentence about what the program just achieved.
+  Text that names a thing is sentence case; text that reports a value is lowercase. A heading, a
+  button's accessible name, a field's placeholder, an empty state and a card's derived title all
+  name something, so they read `Find`, `Take over`, `Type to filter`, `Nothing matches`,
+  `Waiting for the first frame…`, `Display 2`. A readout says what a number or a state currently
+  is — the stream HUD (`rtt –`, `stalled`), the agent pill (`working`, `allow? bash`), the file
+  card's summary (`212 lines`, `binary, 1.2 MB`, `reading…`), a finished command (`done 1.2 s`),
+  a toast (`pointed Ada at Notes`) — and a capital there reads as the start of a sentence rather
+  than the start of a value. One deliberate crossing: an item pill's visible word is a single
+  lowercase token (`reload`, `edit`, `find`, `take`, `hooks`) so the chrome band reads as a row
+  of switches rather than a sentence cut into pieces, while its accessible name is the
+  sentence-case phrase a screen reader announces (`Read the file again`, `Take over`).
+  `kit::chrome_text_is_sentence_case` holds the naming half.
 
 - ❌ **Ranking the command palette by match quality** (2026-09-14, written and then measured
   against the real command list rather than a toy one). `palette::filter` keeps every item whose

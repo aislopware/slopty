@@ -414,7 +414,7 @@ mod tests {
             .driver
             .wait_for("the hooks pill on the guessed agent", STEP, |d| {
                 d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("process"))
-                    && d.a11y_node("Button", Some("install hooks")).is_some()
+                    && d.a11y_node("Button", Some("Install hooks")).is_some()
             })
             .await
             .unwrap();
@@ -430,7 +430,7 @@ mod tests {
         stack
             .driver
             .wait_for("the offer to retire", STEP, |d| {
-                d.hooks_offered && d.a11y_node("Button", Some("install hooks")).is_none()
+                d.hooks_offered && d.a11y_node("Button", Some("Install hooks")).is_none()
             })
             .await
             .unwrap();
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(dump.screens.len(), 1, "{dump:#?}");
         assert_eq!(dump.screens[0].frames, 0, "an off-screen window produced pictures");
         assert!(
-            dump.a11y_node("Status", Some("waiting for the window to draw…")).is_some(),
+            dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_some(),
             "{:#?}",
             dump.a11y
         );
@@ -667,7 +667,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            dump.a11y_node("Status", Some("waiting for the window to draw…")).is_none(),
+            dump.a11y_node("Status", Some("Waiting for the window to draw…")).is_none(),
             "{:#?}",
             dump.a11y
         );

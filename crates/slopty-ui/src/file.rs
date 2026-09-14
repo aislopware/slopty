@@ -25,6 +25,7 @@ use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::{self, Span, Syntax};
+use crate::kit::FIND_PLACEHOLDER;
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 
 /// How the reading line moves on a key.
@@ -229,7 +230,7 @@ impl FileView {
     /// ⌘F: open the find bar, or put the caret back in it with the text selected.
     pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("find"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
             let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
                 InputEvent::Change => this.search_changed(cx),
                 InputEvent::PressEnter { shift, .. } => {

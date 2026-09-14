@@ -17,6 +17,9 @@ use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
+/// What the list says when the query leaves nothing.
+pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
+
 /// What a line does when it is chosen.
 pub enum PaletteRun {
     /// Dispatch this from the element that had the keyboard.
@@ -650,7 +653,7 @@ impl Render for CommandPalette {
                                     div()
                                         .p(px(theme.spacing.md))
                                         .text_color(hsla(s.text_muted))
-                                        .child("no command matches"),
+                                        .child(NO_COMMAND_MATCHES),
                                 )
                             }),
                     ),
