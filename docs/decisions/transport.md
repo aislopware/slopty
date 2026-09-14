@@ -628,14 +628,59 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
   **The collapsed link has now been measured** (MEASUREMENTS.md, the shaped ladder), and it
   answers the question this was deferred on. The hold after a keyframe is not hundreds of
-  milliseconds: the worst episode held **435 kB for 4.8 seconds**, with `cwnd` at 261 kB. The
-  budget cannot be blamed and cannot be tuned out of it — 261 kB of window was available and the
-  frame still overshot by 175 kB, so no sizing of `max(per_frame × 2, cwnd)` reaches a frame that
-  large. It is the keyframe itself, which is what the rule exists for. The rung it came from is a
-  600 kB/s link at 3 % loss where the rate controller is pinned at its 1 Mbit/s floor and the
-  guard is already dropping 99 of 202 captured frames; 4.8 s of one frame's fragments on a link
-  in that state is worse than the hole the client would have sat on. Implement the rule with the
-  valve; the number to beat is that 4 796 ms.
+  milliseconds: the worst episode held **435 kB for 4.8 seconds**, with `cwnd` at 261 kB. The rung
+  it came from is a 600 kB/s link at 3 % loss where the rate controller is pinned at its 1 Mbit/s
+  floor and the guard is already dropping 99 of 202 captured frames; 4.8 s of one frame's fragments
+  on a link in that state is worse than the hole the client would have sat on. Implement the rule
+  with the valve; the number to beat is that 4 796 ms.
+
+  **Correction (2026-09-15): 435 kB was never one frame, and the sentence that said so is
+  withdrawn.** This entry read the hold's `max_bytes` as a keyframe's size and concluded "the frame
+  overshot the window by 175 kB, so no sizing of `max(per_frame × 2, cwnd)` reaches a frame that
+  large. It is the keyframe itself." The host's own log refutes it: across the whole ladder the
+  encoder produced 34 keyframes and the largest was **133 960 B**, the range 87–134 kB. `max_bytes`
+  is peak bytes *held* in QUIC's send buffer, which is the standing queue plus the admitted frame
+  plus its parity — at 3 % loss the redundancy controller is not cheap — so 261 kB of window plus a
+  134 kB keyframe and its parity lands within a few tens of kB of the 435 kB measured. The budget
+  was doing exactly what it was sized to do.
+
+  What survives is the reason for the rule, on better numbers than the wrong ones. A 134 kB
+  keyframe at the 1 Mbit/s floor is **1.07 seconds of link** by itself, and `frame_fits` still
+  cannot see it: that gate runs before the encode and bounds the queue ahead of a frame, never the
+  frame. The rule is right; the arithmetic that motivated it was not. (Second time this session a
+  conclusion was drawn from a number that measured something adjacent to what it was read as; the
+  first is in `docs/decisions/testing.md`.)
+
+- ✅ **A keyframe the link cannot drain is deferred for an LTR refresh** (2026-09-15,
+  `keyframe_fits`). What makes the deferral affordable is that there is something to send instead.
+  Refusing a keyframe and sending nothing does not help: the frame does not get smaller while the
+  host waits, and a client with a hole and no frames is exactly the failure the valve is there to
+  prevent. An LTR refresh is a picture decodable from a reference the client has already
+  acknowledged, at a fraction of a keyframe's bytes, and the encoder already takes it as
+  `force_ltr_refresh` — the drop path has been asking for one since the frame budget landed. So the
+  rule is a substitution rather than a refusal: while the estimate says a keyframe will not drain
+  inside 400 ms at the rate in force, the request stays pending and each due frame goes out as a
+  refresh.
+
+  Three things keep it honest. A stream that has never had an LTR acknowledged is never deferred —
+  a refresh would decode into nothing, and that client is the one the first keyframe exists for.
+  The estimate rises to an observed keyframe at once and decays by an eighth, so one cheap keyframe
+  (a blank screen, a window scrolled off) cannot license the next expensive one. And the valve is a
+  wall-clock second from the start of a run, not a refusal count: a count is read at capture rate,
+  so the same second would be 60 refusals at 60 fps and 8 at 8 fps, which is a valve that opens
+  sooner exactly where the link is worst. One second against the measured 4 796 ms, with a picture
+  going out throughout.
+
+  400 ms is the drain budget because it separates the rungs cleanly on the sizes the encoder
+  actually produced (87–134 kB, from the host log of the ladder run). 30 Mbit/s carries 1.5 MB in
+  400 ms and the `lte` rung's 9 Mbit/s carries 450 kB, so neither ever defers; the 1 Mbit/s floor
+  carries 50 kB, so the collapsed rung refuses a 134 kB keyframe — 1.07 s of that link in one
+  frame — by a factor of nearly three. The rule fires on exactly the one rung that earned it.
+  `keyframes_deferred` counts episodes, not frames, and is in `ScreenStats` for the ladder to read.
+
+  Not yet re-measured: the shaped ladder has not been run against the rule, so the number that
+  replaces 4 796 ms is not in MEASUREMENTS.md. The rule is licensed by the measurement above, not
+  by one of its own.
 
 - ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
   rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe

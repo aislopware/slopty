@@ -226,6 +226,50 @@ pub const fn frame_fits(free: usize, held: usize, cwnd: u64, target_bps: u64, fp
     (held as u64) <= limit
 }
 
+/// How long the link may take to drain a keyframe before one is deferred instead of encoded.
+///
+/// The encoder sizes a keyframe from the picture and the average rate, never from what the path
+/// can carry right now, so a collapsed link is handed one that does not fit. The shaped ladder's
+/// keyframes ran 87–134 kB (MEASUREMENTS.md, 2026-09-15), and 134 kB at the 1 Mbit/s floor is
+/// 1.07 s of link in a single frame. [`frame_fits`] cannot reach it: that gate runs before the
+/// encode, so it bounds what is queued *ahead* of a frame and never the frame itself.
+const KEYFRAME_DRAIN_MS: u64 = 400;
+
+/// How long a keyframe may be deferred before it goes out whatever it costs.
+///
+/// The safety valve. Without one a link that never recovers never gets a keyframe and the client
+/// sits on a hole for good, which is worse than the stall the deferral prevents. A second bounds
+/// the wait against the 4 796 ms hold that motivated the rule, and a picture goes out meanwhile:
+/// deferral only happens when an LTR refresh is available to send instead.
+const KEYFRAME_VALVE_US: u64 = 1_000_000;
+
+/// Whether a keyframe of `estimate` bytes should be encoded now.
+///
+/// `held` bytes are in QUIC's send buffer already and the link is running at `target_bps`. True
+/// while the two together drain inside 400 ms, and true whenever there is no estimate yet: the
+/// first keyframe of a stream is the one the client has no picture without.
+#[must_use]
+pub const fn keyframe_fits(estimate: u64, held: usize, target_bps: u64) -> bool {
+    if estimate == 0 {
+        return true;
+    }
+    let drainable = (target_bps / 8).saturating_mul(KEYFRAME_DRAIN_MS) / 1000;
+    estimate.saturating_add(held as u64) <= drainable
+}
+
+/// Fold an encoded keyframe's size into the running estimate: up at once, down by an eighth.
+///
+/// Rising immediately is what makes the rule safe — one cheap keyframe (a blank screen, a
+/// scrolled-off window) must not license the next expensive one — and decaying at all is what
+/// lets a stream whose picture genuinely got simpler stop deferring.
+#[must_use]
+pub const fn keyframe_estimate(previous: u64, observed: u64) -> u64 {
+    if observed >= previous {
+        return observed;
+    }
+    previous.saturating_sub(previous / 8).saturating_add(observed / 8)
+}
+
 /// p50 / p95 / max of a latency over the last `LATENCY_WINDOW` samples, microseconds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Quantiles {
@@ -337,6 +381,11 @@ pub struct ScreenStats {
     pub heartbeats: u64,
     /// Refresh requests the client sent for this stream (what the receiver's cap bounds).
     pub refreshes: u64,
+    /// Times a wanted keyframe was put off because the link could not drain one, counted once
+    /// per episode rather than per frame (see [`keyframe_fits`]). Each one sent an LTR refresh in
+    /// its place and ended either when the link could carry the keyframe or when the one-second
+    /// valve opened.
+    pub keyframes_deferred: u64,
     /// Worst capture-to-packet latency seen, microseconds.
     pub latency_max_us: u64,
     /// Sum of capture-to-packet latencies, microseconds (divide by `encoded`).
@@ -645,6 +694,8 @@ struct Counters {
     heartbeats: AtomicU64,
     /// Refresh requests received from the client.
     refreshes: AtomicU64,
+    /// Deferral episodes, one per run of put-off keyframes.
+    keyframes_deferred: AtomicU64,
     latency_max_us: AtomicU64,
     latency_sum_us: AtomicU64,
     bitrate_bps: AtomicU64,
@@ -678,6 +729,7 @@ impl Counters {
             queue_full: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
             refreshes: AtomicU64::new(0),
+            keyframes_deferred: AtomicU64::new(0),
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
             bitrate_bps: AtomicU64::new(0),
@@ -719,6 +771,7 @@ impl Counters {
             captured: self.captured.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             withheld: self.withheld.load(Ordering::Relaxed),
+            keyframes_deferred: self.keyframes_deferred.load(Ordering::Relaxed),
             suspected: self.suspected.load(Ordering::Relaxed),
             suspicions: self.suspicions.load(Ordering::Relaxed),
             siblings: self.siblings.load(Ordering::Relaxed),
@@ -801,6 +854,16 @@ struct Shared {
     fps_ceiling: std::sync::atomic::AtomicU16,
     /// `capture_ts_us` of the last frame handed to the encoder; the cadence gate's clock.
     last_encoded_us: AtomicU64,
+    /// What a keyframe costs on this stream, as [`keyframe_estimate`] tracks it; `0` until one
+    /// has been encoded.
+    keyframe_bytes: AtomicU64,
+    /// `host_now_us()` when the current run of deferrals began, `0` when none is running: the
+    /// valve's clock.
+    keyframe_deferred_us: AtomicU64,
+    /// The client has acknowledged a long-term reference, so an LTR refresh is a picture it can
+    /// decode and a keyframe is not the only way out of a hole. Nothing clears it: a client that
+    /// goes away takes the stream with it.
+    ltr_acked: std::sync::atomic::AtomicBool,
     /// Whether frames come through the display-crop path right now.
     cropped: std::sync::atomic::AtomicBool,
     /// The target window is not on screen. Nothing ScreenCaptureKit delivers can be a picture of
@@ -940,7 +1003,8 @@ impl Shared {
         let since_encoded =
             frame.capture_ts_us.saturating_sub(self.last_encoded_us.load(Ordering::Relaxed));
         let due = frame_due(since_encoded, self.fps.load(Ordering::Relaxed));
-        if !due && !self.pending.lock().keyframe {
+        let want_keyframe = self.pending.lock().keyframe;
+        if !due && !want_keyframe {
             return;
         }
         let fits = frame_fits(
@@ -956,11 +1020,20 @@ impl Shared {
             self.pending.lock().refresh = true;
             return;
         }
+        // A keyframe the link cannot drain is put off and an LTR refresh encoded in its place: a
+        // picture the client can decode, at a fraction of the bytes. The request stays pending, so
+        // the keyframe follows as soon as the link can carry one or the valve opens. With it
+        // deferred there is nothing urgent in this frame, so the cadence rung applies again.
+        let defer = want_keyframe && !self.keyframe_admitted(host_now_us());
+        if defer && !due {
+            return;
+        }
         let options = {
             let mut pending = self.pending.lock();
+            let force_keyframe = if defer { false } else { std::mem::take(&mut pending.keyframe) };
             FrameOptions {
-                force_keyframe: std::mem::take(&mut pending.keyframe),
-                force_ltr_refresh: std::mem::take(&mut pending.refresh),
+                force_keyframe,
+                force_ltr_refresh: std::mem::take(&mut pending.refresh) || defer,
                 acked_ltr: std::mem::take(&mut pending.acked),
             }
         };
@@ -1036,6 +1109,12 @@ impl Shared {
         self.counters.returned(packet.pts_us, now);
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+        if packet.keyframe {
+            let bytes = u64::try_from(packet.data.len()).unwrap_or(u64::MAX);
+            let estimate = keyframe_estimate(self.keyframe_bytes.load(Ordering::Relaxed), bytes);
+            self.keyframe_bytes.store(estimate, Ordering::Relaxed);
+            self.keyframe_deferred_us.store(0, Ordering::Relaxed);
+        }
         if encoded == 0 || packet.keyframe {
             tracing::debug!(
                 stream = %self.id,
@@ -1078,6 +1157,11 @@ impl Shared {
     fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
         let acked = report.acked_ltr.iter().take(usize::from(report.acked_ltr_len)).copied();
         self.pending.lock().acked.extend(acked);
+        if report.acked_ltr_len > 0 {
+            // From here a refresh is a picture, so a keyframe can be deferred
+            // (`keyframe_admitted`).
+            self.ltr_acked.store(true, Ordering::Relaxed);
+        }
         let sent_total = self.packetizer.lock().datagrams_sent();
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
@@ -1101,6 +1185,45 @@ impl Shared {
             self.apply_cadence(decision.target_bps);
         }
         Some(decision)
+    }
+
+    /// Whether a wanted keyframe goes into the frame being encoded now.
+    ///
+    /// Deferring needs somewhere to fall back to: with no acknowledged long-term reference the
+    /// client can decode nothing but a keyframe, so one always goes out. Past that the estimate
+    /// decides, and [`KEYFRAME_VALVE_US`] after the run began it goes out regardless.
+    fn keyframe_admitted(&self, now: u64) -> bool {
+        if !self.ltr_acked.load(Ordering::Relaxed) {
+            return true;
+        }
+        if keyframe_fits(
+            self.keyframe_bytes.load(Ordering::Relaxed),
+            self.budget.held(),
+            self.counters.bitrate_bps.load(Ordering::Relaxed),
+        ) {
+            return true;
+        }
+        // Counted where the clock starts, so the number is deferral episodes and not the frames
+        // each one spans — at 60 fps a one-second run would otherwise read as sixty.
+        match self.keyframe_deferred_us.compare_exchange(
+            0,
+            now,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_started) => {
+                self.counters.keyframes_deferred.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    stream = %self.id,
+                    estimate = self.keyframe_bytes.load(Ordering::Relaxed),
+                    held = self.budget.held(),
+                    target_bps = self.counters.bitrate_bps.load(Ordering::Relaxed),
+                    "keyframe deferred; sending an LTR refresh instead"
+                );
+                false
+            }
+            Err(started) => now.saturating_sub(started) >= KEYFRAME_VALVE_US,
+        }
     }
 
     /// The client lost a frame it cannot recover: make the next frame stand on its own.
@@ -1415,6 +1538,9 @@ impl ScreenStream {
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             fps_ceiling: std::sync::atomic::AtomicU16::new(capture_config.fps),
             last_encoded_us: AtomicU64::new(0),
+            keyframe_bytes: AtomicU64::new(0),
+            keyframe_deferred_us: AtomicU64::new(0),
+            ltr_acked: std::sync::atomic::AtomicBool::new(false),
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             pointer_over: std::sync::atomic::AtomicBool::new(false),
@@ -2127,6 +2253,9 @@ mod tests {
             fps: std::sync::atomic::AtomicU16::new(60),
             fps_ceiling: std::sync::atomic::AtomicU16::new(60),
             last_encoded_us: AtomicU64::new(0),
+            keyframe_bytes: AtomicU64::new(0),
+            keyframe_deferred_us: AtomicU64::new(0),
+            ltr_acked: std::sync::atomic::AtomicBool::new(false),
             cropped: std::sync::atomic::AtomicBool::new(true),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             pointer_over: std::sync::atomic::AtomicBool::new(false),
@@ -2671,5 +2800,73 @@ mod tests {
         assert!(frame_fits(DATAGRAM_QUEUE, 4_920, 4_920, 1_000_000, 60));
         assert!(!frame_fits(DATAGRAM_QUEUE, 4_921, 4_920, 1_000_000, 60));
         assert!(frame_fits(DATAGRAM_QUEUE, 0, 0, 0, 0), "nothing known, nothing held");
+    }
+
+    #[test]
+    fn a_keyframe_fits_while_the_link_drains_one_inside_the_budget() {
+        // 30 Mbit/s is 3.75 MB/s, so 400 ms carries 1.5 MB: the ladder's biggest keyframe is
+        // nothing to a healthy link and must not be deferred there.
+        assert!(keyframe_fits(133_960, 0, 30_000_000));
+        assert!(keyframe_fits(1_500_000, 0, 30_000_000));
+        assert!(!keyframe_fits(1_500_001, 0, 30_000_000));
+        // Bytes already queued come out of the same budget.
+        assert!(!keyframe_fits(1_500_000, 1, 30_000_000));
+        // The `lte` rung settles around 9 Mbit/s, which carries 450 kB: still no deferral. Only
+        // the collapsed rung earns one.
+        assert!(keyframe_fits(133_960, 0, 9_000_000));
+        // The 1 Mbit/s floor is 125 kB/s, so 400 ms carries 50 kB, and the same 134 kB keyframe —
+        // 1.07 s of that link on its own — is refused.
+        assert!(!keyframe_fits(133_960, 0, 1_000_000));
+        assert!(keyframe_fits(50_000, 0, 1_000_000));
+        assert!(!keyframe_fits(50_001, 0, 1_000_000));
+        // No estimate yet: a stream's first keyframe is never refused, whatever the link.
+        assert!(keyframe_fits(0, 4 * 1024 * 1024, 0));
+    }
+
+    #[test]
+    fn the_keyframe_estimate_rises_at_once_and_falls_by_an_eighth() {
+        assert_eq!(keyframe_estimate(0, 133_960), 133_960, "the first one is the estimate");
+        assert_eq!(keyframe_estimate(10_000, 133_960), 133_960, "a jump is taken whole");
+        // Falling: 133 960 - 16 745 + 1 250 = 118 465. One cheap keyframe moves it 12 %, so a
+        // blank screen between two busy ones cannot license the next expensive one.
+        assert_eq!(keyframe_estimate(133_960, 10_000), 118_465);
+        assert_eq!(keyframe_estimate(8, 8), 8, "a steady stream stays put");
+    }
+
+    #[test]
+    fn a_keyframe_is_deferred_only_when_a_refresh_can_go_out_instead() {
+        let (shared, _rx) = shared_for_frames();
+        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
+        // The client has never acknowledged a reference, so a refresh would decode into nothing
+        // and the keyframe goes out however badly it fits.
+        assert!(shared.keyframe_admitted(1_000_000));
+        assert_eq!(shared.stats().keyframes_deferred, 0);
+
+        let mut acked_ltr = [0; 4];
+        acked_ltr[0] = 7;
+        let report = ReceiverReport { acked_ltr, acked_ltr_len: 1, ..ReceiverReport::default() };
+        shared.report(&report, None);
+        assert!(!shared.keyframe_admitted(1_000_000), "now a refresh is a picture");
+        assert_eq!(shared.stats().keyframes_deferred, 1);
+
+        // The run is one episode however many frames it spans, and the valve opens a second in.
+        assert!(!shared.keyframe_admitted(1_016_000));
+        assert!(!shared.keyframe_admitted(1_999_999));
+        assert_eq!(shared.stats().keyframes_deferred, 1);
+        assert!(shared.keyframe_admitted(2_000_000), "the valve opens rather than hold forever");
+    }
+
+    #[test]
+    fn a_link_that_recovers_ends_the_deferral_without_the_valve() {
+        let (shared, _rx) = shared_for_frames();
+        shared.ltr_acked.store(true, Ordering::Relaxed);
+        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
+        assert!(!shared.keyframe_admitted(1_000_000));
+        // The rate controller climbed back: 12 Mbit/s carries 600 kB in the drain window.
+        shared.counters.bitrate_bps.store(12_000_000, Ordering::Relaxed);
+        assert!(shared.keyframe_admitted(1_100_000), "not the valve, the link");
+        assert_eq!(shared.stats().keyframes_deferred, 1, "still the one episode");
     }
 }

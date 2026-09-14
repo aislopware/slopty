@@ -2950,8 +2950,18 @@ verdicts and stays pinned at the floor, the guard drops 99 of 202 captured frame
 gets 52 frames in 8 s with a p90 arrival gap of 277 ms. The ⏸ keyframe rule asked one question —
 whether the hold after a keyframe is still hundreds of milliseconds once the budget is
 `max(per_frame × 2, cwnd)` — and the answer is worse than the question assumed: **4.8 seconds**,
-holding 435 kB. `cwnd` was 261 kB at the time, so this is not a window the guard could have
-respected; the frame itself is the overshoot, exactly as the Cubic half of the 🔬 entry argued.
+with 435 kB held.
+
+**Read `max_bytes` as what it is.** It is peak bytes held in QUIC's send buffer — the standing
+queue, the admitted frame, and that frame's parity together — not one frame's size. The host's own
+log says so: the encoder produced 34 keyframes across the whole ladder and the largest was
+**133 960 B**, the range 87–134 kB. So 261 kB of window plus a 134 kB keyframe plus parity (and at
+3 % loss the redundancy controller is not cheap) accounts for the 435 kB without any frame being
+anywhere near that big. An earlier reading of this paragraph took the 435 kB for the keyframe and
+concluded no budget could have reached it; that inference is withdrawn in
+`docs/decisions/transport.md`. The rule still stands on the real number — a 134 kB keyframe is
+1.07 s of a 1 Mbit/s link in one frame, and `frame_fits` runs before the encode so it never sees
+it.
 
 **Two harness defects found on the way, and both had the same cause.** The first rungs read zero
 decoded frames, and the decoder warm-up took 28.4 / 28.7 / 31.0 s where 2026-09-05 measured
