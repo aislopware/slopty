@@ -3033,3 +3033,52 @@ grep -c "keyframe deferred" ~/Library/Logs/Slopty/slopty-hostd.log     # the rul
 perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
   | perl -ne 'print "$1 $2\n" if /^(\S+).*bytes=(\d+) keyframe=true/'  # sizes with timestamps
 ```
+
+## 2026-09-15 — why a refresh costs a keyframe: the LTR reference is starved
+
+Third shaped-ladder run, same rig, with `ltr_acked` reported per stream and the first
+acknowledgement logged. It was run to decide between two explanations for the 28 IDRs of the run
+above: the client never acknowledges a long-term reference, or it does and the encoder ignores it.
+Neither is right.
+
+| link      | rate      | loss  | first decoded | hold max | decoded | gap p50 / p90 / max     | nacks |
+| --------- | --------- | ----- | ------------- | -------- | ------- | ----------------------- | ----- |
+| direct    | —         | —     | 134 ms        | 4 ms     | 196     | 47.9 / 61.2 / 78.6 ms   | 1     |
+| clear     | ∞         | 0 %   | 139 ms        | 12 ms    | 193     | 47.6 / 63.7 / 82.0 ms   | 0     |
+| wifi      | 4000 kB/s | 0.2 % | 248 ms        | 55 ms    | 187     | 48.4 / 64.7 / 81.9 ms   | 12    |
+| lte       | 1500 kB/s | 1.0 % | 517 ms        | 175 ms   | 155     | 50.6 / 73.0 / 154.3 ms  | 3     |
+| collapsed | 600 kB/s  | 3.0 % | 663 ms        | 256 ms   | 54      | 128.4 / 278.7 / 343.5 ms | 11    |
+
+**Every stream acknowledged a reference, and every one acknowledged exactly one.** Six streams
+(five rungs plus the discarded start-up sample), six `first LTR ack` lines, `tokens=1` on all of
+them, each within the first second. So the acknowledgement path works end to end — the client's
+`ack_ltr` reaches the host and sets `ltr_acked`.
+
+**And the run still produced 33 keyframes.** Only two places set `pending.keyframe` (a stream
+opening, a quality change rebuilding the encoder), which accounts for at most one or two per
+stream. The rest can only be `force_ltr_refresh` falling back to an IDR — with an acknowledged
+reference already on record.
+
+**So the mechanism is starved, not broken.** VideoToolbox offers tokens sparsely: one per fifteen
+frames in `a_forced_ltr_refresh_is_a_delta_not_an_idr`, and one per eight-second stream here. A
+refresh taken immediately off a fresh reference is 733 B against a 3 998 B IDR; a refresh asked for
+seconds later, with that single reference long overtaken, is answered with a keyframe. The guard
+asks on every dropped frame, so the collapsed rung — 99 of 202 captures dropped — spends its whole
+budget re-requesting keyframes from a link that cannot carry one.
+
+That reframes the rule. It is not "defer a keyframe for a refresh": a refresh *is* a keyframe
+whenever the reference behind it has gone stale, and `ltr_acked` does not distinguish the two
+because it only records that an acknowledgement once happened. What the guard needs is either more
+live references, or a gate on the refresh request itself.
+
+```sh
+# as the runs above, then:
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log | grep "first LTR ack"
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+  | grep -c "bytes=[0-9]* keyframe=true"
+```
+
+Harness note: the first attempt at this run failed at `e2e.rs:826`, a timeout waiting for the
+discarded sample's `Closed` event, and passed unchanged on the next run. Not investigated; if it
+recurs, the log line to read first is noq's `failed closing path err=LastOpenPath`, which appeared
+17 s into the stalled stream.

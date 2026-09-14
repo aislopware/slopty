@@ -708,13 +708,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   run-to-run variance in desktop content — worth stating plainly, because a green number next to a
   new feature is exactly how a rule with no effect gets believed.
 
-  **Where the real rule goes.** At the refresh request, not the keyframe request, and the question
-  to answer first is why an LTR refresh becomes an IDR at all: the client does acknowledge tokens
-  (`ack_ltr` on every decoded frame carrying one), so either the encoder is not attaching them or
-  the acknowledgement is not reaching it. A refresh that is a genuine delta off an acknowledged
-  reference is cheap and the problem dissolves; a refresh that is always an IDR means the guard is
-  requesting a full keyframe 99 times per 202 captures on a link that cannot carry one. Measure
-  which, then gate the refresh with the same drain budget and valve.
+  **Where the real rule goes.** At the refresh request, not the keyframe request. Measured
+  2026-09-15 (MEASUREMENTS.md, "the LTR reference is starved"), and the answer was neither of the
+  two candidates. The acknowledgement path works: all six streams of a ladder run logged a `first
+  LTR ack` within their first second. The encoder honours it: with a fresh acknowledged reference a
+  forced refresh is 733 B against a 3 998 B IDR (`a_forced_ltr_refresh_is_a_delta_not_an_idr`). And
+  the same run still produced 33 keyframes, far more than the two `pending.keyframe` sites can
+  account for.
+
+  What is wrong is the *supply*. VideoToolbox offers acknowledgement tokens sparsely — one per
+  fifteen frames in the codec test, one per eight-second stream live — so a stream holds a single
+  reference, and a refresh asked for seconds after that reference was taken is answered with an
+  IDR. A refresh is therefore cheap or ruinous depending on how stale the reference behind it is,
+  and nothing in the host currently knows which. `ltr_acked` does not: it records only that an
+  acknowledgement once happened, which is why it is the wrong guard to have built the rule on.
+
+  Two ways out, and the first is the root cause. Either keep more references live and acknowledged
+  so a refresh always has a recent one to work from, or accept that a refresh is a keyframe in
+  disguise and put the drain budget and valve on the refresh request. The first needs an answer to
+  whether the token rate can be influenced at all — `EnableLTR` is a plain bool and the encoder
+  chooses its own LTR frames, so that may not be ours to set.
 
 - ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
   rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe
