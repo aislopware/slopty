@@ -59,6 +59,11 @@ struct Args {
     /// then lose the host after a restart). Also `SLOPTY_PORT`.
     #[arg(long, env = "SLOPTY_PORT", default_value_t = slopty_net::endpoint::HOST_PORT)]
     port: u16,
+    /// Listen on this one IP and reach nothing off it, instead of every interface. A shaped
+    /// measurement binds its two ends this way so they stay on the relay between them; see
+    /// `Local::Pinned`. Also `SLOPTY_BIND`.
+    #[arg(long = "bind", env = "SLOPTY_BIND")]
+    bind: Option<std::net::IpAddr>,
 }
 
 /// Shared daemon state.
@@ -154,9 +159,12 @@ async fn main() -> Result<()> {
     let store = TrustStore::open(&data_dir.join("trust.json"))?;
     let id = paths::host_id(&data_dir)?;
     let reach = if args.direct_only { Reach::DirectOnly } else { Reach::Anywhere };
-    let listener = HostListener::bind_on(store, reach, args.port)
+    let local = args.bind.map_or(slopty_net::endpoint::Local::Anywhere(args.port), |ip| {
+        slopty_net::endpoint::Local::Pinned(std::net::SocketAddr::new(ip, args.port))
+    });
+    let listener = HostListener::bind_at(store, reach, local)
         .await
-        .with_context(|| format!("bind UDP port {} (is another hostd running?)", args.port))?;
+        .with_context(|| format!("bind {local:?} (is another hostd running?)"))?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;

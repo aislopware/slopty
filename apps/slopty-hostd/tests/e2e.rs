@@ -8,7 +8,7 @@ mod tests {
 
     use slopty_client::LinkEvent;
     use slopty_core::{ClientId, WindowId};
-    use slopty_net::client::{HostConn, bind_client, connect_with_ticket};
+    use slopty_net::client::{HostConn, bind_client, bind_pinned_client, connect_with_ticket};
     use slopty_net::framed::FramedRecv;
     use slopty_net::pairing::PairTicket;
     use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
@@ -94,6 +94,16 @@ mod tests {
 
     /// Start ptyd and hostd in `dir` and read the pairing ticket hostd prints.
     async fn daemons(dir: &std::path::Path, reach: Reach) -> (Guard, PairTicket) {
+        daemons_at(dir, reach, None).await
+    }
+
+    /// [`daemons`] with hostd bound to one IP, which is what a shaped run needs: see
+    /// [`lan_ip`] and `slopty_net::endpoint::Local::Pinned`.
+    async fn daemons_at(
+        dir: &std::path::Path,
+        reach: Reach,
+        bind: Option<std::net::IpAddr>,
+    ) -> (Guard, PairTicket) {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = Command::new(bin("slopty-ptyd"))
             .arg("--socket")
@@ -104,18 +114,25 @@ mod tests {
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
         wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
-        let (hostd, ticket) = spawn_hostd(dir, reach).await;
+        let (hostd, ticket) = spawn_hostd(dir, reach, bind).await;
         let guard = Guard(vec![ptyd, hostd], None);
         (guard, ticket)
     }
 
     /// Start hostd on `dir`'s ptyd socket and data dir and read its ticket.
-    async fn spawn_hostd(dir: &std::path::Path, reach: Reach) -> (Child, PairTicket) {
+    async fn spawn_hostd(
+        dir: &std::path::Path,
+        reach: Reach,
+        bind: Option<std::net::IpAddr>,
+    ) -> (Child, PairTicket) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("hostd.sock");
         let mut hostd = Command::new(bin("slopty-hostd"));
         if reach.is_direct_only() {
             hostd.arg("--direct-only");
+        }
+        if let Some(ip) = bind {
+            hostd.arg("--bind").arg(ip.to_string());
         }
         let mut hostd = hostd
             .arg("--ptyd-socket")
@@ -165,7 +182,15 @@ mod tests {
 
     /// A fresh endpoint (new key, new client id) dialing `ticket`: a cold QUIC connection.
     async fn dial(ticket: &PairTicket, reach: Reach) -> (slopty_net::Endpoint, HostConn) {
-        let endpoint = bind_client(SecretKey::generate(), reach).await.unwrap();
+        dial_from(bind_client(SecretKey::generate(), reach).await.unwrap(), ticket, reach).await
+    }
+
+    /// [`dial`] on an endpoint the caller bound, for a client that must stay on one address.
+    async fn dial_from(
+        endpoint: slopty_net::Endpoint,
+        ticket: &PairTicket,
+        reach: Reach,
+    ) -> (slopty_net::Endpoint, HostConn) {
         let hello = Hello {
             protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
@@ -180,6 +205,43 @@ mod tests {
             .unwrap()
             .unwrap();
         (endpoint, host)
+    }
+
+    /// What a shaper binds: any interface, any free port. It has to answer the client on
+    /// loopback and reach the host on a real one, and a socket on `127.0.0.1` cannot do both.
+    fn wildcard() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+
+    /// This machine's address on the LAN, which is where a shaped run binds hostd. Asking the
+    /// routing table beats reading interfaces: nothing is sent, the socket only reports which
+    /// source it would use.
+    fn lan_ip() -> std::net::IpAddr {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        probe.connect("192.0.2.1:9").expect("a route off this machine");
+        probe.local_addr().unwrap().ip()
+    }
+
+    /// The address hostd's endpoint is bound to, which under `--bind` is the only one it has.
+    fn hostd_addr(ticket: &PairTicket) -> std::net::SocketAddr {
+        // v4 only: iroh binds v6 on a socket of its own, which is a different port.
+        *ticket.addr.ip_addrs().find(|addr| addr.is_ipv4()).expect("hostd has a direct v4 address")
+    }
+
+    /// A ticket that reaches the host through `relay` rather than straight at it.
+    ///
+    /// The relay is only the measured path while it is the *sole* path. Turning relays off does
+    /// not do that, and neither does skipping mDNS: iroh holepunches regardless, clamping
+    /// `max_concurrent_multipath_paths` to 13 and ignoring anything smaller, so it finds the
+    /// host's real address within a second. What holds the flow here is that the two ends are
+    /// bound where the other's address does not route — hostd on the LAN with `--bind`, the
+    /// client on loopback with [`bind_pinned_client`] — and iroh drops a datagram it has no
+    /// socket for. `a_shaped_link_keeps_the_client_on_the_shaper` is the test of that.
+    fn reroute(ticket: &PairTicket, relay: std::net::SocketAddr) -> PairTicket {
+        PairTicket {
+            addr: slopty_net::EndpointAddr::new(ticket.addr.id).with_ip_addr(relay),
+            token: ticket.token,
+        }
     }
 
     /// Mint a fresh pairing ticket over hostd's control socket (tokens are single-use).
@@ -471,7 +533,7 @@ mod tests {
         drop(events);
         drop(host);
 
-        let (hostd, ticket) = spawn_hostd(dir.path(), Reach::Anywhere).await;
+        let (hostd, ticket) = spawn_hostd(dir.path(), Reach::Anywhere, None).await;
         guard.0.push(hostd);
         let (endpoint, mut host) = dial(&ticket, Reach::Anywhere).await;
         guard.1 = Some(endpoint);
@@ -617,6 +679,10 @@ mod tests {
         /// runs, fed the same `frames` channel and paced by a 60 Hz timer standing in for the
         /// display link.
         pacing: slopty_client::PacingStats,
+        /// The address the selected path was sending to when the sample ended. On a shaped run
+        /// this must still be the shaper's; anything else means iroh migrated and the rest of
+        /// the row describes a link nobody degraded.
+        selected: Option<std::net::SocketAddr>,
     }
 
     /// `min / p50 / p90 / max` of `samples`, in milliseconds.
@@ -641,9 +707,22 @@ mod tests {
     }
 
     /// Stream the first display on a cold connection for `seconds` and measure the start.
-    async fn start_up_sample(ctl_sock: &std::path::Path, seconds: u64) -> StartUp {
+    ///
+    /// `through` sends the connection past a shaper instead of straight at the host.
+    async fn start_up_sample(
+        ctl_sock: &std::path::Path,
+        seconds: u64,
+        through: Option<std::net::SocketAddr>,
+    ) -> StartUp {
         let ticket = mint(ctl_sock).await;
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (endpoint, host) = match through {
+            Some(relay) => {
+                let pinned = bind_pinned_client(SecretKey::generate()).await.unwrap();
+                dial_from(pinned, &reroute(&ticket, relay), Reach::DirectOnly).await
+            }
+            None => dial(&ticket, Reach::DirectOnly).await,
+        };
+        let conn = host.conn.clone();
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -728,6 +807,8 @@ mod tests {
         sample.lost = stats.frames_lost;
         sample.rate = rate.join(" ");
         sample.pacing = pacer.stats();
+        // Read before the connection closes: a closed connection has no selected path.
+        sample.selected = slopty_net::endpoint::selected_addr(&conn);
         assert_eq!(stats.decode_errors, 0, "{stats:?}");
         drop(screen);
         link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
@@ -1009,7 +1090,7 @@ mod tests {
         let ctl_sock = dir.path().join("hostd.sock");
         let mut rows = Vec::new();
         for i in 0..samples {
-            let s = start_up_sample(&ctl_sock, seconds).await;
+            let s = start_up_sample(&ctl_sock, seconds, None).await;
             eprintln!(
                 "| {i} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} | {:.1} / {:.1} / {:.1} | {} ({} ms) | {} / {} / {} | {} |",
                 s.opened_ms,
@@ -1082,6 +1163,238 @@ mod tests {
                 s.pacing.presented > 0 && s.pacing.late == 0,
                 "sample {i} presented nothing, or presented out of order: {:?}",
                 s.pacing
+            );
+        }
+    }
+
+    /// A shell through the shaper, with the client still on the shaper at the end of it.
+    ///
+    /// The ladder below is only worth reading while the shaper is the path, and no iroh setting
+    /// guarantees that: holepunching cannot be turned off, so it moves to the direct path within
+    /// a second of finding it. Only the two binds keep it here. That contract gets a test at the
+    /// cheapest layer that can see it — a link delayed enough that the direct path would win the
+    /// swap, a real session carried over it, and the selected address read after the traffic
+    /// rather than at the handshake, when only one path has ever existed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shaped_link_keeps_the_client_on_the_shaper() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, ticket) = daemons_at(dir.path(), Reach::DirectOnly, Some(lan_ip())).await;
+        // 30 ms each way against loopback's microseconds: if iroh can find the direct path at
+        // all, this is the gradient that makes it take it.
+        let link =
+            slopty_shape::Link { delay: Duration::from_millis(30), ..slopty_shape::Link::CLEAR };
+        let relay = std::sync::Arc::new(
+            slopty_shape::relay::Relay::bind(wildcard(), hostd_addr(&ticket), link, 1)
+                .await
+                .unwrap(),
+        );
+        let addr = relay.addr().unwrap();
+        tokio::spawn({
+            let relay = std::sync::Arc::clone(&relay);
+            async move { relay.run().await }
+        });
+
+        let pinned = bind_pinned_client(SecretKey::generate()).await.unwrap();
+        let (_endpoint, mut host) =
+            dial_from(pinned, &reroute(&ticket, addr), Reach::DirectOnly).await;
+        host.tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size: TermSize { cols: 40, rows: 6, ..TermSize::default() },
+                cwd: Some("~".to_owned()),
+                command: vec!["/bin/sh".to_owned()],
+                env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                title: None,
+                attach: true,
+            }))
+            .await
+            .unwrap();
+        let session = loop {
+            match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
+                HostMsg::SessionOpened(summary) => break summary.id,
+                HostMsg::Canvas(_sync) => {}
+                other => panic!("unexpected control message before SessionOpened: {other:?}"),
+            }
+        };
+        let (_header, mut events) =
+            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
+        host.tx
+            .send(&ClientMsg::Term {
+                session,
+                req: TermRequest::Raw(b"echo marker-$((40+2))\n".to_vec()),
+            })
+            .await
+            .unwrap();
+        wait_for_text(&mut events, "marker-42").await;
+
+        assert_eq!(
+            slopty_net::endpoint::selected_addr(&host.conn),
+            Some(addr),
+            "the connection left the shaper; a shaped measurement would read an unshaped link. \
+             paths: {}",
+            slopty_net::endpoint::describe_paths(&host.conn)
+        );
+        let carried = relay.carried().await;
+        assert!(
+            carried.up.sent > 0 && carried.down.sent > 0,
+            "the shaper carried nothing in one direction: {carried:?}"
+        );
+        assert_eq!((carried.up.lost, carried.down.lost), (0, 0), "a clear link lost nothing");
+    }
+
+    /// One rung of the shaped ladder: the link, what got through, and what the shaper did.
+    #[derive(Debug)]
+    struct Rung {
+        name: &'static str,
+        link: slopty_shape::Link,
+        /// Where the shaper listened: the one address the client was given.
+        relay: std::net::SocketAddr,
+        sample: StartUp,
+        carried: slopty_shape::relay::Carried,
+    }
+
+    /// The links the ladder is measured on, clear first.
+    ///
+    /// `clear` is the control: the same relay process, the same extra hop, no impairment, so a
+    /// difference further down the table is the link rather than the harness. The other three are
+    /// shaped after the paths the congestion rulings argue about — a good Wi-Fi, an LTE hop, and
+    /// the collapsed link where BBR3 starves and Cubic overshoots.
+    const LADDER: &[(&str, slopty_shape::Link)] = &[
+        ("clear", slopty_shape::Link::CLEAR),
+        (
+            "wifi",
+            slopty_shape::Link {
+                delay: Duration::from_millis(15),
+                jitter: Duration::from_millis(5),
+                loss: 0.002,
+                rate: 4_000_000,
+                queue: 1_000_000,
+            },
+        ),
+        (
+            "lte",
+            slopty_shape::Link {
+                delay: Duration::from_millis(60),
+                jitter: Duration::from_millis(20),
+                loss: 0.01,
+                rate: 1_500_000,
+                queue: 375_000,
+            },
+        ),
+        (
+            "collapsed",
+            slopty_shape::Link {
+                delay: Duration::from_millis(80),
+                jitter: Duration::from_millis(30),
+                loss: 0.03,
+                rate: 600_000,
+                queue: 150_000,
+            },
+        ),
+    ];
+
+    /// Stream a display over each rung of [`LADDER`] and print what arrived.
+    ///
+    /// The impairment lives in a relay both ends speak QUIC through, so the congestion controller
+    /// reacts to it exactly as it would to a bottleneck; `SLOPTY_E2E_SECONDS` (default 8) per
+    /// rung. This is the harness the ⏸ keyframe-admission rule, the 🔬 cadence ladder and the ⏸
+    /// audio jitter estimator were waiting on. Gated on `SLOPTY_SCREEN_E2E` for the recording
+    /// permission; the numbers go to `docs/MEASUREMENTS.md`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn screen_over_a_shaped_link() {
+        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
+            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            return;
+        }
+        let seconds: u64 =
+            std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        let dir = tempfile::tempdir().unwrap();
+        let _logs = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+        slopty_client::warm_up_decoder();
+        let (_guard, ticket) = daemons_at(dir.path(), Reach::DirectOnly, Some(lan_ip())).await;
+        // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
+        // observable state for it.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let ctl_sock = dir.path().join("hostd.sock");
+        let host_addr = hostd_addr(&ticket);
+
+        let mut rungs = Vec::new();
+        for &(name, link) in LADDER {
+            // A shaper per rung: each starts with an empty queue and its own draws, so a rung
+            // never inherits the standing queue the one before it left behind.
+            let relay = std::sync::Arc::new(
+                slopty_shape::relay::Relay::bind(wildcard(), host_addr, link, 1).await.unwrap(),
+            );
+            let addr = relay.addr().unwrap();
+            let carrying = tokio::spawn({
+                let relay = std::sync::Arc::clone(&relay);
+                async move { relay.run().await }
+            });
+            let sample = start_up_sample(&ctl_sock, seconds, Some(addr)).await;
+            let carried = relay.carried().await;
+            carrying.abort();
+            eprintln!("{name}: selected {:?}, shaper {carried:?}", sample.selected);
+            rungs.push(Rung { name, link, relay: addr, sample, carried });
+        }
+
+        eprintln!(
+            "| link | rate | loss | first decoded | hold max | decoded | gap p50 / p90 / max | stalls (stalled) | nack / refresh / lost | shaper down: sent / lost / overflowed | host target |"
+        );
+        for r in &rungs {
+            let s = &r.sample;
+            let d = r.carried.down;
+            eprintln!(
+                "| {} | {} kB/s | {:.1} % | {:.0} ms | {:.0} ms | {} | {:.1} / {:.1} / {:.1} ms | {} ({} ms) | {} / {} / {} | {} / {} / {} | {} |",
+                r.name,
+                r.link.rate / 1_000,
+                f64::from(r.link.loss) * 100.0,
+                s.first_decoded_ms,
+                s.hold_max_ms,
+                s.decoded,
+                s.gap_p50_ms,
+                s.gap_p90_ms,
+                s.gap_max_ms,
+                s.stalls,
+                s.stalled_ms,
+                s.nacks,
+                s.refreshes,
+                s.lost,
+                d.sent,
+                d.lost,
+                d.overflowed,
+                s.rate
+            );
+        }
+
+        for r in &rungs {
+            // The whole run is only readable while the shaper is the path. If iroh found hostd's
+            // own address and migrated, every number above describes an unshaped link.
+            assert_eq!(
+                r.sample.selected,
+                Some(r.relay),
+                "{}: the connection left the shaper, so this row is of an unshaped link",
+                r.name
+            );
+            assert!(r.sample.decoded >= 1, "{}: decoded nothing: {r:?}", r.name);
+            assert!(
+                r.carried.up.sent > 0 && r.carried.down.sent > 0,
+                "{}: nothing carried",
+                r.name
+            );
+        }
+        let clear = rungs.first().expect("the clear rung");
+        assert_eq!((clear.carried.up.lost, clear.carried.down.lost), (0, 0), "{clear:?}");
+        assert_eq!(clear.carried.down.overflowed, 0, "a clear link has no queue to overflow");
+        // Every shaped rung must actually have degraded something, or its row is the clear row
+        // with a different name on it.
+        for r in rungs.iter().skip(1) {
+            let d = r.carried.down;
+            assert!(
+                d.lost.saturating_add(d.overflowed) > 0,
+                "{}: the shaper dropped nothing: {r:?}",
+                r.name
             );
         }
     }

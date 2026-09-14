@@ -163,51 +163,86 @@ fn congestion_controller()
 /// random port per launch would strand it until it re-pairs.
 pub const HOST_PORT: u16 = 45550;
 
+/// Where an endpoint binds, and how far it can reach from there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Local {
+    /// Every interface, on `port` (0 for any free port). Advertises and looks up over mDNS with
+    /// the `mdns` feature built in.
+    Anywhere(u16),
+    /// This address only, able to send only to that same IP, and off mDNS entirely.
+    ///
+    /// iroh drops a datagram it has no socket for rather than falling back to another socket
+    /// (`poll_send` blackholes once no transport matches the destination and none is the default
+    /// route), so an endpoint bound this way cannot be dragged onto a path outside the address it
+    /// was given: the probe never leaves and the path fails validation.
+    ///
+    /// A shaped measurement is the reason this exists. Its two ends must speak through a relay
+    /// that impairs the link, and iroh will not be told to stop holepunching: it clamps
+    /// `max_concurrent_multipath_paths` to 13 and `max_remote_nat_traversal_addresses` to 8,
+    /// ignoring anything smaller. Left alone it finds the host's real address within a second and
+    /// the run reads an unshaped link. Binding both ends where the other's real address is
+    /// unreachable is what holds them on the relay.
+    Pinned(std::net::SocketAddr),
+}
+
 /// Bind an endpoint on any free port.
 ///
 /// [`Reach::Anywhere`] uses n0's production relays and DNS/pkarr address lookup so a host is
-/// reachable from anywhere by id; [`Reach::DirectOnly`] turns both off. With the `mdns`
-/// feature either mode also advertises/looks up on the LAN.
+/// reachable from anywhere by id; [`Reach::DirectOnly`] turns both off.
 pub async fn bind(secret: SecretKey, role: Role, reach: Reach) -> Result<Endpoint, NetError> {
-    bind_on(secret, role, reach, 0).await
+    bind_at(secret, role, reach, Local::Anywhere(0)).await
 }
 
-/// [`bind`] on a fixed UDP `port` (0 for any free port). A port already in use is an error:
-/// falling back to a random one would reintroduce the strand-on-restart problem
-/// [`HOST_PORT`] exists to avoid.
-pub async fn bind_on(
+/// [`bind`] somewhere specific. An address already in use is an error: falling back to a random
+/// port would reintroduce the strand-on-restart problem [`HOST_PORT`] exists to avoid.
+pub async fn bind_at(
     secret: SecretKey,
     role: Role,
     reach: Reach,
-    port: u16,
+    local: Local,
 ) -> Result<Endpoint, NetError> {
     let builder = Endpoint::builder(presets::N0)
         .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
         .transport_config(transport_config());
-    let builder = if port == 0 {
-        builder
-    } else {
-        let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
-        let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
-        builder
-            .clear_ip_transports()
-            .bind_addr(v4)
-            .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
-            .map_err(|e| NetError::Bind(e.to_string()))?
+    let builder = match local {
+        Local::Anywhere(0) => builder,
+        Local::Anywhere(port) => {
+            let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+            let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+            builder
+                .clear_ip_transports()
+                .bind_addr(v4)
+                .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
+                .map_err(|e| NetError::Bind(e.to_string()))?
+        }
+        Local::Pinned(addr) => {
+            // The prefix is the address itself, so the only destination that routes is the one
+            // this endpoint was bound to; everything else falls through to no default route.
+            let alone = BindOpts::default()
+                .set_prefix_len(if addr.is_ipv4() { 32 } else { 128 })
+                .set_is_default_route(false);
+            builder
+                .clear_ip_transports()
+                .bind_addr_with_opts(addr, alone)
+                .map_err(|e| NetError::Bind(e.to_string()))?
+        }
     };
     let builder = match reach {
         Reach::Anywhere => builder,
         Reach::DirectOnly => builder.relay_mode(RelayMode::Disabled).clear_address_lookup(),
     };
     #[cfg(feature = "mdns")]
-    let builder = builder.address_lookup(
-        iroh_mdns_address_lookup::MdnsAddressLookup::builder()
-            .advertise(role == Role::Host)
-            .service_name("slopty"),
-    );
+    let builder = match local {
+        Local::Anywhere(_) => builder.address_lookup(
+            iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+                .advertise(role == Role::Host)
+                .service_name("slopty"),
+        ),
+        Local::Pinned(_) => builder,
+    };
     #[cfg(not(feature = "mdns"))]
-    tracing::debug!(?role, "mdns feature off; LAN discovery disabled");
+    tracing::debug!(?role, ?local, "mdns feature off; LAN discovery disabled");
     builder.bind().await.map_err(|e| NetError::Bind(e.to_string()))
 }
 
@@ -254,6 +289,22 @@ pub fn received_datagrams(conn: &iroh::endpoint::Connection) -> u64 {
 #[must_use]
 pub fn relayed(conn: &iroh::endpoint::Connection) -> Option<bool> {
     conn.paths().iter().find(iroh::endpoint::Path::is_selected).map(|p| p.is_relay())
+}
+
+/// The address the selected path sends to (`None` while none is selected or it is relayed).
+///
+/// A shaped measurement hands the client a ticket pointing at a shaper rather than at the host,
+/// and the whole run is only worth reading while that address is the one in use: if iroh finds
+/// the host's own address and migrates, the numbers are silently unshaped. This is how a run
+/// notices.
+#[must_use]
+pub fn selected_addr(conn: &iroh::endpoint::Connection) -> Option<std::net::SocketAddr> {
+    conn.paths().iter().find(iroh::endpoint::Path::is_selected).and_then(|p| {
+        match p.remote_addr() {
+            TransportAddr::Ip(addr) => Some(*addr),
+            _relayed_or_custom => None,
+        }
+    })
 }
 
 /// Human-readable description of every path (for diagnostics): `*` marks the selected one.

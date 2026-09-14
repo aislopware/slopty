@@ -27,6 +27,7 @@ slopty-host = { path = "crates/slopty-host" }
 slopty-net = { path = "crates/slopty-net" }
 slopty-client = { path = "crates/slopty-client" }
 slopty-predict = { path = "crates/slopty-predict" }
+slopty-shape = { path = "crates/slopty-shape" }
 slopty-codec = { path = "crates/slopty-codec" }
 slopty-capture = { path = "crates/slopty-capture" }
 slopty-input = { path = "crates/slopty-input" }

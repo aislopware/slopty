@@ -40,6 +40,7 @@ slopty-codec.workspace = true
 serde_json.workspace = true
 slopty-host.workspace = true
 slopty-media.workspace = true
+slopty-shape.workspace = true
 libc.workspace = true
 slopty-client.workspace = true
 tempfile.workspace = true

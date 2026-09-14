@@ -1,0 +1,22 @@
+[package]
+name = "slopty-shape"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A UDP link shaper: the degraded path Slopty's congestion rulings are measured on"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "slopty-shape"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

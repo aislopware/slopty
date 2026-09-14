@@ -6,6 +6,7 @@ mod tests {
 
     use slopty_core::{ClientId, HostId, SessionId};
     use slopty_net::client::{HandshakeError, bind_client, connect, connect_with_ticket};
+    use slopty_net::endpoint::Local;
     use slopty_net::host::{HostListener, open_session_stream};
     use slopty_net::pairing::TrustStore;
     use slopty_net::{HostMsg, Reach, SecretKey};
@@ -90,7 +91,8 @@ mod tests {
         let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let dir = tempfile::tempdir().unwrap();
         let store = TrustStore::open(&dir.path().join("trust.json")).unwrap();
-        let listener = HostListener::bind_on(store, Reach::DirectOnly, port).await.unwrap();
+        let listener =
+            HostListener::bind_at(store, Reach::DirectOnly, Local::Anywhere(port)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), listener.online()).await.unwrap();
         let ticket = listener.pair_ticket().await;
         let ports: Vec<u16> = ticket

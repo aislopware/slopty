@@ -47,6 +47,22 @@ pub async fn bind_client(secret: SecretKey, reach: Reach) -> Result<Endpoint, Ne
     bind(secret, Role::Client, reach).await
 }
 
+/// Bind a client on loopback that can reach nothing else.
+///
+/// No relays, no DNS, no LAN lookup, and no route off `127.0.0.1`. A shaped measurement dials a
+/// relay it controls there, and the run means nothing once the connection has found the host by
+/// another route; see [`Local::Pinned`](crate::endpoint::Local::Pinned).
+pub async fn bind_pinned_client(secret: SecretKey) -> Result<Endpoint, NetError> {
+    let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+    crate::endpoint::bind_at(
+        secret,
+        Role::Client,
+        Reach::DirectOnly,
+        crate::endpoint::Local::Pinned(loopback),
+    )
+    .await
+}
+
 /// Connect using a pairing ticket: the token goes into `hello.pair_token`. `reach` must be
 /// what `endpoint` was bound with.
 pub async fn connect_with_ticket(

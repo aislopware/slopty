@@ -626,3 +626,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   hold after a `keyframe encoded` is still hundreds of milliseconds. Out of scope in either case:
   at 2 Mbit/s 60 fps HEVC is not viable whatever the guard does, and the answer there is frame
   rate adaptation.
+
+- ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
+  rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe
+  rule above, and the audio jitter estimator. The kernel's shapers (`dnctl`, `pfctl`) want a
+  password this process does not have, and a measurement that cannot run unattended does not run.
+  So the impairment goes in a process of our own: the client's pair ticket carries the host's node
+  id and the relay's address, every datagram passes through `Shaper::admit`, and QUIC sees a queue,
+  a delay and a loss rate it cannot tell from a real bottleneck.
+
+  Two alternatives were rejected. `SLOPTY_E2E_DROP_PERMILLE` drops frames *above* QUIC, so the
+  congestion controller never learns anything was lost and the arm measures the wrong layer
+  entirely. `iroh`'s `add_custom_transport` sits at the right layer but takes a whole
+  `CustomEndpoint`/`CustomSender`/`CustomAddr` implementation — a new address type in the product
+  so that a test can be slow, when a 400-line process outside it does the same job.
+
+  Two things the model gets right on purpose. Packets leave in the order they arrived, one sender
+  task per direction: a task per packet lets a small jitter draw overtake a large one, and quinn
+  declares loss after three out-of-order packets, so a reordering shaper would report congestion on
+  a clear link. And the queue drains forward only (`drains_at.max(now)`) — a link left idle does not
+  owe the next packet the transmission time it did not use.
+
+  Pinning the path is what makes the numbers mean anything: if hostd's real address ever reaches
+  the client, iroh migrates off the relay and the run is silently unshaped. Two tries at this were
+  wrong, and the test is the only reason that is known. Turning relays off does nothing — the first
+  run moved to `192.168.100.240` in about a second, with `PathId(2)` and `PathId(3)` probing a
+  Tailscale address on the way. Skipping mDNS does nothing either: the addresses travel over the
+  connection itself. Holepunching is the mechanism, and iroh 1.2 refuses to be told to stop.
+  `quic.rs:472-480` clamps `max_concurrent_multipath_paths` to a minimum of 13 and `:537-540`
+  clamps `max_remote_nat_traversal_addresses` to 8, each ignoring a smaller value with a warning.
+  There is no configuration that pins a path.
+
+  What works is giving each end nowhere else to go. `Local::Pinned` binds one address with the
+  prefix set to the address itself and the default route off, and `poll_send` blackholes a datagram
+  once no transport matches and none is default. So hostd binds its LAN address (`--bind`), the
+  client binds loopback (`bind_pinned_client`), and each one's probe at the other's real address is
+  dropped before it leaves: the path never validates and the relay stays selected. It is also a
+  feature worth having outside a measurement — a host reachable only through a local tunnel. The
+  run checks itself as well as pinning: `selected_addr` reads the address the selected path is
+  sending to, `a_shaped_link_keeps_the_client_on_the_shaper` asserts it over a real session on a
+  30 ms link, and each rung of the ladder asserts it again.
