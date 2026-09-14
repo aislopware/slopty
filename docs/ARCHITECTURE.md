@@ -449,10 +449,14 @@ grip resizes, ⌘T/⌘⇧N/⌘O/⌘W/⌘Z/⌘0/⌘1/⌘=/⌘-/⌘⇧A/⌘]/⌘[/
 one a find in every card (the palette lists the cards with hits, ↩ opens that card's find bar), the two before it
 walking the cards in reading order and the arrows to the nearest card in that direction
 (`step_towards`, the window managers' cone rule); a minimap in the corner
-shows every item and the viewport and scrubs the camera). ⌘W on an idle shell removes its
-card but keeps the session and the attached view for `UNDO_CLOSE` (5 s): ⌘Z, the palette's
-"Undo close" or the toast's button put the item back as it was (`close_shell`,
-`take_back`), else `forget_closed` sends the host `Close`. Notes (⌘⇧N) are edited
+shows every item and the viewport and scrubs the camera). ⌘W on any card takes it off the canvas and offers it
+back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's button put the
+item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
+shell keeps its session and its attached view through the wait, so its rows come back
+untouched and `forget_closed` sends the host `Close`; every other card is its item, so the
+document restores it (a note's editor commits on a timer, and the close reads the field
+directly so the last keystrokes come back too). An ended shell is the one exception: it has
+no session to keep and no rows the host could replay, so it goes at once. Notes (⌘⇧N) are edited
 in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
 draws that text as Markdown (`slopty-ui::markdown`), its
 fenced blocks as a block element with "copy" and, given a shell, "run"

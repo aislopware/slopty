@@ -120,6 +120,14 @@ impl NoteView {
         &self.synced
     }
 
+    /// What the field holds this instant, keystrokes the commit timer has not carried into
+    /// the document included. The canvas reads this when it has to act on the note's text
+    /// before that timer fires — closing the card, which must take back what was typed.
+    #[must_use]
+    pub fn live_text(&self, cx: &gpui::App) -> String {
+        self.text.read(cx).value().to_string()
+    }
+
     /// Whether the editor has keyboard focus.
     #[must_use]
     pub fn editing(&self, window: &Window, cx: &gpui::App) -> bool {

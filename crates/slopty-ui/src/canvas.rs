@@ -72,7 +72,7 @@ pub mod actions {
             AddWindow,
             /// Close the active item (terminates its session).
             CloseItem,
-            /// Put back the shell closed last, while its session still runs.
+            /// Put back the card closed last, while the offer stands.
             UndoClose,
             /// Zoom in about the viewport centre.
             ZoomIn,
@@ -292,7 +292,7 @@ const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// How long another client's pointing stays on offer before it goes by itself.
 const POINT_FOR: Duration = Duration::from_secs(8);
 
-/// How long a closed shell can be taken back (⌘Z) before its session is closed for good.
+/// How long a closed card can be taken back (⌘Z) before a shell's session is closed for good.
 const UNDO_CLOSE: Duration = Duration::from_secs(5);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
@@ -344,21 +344,23 @@ enum ToastKind {
     },
     /// A word to this client alone ("nobody else is here").
     Said(String),
-    /// A shell just closed: a button that takes it back, until [`UNDO_CLOSE`] passes.
+    /// A card just closed: a button that takes it back, until [`UNDO_CLOSE`] passes.
     Closed {
-        /// Which closing (`ClosedShell::seq`).
+        /// Which closing (`ClosedCard::seq`).
         seq: u64,
         /// The card's title as it was.
         title: String,
     },
 }
 
-/// A shell taken off the canvas whose session still runs, until [`UNDO_CLOSE`] passes or
-/// ⌘Z puts it back as it was.
-struct ClosedShell {
+/// A card taken off the canvas, until [`UNDO_CLOSE`] passes or ⌘Z puts it back as it was.
+/// A live shell's session runs on through the wait, so its rows come back untouched.
+struct ClosedCard {
     /// The item, to put back where it was.
     item: CanvasItem,
-    session: SessionId,
+    /// The session kept alive for the wait, for a live shell; `None` for every other card,
+    /// whose whole state is the item.
+    session: Option<SessionId>,
     /// Which closing, for the timer and the toast.
     seq: u64,
 }
@@ -645,9 +647,9 @@ pub struct CanvasView {
     /// The toast at the top: another client's pointing on offer, or a word to this client,
     /// until a click or [`POINT_FOR`].
     toast: Option<Toast>,
-    /// Shells closed within the last [`UNDO_CLOSE`], oldest first; their views stay in
+    /// Cards closed within the last [`UNDO_CLOSE`], oldest first; a shell's view stays in
     /// `terminals`, attached, so taking one back shows it as it was.
-    closed: Vec<ClosedShell>,
+    closed: Vec<ClosedCard>,
     closed_seq: u64,
     /// A camera move in progress, advanced once per frame by the render loop.
     flight: Option<Flight>,
@@ -1316,9 +1318,15 @@ impl CanvasView {
     /// "answer" button on a question badge: the reply has to be typed).
     pub fn reveal_session(&mut self, session: SessionId, cx: &mut Context<Self>) {
         let Some(id) = self.doc.item_for_session(session).map(|i| i.id) else { return };
+        self.reveal_item(id, cx);
+        self.pending_focus = Some(session);
+    }
+
+    /// Bring a card into view and make it active, without asking for the keyboard: only a
+    /// terminal can take it before its view exists.
+    fn reveal_item(&mut self, id: ItemId, cx: &mut Context<Self>) {
         self.activate(id, cx);
         self.reveal_pending = Some(id);
-        self.pending_focus = Some(session);
         cx.notify();
     }
 
@@ -1990,9 +1998,10 @@ impl CanvasView {
     }
 
     /// Create views for terminal items whose session is alive; drop views whose item is gone.
-    /// A shell closed within [`UNDO_CLOSE`] has no item but keeps its view, attached.
+    /// A card closed within [`UNDO_CLOSE`] has no item; a shell among them keeps its view,
+    /// attached, and drops out of the stack the moment its session ends on its own.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
-        self.closed.retain(|c| self.sessions.contains_key(&c.session));
+        self.closed.retain(|c| c.session.is_none_or(|s| self.sessions.contains_key(&s)));
         let wanted: Vec<SessionId> = self
             .doc
             .items()
@@ -2000,7 +2009,7 @@ impl CanvasView {
                 ItemKind::Terminal { session } if !i.sleeping => Some(session),
                 _ => None,
             })
-            .chain(self.closed.iter().map(|c| c.session))
+            .chain(self.closed.iter().filter_map(|c| c.session))
             .filter(|s| self.sessions.contains_key(s))
             .collect();
         for session in &wanted {
@@ -2508,12 +2517,21 @@ impl CanvasView {
                     self.close_shell(session, cx);
                 }
             }
-            ItemKind::Terminal { .. }
-            | ItemKind::Window { .. }
-            | ItemKind::Display { .. }
-            | ItemKind::Note { .. }
-            | ItemKind::File { .. } => {
-                self.propose(CanvasOp::Remove(id));
+            // An ended shell has no session to keep and no rows the host could replay, so
+            // it goes for good; every other card is its item, and comes back from it.
+            ItemKind::Terminal { .. } => self.propose(CanvasOp::Remove(id)),
+            // A note's editor commits on a timer, so the last keystrokes may not be in the
+            // document yet; take them from the field, or the undo would give back a note
+            // missing the line that was just typed.
+            ItemKind::Note { .. } => {
+                let mut item = item;
+                if let Some(text) = self.notes.get(&id).map(|view| view.read(cx).live_text(cx)) {
+                    item.kind = ItemKind::Note { text };
+                }
+                self.remember_closed(item, None, cx);
+            }
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::File { .. } => {
+                self.remember_closed(item, None, cx);
             }
         }
         cx.notify();
@@ -2528,11 +2546,23 @@ impl CanvasView {
             self.send(ClientMsg::Term { session, req: TermRequest::Close });
             return;
         };
+        self.remember_closed(item, Some(session), cx);
+    }
+
+    /// Take a card off the canvas and offer it back for [`UNDO_CLOSE`]: the toast's button
+    /// or ⌘Z puts it where it was, and the timer forgets it.
+    fn remember_closed(
+        &mut self,
+        item: CanvasItem,
+        session: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) {
         self.closed_seq = self.closed_seq.wrapping_add(1);
         let seq = self.closed_seq;
         let title = self.card_title(&item, cx);
-        self.closed.push(ClosedShell { item: item.clone(), session, seq });
-        self.propose(CanvasOp::Remove(item.id));
+        let id = item.id;
+        self.closed.push(ClosedCard { item, session, seq });
+        self.propose(CanvasOp::Remove(id));
         self.reconcile(cx);
         self.show_toast_for(ToastKind::Closed { seq, title }, UNDO_CLOSE, cx);
         cx.spawn(async move |this, cx| {
@@ -2542,14 +2572,17 @@ impl CanvasView {
         .detach();
     }
 
-    /// [`UNDO_CLOSE`] passed for closing `seq`: the host closes the session and the view goes.
+    /// [`UNDO_CLOSE`] passed for closing `seq`: a shell's session is closed by the host and
+    /// its view goes; every other card was already off the canvas and is simply forgotten.
     fn forget_closed(&mut self, seq: u64, cx: &mut Context<Self>) {
         let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
         let closed = self.closed.remove(ix);
-        if self.sessions.contains_key(&closed.session) {
-            self.send(ClientMsg::Term { session: closed.session, req: TermRequest::Close });
+        if let Some(session) = closed.session {
+            if self.sessions.contains_key(&session) {
+                self.send(ClientMsg::Term { session, req: TermRequest::Close });
+            }
+            self.terminals.remove(&session);
         }
-        self.terminals.remove(&closed.session);
         if matches!(self.toast, Some(Toast { what: ToastKind::Closed { seq: s, .. }, .. }) if s == seq)
         {
             self.toast = None;
@@ -2557,8 +2590,8 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// ⌘Z: the shell closed last comes back where it was, active and focused, its session
-    /// untouched. Nothing to take back is nothing.
+    /// ⌘Z: the card closed last comes back where it was, active and focused, a shell's
+    /// session untouched. Nothing to take back is nothing.
     pub fn undo_close(&mut self, _: &UndoClose, _window: &mut Window, cx: &mut Context<Self>) {
         self.take_back(None, cx);
     }
@@ -2574,10 +2607,14 @@ impl CanvasView {
         if matches!(self.toast, Some(Toast { what: ToastKind::Closed { .. }, .. })) {
             self.toast = None;
         }
-        tracing::debug!(session = %closed.session, item = %closed.item.id, "shell taken back");
+        tracing::debug!(item = %closed.item.id, session = ?closed.session, "card taken back");
+        let id = closed.item.id;
         self.propose(CanvasOp::Upsert(closed.item));
         self.reconcile(cx);
-        self.reveal_session(closed.session, cx);
+        match closed.session {
+            Some(session) => self.reveal_session(session, cx),
+            None => self.reveal_item(id, cx),
+        }
     }
 
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
@@ -5085,6 +5122,133 @@ mod tests {
         cx.run_until_parked();
         let sent = drain(&mut rx);
         assert!(upserts(&sent).is_empty(), "nothing to take back: {sent:?}");
+    }
+
+    /// A note holds the only copy of what was typed into it, so closing one offers it back
+    /// for the same five seconds — with its text — and lets go after them.
+    #[gpui::test]
+    fn a_closed_note_comes_back_with_its_text(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let id = ItemId::new();
+        let rect = SHELL;
+        let item = CanvasItem {
+            id,
+            kind: ItemKind::Note { text: "ship it".to_owned() },
+            rect,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+            c.activate(id, cx);
+        });
+        cx.run_until_parked();
+        drain(&mut rx);
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            sent.iter().any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Remove(i)) if *i == id)),
+            "{sent:?}"
+        );
+        view.read_with(cx, |c, _| assert!(c.items().iter().all(|i| i.id != id)));
+        assert!(cx.debug_bounds("closed").is_some(), "the toast offers it back");
+
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        let back: Vec<&CanvasItem> = sent
+            .iter()
+            .filter_map(|m| match m {
+                ClientMsg::Canvas(CanvasOp::Upsert(item)) => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(back.len(), 1, "{sent:?}");
+        assert_eq!((back[0].id, back[0].rect), (id, rect), "back where it was");
+        assert!(
+            matches!(&back[0].kind, ItemKind::Note { text } if text == "ship it"),
+            "with what was typed into it: {:?}",
+            back[0].kind
+        );
+        view.read_with(cx, |c, _| assert_eq!(c.active_item(), Some(id)));
+        assert!(cx.debug_bounds("closed").is_none(), "the toast went with the undo");
+
+        // Five seconds later the offer is gone and ⌘Z finds nothing.
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        drain(&mut rx);
+        cx.executor().advance_clock(UNDO_CLOSE);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed").is_none(), "the toast went with the wait");
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        assert!(
+            !sent.iter().any(|m| matches!(m, ClientMsg::Canvas(CanvasOp::Upsert(_)))),
+            "nothing to take back: {sent:?}"
+        );
+    }
+
+    /// The editor carries typing into the document on a timer, so a note closed mid-sentence
+    /// has to be remembered from the field rather than from the document, or the take-back
+    /// would hand back a note missing the line that prompted the close.
+    #[gpui::test]
+    fn a_note_closed_before_its_commit_keeps_what_was_typed(cx: &mut TestAppContext) {
+        let (view, mut rx, me, cx) = canvas(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let id = ItemId::new();
+        let item = CanvasItem {
+            id,
+            kind: ItemKind::Note { text: "ship".to_owned() },
+            rect: SHELL,
+            z: 1,
+            group: None,
+            sleeping: false,
+            name: None,
+        };
+        view.update(cx, |c, cx| {
+            c.apply_sync(CanvasSync::Delta { version: 1, by: me, op: CanvasOp::Upsert(item) }, cx);
+            c.activate(id, cx);
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds(selector("note-read", id)).expect("the rendered note");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("!");
+        cx.run_until_parked();
+        // No `advance_clock`: the commit timer has not fired, so the document still says "ship".
+        view.read_with(cx, |c, _| {
+            let stored = c.items().iter().find_map(|i| match &i.kind {
+                ItemKind::Note { text } => Some(text.clone()),
+                _ => None,
+            });
+            assert_eq!(stored.as_deref(), Some("ship"), "the commit is still pending");
+        });
+        drain(&mut rx);
+
+        // Driven rather than typed: the keystroke path is covered above, and here the
+        // editor had the keyboard until the card went.
+        view.update_in(cx, |c, window, cx| {
+            c.close_item(&CloseItem, window, cx);
+            c.undo_close(&UndoClose, window, cx);
+        });
+        cx.run_until_parked();
+        let sent = drain(&mut rx);
+        let back = sent.iter().rev().find_map(|m| match m {
+            ClientMsg::Canvas(CanvasOp::Upsert(item)) if item.id == id => Some(item.clone()),
+            _ => None,
+        });
+        let back = back.unwrap_or_else(|| panic!("the note comes back: {sent:?}"));
+        assert!(
+            matches!(&back.kind, ItemKind::Note { text } if text == "ship!"),
+            "with the keystroke the timer had not carried over: {:?}",
+            back.kind
+        );
     }
 
     /// A shell command that ran long and ended in an item the human is not on badges its

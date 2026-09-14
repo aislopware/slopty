@@ -978,11 +978,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (5 s), during which ⌘Z, "Undo close" in the palette, or the toast's button (`closed
   <title> · take back ⌘Z`) upserts the item as it was, active and focused. When the time
   passes the host is sent `Close` and the view is dropped. A shell whose program exited
-  closes at once (nothing to take back), and so does every other card kind. The stack is
+  closes at once: there is nothing to take back, since the host cannot replay its rows.
+  Widened 2026-09-14 to every other card kind, which has no such problem — a window, a
+  display, a note and a file card are each entirely their document item, so `remember_closed`
+  holds the item and the take-back upserts it (`ClosedCard.session` is `None` for them, and
+  nothing is sent to the host when the time passes). A note was the case that forced it: its
+  text lives only in the item, so the old immediate `Remove` was the one destructive action on
+  the canvas with no way back. Its editor commits on a timer, so the close reads the live
+  field (`NoteView::live_text`) rather than the document, or the take-back would return the
+  note without the line that prompted it. The stack is
   per client and holds every close within the window, newest taken back first; a session
   the host reports gone leaves it. Tests: `a_closed_shell_can_be_taken_back_for_five_seconds`
   (canvas: ⌘W removes and keeps, ⌘Z and the toast put back the same view at the same
-  rect, the clock passing sends `Close` and empties the stack).
+  rect, the clock passing sends `Close` and empties the stack),
+  `a_closed_note_comes_back_with_its_text` (the item and its text return, and the offer
+  lapses with the clock), `a_note_closed_before_its_commit_keeps_what_was_typed`.
 
 - ✅ **A `133;C` on its own is a frame** (2026-09-13). App e2e run 343 timed out waiting for
   `sleep 6` to badge its shell: the client saw the command start only when it ended
