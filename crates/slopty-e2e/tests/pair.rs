@@ -8,7 +8,8 @@
 //! The behaviours, one test each, in the order of the brief: (a) a terminal opened on A is on B
 //! within a round trip with the same title, size and rows; (b) typing on both into one session
 //! is serialised, nothing lost or reordered, and the PTY size follows the "take" pill; (c) an
-//! agent's attention badges both, an answer on A clears A at once and B when the agent moves on;
+//! agent's attention badges both, "go" on A reveals A's terminal and only the host reporting the
+//! agent moved on clears the count, on both at once;
 //! (d) a display streams to both (needs `SLOPTY_SCREEN_E2E`), and the host's `screens` listing
 //! says how many times it encodes; (e) camera and zoom are per client while item geometry is
 //! shared; (f) A dying leaves B streaming, and a relaunched A catches up; (g) closing on A closes
@@ -389,8 +390,10 @@ mod tests {
         pair.shutdown().await;
     }
 
-    /// (c) An agent's attention (a hook played to hostd) badges both clients and both count
-    /// one waiting; "allow" on A clears A's count at once, and B's when the agent moves on.
+    /// (c) An agent's attention (a hook played to hostd) badges both clients and both count one
+    /// waiting. "go" on A reveals A's terminal, where the TUI's own prompt takes the answer —
+    /// Slopty never answers for the human, so nothing is cleared until the host says the agent
+    /// moved on, and then it clears on both at once.
     #[tokio::test]
     async fn an_agents_attention_badges_both_clients_and_an_answer_clears_both_on_the_mac() {
         if !gated() {
@@ -416,13 +419,15 @@ mod tests {
             start.elapsed().as_secs_f64() * 1e3
         );
         let bounds = da.item_for_session(&session).unwrap().bounds;
-        assert!(button_in(&db, "allow", db.item_for_session(&session).unwrap().bounds).is_some());
+        assert!(button_in(&db, "go", db.item_for_session(&session).unwrap().bounds).is_some());
 
-        // Allow on A: A's own count drops now (the answer is A's, typed into the prompt).
-        let (x, y) = button_in(&da, "allow", bounds).unwrap();
+        // "go" on A reveals A's terminal and does no more: the answer belongs to the TUI's own
+        // prompt, so both clients go on counting one until the host says otherwise.
+        let (x, y) = button_in(&da, "go", bounds).unwrap();
         a.click(x, y).await.unwrap();
-        a.wait_for("A's count cleared", STEP, |d| needs_you(d).is_none()).await.unwrap();
-        // B still counts it: only the host can say the agent moved on.
+        let want = format!("terminal:{session}");
+        let da = a.wait_for("A's terminal revealed", STEP, |d| d.focused == want).await.unwrap();
+        assert_eq!(needs_you(&da).as_deref(), Some("1 needs you"), "{da:#?}");
         let db = b.dump().await.unwrap();
         assert_eq!(needs_you(&db).as_deref(), Some("1 needs you"), "{db:#?}");
 

@@ -4420,11 +4420,10 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
 }
 
 impl CanvasView {
-    /// The agent pill in a terminal's title bar: a coloured dot and a short line, plus the
-    /// one-tap answers when the agent is waiting on the human: "allow" / "deny" for a
-    /// permission prompt (Enter / Esc into the terminal), "answer" for a question (bring the
-    /// terminal up so the reply can be typed). A sent answer shows as such until the host
-    /// reports what the agent did next.
+    /// The agent pill in a terminal's title bar: a coloured dot and a short line, plus a "go"
+    /// button while the agent is waiting on the human, which brings the terminal up so the
+    /// TUI's own prompt can be answered there. Slopty never answers for the human, so the
+    /// count of what needs you drops only when the host reports the agent moved on.
     fn agent_badge(
         &self,
         item: ItemId,
