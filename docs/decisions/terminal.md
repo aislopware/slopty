@@ -1085,7 +1085,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the canvas. The first version of this ruling did exactly that, and
   `a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas` — written months earlier for
   a different reason — failed inside the hour. So `Started` only clears the latch, and the first
-  non-zero delta sets it.
+  non-zero delta sets it. The exception is a program that wants the mouse: it owns the gesture
+  whichever way the fingers go, so there is nothing to wait to see and the landing decides. Not
+  making that exception leaks the landing to the canvas, whose `take_camera` would drop a
+  camera-follow that a scroll inside vim has no business touching.
 
   **The latch must outlive `Ended`.** In the fork's `gpui_macos/src/events.rs` (read at
   `a07e5cf`), `NSScrollWheel` maps `NSEvent.phase()` to `TouchPhase` and never reads

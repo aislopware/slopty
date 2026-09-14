@@ -2083,7 +2083,9 @@ impl TerminalView {
         let mine = match (event.delta, self.wheel_gesture) {
             (ScrollDelta::Lines(_), _) => can_use,
             (ScrollDelta::Pixels(_), Some(mine)) => mine,
-            (ScrollDelta::Pixels(_), None) if lines.abs() > f32::EPSILON => {
+            // A program that wants the mouse owns the gesture whichever way it goes, so there
+            // is nothing to wait to see; otherwise the direction is the whole question.
+            (ScrollDelta::Pixels(_), None) if to_program || lines.abs() > f32::EPSILON => {
                 self.wheel_gesture = Some(can_use);
                 can_use
             }
@@ -4429,6 +4431,11 @@ mod tests {
         wheel(cx, 2.0, mods, TouchPhase::Started);
         assert_eq!(wheels(&mut rx), [2], "the program gets the rows");
         assert_eq!(offset(cx), 0, "and the viewport stays");
+        // A finger landing inside a program that wants the mouse takes the gesture there and
+        // then: the program has it whichever way it goes, so there is nothing to wait to see,
+        // and the canvas never gets an event out of the middle of it.
+        pan(cx, 0.0, TouchPhase::Started);
+        assert_eq!(owner(cx), Some(true), "the program owns it from the landing");
         let shift = gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
         wheel(cx, 2.0, shift, TouchPhase::Started);
         assert!(wheels(&mut rx).is_empty(), "⇧ keeps the wheel");
