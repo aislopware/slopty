@@ -821,6 +821,10 @@ impl ScreenView {
                 self.scrolling = Scrolling::Idle;
                 (ScrollPhase::None, ScrollPhase::Ended)
             }
+            // gpui reads `NSEventPhaseMayBegin` and `NSEventPhaseBegan` as the same `Started`, so
+            // fingers that rest before they push open the gesture twice. The second one is the
+            // same gesture; telling the host it began again would restart its rubber-banding.
+            (TouchPhase::Started, Scrolling::Fingers) => (ScrollPhase::Changed, ScrollPhase::None),
             (TouchPhase::Started, _) => {
                 self.scrolling = Scrolling::Fingers;
                 (ScrollPhase::Began, ScrollPhase::None)
@@ -854,10 +858,11 @@ impl ScreenView {
     /// The zero-delta `momentumPhase = End` macOS sends when a fling stops. gpui has no event
     /// for it, so without this the remote app is left latched to a scroll that never ended.
     fn end_momentum(&mut self, x: f32, y: f32, mods: Mods) {
-        let was = std::mem::replace(&mut self.scrolling, Scrolling::Idle);
+        let Scrolling::Momentum { begun } = self.scrolling else { return };
+        self.scrolling = Scrolling::Idle;
         self.momentum_end = None;
         // A gesture that ended without a fling behind it is already closed by its own `Ended`.
-        if was == (Scrolling::Momentum { begun: true }) {
+        if begun {
             self.input(ScreenInput::Scroll {
                 dx: 0.0,
                 dy: 0.0,
@@ -1913,6 +1918,18 @@ mod tests {
             }
             other => panic!("expected one zero-delta momentum end, got {other:?}"),
         }
+
+        // Fingers that rest on the trackpad before they push open the gesture twice, because
+        // gpui reads `MayBegin` and `Began` as the same phase. The host is told once.
+        wheel(cx, 0.0, TouchPhase::Started);
+        wheel(cx, 0.0, TouchPhase::Started);
+        wheel(cx, -30.0, TouchPhase::Moved);
+        wheel(cx, -30.0, TouchPhase::Ended);
+        assert_eq!(
+            phases(&mut rx),
+            [(Began, Off), (Changed, Off), (Changed, Off), (Ended, Off)],
+            "resting fingers open the gesture once"
+        );
 
         // A drag that ends without a fling behind it needs no closing: its own `Ended` did it.
         wheel(cx, -8.0, TouchPhase::Started);

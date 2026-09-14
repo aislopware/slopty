@@ -179,5 +179,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   running fling closes it first, as macOS does. A drag that ended without a fling behind it needs
   nothing: its own `Ended` closed it.
 
+  Two more shapes come from the same place gpui flattens phases. `NSEventPhaseMayBegin` and
+  `NSEventPhaseBegan` both map to `TouchPhase::Started`, so fingers that rest on the trackpad
+  before they push open one gesture twice; the second `Started` is the same gesture continuing
+  and goes out as `Changed`, because telling the remote app a scroll began again restarts its
+  rubber-banding mid-scroll. And `NSEventPhaseCancelled` fell into the mapping's `_ => Moved`
+  arm, so a gesture the system took back looked like one still running and was never closed.
+  That one is not fixable from here — it is a lost distinction, not a lost sequence — so the
+  fork carries it (`gpui_macos: a cancelled scroll or pinch is cancelled, not moved`,
+  `2b52c4bc82`), mapping it to the `TouchPhase::Cancelled` gpui already has for touch. `Magnify`
+  had the same arm and got the same fix; the canvas's pinch handler ignores phase, so nothing
+  there changes.
+
   Test: `a_fling_over_the_picture_reaches_the_host_as_a_gesture_and_then_as_momentum` drives the
-  whole shape and both ways it can finish.
+  whole shape, both ways it can finish, and the doubled open.
