@@ -296,6 +296,20 @@ const POINT_FOR: Duration = Duration::from_secs(8);
 const UNDO_CLOSE: Duration = Duration::from_secs(5);
 /// Smallest item on screen while dragging.
 const MIN_ITEM: f32 = 160.0;
+
+/// Where a resize drag of `dx`, `dy` canvas units from `start` puts the card.
+///
+/// With `aspect` (`height / width` of a source that cannot be reshaped) the body keeps its shape
+/// and only one edge is really being dragged: whichever way the pointer went further drives the
+/// other, so the grip follows the hand down a portrait display as it does across a landscape one.
+fn resized(start: Rect, dx: f32, dy: f32, aspect: Option<f32>) -> Rect {
+    let Some(aspect) = aspect else {
+        return Rect { w: (start.w + dx).max(MIN_ITEM), h: (start.h + dy).max(MIN_ITEM), ..start };
+    };
+    let from_height = (start.h + dy - TITLE_H) / aspect;
+    let w = if dy.abs() > dx.abs() { from_height } else { start.w + dx }.max(MIN_ITEM);
+    Rect { w, h: w.mul_add(aspect, TITLE_H), ..start }
+}
 /// Size of a new note.
 const NOTE_SIZE: (f32, f32) = (320.0, 240.0);
 /// A new file card's size in canvas units.
@@ -3407,11 +3421,8 @@ impl CanvasView {
             }
             Drag::Resize { id, grab, start } => {
                 let d = ev.position - grab;
-                let rect = Rect {
-                    w: (start.w + f32::from(d.x) / zoom).max(MIN_ITEM),
-                    h: (start.h + f32::from(d.y) / zoom).max(MIN_ITEM),
-                    ..start
-                };
+                let locked = self.locked_aspect(id, cx);
+                let rect = resized(start, f32::from(d.x) / zoom, f32::from(d.y) / zoom, locked);
                 self.doc.apply_op(&CanvasOp::Place { id, rect });
             }
         }
@@ -3430,15 +3441,35 @@ impl CanvasView {
                 }
             }
             Drag::Resize { id, start, .. } => {
-                if let Some(item) = self.doc.get(id) {
-                    let r = item.rect;
-                    let rect = Rect { x: snap(r.x), y: snap(r.y), w: snap(r.w), h: snap(r.h) };
+                if let Some(r) = self.doc.get(id).map(|i| i.rect) {
+                    let w = snap(r.w);
+                    // The snap grid would nudge a locked card off its aspect by up to half a
+                    // step, so the height is taken from the snapped width, not snapped itself.
+                    let h = self
+                        .locked_aspect(id, cx)
+                        .map_or_else(|| snap(r.h), |aspect| w.mul_add(aspect, TITLE_H));
+                    let rect = Rect { x: snap(r.x), y: snap(r.y), w, h };
                     self.propose(CanvasOp::Place { id, rect });
                     self.resize_remote_window(id, start, rect, cx);
                 }
             }
         }
         cx.notify();
+    }
+
+    /// The shape a card's body must keep while it is dragged, `height / width` of its source.
+    ///
+    /// Only a display has one. The host can resize a window to whatever shape the drag asks for
+    /// and [`Self::follow_geometry`] settles the card on what it became, but a display is the
+    /// size it is, so a free drag would leave its picture stretched with nothing to correct it.
+    fn locked_aspect(&self, id: ItemId, cx: &App) -> Option<f32> {
+        let view = self.screens.get(&id)?.read(cx);
+        if !matches!(view.target(), CaptureTarget::Display(_)) {
+            return None;
+        }
+        let (w, h) = view.size();
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
+        (w > 0 && h > 0).then(|| h as f32 / w as f32)
     }
 
     /// The grip of a streamed window's card was let go: ask the host to give the window the
@@ -4659,7 +4690,8 @@ mod tests {
 
     /// Letting go of a window card's grip asks the host for the window size the card now
     /// stands for: the card's new size over the scale it drew the window at, less the title
-    /// bar. A card left at its size asks nothing; a display card never asks.
+    /// bar. A card left at its size asks nothing; a display card never asks, and is the one
+    /// kind whose drag is locked to the source's shape instead.
     #[gpui::test]
     fn the_grip_asks_the_host_to_resize_the_window(cx: &mut TestAppContext) {
         let me = ClientId::new();
@@ -4735,6 +4767,39 @@ mod tests {
         open(&view, cx, display, kind, CaptureTarget::Display(2), StreamId(2));
         view.update(cx, |c, cx| c.resize_remote_window(display, start, wider, cx));
         assert!(resizes(&mut rx).is_empty(), "a display is not resized");
+
+        // Because the host cannot reshape it, the display's card is the one that has to keep
+        // the shape itself; the window's card is free to take whatever the drag gives it.
+        view.read_with(cx, |c, cx| {
+            let locked = c.locked_aspect(display, cx).expect("the display is locked");
+            assert!((locked - 800.0 / 1280.0).abs() < 0.001, "{locked}");
+            assert!(c.locked_aspect(window, cx).is_none(), "a window's card is free");
+        });
+    }
+
+    /// A resize drag is free unless the card's source cannot be reshaped, and then the body
+    /// keeps its aspect: the edge the hand moved further along drives the other.
+    #[test]
+    fn a_card_over_a_display_keeps_the_displays_shape_as_it_is_dragged() {
+        let close = |got: f32, want: f32| (got - want).abs() < 0.01;
+        let start = Rect { x: 40.0, y: 40.0, w: 640.0, h: 400.0 + TITLE_H };
+        let free = resized(start, 160.0, -80.0, None);
+        assert!(close(free.w, 800.0) && close(free.h, 320.0 + TITLE_H), "no lock: {free:?}");
+
+        let aspect = 800.0 / 1280.0;
+        let wider = resized(start, 160.0, -80.0, Some(aspect));
+        assert!(close(wider.w, 800.0), "the hand went further across: {wider:?}");
+        assert!(close(wider.h, 500.0 + TITLE_H), "the height follows the shape: {wider:?}");
+
+        let taller = resized(start, 10.0, 200.0, Some(aspect));
+        assert!(close(taller.h, 600.0 + TITLE_H), "the hand went further down: {taller:?}");
+        assert!(close(taller.w, 960.0), "the width follows: {taller:?}");
+
+        // The floor is the width's, and the height still comes from it.
+        let tiny = resized(start, -10_000.0, -10_000.0, Some(aspect));
+        assert!(close(tiny.w, MIN_ITEM), "{tiny:?}");
+        assert!(close(tiny.h, MIN_ITEM.mul_add(aspect, TITLE_H)), "{tiny:?}");
+        assert!(close(tiny.x, start.x) && close(tiny.y, start.y), "the corner stays: {tiny:?}");
     }
 
     /// A focused remote window gets every chord, the canvas's own included: ⌘W goes to the

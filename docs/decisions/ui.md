@@ -859,3 +859,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The picker is left alone for the same reason and a stronger one: its rows are grouped by kind —
   sessions, then the host's displays and windows — and that grouping is the information the list
   carries.
+
+- ✅ **A display card's grip is locked to the display's shape (2026-09-15).** `follow_geometry`
+  carries a promise in its own doc — the picture is never stretched and pointer mapping stays
+  exact — and it kept that promise for exactly one of the two kinds of screen card. A window's
+  card can be dragged to any shape because the drag is a request: `resize_remote_window` asks the
+  host for a window that size, the host answers with a `Geometry`, and the card settles on the
+  shape the window really took. A display card had the same free drag and no such answer;
+  `resize_remote_window` returns early for `CaptureTarget::Display`, because nothing can make a
+  monitor a different shape. The card kept whatever the drag gave it and the picture, painted
+  with `ObjectFit::Fill` over the full bounds, stretched for good.
+
+  So the lock lives where the shape cannot be negotiated: `locked_aspect` is `Some(h / w)` for a
+  display and `None` for a window, and `resized` reads it. While a locked card is dragged the
+  edge the hand moved further along drives the other — across for a landscape display, down for a
+  portrait one — so the grip still follows the hand rather than one axis of it. On release the
+  height is recomputed from the *snapped* width instead of being snapped itself, since the snap
+  grid would otherwise nudge the card off its aspect by up to half a step and leave a stretch too
+  small to see and too permanent to forgive.
+
+  Letterboxing was the other way to keep the picture honest, and it is worse here: bars inside a
+  card on a canvas are a second surface at a second colour inside a surface that already has one,
+  and the card's own bounds stop meaning the picture's bounds, which is what `to_stream` maps a
+  pointer through. Locking the card keeps one rectangle with one meaning.
+
+  Tests: `a_card_over_a_display_keeps_the_displays_shape_as_it_is_dragged` over the arithmetic
+  (free drag, width-led, height-led, the floor), and
+  `the_grip_asks_the_host_to_resize_the_window` over the wiring, where the same canvas holds a
+  window card and a display card and only the display reports a locked aspect.
