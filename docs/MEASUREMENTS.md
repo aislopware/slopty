@@ -2956,9 +2956,11 @@ respected; the frame itself is the overshoot, exactly as the Cubic half of the ð
 **Two harness defects found on the way, and both had the same cause.** The first rungs read zero
 decoded frames, and the decoder warm-up took 28.4 / 28.7 / 31.0 s where 2026-09-05 measured
 150â€“400 ms. That is not the decoder: the same test binary takes 118 s run from this repo's
-external volume and 0.56 s run from `/tmp`, unmodified, because the volume is mounted `noowners`
-and code-signature validation there misses the cached path (`decisions/testing.md`). Every
-VideoToolbox test in the suite pays it; the fix is `CARGO_TARGET_DIR` on the boot volume.
+external volume and 0.56 s run from `/tmp`, unmodified. The cause is the mount flag: a disk image
+*created on that same external disk* and attached with `-owners on` runs it in 0.50 s, while
+`/Volumes/Lacie` is mounted `noowners` and so misses the cached code-signature path
+(`decisions/testing.md`). Every VideoToolbox test in the suite pays it, and the fix is one command:
+`sudo diskutil enableOwnership /Volumes/Lacie`.
 
 The harness keeps two changes anyway, both right on their own terms: it waits for
 `slopty_codec::warm_up()` before the first rung rather than racing it, and throws the first
