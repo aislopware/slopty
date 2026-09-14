@@ -1102,7 +1102,7 @@ impl Render for ScreenView {
                 .px(px(self.theme.spacing.sm))
                 .py(px(self.theme.spacing.xxs))
                 .rounded(px(self.theme.radii.xs))
-                .bg(crate::colors::hsla_alpha(self.theme.surfaces.overlay, alpha::HUD))
+                .bg(crate::colors::hsla_alpha(self.theme.surfaces.overlay, alpha::VEIL))
                 .text_size(px(self.theme.typography.caption()))
                 .text_color(hsla(self.theme.surfaces.text_secondary))
                 .font_family(self.theme.typography.ui_family.clone())

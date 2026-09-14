@@ -174,7 +174,7 @@ pub fn code_block(
             .rounded(px(theme.radii.xs))
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
-            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::FAINT)))
             // The surface under it may take a press as "edit me": the button keeps its own.
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(text)
@@ -267,7 +267,7 @@ pub fn task_row(
     if let Some(toggle) = toggle {
         boxed = boxed
             .cursor_pointer()
-            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::HOVER)))
+            .hover(move |st| st.bg(hsla_alpha(s.text, alpha::FAINT)))
             // The surface under it may take a press as "edit me": the box keeps its own.
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(move |_ev, window, cx| {

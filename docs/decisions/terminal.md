@@ -303,8 +303,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`prompt_navigation_and_last_output_follow_the_marks`). ⌘↑/⌘↓/⌘⇧C are Terminal-context
   bindings (`PrevPrompt`, `NextPrompt`, `CopyLastOutput`); the separator is a 1 px quad on
   the prompt-start row's top edge from the same prepaint pass as the selection
-  (`separator_color`: fg at 18 %, the theme's `surfaces.error` token at
-  `alpha::SEPARATOR_ERROR` (70 %) when the status is non-zero; `crates/slopty-theme/src/lib.rs`,
+  (`separator_color`: fg at `alpha::FAINT` (12 %), the theme's `surfaces.error` token at
+  `alpha::STRONG` (70 %) when the status is non-zero; `crates/slopty-theme/src/lib.rs`,
   `crates/slopty-ui/src/terminal/element.rs`), never on line 0. Search bar and selection are
   untouched. Headless:
   `cmd_up_and_down_walk_the_prompts_and_separators_follow` (separator rows and colours read
@@ -412,7 +412,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   / `took`), only from [`TOOK_MIN`] (1 s) up — a quick command says nothing worth a caption;
   (2) the caption (`took_label`: `3.3 s`, `2 m 03 s`, `1 h 02 m`) is drawn at the right end
   of that prompt row by the element's prepaint as an overlay glyph run, the foreground at
-  `alpha::TINT_STRONG`, flush with the grid's right edge, and left out when the command's
+  `alpha::TINT`, flush with the grid's right edge, and left out when the command's
   text comes within a cell of it (the text wins); the row keeps it through history; (3) rows are numbered
   per epoch, so a new epoch (a reflow, a reset, the alt screen) empties the map; the host
   is not asked (the marks carry no time); (4) the sticky block header carries the same
@@ -639,7 +639,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The bell is seen, and heard only when the human is elsewhere** (2026-09-15). BEL
   travelled the whole way (engine → `TermEvent::Bell` → `TerminalViewEvent::Bell` →
   `CanvasEvent::Bell`) and the app dropped it. Now the view tints its grid with the text
-  colour (`alpha::BELL`) for 150 ms — a visual bell, the one every terminal offers and the only
+  colour (`alpha::FAINT`) for 150 ms — a visual bell, the one every terminal offers and the only
   one that names *which* card rang on a canvas of many — a second bell inside the flash
   restarts it, and the app, when no window of ours is active, plays the user's alert sound and
   bounces the Dock through the attention path an agent's block takes. In front of the window

@@ -462,11 +462,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `typography.ui_size` + `caption()/small()/title()` | 13 → 10 / 12 / 15 | same | chrome type scale (settings move the base) |
   | `typography.mono_size` @ `mono_line_height` | 13 @ 1.0 | same | terminal grid, code in the conversation (the multiplier is ghostty's `adjust-cell-height`; 1.0 = the font's own) |
   | `typography.markdown_line_height` | 1.5 | same | assistant turns |
-  | `alpha::TINT_FAINT / TINT / TINT_STRONG / TINT_PRESSED` | 0.08 / 0.12 / 0.25 / 0.4 | same | selected row / pill fills, hover / answer buttons, the human's bubble / a strong tint under the pointer |
-  | `alpha::HOVER` | 0.08 | same | hover wash of `text` on a bare button |
+  | `alpha::FAINT` | 0.12 | same | a quiet fill, a hover wash, the command-block hairline, the visual bell |
+  | `alpha::TINT` | 0.25 | same | a tint that has to be seen: a selected row, a text selection |
+  | `alpha::PRESSED` | 0.4 | same | under the pointer; a scrollbar thumb |
   | `alpha::SCRIM` | 0.6 | same | modal backdrop |
-  | `alpha::SEPARATOR / SEPARATOR_ERROR` | 0.18 / 0.7 | same | command-block hairline (terminal fg / `error`) |
-  | `alpha::HUD / MINIMAP / MINIMAP_ITEM` | 0.85 / 0.92 / 0.7 | same | translucent panels over video and the canvas |
+  | `alpha::STRONG` | 0.7 | same | the separator after a failed command, minimap item blocks |
+  | `alpha::VEIL` | 0.9 | same | panels over video and the canvas: the stream HUD, the minimap, a looker's outline and tag |
 
   Rules that follow (as shipped): status tones are chrome tokens now — the terminal palette
   stays the terminal's; the chrome tones share its hues so nothing jars, and the light table
@@ -779,3 +780,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   plain-text fallback in `FileView` (kept only for a row with no spans, where it saves the
   run vector, but it did not move the coloured card's numbers). To carry on an upstream sync:
   the patch is one hunk per site, `cargo xtask upstream sync` replays it.
+
+- ✅ **One overlay shell, one alpha ladder (2026-09-14).** The three modal surfaces (the command
+  palette, the window picker, the settings editor) each carried their own copy of the same
+  fourteen lines of chrome, and the copies had drifted: three max widths (520, 560, 640), three
+  heights (440, 520, 720) and two elevations (`shadow_md` on the palette, `shadow_sm` on the
+  other two). Nothing chose those numbers; they were typed one at a time. The `alpha` module had
+  grown the same way, to fourteen constants, seven of them used once: `MINIMAP` 0.92 and `HUD`
+  0.85 and `MINIMAP_LOOKER` 0.8 and `LOOKER_TAG` 0.9 are four names for "a panel laid over
+  content", and `HOVER` 0.08 was `TINT_FAINT` 0.08 under a second name.
+  Ruled, and this is what a minimalist interface means here, stated so it can be checked rather
+  than admired: every overlay wears `kit::dialog`, which is one radius (`radii.md`), one hairline
+  border (`surfaces.border`), one elevation (`shadow_sm`) and the UI font, sized from
+  `kit::Overlay` — `List` 560×520 for a list typed at, `Editor` 640×720 for a file being edited.
+  Two sizes, because a command list and a text editor want different room and a third size is one
+  nobody could name. Every overlay sits on `kit::backdrop`: the canvas under `alpha::SCRIM`, the
+  dialog near the top so a phone's keyboard covers fewer rows. The alpha ladder is six steps, each
+  used in more than one place: `FAINT` 0.12 (a quiet fill, a hover wash, a wash across the grid),
+  `TINT` 0.25 (a tint that has to be seen), `PRESSED` 0.4, `SCRIM` 0.6, `STRONG` 0.7 (a mark read
+  over whatever it covers), `VEIL` 0.9 (a panel read through only barely).
+  What moved on screen: a hover wash 0.08 → 0.12, a command-block separator 0.18 → 0.12 and the
+  visual bell 0.15 → 0.12 (both hairline washes, and the gap to the failed-command separator at
+  0.7 widens, which is the signal), the stream HUD 0.85 → 0.9 and another client's minimap outline
+  0.8 → 0.9 (both more legible over video), the minimap panel 0.92 → 0.9, the palette from 520 to
+  560 wide and from `shadow_md` to `shadow_sm`. Nothing else.
+  The rules that hold from here: chrome takes every padding and gap from `Spacing`, every corner
+  from `Radii`, every transparency from `alpha`, and every colour from `Surfaces`; no gradient, no
+  glow, no second elevation; no emoji and no decorative glyph in chrome text; motion only where it
+  carries meaning (the camera flights, the take-back offer), never as decoration. Microcopy is a
+  noun phrase or a verb in the imperative, never a sentence about what the program just achieved.

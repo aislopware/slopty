@@ -766,7 +766,7 @@ impl TerminalView {
                 .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::HOVER)))
+                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 })
                 .child(label);
             crate::a11y::tab_stop(row, s.accent)
@@ -787,7 +787,7 @@ impl TerminalView {
                 .bg(hsla(s.panel))
                 .border_1()
                 .border_color(hsla(s.border))
-                .shadow_md()
+                .shadow_sm()
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text))
                 .font_family(theme.typography.ui_family.clone())
@@ -1226,7 +1226,7 @@ impl TerminalView {
             .border_1()
             .border_color(hsla(s.border))
             .bg(hsla(s.panel))
-            .shadow_md()
+            .shadow_sm()
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .on_mouse_down_out(cx.listener(|this, _ev, _window, cx| {
@@ -1244,7 +1244,7 @@ impl TerminalView {
                     .py(px(spacing.xxs))
                     .rounded(px(theme.radii.xs))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::TINT_PRESSED)))
+                    .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::PRESSED)))
                     .child(SharedString::from(item.label()));
                 crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
                     move |this, _ev, window, cx| {
@@ -2512,7 +2512,7 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
-        let wash = hsla_alpha(s.text, alpha::HOVER);
+        let wash = hsla_alpha(s.text, alpha::FAINT);
         let bare = move |id: &'static str| {
             div()
                 .id(id)
@@ -2933,7 +2933,7 @@ mod tests {
         let failed = separator_color(&theme, Some(1));
         let none = separator_color(&theme, None);
         assert_ne!(ok, failed);
-        assert_eq!(failed, hsla_alpha(theme.surfaces.error, alpha::SEPARATOR_ERROR));
+        assert_eq!(failed, hsla_alpha(theme.surfaces.error, alpha::STRONG));
         assert_eq!(ok, none, "no status and a zero status rule the same faint line");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");

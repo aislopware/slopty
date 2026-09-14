@@ -572,7 +572,7 @@ impl CommandPalette {
             .gap(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(chosen, |el| el.bg(hsla_alpha(s.accent, alpha::TINT_STRONG)))
+            .when(chosen, |el| el.bg(hsla_alpha(s.accent, alpha::TINT)))
             .hover(move |st| st.bg(hsla(raised)))
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
@@ -608,15 +608,8 @@ impl Render for CommandPalette {
             .map(|(ix, item)| self.row(ix, item, ix == chosen, cx).into_any_element())
             .collect();
         let empty = rows.is_empty();
-        div()
+        crate::kit::backdrop(&theme)
             .id("palette-backdrop")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_start()
-            .justify_center()
-            .pt(px(theme.spacing.xl * 2.0))
-            .bg(hsla_alpha(s.canvas, alpha::SCRIM))
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
             .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
@@ -630,26 +623,11 @@ impl Render for CommandPalette {
                 }),
             )
             .child(
-                div()
+                crate::kit::dialog(&theme, crate::kit::Overlay::List)
                     .id("palette")
                     .debug_selector(|| "palette".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label("Commands")
-                    // The desktop width, or what a phone leaves after a margin each side.
-                    .w_full()
-                    .max_w(px(520.0))
-                    .mx(px(theme.spacing.md))
-                    .max_h(px(440.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(theme.radii.md))
-                    .border_1()
-                    .border_color(hsla(s.border))
-                    .bg(hsla(s.panel))
-                    .shadow_md()
-                    .text_size(px(theme.typography.ui_size))
-                    .font_family(theme.typography.ui_family.clone())
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .child(
                         div()
                             .px(px(theme.spacing.md))

@@ -299,7 +299,7 @@ impl WindowPicker {
             .gap(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(chosen, |el| el.bg(hsla_alpha(theme.surfaces.accent, alpha::TINT_STRONG)))
+            .when(chosen, |el| el.bg(hsla_alpha(theme.surfaces.accent, alpha::TINT)))
             .hover(move |s| s.bg(hsla(raised)))
             .active(move |s| s.bg(hsla(overlay)))
             .child(div().text_color(hsla(theme.surfaces.text)).child(SharedString::from(primary)))
@@ -360,18 +360,9 @@ impl Render for WindowPicker {
             "nothing matches"
         };
 
-        div()
+        crate::kit::backdrop(&theme)
             .id("picker-backdrop")
             .track_focus(&self.focus)
-            .absolute()
-            .inset_0()
-            .flex()
-            // At the top like the palette: one shape for the two dialogs that are typed at,
-            // and the phone's keyboard, rising from the bottom, covers fewer rows.
-            .items_start()
-            .justify_center()
-            .pt(px(theme.spacing.xl * 2.0))
-            .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
             .on_key_down(cx.listener(Self::key_down))
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
@@ -386,28 +377,11 @@ impl Render for WindowPicker {
                 }),
             )
             .child(
-                div()
+                crate::kit::dialog(&theme, crate::kit::Overlay::List)
                     .id("picker")
                     .debug_selector(|| "picker".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label(title)
-                    // The desktop width, or what a phone leaves after a margin each side
-                    // (`min_w_0`: the title's unwrapped width must not hold the box open).
-                    .w_full()
-                    .min_w_0()
-                    .max_w(px(560.0))
-                    .mx(px(theme.spacing.md))
-                    .max_h(px(520.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(theme.radii.md))
-                    .border_1()
-                    .border_color(hsla(theme.surfaces.border))
-                    .bg(hsla(theme.surfaces.panel))
-                    .shadow_sm()
-                    .text_size(px(theme.typography.ui_size))
-                    .font_family(theme.typography.ui_family.clone())
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                     .child(
                         div()
                             .px(px(theme.spacing.md))

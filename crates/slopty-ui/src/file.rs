@@ -355,7 +355,7 @@ impl FileView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
-        let wash = hsla_alpha(s.text, alpha::HOVER);
+        let wash = hsla_alpha(s.text, alpha::FAINT);
         let bare = move |id: &'static str| {
             div()
                 .id(id)
@@ -647,10 +647,10 @@ impl Render for FileView {
                 });
                 let muted = hsla(theme.surfaces.text_muted);
                 let fg = hsla(theme.surfaces.text);
-                let tint = hsla_alpha(theme.surfaces.success, alpha::TINT);
-                let mark = hsla_alpha(theme.surfaces.accent, alpha::TINT);
-                let hit = hsla_alpha(theme.surfaces.warn, alpha::TINT);
-                let here = hsla_alpha(theme.surfaces.warn, alpha::TINT_STRONG);
+                let tint = hsla_alpha(theme.surfaces.success, alpha::FAINT);
+                let mark = hsla_alpha(theme.surfaces.accent, alpha::FAINT);
+                let hit = hsla_alpha(theme.surfaces.warn, alpha::FAINT);
+                let here = hsla_alpha(theme.surfaces.warn, alpha::TINT);
                 let this = cx.entity().downgrade();
                 let list = uniform_list(
                     SharedString::from(format!("file-lines-{id}")),

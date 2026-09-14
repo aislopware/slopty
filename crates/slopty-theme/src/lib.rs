@@ -382,36 +382,24 @@ impl Default for Spacing {
     }
 }
 
-/// Opacities for tints and washes over a surface.
+/// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
+/// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
-    /// A selected row, the faint fill of a quiet pill.
-    pub const TINT_FAINT: f32 = 0.08;
-    /// Pill fills, the hover of a row.
-    pub const TINT: f32 = 0.12;
-    /// Answer buttons, the human's bubble.
-    pub const TINT_STRONG: f32 = 0.25;
-    /// A strong tint under the pointer.
-    pub const TINT_PRESSED: f32 = 0.4;
-    /// The hover wash of `text` over a bare button.
-    pub const HOVER: f32 = 0.08;
+    /// Barely there: a selected row, the faint fill of a quiet pill, the hover wash over a
+    /// bare button, a wash across the terminal grid (a block separator, the visual bell).
+    pub const FAINT: f32 = 0.12;
+    /// A tint that has to be seen: answer buttons, a selection.
+    pub const TINT: f32 = 0.25;
+    /// A tint under the pointer, a scrollbar thumb.
+    pub const PRESSED: f32 = 0.4;
     /// A modal backdrop.
     pub const SCRIM: f32 = 0.6;
-    /// The command-block separator (the terminal foreground).
-    pub const SEPARATOR: f32 = 0.18;
-    /// The visual bell: the terminal foreground laid over the whole grid for a flash.
-    pub const BELL: f32 = 0.15;
-    /// The separator after a failed command (the error tone).
-    pub const SEPARATOR_ERROR: f32 = 0.7;
-    /// The translucent panel behind a HUD readout over video.
-    pub const HUD: f32 = 0.85;
-    /// The minimap's panel over the canvas.
-    pub const MINIMAP: f32 = 0.92;
-    /// Minimap item blocks.
-    pub const MINIMAP_ITEM: f32 = 0.7;
-    /// Another client's viewport outline on the minimap.
-    pub const MINIMAP_LOOKER: f32 = 0.8;
-    /// The name tag on another client's outline; opaque while that client is followed.
-    pub const LOOKER_TAG: f32 = 0.9;
+    /// A mark that must read over whatever it covers: the separator after a failed command,
+    /// the minimap's item blocks.
+    pub const STRONG: f32 = 0.7;
+    /// A panel or tag laid over content and read through only barely: the stream HUD, the
+    /// minimap, another client's viewport outline and its name tag.
+    pub const VEIL: f32 = 0.9;
 }
 
 /// Surface colours for chrome (not the terminal grid): a four-step ladder, three text

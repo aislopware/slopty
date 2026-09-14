@@ -247,9 +247,9 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
 #[must_use]
 pub fn separator_color(theme: &Theme, exit: Option<u8>) -> Hsla {
     if exit.is_some_and(|code| code != 0) {
-        hsla_alpha(theme.surfaces.error, alpha::SEPARATOR_ERROR)
+        hsla_alpha(theme.surfaces.error, alpha::STRONG)
     } else {
-        hsla_alpha(theme.terminal.fg, alpha::SEPARATOR)
+        hsla_alpha(theme.terminal.fg, alpha::FAINT)
     }
 }
 
@@ -936,7 +936,7 @@ impl Element for TerminalElement {
             let link = view.link_highlight();
             let scrollbar = view.scrollbar_shown().then(|| {
                 let held = view.thumb_held();
-                let alpha = if held { alpha::TINT_PRESSED } else { alpha::TINT_STRONG };
+                let alpha = if held { alpha::PRESSED } else { alpha::TINT };
                 (hsla_alpha(palette.theme.fg, alpha), state.history_len(), view_offset)
             });
 
@@ -1081,7 +1081,7 @@ impl Element for TerminalElement {
                             palette,
                             false,
                         );
-                        run.color = hsla_alpha(palette.theme.fg, alpha::TINT_STRONG);
+                        run.color = hsla_alpha(palette.theme.fg, alpha::TINT);
                         let shaped = text_system.shape_line(
                             SharedString::from(text.clone()),
                             font_size,
@@ -1405,7 +1405,7 @@ impl Element for TerminalElement {
         }
         if self.view.read(cx).bell_flashing() {
             // The visual bell: the text colour laid thinly over the whole grid.
-            window.paint_quad(fill(bounds, Hsla { a: alpha::BELL, ..prepared.link }));
+            window.paint_quad(fill(bounds, Hsla { a: alpha::FAINT, ..prepared.link }));
         }
         let shown = std::mem::take(&mut prepared.shown);
         self.view.update(cx, |view, _cx| view.painted(&shown));

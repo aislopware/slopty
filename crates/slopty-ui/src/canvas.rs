@@ -2763,12 +2763,12 @@ impl CanvasView {
                 .py(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.sm))
                 .bg(if following {
-                    hsla_alpha(colour, 1.0)
+                    hsla(colour)
                 } else {
-                    hsla_alpha(theme.surfaces.panel, alpha::MINIMAP)
+                    hsla_alpha(theme.surfaces.panel, alpha::VEIL)
                 })
                 .border_1()
-                .border_color(hsla_alpha(colour, alpha::LOOKER_TAG))
+                .border_color(hsla_alpha(colour, alpha::VEIL))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(if following {
                     theme.surfaces.accent_fg
@@ -2816,7 +2816,7 @@ impl CanvasView {
                     .left(px(0.0))
                     .top(px(0.0))
                     .px(px(theme.spacing.xs))
-                    .bg(hsla_alpha(colour, if following { 1.0 } else { alpha::LOOKER_TAG }))
+                    .bg(if following { hsla(colour) } else { hsla_alpha(colour, alpha::VEIL) })
                     .text_size(px(theme.typography.small()))
                     .text_color(hsla(theme.surfaces.accent_fg))
                     .font_family(theme.typography.ui_family.clone())
@@ -2846,7 +2846,7 @@ impl CanvasView {
                     .w(px(s.w.max(1.0)))
                     .h(px(s.h.max(1.0)))
                     .border_1()
-                    .border_color(hsla_alpha(colour, 0.9))
+                    .border_color(hsla_alpha(colour, alpha::VEIL))
                     .rounded(px(theme.radii.md))
                     .child(tag)
                     .into_any_element()
@@ -3079,9 +3079,9 @@ impl CanvasView {
                 .debug_selector(|| "said".to_owned())
                 .role(Role::Status)
                 .aria_label(SharedString::from(text.clone()))
-                .bg(hsla_alpha(theme.surfaces.panel, alpha::MINIMAP))
+                .bg(hsla_alpha(theme.surfaces.panel, alpha::VEIL))
                 .border_1()
-                .border_color(hsla_alpha(theme.surfaces.accent, alpha::LOOKER_TAG))
+                .border_color(hsla_alpha(theme.surfaces.accent, alpha::VEIL))
                 .text_color(hsla(theme.surfaces.text))
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
@@ -3859,7 +3859,7 @@ impl CanvasView {
                 window.paint_quad(gpui::quad(
                     bounds,
                     px(theme.radii.md),
-                    hsla_alpha(theme.surfaces.panel, alpha::MINIMAP),
+                    hsla_alpha(theme.surfaces.panel, alpha::VEIL),
                     px(1.0),
                     hsla(theme.surfaces.border),
                     BorderStyle::Solid,
@@ -3867,15 +3867,12 @@ impl CanvasView {
                 for (rect, active) in &items {
                     let color =
                         if *active { theme.surfaces.accent } else { theme.surfaces.text_muted };
-                    window.paint_quad(fill(
-                        map.to_box(*rect),
-                        hsla_alpha(color, alpha::MINIMAP_ITEM),
-                    ));
+                    window.paint_quad(fill(map.to_box(*rect), hsla_alpha(color, alpha::STRONG)));
                 }
                 for (rect, colour) in &lookers {
                     window.paint_quad(outline(
                         map.to_box(*rect),
-                        hsla_alpha(*colour, alpha::MINIMAP_LOOKER),
+                        hsla_alpha(*colour, alpha::VEIL),
                         BorderStyle::Solid,
                     ));
                 }
@@ -4332,11 +4329,11 @@ fn pill(
         .px(px(theme.spacing.sm * k))
         .py(px(theme.spacing.xxs * k))
         .rounded(px(theme.radii.xs * k))
-        .bg(hsla_alpha(tone, alpha::TINT))
+        .bg(hsla_alpha(tone, alpha::FAINT))
         .text_size(px(theme.typography.small() * k))
         .text_color(hsla(tone))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
+        .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT)))
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
@@ -4427,11 +4424,11 @@ impl CanvasView {
                 .px(px(pad * k))
                 .py(px(theme.spacing.xs * k))
                 .rounded(px(theme.radii.xs * k))
-                .bg(hsla_alpha(tone, alpha::TINT_STRONG))
+                .bg(hsla_alpha(tone, alpha::TINT))
                 .text_size(px(theme.typography.small() * k))
                 .text_color(hsla(theme.surfaces.text))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_PRESSED)))
+                .hover(move |el| el.bg(hsla_alpha(tone, alpha::PRESSED)))
                 .child(
                     ChromeText::new(text, px(theme.typography.small()), k).zooming(chrome.zooming),
                 );
@@ -4465,7 +4462,7 @@ impl CanvasView {
             .px(px(theme.spacing.sm * k))
             .py(px(theme.spacing.xxs * k))
             .rounded(px(theme.radii.xs * k))
-            .bg(hsla_alpha(color, alpha::TINT))
+            .bg(hsla_alpha(color, alpha::FAINT))
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(color))
             .child(
@@ -4523,11 +4520,11 @@ impl CanvasView {
             .px(px(theme.spacing.sm * k))
             .py(px(theme.spacing.xxs * k))
             .rounded(px(theme.radii.xs * k))
-            .bg(hsla_alpha(tone, alpha::TINT))
+            .bg(hsla_alpha(tone, alpha::FAINT))
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(tone))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT_STRONG)))
+            .hover(move |el| el.bg(hsla_alpha(tone, alpha::TINT)))
             .child(
                 ChromeText::new(label, px(theme.typography.small()), k)
                     .fill()
@@ -5881,8 +5878,9 @@ mod tests {
         assert!((shape - 1080.0 / 1920.0).abs() < 0.05, "its shape is kept: {display:?}");
     }
 
-    /// The palette and the picker are their desktop width on a desktop and, on a phone, what
-    /// the screen leaves after a margin each side; neither runs off the edge.
+    /// The palette and the picker are one overlay size on a desktop (`kit::Overlay::List`,
+    /// the same for both, so the two dialogs that are typed at are the same shape) and, on a
+    /// phone, what the screen leaves after a margin each side; neither runs off the edge.
     #[gpui::test]
     fn the_palette_and_the_picker_fit_the_screen_they_are_on(cx: &mut TestAppContext) {
         let (view, _rx, _me, cx) = canvas(cx);
@@ -5894,7 +5892,9 @@ mod tests {
         };
         cx.simulate_keystrokes("cmd-shift-p");
         cx.run_until_parked();
-        assert!((within(cx, "palette", VIEWPORT.0) - 520.0).abs() < 0.5, "the desktop width");
+        let (want_w, _) = crate::kit::Overlay::List.bounds();
+        let list_w = within(cx, "palette", VIEWPORT.0);
+        assert!((list_w - want_w).abs() < 0.5, "the declared overlay width: {list_w}");
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-o");
@@ -5903,7 +5903,8 @@ mod tests {
             c.screen_event(ScreenEvent::Listing { windows: Vec::new(), displays: Vec::new() }, cx);
         });
         cx.run_until_parked();
-        assert!((within(cx, "picker", VIEWPORT.0) - 560.0).abs() < 0.5, "the desktop width");
+        let picker_w = within(cx, "picker", VIEWPORT.0);
+        assert!((picker_w - list_w).abs() < 0.5, "the same width as the palette: {picker_w}");
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.debug_bounds("picker").is_none(), "Esc closed the picker");

@@ -125,7 +125,7 @@ alike, and the shaped-word cache keys on it. OSC 9, OSC 777 `notify` and OSC 99 
 all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the canvas posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the card, and bounces the Dock like an agent's attention. BEL tints
-the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::BELL`) and, when no window
+the card's grid for a flash (`TerminalView::bell_flashing`, `alpha::FAINT`) and, when no window
 is active and `[terminal] bell_alert` holds (the default), plays the alert sound and bounces
 the Dock.
 
@@ -737,11 +737,11 @@ by one at the zoomed size through `Window::paint_glyph` from the fork's `ShapedL
 so a zoom step shapes nothing; background quads, cursor, selection, underlines — the curly one
 as GPUI's wave — and strikethroughs at the offsets §2's metrics derive, ⌘-hover link
 underline) with a hairline over every prompt-start row but the first line: the
-command-block separator, the foreground at 18 % alpha, or the theme's `surfaces.error` token
-at `alpha::SEPARATOR_ERROR` (70 %) when the row's `Prompt { exit }` is non-zero
+command-block separator, the foreground at `alpha::FAINT` (12 %), or the theme's `surfaces.error` token
+at `alpha::STRONG` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
 prompt row whose command took a second or more, its duration (`took_label`, fg at
-`alpha::TINT_STRONG`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
+`alpha::TINT`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
 emptied with the epoch; the sticky block header repeats it at its right end). Terminal-context bindings: ⌘C /
 ⌘V copy and paste, ⌘A selects every line the host keeps and fetches the history the cache
 lacks so the ⌘C after it has it all, ⌘F / ⌘G / ⌘⇧G search, ⇧⇞ / ⇧⇟ page through history and

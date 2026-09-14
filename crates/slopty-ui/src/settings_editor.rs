@@ -156,7 +156,7 @@ impl Render for SettingsEditor {
                 .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::HOVER)))
+                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 })
                 .child(label)
                 .when(!hint.is_empty(), |el| {
@@ -181,16 +181,9 @@ impl Render for SettingsEditor {
                 .text_color(hsla(s.warn))
                 .child(SharedString::from(error))
         });
-        div()
+        crate::kit::backdrop(&theme)
             .id("settings-backdrop")
             .key_context(CTX)
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_start()
-            .justify_center()
-            .pt(px(spacing.xl * 2.0))
-            .bg(hsla_alpha(s.canvas, alpha::SCRIM))
             .on_key_down(cx.listener(Self::key_down))
             .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
                 cx.emit(SettingsEditorEvent::Dismiss);
@@ -212,27 +205,13 @@ impl Render for SettingsEditor {
                 }),
             )
             .child(
-                div()
+                crate::kit::dialog(&theme, crate::kit::Overlay::Editor)
                     .id("settings-editor")
                     .debug_selector(|| "settings-editor".to_owned())
                     .role(gpui::accesskit::Role::Dialog)
                     .aria_label("Settings")
-                    .w_full()
-                    .max_w(px(640.0))
-                    .mx(px(spacing.md))
+                    // Tall enough to edit in, and not taller than the window.
                     .h(gpui::relative(0.8))
-                    .max_h(px(720.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(radii.md))
-                    .border_1()
-                    .border_color(hsla(s.border))
-                    .bg(hsla(s.panel))
-                    .shadow_sm()
-                    .text_size(px(theme.typography.ui_size))
-                    .font_family(theme.typography.ui_family.clone())
-                    .text_color(hsla(s.text))
-                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()

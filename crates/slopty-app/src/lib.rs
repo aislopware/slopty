@@ -1108,8 +1108,8 @@ impl Workspace {
                 .rounded(px(radii.xs))
                 .text_size(px(ui))
                 .text_color(hsla(warm))
-                .bg(hsla_alpha(warm, alpha::TINT))
-                .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT_STRONG)))
+                .bg(hsla_alpha(warm, alpha::FAINT))
+                .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT)))
                 .cursor_pointer()
                 .child(SharedString::from(if SHORTCUT_HINTS {
                     format!("{text}  ⌘⇧A")
@@ -1252,7 +1252,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.raised)))
                 .active(move |el| el.bg(hsla(s.overlay)))
-                .when(on_show, |el| el.bg(hsla_alpha(s.accent, alpha::TINT_FAINT)))
+                .when(on_show, |el| el.bg(hsla_alpha(s.accent, alpha::FAINT)))
                 .child(div().flex_none().size(px(spacing.sm)).rounded_full().bg(hsla(color)))
                 .child(
                     div()
