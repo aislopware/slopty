@@ -299,15 +299,16 @@ const MIN_ITEM: f32 = 160.0;
 
 /// Where a resize drag of `dx`, `dy` canvas units from `start` puts the card.
 ///
-/// With `aspect` (`height / width` of a source that cannot be reshaped) the body keeps its shape
-/// and only one edge is really being dragged: whichever way the pointer went further drives the
-/// other, so the grip follows the hand down a portrait display as it does across a landscape one.
+/// With `aspect` (`height / width` of a source that cannot be reshaped) the body keeps its shape,
+/// so the corner is put at the nearest point of the ray the shape allows — the pointer projected
+/// onto it. Taking whichever axis moved further instead would jump the card by tens of units as a
+/// diagonal drag crossed `|dx| == |dy|`, which is the way a corner grip is usually pulled.
 fn resized(start: Rect, dx: f32, dy: f32, aspect: Option<f32>) -> Rect {
     let Some(aspect) = aspect else {
         return Rect { w: (start.w + dx).max(MIN_ITEM), h: (start.h + dy).max(MIN_ITEM), ..start };
     };
-    let from_height = (start.h + dy - TITLE_H) / aspect;
-    let w = if dy.abs() > dx.abs() { from_height } else { start.w + dx }.max(MIN_ITEM);
+    let wanted_h = start.h - TITLE_H + dy;
+    let w = (wanted_h.mul_add(aspect, start.w + dx) / aspect.mul_add(aspect, 1.0)).max(MIN_ITEM);
     Rect { w, h: w.mul_add(aspect, TITLE_H), ..start }
 }
 /// Size of a new note.
@@ -4777,8 +4778,9 @@ mod tests {
         });
     }
 
-    /// A resize drag is free unless the card's source cannot be reshaped, and then the body
-    /// keeps its aspect: the edge the hand moved further along drives the other.
+    /// A resize drag is free unless the card's source cannot be reshaped, and then the corner
+    /// rides the one ray its shape allows: it follows the hand exactly along that ray, and
+    /// crossing the diagonal moves it by as little as the hand moved.
     #[test]
     fn a_card_over_a_display_keeps_the_displays_shape_as_it_is_dragged() {
         let close = |got: f32, want: f32| (got - want).abs() < 0.01;
@@ -4787,13 +4789,20 @@ mod tests {
         assert!(close(free.w, 800.0) && close(free.h, 320.0 + TITLE_H), "no lock: {free:?}");
 
         let aspect = 800.0 / 1280.0;
-        let wider = resized(start, 160.0, -80.0, Some(aspect));
-        assert!(close(wider.w, 800.0), "the hand went further across: {wider:?}");
-        assert!(close(wider.h, 500.0 + TITLE_H), "the height follows the shape: {wider:?}");
+        let held = resized(start, 0.0, 0.0, Some(aspect));
+        assert!(close(held.w, start.w) && close(held.h, start.h), "a still hand: {held:?}");
 
-        let taller = resized(start, 10.0, 200.0, Some(aspect));
-        assert!(close(taller.h, 600.0 + TITLE_H), "the hand went further down: {taller:?}");
-        assert!(close(taller.w, 960.0), "the width follows: {taller:?}");
+        // 160 across and 100 down is the shape's own direction, so the corner is under the hand.
+        let along = resized(start, 160.0, 100.0, Some(aspect));
+        assert!(close(along.w, 800.0), "the corner follows the hand: {along:?}");
+        assert!(close(along.h, 500.0 + TITLE_H), "and the height with it: {along:?}");
+
+        // A pixel of pointer movement is a pixel of card: the leading-axis rule used to jump the
+        // width by sixty units here, which is a visible snap in the middle of a diagonal drag.
+        let a = resized(start, 100.0, 100.0, Some(aspect));
+        let b = resized(start, 99.0, 100.0, Some(aspect));
+        assert!((a.w - b.w).abs() < 2.0, "the diagonal jumps: {a:?} vs {b:?}");
+        assert!((a.h - b.h).abs() < 2.0, "the diagonal jumps: {a:?} vs {b:?}");
 
         // The floor is the width's, and the height still comes from it.
         let tiny = resized(start, -10_000.0, -10_000.0, Some(aspect));

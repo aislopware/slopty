@@ -871,9 +871,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   with `ObjectFit::Fill` over the full bounds, stretched for good.
 
   So the lock lives where the shape cannot be negotiated: `locked_aspect` is `Some(h / w)` for a
-  display and `None` for a window, and `resized` reads it. While a locked card is dragged the
-  edge the hand moved further along drives the other — across for a landscape display, down for a
-  portrait one — so the grip still follows the hand rather than one axis of it. On release the
+  display and `None` for a window, and `resized` reads it. A locked card has one ray of sizes it
+  may take, and the corner goes to the point of that ray nearest the pointer. The first rule tried
+  was simpler — whichever axis the hand moved further along drives the other — and it is
+  discontinuous: at `|dx| == |dy|` the driving axis swaps and the width jumps tens of units, which
+  a diagonal pull across a corner grip crosses all the time. Projection costs a little of the
+  literal hand-follows-corner feel off the ray and buys a card that never snaps. On release the
   height is recomputed from the *snapped* width instead of being snapped itself, since the snap
   grid would otherwise nudge the card off its aspect by up to half a step and leave a stretch too
   small to see and too permanent to forgive.
@@ -884,6 +887,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   pointer through. Locking the card keeps one rectangle with one meaning.
 
   Tests: `a_card_over_a_display_keeps_the_displays_shape_as_it_is_dragged` over the arithmetic
-  (free drag, width-led, height-led, the floor), and
+  (free drag, a still hand, a drag along the ray, a pair straddling the diagonal whose widths must
+  stay within two units of each other, the floor), and
   `the_grip_asks_the_host_to_resize_the_window` over the wiring, where the same canvas holds a
   window card and a display card and only the display reports a locked aspect.
