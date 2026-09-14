@@ -727,7 +727,17 @@ mod tests {
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
         let display = loop {
-            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+            // A refused listing has no reply to catch — hostd logs it and answers nothing — so a
+            // missing TCC grant arrives here as a timeout, which says nothing on its own.
+            let Ok(event) = tokio::time::timeout(STEP, events.recv()).await else {
+                panic!(
+                    "no screen listing after {STEP:?}. hostd logs -3801 when it is refused Screen \
+                     Recording, which is every host but the installed one: TCC attributes a \
+                     shell-spawned daemon to whatever launched it, so signing does not help. Run \
+                     against `slopty host install`'s host."
+                );
+            };
+            match event.unwrap() {
                 LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
                     break displays.first().expect("a display").id;
                 }
@@ -880,7 +890,17 @@ mod tests {
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
         let display = loop {
-            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+            // A refused listing has no reply to catch — hostd logs it and answers nothing — so a
+            // missing TCC grant arrives here as a timeout, which says nothing on its own.
+            let Ok(event) = tokio::time::timeout(STEP, events.recv()).await else {
+                panic!(
+                    "no screen listing after {STEP:?}. hostd logs -3801 when it is refused Screen \
+                     Recording, which is every host but the installed one: TCC attributes a \
+                     shell-spawned daemon to whatever launched it, so signing does not help. Run \
+                     against `slopty host install`'s host."
+                );
+            };
+            match event.unwrap() {
                 LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
                     break displays.first().expect("a display").id;
                 }
@@ -1245,50 +1265,54 @@ mod tests {
     #[derive(Debug)]
     struct Rung {
         name: &'static str,
-        link: slopty_shape::Link,
-        /// Where the shaper listened: the one address the client was given.
-        relay: std::net::SocketAddr,
+        /// `None` on the direct rung, which has no shaper between the ends.
+        link: Option<slopty_shape::Link>,
+        /// Where the shaper listened: the one address the client was given. `None` when direct.
+        relay: Option<std::net::SocketAddr>,
         sample: StartUp,
         carried: slopty_shape::relay::Carried,
     }
 
-    /// The links the ladder is measured on, clear first.
+    /// The links the ladder is measured on, easiest first.
     ///
-    /// `clear` is the control: the same relay process, the same extra hop, no impairment, so a
-    /// difference further down the table is the link rather than the harness. The other three are
-    /// shaped after the paths the congestion rulings argue about — a good Wi-Fi, an LTE hop, and
-    /// the collapsed link where BBR3 starves and Cubic overshoots.
-    const LADDER: &[(&str, slopty_shape::Link)] = &[
-        ("clear", slopty_shape::Link::CLEAR),
+    /// Two controls before any impairment. `direct` has no relay at all, so a row that reads
+    /// wrong there is the harness or the host rather than anything on this list. `clear` adds the
+    /// relay process and its extra hop and shapes nothing, which separates the cost of being
+    /// relayed from the cost of the link. The other three are shaped after the paths the
+    /// congestion rulings argue about — a good Wi-Fi, an LTE hop, and the collapsed link where
+    /// BBR3 starves and Cubic overshoots.
+    const LADDER: &[(&str, Option<slopty_shape::Link>)] = &[
+        ("direct", None),
+        ("clear", Some(slopty_shape::Link::CLEAR)),
         (
             "wifi",
-            slopty_shape::Link {
+            Some(slopty_shape::Link {
                 delay: Duration::from_millis(15),
                 jitter: Duration::from_millis(5),
                 loss: 0.002,
                 rate: 4_000_000,
                 queue: 1_000_000,
-            },
+            }),
         ),
         (
             "lte",
-            slopty_shape::Link {
+            Some(slopty_shape::Link {
                 delay: Duration::from_millis(60),
                 jitter: Duration::from_millis(20),
                 loss: 0.01,
                 rate: 1_500_000,
                 queue: 375_000,
-            },
+            }),
         ),
         (
             "collapsed",
-            slopty_shape::Link {
+            Some(slopty_shape::Link {
                 delay: Duration::from_millis(80),
                 jitter: Duration::from_millis(30),
                 loss: 0.03,
                 rate: 600_000,
                 queue: 150_000,
-            },
+            }),
         ),
     ];
 
@@ -1297,31 +1321,69 @@ mod tests {
     /// The impairment lives in a relay both ends speak QUIC through, so the congestion controller
     /// reacts to it exactly as it would to a bottleneck; `SLOPTY_E2E_SECONDS` (default 8) per
     /// rung. This is the harness the ⏸ keyframe-admission rule, the 🔬 cadence ladder and the ⏸
-    /// audio jitter estimator were waiting on. Gated on `SLOPTY_SCREEN_E2E` for the recording
-    /// permission; the numbers go to `docs/MEASUREMENTS.md`.
+    /// audio jitter estimator were waiting on; the numbers go to `docs/MEASUREMENTS.md`.
+    ///
+    /// It runs against the *installed* host rather than daemons of its own, which is not a
+    /// preference: TCC attributes a shell-spawned daemon to whatever launched it, so it is refused
+    /// capture with -3801 however the binary is signed, and only the launchd host records a grant.
+    /// That host must be installed with `--bind <lan-ip>`, or the flow leaves the shaper and the
+    /// numbers describe an unimpaired link. `SLOPTY_E2E_HOSTD_SOCKET` points at its control
+    /// socket, under `<data dir>/run/`.
     #[tokio::test(flavor = "multi_thread")]
     async fn screen_over_a_shaped_link() {
-        if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+        let Some(ctl_sock) = std::env::var_os("SLOPTY_E2E_HOSTD_SOCKET") else {
+            eprintln!(
+                "SLOPTY_E2E_HOSTD_SOCKET unset; skipping. Install the host under launchd with \
+                 `slopty host install --direct-only --bind <lan-ip>` and point this at its \
+                 hostd.sock; a spawned host cannot get Screen Recording."
+            );
             return;
-        }
+        };
+        let ctl_sock = PathBuf::from(ctl_sock);
         let seconds: u64 =
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-        let dir = tempfile::tempdir().unwrap();
         let _logs = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_writer(std::io::stderr)
             .try_init();
-        slopty_client::warm_up_decoder();
-        let (_guard, ticket) = daemons_at(dir.path(), Reach::DirectOnly, Some(lan_ip())).await;
-        // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
-        // observable state for it.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let ctl_sock = dir.path().join("hostd.sock");
-        let host_addr = hostd_addr(&ticket);
+        // Warmed up *before* the first rung, not alongside it. VideoToolbox serialises session
+        // creation process-wide, so a warm-up still running when a stream starts holds that
+        // stream's own session behind it — 35.8 s on the run that found this, which read as every
+        // rung decoding nothing. `warm_up_decoder` is the app's fire-and-forget call; a
+        // measurement has to wait for the answer.
+        let warm = tokio::task::spawn_blocking(slopty_codec::warm_up).await.unwrap().unwrap();
+        eprintln!("decoder warmed up in {warm:?}");
+        // One sample thrown away before the table. Whichever stream is first in the process
+        // decodes nothing however it is carried — proven by running the relay-less rung first
+        // and then second: it read 0 frames, then 184. A warmed decoder is not enough on its
+        // own, so the first rung would otherwise always be a blank row.
+        let discarded = start_up_sample(&ctl_sock, 2, None).await;
+        eprintln!("discarded the first stream: decoded {}", discarded.decoded);
+        // Checked before eight seconds of streaming rather than after: the per-rung assertion
+        // catches an unpinned host too, but only once its numbers are already worthless.
+        let probe = mint(&ctl_sock).await;
+        let addrs: Vec<_> = probe.addr.ip_addrs().copied().collect();
+        assert!(
+            matches!(addrs.as_slice(), [one] if !one.ip().is_loopback()),
+            "the installed host must be pinned to its LAN address (`slopty host install --bind \
+             <lan-ip>`) or the run leaves the shaper; it has {addrs:?}"
+        );
+        let host_addr = hostd_addr(&probe);
 
         let mut rungs = Vec::new();
         for &(name, link) in LADDER {
+            let Some(link) = link else {
+                let sample = start_up_sample(&ctl_sock, seconds, None).await;
+                eprintln!("{name}: selected {:?}, no shaper", sample.selected);
+                rungs.push(Rung {
+                    name,
+                    link: None,
+                    relay: None,
+                    sample,
+                    carried: slopty_shape::relay::Carried::default(),
+                });
+                continue;
+            };
             // A shaper per rung: each starts with an empty queue and its own draws, so a rung
             // never inherits the standing queue the one before it left behind.
             let relay = std::sync::Arc::new(
@@ -1336,7 +1398,7 @@ mod tests {
             let carried = relay.carried().await;
             carrying.abort();
             eprintln!("{name}: selected {:?}, shaper {carried:?}", sample.selected);
-            rungs.push(Rung { name, link, relay: addr, sample, carried });
+            rungs.push(Rung { name, link: Some(link), relay: Some(addr), sample, carried });
         }
 
         eprintln!(
@@ -1348,8 +1410,8 @@ mod tests {
             eprintln!(
                 "| {} | {} kB/s | {:.1} % | {:.0} ms | {:.0} ms | {} | {:.1} / {:.1} / {:.1} ms | {} ({} ms) | {} / {} / {} | {} / {} / {} | {} |",
                 r.name,
-                r.link.rate / 1_000,
-                f64::from(r.link.loss) * 100.0,
+                r.link.map_or(0, |l| l.rate / 1_000),
+                r.link.map_or(0.0, |l| f64::from(l.loss) * 100.0),
                 s.first_decoded_ms,
                 s.hold_max_ms,
                 s.decoded,
@@ -1369,33 +1431,34 @@ mod tests {
         }
 
         for r in &rungs {
-            // The whole run is only readable while the shaper is the path. If iroh found hostd's
-            // own address and migrated, every number above describes an unshaped link.
+            assert!(r.sample.decoded >= 1, "{}: decoded nothing: {r:?}", r.name);
+            let Some(relay) = r.relay else { continue };
+            // A relayed rung is only readable while the relay is the path. If iroh found the
+            // host's own address and migrated, every number in that row is of an unshaped link.
             assert_eq!(
                 r.sample.selected,
-                Some(r.relay),
+                Some(relay),
                 "{}: the connection left the shaper, so this row is of an unshaped link",
                 r.name
             );
-            assert!(r.sample.decoded >= 1, "{}: decoded nothing: {r:?}", r.name);
             assert!(
                 r.carried.up.sent > 0 && r.carried.down.sent > 0,
                 "{}: nothing carried",
                 r.name
             );
         }
-        let clear = rungs.first().expect("the clear rung");
+        let clear = rungs.iter().find(|r| r.name == "clear").expect("the clear rung");
         assert_eq!((clear.carried.up.lost, clear.carried.down.lost), (0, 0), "{clear:?}");
         assert_eq!(clear.carried.down.overflowed, 0, "a clear link has no queue to overflow");
         // Every shaped rung must actually have degraded something, or its row is the clear row
-        // with a different name on it.
-        for r in rungs.iter().skip(1) {
-            let d = r.carried.down;
-            assert!(
-                d.lost.saturating_add(d.overflowed) > 0,
-                "{}: the shaper dropped nothing: {r:?}",
-                r.name
-            );
+        // with a different name on it. Both directions together: at the mildest rung's 0.2 % a
+        // seed that spares one direction over a few hundred packets is ordinary.
+        for r in rungs.iter().skip_while(|r| r.name != "clear").skip(1) {
+            let (up, down) = (r.carried.up, r.carried.down);
+            let dropped = [up.lost, up.overflowed, down.lost, down.overflowed]
+                .into_iter()
+                .fold(0_u64, u64::saturating_add);
+            assert!(dropped > 0, "{}: the shaper dropped nothing: {r:?}", r.name);
         }
     }
 
@@ -1759,7 +1822,17 @@ mod tests {
         // A display stream, so datagrams flow the whole time.
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
         let display = loop {
-            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
+            // A refused listing has no reply to catch — hostd logs it and answers nothing — so a
+            // missing TCC grant arrives here as a timeout, which says nothing on its own.
+            let Ok(event) = tokio::time::timeout(STEP, events.recv()).await else {
+                panic!(
+                    "no screen listing after {STEP:?}. hostd logs -3801 when it is refused Screen \
+                     Recording, which is every host but the installed one: TCC attributes a \
+                     shell-spawned daemon to whatever launched it, so signing does not help. Run \
+                     against `slopty host install`'s host."
+                );
+            };
+            match event.unwrap() {
                 LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
                     break displays.first().expect("a display").id;
                 }

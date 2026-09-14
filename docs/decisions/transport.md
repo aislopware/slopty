@@ -617,15 +617,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   more frequent short drops. Interleave the arms — the mesh drifted monotonically over two hours on
   09-06, and on 09-14 the second machine left the mesh mid-run, which costs a whole arm either way.
 
-- ⏸ **Gating a keyframe on its own headroom** (2026-09-14). The Cubic half of the 🔬 entry —
-  `frame_fits` runs before the frame is encoded, so it bounds what is queued *ahead* of a keyframe
-  and never the keyframe itself — is only partly answered by the budget above, which shrinks the
-  peak without removing it. A keyframe rule needs a safety valve (admit it after N refusals or
-  T ms) or a permanently congested link never gets one and the client sits on a hole for good,
-  which is worse than the stall it would prevent. Deferred until the run above says whether the
-  hold after a `keyframe encoded` is still hundreds of milliseconds. Out of scope in either case:
-  at 2 Mbit/s 60 fps HEVC is not viable whatever the guard does, and the answer there is frame
-  rate adaptation.
+- 🔬 **Gating a keyframe on its own headroom** (2026-09-14, measured 2026-09-15). The Cubic half
+  of the 🔬 entry — `frame_fits` runs before the frame is encoded, so it bounds what is queued
+  *ahead* of a keyframe and never the keyframe itself — is only partly answered by the budget
+  above, which shrinks the peak without removing it. A keyframe rule needs a safety valve (admit
+  it after N refusals or T ms) or a permanently congested link never gets one and the client sits
+  on a hole for good, which is worse than the stall it would prevent. Out of scope either way: at
+  2 Mbit/s 60 fps HEVC is not viable whatever the guard does, and the answer there is frame rate
+  adaptation.
+
+  **The collapsed link has now been measured** (MEASUREMENTS.md, the shaped ladder), and it
+  answers the question this was deferred on. The hold after a keyframe is not hundreds of
+  milliseconds: the worst episode held **435 kB for 4.8 seconds**, with `cwnd` at 261 kB. The
+  budget cannot be blamed and cannot be tuned out of it — 261 kB of window was available and the
+  frame still overshot by 175 kB, so no sizing of `max(per_frame × 2, cwnd)` reaches a frame that
+  large. It is the keyframe itself, which is what the rule exists for. The rung it came from is a
+  600 kB/s link at 3 % loss where the rate controller is pinned at its 1 Mbit/s floor and the
+  guard is already dropping 99 of 202 captured frames; 4.8 s of one frame's fragments on a link
+  in that state is worse than the hole the client would have sat on. Implement the rule with the
+  valve; the number to beat is that 4 796 ms.
 
 - ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
   rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe
@@ -666,3 +676,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   run checks itself as well as pinning: `selected_addr` reads the address the selected path is
   sending to, `a_shaped_link_keeps_the_client_on_the_shaper` asserts it over a real session on a
   30 ms link, and each rung of the ladder asserts it again.
+
+  The ladder runs against the *installed* host, which is not a preference: TCC attributes a
+  shell-spawned daemon to whatever launched it, so a test that spawns its own is refused capture
+  with -3801 however the binary is signed. `SLOPTY_E2E_HOSTD_SOCKET` points it at the launchd
+  host's control socket, and it checks that host is pinned before streaming rather than after.
+  Every other `SLOPTY_SCREEN_E2E` test still spawns its own daemons and so cannot capture either;
+  that is older than this change and not fixed here.

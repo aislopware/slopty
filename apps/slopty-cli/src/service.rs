@@ -44,6 +44,10 @@ pub struct InstallOpts {
     /// UDP port for the host (default: the daemon's fixed port).
     #[arg(long)]
     port: Option<u16>,
+    /// Listen on this one IP and reach nothing off it. A shaped measurement installs the host
+    /// this way so the run stays on its relay; it is unreachable from anywhere else meanwhile.
+    #[arg(long)]
+    bind: Option<std::net::IpAddr>,
     /// `RUST_LOG` for both daemons.
     #[arg(long, default_value = "info")]
     log: String,
@@ -132,6 +136,10 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
     if let Some(port) = opts.port {
         hostd_args.push("--port".to_owned());
         hostd_args.push(port.to_string());
+    }
+    if let Some(ip) = opts.bind {
+        hostd_args.push("--bind".to_owned());
+        hostd_args.push(ip.to_string());
     }
     vec![
         (PTYD_LABEL.to_owned(), common(PTYD_LABEL, "slopty-ptyd", &[], Vec::new())),
@@ -275,7 +283,12 @@ mod tests {
 
     #[test]
     fn plists_carry_the_paths_and_flags() {
-        let opts = InstallOpts { direct_only: true, port: Some(45551), ..InstallOpts::default() };
+        let opts = InstallOpts {
+            direct_only: true,
+            port: Some(45551),
+            bind: Some(std::net::IpAddr::from([192, 168, 1, 10])),
+            ..InstallOpts::default()
+        };
         let list = plists(&opts, Path::new("/opt/slopty/bin"), Path::new("/data/slopty"));
         assert_eq!(list.len(), 2);
         let hostd = list[1].1.as_dictionary().unwrap();
@@ -285,7 +298,17 @@ mod tests {
             .iter()
             .map(|v| v.as_string().unwrap())
             .collect();
-        assert_eq!(argv, ["/opt/slopty/bin/slopty-hostd", "--direct-only", "--port", "45551"]);
+        assert_eq!(
+            argv,
+            [
+                "/opt/slopty/bin/slopty-hostd",
+                "--direct-only",
+                "--port",
+                "45551",
+                "--bind",
+                "192.168.1.10"
+            ]
+        );
         let env = hostd["EnvironmentVariables"].as_dictionary().unwrap();
         assert_eq!(env["SLOPTY_HOSTD_SOCKET"].as_string(), Some("/data/slopty/run/hostd.sock"));
         assert_eq!(env["SLOPTY_DATA_DIR"].as_string(), Some("/data/slopty"));

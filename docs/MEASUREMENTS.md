@@ -2916,3 +2916,69 @@ slopty bench screen --host <id> --display 6 --seconds 20
 grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-hostd.log
 ```
 
+
+## 2026-09-15 — the shaped ladder: a collapsed link on demand, and what it costs the stream
+
+The run three rulings were waiting on. Setup: mac-studio alone, hosting `display 6`
+(1920×1080 @1x 60 Hz, an idle desktop), debug build. The host is the installed one
+(`slopty host install --direct-only --port 45560 --bind 192.168.100.240`); the client is the
+in-process one in `screen_over_a_shaped_link`, dialling through a `slopty-shape` relay per rung.
+Both ends are pinned so the flow cannot leave the relay — the `selected` column of each row is
+asserted, not hoped for. 8 s per rung, seed 1, `Quality::default()`.
+
+`direct` has no relay at all and `clear` has one that shapes nothing: together they separate the
+harness and the extra hop from the link. They agree to within 2 ms of first-decoded and 5 frames,
+so the relay itself costs nothing readable.
+
+| link      | shaper rate | loss  | first decoded | client hold max | decoded (8 s) | gap p50 / p90 / max | stalls | nacks | shaper down: sent / lost / overflowed | host target (Mbit/s, first → last) |
+| --------- | ----------- | ----- | ------------- | --------------- | ------------- | ------------------- | ------ | ----- | ------------------------------------- | ---------------------------------- |
+| direct    | —           | —     | 134 ms        | 12 ms           | 184           | 48.4 / 69.0 / 84.3 ms  | 0   | 0     | —                                     | 13.5 → 30.0, every step Grow       |
+| clear     | unlimited   | 0 %   | 136 ms        | 6 ms            | 187           | 48.9 / 67.4 / 90.5 ms  | 0   | 1     | 1165 / 0 / 0                          | 13.5 → 30.0, every step Grow       |
+| wifi      | 4 000 kB/s  | 0.2 % | 241 ms        | 56 ms           | 182           | 49.6 / 67.3 / 84.9 ms  | 0   | 2     | 1441 / 1 / 0                          | 12.0 → 30.0 by 6.8 s               |
+| lte       | 1 500 kB/s  | 1.0 % | 531 ms        | 278 ms          | 158           | 54.6 / 74.0 / 282.0 ms | 0   | 4     | 1526 / 15 / 0                         | 9.0 Cut → 6.8 → regrew to 9.1      |
+| collapsed | 600 kB/s    | 3.0 % | 645 ms        | 248 ms          | 52            | 141.7 / 277.3 / 341.4 ms | 1 | 10    | 2651 / 78 / 1                         | 7.3 → cut to the 1.0 floor by 5 s  |
+
+Host side, 738 hold episodes across the five rungs: `held_ms` p50 2, p90 3, **worst 4 796 ms**
+holding **435 274 B** with `cwnd` at 260 799 B; second worst 771 ms holding 306 108 B at a
+`cwnd` of 259 925 B. `cwnd` ranged 6 127 B to 441 214 B over the run. Capture guard per rung
+(captured / dropped / encoded): direct 184/0/184, clear 188/0/188, wifi 188/4/184, lte
+188/24/164, collapsed 202/99/58.
+
+**What this settles.** The collapsed rung is the day the capture-guard ruling said it needed and
+could not conjure on a 9.5 ms link: the rate controller walks 7.3 → 1.0 Mbit/s in seven `Cut`
+verdicts and stays pinned at the floor, the guard drops 99 of 202 captured frames, and the client
+gets 52 frames in 8 s with a p90 arrival gap of 277 ms. The ⏸ keyframe rule asked one question —
+whether the hold after a keyframe is still hundreds of milliseconds once the budget is
+`max(per_frame × 2, cwnd)` — and the answer is worse than the question assumed: **4.8 seconds**,
+holding 435 kB. `cwnd` was 261 kB at the time, so this is not a window the guard could have
+respected; the frame itself is the overshoot, exactly as the Cubic half of the 🔬 entry argued.
+
+**Two harness defects found on the way, both worth their own look.**
+
+1. The first `VTDecompressionSessionCreate` in a process took **28.4 / 28.7 / 31.0 s** on three
+   runs; the second takes 4 ms. The 2026-09-05 entry recorded 150–400 ms for the same call. While
+   it runs it blocks every stream's own session — the first run of this ladder read five rungs of
+   zero decoded frames, and the five blocked sessions all unblocked in the same millisecond. The
+   test now waits for `slopty_codec::warm_up()` before the first rung. Unexplained, and it would
+   cost a real user the first half-minute after launch if it reproduces outside a test binary.
+2. Whichever stream is first in the process decodes nothing even with the decoder warm. Proven by
+   running the relay-less rung first and then second: 0 frames, then 184. The test now takes one
+   2 s sample and throws it away.
+
+Also worth knowing: `slopty host install` copies the binary, and the copy loses its Screen
+Recording grant unless `cargo xtask sign` runs immediately before each install.
+
+```sh
+# the host must be the installed one: TCC attributes a shell-spawned daemon to whatever launched
+# it, so a test that spawns its own is refused capture with -3801 however the binary is signed
+cargo xtask sign && slopty host install --direct-only --port 45560 --bind <lan-ip> \
+  --log 'info,slopty_host=debug,slopty_hostd=debug'
+slopty host doctor          # two ticks before the run counts
+SLOPTY_E2E_HOSTD_SOCKET="$HOME/Library/Application Support/Slopty/run/hostd.sock" \
+  SLOPTY_E2E_SECONDS=8 RUST_LOG=info,slopty_client=debug,slopty_codec=debug \
+  cargo nextest run -p slopty-hostd --test e2e -E 'test(screen_over_a_shaped_link)' --no-capture
+grep -E '^\| ' /tmp/ladder.log                                   # the table
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+  | perl -ne 'print "$1 $2 $3\n" if /held_ms=(\d+) max_bytes=(\d+) cwnd=(\d+)/'
+cargo xtask sign && slopty host install --direct-only --port 45560   # put the host back
+```
