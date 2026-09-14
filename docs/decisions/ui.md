@@ -64,6 +64,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the binding fork re-pinned at `e69a909`. Standing order from the same day: every coding
   session starts with `cargo xtask upstream check` (sync what is behind), `rustup update`,
   `cargo update -w` and the tool versions (`docs/DEV.md`).
+  2026-09-14: rebased onto zed main `7cda6f0523` (8 commits, no API break, fork head
+  `a07e5cf08a`) and gpui-kit main `9504b4658d` (13 commits, fork head `ef7525ba`). gpui-kit's
+  only conflict was the usual one, now in `Cargo.toml` as well as `Cargo.lock`: upstream bumped
+  its `gpui-pre` deps 0.3.1 → 0.3.5 in the block our one commit rewrites into git sources on the
+  zed fork, so the bump has nothing to carry over and our side of the hunk stands. libghostty-rs
+  was at upstream head. `vendor/ghostty` is left at `5252b193cf`, 19 commits behind ghostty main:
+  the binding pins that commit and a bump means regenerating and re-checking the bindings, which
+  is its own change. Nightly moved to 2026-09-13; stable 1.98.1 unchanged.
 
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
