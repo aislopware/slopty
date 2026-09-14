@@ -1060,3 +1060,47 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_theme_that_rebuilds_ps1_still_gets_its_prompt_marked` (a `.zshrc` precmd that sets
   PS1: the first prompt is marked by `P`, the second in PS1) and the scanner's
   `prompt_starts_but_not_continuations`.
+
+- ✅ **A gesture belongs to whichever surface could use its first movement** (2026-09-15). The
+  grid used to judge every wheel event on its own: it took the event if a program wanted the
+  mouse or there was history that way, and let it through otherwise, so the canvas could pan
+  under a terminal that had nothing left to scroll. Per event, that rule breaks in the middle of
+  a fling. Flick a grid ten lines from the bottom of its history and the first few events scroll
+  it; the rest of the momentum — which on macOS keeps arriving for the best part of a second
+  after the fingers lift — falls through to the canvas, and the whole workspace slides away from
+  under the pointer. Nobody asked for that pan, and it lands after the gesture that caused it is
+  over, which is the worst kind of surprise on a surface built for direct manipulation.
+
+  Ruling: the first event of a gesture that actually *moves* decides the owner, and
+  `wheel_gesture` holds it until the next `TouchPhase::Started` clears it. A fling that began in
+  the grid stays in the grid and is absorbed at the end of the scrollback; a pan that began over
+  a bottomed-out grid goes on panning even as it crosses history the grid could have used. ⌘
+  means the canvas's zoom, and taking it drops the latch rather than fighting it.
+
+  Three facts decide the shape, and getting any of them wrong makes the change a no-op or worse.
+
+  **`Started` cannot be the event that decides.** The first event of a gesture is a finger
+  landing: gpui's touch recogniser and a trackpad both deliver it with a zero delta. Latching
+  there reads "no movement, so the grid cannot use this" and hands every finger pan straight to
+  the canvas. The first version of this ruling did exactly that, and
+  `a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas` — written months earlier for
+  a different reason — failed inside the hour. So `Started` only clears the latch, and the first
+  non-zero delta sets it.
+
+  **The latch must outlive `Ended`.** In the fork's `gpui_macos/src/events.rs` (read at
+  `a07e5cf`), `NSScrollWheel` maps `NSEvent.phase()` to `TouchPhase` and never reads
+  `momentumPhase()`, so a fling's momentum — which keeps arriving for the best part of a second
+  after the fingers lift — is a run of plain `Moved` events *after* `Ended`. Releasing the latch
+  on `Ended` would drop it at the one moment it exists for. iOS's `UIPanGestureRecognizer` sends
+  no momentum, so a latch left standing there is simply never read again.
+
+  **`ScrollDelta` is what tells a wheel from a gesture.** The same file picks `Pixels` when
+  `hasPreciseScrollingDeltas` is set and `Lines` otherwise, which on macOS makes `Lines` a mouse
+  wheel and nothing else. A notch has no gesture to belong to, so it neither reads nor writes the
+  latch — otherwise a wheel would be stuck with whatever the last trackpad fling decided.
+
+  Tests: `the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it` drives both directions
+  of the latch through the real phase order (`Started`, `Moved`, `Ended`, then momentum `Moved`s)
+  and checks a `Lines` notch still scrolls a grid whose latch says canvas;
+  `a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas` holds the zero-delta start,
+  from the canvas's side where the consequence is visible.

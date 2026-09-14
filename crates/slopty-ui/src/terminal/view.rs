@@ -339,6 +339,10 @@ pub struct TerminalView {
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
     /// in fractions; they add up).
     wheel_remainder: f32,
+    /// Whether the gesture in flight belongs to the grid, decided by its first movement and
+    /// held through its momentum until the next one starts. `None` while a gesture has yet to
+    /// move; a mouse wheel never reads or writes it.
+    wheel_gesture: Option<bool>,
     /// The command-block menu a right click opened, and where.
     block_menu: Option<BlockMenu>,
     /// When the running shell command left its prompt.
@@ -441,6 +445,7 @@ impl TerminalView {
             bell_task: None,
             thumb_drag: None,
             wheel_remainder: 0.0,
+            wheel_gesture: None,
             search: None,
             agent: None,
             search_regex: false,
@@ -2040,6 +2045,7 @@ impl TerminalView {
         // ⌘-wheel is the canvas's zoom, never the grid's.
         if event.modifiers.platform {
             self.wheel_remainder = 0.0;
+            self.wheel_gesture = None;
             return;
         }
         // A program that asked for the mouse gets the wheel (⇧ keeps it for scrolling, as
@@ -2048,22 +2054,49 @@ impl TerminalView {
         let modes = self.state.modes();
         let to_program = (modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
             || modes.contains(TermModes::ALT_SCREEN);
-        // The grid takes the wheel while it can use it — a program wants it, or there is
-        // history that way — and otherwise lets it through, so the canvas pans under a grid
-        // at the end of its history rather than swallowing the gesture.
-        let usable = to_program
+        // The grid can take the wheel while it has somewhere to go with it — a program wants
+        // it, or there is history that way — and otherwise lets it through, so the canvas pans
+        // under a grid at the end of its history rather than swallowing the gesture.
+        let can_use = to_program
             || (lines > 0.0 && self.state.view_offset() < self.state.history_len())
             || (lines < 0.0 && self.state.view_offset() > 0);
-        if !usable {
+        // A gesture goes to whichever surface could use its first *movement* and keeps it to
+        // the last. Deciding per event instead would hand a fling's momentum to the canvas the
+        // moment the grid ran out of scrollback, and the whole workspace would slide out from
+        // under a terminal that was merely flicked too hard.
+        //
+        // The latch outlives `Ended` on purpose. gpui reads only `NSEvent.phase`, never
+        // `momentumPhase`, so macOS momentum arrives as a run of `Moved` *after* the fingers
+        // lift — releasing on `Ended` would drop the latch at exactly the moment it is needed.
+        // Only `Started` clears it, and `Started` itself decides nothing: the first event of a
+        // gesture is a finger landing, and it carries no movement to judge.
+        //
+        // Only a gesture latches. `hasPreciseScrollingDeltas` is what picks `Pixels` over
+        // `Lines`, so on macOS a `Lines` delta is a mouse wheel and nothing else: a notch has no
+        // gesture to be part of and is judged on its own, rather than inheriting whatever the
+        // last trackpad fling decided.
+        if event.touch_phase == TouchPhase::Started {
+            // A new gesture also counts its fractions of a line from zero.
+            self.wheel_remainder = 0.0;
+            self.wheel_gesture = None;
+        }
+        let mine = match (event.delta, self.wheel_gesture) {
+            (ScrollDelta::Lines(_), _) => can_use,
+            (ScrollDelta::Pixels(_), Some(mine)) => mine,
+            (ScrollDelta::Pixels(_), None) if lines.abs() > f32::EPSILON => {
+                self.wheel_gesture = Some(can_use);
+                can_use
+            }
+            // Still nothing to scroll and nothing to decide: leave the gesture unowned.
+            (ScrollDelta::Pixels(_), None) => return,
+        };
+        if !mine {
             self.wheel_remainder = 0.0;
             return;
         }
         cx.stop_propagation();
         // A trackpad moves in fractions of a line: they add up to whole ones, and a new
         // gesture starts the count over.
-        if event.touch_phase == TouchPhase::Started {
-            self.wheel_remainder = 0.0;
-        }
         let total = self.wheel_remainder + lines;
         // Wheel up (positive y in GPUI) scrolls into history.
         #[expect(clippy::cast_possible_truncation, reason = "whole lines")]
@@ -4281,8 +4314,9 @@ mod tests {
         );
     }
 
-    /// A trackpad's fractions of a line add up to whole lines scrolled; a program tracking
-    /// the mouse gets the wheel as rows (⇧ keeps it local); so does the alternate screen.
+    /// A trackpad's fractions of a line add up to whole lines scrolled, and a gesture stays
+    /// with the surface that took its first event; a program tracking the mouse gets the wheel
+    /// as rows (⇧ keeps it local); so does the alternate screen.
     #[gpui::test]
     fn the_wheel_adds_up_fractions_and_reaches_a_program_that_wants_it(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -4326,6 +4360,49 @@ mod tests {
             view.read_with(cx, |v, _| v.wheel_remainder).abs() < f32::EPSILON,
             "and carries nothing"
         );
+
+        // A trackpad sends pixels, and those events are a gesture: whichever surface could use
+        // the first of them keeps the rest, momentum included.
+        let pan = |cx: &mut VisualTestContext, lines: f32, phase| {
+            let h = view.read_with(cx, |v, _| v.metrics.map_or(20.0, |m| f32::from(m.line_height)));
+            cx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(0.0), px(lines * h))),
+                modifiers: mods,
+                touch_phase: phase,
+            });
+            cx.run_until_parked();
+        };
+        let owner = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.wheel_gesture);
+        pan(cx, 0.0, TouchPhase::Started);
+        assert_eq!(owner(cx), None, "a finger landing has moved nothing and decides nothing");
+        pan(cx, 3.0, TouchPhase::Moved);
+        assert!(offset(cx) > 0, "the first movement puts the gesture in the grid");
+        pan(cx, -99.0, TouchPhase::Moved);
+        assert_eq!(offset(cx), 0, "which runs it to the bottom of the history");
+        pan(cx, 0.0, TouchPhase::Ended);
+        pan(cx, -99.0, TouchPhase::Moved);
+        assert_eq!(
+            owner(cx),
+            Some(true),
+            "the momentum after the fingers lift is still the grid's, not a canvas pan"
+        );
+        // And the other way: a pan the canvas began is not taken back the moment the grid
+        // could use it, so dragging the canvas past a terminal never snags halfway across.
+        pan(cx, 0.0, TouchPhase::Started);
+        pan(cx, -1.0, TouchPhase::Moved);
+        assert_eq!(owner(cx), Some(false), "nothing below: the gesture is the canvas's");
+        pan(cx, 99.0, TouchPhase::Moved);
+        assert_eq!(offset(cx), 0, "the grid stays out of a gesture it did not take");
+        pan(cx, 0.0, TouchPhase::Ended);
+        pan(cx, 99.0, TouchPhase::Moved);
+        assert_eq!(offset(cx), 0, "momentum the other way round, and still not the grid's");
+        // A mouse wheel has no gesture: the latch says "canvas" and the notch scrolls anyway.
+        wheel(cx, 3.0, mods, TouchPhase::Moved);
+        assert_eq!(offset(cx), 3, "a wheel notch belongs to nothing and is judged on its own");
+        wheel(cx, -3.0, mods, TouchPhase::Started);
+        assert_eq!(offset(cx), 0, "back to the output");
+
         let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
         wheel(cx, 3.0, cmd, TouchPhase::Started);
         assert_eq!(offset(cx), 0, "⌘-wheel is the canvas's zoom");
