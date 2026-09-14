@@ -116,16 +116,18 @@ fn pointer_bounds(at: Point<Pixels>, size: Size<Pixels>, hot: Point<Pixels>) -> 
     Bounds { origin: point(at.x - hot.x, at.y - hot.y), size }
 }
 
-/// How long a fling may go quiet before the host is told its momentum ended. macOS sends a
-/// zero-delta `momentumPhase = End`; gpui has no event for it, so the gap is the only signal.
-/// Momentum events arrive about a frame apart, so this is several frames of silence.
+/// How long a fling may go quiet before the host is told its momentum ended. Both platforms say
+/// so themselves, so this is the backstop for a lost or dropped close. Momentum events arrive
+/// about a frame apart, which makes this several frames of silence.
 const MOMENTUM_GAP: Duration = Duration::from_millis(120);
 
 /// Where a scroll gesture over the picture has got to.
 ///
 /// gpui reads `NSEvent.phase` and never `momentumPhase`, so a fling's momentum reaches us as
 /// plain `Moved` events *after* `Ended`. Forwarding those as more of the same gesture tells the
-/// remote app the scroll ended and then went on changing, which is not a thing macOS does.
+/// remote app the scroll ended and then went on changing, which is not a thing macOS does. iOS
+/// coasts through its own touch recognizer, which sends the same run of `Moved` and then closes
+/// it with a second `Ended`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Scrolling {
     /// No gesture in flight. A mouse wheel notch never leaves this state.
@@ -828,6 +830,13 @@ impl ScreenView {
             (TouchPhase::Started, _) => {
                 self.scrolling = Scrolling::Fingers;
                 (ScrollPhase::Began, ScrollPhase::None)
+            }
+            // iOS coasts on its own recognizer and closes the coast with one more `Ended`. The
+            // fingers lifted a fling ago, so this ends the momentum, not the gesture; reading it
+            // as a second gesture end would leave the momentum open forever.
+            (TouchPhase::Ended, Scrolling::Momentum { begun: true }) => {
+                self.scrolling = Scrolling::Idle;
+                (ScrollPhase::None, ScrollPhase::Ended)
             }
             (TouchPhase::Ended, _) => {
                 self.scrolling = Scrolling::Momentum { begun: false };
@@ -1918,6 +1927,21 @@ mod tests {
             }
             other => panic!("expected one zero-delta momentum end, got {other:?}"),
         }
+
+        // iOS coasts through gpui's own touch recognizer, whose last momentum step carries
+        // `Ended`. That closes the coast; it is not the gesture ending a second time.
+        wheel(cx, -8.0, TouchPhase::Started);
+        wheel(cx, -30.0, TouchPhase::Ended);
+        wheel(cx, -20.0, TouchPhase::Moved);
+        wheel(cx, -4.0, TouchPhase::Ended);
+        assert_eq!(
+            phases(&mut rx),
+            [(Began, Off), (Ended, Off), (Off, Began), (Off, Ended)],
+            "the coast closes itself on iOS"
+        );
+        cx.executor().advance_clock(PAST_THE_GAP);
+        cx.run_until_parked();
+        assert!(inputs(&mut rx).is_empty(), "and the backstop has nothing left to close");
 
         // Fingers that rest on the trackpad before they push open the gesture twice, because
         // gpui reads `MayBegin` and `Began` as the same phase. The host is told once.

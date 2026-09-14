@@ -179,6 +179,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   running fling closes it first, as macOS does. A drag that ended without a fling behind it needs
   nothing: its own `Ended` closed it.
 
+  iOS reaches the same state machine by a different road, and the road is not the one it looks
+  like. `gpui_ios` has a `UIPanGestureRecognizer` for scrolling, but it sets
+  `maximumNumberOfTouches: 0`, so it carries indirect scroll only — a trackpad or a wheel on an
+  iPad — and no finger ever reaches it. Finger scrolling runs through `gpui/src/gestures.rs`,
+  which recognises a pan from raw touches and coasts it on a `UIScrollView` deceleration curve,
+  ticked from the window each frame. Its shape is the macOS one plus a closing event: `Started`,
+  `Moved`s, `Ended` at the lift, the coast's `Moved`s, then **one more `Ended`**. Read naively
+  that second `Ended` is a gesture ending twice, and the momentum it was closing stays open until
+  `MOMENTUM_GAP` runs out — the exact latch this ruling exists to prevent, on the platform where
+  flinging is the only way to scroll. It closes the momentum instead.
+
   Two more shapes come from the same place gpui flattens phases. `NSEventPhaseMayBegin` and
   `NSEventPhaseBegan` both map to `TouchPhase::Started`, so fingers that rest on the trackpad
   before they push open one gesture twice; the second `Started` is the same gesture continuing
