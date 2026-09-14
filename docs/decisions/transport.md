@@ -651,7 +651,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   conclusion was drawn from a number that measured something adjacent to what it was read as; the
   first is in `docs/decisions/testing.md`.)
 
-- ✅ **A keyframe the link cannot drain is deferred for an LTR refresh** (2026-09-15,
+- 🔬 **A keyframe the link cannot drain is deferred for an LTR refresh** (2026-09-15,
   `keyframe_fits`). What makes the deferral affordable is that there is something to send instead.
   Refusing a keyframe and sending nothing does not help: the frame does not get smaller while the
   host waits, and a client with a hole and no frames is exactly the failure the valve is there to
@@ -678,9 +678,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   frame — by a factor of nearly three. The rule fires on exactly the one rung that earned it.
   `keyframes_deferred` counts episodes, not frames, and is in `ScreenStats` for the ladder to read.
 
-  Not yet re-measured: the shaped ladder has not been run against the rule, so the number that
-  replaces 4 796 ms is not in MEASUREMENTS.md. The rule is licensed by the measurement above, not
-  by one of its own.
+  **Measured, and it never fires** (2026-09-15, second shaped-ladder run). Across five rungs the
+  host logged **zero** deferrals. The rule is guarded correctly and it is not dead code in general,
+  but in the scenario it was written for it does not run, so it is not the fix for the 4 796 ms
+  hold and must not be recorded as one. Two things explain it, and both were assumptions rather
+  than measurements when the rule was written.
+
+  *Nothing requests a keyframe on a collapsed link.* `pending.keyframe` is set in exactly two
+  places: when a stream opens, and when a quality change rebuilds the encoder. Neither happens
+  while a link is collapsing. The drop path sets `pending.refresh`, never `pending.keyframe` — so
+  the gate sits on the one request type that rung never produces.
+
+  *The expensive frames are refreshes answered as keyframes.* The encoder runs an infinite GOP
+  (`MaxKeyFrameInterval` is `i32::MAX`, "keyframes only on request"), so every keyframe is one
+  somebody asked for — and the run still produced 28 of them, 20–124 kB. They came from
+  `force_ltr_refresh`, which VideoToolbox satisfies with an IDR when it has no acknowledged
+  long-term reference to refresh from. The guard sets a refresh on *every* dropped frame, and the
+  collapsed rung drops 99 of 202 captures, so that rung asks for refreshes continuously and is
+  handed keyframes for them.
+
+  One more premise was wrong: keyframes *do* shrink with the target bitrate. This run's ran 124 kB
+  near the top and 20 kB once the controller pinned at the 1 Mbit/s floor, tracking the rate down.
+  The entry above says the encoder sizes a keyframe "never from what the path can carry right now";
+  that half is withdrawn. It sizes them from the average rate, which the controller is already
+  lowering.
+
+  The collapsed rung did read better this run (70 frames decoded against 52, p50 gap 97 ms against
+  142 ms). **That is not this change.** The gated path provably never executed, so the difference is
+  run-to-run variance in desktop content — worth stating plainly, because a green number next to a
+  new feature is exactly how a rule with no effect gets believed.
+
+  **Where the real rule goes.** At the refresh request, not the keyframe request, and the question
+  to answer first is why an LTR refresh becomes an IDR at all: the client does acknowledge tokens
+  (`ack_ltr` on every decoded frame carrying one), so either the encoder is not attaching them or
+  the acknowledgement is not reaching it. A refresh that is a genuine delta off an acknowledged
+  reference is cheap and the problem dissolves; a refresh that is always an IDR means the guard is
+  requesting a full keyframe 99 times per 202 captures on a link that cannot carry one. Measure
+  which, then gate the refresh with the same drain budget and valve.
 
 - ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
   rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe

@@ -2993,3 +2993,43 @@ perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
   | perl -ne 'print "$1 $2 $3\n" if /held_ms=(\d+) max_bytes=(\d+) cwnd=(\d+)/'
 cargo xtask sign && slopty host install --direct-only --port 45560   # put the host back
 ```
+
+## 2026-09-15 — the shaped ladder again, against the keyframe rule
+
+Same rig, same shaper seed, same 8 s per rung as the run above; the host is the installed one
+pinned to the LAN address. The point of the run was to put a number on the keyframe-admission rule
+(`docs/decisions/transport.md`). It produced a better one — and the rule had nothing to do with it.
+
+| link      | rate       | loss  | first decoded | hold max | decoded | gap p50 / p90 / max      | nacks | shaper down sent/lost/ovf |
+| --------- | ---------- | ----- | ------------- | -------- | ------- | ------------------------ | ----- | ------------------------- |
+| direct    | —          | —     | 136 ms        | 10 ms    | 189     | 48.6 / 66.5 / 83.5 ms    | 0     | —                         |
+| clear     | ∞          | 0 %   | 135 ms        | 13 ms    | 190     | 47.7 / 67.1 / 87.0 ms    | 0     | 1139 / 0 / 0              |
+| wifi      | 4000 kB/s  | 0.2 % | 239 ms        | 57 ms    | 185     | 49.4 / 67.3 / 84.5 ms    | 1     | 1370 / 1 / 0              |
+| lte       | 1500 kB/s  | 1.0 % | 523 ms        | 186 ms   | 164     | 49.6 / 71.4 / 213.3 ms   | 4     | 1500 / 15 / 0             |
+| collapsed | 600 kB/s   | 3.0 % | 662 ms        | 276 ms   | 70      | 97.1 / 242.2 / 281.3 ms  | 7     | 2290 / 68 / 0             |
+
+**`keyframes_deferred` was 0 on every rung.** The host logged no deferral at all, so the gated path
+never executed. The collapsed rung nevertheless decoded 70 frames against the previous run's 52,
+with p50 gap 97 ms against 142 ms and max 281 ms against 341 ms. **None of that is the rule** — the
+code it added did not run. It is variance between two runs over content this harness does not
+control, and it is recorded here so nobody later reads the pair of tables as a before/after.
+
+**Why it never fired, from the host's own log.** The encoder runs an infinite GOP
+(`MaxKeyFrameInterval` = `i32::MAX`), so every keyframe is requested rather than periodic — and the
+run still produced 28 of them, 20 524 B to 123 990 B. They cannot have come from the gate's input:
+`pending.keyframe` is set only when a stream opens and when a quality change rebuilds the encoder.
+They came from `force_ltr_refresh`, which the guard sets on every dropped frame (99 of 202 captures
+on the collapsed rung) and which VideoToolbox answers with an IDR when it has no acknowledged
+long-term reference to work from.
+
+**Keyframes track the target bitrate.** Sizes fell with the rate controller through the collapsed
+rung — 123 990, 114 368, 105 439, 80 705, 67 566, 46 935, 42 522, 20 524 B — ending at a sixth of
+where they started once the controller pinned at the 1 Mbit/s floor. The earlier claim that the
+encoder sizes a keyframe without regard for what the path can carry is wrong in that half.
+
+```sh
+# as the run above, then:
+grep -c "keyframe deferred" ~/Library/Logs/Slopty/slopty-hostd.log     # the rule's own log line
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+  | perl -ne 'print "$1 $2\n" if /^(\S+).*bytes=(\d+) keyframe=true/'  # sizes with timestamps
+```
