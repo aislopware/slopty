@@ -462,12 +462,15 @@ impl Surfaces {
         border: Rgb::hex(0xd8dbe1),
         text: Rgb::hex(0x1d1d1f),
         text_secondary: Rgb::hex(0x4b4f58),
-        text_muted: Rgb::hex(0x6e6e73),
-        accent: Rgb::hex(0x2f6fdb),
+        // Darkened 2026-09-15 so every one of these clears WCAG AA on the darkest chrome
+        // surface, not just on white: at their previous values `accent` read 3.83 and `warn`
+        // 3.93 against `overlay`, and all five are text (`chrome_text_clears_wcag_aa`).
+        text_muted: Rgb::hex(0x66666b),
+        accent: Rgb::hex(0x2a63c4),
         accent_fg: Rgb::hex(0xffffff),
-        success: Rgb::hex(0x1a7f37),
-        warn: Rgb::hex(0x9a6700),
-        error: Rgb::hex(0xcf222e),
+        success: Rgb::hex(0x187633),
+        warn: Rgb::hex(0x8b5d00),
+        error: Rgb::hex(0xc7212c),
     };
 }
 
@@ -799,6 +802,47 @@ mod tests {
             (CursorBlink::Never.blinks(true), CursorBlink::Never.blinks(false)),
             (false, false)
         );
+    }
+
+    /// Every chrome colour that is drawn as text reads on every chrome surface it can land on.
+    ///
+    /// The terminal grid has `minimum_contrast` to lift a cell whose colours the program chose;
+    /// chrome has nothing of the kind, because these colours are ours and the fix is to pick
+    /// better ones. WCAG AA for body text is 4.5:1, and the pairs are checked against all four
+    /// surfaces rather than against the one they usually sit on: a status label follows its card,
+    /// and the card can be on any of them.
+    ///
+    /// `warn` and `accent` on `overlay` read 3.93 and 3.83 in the light variant before this test
+    /// existed. The dark variant already passed.
+    #[test]
+    fn chrome_text_clears_wcag_aa() {
+        const AA: f32 = 4.5;
+        for (name, s) in [("dark", Surfaces::DARK), ("light", Surfaces::LIGHT)] {
+            let surfaces = [
+                ("canvas", s.canvas),
+                ("panel", s.panel),
+                ("raised", s.raised),
+                ("overlay", s.overlay),
+            ];
+            let inks = [
+                ("text", s.text),
+                ("text_secondary", s.text_secondary),
+                ("text_muted", s.text_muted),
+                ("success", s.success),
+                ("warn", s.warn),
+                ("error", s.error),
+                ("accent", s.accent),
+            ];
+            for (ink, fg) in inks {
+                for (surface, bg) in surfaces {
+                    let ratio = fg.contrast(bg);
+                    assert!(ratio >= AA, "{name}: {ink} on {surface} is {ratio:.2}, under {AA}");
+                }
+            }
+            // The accent is also a surface of its own, with its own foreground on it.
+            let on_accent = s.accent_fg.contrast(s.accent);
+            assert!(on_accent >= AA, "{name}: accent_fg on accent is {on_accent:.2}");
+        }
     }
 
     #[test]
