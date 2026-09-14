@@ -31,6 +31,12 @@
 //! is small and the target springs back when it recovers, instead of growing back an eighth
 //! at a time. A cut is taken from the target actually sent; a clean window under the cap does
 //! not grow `wanted` (nothing was learned about rates above the cap).
+//!
+//! The target then decides the frame rate as well, through [`Cadence`]: a bitrate is spent on
+//! however many frames the encoder is handed, so a collapsed path at 60 fps produces sixty
+//! smeared frames a second instead of fifteen readable ones. The ladder is the client's ceiling
+//! then 60, 30 and 15, and it moves on bytes per frame rather than on the bitrate itself, so a
+//! ceiling of 30 and a ceiling of 120 behave the same way.
 
 use slopty_core::Duration;
 use slopty_proto::screen::{RateVerdict, ReceiverReport};
@@ -75,6 +81,119 @@ impl PathSample {
         }
         self.cwnd.saturating_mul(8).saturating_mul(1_000_000).checked_div(rtt_us)
     }
+}
+
+/// Bytes a frame needs before the cadence stays where it is; under this the ladder drops a rung.
+///
+/// A bitrate is a budget per second, and the encoder spends it on however many frames it is given.
+/// At the 1 Mbit/s floor, 60 fps leaves 2 KB a frame: every frame is smeared and none of them is
+/// worth the bandwidth it took. Halving the cadence doubles what each surviving frame gets.
+pub const CADENCE_DROP_BYTES: u32 = 8 * 1024;
+/// Bytes a frame must have to spare before the cadence climbs a rung, so the ladder does not flap
+/// around one threshold: half again as much as leaving demands.
+pub const CADENCE_RAISE_BYTES: u32 = 12 * 1024;
+/// `rung` when it sits under `ceiling`, and the ceiling itself when it does not: a client that
+/// asked for 30 never hears about 60, and one that asked for 10 stays at 10.
+const fn under(ceiling: u16, rung: u16) -> u16 {
+    if rung < ceiling { rung } else { ceiling }
+}
+
+/// The rungs highest first: the client's ceiling, then 60, 30 and 15. 15 fps is the slowest ever
+/// sent — below it a moving window reads as a slideshow rather than a slow picture — and 60 is
+/// there for the ceilings above it, so a 120 fps stream has somewhere to go that is not a quarter
+/// of what it asked for. A repeat means that rung is at or above the ceiling; the search below
+/// takes the fastest that qualifies, so a repeat costs nothing.
+const fn rungs(ceiling: u16) -> [u16; 4] {
+    [ceiling, under(ceiling, 60), under(ceiling, 30), under(ceiling, 15)]
+}
+
+/// Whether each frame gets `bytes` at `target_bps` and `fps`.
+const fn affords(fps: u16, target_bps: u32, bytes: u32) -> bool {
+    match (target_bps / 8).checked_div(fps as u32) {
+        Some(per_frame) => per_frame >= bytes,
+        None => false,
+    }
+}
+
+/// The fastest rung whose frames each get `bytes` at `target_bps`; the slowest when none does,
+/// because something has to be sent.
+const fn fastest_rung(ceiling: u16, target_bps: u32, bytes: u32) -> u16 {
+    let [top, high, mid, low] = rungs(ceiling);
+    let mut best = low;
+    if mid > best && affords(mid, target_bps, bytes) {
+        best = mid;
+    }
+    if high > best && affords(high, target_bps, bytes) {
+        best = high;
+    }
+    if top > best && affords(top, target_bps, bytes) {
+        best = top;
+    }
+    best
+}
+
+/// How many frames a second are worth encoding at the bitrate now in force.
+///
+/// Capture keeps running at the ceiling, so a change on screen is still noticed within one display
+/// beat; this only decides how many of those captures reach the encoder. Two consequences to keep
+/// in view: the held-bytes budget in the host's frame guard is `2 / fps` of *time*, so a slower
+/// cadence lets QUIC hold proportionally longer before a frame is refused, and frames arriving
+/// 67 ms apart would read as stalls to the receiver were the host not already heartbeating every
+/// 25 ms of silence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Cadence {
+    ceiling: u16,
+    current: u16,
+}
+
+impl Cadence {
+    /// At the client's ceiling, where every stream starts.
+    #[must_use]
+    pub const fn new(ceiling_fps: u16) -> Self {
+        Self { ceiling: ceiling_fps, current: ceiling_fps }
+    }
+
+    /// Pick the ladder back up at the rung already in force.
+    #[must_use]
+    pub const fn resume(ceiling_fps: u16, current_fps: u16) -> Self {
+        Self { ceiling: ceiling_fps, current: current_fps }
+    }
+
+    /// The rung in force.
+    #[must_use]
+    pub const fn fps(self) -> u16 {
+        self.current
+    }
+
+    /// Move to the rung `target_bps` affords; `None` when that is the rung already in force.
+    pub const fn update(&mut self, target_bps: u32) -> Option<u16> {
+        let keep = fastest_rung(self.ceiling, target_bps, CADENCE_DROP_BYTES);
+        let raise = fastest_rung(self.ceiling, target_bps, CADENCE_RAISE_BYTES);
+        let next = if keep < self.current {
+            keep
+        } else if raise > self.current {
+            raise
+        } else {
+            return None;
+        };
+        self.current = next;
+        Some(next)
+    }
+}
+
+/// Whether a capture taken `elapsed_us` after the last encoded one is due at `cadence_fps`.
+///
+/// Early by an eighth of the period still counts as due: ScreenCaptureKit delivers on the display's
+/// beat with a little jitter either way, and a strict comparison sends a frame that arrives 0.2 ms
+/// early to the back of the next period, which halves the cadence that actually goes out.
+#[must_use]
+pub const fn frame_due(elapsed_us: u64, cadence_fps: u16) -> bool {
+    let fps = if cadence_fps == 0 { 1 } else { cadence_fps as u64 };
+    let period_us = match 1_000_000_u64.checked_div(fps) {
+        Some(period) => period,
+        None => 0,
+    };
+    elapsed_us.saturating_add(period_us / 8) >= period_us
 }
 
 /// One decision window: the reports since the last decision, summed.
@@ -596,5 +715,74 @@ mod tests {
             run(&mut c, &CLEAN, 300, None);
         }
         assert_eq!(c.target_bps(), 2_000_000);
+    }
+
+    #[test]
+    fn the_cadence_drops_a_rung_when_a_frame_can_no_longer_hold_8_kb() {
+        let mut c = Cadence::new(60);
+        // 4 Mbit/s is 8.3 KB a frame at 60: thin, and still the fastest rung that clears the bar.
+        assert_eq!(c.update(4_000_000), None);
+        assert_eq!(c.fps(), 60);
+        // 3 Mbit/s is 6.2 KB at 60 and 12.5 KB at 30.
+        assert_eq!(c.update(3_000_000), Some(30));
+        // 1.5 Mbit/s is 6.2 KB at 30 and 12.5 KB at 15.
+        assert_eq!(c.update(1_500_000), Some(15));
+        // The floor holds: MIN_BPS still leaves 8.3 KB at 15, and nothing slower is ever sent.
+        assert_eq!(c.update(MIN_BPS), None);
+        assert_eq!(c.fps(), 15);
+    }
+
+    #[test]
+    fn climbing_back_costs_more_than_leaving_so_the_ladder_does_not_flap() {
+        let mut c = Cadence::resume(60, 30);
+        // The rate that took the stream off 60 does not put it back: 4 Mbit/s clears 8 KB at 60
+        // but not the 12 KB a climb asks for.
+        assert_eq!(c.update(4_000_000), None);
+        assert_eq!(c.update(5_800_000), None, "12 KB × 60 × 8 is 5.9 Mbit/s");
+        assert_eq!(c.update(6_000_000), Some(60));
+        // And the same from the bottom rung, which may skip 30 outright when the path recovers.
+        let mut c = Cadence::resume(60, 15);
+        assert_eq!(c.update(3_000_000), Some(30));
+        let mut c = Cadence::resume(60, 15);
+        assert_eq!(c.update(20_000_000), Some(60));
+    }
+
+    #[test]
+    fn the_ladder_never_passes_the_ceiling_the_client_asked_for() {
+        let mut c = Cadence::new(30);
+        assert_eq!(c.update(30_000_000), None, "already at the ceiling");
+        assert_eq!(c.update(2_000_000), None, "8.3 KB a frame at 30 still clears the bar");
+        assert_eq!(c.update(1_500_000), Some(15));
+        assert_eq!(c.update(30_000_000), Some(30));
+        // A ceiling already under the floor is left alone rather than raised to 15.
+        let mut c = Cadence::new(10);
+        assert_eq!(c.update(MIN_BPS), None);
+        assert_eq!(c.update(30_000_000), None);
+        assert_eq!(c.fps(), 10);
+        // A ceiling above every rung steps down through them rather than to the floor.
+        let mut c = Cadence::new(120);
+        assert_eq!(c.update(6_000_000), Some(60), "12 KB × 120 × 8 is 11.8 Mbit/s");
+        assert_eq!(c.update(3_000_000), Some(30));
+        assert_eq!(c.update(20_000_000), Some(120));
+    }
+
+    #[test]
+    fn a_capture_is_due_at_the_cadences_period_give_or_take_an_eighth() {
+        // 60 fps captures at 30: every other one.
+        assert!(!frame_due(16_667, 30));
+        assert!(frame_due(33_334, 30));
+        // At 15 one in four, and a capture a hair early is still due.
+        assert!(!frame_due(50_000, 15));
+        assert!(frame_due(66_667, 15));
+        assert!(frame_due(62_000, 15));
+        assert!(!frame_due(57_000, 15));
+        // A cadence equal to the capture rate keeps every frame, jitter and all.
+        assert!(frame_due(16_500, 60));
+        // A stream that has sent nothing for a while never holds the next frame back.
+        assert!(frame_due(500_000, 60));
+        assert!(
+            frame_due(1_000_000, 0),
+            "a zero cadence is one frame a second, not a division trap"
+        );
     }
 }

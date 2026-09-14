@@ -29,8 +29,8 @@ use slopty_core::StreamId;
 use slopty_input::{Injector, InputError};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController, Redundancy,
-    audio_datagram, cursor_datagram, heartbeat_datagram,
+    Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController,
+    Redundancy, audio_datagram, cursor_datagram, frame_due, heartbeat_datagram,
 };
 use slopty_proto::media::MAX_DATAGRAM;
 use slopty_proto::screen::{
@@ -794,8 +794,13 @@ struct Shared {
     sent_at_report: AtomicU64,
     /// `host_now_us()` when the last datagram was queued; the heartbeat clock.
     last_push_us: AtomicU64,
-    /// Capture frame rate, for the held-bytes limit.
+    /// The cadence rung in force: how many of the captures reach the encoder, and the frame rate
+    /// the held-bytes limit is computed from.
     fps: std::sync::atomic::AtomicU16,
+    /// The cadence the client asked for; the ladder never climbs past it.
+    fps_ceiling: std::sync::atomic::AtomicU16,
+    /// `capture_ts_us` of the last frame handed to the encoder; the cadence gate's clock.
+    last_encoded_us: AtomicU64,
     /// Whether frames come through the display-crop path right now.
     cropped: std::sync::atomic::AtomicBool,
     /// The target window is not on screen. Nothing ScreenCaptureKit delivers can be a picture of
@@ -840,6 +845,23 @@ impl Shared {
             Some(Err(e)) => tracing::warn!(stream = %self.id, bps, error = %e, "set bitrate"),
             None => {}
         }
+    }
+
+    /// Move the cadence to the rung `bps` affords, and tell the encoder it did.
+    ///
+    /// Capture is left at the ceiling either way: a change on screen is still seen within a display
+    /// beat, only fewer of those captures are encoded, so the picture that does go out is worth its
+    /// bandwidth (`docs/decisions/video.md`, the cadence ladder).
+    fn apply_cadence(&self, bps: u32) {
+        let ceiling = self.fps_ceiling.load(Ordering::Relaxed);
+        let mut cadence = Cadence::resume(ceiling, self.fps.load(Ordering::Relaxed));
+        let Some(fps) = cadence.update(bps) else { return };
+        self.fps.store(fps, Ordering::Relaxed);
+        let result = self.encoder.read().as_ref().map(|e| e.set_frame_rate(fps));
+        if let Some(Err(e)) = result {
+            tracing::warn!(stream = %self.id, fps, error = %e, "set frame rate");
+        }
+        tracing::debug!(stream = %self.id, fps, bps, "cadence");
     }
 
     /// Queue a datagram; a full queue drops it (video is unreliable by design).
@@ -907,6 +929,20 @@ impl Shared {
         if self.cropped.load(Ordering::Relaxed) {
             self.counters.cropped.fetch_add(1, Ordering::Relaxed);
         }
+        // The cadence rung, before the congestion guard: a capture the ladder is not asking for is
+        // not a frame the link failed to carry, and skipping it is what gives the next one the
+        // bytes to be worth sending. No refresh is owed, the client is missing nothing.
+        // A keyframe is the one thing the rung does not hold back: it is what a client with no
+        // picture at all is waiting on, and there is at most one in flight. A pending *refresh* is
+        // not urgent in the same way — at a collapsed rate the guard below sets one on every frame
+        // it drops, and letting those through would take the cadence off exactly where it is
+        // needed.
+        let since_encoded =
+            frame.capture_ts_us.saturating_sub(self.last_encoded_us.load(Ordering::Relaxed));
+        let due = frame_due(since_encoded, self.fps.load(Ordering::Relaxed));
+        if !due && !self.pending.lock().keyframe {
+            return;
+        }
         let fits = frame_fits(
             self.out.capacity(),
             self.budget.held(),
@@ -928,6 +964,7 @@ impl Shared {
                 acked_ltr: std::mem::take(&mut pending.acked),
             }
         };
+        self.last_encoded_us.store(frame.capture_ts_us, Ordering::Relaxed);
         self.counters.submitted(frame.capture_ts_us, host_now_us());
         let outcome = self
             .encoder
@@ -1061,6 +1098,7 @@ impl Shared {
         );
         if decision.changed {
             self.apply_bitrate(decision.target_bps);
+            self.apply_cadence(decision.target_bps);
         }
         Some(decision)
     }
@@ -1375,6 +1413,8 @@ impl ScreenStream {
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(host_now_us()),
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
+            fps_ceiling: std::sync::atomic::AtomicU16::new(capture_config.fps),
+            last_encoded_us: AtomicU64::new(0),
             cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             pointer_over: std::sync::atomic::AtomicBool::new(false),
@@ -1390,6 +1430,7 @@ impl ScreenStream {
         *shared.encoder.write() = Some(encoder);
         let start = shared.rate.lock().target_bps();
         shared.apply_bitrate(start);
+        shared.apply_cadence(start);
 
         let (started_tx, started_rx) = oneshot::channel();
         let sink = Arc::clone(&shared);
@@ -1740,7 +1781,11 @@ impl ScreenStream {
             rate.target_bps()
         };
         self.shared.apply_bitrate(target);
+        // A new quality sets a new ceiling, and the ladder starts from it again: the rung that was
+        // in force answered a bitrate the client has just replaced.
+        self.shared.fps_ceiling.store(capture_config.fps, Ordering::Relaxed);
         self.shared.fps.store(capture_config.fps, Ordering::Relaxed);
+        self.shared.apply_cadence(target);
         self.shared.pending.lock().keyframe = true;
         let id = self.id;
         self.capture.update(&capture_config, move |result| {
@@ -2080,6 +2125,8 @@ mod tests {
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(0),
             fps: std::sync::atomic::AtomicU16::new(60),
+            fps_ceiling: std::sync::atomic::AtomicU16::new(60),
+            last_encoded_us: AtomicU64::new(0),
             cropped: std::sync::atomic::AtomicBool::new(true),
             target_hidden: std::sync::atomic::AtomicBool::new(false),
             pointer_over: std::sync::atomic::AtomicBool::new(false),
@@ -2284,6 +2331,51 @@ mod tests {
         shared.on_frame(&frame);
         let flowing = shared.stats();
         assert_eq!((flowing.captured, flowing.suspected, flowing.cropped), (4, 2, 1));
+    }
+
+    /// The ladder is the host's, not only the policy's: a target that has collapsed moves the rung
+    /// the guard and the gate both read, and a target that recovers moves it back.
+    #[test]
+    fn a_collapsed_target_takes_the_stream_down_the_cadence_ladder() {
+        let (shared, _rx) = shared_for_frames();
+
+        shared.apply_cadence(1_000_000);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 15, "2 KB a frame at 60 is not a picture");
+        shared.apply_cadence(30_000_000);
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
+    }
+
+    /// Captures keep arriving on the display's beat whatever the cadence is; the gate is what
+    /// decides which of them the encoder is given, and it counts in time rather than in frames.
+    #[test]
+    fn the_cadence_gate_hands_the_encoder_one_capture_a_period() {
+        // A full-sized queue: the guard below the gate refuses everything under its low-water mark.
+        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        shared.fps.store(30, Ordering::Relaxed);
+
+        // One buffer, moved through the beats: building a `CVPixelBuffer` costs far more than the
+        // gate this is about, and nothing downstream of here reads the pixels.
+        let mut frame = a_frame();
+        let mut encoded = 0_u32;
+        for beat in 0..12_u64 {
+            // Capture timestamps are the host clock, so the first frame of a stream is always due.
+            frame.capture_ts_us = 1_000_000_u64.saturating_add(beat.saturating_mul(16_667));
+            shared.on_frame(&frame);
+            if shared.last_encoded_us.load(Ordering::Relaxed) == frame.capture_ts_us {
+                encoded = encoded.saturating_add(1);
+            }
+        }
+
+        assert_eq!(encoded, 6, "half of a 60 fps capture beat belongs to a 30 fps cadence");
+        assert_eq!(shared.stats().captured, 12, "every capture is still counted");
+        assert_eq!(shared.stats().dropped, 0, "a paced skip is not a congestion drop");
+
+        // A client with no picture waits for a keyframe, not for the rung.
+        let last = shared.last_encoded_us.load(Ordering::Relaxed);
+        shared.pending.lock().keyframe = true;
+        frame.capture_ts_us = last.saturating_add(1_000);
+        shared.on_frame(&frame);
+        assert_eq!(shared.last_encoded_us.load(Ordering::Relaxed), last.saturating_add(1_000));
     }
 
     /// What the crop must never hand on. The path is decided on the geometry tick, but the

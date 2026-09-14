@@ -325,6 +325,25 @@ impl Encoder {
         Ok(())
     }
 
+    /// Tell the session how many frames a second it is now being given.
+    ///
+    /// `AverageBitRate` is spent over a second however many frames arrive, so the cadence change
+    /// alone already gives the surviving frames the skipped ones' bytes. `ExpectedFrameRate` is
+    /// the hint the rate controller sizes its first frames from, and in the VBV mode it also
+    /// fixes the buffer's duration; both would still describe the old cadence otherwise.
+    pub fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
+        let fps = f64::from(fps.max(1));
+        // SAFETY: framework-provided constant string.
+        let expected_key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+        self.set(expected_key, &cf::float(fps), "ExpectedFrameRate")?;
+        if self.config.rate_control == RateControl::Vbv {
+            // SAFETY: framework-provided constant string.
+            let duration_key = unsafe { kVTCompressionPropertyKey_VBVBufferDuration };
+            self.set(duration_key, &cf::float(2.0 / fps), "VBVBufferDuration")?;
+        }
+        Ok(())
+    }
+
     /// Change the target bitrate on the fly (bits per second).
     pub fn set_bitrate(&self, bps: u32) -> Result<(), CodecError> {
         match self.config.rate_control {

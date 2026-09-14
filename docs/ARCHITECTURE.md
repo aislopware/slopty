@@ -413,7 +413,10 @@ retransmit history; `Reassembler` → in-order frames, NACK/refresh `Action`s, `
 path's cwnd/rtt, `judge` the pure policy over one decision window: a stall the reassembler
 reported (`stalled_ms` / `stalls` in the report) freezes the target, loss while flowing cuts
 it, a clean window grows it; every decision goes back to the client as `ScreenEvent::Rate`
-for the stats overlay and the bench; pure, no clocks, tested; `heartbeat_datagram` → a bare
+for the stats overlay and the bench; pure, no clocks, tested; `Cadence` → the frame rate that
+target affords, a ladder of the client's ceiling then 60/30/15 chosen on bytes per frame, with
+`frame_due` the gate the host runs each capture through (decisions/video.md, the cadence ladder);
+`heartbeat_datagram` → a bare
 `Kind::Heartbeat` header the host sends after `HEARTBEAT_AFTER` of silence so a still screen
 or a capture gap does not read as a link stall at the receiver), `slopty-host::screen`
 (`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the

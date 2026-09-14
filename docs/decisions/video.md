@@ -786,3 +786,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   client's display shows. Out-of-range values (fps outside 15–120, a ceiling outside 1–200
   Mbit/s) read as the defaults, as the font sizes do. Tests: `remote_keys`,
   `remote_settings_ride_on_the_theme`, `new_stream_settings_are_asked_of_a_live_stream`.
+
+- ✅ **The frame rate follows the bitrate: a cadence ladder of ceiling → 60 → 30 → 15** (2026-09-15).
+  A bitrate is a budget per second and the encoder spends it on however many frames it is handed,
+  so a path that has collapsed to the 1 Mbit/s floor was being asked for sixty frames of 2 KB each.
+  Every one of them is smeared and none is worth the bandwidth it cost. The collapsed-window run
+  (MEASUREMENTS.md, "QUIC held frames for seconds") already shows the shape of it: the congestion
+  guard dropped 1016 of 1149 captures, an effective 4.5 fps, but it dropped them wherever the send
+  buffer happened to be full, and the encoder went on sizing every frame for a 60 fps stream.
+  `slopty_media::Cadence` now picks the rung — the client's `fps` ceiling, then 60, 30 and 15 — as
+  the fastest whose frames each get 8 KB at the target in force, and `frame_due` admits a capture
+  only when its timestamp is a period past the last encoded one (an eighth of a period of slack,
+  or SCK's jitter halves the cadence that goes out). Climbing back costs 12 KB a frame rather than
+  8, so the ladder does not flap around one threshold. Three consequences, all deliberate:
+  capture keeps running at the ceiling, so a change on screen is still seen within one display
+  beat and only the *sending* slows; `frame_fits` reads the rung, so its two-frame budget is two
+  frames of the new cadence and QUIC may hold 133 ms at 15 fps against 33 ms at 60 — worse than
+  the old floor sounds, but the alternative at that rate is refusing nearly every frame; and the
+  67 ms gaps would read as stalls to the receiver were the host not already heartbeating every
+  25 ms of silence, which it is (`HEARTBEAT_AFTER`, half of `STALL_GAP`).
+  The rungs and the ladder's shape are ruled. 🔬 The 8 KB and 12 KB thresholds are arithmetic, not
+  a measurement: they are where a 1080p HEVC screen frame stops holding text, judged from the
+  58 KB keyframes and ~16 KB P-frames this encoder produces at 8 Mbit/s. The collapsed-link arm
+  that would tune them needs a degraded path, which the 9.5 ms mesh cannot be made into without
+  `dnctl`. Tests: `the_cadence_drops_a_rung_when_a_frame_can_no_longer_hold_8_kb`,
+  `climbing_back_costs_more_than_leaving_so_the_ladder_does_not_flap`,
+  `the_ladder_never_passes_the_ceiling_the_client_asked_for`,
+  `a_capture_is_due_at_the_cadences_period_give_or_take_an_eighth`,
+  `a_collapsed_target_takes_the_stream_down_the_cadence_ladder`,
+  `the_cadence_gate_hands_the_encoder_one_capture_a_period`.
