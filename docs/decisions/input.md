@@ -147,3 +147,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keyboard as the client does: nothing down. A view with nothing held sends nothing. The
   earlier "Modifier keys reach the host on their own" entry's open item is closed by this.
   Test: headless `losing_focus_releases_what_is_held_on_the_host`.
+
+- ✅ **A fling reaches the host as a gesture and then as momentum** (2026-09-15). The wire type
+  and the host have carried both phases from the start: `ScreenInput::Scroll` has `phase` and
+  `momentum`, and `slopty-input`'s backend writes them into `kCGScrollWheelEventScrollPhase` and
+  `kCGScrollWheelEventMomentumPhase`. The client filled in only the first. It mapped gpui's
+  `TouchPhase` straight across and sent `momentum: None` on every event, so a two-finger fling
+  over a remote window arrived as `Began, Changed…, Ended, Changed, Changed…` — a gesture that
+  ends and then keeps changing, which is not a sequence macOS ever produces. AppKit's own scroll
+  latching and rubber-banding read these fields, so the remote app was being handed a shape it
+  has no case for.
+
+  The cause is the same gpui detail behind the terminal's scroll latch: `gpui_macos` derives
+  `TouchPhase` from `NSEvent.phase()` and never reads `momentumPhase()`, so a fling's coast is
+  indistinguishable from more of the drag unless the client tracks the gesture itself.
+  `Scrolling` does that — `Idle`, `Fingers` between `Started` and `Ended`, then `Momentum` — and
+  `scroll_phases` reads it: the coast goes out with no scroll phase at all and a momentum phase
+  that begins once and then continues. A `Lines` delta is a mouse wheel and carries neither
+  phase, where before it was sent as part of whatever gesture gpui's phase claimed.
+
+  The *end* of the coast has no phase of its own to read, but it does still arrive. macOS closes
+  a fling with an event that carries `momentumPhase = End` and moves nothing; its `phase()` is
+  none, so gpui passes it on as one more `Moved`. A momentum event that has stopped moving is
+  therefore the end, and taking it at face value closes the gesture on the frame macOS sent it
+  rather than some time later. Without that, the remote app stays latched to a scroll that never
+  finishes, and AppKit holds its rubber-band open.
+
+  `MOMENTUM_GAP` (120 ms, several frames of silence where momentum events arrive about one frame
+  apart) stays as the backstop for a lost or dropped end, on a timer that every momentum event
+  replaces and the end itself cancels; it emits the same zero-delta close. A finger landing on a
+  running fling closes it first, as macOS does. A drag that ended without a fling behind it needs
+  nothing: its own `Ended` closed it.
+
+  Test: `a_fling_over_the_picture_reaches_the_host_as_a_gesture_and_then_as_momentum` drives the
+  whole shape and both ways it can finish.
