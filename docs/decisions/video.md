@@ -816,30 +816,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_collapsed_target_takes_the_stream_down_the_cadence_ladder`,
   `the_cadence_gate_hands_the_encoder_one_capture_a_period`.
 
-- 🔬 **The first decoder session takes half a minute, not 150 ms** (2026-09-15, from the shaped
-  ladder in MEASUREMENTS.md). `slopty_codec::warm_up` is one `VTDecompressionSessionCreate` from
-  canned 64×64 parameter sets, measured at 150–400 ms on 2026-09-05 and built on that number: it
-  is fire-and-forget on its own thread precisely because it was supposed to be over before anyone
-  noticed. It took **28.4, 28.7 and 31.0 s** on three consecutive runs of the ladder; a second
-  session in the same process takes 4 ms. VideoToolbox serialises session creation, so while it
-  runs every stream's own session waits — the first ladder run read five rungs of zero decoded
-  frames, and the five blocked sessions returned in the same millisecond the warm-up finished.
 
-  Two things are not yet known and matter in opposite directions. Whether it reproduces outside a
-  test binary: if it does, `open_workspace` calls `warm_up_decoder` at launch and the first remote
-  window after launch is blank for half a minute, which is the worst latency defect in the
-  project. And whether it is new: nothing in the decoder has changed since 09-05, so the suspect
-  is the OS or the machine rather than this code. Reproduce first with a signed bundled build and
-  a bare binary before touching anything. One corroboration already: the same afternoon's gate
-  flagged `slopty-codec::roundtrip tests::hevc_encode_then_decode` as slow at **42.7 s**, which is
-  the same call in a test that has never been slow before.
+- ✅ **The decoder has not regressed; a slow first session is the volume the binary runs from**
+  (2026-09-15). The shaped ladder read five rungs of zero decoded frames and a warm-up that took
+  28–31 s where 2026-09-05 measured 150–400 ms, which looked like the worst latency defect in the
+  project: the app calls `warm_up_decoder` at launch, so half a minute of blank first window. It is
+  not in this code. The same test binary takes 118 s from the repo's external volume and 0.56 s
+  from `/tmp`, unmodified — see the `testing.md` entry for the isolation and the `noowners` mount
+  flag behind it. Nothing in `slopty-codec` or `slopty-client` is owed a change, and the daemons
+  never showed it because `bench screen` runs the installed host off the boot volume.
 
-- 🔬 **The first screen stream in a process decodes nothing** (2026-09-15, same run). Separate
-  from the warm-up above and still there once the decoder is warm: whichever stream opens first
-  in a client process delivers no decoded picture, and the next one is fine. Proven by running
-  the ladder's relay-less rung first and then second — 0 frames, then 184 — and again by the
-  throwaway 2 s sample the test now takes, which reads 0 every run. The stream's own session
-  configures in 5 ms and a frame is reassembled (`first_frame_ms` is set); only the decoded
-  picture never arrives, so the loss is between `Decoder::decode` and the sink. A user opening
-  one remote window per launch would see nothing at all, which makes this the more urgent of the
-  two.
+  What the ladder's harness keeps from the episode: it waits for `slopty_codec::warm_up` before the
+  first rung instead of firing it off, and throws the first sample away. Both are right regardless
+  of the cause — a measurement should not race its own warm-up — and on the boot volume they cost
+  a second rather than half a minute.

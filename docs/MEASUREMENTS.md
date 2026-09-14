@@ -2953,17 +2953,16 @@ whether the hold after a keyframe is still hundreds of milliseconds once the bud
 holding 435 kB. `cwnd` was 261 kB at the time, so this is not a window the guard could have
 respected; the frame itself is the overshoot, exactly as the Cubic half of the 🔬 entry argued.
 
-**Two harness defects found on the way, both worth their own look.**
+**Two harness defects found on the way, and both had the same cause.** The first rungs read zero
+decoded frames, and the decoder warm-up took 28.4 / 28.7 / 31.0 s where 2026-09-05 measured
+150–400 ms. That is not the decoder: the same test binary takes 118 s run from this repo's
+external volume and 0.56 s run from `/tmp`, unmodified, because the volume is mounted `noowners`
+and code-signature validation there misses the cached path (`decisions/testing.md`). Every
+VideoToolbox test in the suite pays it; the fix is `CARGO_TARGET_DIR` on the boot volume.
 
-1. The first `VTDecompressionSessionCreate` in a process took **28.4 / 28.7 / 31.0 s** on three
-   runs; the second takes 4 ms. The 2026-09-05 entry recorded 150–400 ms for the same call. While
-   it runs it blocks every stream's own session — the first run of this ladder read five rungs of
-   zero decoded frames, and the five blocked sessions all unblocked in the same millisecond. The
-   test now waits for `slopty_codec::warm_up()` before the first rung. Unexplained, and it would
-   cost a real user the first half-minute after launch if it reproduces outside a test binary.
-2. Whichever stream is first in the process decodes nothing even with the decoder warm. Proven by
-   running the relay-less rung first and then second: 0 frames, then 184. The test now takes one
-   2 s sample and throws it away.
+The harness keeps two changes anyway, both right on their own terms: it waits for
+`slopty_codec::warm_up()` before the first rung rather than racing it, and throws the first
+sample away. On the boot volume they cost about a second.
 
 Also worth knowing: `slopty host install` copies the binary, and the copy loses its Screen
 Recording grant unless `cargo xtask sign` runs immediately before each install.

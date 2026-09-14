@@ -205,3 +205,30 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   fractions of them, asserting stream pixels as fractions of the stream size. Expectations are
   never hard-coded window pixels: the letterboxed picture's size is the layout's business, and
   a test that pinned it would break on any chrome change without a behaviour change.
+
+
+- 🔬 **A test binary run from the external volume costs ~29 s per VideoToolbox session**
+  (2026-09-15). `slopty-codec`'s `hevc_encode_then_decode` takes **108, 116 and 118 s** on three
+  runs from `/Volumes/Lacie/...`, at 9 % CPU throughout — waiting, not working. Copy the *same
+  bytes* to `/tmp` and it takes **0.53–0.66 s**. Nothing else changes: same inode contents, same
+  signature, 1.28 MB, and the file reads at 1.2 GB/s, so this is neither size nor throughput.
+
+  The repo's volume is mounted `nodev, nosuid, noowners` while the boot volume is not. `noowners`
+  makes macOS treat it as untrusted media, and the kernel's code-signature validation for a
+  process on such a volume does not take the cached path — so every `VTDecompressionSessionCreate`
+  re-validates. Later sessions in the same process are 4 ms, which fits: the cost is paid on
+  validation, not on the codec.
+
+  **The fix is to build somewhere else** — `CARGO_TARGET_DIR` on the boot volume — and it is worth
+  measuring the whole suite before and after, because every encoder and decoder test in it is
+  paying this. Not done here: it forces one full rebuild, and the number that justifies it is a
+  suite time, which this session did not have a quiet machine to take.
+
+  **Two earlier conclusions in this file's history were wrong and are withdrawn.** The first blamed
+  the decoder (`video.md` carried a 🔬 saying `VTDecompressionSessionCreate` had regressed from
+  150 ms to 28 s). The second blamed cargo's `linker-signed` ad-hoc signature, on the strength of
+  108 s against 0.53 s for "the same binary re-signed" — but the re-signed copy had also been moved
+  to `/tmp`, so the comparison moved two variables and credited the wrong one. Re-running the
+  *unmodified linker-signed* binary from `/tmp` (0.56 s) is what isolated it. An `xtask` change
+  that re-signed every test binary before each run was written against that wrong cause and has
+  been reverted. Change one variable per measurement; a copy to another volume is a variable.
