@@ -421,7 +421,7 @@ mod tests {
         assert!(!dump.hooks_offered, "not offered until it is clicked");
 
         let [x, y, w, h] =
-            dump.a11y_node("Button", Some("install hooks")).expect("the pill").bounds;
+            dump.a11y_node("Button", Some("Install hooks")).expect("the pill").bounds;
         stack
             .driver
             .ok(&Command::Click { x: x + w / 2.0, y: y + h / 2.0, button: Button::Left, count: 1 })
