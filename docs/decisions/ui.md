@@ -809,3 +809,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   glow, no second elevation; no emoji and no decorative glyph in chrome text; motion only where it
   carries meaning (the camera flights, the take-back offer), never as decoration. Microcopy is a
   noun phrase or a verb in the imperative, never a sentence about what the program just achieved.
+
+- ❌ **Ranking the command palette by match quality** (2026-09-14, written and then measured
+  against the real command list rather than a toy one). `palette::filter` keeps every item whose
+  label holds all of the query's words and returns them in the order they were built. The obvious
+  improvement is a score — the front of a label beats the front of a word inside it beats the
+  middle of one — and it was implemented, tested and then dropped, because the palette's own data
+  does not support it.
+
+  Read the fixed commands and almost nothing moves: `zoom`, `new`, `term`, `note`, `close`,
+  `prompt` all rank exactly as they are declared, because the labels are short noun phrases with
+  no incidental matches in them. One query changes — `card` lifts `Card above` and its three
+  siblings over `Name this card` and `Next card` — and that is the wrong way round for the
+  commands people reach for. The one place a score would earn something is a shell's recent
+  commands, where typing `test` should prefer `Rerun cargo test` over `Rerun cargo nextest`; that
+  is a narrow win to buy with a ranking over everything.
+
+  Two repairs were tried before dropping it. A length tiebreak (prefer the label the query covers
+  more of) scores 0 for every line a context built, so on a tie it demotes a card the human named
+  below whichever fixed command happens to be short — typing `note` put `New note` above
+  `Go to notes.md`, caught by `a_path_typed_into_the_palette_opens_a_file_card`. Applying that
+  tiebreak only between two fixed commands fixes the symptom and breaks the sort: a comparator
+  that orders like pairs and calls unlike pairs equal is not transitive. A third shape works —
+  rank within each group, never across, deriving the groups from where each kind of line first
+  appears — but it is a `HashMap` and a coupling to the assembly order of `palette_lines` bought
+  for one query about rerun lines.
+
+  So matching stays what it is: whole words, case-insensitive, all of them present, in the order
+  the lines were built — agents waiting on the human first, a shell's commands newest first, the
+  cards in document order, then the commands as declared. That order is information; a score that
+  changes one query is not a reason to spend it. Revisit if the fixed list grows long enough to
+  carry incidental matches, or if the rerun lines become the palette's main traffic. Not to be
+  confused with subsequence matching, which is separately unwanted: it would widen `note` to any
+  label with those four letters in order, and a palette that answers a four-letter query with nine
+  lines is slower to use than one that answers with one.
+
+  The picker is left alone for the same reason and a stronger one: its rows are grouped by kind —
+  sessions, then the host's displays and windows — and that grouping is the information the list
+  carries.
