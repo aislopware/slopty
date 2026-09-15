@@ -215,6 +215,27 @@ mod tests {
         out
     }
 
+    /// A padding, margin or gap written as a literal rather than taken from `theme.spacing`.
+    ///
+    /// Only these: a literal `w`/`h`/`size` is a measurement of something real (a hairline, an
+    /// icon box, a panel that has to be some width), while a literal pad is a rhythm chosen in
+    /// one place and nowhere else, which is how a scale of 2/4/8/12/16/24 quietly becomes a
+    /// scale of every number. Returns the offending call for the message.
+    fn literal_spacing(line: &str) -> Option<String> {
+        const PAD: [&str; 13] = [
+            ".p(", ".px(", ".py(", ".pt(", ".pb(", ".pl(", ".pr(", ".m(", ".mx(", ".my(", ".gap(",
+            ".gap_x(", ".gap_y(",
+        ];
+        PAD.iter()
+            .find(|call| {
+                line.split(*call).skip(1).any(|rest| {
+                    rest.strip_prefix("px(")
+                        .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+                })
+            })
+            .map(|call| format!("`{call}px(N)`"))
+    }
+
     /// The ruling in `docs/decisions/ui.md`, as a check rather than a paragraph: chrome takes
     /// its transparencies from `alpha` and wears one elevation. A raw opacity or a second
     /// shadow is how a design system becomes a pile of one-offs, so neither compiles.
@@ -236,9 +257,31 @@ mod tests {
                         wrong.push(format!("{file}:{line_no}: a second elevation ({other})"));
                     }
                 }
+                if let Some(call) = literal_spacing(&line) {
+                    wrong.push(format!("{file}:{line_no}: {call} off the spacing scale"));
+                }
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The spacing check catches what it is for and leaves alone what it is not.
+    ///
+    /// A lint that cannot fail is worse than no lint, because it reads like cover.
+    #[test]
+    fn the_spacing_check_knows_a_pad_from_a_measurement() {
+        assert!(literal_spacing(".p(px(7.0))").is_some());
+        assert!(literal_spacing("div().gap(px(10.0)).child(x)").is_some());
+        assert!(literal_spacing(".py(px(3.))").is_some());
+        // Taken from the scale: the whole point.
+        assert!(literal_spacing(".p(px(theme.spacing.md))").is_none());
+        assert!(literal_spacing(".gap(px(s.xs))").is_none());
+        // A measurement of something real, not a rhythm.
+        assert!(literal_spacing(".w(px(300.0))").is_none());
+        assert!(literal_spacing(".border_b(px(1.0))").is_none());
+        assert!(literal_spacing(".size(px(16.0))").is_none());
+        // `.pr(` must not be found inside `.appear(` or any other word ending in those letters.
+        assert!(literal_spacing("something.expr(px(4.0))").is_none());
     }
 
     /// The two overlay sizes differ in both directions, and a list is the smaller of them: a
