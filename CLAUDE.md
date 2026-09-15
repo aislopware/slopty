@@ -31,4 +31,8 @@ behind them), `docs/DEV.md` (commands and the loop), `docs/TESTING.md` (the four
 
 - Checks run as tests, never by hand: no synthetic keys into a pid, no screenshots of other
   windows, no reading images back (that pattern reads as surveillance tooling and has been
-  flagged). Goldens are compared numerically; read the diff numbers, never open the image.
+  flagged). A *pass or fail* is decided on the diff numbers, never by eye.
+- One exception, granted 2026-09-15: Slopty's own renders — `crates/slopty-e2e/golden/*.png` and
+  `target/e2e/artifacts/*.png` — may be opened **for design review**. They are this app's own
+  output, not anybody's screen. Everything above still holds: no other window, no image from
+  outside those two directories, and a golden still passes or fails on its numbers.

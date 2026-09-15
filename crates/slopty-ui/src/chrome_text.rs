@@ -131,14 +131,35 @@ fn boundaries(line: &ShapedLine) -> Vec<Pixels> {
     xs
 }
 
+/// How much a line may overrun its box before it is worth an ellipsis.
+///
+/// The layout hands back a rounded width while the shaped line keeps its fractional one, so a
+/// label that fits exactly reads as a fraction of a pixel too wide — "shell" was shaped at
+/// 26.27 pt and given a 26 pt box. Cutting on that is not a near miss: the ellipsis needs room
+/// of its own, so the text loses several glyphs to save a quarter of one, and every filled title
+/// on the canvas came out as two letters and a dot. Half a pixel of overrun is invisible; the
+/// cut it used to cause was not.
+const SUBPIXEL: Pixels = px(0.5);
+
 /// The cut that fits `text` and the ellipsis into `available`, or `None` when the whole text
 /// fits. Positions are in shaped (base) units; `k` scales them to the painted size.
 fn cut(shaped: &Shaped, k: f32, available: Pixels) -> Option<Cut> {
-    if shaped.line.width * k <= available {
+    cut_at(&boundaries(&shaped.line), shaped.line.width, shaped.ellipsis.width, k, available)
+}
+
+/// `cut` over the numbers alone: the glyph boundaries `xs`, the line's `width`, and the
+/// `ellipsis` width, all in shaped units.
+fn cut_at(
+    xs: &[Pixels],
+    width: Pixels,
+    ellipsis: Pixels,
+    k: f32,
+    available: Pixels,
+) -> Option<Cut> {
+    if width * k <= available + SUBPIXEL {
         return None;
     }
-    let ellipsis = shaped.ellipsis.width * k;
-    let xs = boundaries(&shaped.line);
+    let ellipsis = ellipsis * k;
     let keep = xs.iter().rposition(|x| *x * k + ellipsis <= available).unwrap_or(0);
     xs.get(keep).map(|at| Cut { keep, at: *at })
 }
@@ -390,5 +411,37 @@ mod tests {
             glyph_origins(&layout, zoomed, None).into_iter().map(|(_, _, at)| at).collect();
         assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(120.0), px(54.0))]);
         assert_eq!(glyph_origins(&layout, zoomed, Some(1)).len(), 1, "cut after one glyph");
+    }
+
+    /// "shell", shaped at 26.27 and handed a 26 pt box: the numbers the canvas actually had.
+    fn shell() -> (Vec<Pixels>, Pixels) {
+        (vec![px(0.0), px(6.0), px(12.0), px(18.0), px(24.0), px(26.26758)], px(26.26758))
+    }
+
+    #[test]
+    fn a_label_a_fraction_of_a_pixel_over_its_box_is_kept_whole() {
+        let (xs, width) = shell();
+        assert!(
+            cut_at(&xs, width, px(8.0), 1.0, px(26.0)).is_none(),
+            "a quarter of a pixel is rounding, not an overflow"
+        );
+    }
+
+    #[test]
+    fn a_label_wider_than_its_box_is_cut_where_the_ellipsis_still_fits() {
+        let (xs, width) = shell();
+        let cut = cut_at(&xs, width, px(8.0), 1.0, px(20.0)).expect("six pixels over is a cut");
+        assert_eq!(cut.at, px(12.0), "the last boundary leaving room for the ellipsis");
+        assert_eq!(cut.keep, 2);
+    }
+
+    /// Zoom scales the text but not the box, so the tolerance must not grow with it.
+    #[test]
+    fn the_subpixel_tolerance_does_not_scale_with_the_zoom() {
+        let (xs, width) = shell();
+        assert!(
+            cut_at(&xs, width, px(8.0), 2.0, px(26.0)).is_some(),
+            "at 2x the line is 52 wide in a 26 box: a real overflow"
+        );
     }
 }
