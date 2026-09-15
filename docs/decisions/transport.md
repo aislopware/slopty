@@ -776,7 +776,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Every other `SLOPTY_SCREEN_E2E` test still spawns its own daemons and so cannot capture either;
   that is older than this change and not fixed here.
 
-- 🔬 **A dropped frame asks for a refresh only when the link could carry one.**
+- ✅ **A dropped frame asks for a refresh only when the link could carry one.**
   The keyframe drain budget landed in the wrong place. It guards `pending.keyframe`, which is
   set at stream open and on a quality change and almost nowhere else — `keyframes_deferred` read
   0 on all five rungs of the shaped ladder, so the rule never once fired. The path that runs on
@@ -807,8 +807,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Test: `a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one`, over the wiring
   the keyframe path never reached.
 
-  🔬 **Not yet measured.** Everything above is the mechanism: the IDR cost, the ask on
-  every drop, the starved reference and the wiring are each measured or tested, but that gating
-  the ask shortens the stall is inference from them. The shaped ladder rerun is the measurement
-  and it has not been done. Until it is in `docs/MEASUREMENTS.md` this stays a hypothesis with a
-  test under it, not a result.
+  **Measured over three runs against one baseline** (`docs/MEASUREMENTS.md`, 2026-09-15, the
+  drain budget on the refresh request). On the collapsed rung the p90 arrival gap halves, 242 ms
+  to 118–129 ms across all three; the guard drops 45–48 frames of ~195 where it dropped 99 of
+  202; about 35% fewer packets go into the 600 kB/s pipe and about half as many are lost; the
+  worst host hold falls 4 796 ms to 1 708 ms. Keyframes over the whole ladder fall 28 to 20, and
+  `keyframes_deferred` reads 4, 1 and 3 where three earlier ladders read 0 on every rung — the
+  rule executing, not variance.
+
+  Three runs and not one because this rung is noisy: its own baseline records it moving 52 to 70
+  decoded with no code change. `first decoded` and `gap max` stay noisy here and no claim rests
+  on them.

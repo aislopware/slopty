@@ -3082,3 +3082,61 @@ Harness note: the first attempt at this run failed at `e2e.rs:826`, a timeout wa
 discarded sample's `Closed` event, and passed unchanged on the next run. Not investigated; if it
 recurs, the log line to read first is noq's `failed closing path err=LastOpenPath`, which appeared
 17 s into the stalled stream.
+
+## 2026-09-15 — the drain budget on the refresh request: three runs against one
+
+Same rig, same shaper seed, same 8 s per rung, same installed host pinned to the LAN address as
+the two ladders above. The change under test is `90cf9b9`: `Shared::dropped` puts the refresh a
+dropped frame asks for through `keyframe_admitted` instead of setting it unconditionally. The
+baseline is the run directly above, which is the last one before the change and uses the same
+harness.
+
+Three runs, because the collapsed rung is the noisy one — its own baseline notes record it moving
+52 → 70 decoded with no code change at all, so a single run proves nothing here.
+
+| collapsed rung        | baseline | run 1 | run 2 | run 3 |
+| --------------------- | -------- | ----- | ----- | ----- |
+| decoded in 8 s        | 70       | 109   | 116   | 95    |
+| arrival gap p50       | 97.1 ms  | 65.0  | 57.6  | 81.9  |
+| arrival gap p90       | 242.2 ms | 118.5 | 120.7 | 129.2 |
+| arrival gap max       | 281.3 ms | 412.5 | 308.5 | 272.8 |
+| guard drops / capture | 99 / 202 | 47 / 195 | 45 / — | 48 / — |
+| client hold max       | 276 ms   | 276   | 238   | 268   |
+| shaper down sent      | 2290     | 1499  | 1453  | 1472  |
+| shaper down lost      | 68       | 36    | 35    | 35    |
+| nacks                 | 7        | 4     | 8     | 6     |
+
+Host side, whole ladder: keyframes **28 → 20, 21, 20**; `keyframes_deferred` **0 → 4, 1, 3**,
+landing on `lte` and `collapsed` and nowhere else. Hold episodes over runs 2 and 3 together
+(1 577 of them): `held_ms` p50 2, p90 6, **max 1 708 ms** holding 379 444 B, against the
+baseline's p50 2, p90 3, **max 4 796 ms** holding 435 274 B. Run 1 alone read p90 20 ms, which
+the next two runs do not reproduce.
+
+**What holds across all three.** p90 arrival gap roughly halves and stays inside 118–129 ms where
+the baseline was 242. The guard drops about half as many frames (45–48 against 99) because the
+queue it tests is no longer full of keyframes. About 35% fewer packets are pushed into a 600 kB/s
+pipe and about half as many are lost. The worst hold falls 2.8×. And `keyframes_deferred` is
+non-zero for the first time: the keyframe rule read 0 on every rung of three earlier ladders, so
+this is the new path executing rather than variance.
+
+**What does not hold, and is not claimed.** `first decoded` on the collapsed rung reads 977, 647
+and 928 ms against a 662 ms baseline — it straddles the baseline and is not a regression, but
+neither is it evidence of anything. Run 1's decoder warm-up took 37.5 s (the `noowners` tax,
+situational as the ruling above says) and its two worst rungs were the two measured under that
+contention. `gap max` is likewise noisy in both directions. The claim is the p90 and the drop
+count, not the tail of the tail.
+
+**A harness race, found and fixed.** Two runs in three died at `e2e.rs:255` with `ENOTCONN` while
+minting the pairing ticket for the fifth rung. hostd was never down — `up 471 s`, no panic. It
+answers a control request and closes without waiting to be half-closed, so the test's
+`wr.shutdown()` races that close and macOS reports `ENOTCONN` when it loses. The reply is already
+buffered, so the shutdown now tolerates that one error kind and `read_line` decides whether a
+reply arrived. Distinct from the `LastOpenPath` flake noted above.
+
+```sh
+# as the ladder runs above; then, per run:
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+  | grep -c "stands on its own is deferred"          # deferral episodes
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+  | grep -oE "keyframes_deferred: [0-9]+|dropped: [0-9]+"   # per-rung counters
+```

@@ -252,7 +252,13 @@ mod tests {
         let mut line = serde_json::to_vec(&slopty_host::ctl::CtlRequest::Ticket).unwrap();
         line.push(b'\n');
         wr.write_all(&line).await.unwrap();
-        wr.shutdown().await.unwrap();
+        // hostd answers a control request and closes without waiting to be half-closed, so this
+        // shutdown races its close and macOS reports ENOTCONN when it loses. The reply is already
+        // buffered by then; let `read_line` below be the judge of whether one arrived. Unwrapping
+        // here failed two ladder runs in three at the fifth rung.
+        if let Err(e) = wr.shutdown().await {
+            assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "control socket shutdown: {e}");
+        }
         let mut reply = String::new();
         BufReader::new(rd).read_line(&mut reply).await.unwrap();
         match serde_json::from_str(reply.trim()).unwrap() {
