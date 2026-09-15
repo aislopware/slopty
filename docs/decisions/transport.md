@@ -775,3 +775,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   host's control socket, and it checks that host is pinned before streaming rather than after.
   Every other `SLOPTY_SCREEN_E2E` test still spawns its own daemons and so cannot capture either;
   that is older than this change and not fixed here.
+
+- 🔬 **A dropped frame asks for a refresh only when the link could carry one.**
+  The keyframe drain budget landed in the wrong place. It guards `pending.keyframe`, which is
+  set at stream open and on a quality change and almost nowhere else — `keyframes_deferred` read
+  0 on all five rungs of the shaped ladder, so the rule never once fired. The path that runs on
+  a collapsed link is the *drop* path, and it asked for a refresh on every frame it dropped.
+
+  That ask is not cheap here. A forced LTR refresh comes back from VideoToolbox as a full IDR
+  (133 960 B measured), not the 733 B delta it produces with a fresh long-term reference on hand,
+  because the encoder offers about one LTR token per stream and the single reference goes stale
+  — the finding recorded above. So a link already too slow for ordinary frames was being asked
+  for keyframes twenty times their size, each of which filled the queue and caused the next drop.
+  That is the shape a multi-second stall would take: not one bad frame, a loop.
+
+  `Shared::dropped` now counts the drop and puts the refresh request through
+  `keyframe_admitted`, the same drain estimate and one-second valve the keyframe rule uses. Where
+  the link cannot carry a picture that stands on its own, the client holds a stale one for a beat
+  instead. Before the first acknowledged reference nothing else decodes, so the ask goes out
+  regardless; the valve keeps a badly-estimating link from holding the picture forever.
+
+  The client's own `request_refresh` — sent when it reports a loss it cannot recover — is *not*
+  gated. It is the same IDR and arguably the same loop, but there the client has said it is stuck
+  rather than the host having guessed, and one change measured beats two changed together.
+
+  The valve resets, which is what makes the rule bite rather than merely delay: `keyframe` on a
+  packet is `!NotSync`, so the IDR a starved refresh produces is flagged as the keyframe it is,
+  and `on_packet` zeroes `keyframe_deferred_us` on it. A collapsed link therefore carries at most
+  one of these a second instead of one per dropped frame.
+
+  Test: `a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one`, over the wiring
+  the keyframe path never reached.
+
+  🔬 **Not yet measured.** Everything above is the mechanism: the IDR cost, the ask on
+  every drop, the starved reference and the wiring are each measured or tested, but that gating
+  the ask shortens the stall is inference from them. The shaped ladder rerun is the measurement
+  and it has not been done. Until it is in `docs/MEASUREMENTS.md` this stays a hypothesis with a
+  test under it, not a result.

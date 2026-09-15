@@ -1029,9 +1029,7 @@ impl Shared {
             self.fps.load(Ordering::Relaxed),
         );
         if !fits {
-            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-            // The client will see a hole; make the next frame decodable on its own.
-            self.pending.lock().refresh = true;
+            self.dropped(host_now_us());
             return;
         }
         // A keyframe the link cannot drain is put off and an LTR refresh encoded in its place: a
@@ -1202,7 +1200,27 @@ impl Shared {
         Some(decision)
     }
 
-    /// Whether a wanted keyframe goes into the frame being encoded now.
+    /// The guard dropped a frame: count it, and decide whether to ask for a picture that
+    /// stands on its own.
+    ///
+    /// The client will see a hole, so the obvious answer is to ask on every drop. That is what
+    /// this did, and it is the shape a slow link turning into a stalled one would take. A forced
+    /// refresh comes
+    /// back from this encoder as a full IDR — 133 960 B measured — and not the 733 B delta it
+    /// produces with a fresh long-term reference on hand, because VideoToolbox offers about one
+    /// LTR token per stream and the single reference goes stale (`docs/decisions/transport.md`).
+    /// So a link already too slow for ordinary frames was being asked for keyframes twenty
+    /// times their size, each of which filled the queue and caused the next drop. Ask only when
+    /// the link could drain one; a held picture for a beat beats a picture that never arrives.
+    fn dropped(&self, now: u64) {
+        self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+        if self.keyframe_admitted(now) {
+            self.pending.lock().refresh = true;
+        }
+    }
+
+    /// Whether a picture that stands on its own — a wanted keyframe, or the refresh a dropped
+    /// frame would ask for — is worth the bytes right now.
     ///
     /// Deferring needs somewhere to fall back to: with no acknowledged long-term reference the
     /// client can decode nothing but a keyframe, so one always goes out. Past that the estimate
@@ -1233,7 +1251,7 @@ impl Shared {
                     estimate = self.keyframe_bytes.load(Ordering::Relaxed),
                     held = self.budget.held(),
                     target_bps = self.counters.bitrate_bps.load(Ordering::Relaxed),
-                    "keyframe deferred; sending an LTR refresh instead"
+                    "a picture that stands on its own is deferred: the link cannot drain one"
                 );
                 false
             }
@@ -2870,6 +2888,36 @@ mod tests {
         assert!(!shared.keyframe_admitted(1_999_999));
         assert_eq!(shared.stats().keyframes_deferred, 1);
         assert!(shared.keyframe_admitted(2_000_000), "the valve opens rather than hold forever");
+    }
+
+    /// The rule the keyframe path could not reach: `pending.keyframe` is set at stream open and
+    /// on a quality change and almost nowhere else, so `keyframes_deferred` read 0 on every rung
+    /// of the shaped ladder. The *drop* path runs on every dropped frame, which on a collapsed
+    /// link is most of them, and a refresh is an IDR here — so this is where the budget bites.
+    #[test]
+    fn a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one() {
+        let (shared, _rx) = shared_for_frames();
+        shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
+
+        // Nothing acknowledged yet: only a keyframe decodes, so the ask goes out regardless.
+        shared.dropped(1_000_000);
+        assert!(shared.pending.lock().refresh, "no reference means ask anyway");
+        assert_eq!(shared.counters.dropped.load(Ordering::Relaxed), 1);
+
+        shared.pending.lock().refresh = false;
+        shared.ltr_acked.store(true, Ordering::Relaxed);
+        shared.dropped(1_000_000);
+        assert!(
+            !shared.pending.lock().refresh,
+            "1 Mbit/s cannot drain 134 kB: asking would only deepen the hole"
+        );
+        assert_eq!(shared.counters.dropped.load(Ordering::Relaxed), 2, "still counted as a drop");
+
+        // The link recovers; the next hole is worth a picture again.
+        shared.counters.bitrate_bps.store(12_000_000, Ordering::Relaxed);
+        shared.dropped(1_100_000);
+        assert!(shared.pending.lock().refresh);
     }
 
     #[test]
