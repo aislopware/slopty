@@ -451,12 +451,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `surfaces.border` | `24272E` | `D8DBE1` | every hairline (1 pt) |
   | `surfaces.text` | `E6E6E6` | `1D1D1F` | primary |
   | `surfaces.text_secondary` | `B4B9C3` | `4B4F58` | labels, tool summaries, counts |
-  | `surfaces.text_muted` | `8B919C` | `6E6E73` | hints, timestamps, folds, inactive titles |
-  | `surfaces.accent` | `8AB4F8` | `2F6FDB` | focus ring, active border, primary action, links |
+  | `surfaces.text_muted` | `8B919C` | `66666B` | hints, timestamps, folds, inactive titles |
+  | `surfaces.accent` | `8AB4F8` | `2A63C4` | focus ring, active border, primary action, links |
   | `surfaces.accent_fg` | `0A0B0E` | `FFFFFF` | text on an accent fill |
-  | `surfaces.success` | `98C379` | `1A7F37` | connected, agent done |
-  | `surfaces.warn` | `E5C07B` | `9A6700` | agent waiting, "N need you", muted, reconnecting |
-  | `surfaces.error` | `F06C75` | `CF222E` | failed result, failed command, pairing error |
+  | `surfaces.success` | `98C379` | `187633` | connected, agent done |
+  | `surfaces.warn` | `E5C07B` | `8B5D00` | agent waiting, "N need you", muted, reconnecting |
+  | `surfaces.error` | `F06C75` | `C7212C` | failed result, failed command, pairing error |
   | `radii.xs / sm / md` | 4 / 6 / 8 | same | pills and inline buttons / buttons, inputs, key caps / panels, items, popovers |
   | `spacing.xxs … xl` | 2 / 4 / 8 / 12 / 16 / 24 | same | the only paddings and gaps in chrome |
   | `typography.ui_size` + `caption()/small()/title()` | 13 → 10 / 12 / 15 | same | chrome type scale (settings move the base) |
@@ -891,3 +891,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stay within two units of each other, the floor), and
   `the_grip_asks_the_host_to_resize_the_window` over the wiring, where the same canvas holds a
   window card and a display card and only the display reports a locked aspect.
+
+- ✅ **Chrome text clears WCAG AA on every surface, not just the one it usually sits on.**
+  The terminal grid has `minimum_contrast` to lift colours a program chose. Chrome had nothing,
+  because these colours are ours and the fix is to pick better ones — so nothing checked them,
+  and five of the light variant's inks failed 4.5:1 against the darker surfaces: `accent` 3.83
+  and `warn` 3.93 on `overlay`, with `success`, `error` and `text_muted` between 4.09 and 4.45.
+  All five are drawn as text. `accent` is a link and the primary action's label, `warn` is
+  "N need you", `success` is "connected": body text, not decoration. Dark always passed, which
+  is why this went unseen — dark is the default and nobody ran the app in light.
+
+  The five were darkened 5–10% with the hue held (table above). `chrome_text_clears_wcag_aa`
+  checks all seven inks against all four surfaces in both variants, plus `accent_fg` on an
+  accent fill: a status label follows its card and a card can sit on any surface, so checking
+  an ink against the one surface it usually has is checking the easy case.
+
+- ✅ **A title is cut for an ellipsis only when it is more than half a pixel too wide.**
+  Every filled chrome title on the canvas was rendering as two glyphs and a dot — `sh…` for a
+  terminal named "shell", `no…` for a note. The cause is a rounding mismatch, not a layout one:
+  taffy hands the element a rounded box while the shaped line keeps its fractional width, so
+  "shell" was shaped at 26.27 pt and given 26. `cut` read that quarter-pixel as an overflow, and
+  because the ellipsis needs room of its own it dropped four glyphs to save a fraction of one.
+
+  `chrome_text::SUBPIXEL` is half a pixel of tolerance on that one comparison. Half a pixel of
+  overrun cannot be seen; the cut it used to cause could be read across the room.
+
+  The first diagnosis was wrong and worth recording: `max_width: relative(1.0)` on a `flex_1`
+  parent resolving a percentage against a zero flex-basis. Changing it moved **zero** pixels, so
+  it was reverted rather than kept as a plausible-sounding extra — a change with no measurement
+  behind it is not a fix.
+
+  This defect is the argument for looking at a golden rather than only diffing it. The numeric
+  comparison read 0 differing pixels on `terminal` because the golden had the bug baked in;
+  nothing in the suite could have reported it. Tests at `chrome_text::tests`
+  (`a_label_a_fraction_of_a_pixel_over_its_box_is_kept_whole` and two siblings) now pin the
+  arithmetic, which needed `cut` split into `cut_at` over plain numbers — `ShapedLine`'s fields
+  are `pub(crate)` in gpui, so the decision could not otherwise be reached from a test.
+
+- ✅ **The top bar prints no key chords; a hover says what a button does and the key that does it.**
+  The bar carried every binding inline — `fit ⌘1  + shell ⌘T  + agent ⌘⇧T  + note ⌘⇧N
+  + window ⌘O  ⋯ ⌘⇧P` — six chords across one 40 pt strip, most of its text, none of it
+  answering what a button does. Zed and Warp print none of theirs. The index belongs in the
+  command palette, which Slopty already has and which is the phone's only way to an action
+  without a button.
+
+  `kit::Hint` is the tooltip: what the button does, then its key in `text_muted`, on `raised`
+  behind the one hairline and the one elevation the rest of the chrome wears. It is gated on
+  `SHORTCUT_HINTS` (macOS), since a hint needs a pointer to hover and glass has none.
+
+  Nothing is lost to a screen reader: the `aria_label` was already the bare word, so VoiceOver
+  never read the chord out of the visible label either. A dropdown row keeps its key inline
+  ("Add host…  ⌘⇧H") — a menu showing its shortcut is what a menu is for, and that is the one
+  place the convention runs the other way.
+
+- 🔬 **The golden tolerance is blind to chrome text.** Taking the six key chords out of the bar
+  moved 2289 pixels on `terminal` and 2558 on `note` — 0.42% and 0.47% against a 1% tolerance, so
+  neither golden failed and `--accept` left both untouched, still encoding a bar the app no longer
+  draws. The tolerance is tuned for what `snapshot.rs` says it is tuned for ("a font hint or an
+  antialiasing change moves a few hundred pixels, a broken layout moves a few hundred thousand"),
+  and every word of chrome text in the app falls between those two. `--accept-all` is the blunt
+  answer and was used here. The sharp one is an assertion over the bar's text through the app's
+  own dump socket, at layer 3, where a word appearing or vanishing is a string comparison and not
+  a pixel count. Not written yet.

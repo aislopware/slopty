@@ -13,6 +13,8 @@ pub mod hosts;
 pub mod net;
 pub mod settings;
 
+use std::rc::Rc;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -37,6 +39,7 @@ use slopty_ui::canvas::{
     NextAttention, OpenPalette,
 };
 use slopty_ui::colors::{hsla, hsla_alpha};
+use slopty_ui::kit;
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
@@ -271,7 +274,7 @@ impl Workspace {
         }
         // gpui-kit widgets (inputs, Markdown) read gpui-kit's theme: keep it on
         // the same tokens.
-        slopty_ui::kit::sync(&theme, cx);
+        kit::sync(&theme, cx);
         let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
         for canvas in canvases {
             canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
@@ -1030,11 +1033,13 @@ impl Workspace {
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(text))
         };
+        let hint_theme = Rc::new(theme.clone());
         let button = move |id: &'static str, text: &'static str, hint: &'static str| {
+            let label = text.trim_start_matches("+ ");
             let pill = div()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(text.trim_start_matches("+ "))
+                .aria_label(label)
                 .flex_none()
                 .px(px(if narrow { spacing.xs } else { spacing.sm }))
                 .py(px(spacing.xs))
@@ -1044,11 +1049,13 @@ impl Workspace {
                 .hover(move |el| el.bg(hsla(s.panel)))
                 .active(move |el| el.bg(hsla(s.raised)))
                 .cursor_pointer()
-                .child(SharedString::from(if SHORTCUT_HINTS {
-                    format!("{text}  {hint}")
-                } else {
-                    text.to_owned()
-                }));
+                .child(SharedString::from(text))
+                .when(SHORTCUT_HINTS, |el| {
+                    let theme = Rc::clone(&hint_theme);
+                    el.tooltip(move |_window, cx| {
+                        cx.new(|_| kit::Hint::new(label, hint, Rc::clone(&theme))).into()
+                    })
+                });
             tab_stop(pill, s.accent)
         };
         let new_button = button("new-terminal", "+ shell", "⌘T").on_click(cx.listener(
@@ -1111,11 +1118,14 @@ impl Workspace {
                 .bg(hsla_alpha(warm, alpha::FAINT))
                 .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT)))
                 .cursor_pointer()
-                .child(SharedString::from(if SHORTCUT_HINTS {
-                    format!("{text}  ⌘⇧A")
-                } else {
-                    text
-                }));
+                .child(SharedString::from(text))
+                .when(SHORTCUT_HINTS, |el| {
+                    let theme = Rc::new(self.theme.clone());
+                    el.tooltip(move |_window, cx| {
+                        cx.new(|_| kit::Hint::new("Go to the next one", "⌘⇧A", Rc::clone(&theme)))
+                            .into()
+                    })
+                });
             tab_stop(pill, s.accent)
                 .on_click(cx.listener(|this, _ev, window, cx| this.next_attention(window, cx)))
         });
@@ -1571,7 +1581,7 @@ pub fn open_workspace(
     cx.bind_keys(app_key_bindings());
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
-    slopty_ui::kit::sync(&Theme::default(), cx);
+    kit::sync(&Theme::default(), cx);
     slopty_ui::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
     let loaded = Settings::load(&settings_path);

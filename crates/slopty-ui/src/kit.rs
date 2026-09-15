@@ -6,7 +6,12 @@
 //! Slopty surface tokens over the colours those widgets read, so a text field, a code block
 //! or a link looks like the chrome around it in both variants.
 
-use gpui::{App, Div, InteractiveElement as _, Styled as _, div, px};
+use std::rc::Rc;
+
+use gpui::{
+    App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Window, div, px,
+};
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use slopty_theme::{Theme, Variant, alpha};
@@ -81,6 +86,53 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .font_family(theme.typography.ui_family.clone())
         .text_color(hsla(s.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+}
+
+/// What a bar button does, and the key that does it, shown after a pause on the pointer.
+///
+/// The bar prints no keys of its own. Six ⌘ chords across one strip was most of the text up
+/// there and none of it answered what a button does; zed and warp print none and keep the index
+/// in the command palette, which Slopty already has. A hint needs a pointer to hover, so this is
+/// the Mac's affordance — on a phone the palette is the only one, as it always was.
+#[derive(Debug)]
+pub struct Hint {
+    what: SharedString,
+    key: SharedString,
+    theme: Rc<Theme>,
+}
+
+impl Hint {
+    /// `what` the button does ("New shell"), and the `key` that does it ("⌘T").
+    #[must_use]
+    pub fn new(
+        what: impl Into<SharedString>,
+        key: impl Into<SharedString>,
+        theme: Rc<Theme>,
+    ) -> Self {
+        Self { what: what.into(), key: key.into(), theme }
+    }
+}
+
+impl Render for Hint {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.sm))
+            .py(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.sm))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.raised))
+            .shadow_sm()
+            .text_size(px(theme.typography.small()))
+            .font_family(theme.typography.ui_family.clone())
+            .child(div().text_color(hsla(s.text)).child(self.what.clone()))
+            .child(div().text_color(hsla(s.text_muted)).child(self.key.clone()))
+    }
 }
 
 /// Point gpui-kit's theme at `theme`: mode, then the colours its widgets read.
