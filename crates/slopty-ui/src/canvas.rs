@@ -3067,6 +3067,11 @@ impl CanvasView {
     fn render_toast(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
+        // One surface for all three. An accent *fill* is the token for a primary action, and a
+        // toast is not one: it is a notice that happens to be clickable, and the close toast
+        // appears on every card a hand closes. Filling it brand-blue made the loudest thing on
+        // the canvas the thing the canvas was apologising for. The affordance carries the
+        // accent instead, in the words that name it.
         let style = |d: Stateful<Div>| {
             d.flex()
                 .items_center()
@@ -3074,9 +3079,16 @@ impl CanvasView {
                 .px(px(theme.spacing.md))
                 .py(px(theme.spacing.xs))
                 .rounded(px(theme.radii.md))
+                .bg(hsla_alpha(theme.surfaces.panel, alpha::VEIL))
+                .border_1()
+                .border_color(hsla(theme.surfaces.border))
+                .shadow_sm()
+                .text_color(hsla(theme.surfaces.text))
                 .text_size(px(theme.typography.small()))
                 .font_family(theme.typography.ui_family.clone())
         };
+        // What a clickable toast offers, in the accent: the only colour on it.
+        let offer = |text: &'static str| div().text_color(hsla(theme.surfaces.accent)).child(text);
         let inner = match &toast.what {
             ToastKind::Pointed { name, item } => {
                 let item = self.doc.get(*item)?;
@@ -3086,12 +3098,10 @@ impl CanvasView {
                     .debug_selector(|| "pointed".to_owned())
                     .role(Role::Button)
                     .aria_label(format!("{name} points at {title}, go there"))
-                    .bg(hsla(theme.surfaces.accent))
-                    .text_color(hsla(theme.surfaces.accent_fg))
                     .cursor_pointer()
                     .child(SharedString::from(format!("{name} points at {title}")))
-                    .child(div().opacity(0.8).child("· go"));
-                tab_stop(pill, theme.surfaces.accent_fg)
+                    .child(offer("· go"));
+                tab_stop(pill, theme.surfaces.accent)
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.toast = None;
                         this.go_to(id, cx);
@@ -3103,13 +3113,11 @@ impl CanvasView {
                 let pill = style(div().id("closed"))
                     .debug_selector(|| "closed".to_owned())
                     .role(Role::Button)
-                    .aria_label(format!("closed {title}, take it back"))
-                    .bg(hsla(theme.surfaces.accent))
-                    .text_color(hsla(theme.surfaces.accent_fg))
+                    .aria_label(format!("Closed {title}, take it back"))
                     .cursor_pointer()
-                    .child(SharedString::from(format!("closed {title}")))
-                    .child(div().opacity(0.8).child("· take back ⌘Z"));
-                tab_stop(pill, theme.surfaces.accent_fg)
+                    .child(SharedString::from(format!("Closed {title}")))
+                    .child(offer("· take back ⌘Z"));
+                tab_stop(pill, theme.surfaces.accent)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)))
                     .into_any_element()
             }
@@ -3117,10 +3125,6 @@ impl CanvasView {
                 .debug_selector(|| "said".to_owned())
                 .role(Role::Status)
                 .aria_label(SharedString::from(text.clone()))
-                .bg(hsla_alpha(theme.surfaces.panel, alpha::VEIL))
-                .border_1()
-                .border_color(hsla_alpha(theme.surfaces.accent, alpha::VEIL))
-                .text_color(hsla(theme.surfaces.text))
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
         };
