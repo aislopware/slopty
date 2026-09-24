@@ -90,8 +90,8 @@ mod tests {
         assert_eq!(escape(Path::new("/Users/x/.config")), "-Users-x--config");
         assert_eq!(escape(Path::new("/private/tmp/a_b")), "-private-tmp-a-b");
         assert_eq!(
-            project_dir(Path::new("/Users/x"), Path::new("/tmp/p")),
-            Path::new("/Users/x/.claude/projects/-tmp-p"),
+            project_dir(Path::new("/Users/x"), Path::new("/slopty-absent/p")),
+            Path::new("/Users/x/.claude/projects/-slopty-absent-p"),
             "a directory that does not exist is named as given"
         );
         // One that exists is named by its resolved path, as the agent's own cwd would be.
