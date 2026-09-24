@@ -17,13 +17,21 @@
 use anyhow::{Result, bail};
 use xshell::{Shell, cmd};
 
-use crate::tools::{HOST_ONLY_CRATES, TRIPLES, quiet_step, repo_root};
+use crate::tools::{HOST_ONLY_CRATES, TRIPLES, quiet_step, workspace_packages};
 
 pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
     if crates.is_empty() {
         bail!("name the crates to check: `cargo xtask check -p <crate> [-p <crate>…]`");
     }
     let started = std::time::Instant::now();
+    let workspace = workspace_packages()?;
+    let mut owned = Vec::new();
+    for name in crates {
+        match workspace.iter().find(|p| &p.name == name) {
+            Some(p) => owned.push(p),
+            None => bail!("no workspace package is named `{name}`"),
+        }
+    }
     let packages: Vec<String> = crates.iter().flat_map(|c| ["-p".to_owned(), c.clone()]).collect();
     let p = &packages;
     let host = TRIPLES[0];
@@ -44,24 +52,18 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         quiet_step("clippy ios + ios-sim", cmd!(sh, "cargo clippy {a...} {i...} -- -D warnings"))?;
     }
     quiet_step("nextest", cmd!(sh, "cargo nextest run {p...} --no-tests=pass"))?;
-    quiet_step("doctests", cmd!(sh, "cargo test {p...} --doc"))?;
+    let libs: Vec<String> =
+        owned.iter().filter(|p| p.lib).flat_map(|p| ["-p".to_owned(), p.name.clone()]).collect();
+    if !libs.is_empty() {
+        let l = &libs;
+        quiet_step("doctests", cmd!(sh, "cargo test {l...} --doc"))?;
+    }
     {
         let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
         quiet_step("rustdoc", cmd!(sh, "cargo doc {p...} --no-deps --document-private-items"))?;
     }
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
-    let root = repo_root()?;
-    let dirs: Vec<String> = crates
-        .iter()
-        .filter_map(|c| {
-            ["crates", "apps"]
-                .iter()
-                .map(|d| root.join(d).join(c))
-                .chain((c == "xtask").then(|| root.join("xtask")))
-                .find(|p| p.exists())
-                .map(|p| p.to_string())
-        })
-        .collect();
+    let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();
     let d = &dirs;
     quiet_step("typos", cmd!(sh, "typos {d...}"))?;
     println!("✔ checked {} ({:.1?})", crates.join(", "), started.elapsed());

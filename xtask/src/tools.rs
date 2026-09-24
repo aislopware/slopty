@@ -11,7 +11,7 @@ pub const TRIPLES: [&str; 3] =
 /// Crates that only build on the host triple: they wrap host-only frameworks (`ScreenCaptureKit`,
 /// `CGEvent`, PTYs) or are dev tools. The client crates (`slopty-ui`, `slopty-app`) build for iOS
 /// through the fork's `gpui_ios`.
-pub const HOST_ONLY_CRATES: [&str; 12] = [
+pub const HOST_ONLY_CRATES: [&str; 14] = [
     "slopty-shape",
     "slopty-engine",
     "slopty-pty",
@@ -22,6 +22,8 @@ pub const HOST_ONLY_CRATES: [&str; 12] = [
     "slopty-hostd",
     "slopty-ptyd",
     "slopty-cli",
+    "slopty-server",
+    "slopty-serverd",
     "slopty",
     "xtask",
 ];
@@ -29,15 +31,50 @@ pub const HOST_ONLY_CRATES: [&str; 12] = [
 /// The host-only crates that exist in this checkout (cargo rejects `--exclude` of an unknown
 /// package, and crates arrive one at a time).
 pub fn host_only_present() -> Result<Vec<&'static str>> {
-    let root = repo_root()?;
+    let packages = workspace_packages()?;
     Ok(HOST_ONLY_CRATES
         .into_iter()
-        .filter(|name| {
-            let dir =
-                if *name == "xtask" { root.join("xtask") } else { root.join("crates").join(name) };
-            dir.exists() || root.join("apps").join(name).exists()
-        })
+        .filter(|name| packages.iter().any(|p| p.name == *name))
         .collect())
+}
+
+/// A workspace member, as its manifest declares it.
+pub struct Package {
+    pub name: String,
+    pub dir: Utf8PathBuf,
+    /// It has a library target, so it has doctests.
+    pub lib: bool,
+}
+
+/// Every package under `crates/`, `apps/` and `xtask`. A package's name need not match its
+/// directory (`apps/slopty-server` is `slopty-serverd`), so this reads the manifests.
+pub fn workspace_packages() -> Result<Vec<Package>> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        package: Named,
+        lib: Option<toml::Table>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Named {
+        name: String,
+    }
+    let root = repo_root()?;
+    let mut dirs = vec![root.join("xtask")];
+    for group in ["crates", "apps"] {
+        for entry in root.join(group).read_dir_utf8().with_context(|| format!("listing {group}"))? {
+            dirs.push(entry?.into_path());
+        }
+    }
+    let mut packages = Vec::new();
+    for dir in dirs {
+        let manifest = dir.join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else { continue };
+        let parsed: Manifest =
+            toml::from_str(&text).with_context(|| format!("parsing {manifest}"))?;
+        let lib = parsed.lib.is_some() || dir.join("src").join("lib.rs").exists();
+        packages.push(Package { name: parsed.package.name, dir, lib });
+    }
+    Ok(packages)
 }
 
 /// The repository root: the directory containing the workspace `Cargo.toml`.
