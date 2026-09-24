@@ -20,10 +20,11 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_agent::AgentTable;
-use slopty_core::WorkerId;
-use slopty_host::{Host, ItemStore};
+use slopty_core::{ClientId, SessionId, WorkerId};
+use slopty_host::{Host, HostError, ItemStore};
 use slopty_net::admission::{Admission, Cidr};
 use slopty_net::host::HostListener;
+use slopty_proto::terminal::{CloseReason, SessionState};
 use tokio::sync::broadcast;
 
 /// Command line.
@@ -111,6 +112,34 @@ pub struct Daemon {
     pub screens: slopty_host::screen::Registry,
     /// Sleep policy: awake while a client is attached, display on while a stream is live.
     pub wake: Arc<parking_lot::Mutex<slopty_host::wake::Wake<Box<dyn slopty_host::wake::Holds>>>>,
+}
+
+impl Daemon {
+    /// End `session` (kill its program if it still runs) and tell every client and the server
+    /// why, on behalf of `by` (whose item delta is not echoed back to it).
+    ///
+    /// Only the call that takes the session out of the table announces it, so a program that
+    /// exits while a client closes it is announced once. `NoSuchSession` when it was already
+    /// gone.
+    pub async fn end_session(
+        &self,
+        session: SessionId,
+        reason: CloseReason,
+        by: ClientId,
+    ) -> Result<(), HostError> {
+        let closed = self.host.close(session).await;
+        if matches!(closed, Err(HostError::NoSuchSession)) {
+            return closed;
+        }
+        // Past the table the session is gone whatever ptyd answered; a failed ptyd close is
+        // the caller's to report, but the clients must still hear of it.
+        self.agents.lock().forget(session);
+        let _sent = self.events.send(slopty_proto::HostMsg::SessionClosed { session, reason });
+        for delta in self.items.remove_session(session, by) {
+            let _sent = self.events.send(slopty_proto::HostMsg::Items(delta));
+        }
+        closed
+    }
 }
 
 /// The daemon's sleep assertions, as `NSProcessInfo` activities.
@@ -245,12 +274,29 @@ async fn main() -> Result<()> {
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
 
+    // A terminal ends with its program: the viewers see the exit status, then the session is
+    // closed and announced like a close. Programs that exited while this daemon was down end
+    // here too, before the server hears of them.
+    for summary in daemon.host.summaries().await {
+        if let SessionState::Exited { status } = summary.state {
+            tracing::info!(session = %summary.id, status, "ended while the daemon was down");
+            if let Err(e) =
+                daemon.end_session(summary.id, CloseReason::Exited, ClientId::nil()).await
+            {
+                tracing::warn!(session = %summary.id, error = %e, "closing an ended session");
+            }
+        }
+    }
     if let Some(mut exits) = daemon.host.take_exits() {
-        let host = daemon.host.clone();
+        let daemon = daemon.clone();
         tokio::spawn(async move {
             while let Some((session, status)) = exits.recv().await {
                 tracing::info!(%session, status, "child exited");
-                host.on_exit(session, status);
+                daemon.host.on_exit(session, status);
+                match daemon.end_session(session, CloseReason::Exited, ClientId::nil()).await {
+                    Ok(()) | Err(HostError::NoSuchSession) => {}
+                    Err(e) => tracing::warn!(%session, error = %e, "closing an exited session"),
+                }
             }
         });
     }

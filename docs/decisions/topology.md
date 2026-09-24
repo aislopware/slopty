@@ -241,3 +241,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     none. The stdio shim keeps the redial and the needs-a-human notifications.
   - A test sends the same calls to the server's endpoint and to `slopty mcp` dialled to that
     server, over one fake worker, and requires identical results.
+
+- ✅ **A terminal ends with its program** (2026-09-25). When a session's program exits, hostd
+  shows the viewers the exit status, then closes the session and announces
+  `SessionClosed { reason: Exited }` to its clients and the server. Before, only a verb or a
+  client's close announced an end, so a shell that ran `exit` stayed listed on the server
+  until the worker registered again. The app already closed a terminal on seeing its exit, so
+  the retained session served nobody.
+  - **Exactly once.** Every end goes through one path that takes the session out of the
+    table, and only the call that removes it announces it. A client's `Close` for a session
+    already gone is no longer an error, because that is the usual race: its program exited
+    and the client closed the tile on seeing it.
+  - Sessions that ended while hostd was down (ptyd reports them exited on adoption) are
+    closed the same way at start, before the server hears of them.
+  - An orchestrator that wants a program's last output reads it before the program exits: run
+    it in a shell and wait with `command_done`, not `exit`. `WaitFor { Exit }` still resolves
+    when the session is closed under it.

@@ -818,17 +818,14 @@ impl Peer<'_> {
             }
             TermRequest::Close => {
                 self.forget(session);
-                match self.daemon.host.close(session).await {
+                let reason = CloseReason::Requested;
+                match self.daemon.end_session(session, reason, self.client).await {
                     Ok(()) => {
                         tracing::debug!(client = %self.client, %session, "closed on request");
-                        self.daemon.agents.lock().forget(session);
-                        let reason = CloseReason::Requested;
-                        let _sent =
-                            self.daemon.events.send(HostMsg::SessionClosed { session, reason });
-                        for delta in self.daemon.items.remove_session(session, self.client) {
-                            let _sent = self.daemon.events.send(HostMsg::Items(delta));
-                        }
                     }
+                    // Gone already: most often its program exited, and a client closes a
+                    // terminal on seeing that.
+                    Err(HostError::NoSuchSession) => {}
                     Err(e) => self.report(session, &e).await,
                 }
             }

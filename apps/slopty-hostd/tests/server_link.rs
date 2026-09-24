@@ -18,10 +18,14 @@ mod tests {
         ErrorCode, Input, Outcome, TermRef, Verb, WaitUntil, Waited,
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
+    use slopty_proto::terminal::CloseReason;
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
     const STEP: Duration = Duration::from_secs(20);
+    /// From `exit` typed to the worker announcing the session's end: ptyd reaps the child and
+    /// tells hostd at once, so this is slack for a loaded machine, not a wait.
+    const EXIT_BOUND: Duration = Duration::from_secs(5);
 
     /// A sibling binary from the same build, built on demand (as `e2e.rs` does).
     fn bin(name: &str) -> PathBuf {
@@ -140,6 +144,20 @@ mod tests {
         }
     }
 
+    /// A quiet interactive bash in `cwd`.
+    fn open(worker: WorkerId, cwd: &std::path::Path) -> Verb {
+        Verb::OpenTerminal {
+            worker,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            command: ["/bin/bash", "--noprofile", "--norc", "-i"].map(String::from).to_vec(),
+            env: vec![
+                ("PS1".to_owned(), "$ ".to_owned()),
+                ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
+            ],
+            name: Some("link test".to_owned()),
+        }
+    }
+
     fn text(s: &str) -> Input {
         Input::Text(s.to_owned())
     }
@@ -161,19 +179,7 @@ mod tests {
         assert!(reg.caps.cpus > 0 && reg.caps.memory > 0, "{:?}", reg.caps);
         let worker = reg.worker;
 
-        let Outcome::Opened(term) = peer
-            .ask(Verb::OpenTerminal {
-                worker,
-                cwd: Some(dir.path().to_string_lossy().into_owned()),
-                command: ["/bin/bash", "--noprofile", "--norc", "-i"].map(String::from).to_vec(),
-                env: vec![
-                    ("PS1".to_owned(), "$ ".to_owned()),
-                    ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
-                ],
-                name: Some("link test".to_owned()),
-            })
-            .await
-        else {
+        let Outcome::Opened(term) = peer.ask(open(worker, dir.path())).await else {
             panic!("the terminal opens");
         };
         assert_eq!(term.worker, worker);
@@ -255,11 +261,37 @@ mod tests {
         assert_eq!(again.worker, worker);
         assert!(again.sessions.iter().any(|s| s.id == term.session), "{:?}", again.sessions);
 
+        // A shell that exits on its own is announced as exited, once, without a verb closing
+        // it.
+        let Outcome::Opened(quitter) = peer.ask(open(worker, dir.path())).await else {
+            panic!("the second terminal opens");
+        };
+        assert_eq!(
+            peer.ask(Verb::SendInput { term: quitter, input: text("exit\n") }).await,
+            Outcome::Done
+        );
+        let exited = |m: &ToServer| matches!(m, ToServer::SessionClosed { session, reason: CloseReason::Exited } if *session == quitter.session);
+        tokio::time::timeout(EXIT_BOUND, peer.heard(exited))
+            .await
+            .expect("the exit is announced within the bound");
+        let gone = peer.ask(Verb::ReadScreen { term: quitter }).await;
+        assert!(
+            matches!(gone, Outcome::Error { code: ErrorCode::UnknownTerminal, .. }),
+            "{gone:?}"
+        );
+
         assert_eq!(peer.ask(Verb::Close { term }).await, Outcome::Done);
-        peer.heard(
-            |m| matches!(m, ToServer::SessionClosed { session, .. } if *session == term.session),
-        )
+        peer.heard(|m| {
+            matches!(m, ToServer::SessionClosed { session, reason: CloseReason::Requested } if *session == term.session)
+        })
         .await;
+        let closes = |id| {
+            peer.heard
+                .iter()
+                .filter(|m| matches!(m, ToServer::SessionClosed { session, .. } if *session == id))
+                .count()
+        };
+        assert_eq!((closes(quitter.session), closes(term.session)), (1, 1), "{:?}", peer.heard);
         let gone = peer.ask(Verb::ReadScreen { term }).await;
         assert!(
             matches!(gone, Outcome::Error { code: ErrorCode::UnknownTerminal, .. }),
