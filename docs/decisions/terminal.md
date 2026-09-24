@@ -833,9 +833,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   1.0 is ghostty's default and the Mac's ⌘C is the convention (ghostty's own macOS default
   copies only to the selection clipboard, which the Mac has none of). A typo in the ratio
   (0, 40, `inf`) reads as off, as the font sizes do. Tests:
-  `text_under_the_minimum_contrast_turns_black_or_white`,
+  `text_under_the_minimum_contrast_moves_toward_black_or_white`,
   `text_is_held_to_the_minimum_contrast`, `terminal_settings_ride_on_the_theme`,
   `a_selection_is_copied_as_it_is_made_when_asked`, `terminal_keys`.
+  Superseded in part 2026-09-25: the minimum defaults to 3.0 and a colour under it moves
+  toward black or white only as far as needed, hue kept; a typo reads as that default. The
+  light theme's golden showed why: a prompt's own 24-bit mint (`#80FFEA`, 1.2:1 on white),
+  chosen for a dark terminal, was unreadable, and the snap to black would have lost its hue
+  (ui.md, "The de-slop pass").
 
 - ✅ **A paste that would run waits for a confirmation** (2026-09-15, ghostty's
   `clipboard-paste-protection`, iTerm2's multi-line warning). A copied snippet with a

@@ -251,15 +251,18 @@ mod tests {
             // Split View, the app on half the screen.
             let (w, h) = (dump.window.width / 2.0 - 5.0, dump.window.height);
             drv.ok(&Command::Resize { width: w, height: h }).await.unwrap();
-            // The columns keep their proportions of the narrower window; the active one rests
-            // inside it.
-            drv.wait_for("the half-width layout", STEP, |d| {
-                d.items.iter().any(|i| {
-                    i.active
-                        && i.bounds[2] < w / 2.0
-                        && i.bounds[0] >= 0.0
-                        && i.bounds[0] + i.bounds[2] <= w + 1.0
-                })
+            // Compact: the active column shows at full width (the window less a 12 pt peek and
+            // an 8 pt gap each side), and the other column waits off screen beside it.
+            drv.wait_for("one full-width column", STEP, |d| {
+                let Some(active) = d.items.iter().find(|i| i.active) else { return false };
+                let (left, right) = (active.bounds[0], active.bounds[0] + active.bounds[2]);
+                active.bounds[2] >= w - 41.0
+                    && left >= 0.0
+                    && right <= w + 1.0
+                    && d.items.len() >= 2
+                    && d.items.iter().filter(|i| !i.active).all(|i| {
+                        i.bounds[0] + i.bounds[2] <= left + 1.0 || i.bounds[0] >= right - 1.0
+                    })
             })
             .await
             .unwrap();

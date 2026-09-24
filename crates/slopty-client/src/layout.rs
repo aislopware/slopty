@@ -442,6 +442,8 @@ struct Geom {
     view_h: f32,
     strut: f32,
     gaps: f32,
+    /// Narrower than `phone_below`: every column shows at full width (see `normal_width`).
+    compact: bool,
 }
 
 impl Geom {
@@ -647,8 +649,16 @@ impl Column {
         if self.fullscreen { g.view_w } else { self.normal_width(g) }
     }
 
-    /// The width outside fullscreen.
+    /// The width outside fullscreen: the stored one, or the full width while the viewport is
+    /// compact. A deviation from niri, which keeps proportions at any size: in Split View a
+    /// half column is 231 pt, a terminal of about 25 columns nobody can use.
     fn normal_width(&self, g: &Geom) -> f32 {
+        if g.compact { g.max_width() } else { self.stored_width(g) }
+    }
+
+    /// The width the column keeps for a viewport that is not compact: what presets, ±10 %
+    /// and a resize act on, so leaving Split View brings it back.
+    fn stored_width(&self, g: &Geom) -> f32 {
         if self.full_width { g.max_width() } else { g.resolve(self.width) }
     }
 
@@ -1239,7 +1249,7 @@ impl Workspace {
             Some(i) if forward => i.saturating_add(1).checked_rem(len).unwrap_or(0),
             Some(i) => i.saturating_add(len).saturating_sub(1).checked_rem(len).unwrap_or(0),
             None => {
-                let current = col.normal_width(&g);
+                let current = col.stored_width(&g);
                 let mut resolved =
                     ctx.presets.iter().map(|p| g.resolve(ColumnWidth::Proportion(*p)));
                 if forward {
@@ -1627,7 +1637,7 @@ impl Workspace {
         if col.fullscreen || self.resize.is_some() {
             return false;
         }
-        self.resize = Some(Resize { column, original: col.resolved_width(&ctx.g) });
+        self.resize = Some(Resize { column, original: col.stored_width(&ctx.g) });
         self.view = ViewOffset::Static(self.view.current(ctx.now));
         true
     }
@@ -1637,10 +1647,17 @@ impl Workspace {
         let g = ctx.g;
         let Some(col) = self.columns.get_mut(resize.column) else { return false };
         let old = col.resolved_width(&g);
-        let new = (resize.original + dx).clamp(g.min_width(), g.max_width().max(g.min_width()));
-        col.width = ColumnWidth::Fixed(new);
+        let stored = (resize.original + dx).clamp(g.min_width(), g.max_width().max(g.min_width()));
+        // Compact shows every column full width, so the drag only means anything as a share of
+        // the window; points taken here would pin a phone-sized column into the wide window.
+        col.width = if g.compact {
+            ColumnWidth::Proportion((stored + g.gaps) / (g.working_w() - g.gaps).max(1.0))
+        } else {
+            ColumnWidth::Fixed(stored)
+        };
         col.preset = None;
         col.full_width = false;
+        let new = col.resolved_width(&g);
         // Keep the camera still: a column left of the active one would drag the view with it.
         if resize.column < self.active {
             self.view.offset(-(new - old));
@@ -1931,7 +1948,13 @@ impl Layout {
 
     fn geom(&self) -> Geom {
         let strut = if self.is_phone() { self.config.phone_peek.max(0.0) } else { 0.0 };
-        Geom { view_w: self.view_w, view_h: self.view_h, strut, gaps: self.config.gaps.max(0.0) }
+        Geom {
+            view_w: self.view_w,
+            view_h: self.view_h,
+            strut,
+            gaps: self.config.gaps.max(0.0),
+            compact: self.is_phone(),
+        }
     }
 
     fn ctx(&self) -> Ctx {

@@ -60,6 +60,17 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   by default there), including when a removal leaves one, and the overview centres a strip
   that fits the zoomed-out window without moving the view (`shown_view_pos`). 67 unit tests
   pin the maths.
+  Deviation added 2026-09-25, compact width: below 700 pt (a phone, an iPad in Split View) no
+  column is narrower than the viewport. Every column shows full width and the strip scrolls
+  between them, as it always did on the phone, because niri's proportions there give a 231 pt
+  terminal, about 25 columns, which is unusable. The proportions stay stored, so leaving Split
+  View brings them back; a width preset or a resize made while compact changes the stored
+  proportion (a resize stores a share of the window, not points, so it survives widening)
+  while the column still shows full width. The strip indicator keeps counting every column.
+  Rejected: shrinking the terminal text to fit two columns (the text is the one thing that
+  must stay readable). `Column::normal_width` against `stored_width`; tests
+  `a_compact_window_shows_every_column_full_width_and_keeps_the_proportions` and
+  `a_resize_while_compact_changes_the_stored_proportion`.
 
 - ✅ **The keys** (2026-09-24). ⌘ is the app's modifier; ⌃ and ⌥ without ⌘ belong to the
   terminal. Where the old keys conflicted the table won: ⌘⌥←/→ no longer switch host, ⌘[/⌘]

@@ -144,14 +144,15 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme
 }
 
-/// A contrast ratio as the theme carries it: hundredths, a typo reads as off.
+/// A contrast ratio as the theme carries it: hundredths, a typo reads as the default.
 fn hundredths(ratio: f32) -> u16 {
+    let default = slopty_settings::TerminalSettings::default().minimum_contrast;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the ratio is clamped to 1..=21 first, so ×100 fits a u16 and is positive"
     )]
-    let hundredths = (sized(ratio, &CONTRAST, 1.0) * 100.0).round() as u16;
+    let hundredths = (sized(ratio, &CONTRAST, default) * 100.0).round() as u16;
     hundredths
 }
 
@@ -313,7 +314,7 @@ mod tests {
     fn terminal_settings_ride_on_the_theme() {
         let mut s = Settings::default();
         let t = theme_for(&s, true);
-        assert_eq!(t.terminal.minimum_contrast, 100, "off");
+        assert_eq!(t.terminal.minimum_contrast, 300, "on by default");
         assert!(!t.behaviour.copy_on_select);
         s.terminal.minimum_contrast = 4.5;
         s.terminal.copy_on_select = true;
@@ -349,9 +350,11 @@ mod tests {
         s.terminal.option_as_alt = OptionAsAlt::Left;
         assert_eq!(theme_for(&s, true).behaviour.option_as_alt, slopty_theme::OptionAsAlt::Left);
         s.terminal.minimum_contrast = 0.0;
-        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "a typo reads as off");
+        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 300, "a typo: the default");
         s.terminal.minimum_contrast = f32::INFINITY;
-        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100);
+        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 300);
+        s.terminal.minimum_contrast = 1.0;
+        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "1.0 turns it off");
     }
 
     #[test]

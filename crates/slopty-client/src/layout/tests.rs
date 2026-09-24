@@ -8,6 +8,10 @@ use super::*;
 const MS: fn(u64) -> Duration = Duration::from_millis;
 const HALF: f32 = 628.0;
 const STEP: f32 = 636.0;
+/// 1280 pt less one gap, at 2/3, less the gap.
+const TWO_THIRDS: f32 = 840.0;
+/// Split View's 511 pt less a 12 pt peek each side, less one gap.
+const COMPACT_WORKING: f32 = 479.0;
 
 /// Where column `i` of half-width columns starts, in strip coordinates.
 fn col_x(i: u8) -> f32 {
@@ -634,7 +638,7 @@ fn tile_heights_split_by_weight_after_fixed_ones() {
     let mut col = Column::new(Tile::new(t(1)), ColumnWidth::Proportion(0.5), false);
     col.tiles.push(Tile { height: TileHeight::Fixed(200.0), ..Tile::new(t(2)) });
     col.tiles.push(Tile { height: TileHeight::Auto { weight: 2.0 }, ..Tile::new(t(3)) });
-    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, gaps: 8.0 };
+    let g = Geom { view_w: 1280.0, view_h: 800.0, strut: 0.0, gaps: 8.0, compact: false };
     let r = col.tile_rects(&g);
     let left = 800.0 - 32.0 - 200.0;
     near(r[0].h, left / 3.0);
@@ -757,6 +761,51 @@ fn a_lone_column_is_centred_and_stays_centred() {
     l.focus_column_first();
     l.remove(t(2));
     centred(&l);
+}
+
+/// Below `phone_below` (an iPad in Split View) every column shows at full width and the strip
+/// scrolls between them; the proportions stay stored, a preset or a resize made meanwhile
+/// changes them, and widening the window brings them back.
+#[test]
+fn a_compact_window_shows_every_column_full_width_and_keeps_the_proportions() {
+    let mut l = columns(2);
+    near(rect(&l, t(1)).w, HALF);
+    near(rect(&l, t(2)).w, HALF);
+    l.set_viewport(511.0, 800.0);
+    let full = COMPACT_WORKING - 8.0;
+    let active = rect(&l, t(2));
+    near(active.w, full);
+    assert!(active.x >= 0.0 && active.right() <= 511.0, "in view: {active:?}");
+    near(rect(&l, t(1)).w, full);
+    assert!(rect(&l, t(1)).right() <= 12.0 + 0.01, "the neighbour only peeks");
+    assert_eq!(l.frame().strip.columns.len(), 2, "the dots still say two");
+    // A preset while compact: the stored width moves, the shown one does not.
+    l.switch_preset_width(true);
+    near(rect(&l, t(2)).w, full);
+    l.set_viewport(1280.0, 800.0);
+    near(rect(&l, t(1)).w, HALF);
+    near(rect(&l, t(2)).w, TWO_THIRDS);
+    // And back again: full width, and the round trip loses nothing.
+    l.set_viewport(511.0, 800.0);
+    near(rect(&l, t(2)).w, full);
+    l.set_viewport(1280.0, 800.0);
+    near(rect(&l, t(2)).w, TWO_THIRDS);
+}
+
+/// A resize dragged while compact changes the stored proportion, not the width shown.
+#[test]
+fn a_resize_while_compact_changes_the_stored_proportion() {
+    let mut l = columns(2);
+    l.set_viewport(511.0, 800.0);
+    let full = rect(&l, t(2)).w;
+    let half = COMPACT_WORKING / 2.0 - 8.0;
+    assert!(l.resize_begin(1));
+    l.resize_update(-100.0);
+    l.resize_end();
+    near(rect(&l, t(2)).w, full);
+    l.set_viewport(1280.0, 800.0);
+    let share = (half - 100.0 + 8.0) / COMPACT_WORKING;
+    near(rect(&l, t(2)).w, (1280.0_f32 - 8.0).mul_add(share, -8.0));
 }
 
 /// In the overview a strip that fits the zoomed-out window is centred in it, whatever column

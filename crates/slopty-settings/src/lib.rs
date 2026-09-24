@@ -196,8 +196,10 @@ pub struct ThemeSettings {
 #[serde(default)]
 pub struct TerminalSettings {
     /// The least WCAG contrast ratio (1–21) between a cell's text and its background; text
-    /// under it is painted black or white instead, whichever reads. `1.0` leaves every
-    /// colour as the program set it (ghostty's `minimum-contrast`).
+    /// under it is moved toward black or white, whichever reads, only as far as the ratio
+    /// needs, keeping its hue. `1.0` leaves every colour as the program set it. On by
+    /// default, unlike ghostty's `minimum-contrast`: a prompt's own 24-bit colours chosen for
+    /// a dark terminal (a pale mint at 1.2:1) are unreadable on a light one.
     pub minimum_contrast: f32,
     /// Copy a selection to the clipboard as soon as it is made (ghostty's
     /// `copy-on-select = clipboard`, iTerm2's default).
@@ -235,7 +237,7 @@ pub struct TerminalSettings {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            minimum_contrast: 1.0,
+            minimum_contrast: 3.0,
             copy_on_select: false,
             bell_alert: true,
             cursor_blink: CursorBlink::Program,
@@ -448,8 +450,9 @@ ui_size = {ui_size}
 appearance = {appearance}
 
 [terminal]
-# Least contrast ratio (1.0 to 21.0) between text and its background;
-# text under it turns black or white. 1.0 keeps every colour as set.
+# Least contrast ratio (1.0 to 21.0) between text and its background; text
+# under it moves toward black or white, only as far as needed, keeping its hue.
+# 1.0 keeps every colour as the program set it.
 minimum_contrast = {minimum_contrast}
 # Copy a selection to the clipboard as soon as it is made.
 copy_on_select = {copy_on_select}
@@ -713,7 +716,7 @@ mod tests {
         assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
         assert_eq!(d.font.ui_size, 13.0);
         assert_eq!(d.theme.appearance, Appearance::System);
-        assert_eq!(d.terminal.minimum_contrast, 1.0, "off, as ghostty");
+        assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
         assert!(d.terminal.bell_alert, "a bell in the background is heard");
         assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
@@ -897,7 +900,7 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
         assert!(text.contains("mono_size = 13.0"), "{text}");
         assert!(text.contains("appearance = \"system\""), "{text}");
-        assert!(text.contains("minimum_contrast = 1.0"), "{text}");
+        assert!(text.contains("minimum_contrast = 3.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");

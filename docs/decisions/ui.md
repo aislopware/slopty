@@ -1044,14 +1044,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Dynamic Island); key caps take a fixed basis and share out any spare width equally (a
   phone keeps 36/52 pt caps and scrolls, an iPad's row fills the width, where equal flex
   shares had grown "esc" and "paste" and not the arrows); the phone's `columns` golden waits
-  for the take-back toast to lapse. In Split View (511 pt) columns keep their proportions, as
-  in niri, so two half columns of 231 pt stand side by side.
+  for the take-back toast to lapse. In Split View (511 pt) every column now shows at full width
+  and the strip scrolls between them (workspace.md, compact width), where two half columns of
+  231 pt had stood side by side.
   Terminal colours, the same day: the pale mint prompt in `workspace` was the prompt's own
   24-bit colour (`#80FFEA`, 1.2:1 on white), not the palette, so no ANSI tuning could reach it.
   libghostty draws nothing here; the minimum contrast is the app's own ghostty-style check
-  (`Colors::text_over`) and `[terminal] minimum_contrast` defaults to 1.0, off, as ghostty's
+  (`Colors::text_over`) and `[terminal] minimum_contrast` defaulted to 1.0, off, as ghostty's
   does, so it never ran. It now moves a colour toward black or white only as far as the
   minimum needs, hue kept (mint on white becomes teal, where the snap made it black), and the
   light brights 11–14 and dark 8 were darkened or lightened, hue held, until every ANSI colour
   but the background's namesake clears 4.5:1 (`ansi_text_clears_wcag_aa_on_the_terminal_background`;
-  11–14 read 3.1–3.6 before). Turning the minimum on by default is `slopty-settings`' call.
+  11–14 read 3.1–3.6 before). The minimum now defaults to 3.0 (ruled the same day), so the
+  prompt reads without a setting.
