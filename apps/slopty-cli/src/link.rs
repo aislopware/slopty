@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr};
@@ -32,47 +32,35 @@ const HEALTHY: Duration = Duration::from_secs(10);
 pub fn locate(flag: Option<&str>, data_dir: &Path) -> Result<HostAddr> {
     let env = std::env::var(SERVER_ENV).ok();
     let settings_path = slopty_settings::path_in(data_dir);
-    let file = || match std::fs::read_to_string(&settings_path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow!(e).context(format!("read {}", settings_path.display()))),
+    let file = || {
+        let loaded = slopty_settings::Settings::load(&settings_path);
+        match loaded.error {
+            Some(e) => Err(anyhow!(e)),
+            None => Ok(loaded.settings.client.server),
+        }
     };
-    let address = choose(flag, env.as_deref(), file)?.with_context(|| {
+    choose(flag, env.as_deref(), file)?.with_context(|| {
         format!(
             "no server: pass --server host[:port], set {SERVER_ENV}, or set `server` under \
              [client] in {}",
             settings_path.display()
         )
-    })?;
-    Ok(HostAddr::parse_with_port(&address, SERVER_PORT)?)
+    })
 }
 
-/// The first of flag, environment and settings text that names a server. The file is read
+/// The first of flag, environment and settings file that names a server. The file is read
 /// only when neither of the first two does.
 fn choose(
     flag: Option<&str>,
     env: Option<&str>,
-    settings: impl FnOnce() -> Result<Option<String>>,
-) -> Result<Option<String>> {
-    let given = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-    if let Some(address) = given(flag).or_else(|| given(env)) {
-        return Ok(Some(address));
+    settings: impl FnOnce() -> Result<Option<HostAddr>>,
+) -> Result<Option<HostAddr>> {
+    fn given(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
     }
-    settings()?.as_deref().map_or(Ok(None), settings_server)
-}
-
-/// `server` in the `[client]` table of a settings file.
-///
-/// Read here rather than through `slopty_settings::Settings` until that schema carries a
-/// `[client]` table.
-fn settings_server(text: &str) -> Result<Option<String>> {
-    let table: toml::Table = toml::from_str(text).context("settings.toml")?;
-    let Some(client) = table.get("client") else { return Ok(None) };
-    match client.get("server") {
-        None => Ok(None),
-        Some(toml::Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(toml::Value::String(s)) => Ok(Some(s.trim().to_owned())),
-        Some(other) => bail!("settings.toml: [client] server must be a string, not {other}"),
+    match given(flag).or_else(|| given(env)) {
+        Some(address) => Ok(Some(HostAddr::parse_with_port(address, SERVER_PORT)?)),
+        None => settings(),
     }
 }
 
@@ -249,37 +237,37 @@ async fn serve(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::bail;
+
     use super::*;
 
     #[test]
     fn the_flag_beats_the_environment_beats_the_settings() {
-        let file = || Ok(Some("[client]\nserver = \"from-file\"\n".to_owned()));
-        assert_eq!(choose(Some("flag"), Some("env"), file).unwrap().as_deref(), Some("flag"));
-        assert_eq!(choose(None, Some("env"), file).unwrap().as_deref(), Some("env"));
-        assert_eq!(choose(None, None, file).unwrap().as_deref(), Some("from-file"));
-        assert_eq!(choose(Some(" "), Some(""), file).unwrap().as_deref(), Some("from-file"));
-        assert_eq!(choose(None, None, || Ok(None)).unwrap(), None);
+        let file = || Ok(Some(HostAddr::parse_with_port("from-file", SERVER_PORT)?));
+        let pick = |flag, env| choose(flag, env, file).unwrap().map(|a| a.host().to_owned());
+        assert_eq!(pick(Some("flag"), Some("env")), Some("flag".to_owned()));
+        assert_eq!(pick(None, Some("env")), Some("env".to_owned()));
+        assert_eq!(pick(None, None), Some("from-file".to_owned()));
+        assert_eq!(pick(Some(" "), Some("")), Some("from-file".to_owned()));
+        assert!(choose(None, None, || Ok(None)).unwrap().is_none());
     }
 
     #[test]
     fn the_settings_file_is_not_read_when_a_flag_names_the_server() {
-        let broken = || -> Result<Option<String>> { bail!("unreadable") };
-        assert_eq!(choose(Some("flag"), None, broken).unwrap().as_deref(), Some("flag"));
+        let broken = || -> Result<Option<HostAddr>> { bail!("unreadable") };
+        assert!(choose(Some("flag"), None, broken).unwrap().is_some());
         choose(None, None, broken).unwrap_err();
     }
 
     #[test]
     fn the_client_table_names_the_server() {
-        assert_eq!(settings_server("").unwrap(), None);
-        assert_eq!(settings_server("[font]\nsize = 13\n").unwrap(), None);
-        assert_eq!(settings_server("[client]\nserver = \"\"\n").unwrap(), None);
-        assert_eq!(
-            settings_server("[client]\nserver = \" studio:7 \"\n").unwrap().as_deref(),
-            Some("studio:7")
-        );
-        let err = settings_server("[client]\nserver = 7\n").unwrap_err();
-        assert!(err.to_string().contains("must be a string"), "{err}");
-        settings_server("[client\n").unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let path = slopty_settings::path_in(dir.path());
+        std::fs::write(&path, "[client]\nserver = \"studio:7\"\n").unwrap();
+        let found = locate(None, dir.path()).unwrap();
+        assert_eq!((found.host(), found.port()), ("studio", 7));
+        std::fs::write(&path, "[client]\nserver = 7\n").unwrap();
+        locate(None, dir.path()).unwrap_err();
     }
 
     #[test]

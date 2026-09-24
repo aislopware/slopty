@@ -33,7 +33,6 @@ slopty-proto.workspace = true
 slopty-settings.workspace = true
 slopty-tools.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }
-toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
