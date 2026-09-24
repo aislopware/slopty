@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "xtask is a CLI; stdout is its UI")]
 
 mod bundle;
+mod check;
 mod deep;
 mod e2e;
 mod gate;
@@ -46,6 +47,13 @@ enum Cmd {
         /// List every installed source, not only the enabled ones.
         #[arg(long)]
         all: bool,
+    },
+    /// The gate's checks on the named crates only, on the working tree: what an agent that owns
+    /// those crates runs before it reports.
+    Check {
+        /// A crate to check; repeat for several.
+        #[arg(short = 'p', long = "package", required = true)]
+        packages: Vec<String>,
     },
     /// Run the full pre-commit gate: fmt, clippy on every triple, tests, docs, deny, shear, typos.
     Gate {
@@ -141,6 +149,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
+        Cmd::Check { packages } => check::run(&sh, &packages),
         Cmd::Gate { fix, quick, in_place } => {
             gate::run(&sh, gate::Options { fix, quick, in_place })
         }

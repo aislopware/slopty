@@ -36,6 +36,14 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     let started = Instant::now();
     crate::upstream::warn_if_stale();
     let root = repo_root()?;
+    // Two gates share `target/gate/tree`: a second one would rewrite the snapshot under the
+    // first one's build and both logs would lie. The lock is released when the file closes.
+    let gate_dir = root.join("target").join("gate");
+    std::fs::create_dir_all(&gate_dir)?;
+    let lock = std::fs::File::create(gate_dir.join(".lock"))?;
+    if lock.try_lock().is_err() {
+        bail!("another `cargo gate` is running on this checkout; wait for it");
+    }
     if opts.fix {
         // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
         fmt(sh, true)?;

@@ -40,6 +40,9 @@ edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers 
 first (stage what they changed); `--in-place` checks the tree itself (CI). Per-lane times are
 in the log.
 
+`cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
+what an agent that owns those crates runs before it reports.
+
 ## Deep checks (on a schedule, not per commit)
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir
 under `target/deep/`:

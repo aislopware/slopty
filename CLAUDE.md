@@ -62,9 +62,10 @@ in it until checked here.
   - A change to a shared crate (`slopty-proto`, `slopty-core`, the workspace `Cargo.toml`) is
     owned by one agent and lands first. Work that depends on it is sequenced after it, not run
     alongside it.
-  - An agent keeps its crates compiling between edits and checks only its own crates
-    (`cargo check/clippy/nextest -p <crate>`), because a half-edited crate breaks everyone's
-    build.
+  - An agent keeps its crates compiling between edits and checks only its own crates, because
+    a half-edited crate breaks everyone's build. `cargo xtask check -p <crate>…` runs the gate's
+    steps (fmt, clippy on every triple, tests, rustdoc, shear, typos) on just those crates; a
+    clean run is what an agent reports.
   - Subagents do not commit. The session that started them stages one subagent's files, gates
     that index, commits it, and moves on to the next.
 
