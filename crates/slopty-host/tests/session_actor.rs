@@ -44,6 +44,7 @@ mod actor {
             size: size(40, 6),
             scrollback_lines: 1000,
             exited: None,
+            port_hints: None,
         })
         .unwrap();
         (handle, child, tap_rx)
@@ -708,7 +709,7 @@ done
     /// clipboard cap and one past it is dropped on the host.
     #[tokio::test]
     async fn a_directory_and_a_bounded_clipboard_write_reach_the_viewers() {
-        let cap = slopty_proto::screen::MAX_CLIPBOARD_BYTES;
+        let cap = slopty_proto::terminal::MAX_OSC52_BYTES;
         let clip = |n: usize| {
             format!(
                 "printf '\\033]52;c;'; head -c {n} /dev/zero | tr '\\0' a | base64 | tr -d '\\n'; printf '\\a'"

@@ -95,6 +95,16 @@ impl Driver {
         self.ok(&Command::Type { text: text.to_owned() }).await
     }
 
+    /// Drop files on a window point, through GPUI's own file-drop events.
+    ///
+    /// # Errors
+    ///
+    /// When the app answers an error or the socket fails.
+    pub async fn drop_files(&mut self, paths: &[&Path], x: f32, y: f32) -> Result<()> {
+        let paths = paths.iter().map(|p| p.display().to_string()).collect();
+        self.ok(&Command::DropFiles { paths, x, y }).await
+    }
+
     /// Put a picture on the app's clipboard (the simulator's own pasteboard).
     ///
     /// # Errors

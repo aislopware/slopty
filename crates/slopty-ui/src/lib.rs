@@ -5,6 +5,8 @@
 //! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
 //! * [`workspace`] — every worker's items as tiles in scrollable columns, the titlebar, actions.
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
+//! * [`clipboard`] — the clipboard shared with the workers: announced, fetched on paste, echoes
+//!   broken.
 //! * [`note`] — a sticky note read as Markdown and edited in place, text shared through the
 //!   document.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
@@ -18,6 +20,7 @@
 pub mod a11y;
 
 pub mod chrome_text;
+pub mod clipboard;
 pub mod colors;
 pub mod file;
 pub mod fonts;

@@ -10,6 +10,7 @@
 //! files, [`ports`]); [`caps`] says what this worker can do.
 
 pub mod caps;
+pub mod clip;
 pub mod ctl;
 pub mod file;
 pub mod find;
@@ -21,6 +22,7 @@ pub mod repo;
 pub mod screen;
 pub mod session;
 pub mod wake;
+pub mod xfer;
 
 pub use items::ItemStore;
 pub use manager::Host;

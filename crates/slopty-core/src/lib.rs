@@ -8,5 +8,5 @@
 mod id;
 mod time;
 
-pub use id::{ClientId, ItemId, SessionId, StreamId, WindowId, WorkerId};
+pub use id::{ClientId, ItemId, SessionId, StreamId, WindowId, WorkerId, XferId};
 pub use time::{Duration, MonoTime};

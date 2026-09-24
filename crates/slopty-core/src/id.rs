@@ -84,8 +84,12 @@ uuid_id!(
     WorkerId
 );
 uuid_id!(
-    /// An item on the canvas (terminal tile, remote window tile, note, agent card).
+    /// An item on the workspace (terminal tile, remote window tile, note).
     ItemId
+);
+uuid_id!(
+    /// One file transfer: a drop of files or a directory, or one file fetched down.
+    XferId
 );
 
 /// A window on the host that can be streamed: the `CGWindowID`. macOS reuses these, so a

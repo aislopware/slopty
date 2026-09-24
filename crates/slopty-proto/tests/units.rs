@@ -12,15 +12,15 @@ mod units {
     use slopty_proto::input::CellMetrics;
     use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
-    use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
-    use slopty_proto::terminal::TermSize;
+    use slopty_proto::terminal::{MAX_OSC52_BYTES, TermSize};
     use slopty_proto::{ClientMsg, HostMsg};
     use zerocopy::FromZeros as _;
 
     #[test]
     fn the_limits_are_the_numbers_the_docs_name() {
         assert_eq!(FILE_BYTES, 524_288);
-        assert_eq!(MAX_CLIPBOARD_BYTES, 262_144);
+        assert_eq!(MAX_OSC52_BYTES, 262_144);
+        assert_eq!(slopty_proto::transfer::INLINE_CLIP_BYTES, 65_536);
         assert_eq!(MAX_FRAME_BYTES, 16_777_216);
         let size = TermSize {
             cols: 80,

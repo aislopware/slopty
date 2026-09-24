@@ -78,7 +78,7 @@ fn connect(
         v.connect_worker(
             key,
             name.to_owned(),
-            WorkerLink { me, out: tx, open_screen: factory },
+            WorkerLink { me, out: tx, open_screen: factory, remote: None },
             Vec::new(),
             cx,
         );
@@ -449,7 +449,7 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
         Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
     let item = view.read_with(cx, |v, _| v.item(kept).cloned()).unwrap();
     view.update_in(cx, |v, _w, cx| {
-        let link = WorkerLink { me: studio.me, out: tx, open_screen: factory };
+        let link = WorkerLink { me: studio.me, out: tx, open_screen: factory, remote: None };
         v.connect_worker(key, "studio".into(), link, Vec::new(), cx);
         v.apply_sync(key, ItemSync::Snapshot { version: 9, items: vec![item] }, cx);
     });
@@ -1104,3 +1104,5 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     assert!(read_layout(&dir.join("bad.json")).is_none(), "a bad file costs the layout only");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+mod remote;

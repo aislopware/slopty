@@ -380,6 +380,11 @@ fn apply(
             }
             Reply::Ok
         }
+        #[cfg(target_os = "macos")]
+        Command::Clipboard { .. } => Reply::Error {
+            message: "clipboard: the Mac app shares a named pasteboard; write that".into(),
+        },
+        #[cfg(not(target_os = "macos"))]
         Command::Clipboard { media_type, data } => {
             let Ok(bytes) = data_encoding::BASE64.decode(data.as_bytes()) else {
                 return Reply::Error { message: "clipboard: data is not base64".into() };
@@ -398,6 +403,18 @@ fn apply(
                 bytes,
                 id: 0,
             }));
+            Reply::Ok
+        }
+        Command::DropFiles { paths, x, y } => {
+            let position = point(px(x), px(y));
+            let paths = gpui::ExternalPaths(paths.into_iter().map(PathBuf::from).collect());
+            for event in [
+                gpui::FileDropEvent::Entered { position, paths },
+                gpui::FileDropEvent::Pending { position },
+                gpui::FileDropEvent::Submit { position },
+            ] {
+                let _handled = window.dispatch_event(PlatformInput::FileDrop(event), cx);
+            }
             Reply::Ok
         }
         Command::Type { text } => {
@@ -850,6 +867,12 @@ impl Workspace {
                     face: terminal.metrics().map(|m| face_info(&m)),
                     driving: terminal.driving(),
                     images: terminal.state().placements().len(),
+                    ports: view
+                        .forwards(session)
+                        .iter()
+                        .map(|f| [f.port.number, f.local.unwrap_or(0)])
+                        .collect(),
+                    upload: view.upload_on(tile).map(|(_, u)| u.label()),
                 });
             }
         }

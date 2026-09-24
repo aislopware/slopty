@@ -8,9 +8,10 @@ mod tests {
     use std::time::Duration;
 
     use slopty_client::LinkEvent;
-    use slopty_core::{ClientId, WindowId};
+    use slopty_core::{ClientId, SessionId, WindowId};
     use slopty_net::client::{HostConn, bind_client, connect_addr};
     use slopty_net::framed::FramedRecv;
+    use slopty_net::streams::{self, Uni};
     use slopty_net::{ClientMsg, HostMsg};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
@@ -123,6 +124,9 @@ mod tests {
             // Any free port: the developer's own hostd may hold the default one.
             .arg("--port")
             .arg("0")
+            // Never the user's clipboard, never their home.
+            .env("SLOPTY_PASTEBOARD", pasteboard_name(dir))
+            .env("SLOPTY_DROP_DIR", dir.join("drop"))
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
@@ -184,6 +188,14 @@ mod tests {
             .unwrap()
             .unwrap();
         (endpoint, host)
+    }
+
+    /// The next session stream the host opens: its session and its events.
+    async fn session_stream(host: &HostConn) -> (SessionId, FramedRecv<TermEvent>) {
+        match tokio::time::timeout(STEP, streams::accept_uni(&host.conn)).await.unwrap().unwrap() {
+            Uni::Session { session, rx } => (session, rx),
+            Uni::Bulk { header, .. } => panic!("a bulk stream, not a session: {header:?}"),
+        }
     }
 
     /// Close a test's endpoint, giving its connection a moment to tell the host.
@@ -250,9 +262,8 @@ mod tests {
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
-        let (header, mut events) =
-            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
-        assert_eq!(header.session, session);
+        let (opened, mut events) = session_stream(&host).await;
+        assert_eq!(opened, session);
 
         host.tx
             .send(&ClientMsg::Term {
@@ -310,7 +321,7 @@ mod tests {
     async fn open_shell_and_see(
         host: &mut HostConn,
         marker: &str,
-    ) -> (slopty_core::SessionId, FramedRecv<TermEvent>) {
+    ) -> (SessionId, FramedRecv<TermEvent>) {
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
         host.tx
             .send(&ClientMsg::OpenSession(OpenSession {
@@ -330,9 +341,8 @@ mod tests {
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
-        let (header, mut events) =
-            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
-        assert_eq!(header.session, session);
+        let (opened, mut events) = session_stream(host).await;
+        assert_eq!(opened, session);
         // Quoted so the echoed command line never matches, only the output.
         let (head, tail) = marker.split_at(marker.len() / 2);
         host.tx
@@ -462,9 +472,8 @@ mod tests {
             .send(&ClientMsg::Term { session, req: TermRequest::Attach { size } })
             .await
             .unwrap();
-        let (header, mut events) =
-            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
-        assert_eq!(header.session, session);
+        let (opened, mut events) = session_stream(&host).await;
+        assert_eq!(opened, session);
         let full = loop {
             match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
                 TermEvent::Frame(f) if f.full => break f,
@@ -1130,8 +1139,7 @@ mod tests {
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
-        let (_header, mut events) =
-            tokio::time::timeout(STEP, host.accept_session_stream()).await.unwrap().unwrap();
+        let (_opened, mut events) = session_stream(&host).await;
         host.tx
             .send(&ClientMsg::Term {
                 session,
@@ -2629,5 +2637,386 @@ mod tests {
             }
         }
         false
+    }
+
+    /// The named pasteboard a test's hostd syncs instead of the general one.
+    fn pasteboard_name(dir: &std::path::Path) -> String {
+        let leaf = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        format!("dev.aislopware.slopty.e2e.{leaf}")
+    }
+
+    /// A test's pasteboard, released however the test ends.
+    struct TestBoard(slopty_input::MacBoard);
+
+    impl Drop for TestBoard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    /// The first control message `pick` takes within a step, skipping the others.
+    async fn next_msg<T>(host: &mut HostConn, mut pick: impl FnMut(HostMsg) -> Option<T>) -> T {
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        loop {
+            let msg = tokio::time::timeout_at(deadline, host.rx.recv()).await.unwrap().unwrap();
+            if let Some(found) = pick(msg) {
+                return found;
+            }
+        }
+    }
+
+    /// Whether a message `pick` takes arrives within `wait`.
+    async fn arrives<T>(
+        host: &mut HostConn,
+        wait: Duration,
+        mut pick: impl FnMut(HostMsg) -> Option<T>,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now().checked_add(wait).unwrap();
+        loop {
+            match tokio::time::timeout_at(deadline, host.rx.recv()).await {
+                Err(_elapsed) => return false,
+                Ok(msg) => {
+                    if pick(msg.unwrap()).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every message sent before this has been handled by the host (it answers in order).
+    async fn settled(host: &mut HostConn) {
+        let sent_at = slopty_core::MonoTime::now();
+        host.tx.send(&ClientMsg::Ping { sent_at }).await.unwrap();
+        next_msg(host, |m| matches!(m, HostMsg::Pong { sent_at: s } if s == sent_at).then_some(()))
+            .await;
+    }
+
+    /// Everything left on a raw stream.
+    async fn drain(rx: &mut streams::RawRecv) -> Vec<u8> {
+        let mut got = Vec::new();
+        while let Some(chunk) = rx.chunk(1 << 20).await.unwrap() {
+            got.extend_from_slice(&chunk);
+        }
+        got
+    }
+
+    /// Open `/bin/sh` in `cwd`, not attached.
+    async fn open_shell(host: &mut HostConn, cwd: &std::path::Path) -> SessionId {
+        host.tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                command: vec!["/bin/sh".to_owned()],
+                env: vec![("PS1".to_owned(), "$ ".to_owned())],
+                title: None,
+                attach: false,
+            }))
+            .await
+            .unwrap();
+        next_msg(host, |m| match m {
+            HostMsg::SessionOpened(summary) => Some(summary.id),
+            _ => None,
+        })
+        .await
+    }
+
+    fn digest(bytes: &[u8]) -> [u8; 32] {
+        blake3::hash(bytes).into()
+    }
+
+    /// Host → client: a change is announced while watched, small text inline and a picture
+    /// fetched over a bulk stream. Client → host: the offer waits for the paste chord, the
+    /// picture is fetched from the client, and what lands is not announced back. Unwatched, a
+    /// change is not announced. All on a named pasteboard, never the user's.
+    #[tokio::test]
+    async fn the_clipboard_is_announced_fetched_and_pasted_both_ways() {
+        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, Rep};
+        use slopty_proto::input::{KeyAction, KeyCode, Mods};
+        use slopty_proto::screen::ScreenInput;
+        use slopty_proto::transfer::{ClipItem, ClipMsg, Offer, Peer, Purpose};
+
+        let dir = tempfile::tempdir().unwrap();
+        let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
+        let (_guard, mut host) = connect(dir.path()).await;
+        let (text, png) = (Rep::Text.uti(), Rep::Png.uti());
+        let offered = |m| match m {
+            HostMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
+            _ => None,
+        };
+
+        host.tx.send(&ClientMsg::Clip(ClipMsg::Watch(true))).await.unwrap();
+        settled(&mut host).await;
+        let picture: Vec<u8> = (0..200_000_u32).map(|i| (i % 253) as u8).collect();
+        let copied =
+            vec![(png.clone(), picture.clone()), (text.clone(), b"copied on the host".to_vec())];
+        board.0.write(&[copied]).unwrap();
+        let offer = next_msg(&mut host, offered).await;
+        assert_eq!(offer.origin, Peer::Worker(host.ack.worker));
+        let utis: Vec<&str> = offer.items.iter().map(|i| i.uti.as_str()).collect();
+        assert_eq!(utis, [png.as_str(), text.as_str()], "richest first");
+        assert_eq!(offer.items[0].inline, None, "a picture is listed, not pushed");
+        assert_eq!(
+            (offer.items[0].size, offer.items[0].hash),
+            (picture.len() as u64, digest(&picture))
+        );
+        assert_eq!(offer.items[1].inline.as_deref(), Some(&b"copied on the host"[..]));
+
+        let generation = offer.generation;
+        let fetch = ClipMsg::Fetch { generation, uti: png.clone() };
+        host.tx.send(&ClientMsg::Clip(fetch)).await.unwrap();
+        let Uni::Bulk { header, mut rx } =
+            tokio::time::timeout(STEP, streams::accept_uni(&host.conn)).await.unwrap().unwrap()
+        else {
+            panic!("the picture comes as a bulk stream");
+        };
+        assert_eq!(header.purpose, Purpose::Clip { generation, uti: png.clone() });
+        assert!(drain(&mut rx).await == picture, "the picture arrives whole");
+        host.tx
+            .send(&ClientMsg::Clip(ClipMsg::Fetch { generation, uti: text.clone() }))
+            .await
+            .unwrap();
+        let data = next_msg(&mut host, |m| match m {
+            HostMsg::Clip(ClipMsg::Data { bytes, .. }) => Some(bytes),
+            _ => None,
+        })
+        .await;
+        assert_eq!(data, b"copied on the host");
+
+        // The client copies a picture and some text.
+        let theirs: Vec<u8> = (0..100_000_u32).map(|i| (i % 7) as u8).collect();
+        let offer = Offer {
+            origin: Peer::Client(ClientId::new()),
+            generation: 1,
+            items: vec![
+                ClipItem {
+                    uti: png.clone(),
+                    size: theirs.len() as u64,
+                    hash: digest(&theirs),
+                    inline: None,
+                },
+                ClipItem {
+                    uti: text.clone(),
+                    size: 15,
+                    hash: digest(b"from the client"),
+                    inline: Some(b"from the client".to_vec()),
+                },
+            ],
+        };
+        host.tx.send(&ClientMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        settled(&mut host).await;
+        assert_eq!(board.0.data(&text).unwrap(), b"copied on the host", "announced, not pushed");
+        // ⌘V aimed at a stream that does not exist: no event is posted anywhere.
+        let chord = ScreenInput::Key {
+            code: KeyCode::V,
+            action: KeyAction::Press,
+            mods: Mods::SUPER,
+            text: None,
+        };
+        let input = ScreenRequest::Input { stream: slopty_core::StreamId(77), input: chord };
+        host.tx.send(&ClientMsg::Screen(input)).await.unwrap();
+        let (generation, uti) = next_msg(&mut host, |m| match m {
+            HostMsg::Clip(ClipMsg::Fetch { generation, uti }) => Some((generation, uti)),
+            _ => None,
+        })
+        .await;
+        assert_eq!((generation, uti.as_str()), (1, png.as_str()), "only what was not inline");
+        let data = ClipMsg::Data { generation, uti, bytes: theirs.clone() };
+        host.tx.send(&ClientMsg::Clip(data)).await.unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while board.0.data(&png).as_deref() != Some(theirs.as_slice()) {
+            assert!(tokio::time::Instant::now() < deadline, "the picture reaches the pasteboard");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(board.0.data(&text).unwrap(), b"from the client");
+        assert!(board.0.types().iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
+        assert!(
+            !arrives(&mut host, Duration::from_millis(800), offered).await,
+            "not announced back"
+        );
+
+        host.tx.send(&ClientMsg::Clip(ClipMsg::Watch(false))).await.unwrap();
+        settled(&mut host).await;
+        board.0.write(&[vec![(text.clone(), b"nobody watches".to_vec())]]).unwrap();
+        assert!(!arrives(&mut host, Duration::from_millis(800), offered).await, "unwatched");
+    }
+
+    /// Two files dropped on a terminal land in its shell's directory; one is cut halfway,
+    /// resumed from what the host kept, and lands whole. A name already taken lands in the
+    /// drop directory. The paths to paste come back once every file is in.
+    #[tokio::test]
+    async fn an_upload_lands_in_the_shells_directory_and_resumes_after_a_cut() {
+        use slopty_core::XferId;
+        use slopty_proto::transfer::{BulkHeader, Dest, Purpose, XferMsg};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut host) = connect(dir.path()).await;
+        let cwd = dir.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("taken.txt"), b"mine").unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        let session = open_shell(&mut host, &cwd).await;
+        let header = |xfer, name: &str, size: usize, offset: u64| BulkHeader {
+            xfer,
+            purpose: Purpose::Upload,
+            name: name.to_owned(),
+            size: size as u64,
+            mtime_ms: 1_700_000_000_000,
+            mode: 0o640,
+            offset,
+        };
+        let done = |m| match m {
+            HostMsg::Xfer(XferMsg::Done { name, path, hash, .. }) => Some((name, path, hash)),
+            HostMsg::Xfer(XferMsg::Failed { name, error, .. }) => {
+                panic!("{name:?} failed: {error}")
+            }
+            _ => None,
+        };
+
+        let xfer = XferId::new();
+        let small = b"a small file".to_vec();
+        let big: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 249) as u8).collect();
+        let begin = XferMsg::Begin {
+            xfer,
+            dest: Some(Dest::SessionCwd(session)),
+            files: 2,
+            bytes: (small.len() + big.len()) as u64,
+        };
+        host.tx.send(&ClientMsg::Xfer(begin)).await.unwrap();
+        let mut send =
+            streams::open_bulk(&host.conn, header(xfer, "a.txt", small.len(), 0)).await.unwrap();
+        send.write_all(&small).await.unwrap();
+        send.finish().unwrap();
+        let (name, path, hash) = next_msg(&mut host, done).await;
+        assert_eq!((name.as_str(), hash), ("a.txt", digest(&small)));
+        assert_eq!(PathBuf::from(&path), cwd.join("a.txt"));
+
+        // Half the big file, then the stream is cut.
+        let mut send =
+            streams::open_bulk(&host.conn, header(xfer, "big.bin", big.len(), 0)).await.unwrap();
+        send.write_all(&big[..1_500_000]).await.unwrap();
+        let partial = cwd.join("big.bin.partial");
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while std::fs::metadata(&partial).map_or(0, |m| m.len()) == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the host writes as bytes arrive");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        send.reset(0_u32.into()).unwrap();
+        let failed = next_msg(&mut host, |m| match m {
+            HostMsg::Xfer(XferMsg::Failed { name, .. }) => Some(name),
+            _ => None,
+        })
+        .await;
+        assert_eq!(failed.as_deref(), Some("big.bin"));
+        assert!(!cwd.join("big.bin").exists(), "half a file is never under its name");
+        host.tx
+            .send(&ClientMsg::Xfer(XferMsg::Resume { xfer, name: "big.bin".to_owned() }))
+            .await
+            .unwrap();
+        let durable = next_msg(&mut host, |m| match m {
+            HostMsg::Xfer(XferMsg::Offset { durable, .. }) => Some(durable),
+            _ => None,
+        })
+        .await;
+        assert!(durable > 0 && durable <= 1_500_000, "kept what arrived: {durable}");
+        let rest = &big[usize::try_from(durable).unwrap()..];
+        let mut send = streams::open_bulk(&host.conn, header(xfer, "big.bin", big.len(), durable))
+            .await
+            .unwrap();
+        send.write_all(rest).await.unwrap();
+        send.finish().unwrap();
+        let (name, _path, hash) = next_msg(&mut host, done).await;
+        assert_eq!((name.as_str(), hash), ("big.bin", digest(&big)), "whole across the cut");
+        let paths = next_msg(&mut host, |m| match m {
+            HostMsg::Xfer(XferMsg::Finished { xfer: x, paths }) if x == xfer => Some(paths),
+            _ => None,
+        })
+        .await;
+        let expected: Vec<String> =
+            ["a.txt", "big.bin"].map(|n| cwd.join(n).to_string_lossy().into_owned()).into();
+        assert_eq!(paths, expected);
+        assert_eq!(digest(&std::fs::read(cwd.join("big.bin")).unwrap()), digest(&big));
+
+        // A name the directory already has lands in the drop directory instead.
+        let clash = XferId::new();
+        let begin = XferMsg::Begin {
+            xfer: clash,
+            dest: Some(Dest::SessionCwd(session)),
+            files: 1,
+            bytes: 5,
+        };
+        host.tx.send(&ClientMsg::Xfer(begin)).await.unwrap();
+        let mut send =
+            streams::open_bulk(&host.conn, header(clash, "taken.txt", 5, 0)).await.unwrap();
+        send.write_all(b"yours").await.unwrap();
+        send.finish().unwrap();
+        let paths = next_msg(&mut host, |m| match m {
+            HostMsg::Xfer(XferMsg::Finished { xfer: x, paths }) if x == clash => Some(paths),
+            _ => None,
+        })
+        .await;
+        let dropped = dir.path().join("drop").join(clash.to_string()).join("taken.txt");
+        assert_eq!(paths, [dropped.to_string_lossy().into_owned()]);
+        assert_eq!(std::fs::read(cwd.join("taken.txt")).unwrap(), b"mine", "untouched");
+        assert_eq!(std::fs::read(dropped).unwrap(), b"yours");
+        let close = ClientMsg::Term { session, req: TermRequest::Close };
+        host.tx.send(&close).await.unwrap();
+    }
+
+    /// A client's tunnel reaches a TCP server on the host's loopback, both ways, and a
+    /// half-close on one side ends the other.
+    #[tokio::test]
+    async fn a_tunnel_reaches_a_local_echo_server() {
+        use tokio::io::AsyncWriteExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, host) = connect(dir.path()).await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _peer) = echo.accept().await.unwrap();
+            let (mut rd, mut wr) = socket.split();
+            tokio::io::copy(&mut rd, &mut wr).await.unwrap();
+            wr.shutdown().await.unwrap();
+        });
+        let (mut send, mut rx) = streams::open_tunnel(&host.conn, port).await.unwrap();
+        let request: Vec<u8> = (0..300_000_u32).map(|i| (i % 241) as u8).collect();
+        send.write_all(&request).await.unwrap();
+        send.finish().unwrap();
+        let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();
+        assert!(echoed == request, "the bytes come back whole and in order");
+        tokio::time::timeout(STEP, server).await.unwrap().unwrap();
+    }
+
+    /// `nc -l` typed into a real shell is announced as its session's port, and the set is
+    /// announced empty once it stops.
+    #[tokio::test]
+    async fn ports_follow_a_listener_in_a_real_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut host) = connect(dir.path()).await;
+        let session = open_shell(&mut host, dir.path()).await;
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let listen = format!("nc -l 127.0.0.1 {port}\n").into_bytes();
+        host.tx.send(&ClientMsg::Term { session, req: TermRequest::Raw(listen) }).await.unwrap();
+        let ports = next_msg(&mut host, |m| match m {
+            HostMsg::Ports { session: s, ports } if s == session && !ports.is_empty() => {
+                Some(ports)
+            }
+            _ => None,
+        })
+        .await;
+        assert_eq!(ports.len(), 1, "{ports:?}");
+        assert_eq!((ports[0].number, ports[0].process.as_str()), (port, "nc"));
+        assert_eq!(ports[0].session, Some(session));
+        host.tx
+            .send(&ClientMsg::Term { session, req: TermRequest::Raw(b"\x03".to_vec()) })
+            .await
+            .unwrap();
+        next_msg(&mut host, |m| match m {
+            HostMsg::Ports { session: s, ports } if s == session && ports.is_empty() => Some(()),
+            _ => None,
+        })
+        .await;
+        let close = ClientMsg::Term { session, req: TermRequest::Close };
+        host.tx.send(&close).await.unwrap();
     }
 }

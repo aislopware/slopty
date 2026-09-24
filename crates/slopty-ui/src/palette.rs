@@ -48,6 +48,8 @@ pub enum PaletteRun {
         /// As typed, without its trailing slash.
         cwd: String,
     },
+    /// Open this address in the default browser (a forwarded port).
+    OpenUrl(String),
     /// Reveal this session and open its find bar on `needle` (find in every card).
     FindIn {
         /// The card's session.
@@ -81,6 +83,7 @@ impl Clone for PaletteRun {
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
+            Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
@@ -106,6 +109,7 @@ impl std::fmt::Debug for PaletteRun {
             }
             Self::OpenShell { cwd } => f.debug_struct("OpenShell").field("cwd", cwd).finish(),
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
+            Self::OpenUrl(url) => f.debug_tuple("OpenUrl").field(url).finish(),
             Self::FindIn { session, needle } => {
                 f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
             }
@@ -166,6 +170,16 @@ impl PaletteItem {
     #[must_use]
     pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
+    }
+
+    /// A line that opens `url` in the browser, `detail` on the right.
+    #[must_use]
+    pub fn url(label: &str, detail: &str, url: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            keys: detail.to_owned(),
+            run: PaletteRun::OpenUrl(url.to_owned()),
+        }
     }
 
     /// `Rerun <command>` for a command the active shell ran (a multi-line command shows its

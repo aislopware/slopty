@@ -4,9 +4,13 @@
 //!
 //! * **Control stream** — one bidirectional QUIC stream. [`ClientMsg`] one way, [`HostMsg`] the
 //!   other, each framed by [`codec`] (u32 length prefix + postcard).
-//! * **Session streams** — one unidirectional stream per attached terminal, host → client, carrying
-//!   [`terminal::TermEvent`]s with the same framing. Input goes back on the control stream so it is
-//!   never head-of-line blocked behind a large frame.
+//! * **Unidirectional streams** — each opens with a [`transfer::UniHead`]. A session stream (host →
+//!   client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
+//!   input goes back on the control stream so it is never head-of-line blocked behind a large
+//!   frame. A bulk stream (either way, lower priority) carries a file or a large clipboard
+//!   representation as raw bytes.
+//! * **Tunnel streams** — client-opened bidirectional streams after the control stream, one per
+//!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
 //! * **Media datagrams** — unreliable QUIC datagrams with a fixed [`media::MediaHeader`] followed
 //!   by a fragment of an encoded video frame, an audio packet, or a cursor update.
 //!
@@ -26,20 +30,13 @@ pub mod orchestration;
 pub mod screen;
 pub mod server;
 pub mod terminal;
+pub mod transfer;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 51;
-
-/// First message on every host → client session stream, naming the session whose
-/// [`terminal::TermEvent`]s follow.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct StreamHeader {
-    /// The session.
-    pub session: SessionId,
-}
+pub const PROTOCOL_VERSION: u16 = 52;
 
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -94,6 +91,10 @@ pub enum ClientMsg {
         /// Absolute paths on the host.
         paths: Vec<String>,
     },
+    /// Clipboard sync.
+    Clip(transfer::ClipMsg),
+    /// File transfer control.
+    Xfer(transfer::XferMsg),
 }
 
 impl ClientMsg {
@@ -112,6 +113,8 @@ impl ClientMsg {
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
             Self::WatchFiles { .. } => "WatchFiles",
+            Self::Clip(_) => "Clip",
+            Self::Xfer(_) => "Xfer",
         }
     }
 }
@@ -173,6 +176,17 @@ pub enum HostMsg {
         /// Paths relative to `root`, best first; a directory ends in `/`.
         paths: Vec<String>,
     },
+    /// Clipboard sync.
+    Clip(transfer::ClipMsg),
+    /// File transfer control.
+    Xfer(transfer::XferMsg),
+    /// The TCP ports listening in a session's process tree, the whole set each time it changes.
+    Ports {
+        /// The session.
+        session: SessionId,
+        /// Listening ports.
+        ports: Vec<orchestration::Port>,
+    },
 }
 
 impl HostMsg {
@@ -192,6 +206,9 @@ impl HostMsg {
             Self::HooksInstalled { .. } => "HooksInstalled",
             Self::File { .. } => "File",
             Self::FoundFiles { .. } => "FoundFiles",
+            Self::Clip(_) => "Clip",
+            Self::Xfer(_) => "Xfer",
+            Self::Ports { .. } => "Ports",
         }
     }
 }

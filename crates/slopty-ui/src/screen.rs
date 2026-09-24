@@ -34,14 +34,18 @@ use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, CursorShape, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_IMAGE_BYTES, Quality,
-    RateVerdict, ScreenInput, ScreenRequest, ScrollPhase, SourceState, VideoCodec,
+    CaptureTarget, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest, ScrollPhase,
+    SourceState, VideoCodec,
 };
 use slopty_theme::{Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::hsla;
 use crate::keys;
+
+/// What goes on the control stream ahead of a paste chord: this client's clipboard offer, when
+/// the worker has not heard it yet (`crate::clipboard::ClipSync::offer_for`).
+pub type PasteHook = std::rc::Rc<dyn Fn() -> Option<ClientMsg>>;
 
 /// Makes a client-side stream for an `Opened` event (wraps `HostLink::screen`).
 pub type ScreenFactory = Arc<dyn Fn(StreamId, VideoCodec) -> ScreenHandle + Send + Sync>;
@@ -163,12 +167,8 @@ pub struct ScreenView {
     /// Keys whose press went to the host, so a release for a locally-handled chord (its press
     /// was eaten by a canvas binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
-    /// The text last known to be on the host's pasteboard (received from it, or pushed by
-    /// this view ahead of a paste); a paste chord only pushes when the clipboard differs.
-    host_clipboard: Option<String>,
-    /// A fingerprint (length, hash) of the picture last pushed to the host's pasteboard, so
-    /// a second paste of the same screenshot does not ship it again.
-    host_picture: Option<(usize, u64)>,
+    /// Asked before a paste chord goes, so the worker pastes what this client copied.
+    paste_hook: Option<PasteHook>,
     /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
     sticky: Modifiers,
     /// The modifier keys as last reported, so a change forwards the key that moved.
@@ -467,8 +467,7 @@ impl ScreenView {
             held: Vec::new(),
             modifiers: Modifiers::default(),
             let_go: None,
-            host_clipboard: None,
-            host_picture: None,
+            paste_hook: None,
             sticky: Modifiers::default(),
             marked: None,
             hud: None,
@@ -883,7 +882,7 @@ impl ScreenView {
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if is_paste_chord(&ev.keystroke) {
-            self.push_clipboard(cx);
+            self.push_clipboard();
         }
         let text = ev.keystroke.key_char.clone().filter(|t| !t.is_empty());
         self.press_key(&ev.keystroke, ev.is_held, text);
@@ -953,43 +952,19 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
-    /// Before a paste reaches the host, make sure it pastes what this client copied: send the
-    /// clipboard text, or its picture, on the (ordered) control stream ahead of the key.
-    /// Skipped when the host already has it, or when the clipboard holds nothing small
-    /// enough to sync in a kind the host's pasteboard takes as it is.
-    fn push_clipboard(&mut self, cx: &Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else { return };
-        if let Some(text) = item.text() {
-            if text.len() > MAX_CLIPBOARD_BYTES || self.host_clipboard.as_deref() == Some(&*text) {
-                return;
-            }
-            self.send(ScreenRequest::Clipboard { text: text.clone() });
-            self.host_clipboard = Some(text);
-            return;
+    /// Before a paste reaches the host, make sure it pastes what this client copied: this
+    /// client's clipboard offer goes on the (ordered) control stream ahead of the key, when the
+    /// worker has not heard it yet.
+    fn push_clipboard(&self) {
+        let Some(msg) = self.paste_hook.as_ref().and_then(|hook| hook()) else { return };
+        if let Err(e) = self.out.try_send(msg) {
+            tracing::warn!(stream = %self.stream, error = %e, "outbound queue");
         }
-        let Some(picture) = item.into_entries().find_map(|entry| match entry {
-            gpui::ClipboardEntry::Image(image) if pasteboard_takes(image.format) => Some(image),
-            _ => None,
-        }) else {
-            return;
-        };
-        if picture.bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
-            return;
-        }
-        let fingerprint = (picture.bytes.len(), fingerprint(&picture.bytes));
-        if self.host_picture == Some(fingerprint) {
-            return;
-        }
-        self.send(ScreenRequest::ClipboardImage {
-            media_type: picture.format.mime_type().to_owned(),
-            bytes: picture.bytes,
-        });
-        self.host_picture = Some(fingerprint);
     }
 
-    /// The host's pasteboard changed (the canvas already copied it locally).
-    pub fn host_clipboard_changed(&mut self, text: &str) {
-        self.host_clipboard = Some(text.to_owned());
+    /// What to send ahead of a paste chord.
+    pub fn set_paste_hook(&mut self, hook: PasteHook) {
+        self.paste_hook = Some(hook);
     }
 
     /// Whether `which` is armed for the next key.
@@ -1017,7 +992,7 @@ impl ScreenView {
         keystroke.modifiers.control |= armed.control;
         keystroke.modifiers.platform |= armed.platform;
         if is_paste_chord(&keystroke) {
-            self.push_clipboard(cx);
+            self.push_clipboard();
         }
         let code = keys::key_code(&keystroke.key);
         let mods = keys::mods(keystroke.modifiers);
@@ -1388,19 +1363,6 @@ fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
 }
 
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
-/// The picture encodings the host's pasteboard holds as they are (`PictureKind` there).
-const fn pasteboard_takes(format: gpui::ImageFormat) -> bool {
-    matches!(format, gpui::ImageFormat::Png | gpui::ImageFormat::Tiff | gpui::ImageFormat::Jpeg)
-}
-
-/// A cheap fingerprint of a picture's bytes, to tell one paste of it from the next.
-fn fingerprint(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::hash::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn is_paste_chord(keystroke: &Keystroke) -> bool {
     let m = keystroke.modifiers;
     m.platform && !m.control && !m.alt && keystroke.key == "v"
@@ -1761,50 +1723,33 @@ mod tests {
             assert!(!v.muted());
             v.toggle_mute();
             assert!(v.muted());
-            v.host_clipboard_changed("copied on the host");
-            assert_eq!(v.host_clipboard.as_deref(), Some("copied on the host"));
         });
     }
 
-    /// ⌘V with a picture on the clipboard pushes it to the host's pasteboard ahead of the
-    /// key, once per picture; text takes the text path; a kind the pasteboard would have to
-    /// convert, or one past the cap, pushes nothing and the key still goes.
+    /// ⌘V sends this client's clipboard offer ahead of the key when the hook has one, and only
+    /// the key when the worker already heard it.
     #[gpui::test]
-    fn a_paste_chord_pushes_the_clipboards_picture_once(cx: &mut gpui::TestAppContext) {
+    fn a_paste_chord_sends_the_clipboard_offer_ahead_of_the_key(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::transfer::{ClipMsg, Offer, Peer};
         let (view, mut rx) = view(cx);
-        let picture = |format, bytes: &[u8]| {
-            gpui::ClipboardItem::new_image(&gpui::Image { format, bytes: bytes.to_vec(), id: 1 })
-        };
-        let pushed = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            sent(rx)
-                .into_iter()
-                .filter_map(|req| match req {
-                    ScreenRequest::ClipboardImage { media_type, bytes } => {
-                        Some(format!("{media_type}:{}", bytes.len()))
-                    }
-                    ScreenRequest::Clipboard { text } => Some(format!("text:{text}")),
-                    _ => None,
+        let pending = std::rc::Rc::new(std::cell::Cell::new(true));
+        let once = std::rc::Rc::clone(&pending);
+        view.update(cx, |v, _| {
+            v.set_paste_hook(std::rc::Rc::new(move || {
+                once.replace(false).then(|| {
+                    let origin = Peer::Client(slopty_core::ClientId::new());
+                    let offer = Offer { origin, generation: 1, items: Vec::new() };
+                    ClientMsg::Clip(ClipMsg::Offer(offer))
                 })
-                .collect::<Vec<_>>()
+            }));
+        });
+        let kinds = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).map(|m| m.kind()).collect::<Vec<_>>()
         };
-        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &[1, 2, 3])));
         view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert_eq!(pushed(&mut rx), ["image/png:3"]);
+        assert_eq!(kinds(&mut rx)[..2], ["Clip", "Screen"], "the offer goes first");
         view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert!(pushed(&mut rx).is_empty(), "the host has it");
-        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Tiff, &[4; 10])));
-        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert_eq!(pushed(&mut rx), ["image/tiff:10"], "a new picture goes");
-        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Webp, &[5; 10])));
-        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert!(pushed(&mut rx).is_empty(), "webp would need converting");
-        let huge = vec![6; MAX_CLIPBOARD_IMAGE_BYTES + 1];
-        cx.update(|cx| cx.write_to_clipboard(picture(gpui::ImageFormat::Png, &huge)));
-        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert!(pushed(&mut rx).is_empty(), "past the cap");
-        cx.update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
-        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
-        assert_eq!(pushed(&mut rx), ["text:hi"]);
+        assert!(kinds(&mut rx).iter().all(|k| *k == "Screen"), "heard already: the key alone");
     }
 
     #[test]

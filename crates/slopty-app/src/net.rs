@@ -137,7 +137,7 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
     {
         tracing::warn!(error = %e, "refresh worker name");
     }
-    let mut link = HostLink::start(conn);
+    let mut link = HostLink::start_forwarding(conn);
     let events = link.events().ok_or_else(|| "events".to_owned())?;
     let sender = link.sender();
     Ok(Connected { me: me.client(), ack, sender, events, link })

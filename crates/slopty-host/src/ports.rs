@@ -1,4 +1,9 @@
-//! TCP ports listening in the terminals' process trees.
+//! TCP ports listening in the terminals' process trees, and when to look for them.
+//!
+//! [`Trigger`] decides when a session is scanned: soon after its output names a local server
+//! ([`mentions_local_server`]), every [`RESCAN`] while its shell runs a program in the
+//! foreground or while it has listeners (a background job's), and once more when that program
+//! ends. An idle shell is never scanned.
 //!
 //! They are read from libproc: each session's program and its descendants (`proc_listchildpids`),
 //! their descriptors (`proc_pidinfo(PROC_PIDLISTFDS)`), and each socket's state
@@ -10,7 +15,9 @@
 //! `PROC_PIDFDSOCKETINFO_SIZE` bytes or fails, so a size that changed would show as no ports,
 //! never as garbage.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use slopty_core::SessionId;
 use slopty_proto::orchestration::Port;
@@ -33,6 +40,103 @@ const TSI_S_LISTEN: i32 = 1;
 /// Processes walked per session at most: a fork bomb in a terminal must not take the worker
 /// with it.
 const MAX_PROCESSES: usize = 4096;
+
+/// How often a busy session is scanned.
+pub const RESCAN: Duration = Duration::from_secs(2);
+/// How long after output names a local server its session is scanned: a server prints its
+/// address as it binds, and the scan should find it listening.
+pub const SETTLE: Duration = Duration::from_millis(250);
+
+/// A local server's address (`localhost:5173`, `127.0.0.1:8000`, `0.0.0.0:3000`,
+/// `[::1]:8080`) or an OSC 8 hyperlink to a web address.
+static LOCAL_SERVER: LazyLock<Option<regex::bytes::Regex>> = LazyLock::new(|| {
+    regex::bytes::Regex::new(
+        r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):[0-9]{2,5}|\x1b\]8;[^;\x07\x1b]*;https?://",
+    )
+    .ok()
+});
+
+/// Whether terminal output names a local server, so its session is worth a scan.
+#[must_use]
+pub fn mentions_local_server(output: &[u8]) -> bool {
+    LOCAL_SERVER.as_ref().is_some_and(|re| re.is_match(output))
+}
+
+/// When each session is next scanned, and what it listened on last.
+#[derive(Debug, Default)]
+pub struct Trigger {
+    sessions: HashMap<SessionId, Watch>,
+}
+
+#[derive(Debug, Default)]
+struct Watch {
+    due: Option<Instant>,
+    /// Its shell ran a program in the foreground at the last look.
+    busy: bool,
+    ports: Vec<Port>,
+}
+
+impl Watch {
+    fn due_by(&mut self, at: Instant) {
+        self.due = Some(self.due.map_or(at, |due| due.min(at)));
+    }
+}
+
+impl Trigger {
+    /// `session`'s output named a local server: scan it after [`SETTLE`].
+    pub fn hint(&mut self, session: SessionId, now: Instant) {
+        self.sessions.entry(session).or_default().due_by(now.checked_add(SETTLE).unwrap_or(now));
+    }
+
+    /// The periodic look at `session`: `busy` when its shell runs a program in the foreground.
+    /// A busy session, one that just stopped being busy, and one with listeners are due now.
+    pub fn look(&mut self, session: SessionId, busy: bool, now: Instant) {
+        let watch = self.sessions.entry(session).or_default();
+        let ended = std::mem::replace(&mut watch.busy, busy) && !busy;
+        if busy || ended || !watch.ports.is_empty() {
+            watch.due_by(now);
+        }
+    }
+
+    /// Forget sessions `live` says are gone.
+    pub fn retain(&mut self, live: impl Fn(SessionId) -> bool) {
+        self.sessions.retain(|session, _watch| live(*session));
+    }
+
+    /// The earliest scan owed.
+    #[must_use]
+    pub fn next_due(&self) -> Option<Instant> {
+        self.sessions.values().filter_map(|w| w.due).min()
+    }
+
+    /// Sessions to scan now; each is owed nothing more until a hint or a look.
+    pub fn take_due(&mut self, now: Instant) -> Vec<SessionId> {
+        let mut due = Vec::new();
+        for (session, watch) in &mut self.sessions {
+            if watch.due.is_some_and(|at| at <= now) {
+                watch.due = None;
+                due.push(*session);
+            }
+        }
+        due
+    }
+
+    /// A scan of `session` found `ports`: the new set when it changed.
+    pub fn scanned(&mut self, session: SessionId, ports: Vec<Port>) -> Option<Vec<Port>> {
+        let watch = self.sessions.entry(session).or_default();
+        (watch.ports != ports).then(|| {
+            watch.ports.clone_from(&ports);
+            ports
+        })
+    }
+
+    /// Every session with listeners, and them: what a client that just connected is told.
+    #[must_use]
+    pub fn known(&self) -> Vec<(SessionId, Vec<Port>)> {
+        let listening = self.sessions.iter().filter(|(_s, w)| !w.ports.is_empty());
+        listening.map(|(s, w)| (*s, w.ports.clone())).collect()
+    }
+}
 
 /// `struct socket_fdinfo` as bytes, aligned as the struct is (it holds `uint64_t`s).
 #[repr(C, align(8))]
@@ -177,6 +281,97 @@ fn name(pid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_naming_a_local_server_is_noticed() {
+        for yes in [
+            &b"  Local:   http://localhost:5173/"[..],
+            b"Serving HTTP on 0.0.0.0:8000 (http://0.0.0.0:8000/) ...",
+            b"listening on 127.0.0.1:3000",
+            b"http://[::1]:8080",
+            b"\x1b]8;id=1;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+        ] {
+            assert!(mentions_local_server(yes), "{}", String::from_utf8_lossy(yes));
+        }
+        for no in [
+            &b"12:34:56 build finished"[..],
+            b"see localhost for details",
+            b"\x1b]8;;file:///Users/me/a.txt\x1b\\a.txt\x1b]8;;\x1b\\",
+        ] {
+            assert!(!mentions_local_server(no), "{}", String::from_utf8_lossy(no));
+        }
+    }
+
+    /// What the port hint costs a PTY read that names no server, the case that is checked on
+    /// every read (a hit is followed by a second without checks): full 64 KiB reads of
+    /// coloured build output and of escape-free text. Printed; recorded in MEASUREMENTS.md.
+    #[test]
+    #[ignore = "a measurement: run with --run-ignored only --release --no-capture"]
+    fn local_server_scan_cost() {
+        let coloured = "\x1b[1m\x1b[32m   Compiling\x1b[0m slopty-host v0.1.0 (/Users/me/src/slopty/crates/slopty-host) 12:34:56\r\n";
+        let plain =
+            "test ports::tests::a_tree_holds_the_children ... ok, took 0.012 s on 10.0.0.12:x\n";
+        let fill = |line: &str| {
+            let mut read = Vec::with_capacity(64 << 10);
+            while read.len() + line.len() <= 64 << 10 {
+                read.extend_from_slice(line.as_bytes());
+            }
+            read
+        };
+        let reads = [
+            ("one echoed keystroke", b"a".to_vec()),
+            ("a 64 KiB read of coloured build output", fill(coloured)),
+            ("a 64 KiB read of plain text", fill(plain)),
+        ];
+        for (what, read) in reads {
+            let mut took: Vec<u128> = std::iter::repeat_n((), 2_000)
+                .map(|()| {
+                    let at = Instant::now();
+                    assert!(!mentions_local_server(std::hint::black_box(&read)));
+                    at.elapsed().as_nanos()
+                })
+                .collect();
+            took.sort_unstable();
+            let (p50, p99) = (took[took.len() / 2], took[took.len() * 99 / 100]);
+            println!("{what}: p50 {p50} ns, p99 {p99} ns");
+        }
+    }
+
+    fn port(number: u16, session: SessionId) -> Port {
+        Port { number, pid: 1, process: "node".to_owned(), session: Some(session) }
+    }
+
+    /// Idle sessions are never due; a hint is due after the settle; a busy one on every look;
+    /// one that stops being busy once more; one with listeners until they go.
+    #[test]
+    fn scans_follow_hints_and_busy_shells_and_never_idle_ones() {
+        let mut t = Trigger::default();
+        let (idle, busy, hinted) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let now = Instant::now();
+        t.look(idle, false, now);
+        t.look(busy, true, now);
+        t.hint(hinted, now);
+        assert_eq!(t.take_due(now), [busy]);
+        assert_eq!(t.next_due(), Some(now.checked_add(SETTLE).unwrap()));
+        let later = now.checked_add(SETTLE).unwrap();
+        assert_eq!(t.take_due(later), [hinted]);
+        assert_eq!(t.next_due(), None, "nothing owed until the next look");
+
+        let next = later.checked_add(RESCAN).unwrap();
+        t.look(idle, false, next);
+        t.look(busy, false, next);
+        assert_eq!(t.take_due(next), [busy], "one more scan when the program ends");
+        assert_eq!(t.scanned(hinted, vec![port(5173, hinted)]), Some(vec![port(5173, hinted)]));
+        assert_eq!(t.scanned(hinted, vec![port(5173, hinted)]), None, "unchanged");
+        t.look(hinted, false, next);
+        assert_eq!(t.take_due(next), [hinted], "a background server is watched");
+        assert_eq!(t.known(), [(hinted, vec![port(5173, hinted)])]);
+        assert_eq!(t.scanned(hinted, Vec::new()), Some(Vec::new()), "it went");
+        t.look(hinted, false, next);
+        assert!(t.take_due(next).is_empty());
+        t.retain(|s| s != hinted);
+        assert!(t.known().is_empty());
+    }
 
     /// This test process's own listener is found through the same calls, with its port, its
     /// pid and its name; a closed one is gone.

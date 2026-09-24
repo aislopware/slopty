@@ -11,6 +11,7 @@ description = "CGEvent injection for remote-window input on the Slopty host (mac
 workspace = true
 
 [dependencies]
+objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 objc2-core-foundation.workspace = true

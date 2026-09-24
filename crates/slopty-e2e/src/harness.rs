@@ -231,6 +231,18 @@ fn terminfo_env(root: &Path) -> [(&'static str, std::ffi::OsString); 2] {
     [(slopty_pty::terminfo::DIR_ENV, terminfo.into_os_string()), ("TERMINFO_DIRS", dirs.into())]
 }
 
+/// The variable naming the pasteboard hostd and the app share the clipboard through.
+pub const PASTEBOARD_ENV: &str = "SLOPTY_PASTEBOARD";
+
+/// The pasteboard `who` (`host`, or an app's name) of the run under `root` uses: named after
+/// the run, so no two runs and no two processes share one, and nothing touches the human's
+/// clipboard.
+#[must_use]
+pub fn pasteboard_name(root: &Path, who: &str) -> String {
+    let run = root.file_name().map_or_else(|| "run".into(), |n| n.to_string_lossy());
+    format!("com.aislopware.slopty.e2e.{run}.{who}")
+}
+
 /// ptyd on `root/ptyd.sock`, up once its socket is.
 async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Child> {
     let ptyd_sock = root.join("ptyd.sock");
@@ -279,6 +291,9 @@ async fn spawn_hostd(
         .envs(terminfo_env(root))
         .env("RUST_LOG", log)
         .env("SLOPTY_HOST_NAME", host_name)
+        .env(PASTEBOARD_ENV, pasteboard_name(root, "host"))
+        // A drop whose name is taken in the shell's directory lands here, not in `~`.
+        .env("SLOPTY_DROP_DIR", root.join("drops"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -346,6 +361,7 @@ async fn spawn_app(
         // Local echo would put predicted text in the rows before the host confirms it.
         .env("SLOPTY_PREDICT", "never")
         .envs(env.iter().copied())
+        .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -763,6 +779,16 @@ impl Stack {
             let _killed = child.start_kill();
             let _reaped = child.wait().await;
         }
+        #[cfg(target_os = "macos")]
+        release_pasteboards(self.dir.path());
+    }
+}
+
+/// Give the run's named pasteboards back to the system once its processes are gone.
+#[cfg(target_os = "macos")]
+fn release_pasteboards(root: &Path) {
+    for who in ["host", "app", "b"] {
+        slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(root, who)).release();
     }
 }
 
@@ -1067,13 +1093,17 @@ impl RemoteHost {
         Ok((host, address))
     }
 
-    /// The common environment for a remote daemon: a private HOME and a terminfo dir of its own.
+    /// The common environment for a remote daemon: a private HOME, a terminfo dir and a
+    /// pasteboard of its own, so the run never reads that Mac's clipboard.
     fn daemon_env(&self) -> String {
         let terminfo = format!("{}/terminfo", self.root);
+        let board = pasteboard_name(Path::new(&self.root), "host2");
         format!(
-            "HOME={} {}={terminfo} TERMINFO_DIRS={terminfo}: RUST_LOG=info",
+            "HOME={} {}={terminfo} TERMINFO_DIRS={terminfo}: RUST_LOG=info \
+             {PASTEBOARD_ENV}={board} SLOPTY_DROP_DIR={}/drops",
             self.home,
             slopty_pty::terminfo::DIR_ENV,
+            self.root,
         )
     }
 

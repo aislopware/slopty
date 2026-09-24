@@ -1,0 +1,358 @@
+//! The client's pasteboard behind a small trait: the system's general pasteboard in the app, a
+//! uniquely named one in the self-tests, an in-memory one for pure logic.
+//!
+//! A write puts one item on the pasteboard: the representations that are here now, and promises
+//! for the rest, which the pasteboard asks [`Write::provide`] for when something pastes them
+//! (on the main thread, and the bytes must be there before the call returns). Every write carries
+//! [`ORIGIN_TYPE`], saying whose contents they are, so a reader can tell Slopty's writes from the
+//! human's.
+
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// The private type every Slopty write carries: who wrote it, and which generation
+/// (`slopty_proto::transfer::origin_bytes`).
+pub use slopty_proto::transfer::ORIGIN_TYPE;
+
+/// Marks contents a password manager copied: never read, never synced.
+pub const CONCEALED_UTI: &str = "org.nspasteboard.ConcealedType";
+
+/// Marks contents meant to live only briefly: never synced.
+pub const TRANSIENT_UTI: &str = "org.nspasteboard.TransientType";
+
+/// Plain text.
+pub const TEXT_UTI: &str = "public.utf8-plain-text";
+
+/// Answers a promised representation with its bytes, or nothing when it cannot be had.
+pub type Provide = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
+/// One write: what is here now, what is promised, and who wrote it.
+#[derive(Clone, Default)]
+pub struct Write {
+    /// The [`ORIGIN_TYPE`] payload.
+    pub origin: Vec<u8>,
+    /// Representations put on now, by type.
+    pub data: Vec<(String, Vec<u8>)>,
+    /// Representations promised, answered by `provide` when pasted.
+    pub promised: Vec<String>,
+    /// Answers the promises.
+    pub provide: Option<Provide>,
+}
+
+impl std::fmt::Debug for Write {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Write")
+            .field("data", &self.data.iter().map(|(t, b)| (t, b.len())).collect::<Vec<_>>())
+            .field("promised", &self.promised)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A pasteboard.
+pub trait Pasteboard {
+    /// Bumped by every change, anyone's.
+    fn change_count(&self) -> i64;
+    /// The types of the current contents, richest first.
+    fn types(&self) -> Vec<String>;
+    /// The bytes of one type of the current contents (asking a promise's provider).
+    fn data(&self, uti: &str) -> Option<Vec<u8>>;
+    /// Replace the contents; returns the change count this write produced.
+    fn write(&self, write: Write) -> i64;
+}
+
+/// A pasteboard in memory, for tests of what is written and read.
+#[derive(Debug, Default)]
+pub struct Memory {
+    count: Cell<i64>,
+    now: RefCell<BTreeMap<String, Vec<u8>>>,
+    promised: RefCell<Vec<String>>,
+    provide: RefCell<Option<WriteProvide>>,
+    order: RefCell<Vec<String>>,
+}
+
+struct WriteProvide(Provide);
+
+impl std::fmt::Debug for WriteProvide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provide")
+    }
+}
+
+impl Memory {
+    /// Put `data` on it as someone else would (no origin), as a copy in another app does.
+    pub fn copy(&self, data: &[(&str, &[u8])]) {
+        self.write(Write {
+            data: data.iter().map(|(t, b)| ((*t).to_owned(), b.to_vec())).collect(),
+            ..Write::default()
+        });
+        self.now.borrow_mut().remove(ORIGIN_TYPE);
+        self.order.borrow_mut().retain(|t| t != ORIGIN_TYPE);
+    }
+
+    /// The types that are promises rather than bytes.
+    #[must_use]
+    pub fn promised(&self) -> Vec<String> {
+        self.promised.borrow().clone()
+    }
+}
+
+impl Pasteboard for Memory {
+    fn change_count(&self) -> i64 {
+        self.count.get()
+    }
+
+    fn types(&self) -> Vec<String> {
+        self.order.borrow().clone()
+    }
+
+    fn data(&self, uti: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.now.borrow().get(uti) {
+            return Some(bytes.clone());
+        }
+        if !self.promised.borrow().iter().any(|t| t == uti) {
+            return None;
+        }
+        let provide = self.provide.borrow().as_ref().map(|p| Arc::clone(&p.0))?;
+        provide(uti)
+    }
+
+    fn write(&self, write: Write) -> i64 {
+        let mut now = BTreeMap::new();
+        let mut order = Vec::new();
+        for (uti, bytes) in write.data {
+            order.push(uti.clone());
+            now.insert(uti, bytes);
+        }
+        order.extend(write.promised.iter().cloned());
+        order.push(ORIGIN_TYPE.to_owned());
+        now.insert(ORIGIN_TYPE.to_owned(), write.origin);
+        *self.now.borrow_mut() = now;
+        *self.order.borrow_mut() = order;
+        *self.promised.borrow_mut() = write.promised;
+        *self.provide.borrow_mut() = write.provide.map(WriteProvide);
+        self.count.set(self.count.get().saturating_add(1));
+        self.count.get()
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use mac::MacPasteboard;
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{AllocAnyThread as _, DefinedClass as _, define_class, msg_send};
+    use objc2_app_kit::{
+        NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType,
+        NSPasteboardWriting,
+    };
+    use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString};
+
+    use super::{ORIGIN_TYPE, Pasteboard, Provide, Write};
+
+    struct Ivars {
+        provide: Provide,
+    }
+
+    define_class!(
+        // SAFETY:
+        // - `NSObject` has no subclassing requirements.
+        // - `Provider` does not implement `Drop`.
+        #[unsafe(super(NSObject))]
+        #[name = "SloptyPasteboardProvider"]
+        #[ivars = Ivars]
+        struct Provider;
+
+        unsafe impl NSObjectProtocol for Provider {}
+
+        unsafe impl NSPasteboardItemDataProvider for Provider {
+            #[unsafe(method(pasteboard:item:provideDataForType:))]
+            fn provide_data(
+                &self,
+                _pasteboard: Option<&NSPasteboard>,
+                item: &NSPasteboardItem,
+                kind: &NSPasteboardType,
+            ) {
+                let uti = kind.to_string();
+                if let Some(bytes) = (self.ivars().provide)(&uti) {
+                    let set = item.setData_forType(&NSData::with_bytes(&bytes), kind);
+                    tracing::debug!(uti, bytes = bytes.len(), set, "promise kept");
+                } else {
+                    tracing::debug!(uti, "promise not kept");
+                }
+            }
+        }
+    );
+
+    impl Provider {
+        fn new(provide: Provide) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(Ivars { provide });
+            // SAFETY: `NSObject`'s `init` on a freshly allocated instance with ivars set.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// An `NSPasteboard`: the general one, or one of its own name.
+    #[derive(Debug)]
+    pub struct MacPasteboard {
+        board: Retained<NSPasteboard>,
+        /// The provider of the last write's promises, kept alive until the next write.
+        provider: std::cell::RefCell<Option<Retained<Provider>>>,
+    }
+
+    impl std::fmt::Debug for Provider {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Provider")
+        }
+    }
+
+    impl MacPasteboard {
+        /// The system's general pasteboard: what ⌘C and ⌘V use in every app.
+        #[must_use]
+        pub fn general() -> Self {
+            Self {
+                board: NSPasteboard::generalPasteboard(),
+                provider: std::cell::RefCell::default(),
+            }
+        }
+
+        /// The pasteboard called `name`, made on first use and shared by every process that
+        /// names it. A test's own: nothing else on the machine reads or writes it.
+        #[must_use]
+        pub fn named(name: &str) -> Self {
+            let board = NSPasteboard::pasteboardWithName(&NSString::from_str(name));
+            Self { board, provider: std::cell::RefCell::default() }
+        }
+
+        /// Give a named pasteboard back to the system (a test's, when it is done).
+        pub fn release(self) {
+            // SAFETY: AppKit rule: `releaseGlobally` takes no arguments and may be sent to any
+            // pasteboard; after it the object must not be used, and `self` is consumed here.
+            unsafe {
+                let () = msg_send![&*self.board, releaseGlobally];
+            }
+        }
+
+        /// Put `data` on it as a copy in another app does: no origin, no promises. Returns the
+        /// change count the copy produced.
+        pub fn copy(&self, data: &[(&str, &[u8])]) -> i64 {
+            self.board.clearContents();
+            let item = NSPasteboardItem::new();
+            for (uti, bytes) in data {
+                item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(uti));
+            }
+            let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+                ProtocolObject::from_retained(item);
+            self.board.writeObjects(&NSArray::from_retained_slice(&[writer]));
+            self.change_count()
+        }
+
+        /// Its text, when it has any.
+        #[must_use]
+        pub fn text(&self) -> Option<String> {
+            self.board.stringForType(&NSString::from_str(super::TEXT_UTI)).map(|s| s.to_string())
+        }
+    }
+
+    impl Pasteboard for MacPasteboard {
+        fn change_count(&self) -> i64 {
+            i64::try_from(self.board.changeCount()).unwrap_or(i64::MAX)
+        }
+
+        fn types(&self) -> Vec<String> {
+            self.board
+                .types()
+                .map(|types| types.iter().map(|t| t.to_string()).collect())
+                .unwrap_or_default()
+        }
+
+        fn data(&self, uti: &str) -> Option<Vec<u8>> {
+            self.board.dataForType(&NSString::from_str(uti)).map(|d| d.to_vec())
+        }
+
+        fn write(&self, write: Write) -> i64 {
+            self.board.clearContents();
+            let item = NSPasteboardItem::new();
+            for (uti, bytes) in &write.data {
+                item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(uti));
+            }
+            item.setData_forType(
+                &NSData::with_bytes(&write.origin),
+                &NSString::from_str(ORIGIN_TYPE),
+            );
+            let provider = match write.provide {
+                Some(provide) if !write.promised.is_empty() => {
+                    let provider = Provider::new(provide);
+                    let types: Vec<Retained<NSString>> =
+                        write.promised.iter().map(|t| NSString::from_str(t)).collect();
+                    let types = NSArray::from_retained_slice(&types);
+                    item.setDataProvider_forTypes(ProtocolObject::from_ref(&*provider), &types);
+                    Some(provider)
+                }
+                _ => None,
+            };
+            let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+                ProtocolObject::from_retained(item);
+            let wrote = self.board.writeObjects(&NSArray::from_retained_slice(&[writer]));
+            if !wrote {
+                tracing::warn!("pasteboard write refused");
+            }
+            *self.provider.borrow_mut() = provider;
+            self.change_count()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The named pasteboard behaves as the general one does, and nothing here touches the
+    /// general one: text now, a promise answered when read, the origin stamp, the count moving.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_named_pasteboard_keeps_text_promises_and_the_origin() {
+        let name = format!("com.aislopware.slopty.test.{}", std::process::id());
+        let board = MacPasteboard::named(&name);
+        let before = board.change_count();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&asked);
+        let count = board.write(Write {
+            origin: b"worker:7".to_vec(),
+            data: vec![(TEXT_UTI.to_owned(), b"hello".to_vec())],
+            promised: vec!["public.png".to_owned()],
+            provide: Some(Arc::new(move |uti| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (uti == "public.png").then(|| vec![0x89, b'P', b'N', b'G'])
+            })),
+        });
+        assert!(count > before, "a write moves the count");
+        assert_eq!(board.change_count(), count, "and nothing else did");
+        assert_eq!(board.text().as_deref(), Some("hello"));
+        assert!(board.types().iter().any(|t| t == ORIGIN_TYPE), "{:?}", board.types());
+        assert_eq!(board.data(ORIGIN_TYPE).as_deref(), Some(&b"worker:7"[..]));
+        assert_eq!(board.data("public.png"), Some(vec![0x89, b'P', b'N', b'G']));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1, "asked once, on read");
+        board.release();
+    }
+
+    #[test]
+    fn memory_answers_promises_and_stamps_every_write() {
+        let board = Memory::default();
+        board.copy(&[(TEXT_UTI, b"typed")]);
+        assert_eq!(board.change_count(), 1);
+        assert!(!board.types().iter().any(|t| t == ORIGIN_TYPE), "someone else's copy");
+        let count = board.write(Write {
+            origin: b"me".to_vec(),
+            promised: vec!["public.tiff".to_owned()],
+            provide: Some(Arc::new(|_| Some(vec![1]))),
+            ..Write::default()
+        });
+        assert_eq!(count, 2);
+        assert_eq!(board.data("public.tiff"), Some(vec![1]));
+        assert_eq!(board.data(TEXT_UTI), None, "replaced");
+        assert_eq!(board.data(ORIGIN_TYPE), Some(b"me".to_vec()));
+    }
+}

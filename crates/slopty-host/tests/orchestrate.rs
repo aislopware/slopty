@@ -70,6 +70,7 @@ mod orchestrate {
             size,
             scrollback_lines: 1000,
             exited: None,
+            port_hints: None,
         })
         .unwrap();
         until_screen(&handle, |s| last_row(s) == "$").await;

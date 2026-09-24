@@ -66,8 +66,9 @@ pub enum Command {
         /// What to type.
         text: String,
     },
-    /// Put a picture on the app's clipboard through GPUI, as a screenshot would be. For the
-    /// simulator, whose pasteboard is its own (the Mac's is shared with every other app).
+    /// Put a picture on the app's clipboard through GPUI, as a screenshot would be. The
+    /// simulator only, whose pasteboard is its own; the Mac app answers an error, since its
+    /// clipboard is a named pasteboard the test reads and writes itself (`SLOPTY_PASTEBOARD`).
     Clipboard {
         /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
         media_type: String,
@@ -98,6 +99,16 @@ pub enum Command {
         to_x: f32,
         /// Where it comes up, y in points.
         to_y: f32,
+    },
+    /// Drop files on a window point, as Finder's drag would end there: GPUI's own file-drop
+    /// events (entered, over, dropped) through `Window::dispatch_event`, no system drag.
+    DropFiles {
+        /// Absolute paths on this machine.
+        paths: Vec<String>,
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
     },
     /// Move the pointer to a window point (no button).
     Move {
@@ -604,6 +615,13 @@ pub struct TerminalInfo {
     /// Images placed on the visible grid (kitty graphics).
     #[serde(default)]
     pub images: usize,
+    /// The shell's listening ports on the worker and where each is served here: `[worker
+    /// port, local port]`.
+    #[serde(default)]
+    pub ports: Vec<[u16; 2]>,
+    /// An upload dropped on the tile, as the tile shows it (`↑ 42%`); `None` without one.
+    #[serde(default)]
+    pub upload: Option<String>,
 }
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.

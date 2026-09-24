@@ -40,6 +40,12 @@ impl WorkspaceView {
         sessions: Vec<SessionSummary>,
         cx: &mut Context<Self>,
     ) {
+        let known: Vec<SessionId> = self
+            .workers
+            .get(&key)
+            .map(|w| w.sessions.keys().copied().collect())
+            .unwrap_or_default();
+        self.reset_remote(key, &known);
         let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
         w.name = name;
         w.status = WorkerStatus::Connected;
@@ -75,6 +81,7 @@ impl WorkspaceView {
         w.display_wanted = false;
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
+        self.reset_remote(key, &sessions);
         for session in &sessions {
             self.terminals.remove(session);
             self.agents.remove(session);
@@ -404,6 +411,12 @@ impl WorkspaceView {
                 let path = this.absolute_in_session(sid, path);
                 this.open_file_on(this.worker_of_session(sid), &path, *line, cx);
             }
+            TerminalViewEvent::DragOut { path } => {
+                let path = this.absolute_in_session(sid, path);
+                if let Some(worker) = this.worker_of_session(sid) {
+                    this.drag_out(worker, &path);
+                }
+            }
         }));
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
         // What this client paints with, so the driver's colours answer colour queries.
@@ -517,9 +530,15 @@ impl WorkspaceView {
                 let handle = (link.open_screen)(stream, codec);
                 let opened =
                     crate::screen::Opened { stream, target, size: (width, height), quality };
-                let view =
-                    cx.new(|cx| ScreenView::new(opened, handle, link.out.clone(), theme, cx));
                 let rtt = w.rtt;
+                let hook = self.paste_hook(key);
+                let view = cx.new(|cx| {
+                    let mut view = ScreenView::new(opened, handle, link.out.clone(), theme, cx);
+                    if let Some(hook) = hook {
+                        view.set_paste_hook(hook);
+                    }
+                    view
+                });
                 view.update(cx, |v, cx| {
                     v.set_rtt(rtt);
                     if show_stats {
@@ -549,20 +568,6 @@ impl WorkspaceView {
                             view.update(cx, |v, _| v.set_geometry(width, height));
                         }
                     }
-                }
-            }
-            ScreenEvent::Clipboard { text } => {
-                // Every open window shares the one worker pasteboard.
-                for view in self.screens.values() {
-                    view.update(cx, |v, _| v.host_clipboard_changed(&text));
-                }
-                // Same text already here: leave the clipboard alone. With the worker on this
-                // very Mac (the dev loop) the write would bump the change count the worker
-                // watches and the two would echo the text back and forth forever.
-                let same =
-                    cx.read_from_clipboard().and_then(|i| i.text()).as_deref() == Some(&*text);
-                if !same {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
             }
             ScreenEvent::Rate { stream, target_bps, verdict, capped } => {

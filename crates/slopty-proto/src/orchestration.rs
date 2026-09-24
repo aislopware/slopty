@@ -243,6 +243,8 @@ pub enum ErrorCode {
     Invalid,
     /// The worker could not do it (a file error, a spawn failure).
     Failed,
+    /// The caller lost its link to the server before the answer came.
+    ServerUnreachable,
 }
 
 /// The answer to a [`Verb`].

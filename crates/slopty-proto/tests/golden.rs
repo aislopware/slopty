@@ -3,16 +3,20 @@
 
 #[cfg(test)]
 mod golden {
-    use slopty_core::{ClientId, MonoTime, SessionId, StreamId};
+    use slopty_core::{ClientId, MonoTime, SessionId, StreamId, XferId};
     use slopty_grid::{
         Cursor, CursorShape, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes,
     };
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
+    use slopty_proto::orchestration::Port;
     use slopty_proto::screen::{Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenRequest};
     use slopty_proto::terminal::{
         ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
         TermRequest,
+    };
+    use slopty_proto::transfer::{
+        BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead, XferMsg,
     };
     use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
     use uuid::Uuid;
@@ -407,19 +411,96 @@ mod golden {
 
     #[test]
     fn clipboard() {
+        let origin = Peer::Client(ClientId::from_uuid(Uuid::from_u128(7)));
         snap(
-            "client_clipboard",
-            &ClientMsg::Screen(ScreenRequest::Clipboard { text: "fox".to_owned() }),
+            "client_clip_offer",
+            &ClientMsg::Clip(ClipMsg::Offer(Offer {
+                origin,
+                generation: 3,
+                items: vec![
+                    ClipItem {
+                        uti: "public.utf8-plain-text".to_owned(),
+                        size: 3,
+                        hash: [1; 32],
+                        inline: Some(b"fox".to_vec()),
+                    },
+                    ClipItem {
+                        uti: "public.png".to_owned(),
+                        size: 1 << 20,
+                        hash: [2; 32],
+                        inline: None,
+                    },
+                ],
+            })),
         );
-        snap("host_clipboard", &HostMsg::Screen(ScreenEvent::Clipboard { text: "fox".to_owned() }));
+        snap("client_clip_watch", &ClientMsg::Clip(ClipMsg::Watch(true)));
         snap(
-            "client_clipboard_image",
-            &ClientMsg::Screen(ScreenRequest::ClipboardImage {
-                media_type: "image/png".to_owned(),
-                bytes: vec![0x89, b'P', b'N', b'G'],
+            "host_clip_fetch",
+            &HostMsg::Clip(ClipMsg::Fetch { generation: 3, uti: "public.png".to_owned() }),
+        );
+        snap(
+            "host_clip_data",
+            &HostMsg::Clip(ClipMsg::Data {
+                generation: 3,
+                uti: "public.html".to_owned(),
+                bytes: b"<b>fox</b>".to_vec(),
             }),
         );
         snap("host_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
+    }
+
+    #[test]
+    fn transfers() {
+        let xfer = XferId::from_uuid(Uuid::from_u128(9));
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        snap(
+            "client_xfer_begin",
+            &ClientMsg::Xfer(XferMsg::Begin {
+                xfer,
+                dest: Some(Dest::SessionCwd(session)),
+                files: 2,
+                bytes: 4096,
+            }),
+        );
+        snap(
+            "host_xfer_done",
+            &HostMsg::Xfer(XferMsg::Done {
+                xfer,
+                name: "src/a.rs".to_owned(),
+                path: "/Users/c/p/src/a.rs".to_owned(),
+                hash: [3; 32],
+            }),
+        );
+        snap(
+            "host_xfer_finished",
+            &HostMsg::Xfer(XferMsg::Finished { xfer, paths: vec!["/Users/c/p/src".to_owned()] }),
+        );
+        snap(
+            "uni_bulk",
+            &UniHead::Bulk(BulkHeader {
+                xfer,
+                purpose: Purpose::Upload,
+                name: "src/a.rs".to_owned(),
+                size: 4096,
+                mtime_ms: 1_700_000_000_000,
+                mode: 0o644,
+                offset: 1024,
+            }),
+        );
+        snap("uni_session", &UniHead::Session { session });
+        snap("tunnel_open", &TunnelOpen { port: 5173 });
+        snap(
+            "host_ports",
+            &HostMsg::Ports {
+                session,
+                ports: vec![Port {
+                    number: 5173,
+                    pid: 4242,
+                    process: "node".to_owned(),
+                    session: Some(session),
+                }],
+            },
+        );
     }
 
     #[test]

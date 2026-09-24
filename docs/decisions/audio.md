@@ -36,7 +36,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Glass.aiff ×3, 5 s): 249 packets sent, 246 received, 0 lost, bench player audible.
 
 - ✅ **Clipboard sync is polled on the host and pushed ahead of ⌘V on the client**
-  (2026-09-05, protocol 4). `NSPasteboard` has no change notification, only `changeCount`,
+  (2026-09-05, protocol 4; superseded 2026-09-25 by **The host announces its clipboard only
+  while watched**). `NSPasteboard` has no change notification, only `changeCount`,
   so hostd reads it every 200 ms (one Mach call to the pasteboard server); a client-side
   watcher was rejected because GPUI's clipboard API has no count and the client would have to
   push on every poll. The client instead pushes exactly when it matters: the paste chord
@@ -76,7 +77,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the player is still opening.
 
 - ✅ **A picture on the client's clipboard is pushed ahead of ⌘V, text-style** (2026-09-15,
-  protocol 46). A screenshot taken on the client and pasted into a remote window is the
+  protocol 46; superseded 2026-09-25 by **The host announces its clipboard only while
+  watched**). A screenshot taken on the client and pasted into a remote window is the
   coding case (a picture into a chat, an issue, a design tool); the text ruling's shape
   carries it: `ScreenRequest::ClipboardImage { media_type, bytes }` goes on the ordered
   control stream right before the paste chord, so the host's paste already finds it, and a
@@ -101,3 +103,62 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   audio also leaves the video's serial queue: ScreenCaptureKit delivers it on its own queue at
   `QOS_CLASS_USER_INTERACTIVE`, so a sample never waits behind a frame's encode call. Tests:
   `a_stall_burst_does_not_leave_lasting_delay`, `jitter_below_the_cap_is_kept`.
+
+- ✅ **The host announces its clipboard only while watched, and writes a client's on that
+  client's paste chord** (2026-09-25, protocol 52; replaces the two push-ahead-of-⌘V entries
+  above on the host side).
+  - hostd reads `changeCount` every 200 ms only while some client has sent
+    `ClipMsg::Watch(true)`; otherwise the poller sleeps on a watch channel and reads nothing.
+    Watching starts from the pasteboard as it is: a change made while nobody watched was made
+    on the host, and announcing it on focus would overwrite the client's clipboard.
+  - A change becomes an `Offer`, richest first. Text of at most 64 KiB rides inline. PNG,
+    TIFF, RTF, HTML and file URLs are listed with size and BLAKE3 digest and kept for `Fetch`
+    until the next change; an answer over 64 KiB goes on a bulk stream. The file URLs of every
+    item travel as one `public.file-url` representation, one URL per line. Concealed and
+    transient contents are skipped.
+  - Echoes are broken three ways. The `changeCount` a write leaves is never announced. Contents
+    whose `com.aislopware.slopty.origin` names this worker are not announced; its value is
+    postcard `(Peer, u64)`, the origin and generation. Contents whose digest matches what was
+    last announced or written are not announced again, which covers Universal Clipboard.
+  - A client's offer is recorded, not written. ⌘V on one of its window streams writes it:
+    inline text at once, otherwise hostd fetches the missing representations and holds that
+    client's window input, in order, until they arrive. After 3 s the chord goes on
+    unwritten, and the next ⌘V writes what arrived meanwhile. A client's file URLs are never
+    written: they name files on the client, which travel as a transfer.
+  - Tests use a named pasteboard (`--pasteboard`, `SLOPTY_PASTEBOARD`), never the general one:
+    the `slopty_host::clip` unit tests and hostd's
+    `the_clipboard_is_announced_fetched_and_pasted_both_ways`.
+
+- ✅ **Uploads are written as `.partial` beside their name, placed per top-level entry, and
+  resume from what is durable** (2026-09-25, protocol 52).
+  - Each top-level entry of a drop is placed when its first file arrives. It goes to the
+    base directory: the session's OSC 7 directory, else its shell's own working directory
+    from the process table. When that name is taken there it goes to
+    `~/.slopty/drop/<xfer>/` (`--drop-dir`, `SLOPTY_DROP_DIR`). Staging always goes there.
+  - A blocking thread writes the file, fed through a channel of 16 chunks; QUIC flow control
+    is the backpressure. Then fsync, the sender's mode and mtime, rename, and an fsync of the
+    directory. `Done` carries the BLAKE3 digest of the whole file; on a resume the kept prefix
+    is hashed again.
+  - A file's stream can overtake its transfer's `Begin`, which rides the control stream, so it
+    waits up to 5 s for it. `Resume` answers the partial's length after an fsync. `Cancel`
+    stops the streams and keeps the partials. A finished staging transfer puts its paths on
+    the pasteboard as file URLs, stamped with this worker as origin, so they are not
+    announced back.
+  - `Fetch` walks the path (symbolic links skipped, 10 000 files at most) and sends `Begin`
+    and then one bulk stream per file. A download does not resume yet.
+
+- ✅ **Ports are scanned on a hint or while the shell is busy, never when idle** (2026-09-25,
+  protocol 52).
+  - The session actor checks each PTY read for a local server's address or an OSC 8 web link
+    and hints hostd. After a hit it skips the check for a second. A keystroke's echo pays
+    nothing measurable and a full 64 KiB read 7 to 11 µs (`docs/MEASUREMENTS.md`,
+    2026-09-25).
+  - hostd scans a hinted session 250 ms later, so a server that prints its address as it binds
+    is found listening. Every 2 s it looks at each session and scans one whose tty's foreground
+    process is not the one ptyd spawned. It also scans one that still has listeners (a
+    background job) and one whose foreground program just ended. `Ports` goes to every client
+    when a set changes, and the known sets go to a client when it connects.
+  - Every bidirectional stream a client opens after the control stream is a tunnel. hostd
+    dials `127.0.0.1` and then `::1`, because a dev server bound to `localhost` on macOS often
+    listens on `::1` only. It splices both ways with a half-close each way, and a refused dial
+    resets the stream.

@@ -290,6 +290,10 @@ pub struct Placement {
     pub z: i32,
 }
 
+/// Largest text a program can put on the clipboard through OSC 52; a pasteboard can hold a
+/// whole file, and pushing that to every viewer would starve the rows behind it.
+pub const MAX_OSC52_BYTES: usize = 256 * 1024;
+
 /// Bytes of image pixels a client keeps for placements, and the host assumes it keeps.
 ///
 /// The least recently placed image goes first once the budget is over. The host re-sends an
@@ -320,7 +324,7 @@ pub enum TermEvent {
     /// BEL.
     Bell,
     /// The program wrote to the system clipboard (OSC 52 / OSC 1337 Copy). Text only, at
-    /// most `MAX_CLIPBOARD_BYTES`; every attached client puts it on its own clipboard.
+    /// most [`MAX_OSC52_BYTES`]; every attached client puts it on its own clipboard.
     /// There is no read counterpart: an OSC 52 `?` is dropped on the host, by design.
     ClipboardWrite {
         /// Contents.

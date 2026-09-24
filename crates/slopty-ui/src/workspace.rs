@@ -11,6 +11,7 @@
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
 //! * `overlays` — the command palette, find in every tile, the window picker.
 //! * `toast` — the one-line notices, undo close, pointing.
+//! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
 //! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
 //! * `tile` — one tile's chrome and body.
 //! * `titlebar` — the bar across the top.
@@ -19,6 +20,7 @@ pub mod actions;
 mod agents;
 mod commands;
 mod overlays;
+pub mod remote;
 mod strip;
 mod tile;
 mod titlebar;
@@ -143,6 +145,8 @@ pub struct WorkerLink {
     pub out: mpsc::Sender<ClientMsg>,
     /// Opens a stream view for an `Opened` screen.
     pub open_screen: ScreenFactory,
+    /// Files and clipboard bytes to and from the worker; `None` in a test without them.
+    pub remote: Option<std::sync::Arc<dyn slopty_client::remote::Remote>>,
 }
 
 impl std::fmt::Debug for WorkerLink {
@@ -364,6 +368,16 @@ pub struct WorkspaceView {
     save_pending: bool,
     /// Workers whose empty registry was given a shell this run.
     given_shell: std::collections::HashSet<WorkerKey>,
+    /// The clipboard kept in step with the workers; `None` where the platform has none here.
+    clip: Option<Rc<std::cell::RefCell<crate::clipboard::ClipSync>>>,
+    /// The app is frontmost.
+    app_active: bool,
+    /// Workers told this client wants their clipboard.
+    watching: std::collections::HashSet<WorkerKey>,
+    /// Uploads in flight.
+    uploads: HashMap<slopty_core::XferId, remote::Upload>,
+    /// Forwarded ports, by session.
+    ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
     focus: FocusHandle,
     subscriptions: Vec<gpui::Subscription>,
 }
@@ -459,6 +473,11 @@ impl WorkspaceView {
             layout_saved: saved,
             save_pending: false,
             given_shell: std::collections::HashSet::new(),
+            clip: None,
+            app_active: true,
+            watching: std::collections::HashSet::new(),
+            uploads: HashMap::new(),
+            ports: HashMap::new(),
             focus: cx.focus_handle(),
             subscriptions: Vec::new(),
         }
@@ -861,6 +880,7 @@ impl gpui::Render for WorkspaceView {
         }
         self.reconcile_notes_and_files(window, cx);
         self.apply_pending_focus(window, cx);
+        self.sync_clipboard_watch();
         let titlebar = self.render_titlebar(window, cx);
         let strip = self.render_strip(window, cx);
         let toast = self.render_toast(cx);
@@ -897,6 +917,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
             .on_action(cx.listener(Self::list_workers))
+            .on_action(cx.listener(Self::list_ports))
             .on_action(cx.listener(Self::close_item))
             .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::next_attention))

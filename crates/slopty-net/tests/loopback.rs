@@ -8,11 +8,13 @@ mod tests {
     use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{HandshakeError, bind_client, connect, connect_addr};
-    use slopty_net::host::{HostListener, open_session_stream};
+    use slopty_net::host::HostListener;
+    use slopty_net::streams::{self, Uni};
     use slopty_net::{HostAddr, HostMsg, NetError};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck, Rejection};
     use slopty_proto::terminal::TermEvent;
+    use slopty_proto::transfer::{BulkHeader, Purpose};
 
     fn hello() -> Hello {
         Hello {
@@ -66,7 +68,7 @@ mod tests {
                 assert_eq!(client.hello.name, "test");
                 assert_eq!(client.remote.ip(), std::net::Ipv4Addr::LOCALHOST, "canonical IPv4");
                 client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
-                let mut stream = open_session_stream(&client.conn, session).await.unwrap();
+                let mut stream = streams::open_session(&client.conn, session).await.unwrap();
                 stream.send(&TermEvent::Bell).await.unwrap();
                 // A pre-encoded frame (the fan-out path), then a graceful end.
                 let raw = slopty_proto::codec::encode(&TermEvent::Bell).unwrap();
@@ -80,8 +82,12 @@ mod tests {
         let conn = connect(&endpoint, &addr, hello()).await.unwrap();
         assert_eq!(conn.ack.worker, id);
         assert_eq!(conn.remote, SocketAddr::from(([127, 0, 0, 1], port)));
-        let (header, mut events) = conn.accept_session_stream().await.unwrap();
-        assert_eq!(header.session, session);
+        let Uni::Session { session: opened, rx: mut events } =
+            streams::accept_uni(&conn.conn).await.unwrap()
+        else {
+            panic!("a session stream");
+        };
+        assert_eq!(opened, session);
         assert_eq!(events.recv().await.unwrap(), TermEvent::Bell);
         assert_eq!(events.recv().await.unwrap(), TermEvent::Bell, "the raw frame");
         let end = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap();
@@ -99,6 +105,82 @@ mod tests {
         assert!(srtt > Duration::ZERO && cwnd > 1, "{srtt:?} {cwnd}");
         let max = conn.conn.max_datagram_size().unwrap();
         assert!(max >= 1150, "no AEAD tag eats into a datagram: {max}");
+        conn.close();
+        tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
+    }
+
+    fn header(size: u64, purpose: Purpose) -> BulkHeader {
+        BulkHeader {
+            xfer: slopty_core::XferId::new(),
+            purpose,
+            name: "dir/f.bin".to_owned(),
+            size,
+            mtime_ms: 1,
+            mode: 0o644,
+            offset: 0,
+        }
+    }
+
+    /// Everything left on a raw stream.
+    async fn drain(rx: &mut streams::RawRecv) -> Vec<u8> {
+        let mut got = Vec::new();
+        while let Some(chunk) = rx.chunk(64 << 10).await.unwrap() {
+            got.extend_from_slice(&chunk);
+        }
+        got
+    }
+
+    /// A file up, a file down, and a tunnel echoing, all beside the control stream.
+    #[tokio::test]
+    async fn bulk_streams_carry_raw_bytes_both_ways_and_a_tunnel_echoes() {
+        let (listener, port, id) = host(Admission::default());
+        let up: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
+        let down = b"the host's file".to_vec();
+        let host_task = {
+            let (listener, up, down) = (listener.clone(), up.clone(), down.clone());
+            tokio::spawn(async move {
+                let mut client = listener.accept().await.unwrap();
+                client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
+                let Uni::Bulk { header, mut rx } = streams::accept_uni(&client.conn).await.unwrap()
+                else {
+                    panic!("a bulk stream");
+                };
+                assert_eq!((header.purpose, header.size), (Purpose::Upload, up.len() as u64));
+                assert!(drain(&mut rx).await == up, "the upload arrives whole and in order");
+                let mut send = streams::open_bulk(
+                    &client.conn,
+                    self::header(down.len() as u64, Purpose::Download),
+                )
+                .await
+                .unwrap();
+                send.write_all(&down).await.unwrap();
+                send.finish().unwrap();
+                let (open, mut send, mut rx) = streams::accept_tunnel(&client.conn).await.unwrap();
+                assert_eq!(open.port, 5173);
+                let echo = drain(&mut rx).await;
+                send.write_all(&echo).await.unwrap();
+                send.finish().unwrap();
+                client.conn.closed().await;
+            })
+        };
+        let endpoint = bind_client().unwrap();
+        let conn = connect_addr(&endpoint, SocketAddr::from(([127, 0, 0, 1], port)), hello())
+            .await
+            .unwrap();
+        let mut send =
+            streams::open_bulk(&conn.conn, header(up.len() as u64, Purpose::Upload)).await.unwrap();
+        send.write_all(&up).await.unwrap();
+        send.finish().unwrap();
+        let Uni::Bulk { header: got, mut rx } = streams::accept_uni(&conn.conn).await.unwrap()
+        else {
+            panic!("a bulk stream");
+        };
+        assert_eq!(got.purpose, Purpose::Download);
+        assert_eq!(drain(&mut rx).await, down);
+        let (mut send, mut rx) = streams::open_tunnel(&conn.conn, 5173).await.unwrap();
+        send.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        send.finish().unwrap();
+        assert_eq!(drain(&mut rx).await, b"GET / HTTP/1.1\r\n\r\n", "half-close ends the echo");
         conn.close();
         tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
     }

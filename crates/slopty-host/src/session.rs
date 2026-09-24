@@ -12,8 +12,9 @@ use slopty_engine::boundary::Boundary;
 use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
-use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
-use slopty_proto::terminal::{ColorOverrides, TermColors, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{
+    ColorOverrides, MAX_OSC52_BYTES, TermColors, TermEvent, TermRequest, TermSize,
+};
 use slopty_pty::PtyMaster;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -385,6 +386,8 @@ pub struct SessionStart {
     pub scrollback_lines: u32,
     /// The child's exit status, when ptyd reaped it before this host adopted the session.
     pub exited: Option<i32>,
+    /// Where the session says its output named a local server, so its ports get scanned.
+    pub port_hints: Option<mpsc::UnboundedSender<SessionId>>,
 }
 
 /// Spawn the actor thread.
@@ -500,7 +503,15 @@ struct Actor {
     boundary: Boundary,
     /// What waiters watch.
     activity: watch::Sender<Activity>,
+    /// See [`SessionStart::port_hints`].
+    port_hints: Option<mpsc::UnboundedSender<SessionId>>,
+    /// No port hint is sent before this, so a flood of addresses is one hint a second.
+    next_hint: Option<tokio::time::Instant>,
 }
+
+/// A session's output is looked at for a local server's address at most this often once it
+/// named one.
+const HINT_EVERY: Duration = Duration::from_secs(1);
 
 /// A checkpoint follows this much quiet after output. Shorter means a crashed host loses less
 /// of what a fresh one cannot replay from the ring; longer means fewer formatter runs.
@@ -591,6 +602,8 @@ impl Actor {
             checkpoint_due: None,
             boundary: Boundary::default(),
             activity,
+            port_hints: start.port_hints,
+            next_hint: None,
         })
     }
 
@@ -668,6 +681,7 @@ impl Actor {
             tracing::trace!(session = %self.id, n = bytes.len(), bytes = %shown.escape_debug(), "pty read");
         }
         self.engine.write(bytes);
+        self.hint_ports(bytes);
         self.tap_output(bytes);
         self.after_output();
         self.arm_hold();
@@ -689,6 +703,18 @@ impl Actor {
         } else if self.frame_due.is_none() {
             self.frame_due = Some(due);
         }
+    }
+
+    /// Tell the daemon when output names a local server, so it scans for the listener.
+    fn hint_ports(&mut self, bytes: &[u8]) {
+        let Some(hints) = &self.port_hints else { return };
+        let now = tokio::time::Instant::now();
+        if self.next_hint.is_some_and(|at| now < at) || !crate::ports::mentions_local_server(bytes)
+        {
+            return;
+        }
+        self.next_hint = now.checked_add(HINT_EVERY);
+        let _sent = hints.send(self.id);
     }
 
     /// Wake when the program's render hold times out. One that already has is ended by the
@@ -812,7 +838,7 @@ impl Actor {
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
                     // that would sit ahead of every frame on the session stream.
-                    if text.len() > MAX_CLIPBOARD_BYTES {
+                    if text.len() > MAX_OSC52_BYTES {
                         tracing::warn!(session = %self.id, bytes = text.len(), "OSC 52 write too large; dropped");
                     } else {
                         self.broadcast(&TermEvent::ClipboardWrite { text });

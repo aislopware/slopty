@@ -114,7 +114,7 @@ arrow while a program reports the mouse), names the target in a chip at the card
 (`TerminalView::link_target`) and opens the URI on ⌘-click; the OSC 8 target
 wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTerm2 OSC 1337
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
-`MAX_CLIPBOARD_BYTES`, and every attached client puts the text on its own clipboard;
+`MAX_OSC52_BYTES`, and every attached client puts the text on its own clipboard;
 selection/primary targets and every read (`?`) are dropped on the host, and no message exists
 for a read reply. Colour queries (OSC 10/11/12 `?`, OSC 4) are answered by libghostty from
 the defaults the engine sets: the dark theme's foreground, background, cursor and ANSI 0–15
@@ -421,17 +421,49 @@ Mute is per item and per client (the "mute" pill, ⌘⇧M, View ▸ Mute Window)
 arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
 different.
 
-**Clipboard** follows the window both ways for text (≤ 256 KiB), and client → host for a
-picture (PNG, TIFF or JPEG ≤ 16 MiB, `ScreenRequest::ClipboardImage` ahead of ⌘V, once per
-picture; the host's pictures are not polled). Host → client: hostd polls
-`NSPasteboard.changeCount` every 200 ms (`slopty-input::Pasteboard`) and broadcasts
-`ScreenEvent::Clipboard`, which each connection forwards only while that client has a window
-open; the workspace writes it to the local clipboard unless it already holds the same text (with
-the host on the same Mac that write would bump the count the host watches and echo forever).
-Client → host: a ⌘V into a window first sends `ScreenRequest::Clipboard` on the ordered
-control stream, so the host pastes what the client copied; the view remembers what the host
-holds and skips the push when nothing changed. Writes the host makes for a client are not
-reported back by the poller.
+**Clipboard, files and ports** ride beside the control stream (`slopty-proto::transfer`,
+`slopty-net::streams`). Control messages (`ClipMsg`, `XferMsg`, `HostMsg::Ports`) go on the
+control stream. Bytes go on unidirectional bulk streams that open with `UniHead::Bulk` and are
+sent at priority −1, so a file never queues ahead of a keystroke's echo or a video frame. A
+forwarded TCP connection is a client-opened bidirectional stream that opens with `TunnelOpen`.
+
+- **Clipboard: announce, then fetch.** hostd reads `NSPasteboard.changeCount` every 200 ms,
+  but only while some connection has sent `Watch(true)`. A client sends that while a remote
+  tile has focus and the app is frontmost. A change goes out as an `Offer`: every
+  representation (text, PNG, TIFF, RTF, HTML, file URLs) with its size and BLAKE3 digest.
+  Plain text of 64 KiB or less rides inline. Concealed and transient contents are never
+  offered.
+  - The macOS client puts promises on the general pasteboard (`NSPasteboardItem` data
+    providers). A paste fetches the representation, inline or over a bulk stream.
+  - hostd writes a client's offer to its pasteboard when that client's ⌘V reaches a window.
+    The window's input is held in order until any fetch lands, for up to 3 s.
+  - Every Slopty write carries `com.aislopware.slopty.origin` (`transfer::origin_bytes`).
+    Together with the `changeCount` of our own write and a same-digest backstop, this stops
+    echoes, also when client and host share a Mac.
+  - The pasteboard sits behind `slopty_input::pasteboard::Board`, and tests use named
+    pasteboards (`--pasteboard`), never the user's.
+- **Files.** A drop on a terminal tile uploads with `Begin { dest: SessionCwd }`, one bulk
+  stream per file.
+  - hostd writes `name.partial`, fsyncs, renames, then fsyncs the directory, and sends `Done`
+    with the digest. `Finished { paths }` follows once every file is in, and the client types
+    the shell-quoted paths as a bracketed paste.
+  - The destination is the OSC 7 directory, else the shell's cwd from the process table. A
+    name already taken there lands in `~/.slopty/drop/<xfer>/` (`--drop-dir` in tests).
+  - `Resume` answers the durable length of a partial, so an interrupted upload continues.
+  - A drop on a streamed window goes to staging, and the files go on the host's pasteboard
+    as file URLs.
+  - ⌘-drag on a path in a terminal drags the file out as an `NSFilePromiseProvider` that
+    fetches it (`XferMsg::Fetch`, `Purpose::Download`, from the start).
+- **Ports.** A session's listening TCP ports come from its process tree (libproc,
+  `slopty_host::ports`). They are scanned 250 ms after its output names a local address or an
+  OSC 8 web link, and every 2 s while it runs a foreground program or listens, never when
+  idle. A changed set goes to every client as `HostMsg::Ports`.
+  - The client listens on `127.0.0.1` at the same port (the next free one when that is taken,
+    with a notice), so origins, cookies and OAuth redirects keep working.
+  - Each accepted connection becomes a tunnel, which hostd joins to `127.0.0.1` (then `::1`)
+    with a half-close.
+  - The tile shows a quiet chip ("5173 ↗") that opens the default browser, and the palette
+    lists forwarded ports.
 
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries, the cursor's picture),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +

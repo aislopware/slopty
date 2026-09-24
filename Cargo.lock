@@ -703,6 +703,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1212,6 +1225,12 @@ dependencies = [
  "once_cell",
  "tiny-keccak",
 ]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
@@ -4932,6 +4951,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -6978,6 +6998,7 @@ dependencies = [
 name = "slopty-client"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "parking_lot",
  "pretty_assertions",
@@ -7037,6 +7058,7 @@ dependencies = [
  "serde_json",
  "slopty-agent",
  "slopty-media",
+ "slopty-platform",
  "slopty-pty",
  "tempfile",
  "tokio",
@@ -7074,6 +7096,7 @@ dependencies = [
 name = "slopty-host"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "ignore",
  "libc",
@@ -7105,7 +7128,10 @@ name = "slopty-hostd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "bytes",
  "clap",
+ "noq",
  "objc2-application-services",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -7134,6 +7160,7 @@ dependencies = [
 name = "slopty-input"
 version = "0.1.0"
 dependencies = [
+ "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -7198,6 +7225,7 @@ dependencies = [
 name = "slopty-platform"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-audio-toolbox",
@@ -7205,6 +7233,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-game-controller",
  "objc2-ui-kit",
+ "slopty-proto",
  "tracing",
 ]
 
@@ -7361,6 +7390,7 @@ name = "slopty-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "core-foundation 0.10.1",
  "core-video",
  "gpui",
@@ -7377,6 +7407,7 @@ dependencies = [
  "slopty-proto",
  "slopty-theme",
  "syntect",
+ "tempfile",
  "tokio",
  "tracing",
 ]

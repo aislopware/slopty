@@ -2,4 +2,4 @@
 source: crates/slopty-proto/tests/golden.rs
 expression: hex(&bytes)
 ---
-04 00 00 00 06 07 07 00
+04 00 00 00 06 06 07 00

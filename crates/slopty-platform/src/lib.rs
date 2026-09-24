@@ -10,6 +10,10 @@
 
 #![cfg(any(target_os = "macos", target_os = "ios"))]
 
+#[cfg(target_os = "macos")]
+pub mod drag;
+pub mod pasteboard;
+
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
@@ -212,6 +216,32 @@ pub fn playback_audio_session() {
         // SAFETY: activating the configured shared session.
         if let Err(e) = unsafe { session.setActive_error(true) } {
             tracing::warn!(error = %e, "audio session activate");
+        }
+    }
+}
+
+/// Open `url` in the default browser (a forwarded port: the browser's own devtools, extensions
+/// and passwords come with it).
+///
+/// Main thread only on iOS (`UIApplication`); a no-op off it there.
+pub fn open_url(url: &str) {
+    let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) else {
+        tracing::warn!(url, "not a URL");
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let opened = objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+        tracing::debug!(opened, "open url");
+    }
+    #[cfg(target_os = "ios")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        let app = objc2_ui_kit::UIApplication::sharedApplication(mtm);
+        let options = objc2_foundation::NSDictionary::new();
+        // SAFETY: UIKit rule: `openURL:options:completionHandler:` on the main thread with a
+        // valid URL, an empty options dictionary and no completion handler.
+        unsafe {
+            app.openURL_options_completionHandler(&url, &options, None);
         }
     }
 }

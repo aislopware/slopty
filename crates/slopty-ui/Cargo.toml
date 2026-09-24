@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The digest a clipboard offer carries (`clipboard`).
+blake3.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
@@ -44,3 +46,4 @@ e2e = [ "gpui/test-support" ]
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
 slopty-client = { workspace = true, features = [ "headless" ] }
+tempfile.workspace = true

@@ -3312,3 +3312,26 @@ Not measured: the shaped screen ladder (`screen_over_a_shaped_link`). It runs on
 launchd-installed host (TCC grants capture to nothing else), and installing this branch's
 daemons would have replaced the host the user runs. BBR3 against Cubic, and a 2 MB Cubic
 initial window, stay unmeasured on this transport; the tuning carried over unchanged.
+
+## 2026-09-25 — the port hint on the PTY read path
+
+The session actor now asks every PTY read whether it names a local server
+(`slopty_host::ports::mentions_local_server`: `localhost:`, `127.0.0.1:`, `0.0.0.0:` or `[::1]:`
+and a port, or an OSC 8 link to a web address), so hostd can scan that session's listening
+ports. After a hit the session skips the check for a second, so the cost that matters is the
+miss, which every read pays. Release, mac-studio, three runs of 2 000 checks each:
+
+```
+cargo test -p slopty-host --release --lib -- --ignored local_server_scan_cost --nocapture
+```
+
+| read | p50 (3 runs) | p99 (3 runs) |
+| --- | --- | --- |
+| one echoed keystroke (1 byte) | 0 / 0 / 0 ns | 42 / 42 / 42 ns |
+| 64 KiB of coloured `cargo build` lines | 7.2 / 7.0 / 7.2 µs | 7.8 / 7.5 / 7.8 µs |
+| 64 KiB of plain text with digits and colons | 11.1 / 11.1 / 11.1 µs | 11.8 / 12.0 / 11.9 µs |
+
+A keystroke's echo pays nothing measurable. A full 64 KiB read in a flood pays 7 to 11 µs,
+a few percent of what the engine spends on the same read (10 024 coloured lines, about 600 KiB,
+take 2.8 ms, see "the host hot paths" above).
+

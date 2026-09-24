@@ -50,6 +50,12 @@ impl<T: Serialize> FramedSend<T> {
         FramedSend { stream: self.stream, _t: PhantomData }
     }
 
+    /// The stream itself, for raw bytes after a header.
+    #[must_use]
+    pub fn into_inner(self) -> SendStream {
+        self.stream
+    }
+
     /// Finish the stream gracefully.
     pub fn finish(&mut self) -> Result<(), NetError> {
         self.stream.finish().map_err(|e| NetError::stream(&e))
@@ -67,6 +73,12 @@ impl<T: DeserializeOwned> FramedRecv<T> {
     #[must_use]
     pub fn retype<U>(self) -> FramedRecv<U> {
         FramedRecv { stream: self.stream, buf: self.buf, _t: PhantomData }
+    }
+
+    /// Raw bytes from here on, the buffered ones first.
+    #[must_use]
+    pub fn into_raw(self) -> crate::streams::RawRecv {
+        crate::streams::RawRecv::new(self.buf, self.stream)
     }
 
     /// Read the next message; `Err(Closed)` at a clean end of stream.

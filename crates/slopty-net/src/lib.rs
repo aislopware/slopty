@@ -31,6 +31,7 @@ pub mod framed;
 pub mod host;
 pub mod known;
 pub mod server;
+pub mod streams;
 
 pub use addr::HostAddr;
 pub use noq::{Connection, Endpoint};

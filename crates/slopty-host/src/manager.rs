@@ -40,6 +40,9 @@ struct Inner {
     exits: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, i32)>>>,
     /// Environment every session gets on top of the request's (`SLOPTY_HOSTD_SOCKET`).
     session_env: Mutex<Vec<(String, String)>>,
+    /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
+    port_hints: mpsc::UnboundedSender<SessionId>,
+    port_hints_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -56,6 +59,7 @@ impl Host {
         let (mut client, exits) = PtydClient::connect(&path).await?;
         let existing = client.list().await?;
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
+        let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
         let host = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
@@ -63,6 +67,8 @@ impl Host {
                 sessions: Mutex::new(HashMap::new()),
                 exits: Mutex::new(Some(exits)),
                 session_env: Mutex::new(Vec::new()),
+                port_hints,
+                port_hints_rx: Mutex::new(Some(port_hints_rx)),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&host.inner), tap_rx));
@@ -79,6 +85,12 @@ impl Host {
     #[must_use]
     pub fn take_exits(&self) -> Option<mpsc::UnboundedReceiver<(SessionId, i32)>> {
         self.inner.exits.lock().take()
+    }
+
+    /// Take the receiver of port hints (once): the sessions whose output named a local server.
+    #[must_use]
+    pub fn take_port_hints(&self) -> Option<mpsc::UnboundedReceiver<SessionId>> {
+        self.inner.port_hints_rx.lock().take()
     }
 
     /// Record a child exit reported by ptyd, and tell the session's viewers.
@@ -134,6 +146,7 @@ impl Host {
             size: if attached.size == TermSize::default() { size } else { attached.size },
             scrollback_lines: SCROLLBACK_LINES,
             exited,
+            port_hints: Some(self.inner.port_hints.clone()),
         })?;
         self.inner.sessions.lock().insert(id, Entry { handle: handle.clone(), command, exited });
         Ok(handle)

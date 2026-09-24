@@ -5,10 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use noq::{Connection, Endpoint};
-use slopty_core::SessionId;
 use slopty_proto::handshake::{Hello, Rejection};
-use slopty_proto::terminal::TermEvent;
-use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, StreamHeader};
+use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::NetError;
@@ -139,15 +137,4 @@ async fn reject(conn: &Connection, mut tx: FramedSend<HostMsg>, why: Rejection, 
     let _finished = tx.finish();
     let _closed_by_peer = tokio::time::timeout(REJECT_LINGER, conn.closed()).await;
     conn.close(code.into(), b"rejected");
-}
-
-/// Open a session stream to a client and write its header.
-pub async fn open_session_stream(
-    conn: &Connection,
-    session: SessionId,
-) -> Result<FramedSend<TermEvent>, NetError> {
-    let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
-    let mut header = FramedSend::<StreamHeader>::new(send);
-    header.send(&StreamHeader { session }).await?;
-    Ok(header.retype())
 }

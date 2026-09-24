@@ -9,10 +9,14 @@
 #![forbid(unsafe_code)]
 
 mod agents;
+mod clip;
 mod conn;
 mod ctl;
 mod paths;
+mod ports;
 mod server;
+mod tunnel;
+mod xfer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +62,14 @@ struct Args {
     /// on its own.
     #[arg(long, env = "SLOPTY_SERVER")]
     server: Option<String>,
+    /// Sync this named pasteboard instead of the general one; also `SLOPTY_PASTEBOARD`. For
+    /// tests, which must never touch the user's clipboard.
+    #[arg(long, env = "SLOPTY_PASTEBOARD", hide = true)]
+    pasteboard: Option<String>,
+    /// Where dropped files land when their name is taken, and staged files always (default
+    /// `~/.slopty/drop`); also `SLOPTY_DROP_DIR`.
+    #[arg(long, env = "SLOPTY_DROP_DIR")]
+    drop_dir: Option<PathBuf>,
 }
 
 /// Who may connect: the `[host] allow` ranges of `settings.toml` in `data_dir`, else the
@@ -102,8 +114,12 @@ pub struct Daemon {
     /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
     /// by [`agents::watch`] for the sessions no hook speaks for.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
-    /// The host's pasteboard, synced with remote-window clients.
-    pub pasteboard: Arc<slopty_input::Pasteboard>,
+    /// Clipboard sync over the host's pasteboard.
+    pub clip: Arc<slopty_host::clip::Clipboard<slopty_input::MacBoard>>,
+    /// Uploads in flight.
+    pub transfers: Arc<slopty_host::xfer::Transfers>,
+    /// When each session's listening ports are scanned, and what they were.
+    pub ports: Arc<parking_lot::Mutex<slopty_host::ports::Trigger>>,
     /// When the daemon came up (for `doctor`).
     pub started_at: std::time::Instant,
     /// Where it listens.
@@ -160,24 +176,6 @@ impl slopty_host::wake::Holds for Assertions {
         self.display =
             hold.then(|| slopty_platform::Activity::display_awake("Slopty window streaming"));
         tracing::info!(hold, "display sleep hold");
-    }
-}
-
-/// How often the pasteboard's change count is read (one Mach call to the pasteboard server).
-const PASTEBOARD_PERIOD: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// Broadcast every text change of the host pasteboard; `conn` forwards it only to clients
-/// with a remote window open. Writes made through `Pasteboard::write` are not reported.
-async fn watch_pasteboard(daemon: Daemon) -> ! {
-    let mut tick = tokio::time::interval(PASTEBOARD_PERIOD);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
-        if let Some(text) = daemon.pasteboard.poll() {
-            tracing::debug!(bytes = text.len(), "host clipboard changed");
-            let event = slopty_proto::screen::ScreenEvent::Clipboard { text };
-            let _sent = daemon.events.send(slopty_proto::HostMsg::Screen(event));
-        }
     }
 }
 
@@ -264,13 +262,23 @@ async fn main() -> Result<()> {
         events,
         items,
         agents: Arc::default(),
-        pasteboard: Arc::new(slopty_input::Pasteboard::new()),
+        clip: Arc::new(slopty_host::clip::Clipboard::new(
+            args.pasteboard
+                .as_deref()
+                .map_or_else(slopty_input::MacBoard::general, slopty_input::MacBoard::named),
+            slopty_proto::transfer::Peer::Worker(id),
+        )),
+        transfers: Arc::new(slopty_host::xfer::Transfers::new(
+            args.drop_dir.clone().unwrap_or_else(slopty_host::xfer::Transfers::default_drop_root),
+        )),
+        ports: Arc::default(),
         started_at: std::time::Instant::now(),
         listen,
         screens,
         wake,
     };
-    tokio::spawn(watch_pasteboard(daemon.clone()));
+    tokio::spawn(clip::watch(daemon.clone()));
+    tokio::spawn(ports::watch(daemon.clone()));
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
 

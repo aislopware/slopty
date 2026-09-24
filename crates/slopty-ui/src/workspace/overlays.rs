@@ -175,7 +175,7 @@ impl WorkspaceView {
         needle.unwrap_or_default()
     }
 
-    fn show_palette(
+    pub(super) fn show_palette(
         &mut self,
         palette: Entity<CommandPalette>,
         window: &Window,
@@ -211,6 +211,10 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::Worker(worker)) => {
                     this.palette_return = None;
                     this.go_to_worker(*worker, cx);
+                }
+                PaletteEvent::Run(PaletteRun::OpenUrl(url)) => {
+                    tracing::info!(%url, "opening a forwarded port");
+                    slopty_platform::open_url(url);
                 }
                 PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
                     let path = this.absolute_in_active_shell(path);

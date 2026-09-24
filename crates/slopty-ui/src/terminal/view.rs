@@ -57,6 +57,9 @@ const BELL_FLASH: Duration = Duration::from_millis(150);
 #[cfg(test)]
 const BELL_HALF: Duration = Duration::from_millis(75);
 const AUTOSCROLL_MAX: i64 = 8;
+/// How far a ⌘-press on a path moves, in points, before it is a drag of the file rather than
+/// a click that opens it.
+const DRAG_OUT_SLOP: f32 = 4.0;
 
 mod actions {
     #![expect(
@@ -260,6 +263,12 @@ pub enum TerminalViewEvent {
         /// The line to land on.
         line: Option<u32>,
     },
+    /// ⌘-drag on a path: the canvas drags that file out of the app (a file promise the
+    /// worker keeps), a relative path made absolute against the session's directory.
+    DragOut {
+        /// The path as the text gave it.
+        path: String,
+    },
 }
 
 /// A placed image with the texture the element paints it from.
@@ -319,6 +328,9 @@ pub struct TerminalView {
     /// A plain left press and its cell: released without a drag, it moves the shell's cursor
     /// there.
     click_at: Option<(LineIndex, u16)>,
+    /// A ⌘-press on a path, acted on when the button comes up (open it) or when the pointer
+    /// moves off far enough first (drag the file out).
+    path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
     /// The selection is being dragged past the grid's top or bottom: lines to scroll each
     /// tick (positive = up into history) and the column the pointer holds.
     autoscroll: Option<(i64, u16)>,
@@ -431,6 +443,7 @@ impl TerminalView {
             selecting: false,
             selected_by_press: false,
             click_at: None,
+            path_press: None,
             hover: None,
             cmd_held: false,
             shift_held: false,
@@ -2180,7 +2193,7 @@ impl TerminalView {
             } else if let Some(span) =
                 self.state.line(index).and_then(|line| url::path_at_col(line, col))
             {
-                self.open_path(&span, armed, cx);
+                self.path_press = Some((span, armed, event.position));
             } else if armed {
                 // The phone has no right button: the armed tap on a bare row is its menu.
                 let block = self.state.command_block(index);
@@ -2260,6 +2273,15 @@ impl TerminalView {
     /// viewport with it; a selection follows the pointer, and past the grid's top or bottom
     /// it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by how far past the pointer is.
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if event.pressed_button == Some(MouseButton::Left)
+            && let Some((_, _, from)) = &self.path_press
+            && (event.position - *from).magnitude() >= f64::from(DRAG_OUT_SLOP)
+            && let Some((span, ..)) = self.path_press.take()
+        {
+            tracing::info!(path = %span.path, "drag out");
+            cx.emit(TerminalViewEvent::DragOut { path: span.path });
+            return;
+        }
         if event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
             self.thumb_drag = None;
@@ -2369,6 +2391,10 @@ impl TerminalView {
 
     fn mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.autoscroll = None;
+        if let Some((span, armed, _)) = self.path_press.take() {
+            self.open_path(&span, armed, cx);
+            return;
+        }
         if self.thumb_drag.take().is_some() {
             cx.notify();
             return;
@@ -4674,6 +4700,59 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
         assert!(!sent[1].mods.contains(slopty_proto::input::Mods::CTRL));
+    }
+
+    /// ⌘-press on a path and a pull past the slop drags the file out instead of opening it:
+    /// the canvas hears `DragOut` with the path, and nothing is typed.
+    #[gpui::test]
+    fn cmd_drag_on_a_path_drags_the_file_out(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let dragged = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&dragged);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::DragOut { path } = event {
+                    seen.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates: vec![RowUpdate {
+                        row: 0,
+                        line: Line::from_text("wrote out/report.pdf", 30, Style::DEFAULT),
+                    }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drain_words(&mut rx);
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let at = metrics.origin + point(metrics.cell_width * 10.5, metrics.line_height * 0.5);
+        let cmd = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        cx.simulate_mouse_down(at, MouseButton::Left, cmd);
+        cx.simulate_mouse_move(at + point(px(2.0), px(0.0)), Some(MouseButton::Left), cmd);
+        assert!(dragged.borrow().is_empty(), "within the slop it is still a click");
+        cx.simulate_mouse_move(at + point(px(20.0), px(6.0)), Some(MouseButton::Left), cmd);
+        cx.simulate_mouse_up(at + point(px(20.0), px(6.0)), MouseButton::Left, cmd);
+        cx.run_until_parked();
+        assert_eq!(*dragged.borrow(), ["out/report.pdf"]);
+        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "a drag opens nothing");
     }
 
     /// ⌘-click on a path a compiler printed types the editor command at the prompt, with the

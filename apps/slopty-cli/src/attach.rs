@@ -164,7 +164,12 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                         CloseReason::HostShutdown => "host shut down",
                     });
                 }
-                Some(LinkEvent::Control(_) | LinkEvent::Term { .. }) => {}
+                Some(
+                    LinkEvent::Control(_)
+                    | LinkEvent::Term { .. }
+                    | LinkEvent::Ports { .. }
+                    | LinkEvent::XferFailed { .. },
+                ) => {}
                 Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),
                 None => break Ok("link closed"),
             },

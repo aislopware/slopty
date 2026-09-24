@@ -2,16 +2,25 @@
 //!
 //! Runs on tokio; a UI on another executor just holds the receiver and the sender.
 
-use slopty_core::{SessionId, StreamId};
+use std::sync::Arc;
+
+use slopty_core::{SessionId, StreamId, XferId};
 use slopty_net::client::HostConn;
+use slopty_net::framed::FramedRecv;
+use slopty_net::streams::{RawRecv, Uni, accept_uni};
 use slopty_net::{ClientMsg, HostMsg, NetError};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::TermEvent;
+use slopty_proto::transfer::{BulkHeader, Purpose};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::screen::{ScreenHandle, ScreenRouter, Uplink, spawn_screen};
+use crate::clip::{ClipCache, MAX_CLIP_BYTES};
+use crate::remote::{LinkRemote, Remote};
+use crate::screen::{ScreenHandle, ScreenRouter, Uplink as ScreenUplink, spawn_screen};
+use crate::tunnel::{Forward, Forwards};
+use crate::xfer::{Table, Uplink};
 
 /// Bounded queues: a client that cannot keep up sees backpressure, not unbounded memory.
 const EVENT_DEPTH: usize = 4096;
@@ -29,6 +38,20 @@ pub enum LinkEvent {
         /// Event.
         event: TermEvent,
     },
+    /// The listening ports of a session changed; each is forwarded here.
+    Ports {
+        /// Session.
+        session: SessionId,
+        /// Its ports and where each is reachable here.
+        forwards: Vec<Forward>,
+    },
+    /// An upload failed on this side (a file unreadable, the stream cut past resuming).
+    XferFailed {
+        /// The transfer.
+        xfer: XferId,
+        /// Why, for a person.
+        error: String,
+    },
     /// The connection is gone; `HostLink` is dead after this.
     Disconnected(String),
 }
@@ -43,74 +66,93 @@ pub struct HostLink {
     router: ScreenRouter,
     /// The runtime the link's tasks run on; screen workers join them from any thread.
     runtime: tokio::runtime::Handle,
+    remote: Arc<dyn Remote>,
     tasks: JoinSet<()>,
 }
 
 impl HostLink {
     /// Wrap a connection: spawns the control reader, the session-stream acceptor and the writer.
+    /// The worker's listening ports arrive as they are (`HostMsg::Ports`), forwarded nowhere.
     #[must_use]
     pub fn start(conn: HostConn) -> Self {
+        Self::launch(conn, false)
+    }
+
+    /// [`Self::start`], and every port the worker's shells listen on is served on this
+    /// machine's loopback ([`LinkEvent::Ports`] says where): the app's link.
+    #[must_use]
+    pub fn start_forwarding(conn: HostConn) -> Self {
+        Self::launch(conn, true)
+    }
+
+    fn launch(conn: HostConn, forward: bool) -> Self {
         warm_up_decoder();
         let HostConn { conn: quic, ack, mut tx, mut rx, .. } = conn;
         let (events_tx, events_rx) = mpsc::channel(EVENT_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(OUT_DEPTH);
         let mut tasks = JoinSet::new();
 
+        let table = Arc::new(Table::default());
+        let clips = Arc::new(ClipCache::new(out_tx.clone()));
+
         let control_events = events_tx.clone();
+        let (control_table, control_clips) = (Arc::clone(&table), Arc::clone(&clips));
+        let mut forwards = Forwards::new(quic.clone());
         tasks.spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        tracing::trace!(kind = msg.kind(), "control message");
-                        if control_events.send(LinkEvent::Control(msg)).await.is_err() {
-                            break;
-                        }
-                    }
+                let msg = match rx.recv().await {
+                    Ok(msg) => msg,
                     Err(e) => {
+                        forwards.clear();
                         let _sent =
                             control_events.send(LinkEvent::Disconnected(e.to_string())).await;
                         break;
                     }
+                };
+                tracing::trace!(kind = msg.kind(), "control message");
+                let event = match msg {
+                    HostMsg::Xfer(x) if control_table.on_control(&x) => continue,
+                    HostMsg::Clip(c) if control_clips.on_control(&c) => continue,
+                    HostMsg::Ports { session, ports } if forward => {
+                        let forwards = forwards.update(session, ports);
+                        LinkEvent::Ports { session, forwards }
+                    }
+                    msg => LinkEvent::Control(msg),
+                };
+                if control_events.send(event).await.is_err() {
+                    break;
                 }
             }
         });
 
         let acceptor_conn = quic.clone();
-        let stream_events = events_tx;
+        let stream_events = events_tx.clone();
+        let (bulk_table, bulk_clips) = (Arc::clone(&table), Arc::clone(&clips));
         tasks.spawn(async move {
             loop {
-                let recv = match acceptor_conn.accept_uni().await {
-                    Ok(r) => r,
+                let uni = match accept_uni(&acceptor_conn).await {
+                    Ok(uni) => uni,
                     Err(e) => {
                         tracing::debug!(error = %e, "accept_uni ended");
-                        break;
+                        if acceptor_conn.close_reason().is_some() {
+                            break;
+                        }
+                        continue;
                     }
                 };
-                let events = stream_events.clone();
-                tokio::spawn(async move {
-                    let mut header =
-                        slopty_net::framed::FramedRecv::<slopty_proto::StreamHeader>::new(recv);
-                    let Ok(hdr) = header.recv().await else { return };
-                    let session = hdr.session;
-                    let mut stream = header.retype::<TermEvent>();
-                    loop {
-                        match stream.recv().await {
-                            Ok(event) => {
-                                if matches!(event, TermEvent::Frame(_)) {
-                                    tracing::trace!(%session, "frame received");
-                                }
-                                if events.send(LinkEvent::Term { session, event }).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(NetError::Closed) => break,
-                            Err(e) => {
-                                tracing::debug!(%session, error = %e, "session stream ended");
-                                break;
-                            }
-                        }
+                match uni {
+                    Uni::Session { session, rx } => {
+                        tokio::spawn(pump_session(session, rx, stream_events.clone()));
                     }
-                });
+                    Uni::Bulk { header, rx } => {
+                        tokio::spawn(receive_bulk(
+                            header,
+                            rx,
+                            Arc::clone(&bulk_table),
+                            Arc::clone(&bulk_clips),
+                        ));
+                    }
+                }
             }
         });
 
@@ -140,7 +182,18 @@ impl HostLink {
         });
 
         let runtime = tokio::runtime::Handle::current();
-        Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, runtime, tasks }
+        let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
+        let remote = Arc::new(LinkRemote::new(up, clips, events_tx, runtime.clone()));
+        Self {
+            ack,
+            out: out_tx,
+            events: Some(events_rx),
+            conn: quic,
+            router,
+            runtime,
+            remote,
+            tasks,
+        }
     }
 
     /// Start receiving a screen stream the host has `Opened`. Drop the handle to stop; send
@@ -156,7 +209,7 @@ impl HostLink {
                 feedback_conn.close_reason().is_none()
             }
         };
-        let uplink = Uplink {
+        let uplink = ScreenUplink {
             control: self.out.clone(),
             feedback: Box::new(feedback),
             rtt: Box::new(move || slopty_net::endpoint::rtt(&conn)),
@@ -168,6 +221,12 @@ impl HostLink {
     #[must_use]
     pub const fn screens(&self) -> &ScreenRouter {
         &self.router
+    }
+
+    /// Files and clipboard bytes to and from this worker.
+    #[must_use]
+    pub fn remote(&self) -> Arc<dyn Remote> {
+        Arc::clone(&self.remote)
     }
 
     /// The host's `HelloAck`.
@@ -234,6 +293,69 @@ impl HostLink {
 impl Drop for HostLink {
     fn drop(&mut self) {
         self.tasks.abort_all();
+    }
+}
+
+/// A session's terminal events, onto the link's event channel until the stream ends.
+async fn pump_session(
+    session: SessionId,
+    mut stream: FramedRecv<TermEvent>,
+    events: mpsc::Sender<LinkEvent>,
+) {
+    loop {
+        match stream.recv().await {
+            Ok(event) => {
+                if matches!(event, TermEvent::Frame(_)) {
+                    tracing::trace!(%session, "frame received");
+                }
+                if events.send(LinkEvent::Term { session, event }).await.is_err() {
+                    break;
+                }
+            }
+            Err(NetError::Closed) => break,
+            Err(e) => {
+                tracing::debug!(%session, error = %e, "session stream ended");
+                break;
+            }
+        }
+    }
+}
+
+/// A bulk stream the worker opened: a file of a download, or a clipboard representation too
+/// big to inline.
+async fn receive_bulk(
+    header: BulkHeader,
+    mut rx: RawRecv,
+    table: Arc<Table>,
+    clips: Arc<ClipCache>,
+) {
+    match header.purpose.clone() {
+        Purpose::Download => crate::xfer::receive(&table, header, rx).await,
+        Purpose::Clip { generation, uti } => {
+            if header.size > MAX_CLIP_BYTES {
+                tracing::warn!(generation, size = header.size, "clipboard too big; refused");
+                rx.stop();
+                clips.gone(generation);
+                return;
+            }
+            let mut bytes = Vec::with_capacity(usize::try_from(header.size).unwrap_or(0));
+            loop {
+                match rx.chunk(256 * 1024).await {
+                    Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::debug!(generation, error = %e, "clipboard bulk cut");
+                        clips.gone(generation);
+                        return;
+                    }
+                }
+            }
+            clips.fill(generation, uti, bytes);
+        }
+        Purpose::Upload => {
+            tracing::debug!(xfer = %header.xfer, "a worker does not upload; stopping it");
+            rx.stop();
+        }
     }
 }
 

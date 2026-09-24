@@ -475,7 +475,8 @@ impl Workspace {
                 let open_screen: slopty_ui::screen::ScreenFactory =
                     std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
                 let weak_link = std::sync::Arc::downgrade(&link);
-                let worker_link = WorkerLink { me, out: sender, open_screen };
+                let remote = Some(link.remote());
+                let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
                 let sessions = ack.sessions.clone();
                 view.update(cx, |v, cx| v.connect_worker(key, name.clone(), worker_link, sessions, cx));
@@ -1149,6 +1150,18 @@ fn apply_link_event(
                 }
             });
         }
+        LinkEvent::Control(HostMsg::Clip(msg)) => {
+            view.update(cx, |v, _cx| v.clip_message(key, msg));
+        }
+        LinkEvent::Control(HostMsg::Xfer(msg)) => {
+            view.update(cx, |v, cx| v.xfer_message(msg, cx));
+        }
+        LinkEvent::Ports { session, forwards } => {
+            view.update(cx, |v, cx| v.ports_changed(session, forwards, cx));
+        }
+        LinkEvent::XferFailed { xfer, error } => {
+            view.update(cx, |v, cx| v.xfer_failed(xfer, &error, cx));
+        }
         LinkEvent::Control(_) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
@@ -1242,6 +1255,8 @@ pub fn open_workspace(
         let mut view = WorkspaceView::new(Theme::default(), saved, cx);
         view.extend_palette(app_palette_items());
         view.set_layout_path(layout_path());
+        #[cfg(target_os = "macos")]
+        view.set_pasteboard(pasteboard());
         #[cfg(feature = "e2e")]
         view.set_animation(false);
         view
@@ -1285,6 +1300,9 @@ pub fn open_workspace(
         }
     });
     let root_view = workspace.clone();
+    // Terminals and remote desktops stay at full rate while another app has the keyboard: a
+    // second display is watched while typing elsewhere.
+    let options = WindowOptions { inactive_frame_interval: None, ..options };
     let window = cx.open_window(options, move |window, cx| {
         // The theme follows the window's appearance while `theme.appearance = "system"`.
         let observed = root_view.clone();
@@ -1295,6 +1313,12 @@ pub fn open_workspace(
         let dark = settings::is_dark(window.appearance());
         root_view.update(cx, |ws, cx| {
             ws.subscriptions.push(subscription);
+            // A worker's clipboard is watched only while this app is frontmost.
+            let activation = cx.observe_window_activation(window, |ws, window, cx| {
+                let active = window.is_window_active();
+                ws.view.update(cx, |v, cx| v.set_app_active(active, cx));
+            });
+            ws.subscriptions.push(activation);
             ws.window_dark = dark;
             ws.apply_loaded(loaded, cx);
         });
@@ -1347,6 +1371,20 @@ pub fn open_workspace(
         e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
     }
     Ok(())
+}
+
+/// The pasteboard the clipboard is shared through: the general one, or the one named by
+/// `SLOPTY_PASTEBOARD` (the self-tests', so no test touches the human's clipboard).
+#[cfg(target_os = "macos")]
+fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
+    use slopty_platform::pasteboard::MacPasteboard;
+    match std::env::var("SLOPTY_PASTEBOARD") {
+        Ok(name) if !name.is_empty() => {
+            tracing::info!(%name, "clipboard on a named pasteboard");
+            Rc::new(MacPasteboard::named(&name))
+        }
+        _ => Rc::new(MacPasteboard::general()),
+    }
 }
 
 /// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),

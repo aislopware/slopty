@@ -31,6 +31,8 @@ objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-graphics.workspace = true
 objc2-foundation.workspace = true
+# The run's named pasteboards, released when it ends.
+slopty-platform.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

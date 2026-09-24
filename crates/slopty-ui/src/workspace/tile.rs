@@ -4,9 +4,9 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Div, ElementId, InteractiveElement as _, IntoElement as _, MouseButton,
-    MouseDownEvent, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Window, div, px,
+    App, Context, Div, ElementId, ExternalPaths, InteractiveElement as _, IntoElement as _,
+    MouseButton, MouseDownEvent, ParentElement as _, SharedString, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef};
@@ -174,6 +174,14 @@ impl WorkspaceView {
 
         let header = self.render_header(placed, &item, chrome, worker_up, cx);
         let body = self.render_body(placed, &item, chrome, window, cx);
+        // Files dropped on a shell go to its directory; on a remote window, to the worker's
+        // clipboard.
+        let takes_files = worker_up
+            && matches!(
+                item.kind,
+                ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
+            );
+        let accent = theme.surfaces.accent;
 
         // The open animation grows the tile about its centre.
         let rect = placed.rect;
@@ -211,6 +219,16 @@ impl WorkspaceView {
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
                 )
+                .when(takes_files, |el| {
+                    el.drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(hsla(accent))
+                    })
+                    .on_drop(cx.listener(
+                        move |this, paths: &ExternalPaths, _w, cx| {
+                            this.drop_files(tile, paths.paths(), cx);
+                        },
+                    ))
+                })
                 .child(header)
                 .child(body)
                 .when_some(ring, gpui::ParentElement::child)
@@ -290,6 +308,57 @@ impl WorkspaceView {
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.install_hooks(worker, cx)))
                     .into_any_element()
             });
+        // An upload in flight says how far it got; a click stops it.
+        let upload = self.upload_on(tile).map(|(xfer, upload)| {
+            let pill =
+                pill("upload", id, upload.label(), theme.surfaces.text_secondary, theme, chrome)
+                    .role(Role::Button)
+                    .aria_label("Cancel upload");
+            let bar = div()
+                .absolute()
+                .left_0()
+                .bottom_0()
+                .h(px(RING * k))
+                .w(gpui::relative(upload.fraction()))
+                .bg(hsla(theme.surfaces.accent));
+            let pill = tab_stop(pill, theme.surfaces.accent)
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
+                .into_any_element();
+            (pill, bar)
+        });
+        let (upload, progress) = upload.unzip();
+        // The ports a shell listens on, served here: a click opens one in the browser.
+        let ports: Vec<gpui::AnyElement> = match &item.kind {
+            ItemKind::Terminal { session } => self
+                .forwards(*session)
+                .iter()
+                .filter(|f| f.local.is_some())
+                .map(|forward| {
+                    let number = forward.port.number;
+                    let label = match forward.local {
+                        Some(local) if local != number => {
+                            format!("{number} \u{2192} {local} \u{2197}")
+                        }
+                        _ => format!("{number} \u{2197}"),
+                    };
+                    let forward = forward.clone();
+                    let chip = pill(
+                        format!("port-{number}"),
+                        id,
+                        label,
+                        theme.surfaces.text_secondary,
+                        theme,
+                        chrome,
+                    )
+                    .role(Role::Link)
+                    .aria_label(SharedString::from(format!("Open port {number} in the browser")));
+                    tab_stop(chip, theme.surfaces.accent)
+                        .on_click(move |_ev, _w, _cx| Self::open_forward(&forward))
+                        .into_any_element()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         // A muted window always says so: a silenced tile must not pass for a quiet one.
         let muted = self.screens.get(&id).is_some_and(|v| v.read(cx).muted());
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
@@ -333,7 +402,28 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::File { .. } => {
+            ItemKind::File { path } => {
+                // Pressed and dragged: the file leaves the app as a promise the worker keeps.
+                #[cfg(target_os = "macos")]
+                {
+                    let path = path.clone();
+                    let worker = tile.worker;
+                    let drag =
+                        pill("drag", id, "drag", theme.surfaces.text_secondary, theme, chrome)
+                            .role(Role::Button)
+                            .aria_label("Drag the file out")
+                            .cursor_grab()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _ev, _w, cx| {
+                                    this.drag_out(worker, &path);
+                                    cx.stop_propagation();
+                                }),
+                            );
+                    actions.push(drag.into_any_element());
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _: &String = path;
                 let find = pill("find", id, "find", theme.surfaces.text_secondary, theme, chrome)
                     .role(Role::Button)
                     .aria_label("Find in the file");
@@ -418,6 +508,7 @@ impl WorkspaceView {
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .role(Role::Heading)
             .aria_label(heading)
+            .relative()
             .h(px(HEADER_H * k))
             .w_full()
             .flex_none()
@@ -468,10 +559,13 @@ impl WorkspaceView {
                     .into_any_element(),
             })
             .when_some(tabs, gpui::ParentElement::child)
+            .children(ports)
+            .when_some(upload, gpui::ParentElement::child)
             .when_some(hooks, gpui::ParentElement::child)
             .when_some(finished, gpui::ParentElement::child)
             .when_some(badge, gpui::ParentElement::child)
             .child(actions)
+            .when_some(progress, gpui::ParentElement::child)
             .into_any_element()
     }
 
@@ -595,17 +689,19 @@ impl WorkspaceView {
 /// A header pill: `small()` type on a faint fill of its tone, the tone as text, `radii.xs`;
 /// hover deepens the fill. Scaled by the chrome's `k`. Its id is scoped by the tile's.
 fn pill(
-    part: &'static str,
+    part: impl Into<SharedString>,
     item: slopty_core::ItemId,
-    label: &'static str,
+    label: impl Into<SharedString>,
     tone: slopty_theme::Rgb,
     theme: &Theme,
     chrome: Chrome,
 ) -> Stateful<Div> {
     let k = chrome.k;
+    let part: SharedString = part.into();
+    let selector = format!("{part}-{}", item.as_uuid());
     div()
         .id(part)
-        .debug_selector(move || format!("{part}-{}", item.as_uuid()))
+        .debug_selector(move || selector)
         .flex_none()
         .px(px(theme.spacing.sm * k))
         .py(px(theme.spacing.xxs * k))

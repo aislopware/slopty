@@ -2,19 +2,22 @@
 
 use std::collections::HashMap;
 
-use slopty_core::{ClientId, SessionId, StreamId};
+use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_host::HostError;
+use slopty_host::clip::Paste;
 use slopty_host::screen::{
     DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, StreamEvent, listing,
 };
 use slopty_host::session::{ClientSink, Outbound};
-use slopty_net::host::{AcceptedClient, open_session_stream};
+use slopty_net::host::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, HelloAck};
+use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
-use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{Feedback, ScreenEvent, ScreenInput, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
+use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -36,6 +39,26 @@ const SINK_DEPTH: usize = 256;
 const CONTROL_DEPTH: usize = 1024;
 /// Loss feedback datagrams buffered between the reader and the peer loop.
 const FEEDBACK_DEPTH: usize = 256;
+/// Clipboard representations the client sent up as streams, queued for the peer loop.
+const CLIP_DEPTH: usize = 8;
+/// How long a paste chord waits for the client's clipboard to arrive before it goes to the
+/// window anyway (and pastes what the host had).
+const PASTE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether `input` is ⌘V, the chord a paste into a streamed window is.
+fn is_paste_chord(input: &ScreenInput) -> bool {
+    matches!(
+        input,
+        ScreenInput::Key { code: KeyCode::V, action: KeyAction::Press, mods, .. }
+            if mods.contains(Mods::SUPER) && !mods.intersects(Mods::CTRL | Mods::ALT)
+    )
+}
+
+/// Window input held back, in order, while a paste's clipboard is fetched from the client.
+struct Held {
+    inputs: Vec<(StreamId, ScreenInput)>,
+    until: tokio::time::Instant,
+}
 
 pub async fn serve(daemon: Daemon, client: AcceptedClient) {
     let remote = client.remote;
@@ -82,6 +105,20 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let health = tokio::spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "host"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
     let feedback = tokio::spawn(read_feedback(conn.clone(), feedback_tx));
+    let (clips_tx, mut clips_rx) = mpsc::channel::<crate::xfer::ClipData>(CLIP_DEPTH);
+    let uni = tokio::spawn(crate::xfer::accept(
+        daemon.clone(),
+        conn.clone(),
+        hello.client,
+        out.clone(),
+        clips_tx,
+    ));
+    let tunnels = tokio::spawn(crate::tunnel::accept(conn.clone(), hello.client));
+    let known = daemon.ports.lock().known();
+    for (session, ports) in known {
+        out.send(HostMsg::Ports { session, ports }).await.map_err(|_gone| NetError::Closed)?;
+    }
+    let link = conn.stable_id();
     let mut peer = Peer {
         daemon,
         conn,
@@ -97,6 +134,11 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         health,
         feedback,
         watched: HashMap::new(),
+        uni,
+        tunnels,
+        downloads: HashMap::new(),
+        held: None,
+        link,
     };
     daemon.wake.lock().client_joined();
 
@@ -127,10 +169,15 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                 peer.handle(msg).await;
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
+            Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, &clip.uti, clip.bytes),
+            () = held_until(peer.held.as_ref()), if peer.held.is_some() => {
+                tracing::debug!(client = %peer.client, "paste went on without the clipboard");
+                peer.release_held(false);
+            }
             ev = events.recv() => {
                 match ev {
-                    // The host clipboard is only shared with clients showing a window.
-                    Ok(HostMsg::Screen(ScreenEvent::Clipboard { .. })) if peer.screens.is_empty() => {}
+                    // The host's clipboard goes only to the clients that want it now.
+                    Ok(HostMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(peer.link) => {}
                     Ok(msg) => {
                         if peer.out.send(msg).await.is_err() {
                             break Ok("writer gone");
@@ -157,6 +204,14 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     drop(peer);
     writer.abort();
     result
+}
+
+/// Wake when held input is due to go on regardless.
+async fn held_until(held: Option<&Held>) {
+    match held {
+        Some(held) => tokio::time::sleep_until(held.until).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Register `slopty hook` in the host's Claude Code settings, for a client that saw an agent
@@ -447,6 +502,16 @@ struct Peer<'d> {
     feedback: JoinHandle<()>,
     /// Files behind this client's file cards, each with the stamp it was last seen with.
     watched: HashMap<String, Option<(u64, u128)>>,
+    /// Accepts the client's unidirectional streams (uploads, clipboard data).
+    uni: JoinHandle<()>,
+    /// Accepts the client's tunnels.
+    tunnels: JoinHandle<()>,
+    /// Files going down, by transfer.
+    downloads: HashMap<XferId, JoinHandle<()>>,
+    /// Window input waiting for a paste's clipboard.
+    held: Option<Held>,
+    /// This connection, as clipboard sync tells clients apart.
+    link: slopty_host::clip::Link,
 }
 
 impl Drop for Peer<'_> {
@@ -462,6 +527,12 @@ impl Drop for Peer<'_> {
         self.pump.abort();
         self.health.abort();
         self.feedback.abort();
+        self.uni.abort();
+        self.tunnels.abort();
+        for task in self.downloads.values() {
+            task.abort();
+        }
+        self.daemon.clip.forget(self.link);
         self.daemon.wake.lock().client_left();
     }
 }
@@ -551,12 +622,121 @@ impl Peer<'_> {
                 tracing::debug!(client = %self.client, files = watched.len(), "watch files");
                 self.watched = watched;
             }
+            ClientMsg::Clip(msg) => self.clip(msg).await,
+            ClientMsg::Xfer(msg) => self.xfer(msg).await,
             ClientMsg::InstallHooks => {
                 let (ok, message) = install_hooks().await;
                 tracing::info!(client = %self.client, ok, %message, "install hooks");
                 let _sent = self.out.send(HostMsg::HooksInstalled { ok, message }).await;
             }
         }
+    }
+
+    async fn clip(&mut self, msg: ClipMsg) {
+        match msg {
+            ClipMsg::Watch(on) => {
+                tracing::debug!(client = %self.client, on, "clipboard watch");
+                self.daemon.clip.watch(self.link, on);
+            }
+            ClipMsg::Offer(offer) => {
+                tracing::debug!(client = %self.client, generation = offer.generation, items = offer.items.len(), "client clipboard offered");
+                self.daemon.clip.offered(self.link, offer);
+            }
+            ClipMsg::Fetch { generation, uti } => {
+                crate::xfer::send_clip(self.daemon, &self.conn, &self.out, generation, uti).await;
+            }
+            ClipMsg::Data { generation, uti, bytes } => self.clip_data(generation, &uti, bytes),
+            ClipMsg::Unavailable { generation } => {
+                tracing::debug!(client = %self.client, generation, "client clipboard gone");
+                if self.held.is_some() {
+                    self.release_held(true);
+                }
+            }
+        }
+    }
+
+    /// A representation of the client's clipboard arrived; the held paste goes on once all it
+    /// waits for is here.
+    fn clip_data(&mut self, generation: u64, uti: &str, bytes: Vec<u8>) {
+        let whole = self.daemon.clip.supply(self.link, generation, uti, bytes);
+        if whole && self.held.is_some() {
+            self.release_held(true);
+        }
+    }
+
+    /// Send the held input on, having put the client's clipboard on the pasteboard first
+    /// when `write`.
+    fn release_held(&mut self, write: bool) {
+        let Some(held) = self.held.take() else { return };
+        if write && self.daemon.clip.write_incoming(self.link) {
+            tracing::debug!(client = %self.client, "pasteboard set for a paste");
+        }
+        for (stream, input) in held.inputs {
+            self.inject(stream, &input);
+        }
+    }
+
+    fn inject(&mut self, stream: StreamId, input: &ScreenInput) {
+        if let Some(s) = self.screens.get_mut(&stream)
+            && let Err(e) = s.inject(input)
+        {
+            tracing::debug!(client = %self.client, %stream, error = %e, "input");
+        }
+    }
+
+    async fn xfer(&mut self, msg: XferMsg) {
+        match msg {
+            XferMsg::Begin { xfer, dest: Some(dest), files, bytes } => {
+                let cwd = match &dest {
+                    Dest::SessionCwd(session) => self.session_cwd(*session).await,
+                    Dest::Staging | Dest::Path(_) => None,
+                };
+                tracing::info!(client = %self.client, %xfer, ?dest, ?cwd, files, bytes, "upload begins");
+                self.daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
+            }
+            XferMsg::Resume { xfer, name } => {
+                let transfers = std::sync::Arc::clone(&self.daemon.transfers);
+                let asked = name.clone();
+                let durable =
+                    tokio::task::spawn_blocking(move || transfers.durable(xfer, &asked)).await;
+                let msg = match durable {
+                    Ok(Ok(durable)) => XferMsg::Offset { xfer, name, durable },
+                    Ok(Err(e)) => XferMsg::Failed { xfer, name: Some(name), error: e.to_string() },
+                    Err(e) => XferMsg::Failed { xfer, name: Some(name), error: e.to_string() },
+                };
+                let _sent = self.out.send(HostMsg::Xfer(msg)).await;
+            }
+            XferMsg::Cancel { xfer } => {
+                tracing::info!(client = %self.client, %xfer, "transfer cancelled");
+                self.daemon.transfers.cancel(xfer);
+                if let Some(task) = self.downloads.remove(&xfer) {
+                    task.abort();
+                }
+            }
+            XferMsg::Fetch { xfer, path } => {
+                self.downloads.retain(|_xfer, task| !task.is_finished());
+                let task = crate::xfer::download(self.conn.clone(), self.out.clone(), xfer, path);
+                self.downloads.insert(xfer, tokio::spawn(task));
+            }
+            other @ (XferMsg::Begin { dest: None, .. }
+            | XferMsg::Offset { .. }
+            | XferMsg::Progress { .. }
+            | XferMsg::Done { .. }
+            | XferMsg::Finished { .. }
+            | XferMsg::Failed { .. }) => {
+                tracing::debug!(client = %self.client, ?other, "transfer receipt");
+            }
+        }
+    }
+
+    /// Where `session`'s shell is: its OSC 7 directory, else its foreground process's.
+    async fn session_cwd(&self, session: SessionId) -> Option<String> {
+        let handle = self.daemon.host.get(session).ok()?;
+        if let Some(cwd) = handle.snapshot().await.ok()?.cwd {
+            return Some(cwd);
+        }
+        let cwd = handle.probe().await.ok()?.foreground?.cwd?;
+        Some(cwd.to_string_lossy().into_owned())
     }
 
     /// Read `path` and send what is there; `false` when the writer is gone.
@@ -703,11 +883,25 @@ impl Peer<'_> {
                 }
             }
             ScreenRequest::Input { stream, input } => {
-                if let Some(s) = self.screens.get_mut(&stream)
-                    && let Err(e) = s.inject(&input)
-                {
-                    tracing::debug!(client = %self.client, %stream, error = %e, "input");
+                if let Some(held) = &mut self.held {
+                    held.inputs.push((stream, input));
+                    return;
                 }
+                if is_paste_chord(&input)
+                    && let Paste::Fetch { generation, utis } = self.daemon.clip.paste(self.link)
+                {
+                    tracing::debug!(client = %self.client, generation, ?utis, "paste waits for the clipboard");
+                    for uti in utis {
+                        let fetch = ClipMsg::Fetch { generation, uti };
+                        let _sent = self.out.send(HostMsg::Clip(fetch)).await;
+                    }
+                    let until = tokio::time::Instant::now()
+                        .checked_add(PASTE_WAIT)
+                        .unwrap_or_else(tokio::time::Instant::now);
+                    self.held = Some(Held { inputs: vec![(stream, input)], until });
+                    return;
+                }
+                self.inject(stream, &input);
             }
             ScreenRequest::Focus(stream) => {
                 if let Some(s) = self.screens.get_mut(&stream)
@@ -732,24 +926,6 @@ impl Peer<'_> {
                         Err(e) => tracing::debug!(%client, %stream, error = %e, "resize"),
                     }
                 }));
-            }
-            ScreenRequest::Clipboard { text } => {
-                if self.screens.is_empty() || text.len() > MAX_CLIPBOARD_BYTES {
-                    tracing::debug!(client = %self.client, bytes = text.len(), "clipboard refused");
-                } else if self.daemon.pasteboard.write(&text) {
-                    tracing::debug!(client = %self.client, bytes = text.len(), "pasteboard set");
-                } else {
-                    tracing::warn!(client = %self.client, "pasteboard write failed");
-                }
-            }
-            ScreenRequest::ClipboardImage { media_type, bytes } => {
-                if self.screens.is_empty() {
-                    tracing::debug!(client = %self.client, bytes = bytes.len(), "picture refused");
-                } else if self.daemon.pasteboard.write_picture(&media_type, &bytes) {
-                    tracing::debug!(client = %self.client, %media_type, bytes = bytes.len(), "pasteboard picture set");
-                } else {
-                    tracing::warn!(client = %self.client, %media_type, bytes = bytes.len(), "pasteboard picture refused");
-                }
             }
         }
     }
@@ -858,7 +1034,7 @@ impl Peer<'_> {
             Err(e) => return self.report(session, &e).await,
         };
         self.forget(session);
-        let stream = match open_session_stream(&self.conn, session).await {
+        let stream = match slopty_net::streams::open_session(&self.conn, session).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(client = %self.client, %session, error = %e, "open session stream");

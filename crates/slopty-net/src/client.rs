@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use noq::{Connection, Endpoint};
 use slopty_proto::handshake::{Hello, HelloAck, Rejection};
-use slopty_proto::terminal::TermEvent;
-use slopty_proto::{ClientMsg, HostMsg, StreamHeader};
+use slopty_proto::{ClientMsg, HostMsg};
 
 use crate::NetError;
 use crate::addr::HostAddr;
@@ -125,16 +124,6 @@ async fn greet(
 }
 
 impl HostConn {
-    /// Accept the next session stream the host opens; returns its header and the typed reader.
-    pub async fn accept_session_stream(
-        &self,
-    ) -> Result<(StreamHeader, FramedRecv<TermEvent>), NetError> {
-        let recv = self.conn.accept_uni().await.map_err(|e| NetError::stream(&e))?;
-        let mut header = FramedRecv::<StreamHeader>::new(recv);
-        let hdr = header.recv().await?;
-        Ok((hdr, header.retype()))
-    }
-
     /// Current RTT.
     #[must_use]
     pub fn rtt(&self) -> Option<Duration> {

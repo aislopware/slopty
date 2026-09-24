@@ -878,4 +878,156 @@ mod tests {
         let _killed = server.start_kill();
         let _reaped = server.wait().await;
     }
+
+    /// The first shell, prompted and focused, moved into a directory of the run's own (typed,
+    /// as the human would): where a drop on it lands.
+    async fn shell_in(drv: &mut slopty_e2e::Driver, dir: &std::path::Path) -> slopty_e2e::Dump {
+        drv.wait_for("the first shell with a prompt", STEP, |d| {
+            d.status == "connected"
+                && d.focus.as_deref() == Some("terminal")
+                && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+        })
+        .await
+        .unwrap();
+        drv.type_text(&format!("cd '{}' && pwd", dir.display())).await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        drv.wait_for("the shell in the drop directory", STEP, |d| {
+            d.rows_containing(&name).iter().any(|r| r.trim().ends_with(&*name))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A file dropped on a terminal tile goes up to the shell's directory on the worker, and
+    /// its quoted path is typed at the prompt. The drop is GPUI's own file-drop events at the
+    /// tile, delivered through the self-test socket; no system drag.
+    #[tokio::test]
+    async fn a_file_dropped_on_a_shell_lands_on_the_worker_and_its_path_is_typed() {
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-drop").await.unwrap();
+        let work = stack.path("drop-here");
+        let outbox = stack.path("outbox");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&outbox).unwrap();
+        let source = outbox.join("report 1.txt");
+        let body: Vec<u8> = (0..300_000_u32).map(|i| b'a' + (i % 26) as u8).collect();
+        std::fs::write(&source, &body).unwrap();
+        let drv = &mut stack.driver;
+        let dump = shell_in(drv, &work).await;
+        let tile = dump.item("terminal").unwrap().bounds;
+        let (x, y) = (tile[0] + tile[2] / 2.0, tile[1] + tile[3] / 2.0);
+        // GPUI leaves the input modality at keyboard through a file drag, and a keyboard
+        // modality makes every hitbox unhovered, so a drop right after typing falls through.
+        // Until the fork counts a file drag as the pointer, the pointer arrives first.
+        drv.ok(&Command::Move { x, y }).await.unwrap();
+        drv.drop_files(&[source.as_path()], x, y).await.unwrap();
+
+        let dump = drv
+            .wait_for("the quoted path typed at the prompt", STEP, |d| {
+                !d.rows_containing("drop-here/report 1.txt'").is_empty()
+                    && d.terminals[0].upload.is_none()
+            })
+            .await
+            .unwrap();
+        let landed = work.join("report 1.txt");
+        assert_eq!(std::fs::read(&landed).unwrap(), body, "the file arrives whole");
+        assert!(!work.join("report 1.txt.partial").exists(), "renamed into place");
+        let screen = dump.terminals[0].rows.concat();
+        let quoted = format!("'{}'", std::fs::canonicalize(&landed).unwrap().display());
+        assert!(screen.contains(&quoted), "its absolute path, quoted for its space: {screen}");
+        stack.shutdown().await;
+    }
+
+    /// The worker's clipboard reaches the app's while a shell of the worker has the keyboard:
+    /// short text at once, a picture as a promise the app keeps by fetching it when something
+    /// reads it. Both ends are the run's own named pasteboards; the human's is never touched.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_worker_clipboard_arrives_as_text_and_a_picture_fetched_on_paste() {
+        use slopty_e2e::harness::pasteboard_name;
+        use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-clip").await.unwrap();
+        let host_name = pasteboard_name(stack.dir.path(), "host");
+        let app_name = pasteboard_name(stack.dir.path(), "app");
+        let drv = &mut stack.driver;
+        drv.wait_for("the first shell focused", STEP, |d| {
+            d.status == "connected" && d.focus.as_deref() == Some("terminal")
+        })
+        .await
+        .unwrap();
+        let (host, app) = (MacPasteboard::named(&host_name), MacPasteboard::named(&app_name));
+
+        let text = format!("copied on the worker {}", std::process::id());
+        host.copy(&[("public.utf8-plain-text", text.as_bytes())]);
+        let deadline = std::time::Instant::now() + STEP;
+        while app.text().as_deref() != Some(&*text) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(app.text().as_deref(), Some(&*text), "the text arrived inline");
+
+        let picture: Vec<u8> = (0..400_000_u32).map(|i| (i % 251) as u8).collect();
+        host.copy(&[("public.png", &picture)]);
+        let deadline = std::time::Instant::now() + STEP;
+        while !app.types().iter().any(|t| t == "public.png") && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(app.types().iter().any(|t| t == "public.png"), "promised: {:?}", app.types());
+        // Reading it is a paste: the app's provider fetches it from the worker, bulk.
+        drop(app);
+        let reader = app_name.clone();
+        let read =
+            tokio::task::spawn_blocking(move || MacPasteboard::named(&reader).data("public.png"))
+                .await
+                .unwrap();
+        assert!(read.as_deref() == Some(&*picture), "the picture arrived whole on paste");
+        drop(host);
+        stack.shutdown().await;
+    }
+
+    /// A port a shell listens on is served here: the chip's local port reaches the program on
+    /// the worker through a tunnel. With the worker on this very Mac the port is taken here by
+    /// the program itself, so the forward moves to the next free one.
+    #[tokio::test]
+    async fn a_port_listening_in_a_shell_is_reachable_here() {
+        use tokio::io::AsyncWriteExt as _;
+
+        if !gated() {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-ports").await.unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the first shell focused", STEP, |d| {
+            d.status == "connected" && d.focus.as_deref() == Some("terminal")
+        })
+        .await
+        .unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        drv.type_text(&format!("nc -l {port}")).await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let dump = drv
+            .wait_for("the port forwarded", STEP, |d| {
+                d.terminals.iter().any(|t| t.ports.iter().any(|p| p[0] == port && p[1] != 0))
+            })
+            .await
+            .unwrap();
+        let local = dump.terminals[0].ports.iter().find(|p| p[0] == port).unwrap()[1];
+        assert_ne!(local, port, "nc holds the port on this Mac: the next free one serves");
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+        client.write_all(b"through-the-tunnel\n").await.unwrap();
+        drv.wait_for("nc to print what came through", STEP, |d| {
+            d.rows_containing("through-the-tunnel").iter().any(|r| r.trim() == "through-the-tunnel")
+        })
+        .await
+        .unwrap();
+        drop(client);
+        stack.shutdown().await;
+    }
 }
