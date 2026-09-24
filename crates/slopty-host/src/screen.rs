@@ -287,7 +287,12 @@ impl Quantiles {
     /// Quantiles of `samples` (any order).
     #[must_use]
     pub fn of(samples: &[u64]) -> Self {
-        let mut sorted = samples.to_vec();
+        Self::of_owned(samples.to_vec())
+    }
+
+    /// Quantiles of `samples` (any order), sorted in place.
+    #[must_use]
+    pub fn of_owned(mut sorted: Vec<u64>) -> Self {
         sorted.sort_unstable();
         let last = sorted.len().saturating_sub(1);
         let at = |q: f64| -> u64 {
@@ -326,24 +331,39 @@ impl Quantiles {
 /// Samples the latency quantiles are computed over: 10 s at 60 fps.
 const LATENCY_WINDOW: usize = 600;
 
-/// A ring of the last [`LATENCY_WINDOW`] latency samples.
-#[derive(Debug, Default)]
-struct LatencyRing(VecDeque<u64>);
+/// A ring of the last `window` latency samples, microseconds, and their quantiles: the one
+/// latency window the host keeps, whatever it times.
+#[derive(Debug)]
+pub struct LatencyRing {
+    samples: VecDeque<u64>,
+    window: usize,
+}
+
+impl Default for LatencyRing {
+    fn default() -> Self {
+        Self::new(LATENCY_WINDOW)
+    }
+}
 
 impl LatencyRing {
-    fn push(&mut self, us: u64) {
-        if self.0.len() >= LATENCY_WINDOW {
-            self.0.pop_front();
-        }
-        self.0.push_back(us);
+    /// An empty ring keeping the last `window` samples.
+    #[must_use]
+    pub fn new(window: usize) -> Self {
+        Self { samples: VecDeque::with_capacity(window), window: window.max(1) }
     }
 
-    fn quantiles(&self) -> Quantiles {
-        let (a, b) = self.0.as_slices();
-        let mut all = Vec::with_capacity(a.len().saturating_add(b.len()));
-        all.extend_from_slice(a);
-        all.extend_from_slice(b);
-        Quantiles::of(&all)
+    /// Record one sample, forgetting the oldest past the window.
+    pub fn push(&mut self, us: u64) {
+        if self.samples.len() >= self.window {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(us);
+    }
+
+    /// Quantiles of the samples in the window.
+    #[must_use]
+    pub fn quantiles(&self) -> Quantiles {
+        Quantiles::of_owned(self.samples.iter().copied().collect())
     }
 }
 
@@ -636,7 +656,6 @@ pub async fn warm_up() -> Result<Duration, ScreenError> {
             codec: VideoCodec::Hevc,
             fps: 1,
             bitrate_bps: 100_000,
-            rate_control: slopty_codec::RateControl::LowLatency,
         },
         |_packet| {},
     )?;
@@ -648,7 +667,7 @@ pub async fn warm_up() -> Result<Duration, ScreenError> {
         width: 64,
         height: 64,
         fps: 1,
-        format: PixelFormat::Nv12,
+        format: PixelFormat::Nv12Full,
         queue_depth: 1,
         audio: true,
         crop: None,
@@ -1464,18 +1483,15 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     };
     let (width, height) = (side(native.0), side(native.1));
     let fps = quality.fps.clamp(1, 240);
-    let codec = quality.codec;
-    let format =
-        if codec == VideoCodec::HevcMain10 { PixelFormat::P010 } else { PixelFormat::Nv12 };
+    let format = PixelFormat::Nv12Full;
     let capture =
         CaptureConfig { width, height, fps, format, queue_depth: 2, audio: true, crop: None };
     let encoder = EncoderConfig {
         width,
         height,
-        codec,
+        codec: quality.codec,
         fps,
         bitrate_bps: quality.bitrate_bps.max(100_000),
-        rate_control: slopty_codec::RateControl::LowLatency,
     };
     (capture, encoder)
 }
@@ -2093,13 +2109,12 @@ async fn hide_watch_for(
     }
 }
 
-/// Sample the pointer and send its position in stream pixels whenever it moves, and a
-/// heartbeat whenever nothing at all left for [`HEARTBEAT_AFTER`] (a quiet source must not
-/// read as a stalled link). Runs until the task is aborted by [`ScreenStream::close`] or the
+/// Send a heartbeat whenever nothing at all left for [`HEARTBEAT_AFTER`] (a quiet source must
+/// not read as a stalled link). Sleeps until the moment one would be due rather than polling:
+/// while video flows every datagram moves that moment on, so the task wakes at most once per
+/// [`HEARTBEAT_AFTER`]. Runs until the task is aborted by [`ScreenStream::close`] or the
 /// transport queue closes.
 async fn beat_loop(shared: Arc<Shared>) {
-    let mut ticks = tokio::time::interval(CURSOR_PERIOD);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut beats: u32 = 0;
     let mut last_beat_us: Option<u64> = None;
     let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
@@ -2107,14 +2122,16 @@ async fn beat_loop(shared: Arc<Shared>) {
     // this the beat has not merely slipped, it has failed at the one thing it is for.
     let late_beat_us = heartbeat_after_us.saturating_mul(4);
     while !shared.out.is_closed() {
-        ticks.tick().await;
         let now = host_now_us();
-        let silence_us = now.saturating_sub(shared.last_push_us.load(Ordering::Relaxed));
-        if silence_us < heartbeat_after_us {
+        // The beat itself counts as traffic even when the queue refused it, so a full queue
+        // is retried a period later instead of spun on.
+        let last_out = shared.last_push_us.load(Ordering::Relaxed).max(last_beat_us.unwrap_or(0));
+        if let Some(wait) = beat_due_in(now.saturating_sub(last_out), heartbeat_after_us) {
+            tokio::time::sleep(wait).await;
             continue;
         }
         beats = beats.wrapping_add(1);
-        tracing::trace!(stream = %shared.id, beats, silence_us, "heartbeat");
+        tracing::trace!(stream = %shared.id, beats, "heartbeat");
         shared.counters.heartbeats.fetch_add(1, Ordering::Relaxed);
         if let Some(previous) = last_beat_us {
             let gap = now.saturating_sub(previous);
@@ -2129,15 +2146,28 @@ async fn beat_loop(shared: Arc<Shared>) {
     }
 }
 
+/// How long until a heartbeat is due after `silence_us` of nothing sent; `None` when it is due.
+const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
+    if silence_us >= after_us {
+        None
+    } else {
+        Some(Duration::from_micros(after_us.saturating_sub(silence_us)))
+    }
+}
+
 /// Where the pointer is over the target, sent when it moves.
 ///
-/// Every call in here is a window-server round trip, so all of them run on the blocking pool:
+/// A still pointer costs one read of the event system's move counters a tick
+/// ([`slopty_capture::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
+/// for when the counters moved, and the target's bounds (which move a still pointer across the
+/// picture) at 10 Hz. Both are window-server round trips, so they run on the blocking pool:
 /// what this loop must not do is occupy a runtime worker, because [`beat_loop`] needs one on
 /// time (MEASUREMENTS.md, "the beat behind the geometry call").
 async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut bounds: Option<Rect> = None;
+    let mut pointer: Option<(u32, (f64, f64))> = None;
     let mut last: Option<(i32, i32, bool)> = None;
     let mut seq: u32 = 0;
     let mut tick: u64 = 0;
@@ -2157,9 +2187,17 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
         }
         tick = tick.wrapping_add(1);
         let Some(rect) = bounds else { continue };
-        let Ok((px, py)) = tokio::task::spawn_blocking(slopty_capture::pointer_location).await
-        else {
-            return;
+        let moves = slopty_capture::pointer_moves();
+        let (px, py) = match pointer {
+            Some((seen, at)) if seen == moves => at,
+            _moved_or_unread => {
+                let Ok(at) = tokio::task::spawn_blocking(slopty_capture::pointer_location).await
+                else {
+                    return;
+                };
+                pointer = Some((moves, at));
+                at
+            }
         };
         let visible = rect.contains(px, py);
         shared.pointer_over.store(visible, Ordering::Relaxed);
@@ -2319,24 +2357,18 @@ mod tests {
 
     #[test]
     fn configs_clamp_the_quality_and_keep_even_sides() {
-        let q = Quality {
-            fps: 500,
-            bitrate_bps: 1,
-            scale: 0.3333,
-            codec: VideoCodec::Hevc,
-            hdr: false,
-        };
+        let q = Quality { fps: 500, bitrate_bps: 1, scale: 0.3333, codec: VideoCodec::Hevc };
         let (capture, encoder) = configs((1_001, 777), &q);
         assert_eq!((capture.width, capture.height), (334, 260), "scaled, rounded up to even");
         assert_eq!(capture.fps, 240, "fps clamped");
-        assert_eq!(capture.format, PixelFormat::Nv12);
+        assert_eq!(capture.format, PixelFormat::Nv12Full, "full range, what the client samples");
         assert_eq!(encoder.bitrate_bps, 100_000, "bitrate floor");
         assert_eq!((encoder.width, encoder.height, encoder.fps), (334, 260, 240));
 
-        let nan = Quality { scale: f32::NAN, codec: VideoCodec::HevcMain10, ..q };
-        let (capture, _encoder) = configs((100, 100), &nan);
+        let nan = Quality { scale: f32::NAN, codec: VideoCodec::H264, ..q };
+        let (capture, encoder) = configs((100, 100), &nan);
         assert_eq!((capture.width, capture.height), (100, 100), "a NaN scale is native");
-        assert_eq!(capture.format, PixelFormat::P010, "10-bit for Main10");
+        assert_eq!(encoder.codec, VideoCodec::H264, "the codec asked for");
 
         let tiny = Quality { scale: 0.0001, ..q };
         let (capture, _encoder) = configs((10, 10), &tiny);
@@ -2449,6 +2481,31 @@ mod tests {
             sent = sent.saturating_add(1_u64);
         }
         assert!(sent >= 8, "only {sent} datagrams for {} beats", seen.heartbeats);
+    }
+
+    /// The beat waits exactly as long as the silence has left to run, and never polls.
+    #[test]
+    fn a_beat_is_due_when_the_silence_reaches_the_promise() {
+        assert_eq!(beat_due_in(0, 25_000), Some(Duration::from_millis(25)));
+        assert_eq!(beat_due_in(24_000, 25_000), Some(Duration::from_millis(1)));
+        assert_eq!(beat_due_in(25_000, 25_000), None);
+        assert_eq!(beat_due_in(u64::MAX, 25_000), None);
+    }
+
+    /// A full queue refuses the beat, and the loop waits a period before the next try rather
+    /// than spinning on the refusal.
+    #[tokio::test]
+    async fn a_refused_beat_is_retried_a_period_later() {
+        let (shared, _rx) = shared_with_queue(1);
+        assert!(shared.push(Bytes::from_static(b"fills the queue")));
+        let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        beat.abort();
+        let seen = shared.stats();
+        assert!(
+            (4..=10).contains(&seen.heartbeats),
+            "about one attempt per 25 ms over 200 ms, not a spin: {seen:?}"
+        );
     }
 
     /// A frame that arrives inside the hold a suspicion opened is kept back and counted as

@@ -394,12 +394,52 @@ struct Ring {
     underruns: u64,
 }
 
-/// Longest backlog kept (both channels): beyond it the oldest samples are dropped so a stall
-/// never turns into lasting delay. 200 ms.
-const RING_MAX: usize = PACKET_SAMPLES * 10;
-/// Bytes in one output buffer (one packet of PCM).
-const BUFFER_BYTES: usize = PACKET_SAMPLES * SAMPLE_BYTES;
-/// Output buffers in flight; each holds one packet's worth (20 ms).
+impl Ring {
+    /// Queue decoded samples. A backlog past [`RING_MAX`] is the burst a stall leaves behind
+    /// (the packets held up in the network arrive together): the oldest go, down to
+    /// [`RING_TARGET`], so the stall costs one skip and no lasting delay.
+    fn push(&mut self, samples: &[f32]) {
+        self.samples.extend(samples);
+        if self.samples.len() > RING_MAX {
+            let excess = self.samples.len().saturating_sub(RING_TARGET);
+            self.samples.drain(..excess);
+        }
+        self.underruns = 0;
+    }
+
+    /// Fill `out` for the device, silence past what the ring holds.
+    fn pull(&mut self, out: &mut [f32]) {
+        let want = out.len();
+        let have = self.samples.len().min(want);
+        for (slot, sample) in out.iter_mut().zip(self.samples.drain(..have)) {
+            *slot = sample;
+        }
+        if have < want {
+            if let Some(rest) = out.get_mut(have..) {
+                rest.fill(0.0);
+            }
+            self.underruns = self.underruns.saturating_add(1);
+        }
+    }
+}
+
+/// Samples (both channels) in `ms` milliseconds.
+const fn samples_in_ms(ms: usize) -> usize {
+    ms.saturating_mul(SAMPLE_RATE as usize / 1000).saturating_mul(CHANNELS as usize)
+}
+
+/// What the ring holds once a burst is trimmed: two packets, enough to ride out the ordinary
+/// jitter of 20 ms packets without the next one arriving to an empty ring.
+const RING_TARGET: usize = samples_in_ms(40);
+/// A backlog past this is a burst, not jitter: two packets landing together fit under it,
+/// three do not.
+const RING_MAX: usize = samples_in_ms(50);
+/// Samples in one output buffer: 10 ms, half a packet, so the device holds little ahead of
+/// the ring.
+const BUFFER_SAMPLES: usize = samples_in_ms(10);
+/// Bytes in one output buffer.
+const BUFFER_BYTES: usize = BUFFER_SAMPLES * SAMPLE_BYTES;
+/// Output buffers in flight: one playing, two queued behind it.
 const QUEUE_BUFFERS: usize = 3;
 
 /// An `AudioQueue` playing interleaved stereo float at 48 kHz from a ring the decoder fills.
@@ -429,23 +469,11 @@ unsafe extern "C-unwind" fn refill(
     // SAFETY: the queue hands a buffer it allocated; the struct is valid until we re-enqueue it.
     let Some(buf) = (unsafe { buffer.as_mut() }) else { return };
     let capacity = usize::try_from(buf.mAudioDataBytesCapacity).unwrap_or(0) / SAMPLE_BYTES;
-    let want = capacity.min(PACKET_SAMPLES);
+    let want = capacity.min(BUFFER_SAMPLES);
     // SAFETY: `mAudioData` points at `mAudioDataBytesCapacity` bytes owned by the queue.
     let out =
         unsafe { std::slice::from_raw_parts_mut(buf.mAudioData.as_ptr().cast::<f32>(), want) };
-    {
-        let mut ring = ring.lock();
-        let have = ring.samples.len().min(want);
-        for (slot, sample) in out.iter_mut().zip(ring.samples.drain(..have)) {
-            *slot = sample;
-        }
-        if have < want {
-            if let Some(rest) = out.get_mut(have..) {
-                rest.fill(0.0);
-            }
-            ring.underruns = ring.underruns.saturating_add(1);
-        }
-    }
+    ring.lock().pull(out);
     buf.mAudioDataByteSize = u32_of(want.saturating_mul(SAMPLE_BYTES));
     // SAFETY: re-enqueueing the queue's own buffer from its callback is the documented pattern.
     let _ignored = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
@@ -495,15 +523,10 @@ impl Player {
         Ok(player)
     }
 
-    /// Queue interleaved samples for playback; the oldest are dropped past `RING_MAX`.
+    /// Queue interleaved samples for playback; a burst past `RING_MAX` is trimmed to
+    /// `RING_TARGET`.
     pub fn push(&self, samples: &[f32]) {
-        let mut ring = self.ring.lock();
-        ring.samples.extend(samples);
-        let excess = ring.samples.len().saturating_sub(RING_MAX);
-        if excess > 0 {
-            ring.samples.drain(..excess);
-        }
-        ring.underruns = 0;
+        self.ring.lock().push(samples);
     }
 
     /// Samples waiting to be played, both channels.
@@ -601,5 +624,78 @@ mod conceal_tests {
         assert!(out.is_empty());
         c.fill(MAX_CONCEALED, &mut out);
         assert_eq!(out.len(), 2 * MAX_CONCEALED as usize);
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+
+    /// What the listener hears behind the host, in milliseconds: the ring plus the device
+    /// buffers queued ahead of it (the callback refills one as soon as it is played, so all
+    /// of them are full).
+    fn heard_ms(ring: &Ring) -> usize {
+        let queued =
+            ring.samples.len().saturating_add(QUEUE_BUFFERS.saturating_mul(BUFFER_SAMPLES));
+        queued.saturating_mul(1000).checked_div(samples_in_ms(1000)).unwrap_or(0)
+    }
+
+    /// Steady 20 ms packets for a second, a 250 ms stall the device keeps pulling through, the
+    /// stalled packets in one burst, then steady again: the delay after the burst, and 1.25 s
+    /// later. Driven on a 1 ms clock through the same `push` and `pull` the player runs.
+    #[test]
+    fn a_stall_burst_does_not_leave_lasting_delay() {
+        let packet = vec![0.25_f32; PACKET_SAMPLES];
+        let mut ring = Ring::default();
+        let mut out = vec![0.0_f32; BUFFER_SAMPLES];
+        let buffer_ms = BUFFER_SAMPLES * 1000 / samples_in_ms(1000);
+        let (mut owed, mut after_burst, mut at_2500) = (0_u32, 0, 0);
+        let (mut settled_sum, mut settled_n) = (0_usize, 0_usize);
+        for t in 0..3_000_usize {
+            if t.is_multiple_of(20) {
+                if (1_000..1_250).contains(&t) {
+                    owed = owed.saturating_add(1);
+                } else {
+                    ring.push(&packet);
+                }
+            }
+            if t == 1_250 {
+                for _ in 0..owed {
+                    ring.push(&packet);
+                }
+                after_burst = heard_ms(&ring);
+            }
+            if t % buffer_ms == buffer_ms.saturating_sub(1) {
+                ring.pull(&mut out);
+            }
+            if t == 2_500 {
+                at_2500 = heard_ms(&ring);
+            }
+            if t >= 1_500 {
+                settled_sum = settled_sum.saturating_add(heard_ms(&ring));
+                settled_n = settled_n.saturating_add(1);
+            }
+        }
+        let settled = settled_sum.checked_div(settled_n).unwrap_or(0);
+        eprintln!(
+            "heard behind the host: {after_burst} ms after the burst, {at_2500} ms at 2.5 s, {settled} ms mean over 1.5–3 s"
+        );
+        assert!(
+            after_burst <= 70,
+            "a burst leaves at most the target and the device: {after_burst} ms"
+        );
+        assert!(settled <= 80, "and no delay builds up afterwards: {settled} ms");
+    }
+
+    /// Ordinary jitter is not a burst: two packets landing together stay whole.
+    #[test]
+    fn jitter_below_the_cap_is_kept() {
+        let mut ring = Ring::default();
+        ring.push(&vec![0.5; PACKET_SAMPLES]);
+        ring.push(&vec![0.5; PACKET_SAMPLES]);
+        assert_eq!(ring.samples.len(), 2 * PACKET_SAMPLES);
+        assert!(ring.samples.len() <= RING_MAX);
+        ring.push(&vec![0.5; PACKET_SAMPLES]);
+        assert_eq!(ring.samples.len(), RING_TARGET, "a third is a burst, trimmed to the target");
     }
 }

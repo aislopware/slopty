@@ -366,16 +366,10 @@ impl Focusable for ScreenView {
     }
 }
 
-/// The quality a stream is asked for: the settings' rate, ceiling and depth at `scale`.
+/// The quality a stream is asked for: the settings' rate and ceiling at `scale`.
 #[must_use]
 pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality {
-    Quality {
-        fps: prefs.fps,
-        bitrate_bps: prefs.max_bitrate_bps,
-        scale,
-        codec: if prefs.hdr { VideoCodec::HevcMain10 } else { VideoCodec::Hevc },
-        hdr: prefs.hdr,
-    }
+    Quality { fps: prefs.fps, bitrate_bps: prefs.max_bitrate_bps, scale, codec: VideoCodec::Hevc }
 }
 
 impl ScreenView {
@@ -596,11 +590,13 @@ impl ScreenView {
 
     /// Recompute the overlay's rates when a second has passed; returns the text to draw.
     fn hud_text(&mut self, cx: &gpui::App) -> Option<String> {
-        let ui = crate::frames::stats(cx);
         let hud = self.hud.as_mut()?;
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
         if elapsed >= HUD_PERIOD {
+            // The frame and pacing percentiles sort their rings: once a HUD period, never
+            // per paint.
+            let ui = crate::frames::stats(cx);
             let stats = self.handle.stats();
             let secs = elapsed.as_secs_f64();
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
@@ -1531,14 +1527,13 @@ mod tests {
         assert!(sent(&mut rx).is_empty(), "nothing about the stream changed");
         theme.behaviour.stream.fps = 30;
         theme.behaviour.stream.max_bitrate_bps = 8_000_000;
-        theme.behaviour.stream.hdr = true;
         view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         let asked = sent(&mut rx);
         let [ScreenRequest::SetQuality { stream: StreamId(4), quality }] = asked.as_slice() else {
             panic!("{asked:?}");
         };
-        assert_eq!((quality.fps, quality.bitrate_bps, quality.hdr), (30, 8_000_000, true));
-        assert_eq!(quality.codec, VideoCodec::HevcMain10);
+        assert_eq!((quality.fps, quality.bitrate_bps), (30, 8_000_000));
+        assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
         assert!((quality.scale - 1.0).abs() < f32::EPSILON, "the scale is the canvas's");
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");

@@ -10,7 +10,14 @@ description = "VideoToolbox HEVC/H.264 encode (macOS) and decode (macOS, iOS) wi
 [lints]
 workspace = true
 
+[features]
+# The encoder's measurement-only surface: the VBV rate-control mode the ruling rejected, raw
+# property writes, and the property probes. Turned on by the tests that measure them, never by
+# a shipped binary.
+experiments = [  ]
+
 [dependencies]
+memchr.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 

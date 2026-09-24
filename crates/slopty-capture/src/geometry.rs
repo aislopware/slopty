@@ -8,11 +8,11 @@ use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect,
 };
 use objc2_core_graphics::{
-    CGDisplayBounds, CGEvent, CGGetDisplaysWithRect, CGPreflightScreenCaptureAccess,
-    CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess,
-    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption,
-    kCGWindowAlpha, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName,
-    kCGWindowNumber, kCGWindowOwnerPID,
+    CGDisplayBounds, CGEvent, CGEventSource, CGEventSourceStateID, CGEventType,
+    CGGetDisplaysWithRect, CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation,
+    CGRequestScreenCaptureAccess, CGWindowListCopyWindowInfo,
+    CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGWindowAlpha, kCGWindowBounds,
+    kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
@@ -125,6 +125,28 @@ pub fn pointer_location() -> (f64, f64) {
     let event = CGEvent::new(None);
     let p = CGEvent::location(event.as_deref());
     (p.x, p.y)
+}
+
+/// How many pointer moves and drags the login session has seen. Wraps; compare for equality.
+///
+/// The number changes exactly when the pointer does, and it comes from the event system's
+/// counters without asking the window server where the pointer is (MEASUREMENTS.md, "the
+/// still pointer").
+#[must_use]
+pub fn pointer_moves() -> u32 {
+    [
+        CGEventType::MouseMoved,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
+    ]
+    .into_iter()
+    .fold(0_u32, |sum, kind| {
+        sum.wrapping_add(CGEventSource::counter_for_event_type(
+            CGEventSourceStateID::CombinedSessionState,
+            kind,
+        ))
+    })
 }
 
 /// Current bounds of a capture target, or `None` when a window is gone.
@@ -412,5 +434,28 @@ mod tests {
         assert!(a.overlaps(&inside));
         assert!(a.overlaps(&crossing));
         assert!(!a.overlaps(&touching), "a shared edge is not an overlap");
+    }
+
+    /// What one look at the pointer costs each way: the event snapshot the cursor loop took on
+    /// every tick, and the move counters it reads now. `docs/MEASUREMENTS.md` records runs.
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    fn pointer_read_cost() {
+        let rounds = 2_000_u32;
+        let started = std::time::Instant::now();
+        let mut sum = 0.0_f64;
+        for _ in 0..rounds {
+            sum += pointer_location().0;
+        }
+        let location = started.elapsed() / rounds;
+        let started = std::time::Instant::now();
+        let mut moves = 0_u32;
+        for _ in 0..rounds {
+            moves = moves.wrapping_add(pointer_moves());
+        }
+        let counters = started.elapsed() / rounds;
+        eprintln!(
+            "pointer_location {location:?}, pointer_moves {counters:?} per call ({sum} {moves})"
+        );
     }
 }

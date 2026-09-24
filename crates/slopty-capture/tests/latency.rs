@@ -181,7 +181,7 @@ mod tests {
             width: size.0,
             height: size.1,
             fps: 60,
-            format: PixelFormat::Nv12,
+            format: PixelFormat::Nv12Full,
             queue_depth: depth,
             audio: false,
             crop,

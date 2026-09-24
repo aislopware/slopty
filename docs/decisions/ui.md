@@ -90,6 +90,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Queued as follow-ups: `ShapedLine::cursor` for truncating without reshaping, standalone
     modifier keystrokes for remote input, and integer `ElementId`s instead of per-frame
     `format!` ids.
+  2026-09-24, fork commit `c2733ceab3` (`gpui_apple`): the video surface path holds each
+  frame's `CVMetalTexture`s until the command buffer's completion handler and flushes the
+  texture cache every frame. The shader multiplies by a matrix built from the buffer's
+  `kCVImageBufferYCbCrMatrixKey` tag (BT.709 when untagged) at the range its pixel format says,
+  where it used to hard-code BT.601. A pixel format it cannot sample, or a failed texture, skips
+  that surface with one log line instead of the `assert_eq!`/`unwrap` abort. Tests in the fork:
+  `the_matrices_map_codes_to_the_right_colours`, and
+  `a_tagged_surface_renders_its_colour_and_a_foreign_one_is_skipped`, which renders BT.709 red
+  headless three frames running and checks the pixel values.
 
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,

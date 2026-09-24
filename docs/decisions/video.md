@@ -4,6 +4,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **HEVC Main (8-bit 4:2:0) default, Main10/P010 when the source is HDR.** AV1 is decode-only
   on Apple silicon (Apple spec pages, verified 2026-09-04). No 4:4:4 hardware path exists.
+  (Main10/P010 superseded 2026-09-24: HEVC Main only, see "420f and BT.709 end to end".)
 
 - ✅ **Encoder property set** — verified against `VTCompressionProperties.h` in the macOS 26.5 SDK:
   - `kVTVideoEncoderSpecification_EnableLowLatencyRateControl` = true, in the **encoder
@@ -783,7 +784,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   at the scale it holds — a bitrate change is applied in place on the host, a rate or
   depth change rebuilds its encoder, as `set_quality` already ruled. `hdr` selects HEVC
   Main 10 (P010 capture); it is the client's choice, since the host cannot know what the
-  client's display shows. Out-of-range values (fps outside 15–120, a ceiling outside 1–200
+  client's display shows. (`hdr` superseded 2026-09-24: removed from the wire, see "420f and
+  BT.709 end to end".) Out-of-range values (fps outside 15–120, a ceiling outside 1–200
   Mbit/s) read as the defaults, as the font sizes do. Tests: `remote_keys`,
   `remote_settings_ride_on_the_theme`, `new_stream_settings_are_asked_of_a_live_stream`.
 
@@ -830,3 +832,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   first rung instead of firing it off, and throws the first sample away. Both are right regardless
   of the cause — a measurement should not race its own warm-up — and on the boot volume they cost
   a second rather than half a minute.
+
+- ✅ **420f and BT.709 end to end, one stream format, no HDR option** (2026-09-24, protocol 49).
+  The host asked ScreenCaptureKit for `420v` while the client's decoder asked for `420f`, so
+  VideoToolbox converted the range into a second pool on every frame (~12 MB read and written
+  per 4K frame), and the fork's shader hard-coded BT.601 on a matrix nobody had set. Now:
+  capture is `PixelFormat::Nv12Full` with `colorMatrix = kCGDisplayStreamYCbCrMatrix_ITU_R_709_2`
+  (SCStream.h leaves the default unsaid, so it is set rather than assumed); the encoder sets
+  `kVTCompressionPropertyKey_YCbCrMatrix = ITU_R_709_2`, and VideoToolbox writes the full-range
+  flag from the `420f` source by itself; the decoder's output attributes ask for that same
+  `420f`, so it writes its output directly. The fork's shader reads the matrix tag off each
+  decoded buffer (`ui.md`, the fork entry). Colour primaries and transfer stay untagged: the
+  capture is in the host display's colour space, and GPUI's layer does no colour matching.
+  The `hdr` setting and `VideoCodec::HevcMain10` are gone. The client forced 8-bit output into
+  an 8-bit layer, so Main 10 cost bandwidth and showed nothing. `PixelFormat::{Nv12, P010}` went
+  with them. Tests: `the_stream_is_full_range_bt709_end_to_end` (the keyframe's parameter sets
+  say full range and BT.709, and the decoded buffer is `420f` tagged BT.709),
+  `the_capture_is_full_range_bt709`, `configs_clamp_the_quality_and_keep_even_sides`.
+  Still owed: `ScreenEvent::Opened.hdr` and `DisplayInfo.hdr` are always false on the wire, and
+  the `[remote] hdr` setting in `slopty-settings`/`slopty-theme`/`slopty-app` no longer reaches
+  the stream.
+
+- ✅ **The LTR-refresh flag rides with its own frame, in `sourceFrameRefcon`** (2026-09-24). The
+  encoder kept one `pending_refresh` atomic, set before `VTCompressionSessionEncodeFrame` and
+  taken by the next output callback. With frames in flight, or a submit that failed, the flag
+  landed on whichever frame came back next. The receiver restarts decoding on an `LTR_REFRESH`
+  frame (`reassemble.rs`), so a mislabelled P-frame there is a corrupted picture. The refcon
+  VideoToolbox hands back with each frame (VTCompressionSession.h: "sourceFrameRefcon: Your
+  reference value for the frame") now carries a tag for refresh frames, never a pointer. A
+  refresh frame the encoder drops is not carried forward: the receiver repeats its request until
+  a picture it can decode arrives. Test: `the_refresh_flag_rides_with_its_own_frame` (12 frames
+  in flight, the refresh on the 8th; only its pts comes back flagged).
+
+- ✅ **An encoded frame is copied twice on the host and once on the client** (2026-09-24). Host:
+  the sample's bytes go once into a vector sized for the parameter sets plus the body. The
+  4-byte length prefixes are rewritten to start codes in place (both are four bytes), and a
+  length that runs past the end is an error that drops the frame, where it used to be silently
+  truncated. The packetizer then writes every datagram, parity included, into one buffer laid
+  out as the wire wants it and hands out `Bytes` slices of it: one allocation per frame, not one
+  per fragment. Client: one `memchr` scan splits the access unit into parameter sets and units,
+  and the units are written length-prefixed straight into the `CMBlockBuffer` CoreMedia
+  allocates. The old path scanned byte by byte twice and copied into a vector and then into the
+  block. Numbers in `docs/MEASUREMENTS.md` (2026-09-24, "the media path's copies"). Tests:
+  `length_prefixes_become_start_codes_in_place_and_back`, `a_malformed_length_is_an_error`,
+  `the_datagrams_share_one_buffer_and_rebuild_the_frame`.
+
+- ✅ **The host's per-stream timers sleep instead of polling** (2026-09-24). `beat_loop` woke at
+  120 Hz to ask whether 25 ms of silence had passed. It now sleeps until the moment a heartbeat
+  would be due, which every datagram moves on, so a streaming window wakes it about once per
+  `HEARTBEAT_AFTER`. A beat the full queue refused still counts as traffic, so a full queue is
+  retried a period later and not spun on. `cursor_loop` still ticks at 120 Hz, but a tick with
+  the pointer still costs one read of `CGEventSourceCounterForEventType` over the move and drag
+  types (43 ns) instead of a `spawn_blocking` hop and a `CGEventCreate` (13.8 µs plus the hop).
+  The pointer is read only when those counters moved, and the target's bounds are still read
+  at 10 Hz, since a window moving under a still pointer moves the cursor across the picture.
+  Tests: `a_beat_is_due_when_the_silence_reaches_the_promise`,
+  `a_refused_beat_is_retried_a_period_later`, `a_slow_geometry_call_does_not_make_the_beat_late`.
+
+- ✅ **The stream worker never waits on the control channel** (2026-09-24). Its receiver report
+  went out with `send().await` on the bounded control channel, so a full channel stopped
+  reassembly, NACKs and decode behind a report. It uses `try_send` now: a full channel drops that
+  report (the next follows in 50 ms), and the counters are published either way. Test:
+  `a_full_control_channel_does_not_stall_the_worker`.

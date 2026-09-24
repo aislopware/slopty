@@ -63,7 +63,8 @@ pub fn time_us(us: u64) -> CMTime {
     }
 }
 
-/// Microseconds from a `CMTime`, `None` when invalid.
+/// Microseconds from a `CMTime`, `None` when invalid. The one conversion every CoreMedia
+/// timestamp in the media path goes through.
 pub fn micros(time: CMTime) -> Option<u64> {
     if !time.flags.contains(CMTimeFlags::Valid) || time.timescale <= 0 {
         return None;

@@ -640,7 +640,7 @@ impl Worker {
                     }
                 }
                 () = tick => {}
-                _instant = report.tick() => self.report().await,
+                _instant = report.tick() => self.report(),
             }
             if !self.actions() {
                 break;
@@ -742,7 +742,10 @@ impl Worker {
         true
     }
 
-    async fn report(&mut self) {
+    /// Publish the counters and send the host a receiver report. The report never waits for
+    /// room on the control channel: a full channel drops this one (the next follows in
+    /// [`REPORT_EVERY`]) rather than holding reassembly and decode behind it.
+    fn report(&mut self) {
         let now = Instant::now();
         let report = self.reassembler.take_report(now, 0);
         let stats = self.reassembler.stats();
@@ -764,8 +767,12 @@ impl Worker {
         self.counters.first_decoded_at = *self.first_decoded.lock();
         self.stats.send_replace(self.counters);
         let stream = self.stream;
-        let _gone =
-            self.out.send(ClientMsg::Screen(ScreenRequest::Report { stream, report })).await;
+        match self.out.try_send(ClientMsg::Screen(ScreenRequest::Report { stream, report })) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!(stream = %self.stream, "control channel full; report dropped");
+            }
+        }
     }
 }
 
@@ -1026,7 +1033,7 @@ mod worker_tests {
         }
 
         /// Poll `done` every few milliseconds for up to `secs`, draining the reports the worker
-        /// sends meanwhile (its report send awaits a slot).
+        /// sends meanwhile.
         fn wait_for(&mut self, what: &str, secs: u64, mut done: impl FnMut(&ScreenHandle) -> bool) {
             let deadline = Instant::now().checked_add(Duration::from_secs(secs)).unwrap();
             self.rt.block_on(async {
@@ -1195,5 +1202,40 @@ mod worker_tests {
         assert_eq!(h.handle.stream(), STREAM);
         drop(h.handle);
         assert!(h.router.inner.lock().attached.is_empty(), "dropping the handle unroutes");
+    }
+
+    /// A control channel nobody drains fills up; the worker drops its reports and goes on
+    /// reassembling and publishing, instead of waiting for room.
+    #[test]
+    fn a_full_control_channel_does_not_stall_the_worker() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let router = ScreenRouter::with_loss(0);
+        let (control_tx, _control) = mpsc::channel(1);
+        let uplink = Uplink {
+            control: control_tx,
+            feedback: Box::new(|_bytes| true),
+            rtt: Box::new(|| Some(Duration::from_millis(10))),
+        };
+        let handle = spawn_screen(rt.handle(), &router, STREAM, VideoCodec::Hevc, uplink);
+        let mut packetizer = Packetizer::new(STREAM);
+        packetizer.set_parity_permille(0);
+        rt.block_on(async {
+            // Two report periods: the one slot is taken and the next report finds it full.
+            tokio::time::sleep(REPORT_EVERY.saturating_mul(3)).await;
+            for (n, ts) in [(1_u64, 1_000_u32), (2, 2_000)] {
+                for d in packetize(&mut packetizer, n == 1, ts) {
+                    router.route(d, Instant::now());
+                }
+                let deadline = Instant::now().checked_add(Duration::from_secs(3)).unwrap();
+                while handle.stats().frames < n {
+                    assert!(Instant::now() < deadline, "the worker stalled: {:?}", handle.stats());
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        });
     }
 }

@@ -23,9 +23,13 @@ mod decoder;
 mod encoder;
 
 #[cfg(target_vendor = "apple")]
+pub use cf::micros;
+#[cfg(target_vendor = "apple")]
 pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
+#[cfg(all(target_os = "macos", feature = "experiments"))]
+pub use encoder::RateControl;
 #[cfg(target_os = "macos")]
-pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions, RateControl};
+pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -41,6 +45,12 @@ pub enum CodecError {
     /// The bitstream has no parameter sets and no decoder exists yet.
     #[error("no parameter sets seen yet; waiting for a keyframe")]
     NoParameterSets,
+    /// An access unit whose NAL lengths do not add up.
+    #[error("malformed NAL unit length at byte {offset}")]
+    MalformedNal {
+        /// Where the bad length starts.
+        offset: usize,
+    },
     /// The codec is not supported on this platform.
     #[error("unsupported codec {0:?}")]
     Unsupported(slopty_proto::screen::VideoCodec),

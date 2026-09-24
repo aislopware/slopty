@@ -61,8 +61,6 @@ pub enum CaptureTarget {
 pub enum VideoCodec {
     /// HEVC Main, 8-bit 4:2:0.
     Hevc,
-    /// HEVC Main10, 10-bit 4:2:0 (HDR).
-    HevcMain10,
     /// H.264 High (fallback only).
     H264,
 }
@@ -78,13 +76,11 @@ pub struct Quality {
     pub scale: f32,
     /// Preferred codec.
     pub codec: VideoCodec,
-    /// Capture HDR when the source is HDR.
-    pub hdr: bool,
 }
 
 impl Default for Quality {
     fn default() -> Self {
-        Self { fps: 60, bitrate_bps: 30_000_000, scale: 1.0, codec: VideoCodec::Hevc, hdr: false }
+        Self { fps: 60, bitrate_bps: 30_000_000, scale: 1.0, codec: VideoCodec::Hevc }
     }
 }
 

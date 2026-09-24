@@ -30,6 +30,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 objc2-core-foundation.workspace = true
+# The encoder's measurement surface (VBV mode, property probes) for `tests/screen.rs`.
+slopty-codec = { workspace = true, features = [ "experiments" ] }
 slopty-client.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true

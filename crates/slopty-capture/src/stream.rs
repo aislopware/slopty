@@ -3,7 +3,7 @@
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use dispatch2::{DispatchQoS, DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread as _, DefinedClass as _, define_class, msg_send};
@@ -14,14 +14,13 @@ use objc2_core_audio_types::{
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
+use objc2_core_graphics::kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMClock, CMSampleBuffer,
     CMTime, CMTimeFlags,
 };
 use objc2_core_video::{
     CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
@@ -31,7 +30,7 @@ use objc2_screen_capture_kit::{
     SCWindow,
 };
 use parking_lot::Mutex;
-use slopty_codec::PixelBuffer;
+use slopty_codec::{PixelBuffer, micros};
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
 
@@ -41,13 +40,9 @@ use crate::{CaptureError, Shareable};
 /// Pixel layout of captured frames.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PixelFormat {
-    /// 8-bit 4:2:0 bi-planar, video range (`420v`).
-    Nv12,
-    /// 8-bit 4:2:0 bi-planar, full range (`420f`); what the client's Metal surface path
-    /// samples, so the stream stays full range end to end.
+    /// 8-bit 4:2:0 bi-planar, full range (`420f`), BT.709 matrix: what the encoder takes and
+    /// the client's decoder hands its Metal surface path unconverted.
     Nv12Full,
-    /// 10-bit 4:2:0 bi-planar, video range (`x420`); for Main10 / HDR.
-    P010,
     /// 8-bit BGRA; for debugging and screenshots.
     Bgra,
 }
@@ -55,9 +50,7 @@ pub enum PixelFormat {
 impl PixelFormat {
     const fn os_type(self) -> u32 {
         match self {
-            Self::Nv12 => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             Self::Nv12Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            Self::P010 => kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
             Self::Bgra => kCVPixelFormatType_32BGRA,
         }
     }
@@ -588,17 +581,6 @@ fn display_time(sample: &CMSampleBuffer) -> Option<u64> {
     micros(unsafe { CMClock::make_host_time_from_system_units(ticks) })
 }
 
-fn micros(time: CMTime) -> Option<u64> {
-    if !time.flags.contains(CMTimeFlags::Valid) || time.timescale <= 0 {
-        return None;
-    }
-    let value = u128::from(u64::try_from(time.value).ok()?);
-    let scale = u128::from(u32::try_from(time.timescale).ok()?);
-    // The host clock is nanoseconds since boot (about 1e15 after days of uptime), so the
-    // product needs more than 64 bits.
-    u64::try_from(value.saturating_mul(1_000_000).checked_div(scale)?).ok()
-}
-
 /// Now on the host time clock, microseconds; the clock ScreenCaptureKit stamps frames with.
 #[must_use]
 pub fn host_now_us() -> u64 {
@@ -612,7 +594,8 @@ pub fn host_now_us() -> u64 {
 pub struct Capture {
     stream: Retained<SCStream>,
     _output: Retained<Output>,
-    _queue: DispatchRetained<DispatchQueue>,
+    /// The video and the audio sample queues.
+    _queues: [DispatchRetained<DispatchQueue>; 2],
     target: CaptureTarget,
 }
 
@@ -655,6 +638,14 @@ impl Capture {
             )
         };
         let queue = DispatchQueue::new("io.slopty.capture", DispatchQueueAttr::SERIAL);
+        // Audio on its own queue: a sample never waits behind a frame's encode call, and the
+        // player's ~40 ms of slack is less than a few late video callbacks.
+        let audio_attr = DispatchQueueAttr::with_qos_class(
+            DispatchQueueAttr::SERIAL,
+            DispatchQoS::UserInteractive,
+            0,
+        );
+        let audio_queue = DispatchQueue::new("io.slopty.capture.audio", Some(&audio_attr));
         let handler: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
         // SAFETY: valid stream, output and queue.
         unsafe {
@@ -671,7 +662,7 @@ impl Capture {
                 stream.addStreamOutput_type_sampleHandlerQueue_error(
                     handler,
                     SCStreamOutputType::Audio,
-                    Some(&queue),
+                    Some(&audio_queue),
                 )
             }
             .map_err(|e| CaptureError::from_ns(&e))?;
@@ -681,7 +672,7 @@ impl Capture {
         unsafe {
             stream.startCaptureWithCompletionHandler(Some(&block));
         }
-        Ok(Self { stream, _output: output, _queue: queue, target: target.kind() })
+        Ok(Self { stream, _output: output, _queues: [queue, audio_queue], target: target.kind() })
     }
 
     /// What is being captured.
@@ -762,6 +753,15 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     unsafe {
         c.setPixelFormat(config.format.os_type());
     }
+    if config.format == PixelFormat::Nv12Full {
+        // SCStream.h leaves the YCbCr matrix's default unsaid; the encoder tags BT.709 and the
+        // client converts with whatever the stream says, so the capture must be BT.709 too.
+        // SAFETY: plain property write on the fresh configuration object; the value is one of
+        // the `kCGDisplayStreamYCbCrMatrix_*` strings the header asks for.
+        unsafe {
+            c.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
+        }
+    }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
         c.setShowsCursor(false);
@@ -818,4 +818,33 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
         }
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The video format asked of ScreenCaptureKit is full range with the matrix the encoder
+    /// tags, so nothing between the capture and the client's shader converts or guesses.
+    #[test]
+    fn the_capture_is_full_range_bt709() {
+        let config = CaptureConfig {
+            width: 64,
+            height: 64,
+            fps: 60,
+            format: PixelFormat::Nv12Full,
+            queue_depth: 2,
+            audio: false,
+            crop: None,
+        };
+        let c = stream_configuration(&config);
+        // SAFETY: plain getter on a valid configuration object.
+        let format = unsafe { c.pixelFormat() };
+        // SAFETY: as above.
+        let matrix = unsafe { c.colorMatrix() };
+        assert_eq!(format, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+        // SAFETY: framework-provided constant string.
+        let bt709 = unsafe { kCGDisplayStreamYCbCrMatrix_ITU_R_709_2 };
+        assert_eq!(matrix.to_string(), bt709.to_string());
+    }
 }

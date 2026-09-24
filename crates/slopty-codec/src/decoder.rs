@@ -1,6 +1,6 @@
 //! `VTDecompressionSession` fed Annex B; rebuilds itself from in-band parameter sets.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ use objc2_video_toolbox::{
 use slopty_proto::screen::VideoCodec;
 
 use crate::CodecError;
-use crate::annexb::{self, h264, hevc};
+use crate::annexb::{AccessUnit, h264, hevc};
 use crate::cf::{self, check};
 
 /// A decoded picture that may cross threads.
@@ -180,18 +180,24 @@ impl Decoder {
     }
 
     /// Decode one Annex B access unit. Output arrives asynchronously through the sink.
+    ///
+    /// One scan finds the parameter sets and the picture's units; the units are written once,
+    /// length-prefixed, straight into the sample's block buffer.
     pub fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), CodecError> {
         let is_ps: fn(&[u8]) -> bool = match self.codec {
-            VideoCodec::Hevc | VideoCodec::HevcMain10 => hevc::is_parameter_set,
+            VideoCodec::Hevc => hevc::is_parameter_set,
             VideoCodec::H264 => h264::is_parameter_set,
         };
-        let sets: Vec<Vec<u8>> =
-            annexb::nal_units(annexb).filter(|nal| is_ps(nal)).map(<[u8]>::to_vec).collect();
-        if !sets.is_empty() && sets != self.parameter_sets {
+        let unit = AccessUnit::parse(annexb, is_ps);
+        let sets = unit.parameter_sets();
+        if !sets.is_empty()
+            && !sets.iter().copied().eq(self.parameter_sets.iter().map(Vec::as_slice))
+        {
+            let owned: Vec<Vec<u8>> = sets.iter().map(|set| set.to_vec()).collect();
             let t0 = std::time::Instant::now();
-            self.configure(&sets)?;
+            self.configure(&owned)?;
             tracing::debug!(ms = t0.elapsed().as_millis(), "decoder session configured");
-            self.parameter_sets = sets;
+            self.parameter_sets = owned;
         }
         let Some(session) = self.session.as_ref() else {
             return Err(CodecError::NoParameterSets);
@@ -199,11 +205,10 @@ impl Decoder {
         let Some(format) = self.format.as_ref() else {
             return Err(CodecError::NoParameterSets);
         };
-        let body = annexb::annexb_to_length_prefixed(annexb, is_ps);
-        if body.is_empty() {
+        if unit.length_prefixed_len() == 0 {
             return Ok(());
         }
-        let sample = sample_buffer(&body, format, cf::time_us(pts_us))?;
+        let sample = sample_buffer(&unit, format, cf::time_us(pts_us))?;
         let mut info = VTDecodeInfoFlags::empty();
         // SAFETY: the sample buffer is valid and owned by us; the session outlives the call.
         // Frames are returned through the output callback, so no source refcon is needed.
@@ -233,8 +238,9 @@ impl Decoder {
             unsafe { session.invalidate() }
             self.session = None;
         }
-        // Full-range bi-planar 4:2:0 is what GPUI's surface path samples (two Metal planes
-        // through `CVMetalTextureCache`); the decoder converts if the stream is video range.
+        // Full-range bi-planar 4:2:0, the format the host captures and encodes, so the decoder
+        // writes its output directly and runs no conversion pass; GPUI's surface path samples
+        // the two planes through `CVMetalTextureCache`.
         let format_type = CFNumber::new_i32(i32::from_ne_bytes(
             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange.to_ne_bytes(),
         ));
@@ -319,7 +325,7 @@ unsafe extern "C-unwind" fn output_callback(
     (shared.sink)(DecodedFrame { image: PixelBuffer(image), pts_us });
 }
 
-fn format_description(
+pub fn format_description(
     codec: VideoCodec,
     sets: &[Vec<u8>],
 ) -> Result<CFRetained<CMFormatDescription>, CodecError> {
@@ -335,7 +341,7 @@ fn format_description(
     }
     let mut out: *const CMFormatDescription = ptr::null();
     let (call, status) = match codec {
-        VideoCodec::Hevc | VideoCodec::HevcMain10 => (
+        VideoCodec::Hevc => (
             "CMVideoFormatDescriptionCreateFromHEVCParameterSets",
             // SAFETY: the pointer and size arrays have `pointers.len()` valid entries and the
             // parameter set bytes outlive the call.
@@ -374,24 +380,26 @@ fn format_description(
     Ok(unsafe { CFRetained::from_raw(out) })
 }
 
-/// Wrap length-prefixed NAL units in a sample buffer the decoder accepts.
+/// A sample buffer holding `unit`'s picture as length-prefixed NAL units, written straight
+/// into the block buffer CoreMedia allocates.
 fn sample_buffer(
-    body: &[u8],
+    unit: &AccessUnit<'_>,
     format: &CMFormatDescription,
     pts: CMTime,
 ) -> Result<CFRetained<CMSampleBuffer>, CodecError> {
+    let size = unit.length_prefixed_len();
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
-    // SAFETY: a NULL memory block asks CoreMedia to allocate `body.len()` bytes itself; the
-    // out-pointer is valid.
+    // SAFETY: a NULL memory block asks CoreMedia to allocate `size` bytes itself, now
+    // (`kCMBlockBufferAssureMemoryNowFlag`); the out-pointer is valid.
     let status = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
             ptr::null_mut(),
-            body.len(),
+            size,
             None,
             ptr::null(),
             0,
-            body.len(),
+            size,
             kCMBlockBufferAssureMemoryNowFlag,
             NonNull::from(&mut block),
         )
@@ -402,19 +410,20 @@ fn sample_buffer(
     };
     // SAFETY: +1 reference from the create call.
     let block = unsafe { CFRetained::from_raw(block) };
-    if let Some(first) = body.first() {
-        // SAFETY: the source has `body.len()` readable bytes and the block buffer was created
-        // with exactly that capacity.
-        let status = unsafe {
-            CMBlockBuffer::replace_data_bytes(
-                NonNull::from(first).cast::<c_void>(),
-                &block,
-                0,
-                body.len(),
-            )
-        };
-        check("CMBlockBufferReplaceDataBytes", status)?;
+    let mut contiguous: usize = 0;
+    let mut data: *mut c_char = ptr::null_mut();
+    // SAFETY: CoreMedia rule: the out-pointers are valid; the pointer returned addresses
+    // `contiguous` bytes owned by the block buffer, which lives past the write below.
+    let status =
+        unsafe { block.data_pointer(0, &raw mut contiguous, ptr::null_mut(), &raw mut data) };
+    check("CMBlockBufferGetDataPointer", status)?;
+    if data.is_null() || contiguous < size {
+        return Err(CodecError::Os { call: "CMBlockBufferGetDataPointer", status: -1 });
     }
+    // SAFETY: `data` addresses `contiguous >= size` writable bytes of the block buffer's one
+    // allocation, which nothing else references yet.
+    let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
+    unit.write_length_prefixed(out)?;
     let timing = CMSampleTimingInfo {
         // SAFETY: framework-provided constant.
         duration: unsafe { kCMTimeInvalid },
@@ -422,7 +431,6 @@ fn sample_buffer(
         // SAFETY: framework-provided constant.
         decodeTimeStamp: unsafe { kCMTimeInvalid },
     };
-    let size = body.len();
     let mut sample: *mut CMSampleBuffer = ptr::null_mut();
     // SAFETY: one sample, one timing entry, one size entry; every pointer is valid for the call.
     let status = unsafe {
@@ -444,4 +452,48 @@ fn sample_buffer(
     };
     // SAFETY: +1 reference from the create call.
     Ok(unsafe { CFRetained::from_raw(sample) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1 MB Annex B keyframe: the warm-up parameter sets, then four slices of noise-free
+    /// bytes with no start-code lookalikes.
+    fn keyframe() -> Vec<u8> {
+        let mut out = Vec::new();
+        for set in WARM_UP_HEVC {
+            out.extend_from_slice(&crate::annexb::START_CODE);
+            out.extend_from_slice(set);
+        }
+        for n in 0..4_usize {
+            out.extend_from_slice(&crate::annexb::START_CODE);
+            out.push(0x26);
+            out.extend(
+                (0..250_000_usize)
+                    .map(|i| u8::try_from(i.wrapping_add(n) % 250).unwrap_or(0).wrapping_add(1)),
+            );
+        }
+        out
+    }
+
+    /// What turning one received access unit into a sample buffer costs before VideoToolbox
+    /// sees it. `docs/MEASUREMENTS.md` records runs.
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    fn access_unit_conversion_cost() {
+        let unit = keyframe();
+        let sets: Vec<Vec<u8>> = WARM_UP_HEVC.iter().map(|s| s.to_vec()).collect();
+        let format = format_description(VideoCodec::Hevc, &sets).unwrap();
+        let rounds = 500_u32;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            let access = AccessUnit::parse(&unit, hevc::is_parameter_set);
+            assert_eq!(access.parameter_sets().len(), 3);
+            let sample = sample_buffer(&access, &format, cf::time_us(0)).unwrap();
+            drop(sample);
+        }
+        let per = started.elapsed() / rounds;
+        eprintln!("keyframe {} B: {per:?} per access unit", unit.len());
+    }
 }

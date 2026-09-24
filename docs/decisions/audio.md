@@ -8,7 +8,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   platforms. One fixed configuration, 48 kHz stereo float interleaved, 960-frame packets at
   96 kb/s, so nothing about the format travels on the wire. Playback is an `AudioQueue` with
   three 20 ms buffers refilled from a mutex-guarded ring (≤200 ms; underrun pads silence and
-  counts, overrun drops the oldest). The input-proc pattern: the proc hands its one slice and
+  counts, overrun drops the oldest; buffers and ring superseded 2026-09-24, see "Playback holds
+  about 40 ms"). The input-proc pattern: the proc hands its one slice and
   then returns a private status (`'SLOP'`) with zero packets, which `FillComplexBuffer`
   surfaces and the caller treats as "done".
 
@@ -88,3 +89,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   client that wants one has the terminal's drop and paste paths. Tests:
   `a_paste_chord_pushes_the_clipboards_picture_once`, `the_kinds_the_pasteboard_holds_as_they_are`,
   golden `client_clipboard_image`.
+
+- ✅ **Playback holds about 40 ms, and a stall's burst is trimmed rather than kept** (2026-09-24).
+  The ring kept up to 200 ms behind three 20 ms device buffers, and only an overrun past
+  200 ms trimmed it. After a stall, the held-up packets land together and the listener stayed
+  that far behind the picture for good (a simulated 250 ms stall: 260 ms behind, still 260 ms a
+  second later). Now the device holds three 10 ms buffers and the ring trims to 40 ms whenever a
+  push takes it past 50 ms. Two packets landing together still fit under that cap; three are a
+  burst. The same simulation now reads 70 ms after the burst and 74 ms on average afterwards
+  (`docs/MEASUREMENTS.md`, 2026-09-24). A trim is one audible skip, once per stall. Capture
+  audio also leaves the video's serial queue: ScreenCaptureKit delivers it on its own queue at
+  `QOS_CLASS_USER_INTERACTIVE`, so a sample never waits behind a frame's encode call. Tests:
+  `a_stall_burst_does_not_leave_lasting_delay`, `jitter_below_the_cap_is_kept`.

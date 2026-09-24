@@ -249,7 +249,7 @@ Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame mo
 ## 3. Remote windows: Parsec-class pipeline
 
 ```
-SCStream(display | window-as-display-crop | window, 420v/P010, minimumFrameInterval, queueDepth=2, showsCursor=false)
+SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInterval, queueDepth=2, showsCursor=false)
   → VTCompressionSession(HEVC, EnableLowLatencyRateControl @ creation, RealTime,
                          AllowFrameReordering=false, AllowOpenGOP=false, MaxFrameDelayCount=0,
                          EnableLTR, MaxKeyFrameInterval=∞, AverageBitRate + DataRateLimits)
@@ -393,8 +393,9 @@ frame on one side and a paint on the other.
 this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms packets, 96 kb/s) →
 one `Audio` datagram per packet, no FEC and no NACK (a lost 20 ms is cheaper than a late one).
 The host stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
-The client decodes with `AudioConverter` and plays through an `AudioQueue` fed from a 200 ms
-ring that pads silence on underrun and drops the oldest on overrun (`slopty-codec::audio`);
+The client decodes with `AudioConverter` and plays through an `AudioQueue` of three 10 ms
+buffers fed from a ring that pads silence on underrun and trims a burst past 50 ms back to
+40 ms (`slopty-codec::audio`);
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
 Mute is per item and per client (the "mute" pill, ⌘⇧M, Canvas ▸ Mute Window): packets still
 arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing

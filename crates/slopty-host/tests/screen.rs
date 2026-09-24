@@ -329,15 +329,15 @@ mod encoder_rate_control {
         let target = Target::resolve(&content, CaptureTarget::Window(id)).expect("target");
         let (w, h) = target.pixel_size();
         let (ptx, prx) = mpsc::channel::<(u64, u64, usize, bool)>();
-        let encoder = Encoder::new(
+        let encoder = Encoder::experiment(
             EncoderConfig {
                 width: w,
                 height: h,
                 codec: variant.codec,
                 fps: 60,
                 bitrate_bps: 8_000_000,
-                rate_control: variant.mode,
             },
+            variant.mode,
             move |packet| {
                 let _gone =
                     ptx.send((packet.pts_us, host_now_us(), packet.data.len(), packet.keyframe));
@@ -359,7 +359,7 @@ mod encoder_rate_control {
             width: w,
             height: h,
             fps: 60,
-            format: PixelFormat::Nv12,
+            format: PixelFormat::Nv12Full,
             queue_depth: 2,
             audio: false,
             crop: None,
@@ -447,15 +447,15 @@ mod encoder_rate_control {
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         // What each mode's session says about the optional keys.
         for mode in [RateControl::LowLatency, RateControl::Vbv] {
-            let probe = Encoder::new(
+            let probe = Encoder::experiment(
                 EncoderConfig {
                     width: 900,
                     height: 500,
                     codec: VideoCodec::Hevc,
                     fps: 60,
                     bitrate_bps: 8_000_000,
-                    rate_control: mode,
                 },
+                mode,
                 |_packet| {},
             );
             match probe {

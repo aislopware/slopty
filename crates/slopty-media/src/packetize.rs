@@ -110,7 +110,6 @@ pub struct Packetizer {
     parity_permille: u16,
     max_payload: usize,
     encoder: Option<ReedSolomonEncoder>,
-    body: Vec<u8>,
     history: VecDeque<SentFrame>,
     datagrams_sent: u64,
 }
@@ -136,7 +135,6 @@ impl Packetizer {
             parity_permille: DEFAULT_PARITY_PERMILLE,
             max_payload: MAX_PAYLOAD,
             encoder: None,
-            body: Vec::new(),
             history: VecDeque::with_capacity(HISTORY_FRAMES),
             datagrams_sent: 0,
         }
@@ -160,18 +158,6 @@ impl Packetizer {
         self.max_payload = bytes.saturating_sub(HEADER_BYTES);
     }
 
-    /// Largest payload the next frame will be cut to.
-    #[must_use]
-    pub const fn max_payload(&self) -> usize {
-        if self.max_payload < MIN_PAYLOAD {
-            MIN_PAYLOAD
-        } else if self.max_payload > MAX_PAYLOAD {
-            MAX_PAYLOAD
-        } else {
-            self.max_payload & !1
-        }
-    }
-
     /// The number the next frame will get.
     #[must_use]
     pub const fn next_frame(&self) -> u32 {
@@ -186,6 +172,10 @@ impl Packetizer {
 
     /// Cut `frame` into datagrams and add parity. `send_ms_lo` is the low byte of the host's
     /// millisecond clock, stamped on every datagram.
+    ///
+    /// Every datagram, parity included, is written once into one buffer laid out as the wire
+    /// wants it (header, shard, header, shard, …) and handed out as slices of it: the bitstream
+    /// is copied once, and a frame costs one allocation however many datagrams it makes.
     pub fn packetize(
         &mut self,
         frame: &EncodedFrame<'_>,
@@ -197,25 +187,15 @@ impl Packetizer {
 
         let data_count = usize::from(layout.data_count);
         let parity_count = usize::from(layout.parity_count);
-        let total = data_count.saturating_mul(layout.shard_bytes);
-        self.body.clear();
-        self.body.resize(total, 0);
+        let shard_bytes = layout.shard_bytes;
+        let stride = HEADER_BYTES.saturating_add(shard_bytes);
+        let count = data_count.saturating_add(parity_count);
+        let mut wire = BytesMut::with_capacity(count.saturating_mul(stride));
         let prefix = FramePrefix {
             len: U32::new(u32::try_from(frame.data.len()).unwrap_or(u32::MAX)),
             capture_ts_us: U32::new(frame.capture_ts_us),
             ltr_token: U64::new(frame.ltr_token.unwrap_or(0)),
         };
-        if let Some(head) = self.body.get_mut(..FRAME_PREFIX_BYTES) {
-            head.copy_from_slice(prefix.as_bytes());
-        }
-        if let Some(dst) = self
-            .body
-            .get_mut(FRAME_PREFIX_BYTES..)
-            .and_then(|rest| rest.get_mut(..frame.data.len()))
-        {
-            dst.copy_from_slice(frame.data);
-        }
-
         let mut header = MediaHeader {
             stream: U32::new(self.stream.0),
             frame: U32::new(number),
@@ -226,36 +206,55 @@ impl Packetizer {
             flags: frame_flags(frame),
             send_ms_lo,
         };
-        let mut datagrams = Vec::with_capacity(data_count.saturating_add(parity_count));
-        for (index, shard) in self.body.chunks_exact(layout.shard_bytes).enumerate() {
+        // The frame body is the prefix, the bitstream, then zeros to the last shard's end; the
+        // prefix is shorter than the smallest shard, so it only ever opens the first one.
+        let mut rest = frame.data;
+        for index in 0..data_count {
             header.index = U16::new(u16::try_from(index).unwrap_or(u16::MAX));
-            datagrams.push(datagram(&header, shard));
+            wire.put_slice(header.as_bytes());
+            let mut room = shard_bytes;
+            if index == 0 {
+                wire.put_slice(prefix.as_bytes());
+                room = room.saturating_sub(FRAME_PREFIX_BYTES);
+            }
+            let (now, later) = rest.split_at(room.min(rest.len()));
+            wire.put_slice(now);
+            wire.put_bytes(0, room.saturating_sub(now.len()));
+            rest = later;
         }
 
         if parity_count > 0 {
             let encoder = match self.encoder.as_mut() {
                 Some(encoder) => {
-                    encoder.reset(data_count, parity_count, layout.shard_bytes)?;
+                    encoder.reset(data_count, parity_count, shard_bytes)?;
                     encoder
                 }
                 None => self.encoder.insert(ReedSolomonEncoder::new(
                     data_count,
                     parity_count,
-                    layout.shard_bytes,
+                    shard_bytes,
                 )?),
             };
-            for shard in self.body.chunks_exact(layout.shard_bytes) {
-                encoder.add_original_shard(shard)?;
+            for datagram in wire.chunks_exact(stride) {
+                encoder.add_original_shard(datagram.get(HEADER_BYTES..).unwrap_or_default())?;
             }
             let parity = encoder.encode()?;
             header.kind = Kind::VideoParity as u8;
             for (offset, shard) in parity.recovery_iter().enumerate() {
                 let index = data_count.saturating_add(offset);
                 header.index = U16::new(u16::try_from(index).unwrap_or(u16::MAX));
-                datagrams.push(datagram(&header, shard));
+                wire.put_slice(header.as_bytes());
+                wire.put_slice(shard);
             }
         }
 
+        let wire = wire.freeze();
+        let datagrams: Vec<Bytes> = (0..count)
+            .map(|i| {
+                let start = i.saturating_mul(stride);
+                wire.slice(start..start.saturating_add(stride))
+            })
+            .collect();
         self.datagrams_sent = self.datagrams_sent.saturating_add(datagrams.len() as u64);
         if self.history.len() >= HISTORY_FRAMES {
             self.history.pop_front();
@@ -381,11 +380,26 @@ mod tests {
         // Odd budgets round down; tiny budgets are floored.
         assert_eq!(layout(100, 0, 1001).unwrap().shard_bytes, 116);
         assert!(layout(100_000, 0, 10).unwrap().shard_bytes <= MIN_PAYLOAD);
-        let mut p = Packetizer::new(StreamId(1));
-        p.set_max_datagram(1168);
-        assert_eq!(p.max_payload(), 1152);
-        p.set_max_datagram(5000);
-        assert_eq!(p.max_payload(), MAX_PAYLOAD);
+        // The packetizer cuts to the budget it was given.
+        let shard = |budget: usize| {
+            let mut p = Packetizer::new(StreamId(1));
+            p.set_parity_permille(0);
+            p.set_max_datagram(budget);
+            let data = vec![3_u8; 5000];
+            let frame = EncodedFrame {
+                data: &data,
+                keyframe: false,
+                ltr_token: None,
+                ltr_refresh: false,
+                capture_ts_us: 0,
+            };
+            p.packetize(&frame, 0).unwrap().layout.shard_bytes
+        };
+        assert!(shard(1168) <= 1152);
+        assert_eq!(
+            shard(5000),
+            5000_usize.saturating_add(FRAME_PREFIX_BYTES).div_ceil(5).next_multiple_of(2)
+        );
     }
 
     #[test]
@@ -508,11 +522,100 @@ mod tests {
         assert_eq!(sent.datagrams.len(), usize::from(sent.layout.data_count), "no parity work");
         assert_eq!(p.next_frame(), 2);
 
+        // The budget reaches the cut through `layout`'s clamp: floored, and rounded down to even.
+        let total = data.len() + FRAME_PREFIX_BYTES;
         p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES - 1);
-        assert_eq!(p.max_payload(), MIN_PAYLOAD, "never under the floor");
-        p.set_max_datagram(MAX_PAYLOAD + HEADER_BYTES + 1);
-        assert_eq!(p.max_payload(), MAX_PAYLOAD, "never over the ceiling");
+        let floored = p.packetize(&frame, 0).unwrap().layout.data_count;
+        assert_eq!(usize::from(floored), total.div_ceil(MIN_PAYLOAD), "never under the floor");
         p.set_max_datagram(MIN_PAYLOAD + HEADER_BYTES + 3);
-        assert_eq!(p.max_payload(), MIN_PAYLOAD + 2, "rounded down to even");
+        let even = p.packetize(&frame, 0).unwrap().layout.data_count;
+        assert_eq!(usize::from(even), total.div_ceil(MIN_PAYLOAD + 2), "rounded down to even");
+    }
+
+    /// The datagrams are slices of one buffer, and every byte of them is what the old
+    /// cut-and-copy wrote: header, prefix, bitstream, zero padding, parity that rebuilds a
+    /// lost data shard.
+    #[test]
+    fn the_datagrams_share_one_buffer_and_rebuild_the_frame() {
+        let mut p = Packetizer::new(StreamId(9));
+        let data: Vec<u8> = (0..4000_u32).map(|i| u8::try_from(i % 253).unwrap()).collect();
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe: false,
+            ltr_token: Some(7),
+            ltr_refresh: true,
+            capture_ts_us: 5,
+        };
+        let sent = p.packetize(&frame, 3).unwrap().clone();
+        let stride = HEADER_BYTES + sent.layout.shard_bytes;
+        for pair in sent.datagrams.windows(2) {
+            let gap = pair[1].as_ptr() as usize - pair[0].as_ptr() as usize;
+            assert_eq!(gap, stride, "adjacent slices of one allocation");
+        }
+        let mut body = Vec::new();
+        for (i, d) in sent.datagrams.iter().take(usize::from(sent.layout.data_count)).enumerate() {
+            let (h, payload) = MediaHeader::parse(d).unwrap();
+            assert_eq!(usize::from(h.index.get()), i);
+            assert_eq!(h.flags, flags::LTR | flags::LTR_REFRESH);
+            body.extend_from_slice(payload);
+        }
+        let (prefix, rest) = FramePrefix::parse(&body).unwrap();
+        assert_eq!(
+            (prefix.len.get(), prefix.capture_ts_us.get(), prefix.ltr_token.get()),
+            (4000, 5, 7)
+        );
+        assert_eq!(&rest[..4000], data.as_slice());
+        assert!(rest[4000..].iter().all(|&b| b == 0), "zero padded");
+
+        // Drop data shard 1 and rebuild it from the parity.
+        let data_count = usize::from(sent.layout.data_count);
+        let parity_count = usize::from(sent.layout.parity_count);
+        let shard = |i: usize| MediaHeader::parse(&sent.datagrams[i]).unwrap().1.to_vec();
+        let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
+            data_count,
+            parity_count,
+            sent.layout.shard_bytes,
+        )
+        .unwrap();
+        for i in (0..data_count).filter(|&i| i != 1) {
+            decoder.add_original_shard(i, shard(i)).unwrap();
+        }
+        decoder.add_recovery_shard(0, shard(data_count)).unwrap();
+        let restored = decoder.decode().unwrap();
+        let rebuilt = restored.restored_original_iter().find(|&(i, _)| i == 1).unwrap().1.to_vec();
+        assert_eq!(rebuilt, shard(1));
+    }
+
+    /// What cutting one frame costs on the VideoToolbox callback thread: a 62 KB P-frame and a
+    /// 300 KB keyframe at the default parity and at none. `docs/MEASUREMENTS.md` records runs.
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture in release"]
+    fn packetize_cost() {
+        for (name, len) in [("P-frame", 62_000_usize), ("keyframe", 300_000)] {
+            let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
+            let frame = EncodedFrame {
+                data: &data,
+                keyframe: false,
+                ltr_token: None,
+                ltr_refresh: false,
+                capture_ts_us: 0,
+            };
+            for permille in [DEFAULT_PARITY_PERMILLE, 0] {
+                let mut p = Packetizer::new(StreamId(1));
+                p.set_parity_permille(permille);
+                let rounds = 2_000_u32;
+                let started = std::time::Instant::now();
+                let mut datagrams = 0_usize;
+                for _ in 0..rounds {
+                    datagrams =
+                        datagrams.wrapping_add(p.packetize(&frame, 0).unwrap().datagrams.len());
+                }
+                let per = started.elapsed() / rounds;
+                eprintln!(
+                    "{name} {len} B, parity {permille}‰: {per:?} per frame, {} datagrams",
+                    datagrams / rounds as usize
+                );
+            }
+        }
     }
 }
