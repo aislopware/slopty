@@ -1,7 +1,7 @@
 //! `xtask bundle`: the macOS app bundle.
 //!
 //! `Slopty.app` carries the app and, beside it, the host daemons and the CLI, so one bundle
-//! serves both roles: launch it for the canvas, or run `Contents/MacOS/slopty host install`
+//! serves both roles: launch it for the workspace, or run `Contents/MacOS/slopty host install`
 //! to turn the machine into a host. `Info.plist` is generated from the workspace version;
 //! signing is ad hoc unless `--sign` names a Developer ID identity.
 

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty GPUI views and elements: terminal, canvas, chrome"
+description = "Slopty GPUI views and elements: terminal, workspace, chrome"
 
 [lints]
 workspace = true
@@ -30,6 +30,8 @@ slopty-grid.workspace = true
 slopty-predict.workspace = true
 slopty-proto.workspace = true
 slopty-theme.workspace = true
+# The device's layout, saved as `layout.json` (`workspace`).
+serde_json.workspace = true
 # Syntax colouring for a file card and a fenced code block (`highlight`).
 syntect.workspace = true
 tokio.workspace = true

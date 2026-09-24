@@ -1,17 +1,17 @@
 //! The Slopty app shell, shared by the macOS and iOS apps.
 //!
-//! Connects to every added host at once and shows one host's canvas at a time (the switcher
-//! in the top bar, ⌘⌥→/←): every terminal that host knows about, on one plane shared by all its
-//! clients. Networking runs on a tokio runtime thread; GPUI owns the main thread. The two talk
-//! through channels only. The platform binaries set up logging, the runtime and the GPUI
-//! application, then call [`open_workspace`].
+//! Connects to every added worker at once and shows all of them in one workspace: each
+//! worker's items are tiles in this device's layout, side by side with the others'.
+//! Networking runs on a tokio runtime thread; GPUI owns the main thread. The two talk through
+//! channels only. The platform binaries set up logging, the runtime and the GPUI application,
+//! then call [`open_workspace`].
 
 #![forbid(unsafe_code)]
 
 mod e2e;
-pub mod hosts;
 pub mod net;
 pub mod settings;
+pub mod workers;
 
 use std::rc::Rc;
 
@@ -24,37 +24,25 @@ use gpui::{
 };
 use gpui_kit::component::Root;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-pub use hosts::actions::{AddHost, ForgetHost, NextHost, PrevHost};
-use hosts::{HostSlot, HostStatus};
 pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
+use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::HostMsg;
 use slopty_settings::{Loaded, Settings};
-use slopty_theme::{Theme, alpha};
+use slopty_theme::Theme;
 use slopty_ui::a11y::{key_name, tab_stop};
-use slopty_ui::canvas::{
-    AddWindow, CanvasEvent, CanvasView, FitAll, KeyTarget, NewAgent, NewNote, NewTerminal,
-    NextAttention, OpenPalette,
-};
-use slopty_ui::colors::{hsla, hsla_alpha};
+use slopty_ui::colors::hsla;
 use slopty_ui::kit;
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::TerminalView;
+use slopty_ui::workspace::{
+    KeyTarget, MenuEntry, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
+};
+pub use workers::actions::AddWorker;
+use workers::{WorkerSlot, retry_delay};
 
-/// Height of the top bar (the titlebar area; traffic lights sit at its left on macOS).
-const TOP_BAR: f32 = 38.0;
-/// Space reserved for the traffic lights.
-#[cfg(target_os = "macos")]
-const LEADING_INSET: f32 = 78.0;
-/// No traffic lights on iOS; the safe area is added from the window's insets.
-#[cfg(not(target_os = "macos"))]
-const LEADING_INSET: f32 = 12.0;
-/// Keyboard shortcut hints make sense where there is a keyboard with a ⌘ key.
-const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
-/// Below this window width (points) the top bar is laid out for a phone.
-const NARROW_BAR: f32 = 600.0;
 /// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
 const KEY_BAR: bool = cfg!(target_os = "ios");
 
@@ -110,17 +98,16 @@ const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("→", "right", None),
     ("/", "/", Some("/")),
 ];
-/// How long a settings notice (parse error, unknown keys) replaces the status text.
-const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
-/// Nothing heard from the host for this long is shown as a warning (keep-alives run every 5 s).
+/// Nothing heard from the worker for this long is shown as a warning (keep-alives run every
+/// 5 s).
 const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 /// Nothing heard for this long and the connection is given up so the reconnect loop takes
-/// over: a restarted host is back in ~1 s instead of after the transport's 45 s idle timeout.
-/// Three missed keep-alives, the same bar noq uses to abandon a path.
+/// over: a restarted worker is back in ~1 s instead of after the transport's 45 s idle
+/// timeout. Three missed keep-alives, the same bar noq uses to abandon a path.
 const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The panel that adds a host by address: shown until this installation knows one, and on
-/// "Add host…".
+/// The panel that adds a worker by address: shown until this installation knows one, and on
+/// "Add worker".
 #[derive(Debug)]
 struct Adding {
     /// Where the address is typed or pasted.
@@ -134,12 +121,10 @@ struct Adding {
 /// The window's root view.
 #[derive(Debug)]
 pub struct Workspace {
-    /// Every added host, each with its own link and canvas, in switcher order.
-    hosts: Vec<HostSlot>,
-    /// The host whose canvas is shown.
-    active: Option<WorkerId>,
-    /// The host switcher is open.
-    switcher: bool,
+    /// Every added worker, each with its own link.
+    workers: Vec<WorkerSlot>,
+    /// Every worker's tiles, in one layout.
+    view: Entity<WorkspaceView>,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
     hardware_keyboard: bool,
     theme: Theme,
@@ -147,14 +132,11 @@ pub struct Workspace {
     settings: Settings,
     /// The window's appearance is dark (`theme.appearance = "system"` follows it).
     window_dark: bool,
-    /// A transient message shown in place of the status (with the sequence that clears it).
-    notice: Option<(u64, String)>,
-    notice_seq: u64,
     subscriptions: Vec<gpui::Subscription>,
     adding: Option<Adding>,
     /// Networking runtime; connects run there.
     runtime: tokio::runtime::Handle,
-    /// The window, for focusing a canvas from a task or a banner.
+    /// The window, for focusing from a task or a banner.
     window: Option<gpui::AnyWindowHandle>,
     /// Where `settings.toml` lives (the data directory's).
     settings_path: std::path::PathBuf,
@@ -215,15 +197,13 @@ impl Workspace {
         }
     }
 
-    /// Drop the editor and hand the keyboard back to the canvas.
+    /// Drop the editor and hand the keyboard back to the workspace.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_editor.take().is_none() {
             return;
         }
-        if let Some(canvas) = self.active_canvas() {
-            let handle = canvas.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
+        let handle = self.view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -236,7 +216,7 @@ impl Workspace {
         }
     }
 
-    /// Take a (re)loaded settings file: log what was odd about it, show it in the bar for a
+    /// Take a (re)loaded settings file: log what was odd about it, show it as a toast for a
     /// few seconds, and rebuild the theme.
     fn apply_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
         for warning in &loaded.warnings {
@@ -275,10 +255,7 @@ impl Workspace {
         // gpui-kit widgets (inputs, Markdown) read gpui-kit's theme: keep it on
         // the same tokens.
         kit::sync(&theme, cx);
-        let canvases: Vec<_> = self.hosts.iter().filter_map(|h| h.canvas.clone()).collect();
-        for canvas in canvases {
-            canvas.update(cx, |c, cx| c.set_theme(theme.clone(), cx));
-        }
+        self.view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         if let Some(editor) = &self.settings_editor {
             editor.update(cx, |e, cx| e.set_theme(theme.clone(), cx));
         }
@@ -287,182 +264,116 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Replace the status text with `text` for [`NOTICE_FOR`].
-    fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
-        self.notice_seq = self.notice_seq.wrapping_add(1);
-        let seq = self.notice_seq;
-        self.notice = Some((seq, text));
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(NOTICE_FOR).await;
-            let _cleared = this.update(cx, |ws, cx| {
-                if ws.notice.as_ref().is_some_and(|(s, _)| *s == seq) {
-                    ws.notice = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+    /// A word for the human, as a toast over the workspace.
+    fn show_notice(&self, text: String, cx: &mut Context<Self>) {
+        self.view.update(cx, |v, cx| v.show_notice(text, cx));
     }
 
-    fn slot(&self, id: WorkerId) -> Option<&HostSlot> {
-        self.hosts.iter().find(|h| h.id == id)
+    fn slot(&self, id: WorkerId) -> Option<&WorkerSlot> {
+        self.workers.iter().find(|w| w.id == id)
     }
 
-    fn slot_mut(&mut self, id: WorkerId) -> Option<&mut HostSlot> {
-        self.hosts.iter_mut().find(|h| h.id == id)
+    fn slot_mut(&mut self, id: WorkerId) -> Option<&mut WorkerSlot> {
+        self.workers.iter_mut().find(|w| w.id == id)
     }
 
-    fn active_slot(&self) -> Option<&HostSlot> {
-        self.active.and_then(|id| self.slot(id))
-    }
-
-    /// The canvas on show, if its host is connected.
-    fn active_canvas(&self) -> Option<Entity<CanvasView>> {
-        self.active_slot().and_then(|h| h.canvas.clone())
-    }
-
-    /// Agents waiting on the human across every host (the pill and the Dock badge).
-    fn needs_you_total(&self) -> usize {
-        self.hosts.iter().fold(0, |n, h| n.saturating_add(h.needs_you))
-    }
-
-    fn refresh_badge(&self) {
-        slopty_platform::set_badge(self.needs_you_total());
-    }
-
-    /// What the bar says about the host on show.
-    fn status_text(&self) -> String {
-        match self.active_slot() {
-            Some(host) => host.status.text(),
-            None if self.hosts.is_empty() => "no hosts".to_owned(),
-            None => String::new(),
-        }
-    }
-
-    /// The host whose canvas holds `session` (a banner names only the session).
-    fn host_of_session(&self, session: SessionId, cx: &App) -> Option<WorkerId> {
-        self.hosts
-            .iter()
-            .find(|h| h.canvas.as_ref().is_some_and(|c| c.read(cx).has_session(session)))
-            .map(|h| h.id)
-    }
-
-    /// A banner for `session` was activated: switch to whichever host holds it and reveal it.
-    /// The banner's tag is only the session UUID, so the host is found by asking each canvas
-    /// `has_session`.
+    /// A banner for `session` was activated: whichever worker runs it, its tile is revealed.
     fn notification_response(
-        &mut self,
+        &self,
         session: SessionId,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host_of_session(session, cx) else { return };
-        if self.active != Some(host) {
-            self.activate(host, window, cx);
-        }
-        if let Some(canvas) = self.active_canvas() {
-            canvas.update(cx, |c, cx| c.notification_response(session, cx));
-        }
+        self.view.update(cx, |v, cx| v.notification_response(session, cx));
     }
 
-    /// Start (or refresh) a host: a slot in the switcher and a connect loop of its own.
-    fn add_host(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
+    /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
+    /// own brings them to life.
+    fn add_worker(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
         if let Some(slot) = self.slot_mut(id) {
-            slot.name = name;
-            cx.notify();
+            slot.name.clone_from(&name);
+            let key = slot.key;
+            self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
             return;
         }
-        self.hosts.push(HostSlot::new(id, name));
-        if self.active.is_none() {
-            self.active = Some(id);
-        }
-        self.spawn_host_loop(id, cx);
-        cx.notify();
+        let slot = WorkerSlot::new(id, name.clone());
+        let key = slot.key;
+        self.workers.push(slot);
+        self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
+        self.spawn_worker_loop(id, cx);
+        self.refresh_menu(cx);
     }
 
-    /// Show `id`'s canvas and give it the keyboard.
-    fn activate(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.slot(id).is_none() {
+    /// Drop a worker: its entry in the store, the link, the slot, and its tiles. With none
+    /// left the add-worker panel returns.
+    fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = net::forget_worker(id) {
+            self.show_notice(format!("forget worker: {e:#}"), cx);
             return;
         }
-        self.active = Some(id);
-        self.switcher = false;
-        if let Some(canvas) = self.active_canvas() {
-            let handle = canvas.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
-        cx.notify();
-    }
-
-    /// Show the host `steps` places after the current one, wrapping.
-    fn step_host(&mut self, steps: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.hosts.len();
-        if n == 0 {
-            return;
-        }
-        let current =
-            self.active.and_then(|id| self.hosts.iter().position(|h| h.id == id)).unwrap_or(0);
-        let len = isize::try_from(n).unwrap_or(isize::MAX);
-        let at = isize::try_from(current).unwrap_or(0);
-        let next = at.saturating_add(steps).rem_euclid(len);
-        if let Some(id) = usize::try_from(next).ok().and_then(|i| self.hosts.get(i)).map(|h| h.id) {
-            self.activate(id, window, cx);
-        }
-    }
-
-    /// Drop a host: its entry in the store, the link and the slot. The next host takes the
-    /// stage; with none left the add-host panel returns.
-    fn forget_host(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
-        match net::forget_worker(id) {
-            Ok(_removed) => {}
-            Err(e) => {
-                self.show_notice(format!("forget host: {e:#}"), cx);
-                return;
-            }
-        }
-        let Some(at) = self.hosts.iter().position(|h| h.id == id) else { return };
-        let slot = self.hosts.remove(at);
+        let Some(at) = self.workers.iter().position(|w| w.id == id) else { return };
+        let slot = self.workers.remove(at);
         if let Some(link) = slot.link.as_ref().and_then(std::sync::Weak::upgrade) {
-            link.abandon("host forgotten");
+            link.abandon("worker forgotten");
         }
-        self.switcher = false;
-        if self.active == Some(id) {
-            self.active = None;
-            if let Some(next) = self.hosts.get(at.min(self.hosts.len().saturating_sub(1))) {
-                let next = next.id;
-                self.activate(next, window, cx);
-            }
+        self.view.update(cx, |v, cx| v.remove_worker(slot.key, cx));
+        if self.workers.is_empty() {
+            self.show_add_worker(window, cx);
         }
-        if self.hosts.is_empty() {
-            self.show_add_host(window, cx);
-        }
-        self.refresh_badge();
+        self.refresh_menu(cx);
         cx.notify();
     }
 
-    /// Jump to the next agent needing the human: on the host on show if it has one, else on
-    /// the first host that does.
-    fn next_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let on_show = self.active_slot().filter(|h| h.needs_you > 0).map(|h| h.id);
-        let target = on_show.or_else(|| self.hosts.iter().find(|h| h.needs_you > 0).map(|h| h.id));
-        let Some(id) = target else { return };
-        if self.active != Some(id) {
-            self.activate(id, window, cx);
+    /// The app's rows in the titlebar's "…" menu: settings, adding a worker, and forgetting
+    /// each one.
+    fn refresh_menu(&self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let mut entries = Vec::new();
+        let hint = |hint: &'static str| if cfg!(target_os = "macos") { hint } else { "" };
+        {
+            let this = this.clone();
+            entries.push(MenuEntry {
+                label: "Settings".into(),
+                detail: hint("⌘,").into(),
+                run: Rc::new(move |window, cx| {
+                    let _gone = this.update(cx, |ws, cx| ws.open_settings(window, cx));
+                }),
+            });
         }
-        if let Some(canvas) = self.active_canvas() {
-            canvas.update(cx, |c, cx| c.next_attention(&NextAttention, window, cx));
+        {
+            let this = this.clone();
+            entries.push(MenuEntry {
+                label: "Add worker".into(),
+                detail: hint("⌘⇧H").into(),
+                run: Rc::new(move |window, cx| {
+                    let _gone = this.update(cx, |ws, cx| ws.show_add_worker(window, cx));
+                }),
+            });
         }
+        for slot in &self.workers {
+            let (this, id) = (this.clone(), slot.id);
+            entries.push(MenuEntry {
+                label: format!("Forget {}", slot.name).into(),
+                detail: SharedString::default(),
+                run: Rc::new(move |window, cx| {
+                    let _gone = this.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
+                }),
+            });
+        }
+        self.view.update(cx, |v, cx| v.set_more_menu(entries, cx));
     }
 
-    /// Connect to `id` and keep it connected: each drop (host restart, network change,
-    /// silence) is retried with a capped backoff; the loop ends when the host is forgotten.
-    fn spawn_host_loop(&self, id: WorkerId, cx: &Context<Self>) {
+    /// Connect to `id` and keep it connected: each drop (worker restart, network change,
+    /// silence) is retried with a capped backoff; the loop ends when the worker is forgotten.
+    fn spawn_worker_loop(&self, id: WorkerId, cx: &Context<Self>) {
         let handle = self.runtime.clone();
+        let view = self.view.clone();
         cx.spawn(async move |this, cx| {
             let mut failures: u32 = 0;
             loop {
-                let Ok(true) = this.update(cx, |ws, _cx| ws.slot(id).is_some()) else { break };
+                let Ok(Some(key)) = this.update(cx, |ws, _cx| ws.slot(id).map(|s| s.key)) else {
+                    break;
+                };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 handle.spawn(async move {
                     let _sent = ready_tx.send(net::connect_to(id).await);
@@ -470,19 +381,14 @@ impl Workspace {
                 let outcome = ready_rx.await;
                 let Ok(Ok(connected)) = outcome else {
                     let status = match outcome {
-                        Ok(Err(why)) => HostStatus::Reconnecting(why),
+                        Ok(Err(why)) => WorkerStatus::Reconnecting(why),
                         Ok(Ok(_)) | Err(_) => {
-                            HostStatus::Reconnecting("connection task died".to_owned())
+                            WorkerStatus::Reconnecting("connection task died".to_owned())
                         }
                     };
                     failures = failures.saturating_add(1);
                     let delay = retry_delay(failures);
-                    let _set = this.update(cx, |ws, cx| {
-                        if let Some(slot) = ws.slot_mut(id) {
-                            slot.status = status;
-                        }
-                        cx.notify();
-                    });
+                    view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                     cx.background_executor().timer(delay).await;
                     continue;
                 };
@@ -493,86 +399,27 @@ impl Workspace {
                 let open_screen: slopty_ui::screen::ScreenFactory =
                     std::sync::Arc::new(move |stream, codec| screen_link.screen(stream, codec));
                 let weak_link = std::sync::Arc::downgrade(&link);
-                let Ok(Some(canvas)) = this.update(cx, |ws, cx| {
-                    let theme = ws.theme.clone();
-                    let sessions = ack.sessions.clone();
-                    let canvas = cx.new(|cx| {
-                        let mut canvas =
-                            CanvasView::new(me, sender, sessions, open_screen, theme, cx);
-                        canvas.extend_palette(app_palette_items());
-                        // Under the self-test a frame is a step, not a moment: a camera still
-                        // flying when `dump` runs would report where it was passing through.
-                        // The tests assert the destination.
-                        #[cfg(feature = "e2e")]
-                        canvas.set_animation(false);
-                        canvas
-                    });
-                    let events = cx.subscribe(&canvas, move |ws, _canvas, event, cx| match event {
-                        CanvasEvent::Zoom(z) => {
-                            if let Some(slot) = ws.slot_mut(id) {
-                                slot.zoom = *z;
-                            }
-                            cx.notify();
-                        }
-                        CanvasEvent::NeedsYou(n) => {
-                            if let Some(slot) = ws.slot_mut(id) {
-                                slot.needs_you = *n;
-                            }
-                            ws.refresh_badge();
-                            cx.notify();
-                        }
-                        CanvasEvent::Attention(_session) => {
-                            slopty_platform::attention();
-                            slopty_platform::bounce();
-                        }
-                        // A bell while the human is elsewhere is an alert; in front of the
-                        // window the view's own flash is enough.
-                        CanvasEvent::Bell(_session) => {
-                            if settings::bell_alerts(&ws.settings, cx.active_window().is_some())
-                            {
-                                slopty_platform::attention();
-                                slopty_platform::bounce();
-                            }
-                        }
-                        CanvasEvent::Notice(text) => ws.show_notice(text.clone(), cx),
-                    });
-                    // The chrome follows the active item (key bar target), so every canvas
-                    // change re-renders it; the workspace is a few labels, so this is cheap.
-                    let changes = cx.observe(&canvas, |_ws, _canvas, cx| cx.notify());
-                    let slot = ws.slot_mut(id)?;
-                    if let Some((camera, active)) = slot.resume.take() {
-                        canvas.update(cx, |c, cx| c.resume_at(camera, active, cx));
-                    }
-                    slot.subscriptions = vec![events, changes];
-                    slot.canvas = Some(canvas.clone());
-                    slot.needs_you = 0;
+                let worker_link = WorkerLink { me, out: sender, open_screen };
+                let name = ack.name.clone();
+                let sessions = ack.sessions.clone();
+                view.update(cx, |v, cx| v.connect_worker(key, name.clone(), worker_link, sessions, cx));
+                let alive = this.update(cx, |ws, cx| {
+                    let Some(slot) = ws.slot_mut(id) else { return false };
                     slot.link = Some(weak_link);
-                    slot.name.clone_from(&ack.name);
-                    slot.status = HostStatus::Connected;
-                    ws.refresh_badge();
-                    let on_show = ws.active == Some(id);
-                    if let (true, Some(window)) = (on_show, ws.window) {
-                        let focus = canvas.clone();
-                        cx.defer(move |cx| {
-                            let _focused = window.update(cx, move |_root, window, cx| {
-                                let handle = focus.read(cx).focus_handle(cx);
-                                window.focus(&handle, cx);
-                            });
-                        });
-                    }
-                    cx.notify();
-                    Some(canvas)
-                }) else {
+                    slot.name = name;
+                    ws.refresh_menu(cx);
+                    true
+                });
+                if !matches!(alive, Ok(true)) {
                     break;
-                };
-                // Once a second: RTT for the top bar and the predictors, and a liveness
-                // check. QUIC keep-alives make the host send something every few seconds;
-                // when the received datagram count stops moving the host is gone or
-                // unreachable, and the bar says so long before the transport's idle timeout
-                // drops the connection.
+                }
+                // Once a second: RTT for the bar and the predictors, and a liveness check.
+                // QUIC keep-alives make the worker send something every few seconds; when the
+                // received datagram count stops moving the worker is gone or unreachable, and
+                // the bar says so long before the transport's idle timeout drops the
+                // connection.
                 let rtt_link = std::sync::Arc::downgrade(&link);
-                let rtt_canvas = canvas.clone();
-                let rtt_workspace = this.clone();
+                let rtt_view = view.clone();
                 cx.spawn(async move |cx| {
                     let mut heard = (0_u64, std::time::Instant::now());
                     loop {
@@ -584,40 +431,34 @@ impl Workspace {
                             heard = (received, std::time::Instant::now());
                         }
                         let gap = heard.1.elapsed();
-                        let silent = (gap >= SILENCE_WARN).then_some(gap);
-                        tracing::debug!(host = %id, path = %link.path(), received, "link path");
+                        tracing::debug!(worker = %id, path = %link.path(), received, "link path");
                         if gap >= SILENCE_DROP {
-                            tracing::warn!(host = %id, ?gap, path = %link.path(), "host silent; reconnecting");
-                            link.abandon("host silent");
+                            tracing::warn!(worker = %id, ?gap, path = %link.path(), "worker silent; reconnecting");
+                            link.abandon("worker silent");
                             break;
                         }
-                        rtt_canvas.update(cx, |c, cx| c.set_rtt(rtt, cx));
-                        let _set = rtt_workspace.update(cx, |ws, cx| {
-                            if let Some(slot) = ws.slot_mut(id) {
-                                slot.rtt = rtt;
-                                slot.silent = silent;
-                            }
-                            cx.notify();
+                        let status = if gap >= SILENCE_WARN {
+                            WorkerStatus::Silent(gap.as_secs())
+                        } else {
+                            WorkerStatus::Connected
+                        };
+                        // Both notify only when what the bar shows changed.
+                        rtt_view.update(cx, |v, cx| {
+                            v.set_rtt(key, rtt, cx);
+                            v.set_worker_status(key, status, cx);
                         });
                     }
                 })
                 .detach();
-                let mut first_snapshot = true;
-                tracing::debug!(host = %id, sessions = ack.sessions.len(), "link up; pumping events");
-                // One foreground turn per frame, not per event: a flood of terminal frames
-                // from many sessions would otherwise run a GPUI update (and, when the window
-                // is drawn from the update, a whole frame) for each of them. The first event
-                // after a quiet spell is applied at once; while events keep coming they are
-                // applied in one update per nominal frame.
-                let pace = frame_nominal();
-                let mut last_apply: Option<std::time::Instant> = None;
+                tracing::debug!(worker = %id, sessions = ack.sessions.len(), "link up; pumping events");
+                // One foreground update per batch, not per event: whatever arrived while the
+                // last batch was applied goes in the next one, so a flood from many sessions
+                // costs one update (and GPUI draws at most once per display frame anyway).
+                #[cfg(feature = "e2e")]
+                let mut paced = e2e::Pacer::new(frame_nominal());
                 while let Some(first) = events.recv().await {
-                    if let Some(due) = last_apply.and_then(|at| at.checked_add(pace)) {
-                        let wait = due.saturating_duration_since(std::time::Instant::now());
-                        if !wait.is_zero() {
-                            cx.background_executor().timer(wait).await;
-                        }
-                    }
+                    #[cfg(feature = "e2e")]
+                    paced.wait(cx).await;
                     let mut batch = Vec::with_capacity(LINK_BATCH);
                     batch.push(first);
                     while batch.len() < LINK_BATCH
@@ -625,10 +466,9 @@ impl Workspace {
                     {
                         batch.push(next);
                     }
-                    last_apply = Some(std::time::Instant::now());
                     let disconnected = cx.update(|cx| {
                         batch.into_iter().fold(false, |down, event| {
-                            down | apply_link_event(&this, &canvas, id, &mut first_snapshot, event, cx)
+                            down | apply_link_event(&this, &view, key, event, cx)
                         })
                     });
                     if disconnected {
@@ -643,8 +483,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Show the add-host panel (idempotent).
-    fn show_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show the add-worker panel (idempotent).
+    fn show_add_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.adding.is_some() {
             return;
         }
@@ -658,19 +498,17 @@ impl Workspace {
         }));
         address.update(cx, |input, cx| input.focus(window, cx));
         self.adding = Some(Adding { address, busy: false, error: None });
-        self.switcher = false;
         cx.notify();
     }
 
-    /// Close the add-host panel (only offered while some host is known).
-    fn cancel_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.hosts.is_empty() {
+    /// Close the add-worker panel (only offered while some worker is known).
+    fn cancel_add_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workers.is_empty() {
             return;
         }
         self.adding = None;
-        if let Some(id) = self.active {
-            self.activate(id, window, cx);
-        }
+        let handle = self.view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -705,9 +543,8 @@ impl Workspace {
                 match outcome {
                     Ok(Ok(net::Added { id, name })) => {
                         ws.adding = None;
-                        ws.show_notice(format!("added {name}"), cx);
-                        ws.add_host(id, name, cx);
-                        ws.active = Some(id);
+                        ws.show_notice(format!("Added {name}"), cx);
+                        ws.add_worker(id, name, cx);
                     }
                     Ok(Err(e)) => {
                         if let Some(p) = &mut ws.adding {
@@ -728,7 +565,7 @@ impl Workspace {
         .detach();
     }
 
-    fn add_host_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
+    fn add_worker_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
@@ -749,6 +586,8 @@ impl Workspace {
             tab_stop(pill, s.accent)
         };
         div()
+            .id("add-worker")
+            .occlude()
             .flex()
             .flex_col()
             .gap(px(spacing.md))
@@ -761,20 +600,20 @@ impl Workspace {
             .border_color(hsla(s.border))
             .child(
                 div()
-                    .id("add-host-title")
+                    .id("add-worker-title")
                     .role(Role::Heading)
-                    .aria_label("Add a host")
+                    .aria_label("Add a worker")
                     .text_size(px(theme.typography.title()))
                     .text_color(hsla(s.text))
-                    .child("Add a host"),
+                    .child("Add a worker"),
             )
             .child(
                 div().text_size(px(theme.typography.small())).text_color(hsla(s.text_muted)).child(
                     "Its Tailscale name, LAN name or IP, with :port unless it listens on \
-                         45550. Slopty does not encrypt: the tailnet or VPN is the boundary.",
+                     45550. Slopty does not encrypt: the tailnet or VPN is the boundary.",
                 ),
             )
-            .child(Input::new(&adding.address).aria_label("Host address"))
+            .child(Input::new(&adding.address).aria_label("Worker address"))
             .child(
                 div()
                     .flex()
@@ -788,9 +627,9 @@ impl Workspace {
                     .child(button("paste-address", "Paste & add", false).on_click(
                         cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
                     ))
-                    .when(!self.hosts.is_empty(), |row| {
+                    .when(!self.workers.is_empty(), |row| {
                         row.child(button("cancel-add", "Cancel", false).on_click(
-                            cx.listener(|this, _ev, window, cx| this.cancel_add_host(window, cx)),
+                            cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
                         ))
                     })
                     .child(div().flex_1())
@@ -1002,341 +841,6 @@ impl Workspace {
         }));
         bar.into_any_element()
     }
-
-    /// `narrow`: a phone-width window; the readouts (RTT, zoom) go so every button fits.
-    fn top_bar(
-        &self,
-        safe_top: gpui::Pixels,
-        narrow: bool,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        // Bar text is the small step of the scale.
-        let ui = theme.typography.small();
-        let active = self.active_slot();
-        let zoom = active.map_or(1.0, |h| h.zoom);
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
-        let zoom_pct = (zoom * 100.0).round().max(0.0) as u32;
-        let (rtt, silent) = active.map_or((None, None), |h| (h.rtt, h.silent));
-        let label = move |text: String| {
-            div()
-                .flex_none()
-                .text_size(px(ui))
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(text))
-        };
-        let hint_theme = Rc::new(theme.clone());
-        let button = move |id: &'static str, text: &'static str, hint: &'static str| {
-            let label = text.trim_start_matches("+ ");
-            let pill = div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .px(px(if narrow { spacing.xs } else { spacing.sm }))
-                .py(px(spacing.xs))
-                .rounded(px(radii.sm))
-                .text_size(px(ui))
-                .text_color(hsla(s.text))
-                .hover(move |el| el.bg(hsla(s.panel)))
-                .active(move |el| el.bg(hsla(s.raised)))
-                .cursor_pointer()
-                .child(SharedString::from(text))
-                .when(SHORTCUT_HINTS, |el| {
-                    let theme = Rc::clone(&hint_theme);
-                    el.tooltip(move |_window, cx| {
-                        cx.new(|_| kit::Hint::new(label, hint, Rc::clone(&theme))).into()
-                    })
-                });
-            tab_stop(pill, s.accent)
-        };
-        let new_button = button("new-terminal", "+ shell", "⌘T").on_click(cx.listener(
-            |this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.new_terminal(&NewTerminal, window, cx));
-                }
-            },
-        ));
-        let agent_button =
-            button("new-agent", "+ agent", "⌘⇧T").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.new_agent(&NewAgent, window, cx));
-                }
-            }));
-        let note_button =
-            button("new-note", "+ note", "⌘⇧N").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.new_note(&NewNote, window, cx));
-                }
-            }));
-        let window_button = button("add-window", "+ window", "⌘O").on_click(cx.listener(
-            |this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.add_window(&AddWindow, window, cx));
-                }
-            },
-        ));
-        // Every action by name: the phone's way to what has no button, and the Mac's index.
-        let commands_button = button("commands", "⋯", "⌘⇧P").aria_label("Commands").on_click(
-            cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.open_palette(&OpenPalette, window, cx));
-                }
-            }),
-        );
-        let fit_button =
-            button("fit-all", "fit", "⌘1").on_click(cx.listener(|this, _ev, window, cx| {
-                if let Some(canvas) = this.active_canvas() {
-                    canvas.update(cx, |c, cx| c.fit_all(&FitAll, window, cx));
-                }
-            }));
-        // Agents waiting on the human, on any host: a warm pill with the count; a tap goes to
-        // the next one (switching host when the one on show has none).
-        let total = self.needs_you_total();
-        let needs_you = (total > 0).then(|| {
-            let warm = s.warn;
-            let text =
-                if total == 1 { "1 needs you".to_owned() } else { format!("{total} need you") };
-            let pill = div()
-                .id("needs-you")
-                .role(Role::Button)
-                .aria_label(SharedString::from(text.clone()))
-                .flex_none()
-                .px(px(spacing.sm))
-                .py(px(spacing.xxs))
-                .rounded(px(radii.xs))
-                .text_size(px(ui))
-                .text_color(hsla(warm))
-                .bg(hsla_alpha(warm, alpha::FAINT))
-                .hover(move |el| el.bg(hsla_alpha(warm, alpha::TINT)))
-                .cursor_pointer()
-                .child(SharedString::from(text))
-                .when(SHORTCUT_HINTS, |el| {
-                    let theme = Rc::new(self.theme.clone());
-                    el.tooltip(move |_window, cx| {
-                        cx.new(|_| kit::Hint::new("Go to the next one", "⌘⇧A", Rc::clone(&theme)))
-                            .into()
-                    })
-                });
-            tab_stop(pill, s.accent)
-                .on_click(cx.listener(|this, _ev, window, cx| this.next_attention(window, cx)))
-        });
-        // The host on show, with its status dot; a click opens the switcher.
-        let dot = active.map_or(s.text_muted, |h| status_color(&self.theme, &h.status));
-        let host_name = active.map_or_else(|| "Slopty".to_owned(), |h| h.name.clone());
-        let host_label = active.map_or_else(
-            || "Hosts".to_owned(),
-            |h| format!("Host {}, {}", h.name, h.status.text()),
-        );
-        let host_button = div()
-            .id("host-switcher")
-            .role(Role::Button)
-            .aria_label(SharedString::from(host_label))
-            .flex_shrink(1.0)
-            // A phone's bar keeps the tap target even when the buttons crowd it.
-            .min_w(px(if narrow { 96.0 } else { 0.0 }))
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .px(px(spacing.sm))
-            .py(px(spacing.xs))
-            .rounded(px(radii.sm))
-            .hover(move |el| el.bg(hsla(s.panel)))
-            .active(move |el| el.bg(hsla(s.raised)))
-            .cursor_pointer()
-            .child(div().flex_none().size(px(spacing.sm)).rounded_full().bg(hsla(dot)))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(theme.typography.ui_size))
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(host_name)),
-            )
-            .when(!self.hosts.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(theme.typography.caption()))
-                        .text_color(hsla(s.text_muted))
-                        .child("▾"),
-                )
-            })
-            .on_click(cx.listener(|this, _ev, _window, cx| {
-                this.switcher = !this.switcher;
-                cx.notify();
-            }));
-        let host_button = tab_stop(host_button, s.accent);
-        div()
-            .h(px(TOP_BAR) + safe_top)
-            .pt(safe_top)
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(if narrow { spacing.sm } else { spacing.md }))
-            .pl(px(LEADING_INSET))
-            .pr(px(spacing.md))
-            .bg(hsla(s.canvas))
-            .border_b_1()
-            .border_color(hsla(s.border))
-            .font_family(self.theme.typography.ui_family.clone())
-            // The host name gives way first: a phone's bar must keep every button.
-            .child(host_button)
-            // Narrow: the status lives in the switcher rows; only a notice claims bar space.
-            .child(match &self.notice {
-                Some((_, text)) => label(text.clone()).text_color(hsla(s.warn)),
-                None if narrow => label(String::new()),
-                None => label(self.status_text()),
-            })
-            .child(div().flex_1())
-            .child(match (silent, rtt) {
-                (Some(gap), _) => {
-                    label(format!("host silent {}s", gap.as_secs())).text_color(hsla(s.warn))
-                }
-                (None, _) if narrow => label(String::new()),
-                (None, Some(d)) => label(format!("{:.1} ms", d.as_secs_f64() * 1e3)),
-                (None, None) => label(String::new()),
-            })
-            .when_some(needs_you, gpui::ParentElement::child)
-            .when(!narrow, |bar| bar.child(label(format!("{zoom_pct}%"))))
-            .child(fit_button)
-            .child(new_button)
-            .child(agent_button)
-            .child(note_button)
-            // A phone-wide bar has no room for both: the palette lists "Add a window".
-            .when(!narrow, |bar| bar.child(window_button))
-            .child(commands_button)
-    }
-}
-
-impl Workspace {
-    /// The host switcher: one row per host (status dot, name, state, "forget"), then
-    /// "Add host…". Anchored under the host name; a click anywhere else closes it.
-    fn switcher(&self, safe_top: gpui::Pixels, cx: &Context<Self>) -> impl IntoElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let ui = theme.typography.ui_size;
-        let small = theme.typography.small();
-        let mut panel = div()
-            .id("host-switcher-panel")
-            .occlude()
-            .w(px(320.0))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .py(px(spacing.xs))
-            .rounded(px(radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .shadow_sm()
-            .font_family(self.theme.typography.ui_family.clone())
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation());
-        for host in &self.hosts {
-            let id = host.id;
-            let on_show = self.active == Some(id);
-            let color = status_color(&self.theme, &host.status);
-            let row = div()
-                .id(SharedString::from(format!("host-{id}")))
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("{}, {}", host.name, host.status.text())))
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .px(px(spacing.md))
-                .py(px(spacing.sm))
-                .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
-                .active(move |el| el.bg(hsla(s.overlay)))
-                .when(on_show, |el| el.bg(hsla_alpha(s.accent, alpha::FAINT)))
-                .child(div().flex_none().size(px(spacing.sm)).rounded_full().bg(hsla(color)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(ui))
-                                .text_color(hsla(s.text))
-                                .child(SharedString::from(host.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(small))
-                                .text_color(hsla(s.text_muted))
-                                .child(SharedString::from(host.status.text())),
-                        ),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("forget-{id}")))
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(format!("Forget {}", host.name)))
-                        .flex_none()
-                        .px(px(spacing.xs))
-                        .py(px(spacing.xxs))
-                        .rounded(px(radii.xs))
-                        .text_size(px(small))
-                        .text_color(hsla(s.text_muted))
-                        .hover(move |el| el.text_color(hsla(s.error)))
-                        .child("forget")
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            cx.stop_propagation();
-                            this.forget_host(id, window, cx);
-                        })),
-                )
-                .on_click(cx.listener(move |this, _ev, window, cx| this.activate(id, window, cx)));
-            panel = panel.child(tab_stop(row, s.accent));
-        }
-        let add_host = div()
-            .id("add-host")
-            .role(Role::Button)
-            .aria_label("Add host")
-            .px(px(spacing.md))
-            .py(px(spacing.sm))
-            .text_size(px(ui))
-            .text_color(hsla(s.accent))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
-            .child(SharedString::from(if SHORTCUT_HINTS {
-                "Add host…  ⌘⇧H".to_owned()
-            } else {
-                "Add host…".to_owned()
-            }));
-        panel = panel.child(div().h(px(1.0)).my(px(spacing.xs)).bg(hsla(s.border))).child(
-            tab_stop(add_host, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
-                this.switcher = false;
-                this.show_add_host(window, cx);
-            })),
-        );
-        div()
-            .id("host-switcher-backdrop")
-            .absolute()
-            .inset_0()
-            .pt(px(TOP_BAR) + safe_top)
-            .pl(px(LEADING_INSET - spacing.sm))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _ev, _window, cx| {
-                    this.switcher = false;
-                    cx.notify();
-                }),
-            )
-            .child(panel)
-    }
 }
 
 /// A key-bar key as a screen reader names it; an armed modifier says so.
@@ -1345,46 +849,16 @@ fn key_label(label: &str, lit: bool) -> String {
     if lit { format!("{name}, armed") } else { name.to_owned() }
 }
 
-/// The dot colour for a host's link state.
-const fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
-    match status {
-        HostStatus::Connected => theme.surfaces.success,
-        HostStatus::Connecting | HostStatus::Reconnecting(_) => theme.surfaces.warn,
-    }
-}
-
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The frame's draw starts here; the probe element at the end of the tree closes it.
         slopty_ui::frames::begin(cx);
         let surfaces = &self.theme.surfaces;
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
+        // The workspace keeps the top and the sides clear itself.
         let insets = window.insets().effective();
-        // A phone in portrait; the bar drops its readouts so every button stays reachable.
-        let narrow = window.viewport_size().width < px(NARROW_BAR);
-        let canvas = self.active_canvas();
-        let body = match (canvas, &self.adding) {
-            (_, Some(adding)) => div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(self.theme.spacing.lg))
-                .child(self.add_host_panel(adding, cx)),
-            (Some(canvas), None) => div().flex_1().w_full().child(canvas),
-            (None, None) => div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(self.theme.typography.ui_size))
-                .text_color(hsla(surfaces.text_muted))
-                .child(SharedString::from(self.status_text())),
-        };
         let key_bar = key_bar_visible(KEY_BAR, self.hardware_keyboard)
-            .then(|| self.active_canvas()?.read(cx).active_key_target())
+            .then(|| self.view.read(cx).active_key_target())
             .flatten()
             .map(|target| self.key_bar(&target, cx));
         if std::mem::take(&mut self.pending_focus_editor)
@@ -1393,119 +867,90 @@ impl Render for Workspace {
             editor.update(cx, |e, cx| e.focus(window, cx));
         }
         let settings_editor = self.settings_editor.clone();
-        let switcher = self.switcher.then(|| self.switcher(insets.top, cx));
+        let adding = self.adding.as_ref().map(|adding| {
+            kit::backdrop(&self.theme)
+                .id("add-worker-backdrop")
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(self.theme.spacing.lg))
+                .child(self.add_worker_panel(adding, cx))
+        });
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(hsla(surfaces.canvas))
-            .on_action(cx.listener(|this, _: &NextHost, window, cx| this.step_host(1, window, cx)))
-            .on_action(cx.listener(|this, _: &PrevHost, window, cx| this.step_host(-1, window, cx)))
-            .on_action(cx.listener(|this, _: &AddHost, window, cx| this.show_add_host(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &AddWorker, window, cx| this.show_add_worker(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
-            .on_action(cx.listener(|this, _: &ForgetHost, window, cx| {
-                if let Some(id) = this.active {
-                    this.forget_host(id, window, cx);
-                }
-            }))
-            .child(self.top_bar(insets.top, narrow, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .pl(insets.left)
-                    .pr(insets.right)
-                    .pb(insets.bottom)
-                    .child(body)
-                    .when_some(key_bar, gpui::ParentElement::child),
-            )
-            .when_some(switcher, gpui::ParentElement::child)
+            .child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
+            .when_some(key_bar, |el, bar| el.child(div().w_full().px(insets.left).child(bar)))
+            .child(div().w_full().h(insets.bottom))
+            .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
             .child(slopty_ui::frames::probe())
     }
 }
 
-/// Apply one event from a host link to the workspace; `true` when the link is gone.
+/// Apply one event from a worker's link to the workspace; `true` when the link is gone.
 fn apply_link_event(
     this: &WeakEntity<Workspace>,
-    canvas: &Entity<CanvasView>,
-    id: WorkerId,
-    first_snapshot: &mut bool,
+    view: &Entity<WorkspaceView>,
+    key: WorkerKey,
     event: LinkEvent,
     cx: &mut App,
 ) -> bool {
     tracing::trace!(?event, "link event");
     match event {
         LinkEvent::Term { session, event } => {
-            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
-        }
-        LinkEvent::Control(HostMsg::Canvas(sync)) => {
-            let is_snapshot = matches!(sync, slopty_proto::canvas::CanvasSync::Snapshot { .. });
-            canvas.update(cx, |c, cx| c.apply_sync(sync, cx));
-            if is_snapshot && *first_snapshot {
-                *first_snapshot = false;
-                // First run: an empty canvas gets one shell so there is
-                // something to type into. Otherwise bring the existing
-                // layout into view.
-                let window = this.update(cx, |ws, _cx| ws.window).ok().flatten();
-                if let Some(window) = window {
-                    let _opened = window.update(cx, |_root, window, cx| {
-                        canvas.update(cx, |c, cx| {
-                            if c.is_empty() {
-                                c.new_terminal(&NewTerminal, window, cx);
-                            } else {
-                                c.fit_when_painted();
-                            }
-                        });
-                    });
-                }
-            }
-        }
-        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
-            canvas.update(cx, |c, cx| c.session_opened(summary, cx));
-        }
-        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
-            canvas.update(cx, |c, cx| c.session_closed(session, cx));
+            view.update(cx, |v, cx| v.term_event(session, event, cx));
         }
         LinkEvent::Control(HostMsg::Term { session, event }) => {
-            canvas.update(cx, |c, cx| c.term_event(session, event, cx));
+            view.update(cx, |v, cx| v.term_event(session, event, cx));
+        }
+        LinkEvent::Control(HostMsg::Items(sync)) => {
+            view.update(cx, |v, cx| v.apply_sync(key, sync, cx));
+        }
+        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
+            view.update(cx, |v, cx| v.session_opened(key, summary, cx));
+        }
+        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+            view.update(cx, |v, cx| v.session_closed(session, cx));
         }
         LinkEvent::Control(HostMsg::Screen(event)) => {
-            canvas.update(cx, |c, cx| c.screen_event(event, cx));
+            view.update(cx, |v, cx| v.screen_event(key, event, cx));
         }
         LinkEvent::Control(HostMsg::Agent(event)) => {
-            canvas.update(cx, |c, cx| c.agent_event(event, cx));
+            view.update(cx, |v, cx| v.agent_event(event, cx));
         }
         LinkEvent::Control(HostMsg::File { path, read }) => {
-            canvas.update(cx, |c, cx| c.file_read(&path, &read, cx));
+            view.update(cx, |v, cx| v.file_read(key, &path, &read, cx));
         }
         LinkEvent::Control(HostMsg::FoundFiles { root, query, paths }) => {
-            canvas.update(cx, |c, cx| c.files_found(&root, &query, &paths, cx));
+            view.update(cx, |v, cx| v.files_found(&root, &query, &paths, cx));
         }
         LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
-            let _shown = this.update(cx, |ws, cx| ws.show_notice(message, cx));
-            if !ok {
-                // The offer stays on the title bar so it can be tried again.
-                canvas.update(cx, CanvasView::hooks_offer_failed);
-            }
+            view.update(cx, |v, cx| {
+                v.show_notice(message, cx);
+                if !ok {
+                    // The offer stays on the header so it can be tried again.
+                    v.hooks_offer_failed(key, cx);
+                }
+            });
         }
         LinkEvent::Control(_) => {}
         LinkEvent::Disconnected(why) => {
-            let _set = this.update(cx, |ws, cx| {
-                if let Some(slot) = ws.slot_mut(id) {
-                    let place = slot.canvas.as_ref().map(|c| {
-                        let c = c.read(cx);
-                        (c.camera(), c.active_item())
-                    });
-                    let status = HostStatus::Reconnecting(format!("disconnected: {why}"));
-                    slot.disconnect(status, place);
+            let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
+            view.update(cx, |v, cx| v.disconnect_worker(key, status, cx));
+            let _dropped = this.update(cx, |ws, _cx| {
+                if let Some(slot) = ws.workers.iter_mut().find(|w| w.key == key) {
+                    slot.link = None;
                 }
-                ws.refresh_badge();
-                cx.notify();
             });
             return true;
         }
@@ -1530,28 +975,26 @@ fn frame_nominal() -> std::time::Duration {
 fn app_key_bindings() -> Vec<gpui::KeyBinding> {
     vec![
         gpui::KeyBinding::new("cmd-,", OpenSettings, None),
-        gpui::KeyBinding::new("cmd-alt-right", NextHost, None),
-        gpui::KeyBinding::new("cmd-alt-left", PrevHost, None),
-        gpui::KeyBinding::new("cmd-shift-h", AddHost, None),
+        gpui::KeyBinding::new("cmd-shift-h", AddWorker, None),
     ]
 }
 
-/// The app's lines for the command palette, after the canvas's.
+/// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     let bindings = app_key_bindings();
     let item = |label: &str, action: Box<dyn gpui::Action>| {
         slopty_ui::palette::PaletteItem::new(label, action, &bindings)
     };
-    vec![
-        item("Open settings", Box::new(OpenSettings)),
-        item("Next host", Box::new(NextHost)),
-        item("Previous host", Box::new(PrevHost)),
-        item("Add a host", Box::new(AddHost)),
-    ]
+    vec![item("Open settings", Box::new(OpenSettings)), item("Add a worker", Box::new(AddWorker))]
 }
 
-/// Open the workspace window and start the host link loop on `handle`'s runtime. Call once
-/// from inside the GPUI application callback, after `gpui_kit::init`.
+/// Where this device keeps its layout: beside the settings, in the client's data directory.
+fn layout_path() -> std::path::PathBuf {
+    slopty_settings::data_dir().join("layout.json")
+}
+
+/// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
+/// Call once from inside the GPUI application callback, after `gpui_kit::init`.
 ///
 /// # Errors
 ///
@@ -1561,12 +1004,13 @@ pub fn open_workspace(
     handle: tokio::runtime::Handle,
     options: WindowOptions,
 ) -> anyhow::Result<()> {
-    // VideoToolbox's first decoder session costs 150–400 ms; pay it before any host is dialed.
+    // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
+    // dialed.
     slopty_client::warm_up_decoder();
     if let Err(e) = slopty_ui::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }
-    cx.bind_keys(slopty_ui::canvas::key_bindings());
+    cx.bind_keys(slopty_ui::workspace::key_bindings());
     cx.bind_keys(slopty_ui::terminal::key_bindings());
     cx.bind_keys(app_key_bindings());
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
@@ -1575,23 +1019,56 @@ pub fn open_workspace(
     slopty_ui::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
     let loaded = Settings::load(&settings_path);
-    let workspace = cx.new(|_cx| Workspace {
-        hosts: Vec::new(),
-        active: None,
-        switcher: false,
-        hardware_keyboard: hardware_keyboard_attached(),
-        theme: Theme::default(),
-        settings: Settings::default(),
-        window_dark: true,
-        notice: None,
-        notice_seq: 0,
-        subscriptions: Vec::new(),
-        adding: None,
-        runtime: handle,
-        window: None,
-        settings_path: settings_path.clone(),
-        settings_editor: None,
-        pending_focus_editor: false,
+    // Under the self-test a frame is a step, not a moment: the layout lands at once so a
+    // `dump` reads where things went, not where they were passing through. Each run starts
+    // from an empty layout there, so no test depends on the last one's.
+    let saved = if cfg!(feature = "e2e") {
+        None
+    } else {
+        slopty_ui::workspace::read_layout(&layout_path())
+    };
+    let view = cx.new(|cx| {
+        let mut view = WorkspaceView::new(Theme::default(), saved, cx);
+        view.extend_palette(app_palette_items());
+        view.set_layout_path(layout_path());
+        #[cfg(feature = "e2e")]
+        view.set_animation(false);
+        view
+    });
+    let workspace = cx.new(|cx| {
+        let events = cx.subscribe(&view, |ws: &mut Workspace, _view, event, cx| match event {
+            WorkspaceEvent::NeedsYou(n) => slopty_platform::set_badge(*n),
+            WorkspaceEvent::Attention(_session) => {
+                slopty_platform::attention();
+                slopty_platform::bounce();
+            }
+            // A bell while the human is elsewhere is an alert; in front of the window the
+            // view's own flash is enough.
+            WorkspaceEvent::Bell(_session) => {
+                if settings::bell_alerts(&ws.settings, cx.active_window().is_some()) {
+                    slopty_platform::attention();
+                    slopty_platform::bounce();
+                }
+            }
+        });
+        // The key bar follows the focused tile: a workspace change re-renders the shell,
+        // which is a key bar and the overlays.
+        let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
+        Workspace {
+            workers: Vec::new(),
+            view: view.clone(),
+            hardware_keyboard: hardware_keyboard_attached(),
+            theme: Theme::default(),
+            settings: Settings::default(),
+            window_dark: true,
+            subscriptions: vec![events, changes],
+            adding: None,
+            runtime: handle,
+            window: None,
+            settings_path: settings_path.clone(),
+            settings_editor: None,
+            pending_focus_editor: false,
+        }
     });
     let root_view = workspace.clone();
     let window = cx.open_window(options, move |window, cx| {
@@ -1610,7 +1087,7 @@ pub fn open_workspace(
         cx.new(|cx| Root::new(root_view, window, cx))
     })?;
     watch_settings(settings_path, workspace.clone(), cx);
-    // A tap on an agent banner brings the app and that session forward, on whichever host
+    // A tap on an agent banner brings the app and that session forward, on whichever worker
     // the session lives.
     let for_notifications = workspace.clone();
     cx.on_system_notification_response(move |response, cx| {
@@ -1622,7 +1099,7 @@ pub fn open_workspace(
             });
         });
     });
-    // Every known host gets a link now; with none, the add-host panel.
+    // Every known worker gets a link now; with none, the add-worker panel.
     let known = match net::known_workers() {
         Ok(known) => known,
         Err(e) => {
@@ -1634,10 +1111,14 @@ pub fn open_workspace(
         workspace.update(cx, |ws, cx| {
             ws.window = Some(window.window_handle());
             for worker in known {
-                ws.add_host(worker.worker_id, worker.name, cx);
+                ws.add_worker(worker.worker_id, worker.name, cx);
             }
-            if ws.hosts.is_empty() {
-                ws.show_add_host(window, cx);
+            ws.refresh_menu(cx);
+            if ws.workers.is_empty() {
+                ws.show_add_worker(window, cx);
+            } else {
+                let handle = ws.view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
             }
         });
     })?;
@@ -1685,11 +1166,6 @@ fn open_settings_file(cx: &App) {
         Err(e) => tracing::warn!(path = %path.display(), error = %e, "write default settings"),
     }
     cx.open_with_system(&path);
-}
-
-/// Backoff between connection attempts: 1 s after a drop, doubling per failure, capped.
-fn retry_delay(failures: u32) -> std::time::Duration {
-    std::time::Duration::from_secs((1_u64 << failures.min(4)).min(10))
 }
 
 #[cfg(test)]

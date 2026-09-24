@@ -11,9 +11,9 @@
 //! agent's attention badges both, "go" on A reveals A's terminal and only the host reporting the
 //! agent moved on clears the count, on both at once;
 //! (d) a display streams to both (needs `SLOPTY_SCREEN_E2E`), and the host's `screens` listing
-//! says how many times it encodes; (e) camera and zoom are per client while item geometry is
-//! shared; (f) A dying leaves B streaming, and a relaunched A catches up; (g) closing on A closes
-//! on B and a note edited on A reads the same on B. Each prints `MEASURE` lines for
+//! says how many times it encodes; (e) the items are shared while each client arranges them
+//! in its own layout; (f) A dying leaves B streaming, and a relaunched A catches up; (g) closing on
+//! A closes on B and a note edited on A reads the same on B. Each prints `MEASURE` lines for
 //! `docs/MEASUREMENTS.md`.
 
 #[cfg(test)]
@@ -26,8 +26,8 @@ mod tests {
 
     /// How long a host round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
-    /// Window size: wide enough for two host-placed terminals side by side at zoom 1, so both
-    /// clients can type into the second one without zooming.
+    /// Window size: wide enough for two half-width columns side by side, so both clients can
+    /// click into the second shell without scrolling the strip.
     const WINDOW: (f32, f32) = (1600.0, 720.0);
     /// (a) A terminal one client opens is on the other no later than this after it is on the
     /// opener, over loopback.
@@ -136,7 +136,8 @@ mod tests {
         (session, at_b.saturating_duration_since(at_a))
     }
 
-    /// Wait until `session` reads the same on both: title, size, rows and item rect.
+    /// Wait until `session` reads the same on both: title, size and rows (where its tile sits is
+    /// each client's own business).
     async fn wait_same(a: &mut Driver, b: &mut Driver, session: &str) -> (Dump, Dump) {
         let start = Instant::now();
         loop {
@@ -144,11 +145,8 @@ mod tests {
             let (ta, tb) = (da.terminal(session), db.terminal(session));
             let (ia, ib) = (da.item_for_session(session), db.item_for_session(session));
             let same = match (ta, tb, ia, ib) {
-                (Some(ta), Some(tb), Some(ia), Some(ib)) => {
-                    ta.title == tb.title
-                        && ta.size == tb.size
-                        && ta.rows == tb.rows
-                        && same_rect(ia.rect, ib.rect)
+                (Some(ta), Some(tb), Some(_), Some(_)) => {
+                    ta.title == tb.title && ta.size == tb.size && ta.rows == tb.rows
                 }
                 _ => false,
             };
@@ -178,9 +176,11 @@ mod tests {
             .map(|n| (n.bounds[0] + n.bounds[2] / 2.0, n.bounds[1] + n.bounds[3] / 2.0))
     }
 
-    /// Whether two rects agree to the snap grid's tolerance.
-    fn same_rect(x: [f32; 4], y: [f32; 4]) -> bool {
-        x.iter().zip(y.iter()).all(|(p, q)| (p - q).abs() < 0.5)
+    /// The items of a dump by id, sorted: what two clients must agree on.
+    fn item_ids(d: &Dump) -> Vec<String> {
+        let mut ids: Vec<String> = d.items.iter().map(|i| i.id.clone()).collect();
+        ids.sort();
+        ids
     }
 
     /// A shown moment, by which app.
@@ -195,12 +195,17 @@ mod tests {
             .find(|l| l.ends_with("needs you") || l.ends_with("need you"))
     }
 
-    /// Click the middle of `session`'s item on `drv` and wait for its grid to hold the keyboard.
+    /// Click the middle of `session`'s tile on `drv` (revealing it first when this client's
+    /// layout has it out of view) and wait for its grid to hold the keyboard.
     async fn focus_session(drv: &mut Driver, session: &str) {
         let d = drv.dump().await.unwrap();
         let item = d.item_for_session(session).unwrap_or_else(|| panic!("{session} on {d:#?}"));
-        let (x, y) = item.center();
-        drv.click(x, y).await.unwrap();
+        if item.bounds[2] <= 0.0 {
+            drv.reveal(session).await.unwrap();
+        } else {
+            let (x, y) = item.center();
+            drv.click(x, y).await.unwrap();
+        }
         drv.wait_for("the grid to take the keyboard", STEP, |d| {
             d.focused == format!("terminal:{session}")
         })
@@ -209,10 +214,12 @@ mod tests {
     }
 
     /// (a) A terminal opened on A appears on B with the same title, size and rows, within a
-    /// round trip; (e) A's zoom and camera are A's alone, an item A moves lands on B where A
-    /// put it; (g) a note edited on A reads the same on B, and ⌘W on A takes the item off B.
+    /// round trip; (e) where A puts it is A's alone: a column A widens or moves stays as it was
+    /// on B, while both keep the same items; (g) a note edited on A reads the same on B, and ⌘W on
+    /// A takes the item off B.
     #[tokio::test]
-    async fn a_terminal_opened_on_one_client_is_on_the_other_and_geometry_is_shared_on_the_mac() {
+    async fn a_terminal_opened_on_one_client_is_on_the_other_and_each_arranges_its_own_on_the_mac()
+    {
         if !gated() {
             return;
         }
@@ -224,45 +231,40 @@ mod tests {
         let (da, db) = wait_same(a, b, &session).await;
         let (ta, ia) = (da.terminal(&session).unwrap(), da.item_for_session(&session).unwrap());
         println!(
-            "MEASURE (a) pair mac: shell opened on A shown on B {:.1} ms after A · title {:?} · {}×{} · rect {:?}",
+            "MEASURE (a) pair mac: shell opened on A shown on B {:.1} ms after A · title {:?} · {}×{} · at {:?}",
             lag.as_secs_f64() * 1e3,
             ta.title,
             ta.size[0],
             ta.size[1],
-            ia.rect
+            ia.pos
         );
         assert!(lag <= PROPAGATION_LIMIT, "B lagged A by {lag:?}: {db:#?}");
         assert!(ta.driving, "the opener drives: {ta:#?}");
         assert!(!db.terminal(&session).unwrap().driving, "the other client does not");
 
-        // (e) Zoom is per client.
-        a.keys("cmd-=").await.unwrap();
-        a.wait_for("A zoomed in", STEP, |d| d.zoom > 1.04).await.unwrap();
+        // (e) The layout is per client: A's new shell took A's focus in a column of its own,
+        // while on B it joined the end without taking B's. A moving it left changes nothing
+        // on B; the items stay the same set on both.
+        let on_a = |d: &Dump| d.item_for_session(&session).map(|i| (i.pos, i.active));
+        let (pos_a, active_a) = on_a(&da).unwrap();
+        let (pos_b, active_b) = on_a(&db).unwrap();
+        assert!(active_a, "A's own open takes A's focus: {da:#?}");
+        assert!(!active_b, "and not B's: {db:#?}");
+        a.keys("cmd-alt-shift-left").await.unwrap();
+        let da = a
+            .wait_for("the column moved on A", STEP, |d| {
+                d.item_for_session(&session).is_some_and(|i| i.pos[1] + 1 == pos_a[1])
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let db = b.dump().await.unwrap();
-        assert!((db.zoom - 1.0).abs() < 1e-3, "B's zoom moved with A's: {}", db.zoom);
-        a.keys("cmd-0").await.unwrap();
-        a.wait_for("A back at 1", STEP, |d| (d.zoom - 1.0).abs() < 1e-3).await.unwrap();
-
-        // (e) Geometry is shared: A drags the new shell's title bar 160 pt to the right. Read
-        // the item's window bounds now, after the zoom cycle above (which moves A's camera), so
-        // the grab lands on the title bar wherever it sits.
-        let here = a.dump().await.unwrap();
-        let ia = here.item_for_session(&session).unwrap();
-        let before = ia.rect;
-        let [left, top, width, _height] = ia.bounds;
-        let grab = (left + width / 2.0, top + 10.0);
-        a.drag(grab.0, grab.1, grab.0 + 160.0, grab.1).await.unwrap();
-        let moved = |d: &Dump| {
-            d.item_for_session(&session)
-                .is_some_and(|i| (i.rect[0] - before[0] - 160.0).abs() < 17.0)
-        };
-        let da = a.wait_for("the item moved on A", STEP, moved).await.unwrap();
-        let db = b.wait_for("the item moved on B", STEP, moved).await.unwrap();
-        let (ra, rb) = (
-            da.item_for_session(&session).unwrap().rect,
-            db.item_for_session(&session).unwrap().rect,
+        assert_eq!(
+            db.item_for_session(&session).map(|i| i.pos),
+            Some(pos_b),
+            "B's layout did not move with A's"
         );
-        assert!(same_rect(ra, rb), "host geometry: A {ra:?} B {rb:?}");
+        assert_eq!(item_ids(&da), item_ids(&db), "the same items on both");
 
         // (g) A note typed on A is on B once the editor commits it.
         a.keys("cmd-shift-n").await.unwrap();
@@ -356,34 +358,19 @@ mod tests {
             .unwrap();
         assert_eq!(da.terminal(&session).unwrap().size, db.terminal(&session).unwrap().size);
 
-        // The pill moved the driver, not just its label: prove B now sizes the PTY. Zoom A
-        // down to summary cards (below CARD_ZOOM, 0.6) so A stops measuring a grid and can no
-        // longer be the client that proposes a size — only B can. A card still tracks the
-        // host's size through `Resized`, it just does not ask for one; so if the take-over were
-        // cosmetic (B's flag flips but A keeps driving), nobody would size the PTY and it would
-        // not change. B grows the terminal by its bottom-right grip and both clients follow.
+        // The pill moved the driver, not just its label: prove B now sizes the PTY. B widens
+        // its column (⌘R, the next preset) while A's column stays as it was; if the take-over
+        // were cosmetic (B's flag flips but A keeps driving), A's unchanged grid would keep the
+        // PTY's size and nobody would follow B's.
         let before = db.terminal(&session).unwrap().size;
-        for _ in 0..4 {
-            if a.dump().await.unwrap().zoom < 0.6 {
-                break;
-            }
-            a.keys("cmd--").await.unwrap();
-        }
-        a.wait_for("A collapsed to cards", STEP, |d| d.zoom < 0.6).await.unwrap();
-
-        // Grab B's resize grip (14 pt at the bottom-right corner, B at zoom 1) and drag it
-        // inward to shrink the terminal, keeping every point of the drag inside the window.
-        let [gl, gt, gw, gh] = db.item_for_session(&session).unwrap().bounds;
-        let (grip_x, grip_y) = (gl + gw - 7.0, gt + gh - 7.0);
-        b.drag(grip_x, grip_y, grip_x - 240.0, grip_y - 120.0).await.unwrap();
-        let resized = |d: &Dump| {
-            d.terminal(&session).is_some_and(|t| t.size[0] < before[0] && t.size[1] < before[1])
-        };
+        focus_session(b, &session).await;
+        b.keys("cmd-r").await.unwrap();
+        let resized = |d: &Dump| d.terminal(&session).is_some_and(|t| t.size[0] > before[0]);
         let db = b.wait_for("B's resize taking hold", STEP, resized).await.unwrap();
-        let da = a.wait_for("A (a card) following B's size", STEP, resized).await.unwrap();
+        let da = a.wait_for("A following B's size", STEP, resized).await.unwrap();
         let (sa, sb) = (da.terminal(&session).unwrap().size, db.terminal(&session).unwrap().size);
         println!(
-            "MEASURE (b) pair mac: B drove a resize {}×{} → {}×{}; A (a card) follows",
+            "MEASURE (b) pair mac: B drove a resize {}×{} → {}×{}; A follows",
             before[0], before[1], sb[0], sb[1]
         );
         assert_eq!(sa, sb, "both clients show the size B, the new driver, drove");
@@ -611,13 +598,7 @@ mod tests {
             .await
             .unwrap();
         let db = pair.b.driver.dump().await.unwrap();
-        let rects = |d: &Dump| {
-            let mut r: Vec<(Option<String>, [f32; 4])> =
-                d.items.iter().map(|i| (i.session.clone(), i.rect)).collect();
-            r.sort_by(|x, y| x.0.cmp(&y.0));
-            r
-        };
-        assert_eq!(rects(&da), rects(&db), "the same canvas on both");
+        assert_eq!(item_ids(&da), item_ids(&db), "the same items on both");
         let stall_a = longest_stall(&mut pair.stack.driver, Duration::from_secs(1)).await;
         assert!(stall_a <= STALL_LIMIT, "A is not streaming after its relaunch: {stall_a:?}");
 
@@ -668,8 +649,8 @@ mod tests {
         .await
         .unwrap();
 
-        // (a) opened on the Mac, on the phone; the phone reads the same rows and title. The
-        // rect may differ: the phone fits an item it drives to its screen, this one it does not.
+        // (a) opened on the Mac, on the phone; the phone reads the same rows and title. Where
+        // the tile sits is each device's own: on the phone it joins the end of the strip.
         let (session, lag) = open_on_a(a, b).await;
         let same_rows = |da: &Dump, db: &Dump| match (da.terminal(&session), db.terminal(&session))
         {
@@ -691,10 +672,9 @@ mod tests {
         );
         assert!(lag <= PROPAGATION_LIMIT, "the phone lagged by {lag:?}");
 
-        // (b) typed on the phone into the first shell, read on the Mac. The second shell left
-        // the phone fitted to two desktop-sized items at a card zoom, so reveal this one first:
-        // that zooms it up to a live grid (a plain click cannot) and the soft keyboard routes
-        // to it.
+        // (b) typed on the phone into the first shell, read on the Mac. Reveal it first: the
+        // phone shows one full-width column at a time, and revealing focuses it so the soft
+        // keyboard routes to it.
         b.reveal(&first).await.unwrap();
         b.wait_for("the phone's grid to take the keyboard", STEP, |d| {
             d.focused == format!("terminal:{first}")

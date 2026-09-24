@@ -516,7 +516,7 @@ mod tests {
     #[test]
     #[ignore = "timing, run by hand with --ignored --nocapture"]
     fn timing_of_a_full_card() -> Result<(), String> {
-        let text = include_str!("canvas.rs");
+        let text = include_str!("workspace.rs");
         let t0 = std::time::Instant::now();
         let rust = grammar("rust")?;
         let load = t0.elapsed();

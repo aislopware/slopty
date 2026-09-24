@@ -2,6 +2,10 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
+**Superseded in part 2026-09-24** by `workspace.md`: the plane, the camera, flights, arrange,
+the minimap, the reading-order and cone walks and every placement rule are gone. The entries on
+notes, file cards, the palette, names and agents still hold, a "card" now being a tile.
+
 - ✅ **Infinite canvas is the product.** slop-desk built and retired one; its reasons were
   AppKit-specific (a libghostty surface cannot live under a scaled ancestor) and product-fit
   (undiscoverable, not keyboard-navigable). We own the renderer, so zoom is real, and we add

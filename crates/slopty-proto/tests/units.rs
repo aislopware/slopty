@@ -6,11 +6,11 @@
 mod units {
     use bytes::{BufMut as _, BytesMut};
     use slopty_core::{ClientId, ItemId};
-    use slopty_proto::canvas::CanvasSync;
     use slopty_proto::codec::{self, CodecError, MAX_FRAME_BYTES};
     use slopty_proto::file::FILE_BYTES;
     use slopty_proto::handshake::Rejection;
     use slopty_proto::input::CellMetrics;
+    use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
     use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
     use slopty_proto::terminal::TermSize;
@@ -74,14 +74,13 @@ mod units {
     #[test]
     fn messages_name_their_variants_for_logs() {
         assert_eq!(ClientMsg::InstallHooks.kind(), "InstallHooks");
-        assert_eq!(ClientMsg::Look { view: None }.kind(), "Look");
         assert_eq!(ClientMsg::Point { item: ItemId::new() }.kind(), "Point");
-        let pointed = CanvasSync::Pointed {
+        let pointed = ItemSync::Pointed {
             client: ClientId::new(),
             name: "x".to_owned(),
             item: ItemId::new(),
         };
-        assert_eq!(HostMsg::Canvas(pointed).kind(), "Canvas");
+        assert_eq!(HostMsg::Items(pointed).kind(), "Items");
         assert_eq!(HostMsg::Rejected(Rejection::Busy).kind(), "Rejected");
     }
 }

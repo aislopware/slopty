@@ -194,8 +194,8 @@ mod tests {
     fn chrome_text_is_sentence_case() {
         let chrome = [
             FIND_PLACEHOLDER,
-            crate::canvas::INSTALL_HOOKS,
-            crate::canvas::TAKE_OVER,
+            crate::workspace::INSTALL_HOOKS,
+            crate::workspace::TAKE_OVER,
             crate::note::WRITE_PLACEHOLDER,
             crate::palette::NO_COMMAND_MATCHES,
             crate::picker::FILTER_PLACEHOLDER,

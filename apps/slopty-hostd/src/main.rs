@@ -20,7 +20,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_agent::AgentTable;
 use slopty_core::WorkerId;
-use slopty_host::{CanvasStore, Host};
+use slopty_host::{Host, ItemStore};
 use slopty_net::admission::{Admission, Cidr};
 use slopty_net::host::HostListener;
 use tokio::sync::broadcast;
@@ -32,7 +32,7 @@ struct Args {
     /// ptyd socket (default: `$TMPDIR/slopty/ptyd.sock`, or `$SLOPTY_PTYD_SOCKET`).
     #[arg(long)]
     ptyd_socket: Option<PathBuf>,
-    /// Data directory holding `worker-id`, `canvas.json` and `settings.toml` (default:
+    /// Data directory holding `worker-id`, `items.json` and `settings.toml` (default:
     /// `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -88,17 +88,15 @@ pub struct Daemon {
     pub id: WorkerId,
     /// Human name (hostname).
     pub name: String,
-    /// Events every connected client should hear (session opened/closed, canvas deltas).
+    /// Events every connected client should hear (session opened/closed, item deltas).
     pub events: broadcast::Sender<slopty_proto::HostMsg>,
-    /// The canvas document.
-    pub canvas: CanvasStore,
+    /// The item registry.
+    pub items: ItemStore,
     /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
     /// by [`agents::watch`] for the sessions no hook speaks for.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// The host's pasteboard, synced with remote-window clients.
     pub pasteboard: Arc<slopty_input::Pasteboard>,
-    /// Where each connected client is looking on the canvas.
-    pub presence: Arc<parking_lot::Mutex<slopty_host::presence::Presence>>,
     /// When the daemon came up (for `doctor`).
     pub started_at: std::time::Instant,
     /// Where it listens.
@@ -175,7 +173,7 @@ async fn main() -> Result<()> {
     let listen = listener.local_addr()?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
-    let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
+    let items = ItemStore::open(&data_dir.join("items.json"))?;
     let holds: Box<dyn slopty_host::wake::Holds> = Box::new(Assertions::default());
     let wake = Arc::new(parking_lot::Mutex::new(slopty_host::wake::Wake::new(holds)));
     let screens = slopty_host::screen::Registry::default();
@@ -189,10 +187,9 @@ async fn main() -> Result<()> {
         id,
         name: paths::host_name(),
         events,
-        canvas,
+        items,
         agents: Arc::default(),
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
-        presence: Arc::default(),
         started_at: std::time::Instant::now(),
         listen,
         screens,

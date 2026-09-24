@@ -4,8 +4,8 @@
 //!   the viewport (scrolled or following), and says what to ask the host for.
 //! * [`link`] — [`link::HostLink`]: one connection to a host; fans control and session streams into
 //!   a single event channel and queues outbound messages.
-//! * [`canvas`] — [`canvas::CanvasDoc`] (host-authoritative item layout, applied optimistically)
-//!   and [`canvas::Camera`] (pan/zoom mapping).
+//! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
+//!   optimistically.
 //! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
 //!   (workspaces of columns of tiles), with its springs and gestures; pure, clocked by the caller.
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
@@ -15,15 +15,14 @@
 
 #![forbid(unsafe_code)]
 
-pub mod arrange;
-pub mod canvas;
+pub mod items;
 pub mod layout;
 pub mod link;
 pub mod pacing;
 pub mod screen;
 pub mod term;
 
-pub use canvas::{Camera, CanvasChange, CanvasDoc};
+pub use items::{ItemChange, ItemDoc};
 pub use link::{HostLink, LinkEvent, warm_up_decoder};
 pub use pacing::{Clock, FrameStamp, Pace, Pacer, PacingStats, SystemClock};
 pub use screen::{CursorState, Presentable, ScreenHandle, ScreenStats};

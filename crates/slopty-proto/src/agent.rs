@@ -29,7 +29,7 @@ pub enum BlockReason {
     IdlePrompt,
 }
 
-/// Unified agent status, shape-coded on the canvas.
+/// Unified agent status, shape-coded in the chrome.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AgentStatus {
     /// No agent detected in the session.

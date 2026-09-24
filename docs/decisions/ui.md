@@ -543,6 +543,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   quiet spell is applied at once and, while events keep arriving, the loop drains up to 256 of
   them and applies the batch in one `cx.update` at most once per nominal frame. A keystroke on
   an idle link is not delayed; a flood costs one update and one notify per frame.
+  Amended 2026-09-24: the once-per-frame timer is the self-test build's only
+  (`slopty_app::e2e::Pacer`, `feature = "e2e"`). Its reason was GPUI's `test-support`, which
+  draws every dirty window inside `flush_effects`; the shipped app draws at the display's
+  vsync however many updates land in between, so the timer only delayed an echo by up to one
+  nominal 60 Hz frame (16.7 ms) and capped a ProMotion display at 60 updates a second. The
+  shipped loop still drains up to 256 queued events with `try_recv` into one update.
 
 - ✅ **A session sends at most 125 frames a second** (2026-09-05). The host coalesced PTY output
   for 2 ms and then sent a frame, so a flooding shell produced 500 frames/s per session; twenty

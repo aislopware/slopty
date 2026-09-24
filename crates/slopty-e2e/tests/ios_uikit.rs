@@ -6,7 +6,7 @@
 //! metal view runs the same code its `pressesBegan:` / `touchesBegan:` / pinch target /
 //! `insertText:` / `deleteBackward` run once they have read their UIKit objects, so a lost
 //! modifier, a wrongly mapped touch phase or a key the text system should have typed shows up
-//! here and nowhere else. Every assertion reads the dump (rows, focus, zoom, bounds, a11y);
+//! here and nowhere else. Every assertion reads the dump (rows, focus, overview, bounds, a11y);
 //! no golden is involved.
 
 #[cfg(test)]
@@ -14,14 +14,10 @@ mod tests {
     use std::time::Duration;
 
     use slopty_e2e::harness::{Simulator, Stack};
-    use slopty_e2e::{Driver, Dump, ItemInfo, UiTouchPhase, UiTouchPoint};
+    use slopty_e2e::{Driver, Dump, UiTouchPhase, UiTouchPoint};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
-    /// Room the top bar and the key bar (with the home indicator) take, in points, when
-    /// looking for a bare patch of canvas.
-    const TOP_BAR: f32 = 80.0;
-    const BOTTOM_BARS: f32 = 160.0;
     /// How long a finger rests before lifting, so the release carries no velocity.
     const STILL: Duration = Duration::from_millis(100);
     /// Longer than the view's key repeat delay (400 ms) plus a few repeat ticks: a held key
@@ -72,44 +68,38 @@ mod tests {
         all.get(all.len().saturating_sub(lines)..).unwrap_or_default().join("\n")
     }
 
-    /// A point of bare canvas next to `item`: below it, above it, or to its right, whichever
-    /// is inside the window and on no item.
-    fn bare_canvas(dump: &Dump, item: &ItemInfo) -> (f32, f32) {
-        let [x, y, w, h] = item.bounds;
+    /// A horizontal two-finger swipe of `dx` points across the window's middle, the fingers
+    /// resting before they lift so the release carries no velocity (no fling).
+    async fn swipe(drv: &mut Driver, dump: &Dump, dx: f32) {
         let (vw, vh) = (dump.window.width, dump.window.height);
-        let candidates =
-            [(x + w / 2.0, y + h + 24.0), (x + w / 2.0, y - 24.0), (x + w + 24.0, y + h / 2.0)];
-        let inside = |(px, py): (f32, f32)| {
-            px > 8.0 && px < vw - 8.0 && py > TOP_BAR + 8.0 && py < vh - BOTTOM_BARS
+        let (x0, y) = (vw / 2.0 - dx / 2.0 - 20.0, vh / 2.0);
+        let fingers = |x: f32| {
+            [UiTouchPoint { id: 7, x, y }, UiTouchPoint { id: 8, x: x + 40.0, y: y + 30.0 }]
         };
-        let on_item = |(px, py): (f32, f32)| {
-            dump.items.iter().any(|i| {
-                let [left, top, width, height] = i.bounds;
-                px >= left && px <= left + width && py >= top && py <= top + height
-            })
-        };
-        candidates
-            .into_iter()
-            .find(|p| inside(*p) && !on_item(*p))
-            .unwrap_or_else(|| panic!("no bare canvas around {item:?} in {vw}x{vh}"))
+        let steps = 6_u32;
+        drv.ui_touch(&fingers(x0), UiTouchPhase::Began).await.unwrap();
+        for i in 1..=steps {
+            #[expect(clippy::cast_precision_loss, reason = "six steps")]
+            let x = dx.mul_add(i as f32 / steps as f32, x0);
+            drv.ui_touch(&fingers(x), UiTouchPhase::Moved).await.unwrap();
+        }
+        // A finger that stops reports nothing until it lifts (UIKit sends no `touchesMoved:`
+        // for a still touch); the pause is what tells the recognizer not to fling.
+        tokio::time::sleep(STILL).await;
+        drv.ui_touch(&fingers(x0 + dx), UiTouchPhase::Ended).await.unwrap();
     }
 
-    /// The dump once the camera has stopped moving: two polls apart, the zoom and every
-    /// item's bounds agree.
-    async fn settled(drv: &mut Driver) -> Dump {
-        let mut last: Option<(f32, Vec<[f32; 4]>)> = None;
-        drv.wait_for("the camera to settle", STEP, |d| {
-            let now = (d.zoom, d.items.iter().map(|i| i.bounds).collect::<Vec<_>>());
-            let same = last.as_ref() == Some(&now);
-            last = Some(now);
-            same
-        })
-        .await
-        .unwrap()
+    /// Tap the middle of the `role` node labelled `label`.
+    async fn tap(drv: &mut Driver, role: &str, label: &str) {
+        let d = drv.dump().await.unwrap();
+        let node =
+            d.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{label}: {:#?}", d.a11y));
+        let [left, top, width, height] = node.bounds;
+        drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
     }
 
     /// A hardware keyboard through `pressesBegan:` / `pressesEnded:` on the metal view: a
-    /// ⌘⇧ chord reaches the keymaps (a note card opens), arrows and Escape reach
+    /// ⌘⇧ chord reaches the keymaps (a note tile opens), arrows and Escape reach
     /// the shell as their escape sequences, and a plain key while the terminal is editing is
     /// left to the text system, which types it.
     #[tokio::test]
@@ -172,7 +162,7 @@ mod tests {
         // ⌘⇧N: command and shift from the press's flags, `n` from its usage; ⌘W takes the
         // note away again and the shell has the keyboard back.
         drv.ui_key("cmd-shift-n").await.unwrap();
-        drv.wait_for("a note card", STEP, |d| d.item("note").is_some()).await.unwrap();
+        drv.wait_for("a note tile", STEP, |d| d.item("note").is_some()).await.unwrap();
         drv.ui_key("cmd-w").await.unwrap();
         drv.wait_for("the note gone and the shell focused", STEP, |d| {
             d.item("note").is_none() && d.focused == format!("terminal:{session}")
@@ -204,91 +194,76 @@ mod tests {
     }
 
     /// Fingers through `touchesBegan:` / `touchesMoved:` / `touchesEnded:` and the pinch
-    /// recognizer's target. With two shells fitted side by side (⌘N, ⌘1): a tap on the first
-    /// activates it; a one-finger drag on bare canvas, a second finger resting beside it, pans
-    /// the camera so the content follows the finger along the locked axis and the zoom stays;
-    /// a pinch zooms about the point under the fingers.
+    /// recognizer's target. With two shells in two columns (⌘N): a horizontal two-finger swipe
+    /// drags the strip with the fingers and snaps to the column it lands on, which takes the
+    /// focus; taps reach the titlebar's "…" menu and a tile in the overview; a pinch in opens
+    /// the overview and a pinch out closes it.
     #[tokio::test]
-    async fn fingers_on_the_simulator_tap_pan_and_pinch() {
+    async fn fingers_on_the_simulator_swipe_tap_and_pinch() {
         let Some(simulator) = simulator() else { return };
         let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let first = dump.item("terminal").unwrap().clone();
         let drv = &mut stack.driver;
         drv.keys("cmd-n").await.unwrap();
-        drv.wait_for("a second shell", STEP, |d| {
-            d.items.len() == 2 && d.items.iter().any(|i| i.id != first.id && i.active)
-        })
-        .await
-        .unwrap();
-        drv.keys("cmd-1").await.unwrap();
-        let fitted = settled(drv).await;
-        let (vw, vh) = (fitted.window.width, fitted.window.height);
-        for item in &fitted.items {
-            let [x, y, w, h] = item.bounds;
-            assert!(x >= 0.0 && y >= 0.0 && x + w <= vw && y + h <= vh, "fitted: {item:?}");
-        }
+        let two = drv
+            .wait_for("a second shell, focused", STEP, |d| {
+                d.items.len() == 2 && d.items.iter().any(|i| i.id != first.id && i.active)
+            })
+            .await
+            .unwrap();
         let item_by = |d: &Dump, id: &str| d.items.iter().find(|i| i.id == id).unwrap().clone();
+        let second = two.items.iter().find(|i| i.id != first.id).unwrap().clone();
+        assert_eq!(second.pos[1], item_by(&two, &first.id).pos[1] + 1, "{two:#?}");
+        let [x0, y0, ..] = item_by(&two, &first.id).bounds;
 
-        // A tap on the first shell activates it.
-        let (tx, ty) = item_by(&fitted, &first.id).center();
-        if let Err(e) = drv.ui_tap(tx, ty).await {
-            panic!("{e:#}\napp log:\n{}", app_log_tail(&stack, 40));
-        }
-        let drv = &mut stack.driver;
-        let before = drv
-            .wait_for("the first shell active", STEP, |d| item_by(d, &first.id).active)
+        // A swipe to the right drags the first column back into view: the content follows
+        // the fingers, and the snap focuses the column it lands on.
+        let vw = two.window.width;
+        swipe(drv, &two, vw * 0.6).await;
+        let back = drv
+            .wait_for("the swipe to focus the first column", STEP, |d| {
+                item_by(d, &first.id).active
+                    && d.focused == format!("terminal:{}", first.session.as_deref().unwrap_or(""))
+            })
             .await
             .unwrap();
+        let [x1, y1, w1, _] = item_by(&back, &first.id).bounds;
+        assert!(x1 >= x0 && x1 >= 0.0 && x1 + w1 <= vw + 1.0, "in view: {x0} → {x1}");
+        assert!((y1 - y0).abs() < 2.0, "locked to the swipe's axis: {y0} → {y1}");
+        assert!(!back.overview, "a swipe is not a pinch");
 
-        // A pan of 120 points to the left, the second finger resting beside the first.
-        let (bx, by) = bare_canvas(&before, &item_by(&before, &first.id));
-        let [x0, y0, ..] = item_by(&before, &first.id).bounds;
-        let (steps, travel) = (6_u32, -120.0_f32);
-        let fingers = |x: f32| {
-            [UiTouchPoint { id: 7, x, y: by }, UiTouchPoint { id: 8, x: x + 40.0, y: by + 30.0 }]
-        };
-        drv.ui_touch(&fingers(bx), UiTouchPhase::Began).await.unwrap();
-        for i in 1..=steps {
-            #[expect(clippy::cast_precision_loss, reason = "six steps")]
-            let x = travel.mul_add(i as f32 / steps as f32, bx);
-            drv.ui_touch(&fingers(x), UiTouchPhase::Moved).await.unwrap();
-        }
-        // A finger that stops reports nothing until it lifts (UIKit sends no `touchesMoved:`
-        // for a still touch); the pause is what tells the recognizer not to fling.
-        tokio::time::sleep(STILL).await;
-        drv.ui_touch(&fingers(bx + travel), UiTouchPhase::Ended).await.unwrap();
-        drv.wait_for("the camera to follow the finger", STEP, |d| {
-            let [x, ..] = item_by(d, &first.id).bounds;
-            (x - x0).abs() > 1.0
+        // And to the left, the second column again.
+        swipe(drv, &back, -vw * 0.6).await;
+        drv.wait_for("the swipe to focus the second column", STEP, |d| {
+            item_by(d, &second.id).active
         })
         .await
         .unwrap();
-        let after = settled(drv).await;
-        let [x1, y1, ..] = item_by(&after, &first.id).bounds;
-        assert!(
-            (x1 - x0 - travel).abs() < 2.0,
-            "the content follows the finger by {travel}, without a fling: {x0} → {x1} at zoom {}",
-            after.zoom
-        );
-        assert!((y1 - y0).abs() < 2.0, "locked to the finger's axis: {y0} → {y1}");
-        assert!((after.zoom - before.zoom).abs() < 1e-3, "a pan does not zoom");
 
-        // A pinch about the first shell's centre: zoom × 1.5, the point under the fingers fixed.
-        let (cx, cy) = item_by(&after, &first.id).center();
-        drv.ui_pinch(cx, cy, 1.5, 4).await.unwrap();
-        let zoomed = drv
-            .wait_for("the zoom", STEP, |d| (d.zoom / after.zoom - 1.5).abs() < 0.01)
+        // A tap on "…", a tap on its "Overview": every workspace at a glance. A tap on the
+        // first shell there focuses it and closes the overview.
+        tap(drv, "Button", "More").await;
+        drv.wait_for("the … menu", STEP, |d| d.a11y_node("MenuItem", Some("Overview")).is_some())
             .await
             .unwrap();
-        let [zx, zy, ..] = item_by(&zoomed, &first.id).bounds;
-        let expected = ((zx - cx) / 1.5 + cx, (zy - cy) / 1.5 + cy);
-        assert!(
-            (expected.0 - x1).abs() < 2.0 && (expected.1 - y1).abs() < 2.0,
-            "zoomed about ({cx}, {cy}): {:?} from ({x1}, {y1}) at {}",
-            (zx, zy),
-            zoomed.zoom
-        );
+        tap(drv, "MenuItem", "Overview").await;
+        let over = drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
+        let (tx, ty) = item_by(&over, &first.id).center();
+        drv.ui_tap(tx, ty).await.unwrap();
+        drv.wait_for("the tap to focus the first shell", STEP, |d| {
+            !d.overview && item_by(d, &first.id).active
+        })
+        .await
+        .unwrap();
+
+        // A pinch in opens the overview, a pinch out closes it.
+        let (cx, cy) = (vw / 2.0, two.window.height / 2.0);
+        drv.ui_pinch(cx, cy, 0.6, 4).await.unwrap();
+        drv.wait_for("a pinch in to open the overview", STEP, |d| d.overview).await.unwrap();
+        drv.ui_pinch(cx, cy, 1.6, 4).await.unwrap();
+        let closed = drv.wait_for("a pinch out to close it", STEP, |d| !d.overview).await.unwrap();
+        assert!(item_by(&closed, &first.id).active, "the focus kept: {closed:#?}");
         stack.shutdown().await;
     }
 

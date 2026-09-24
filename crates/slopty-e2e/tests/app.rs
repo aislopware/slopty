@@ -58,8 +58,8 @@ mod tests {
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
 
-        // First connect: the host is up and the app opened one shell on the empty canvas, with
-        // the keyboard, and the shell has printed its prompt.
+        // First connect: the worker is up and the app opened one shell in the empty workspace,
+        // with the keyboard, and the shell has printed its prompt.
         let dump = drv
             .wait_for("the first shell with a prompt", STEP, |d| {
                 d.status == "connected"
@@ -69,8 +69,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(dump.hosts.len(), 1, "{dump:#?}");
-        assert_eq!(dump.hosts[0].name, "e2e-host");
+        assert_eq!(dump.workers.len(), 1, "{dump:#?}");
+        assert_eq!(dump.workers[0].name, "e2e-host");
+        assert_eq!(dump.workspace, "Workspace 1", "{dump:#?}");
         // ptyd compiled ghostty's terminfo into the stack's own database while it came up, so
         // the shells it spawns can be told `TERM=xterm-ghostty` (the dump does not carry a
         // session's environment, and asking the shell would mean typing at it).
@@ -85,9 +86,10 @@ mod tests {
         assert_eq!(dump.items.len(), 1, "{dump:#?}");
         let term = dump.item("terminal").unwrap().clone();
         assert!(term.active, "{dump:#?}");
+        assert_eq!(term.worker, "e2e-host", "{term:?}");
         assert!(term.bounds[2] > 100.0 && term.bounds[3] > 100.0, "{term:?}");
-        // What a screen reader gets: the item's heading, the grid as a terminal whose value is
-        // the cursor row, the top bar's buttons, all inside the window.
+        // What a screen reader gets: the tile's heading, the grid as a terminal whose value is
+        // the cursor row, the titlebar's buttons, all inside the window.
         assert!(
             dump.a11y_node("Heading", None).is_some_and(|n| {
                 n.label.as_deref().is_some_and(|l| l.starts_with("terminal "))
@@ -98,7 +100,7 @@ mod tests {
         let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
         assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
-        for label in ["shell", "agent", "note", "window", "fit", "Commands"] {
+        for label in ["Open", "More", "Workspace 1, show every workspace"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 
@@ -183,41 +185,45 @@ mod tests {
             .await
             .unwrap();
 
-        // The camera panned to reveal the new shell; ⌘1 fits both into the viewport. In this
-        // window that is below the card zoom: the shells draw as cards and the keyboard goes
-        // to the canvas (a focus left on an undrawn terminal would swallow every shortcut).
-        drv.keys("cmd-1").await.unwrap();
+        // The new shell opened in a column right of the first. ⌘⌥← goes back to the first
+        // column, whose terminal takes the keyboard; both half-width columns are in view.
+        drv.keys("cmd-alt-left").await.unwrap();
+        let session = term.session.clone().unwrap();
         let dump = drv
-            .wait_for("both shells in view as cards", STEP, |d| {
-                d.zoom < 0.6
-                    && d.focused == "canvas"
-                    && d.items.iter().all(|i| {
-                        let [x, y, w, h] = i.bounds;
-                        x >= 0.0 && y >= 0.0 && x + w <= d.window.width && y + h <= d.window.height
-                    })
-            })
-            .await
-            .unwrap();
-        // Clicking the first card makes it the active item again.
-        let first = dump.items.iter().find(|i| i.id == term.id).unwrap();
-        let (mid_x, mid_y) = first.center();
-        drv.click(mid_x, mid_y).await.unwrap();
-        let dump = drv
-            .wait_for("the click to activate the first shell", STEP, |d| {
+            .wait_for("the first shell focused again", STEP, |d| {
                 d.items.iter().any(|i| i.id == term.id && i.active)
+                    && d.focused == format!("terminal:{session}")
             })
             .await
             .unwrap();
         assert_eq!(dump.items.len(), 2);
-        assert_eq!(dump.focused, "canvas", "{dump:#?}");
+        assert!(
+            dump.items.iter().all(|i| {
+                let [x, y, w, h] = i.bounds;
+                w > 0.0
+                    && x >= 0.0
+                    && y >= 0.0
+                    && x + w <= dump.window.width
+                    && y + h <= dump.window.height
+            }),
+            "both columns in view: {dump:#?}"
+        );
         assert!(!finished(&dump), "looking at the shell clears its badge: {:#?}", dump.a11y);
+        let second = dump.items.iter().find(|i| i.id != term.id).unwrap().clone();
+        assert_eq!(second.pos[1], term.pos[1] + 1, "opened right of the first: {dump:#?}");
 
-        // ⌘0 brings the grids back and the active shell takes the keyboard again.
-        drv.keys("cmd-0").await.unwrap();
-        let session = term.session.clone().unwrap();
+        // A click on the second tile focuses it; ⌘1 goes to the first column again.
+        let (x, y) = second.center();
+        drv.click(x, y).await.unwrap();
+        drv.wait_for("the click to focus the second shell", STEP, |d| {
+            d.items.iter().any(|i| i.id == second.id && i.active)
+        })
+        .await
+        .unwrap();
+        drv.keys("cmd-1").await.unwrap();
         let dump = drv
-            .wait_for("the first shell to take focus at zoom 1", STEP, |d| {
-                (d.zoom - 1.0).abs() < 1e-3 && d.focused == format!("terminal:{session}")
+            .wait_for("⌘1 on the first column", STEP, |d| {
+                d.focused == format!("terminal:{session}")
             })
             .await
             .unwrap();
@@ -467,7 +473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notes_and_zoom_change_the_canvas_as_dumped() {
+    async fn notes_and_the_width_keys_change_the_workspace_as_dumped() {
         if !gated() {
             return;
         }
@@ -496,65 +502,55 @@ mod tests {
         .unwrap();
         drv.keys("enter").await.unwrap();
         let dump = drv
-            .wait_for("a note", STEP, |d| {
-                d.item("note").is_some() && d.a11y_node("Dialog", Some("Commands")).is_none()
+            .wait_for("a note, drawn", STEP, |d| {
+                d.item("note").is_some_and(|n| n.bounds[2] > 0.0)
+                    && d.a11y_node("Dialog", Some("Commands")).is_none()
             })
             .await
             .unwrap();
-        let before = dump.item("note").unwrap().bounds;
-        assert!((dump.zoom - 1.0).abs() < 1e-3, "{}", dump.zoom);
+        // The note opened in a column right of the shell and has the focus.
+        let note = dump.item("note").unwrap().clone();
+        let shell = dump.item("terminal").unwrap().clone();
+        assert!(note.active, "{dump:#?}");
+        assert_eq!(note.pos[1], shell.pos[1] + 1, "{dump:#?}");
+        let before = note.bounds;
 
-        // Zoom in twice: the camera scale and the item's window size both grow.
-        drv.keys("cmd-= cmd-=").await.unwrap();
-        let dump = drv.wait_for("zoom", STEP, |d| d.zoom > 1.05).await.unwrap();
+        // ⌘R: the next preset width (two thirds); ⌘⇧R back to half.
+        drv.keys("cmd-r").await.unwrap();
+        let dump = drv
+            .wait_for("a wider note", STEP, |d| {
+                d.item("note").is_some_and(|n| n.bounds[2] > before[2] + 50.0)
+            })
+            .await
+            .unwrap();
         let after = dump.item("note").unwrap().bounds;
-        assert!(after[2] > before[2] && after[3] > before[3], "{before:?} → {after:?}");
-
-        // ⌘0 puts it back.
-        drv.keys("cmd-0").await.unwrap();
-        let dump = drv.wait_for("zoom reset", STEP, |d| (d.zoom - 1.0).abs() < 1e-3).await.unwrap();
-        let reset = dump.item("note").unwrap().bounds;
-        assert!((reset[2] - before[2]).abs() < 1.0, "{before:?} → {reset:?}");
+        assert!((after[3] - before[3]).abs() < 1.0, "only the width moved: {before:?} → {after:?}");
+        drv.keys("cmd-shift-r").await.unwrap();
+        let dump = drv
+            .wait_for("the note back at half", STEP, |d| {
+                d.item("note").is_some_and(|n| (n.bounds[2] - before[2]).abs() < 1.0)
+            })
+            .await
+            .unwrap();
 
         let frame = drv.render(&render_path).await.unwrap();
         assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
-        // ⌘⇧R tidies the canvas into a block per repository. The shell has a working
-        // directory and the note does not, so there are two blocks, each under a heading a
-        // screen reader can read.
-        let scattered = dump.item("note").unwrap().bounds;
-        drv.keys("cmd-shift-r").await.unwrap();
-        let dump = drv
-            .wait_for("the arrangement", STEP, |d| {
-                d.a11y_node("Heading", Some("no repository")).is_some()
-            })
-            .await
-            .unwrap();
-        let headings =
-            dump.a11y.iter().filter(|n| n.role == "Heading" && n.label.is_some()).count();
-        assert!(headings >= 2, "one heading per repository, and one for the note: {headings}");
-        let tidied = dump.item("note").unwrap().bounds;
-        let moved = tidied.iter().zip(scattered).any(|(a, b)| (a - b).abs() > 0.5);
-        assert!(moved, "the note was tidied: {scattered:?} -> {tidied:?}");
-
-        // The shell's heading is its checkout's name, which differs from machine to machine;
-        // close it so the golden is only what every run has.
-        let terminal = dump.item("terminal").expect("the first shell");
-        drv.ok(&Command::Click {
-            x: terminal.center().0,
-            y: terminal.center().1,
-            button: Button::Left,
-            count: 1,
+        // The shell, a column left of the note, takes a name: ⌘E puts a field in its header,
+        // ↩ keeps the name, the heading says it, and the shell has the keyboard back (⌘W
+        // below needs it focused).
+        let shell = dump.item("terminal").unwrap().id.clone();
+        drv.keys("cmd-alt-left").await.unwrap();
+        drv.wait_for("the shell focused", STEP, |d| {
+            d.items.iter().any(|i| i.id == shell && i.active)
         })
         .await
         .unwrap();
-        // First it takes a name: ⌘E puts a field in its title bar, ↩ keeps the name, the
-        // heading says it, and the shell has the keyboard back (⌘W below needs it active).
         drv.keys("cmd-e").await.unwrap();
         // (The field's focus does not show in the tree — gpui-kit tracks it on an element
         // without a role — so the name landing is the proof the keys went to it.)
         drv.wait_for("the name field", STEP, |d| {
-            d.a11y_node("TextInput", Some("Card name")).is_some()
+            d.a11y_node("TextInput", Some("Tile name")).is_some()
         })
         .await
         .unwrap();
@@ -562,22 +558,16 @@ mod tests {
         drv.keys("enter").await.unwrap();
         drv.wait_for("the shell named", STEP, |d| {
             d.a11y_node("Heading", Some("terminal build box")).is_some()
-                && d.a11y_node("TextInput", Some("Card name")).is_none()
+                && d.a11y_node("TextInput", Some("Tile name")).is_none()
         })
         .await
         .unwrap();
         drv.keys("cmd-w").await.unwrap();
-        drv.wait_for("the shell to go", STEP, |d| d.item("terminal").is_none()).await.unwrap();
-        drv.keys("cmd-shift-r").await.unwrap();
-        drv.wait_for("the note alone under its heading", STEP, |d| {
-            d.items.len() == 1 && d.a11y_node("Heading", Some("no repository")).is_some()
+        drv.wait_for("the shell to go, the note alone", STEP, |d| {
+            d.item("terminal").is_none() && d.items.len() == 1
         })
         .await
         .unwrap();
-
-        let arranged = stack.path("arrange-by-repo.png");
-        let frame = stack.driver.render(&arranged).await.unwrap();
-        assert_matches("arrange-by-repo", &frame, TOLERANCE, &artifacts_dir()).unwrap();
         stack.shutdown().await;
     }
 

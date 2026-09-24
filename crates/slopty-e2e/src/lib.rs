@@ -379,31 +379,37 @@ pub enum Reply {
 pub struct Dump {
     /// The window.
     pub window: WindowInfo,
-    /// Every added host, in switcher order.
-    pub hosts: Vec<HostInfo>,
-    /// The add-host panel is showing.
+    /// Every added worker.
+    pub workers: Vec<WorkerInfo>,
+    /// The add-worker panel is showing.
     pub adding: bool,
-    /// The status text in the top bar.
+    /// `connected` while every worker is, else the first other worker's state; `no workers`
+    /// with none.
     pub status: String,
-    /// The transient notice in the top bar, if any.
+    /// The toast over the workspace, if any.
     pub notice: Option<String>,
-    /// Which kind of item holds the keyboard on the active canvas (the canvas's own notion).
+    /// Which kind of tile holds the keyboard (the workspace's own notion).
     pub focus: Option<String>,
-    /// GPUI's focused element: `canvas`, `terminal:<session>`, `other`, or `none`.
+    /// GPUI's focused element: `workspace`, `terminal:<session>`, `screen:<stream>`, `other`,
+    /// or `none`.
     pub focused: String,
-    /// Camera zoom of the active canvas.
-    pub zoom: f32,
-    /// Items on the active canvas, by z (bottom first).
+    /// The active workspace's name.
+    #[serde(default)]
+    pub workspace: String,
+    /// The overview is open.
+    #[serde(default)]
+    pub overview: bool,
+    /// Every tile, workspace by workspace, column by column, top to bottom.
     pub items: Vec<ItemInfo>,
-    /// Terminals on the active canvas.
+    /// Terminals with a view.
     pub terminals: Vec<TerminalInfo>,
-    /// Remote windows and displays on the active canvas.
+    /// Remote windows and displays with a stream.
     pub screens: Vec<ScreenInfo>,
     /// The accessibility tree GPUI built for the last frame, depth first in reading order,
     /// trimmed to what a screen reader reads. Empty when the app was built without `e2e`.
     #[serde(default)]
     pub a11y: Vec<A11yNode>,
-    /// `slopty hook install` has already been offered on the active canvas.
+    /// `slopty hook install` has already been offered on some worker.
     pub hooks_offered: bool,
     /// The UI's frame times since the last [`Command::FramesReset`].
     pub frames: FrameInfo,
@@ -499,17 +505,15 @@ pub struct WindowInfo {
     pub active: bool,
 }
 
-/// One added host.
+/// One added worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub struct HostInfo {
+pub struct WorkerInfo {
     /// Display name.
     pub name: String,
     /// `connected`, `connecting…`, …
     pub status: String,
-    /// Its canvas is the one shown.
-    pub active: bool,
-    /// Agents on this host waiting on the human; the pill and the Dock badge sum this over
-    /// every host.
+    /// Agents on this worker waiting on the human; the pill and the Dock badge sum this over
+    /// every worker.
     #[serde(default)]
     pub needs_you: usize,
     /// Link round trip in microseconds, sampled once a second while connected (the bar's
@@ -518,20 +522,24 @@ pub struct HostInfo {
     pub rtt_us: Option<u64>,
 }
 
-/// One canvas item.
+/// One tile.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct ItemInfo {
     /// Item id.
     pub id: String,
-    /// `terminal`, `window`, `display`, `note`.
+    /// `terminal`, `window`, `display`, `note`, `file`.
     pub kind: String,
+    /// The worker holding it, by name.
+    #[serde(default)]
+    pub worker: String,
     /// Session id for terminals.
     pub session: Option<String>,
-    /// Canvas rect: x, y, w, h in canvas units.
-    pub rect: [f32; 4],
-    /// Window rect: x, y, w, h in points (where to click).
+    /// Its place: workspace, column, tile in the column.
+    #[serde(default)]
+    pub pos: [usize; 3],
+    /// Window rect: x, y, w, h in points (where to click); zero when it is not drawn.
     pub bounds: [f32; 4],
-    /// The active item.
+    /// The focused tile.
     pub active: bool,
     /// Sleeping.
     pub sleeping: bool,

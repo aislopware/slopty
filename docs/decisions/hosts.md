@@ -222,3 +222,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake`, which dials the host
   from `fe80::1%lo0` (this Mac's own link-local address, not loopback) against a host admitting
   only 10/8 and reads the refusal in under a second.
+
+- ✅ **Superseded 2026-09-24: one workspace for every worker, no switcher** (see
+  `workspace.md`). The machines the app reaches are workers; one `WorkspaceView` shows all of
+  them at once, a tile being `(WorkerKey, ItemId)` (the key is the `WorkerId`'s 128 bits), so
+  the per-host canvas, the switcher, ⌘⌥←/→ between hosts, the Host menu and the camera resume
+  are gone. Each worker keeps its own link
+  and reconnect loop (`slopty_app::workers`); a dropped worker's tiles stay and say so, and the
+  titlebar names only the workers that are down. Cross-host attention holds unchanged: the pill
+  and the badge count every worker's agents and ⌘⇧A goes to the next one wherever it is.

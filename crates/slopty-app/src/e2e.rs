@@ -27,13 +27,13 @@ use gpui::{
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
-    Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, HostInfo, ItemInfo, LatencyInfo,
-    Reply, ScreenInfo, TerminalInfo, WindowInfo,
+    Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo, LatencyInfo, Reply,
+    ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
 use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
-use slopty_proto::canvas::ItemKind;
-use slopty_ui::canvas::KeyTarget;
+use slopty_proto::items::ItemKind;
 use slopty_ui::screen::ScreenView;
+use slopty_ui::workspace::{KeyTarget, WorkerStatus};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
@@ -66,8 +66,7 @@ pub fn serve(
                         Ok(Ok(net::Added { id, name })) => {
                             workspace.update(cx, |ws, cx| {
                                 ws.adding = None;
-                                ws.add_host(id, name, cx);
-                                ws.active = Some(id);
+                                ws.add_worker(id, name, cx);
                                 cx.notify();
                             });
                             Reply::Ok
@@ -154,6 +153,33 @@ pub fn serve(
         }
     })
     .detach();
+}
+
+/// The self-test build's link pacing: GPUI's `test-support` draws every dirty window inside
+/// `flush_effects`, so an update per burst of events would be a whole frame per burst. A batch
+/// waits until one nominal frame has passed since the last; the first after a quiet spell
+/// goes at once. The shipped app applies each batch as it comes (GPUI draws at vsync).
+#[cfg(feature = "e2e")]
+pub struct Pacer {
+    pace: std::time::Duration,
+    last: Option<std::time::Instant>,
+}
+
+#[cfg(feature = "e2e")]
+impl Pacer {
+    pub const fn new(pace: std::time::Duration) -> Self {
+        Self { pace, last: None }
+    }
+
+    pub async fn wait(&mut self, cx: &gpui::AsyncApp) {
+        if let Some(due) = self.last.and_then(|at| at.checked_add(self.pace)) {
+            let wait = due.saturating_duration_since(std::time::Instant::now());
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
+        }
+        self.last = Some(std::time::Instant::now());
+    }
 }
 
 /// `answer`, once the window has drawn a frame with everything dispatched so far.
@@ -474,21 +500,17 @@ fn apply(
             Reply::Ok
         }
         Command::Open { command, count } => {
-            let Some(canvas) = workspace.read(cx).active_canvas() else {
-                return Reply::Error { message: "no active canvas".into() };
-            };
-            canvas.update(cx, |canvas, cx| {
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, |view, cx| {
                 for _ in 0..count {
-                    canvas.open_command(command.clone(), cx);
+                    view.open_command(command.clone(), cx);
                 }
             });
             Reply::Ok
         }
         Command::OpenFile { path, line } => {
-            let Some(canvas) = workspace.read(cx).active_canvas() else {
-                return Reply::Error { message: "no active canvas".into() };
-            };
-            canvas.update(cx, |canvas, cx| canvas.open_file(&path, line, cx));
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, |view, cx| view.open_file(&path, line, cx));
             Reply::Ok
         }
         Command::FramesReset => {
@@ -499,17 +521,13 @@ fn apply(
             let Ok(session) = session.parse::<SessionId>() else {
                 return Reply::Error { message: format!("not a session id: {session}") };
             };
-            let Some(canvas) = workspace.read(cx).active_canvas() else {
-                return Reply::Error { message: "no active canvas".into() };
-            };
-            canvas.update(cx, |canvas, cx| canvas.reveal_session(session, cx));
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, |view, cx| view.reveal_session(session, cx));
             Reply::Ok
         }
         Command::AddDisplay => {
-            let Some(canvas) = workspace.read(cx).active_canvas() else {
-                return Reply::Error { message: "no active canvas".into() };
-            };
-            canvas.update(cx, slopty_ui::canvas::CanvasView::add_first_display);
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, slopty_ui::workspace::WorkspaceView::add_first_display);
             Reply::Ok
         }
         Command::NotificationResponse { tag } => {
@@ -688,17 +706,23 @@ impl Workspace {
     /// Everything a test may want to know, read from the entities.
     fn dump(&self, window: &Window, cx: &App) -> Dump {
         let viewport = window.viewport_size();
-        let hosts = self
-            .hosts
-            .iter()
-            .map(|h| HostInfo {
-                name: h.name.clone(),
-                status: h.status.text(),
-                active: self.active == Some(h.id),
-                needs_you: h.needs_you,
-                rtt_us: h.rtt.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
+        let view = self.view.read(cx);
+        let workers: Vec<WorkerInfo> = view
+            .workers()
+            .map(|(key, name, status)| WorkerInfo {
+                name: name.to_owned(),
+                status: status.text(),
+                needs_you: view.needs_you_on(key),
+                rtt_us: view.rtt(key).map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
             })
             .collect();
+        let status = if workers.is_empty() {
+            "no workers".to_owned()
+        } else {
+            view.workers()
+                .find(|(_, _, s)| **s != WorkerStatus::Connected)
+                .map_or_else(|| "connected".to_owned(), |(_, _, s)| s.text())
+        };
         let mut dump = Dump {
             a11y: a11y_nodes(window),
             window: WindowInfo {
@@ -707,30 +731,42 @@ impl Workspace {
                 scale: window.scale_factor(),
                 active: window.is_window_active(),
             },
-            hosts,
+            workers,
             adding: self.adding.is_some(),
-            status: self.status_text(),
-            notice: self.notice.as_ref().map(|(_seq, text)| text.clone()),
+            status,
+            notice: view.toast_text(cx),
+            workspace: view.workspace_name(),
+            overview: view.layout().overview_open(),
             frames: frame_info(slopty_ui::frames::stats(cx)),
             ..Dump::default()
         };
-        let mut focused = if window.focused(cx).is_some() { "other" } else { "none" }.to_owned();
-        let Some(canvas) = self.active_canvas() else {
-            dump.focused = focused;
-            return dump;
-        };
-        let canvas = canvas.read(cx);
-        dump.zoom = canvas.zoom();
-        dump.client = canvas.me().to_string();
-        dump.hooks_offered = canvas.hooks_offered();
-        if canvas.focus_handle(cx).is_focused(window) {
-            focused = String::from("canvas");
+        let mut focused = if view.focus_handle(cx).is_focused(window) {
+            "workspace"
+        } else if window.focused(cx).is_some() {
+            "other"
+        } else {
+            "none"
         }
-        dump.focus = canvas.active_key_target().map(|t| match t {
+        .to_owned();
+        dump.hooks_offered = view.workers().any(|(key, ..)| view.hooks_offered(key));
+        let context =
+            view.focused().map(|t| t.worker).or_else(|| view.workers().next().map(|w| w.0));
+        dump.client =
+            context.and_then(|key| view.me(key)).map(|me| me.to_string()).unwrap_or_default();
+        dump.focus = view.active_key_target().map(|t| match t {
             KeyTarget::Terminal(_) => "terminal".to_owned(),
             KeyTarget::Screen(_) => "screen".to_owned(),
         });
-        for item in canvas.items() {
+        let names: std::collections::HashMap<_, _> =
+            view.workers().map(|(key, name, _)| (key, name.to_owned())).collect();
+        let mut tiles: Vec<_> = view
+            .layout()
+            .tiles()
+            .filter_map(|tile| view.layout().position(tile).map(|pos| (pos, tile)))
+            .collect();
+        tiles.sort_by_key(|(pos, _)| (pos.workspace, pos.column, pos.tile));
+        for (pos, tile) in tiles {
+            let Some(item) = view.item(tile) else { continue };
             let (kind, session) = match &item.kind {
                 ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
                 ItemKind::Window { .. } => ("window", None),
@@ -745,60 +781,63 @@ impl Workspace {
             let file = match &item.kind {
                 ItemKind::File { path } => Some(FileItemInfo {
                     path: path.clone(),
-                    summary: canvas
+                    summary: view
                         .file(item.id)
                         .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary()),
-                    lines: canvas.file(item.id).map_or(0, |v| v.read(cx).line_count()),
-                    line: canvas.file(item.id).and_then(|v| v.read(cx).reading_line()),
+                    lines: view.file(item.id).map_or(0, |v| v.read(cx).line_count()),
+                    line: view.file(item.id).and_then(|v| v.read(cx).reading_line()),
                 }),
                 _ => None,
             };
-            let b = canvas.window_bounds(item.rect);
-            dump.items.push(ItemInfo {
-                id: item.id.to_string(),
-                kind: kind.to_owned(),
-                session,
-                rect: [item.rect.x, item.rect.y, item.rect.w, item.rect.h],
-                bounds: [
+            let bounds = view.tile_bounds(tile).map_or([0.0; 4], |b| {
+                [
                     f32::from(b.origin.x),
                     f32::from(b.origin.y),
                     f32::from(b.size.width),
                     f32::from(b.size.height),
-                ],
-                active: canvas.active_item() == Some(item.id),
+                ]
+            });
+            dump.items.push(ItemInfo {
+                id: item.id.to_string(),
+                kind: kind.to_owned(),
+                worker: names.get(&tile.worker).cloned().unwrap_or_default(),
+                session,
+                pos: [pos.workspace, pos.column, pos.tile],
+                bounds,
+                active: view.focused() == Some(tile),
                 sleeping: item.sleeping,
                 note,
                 file,
             });
             if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
-                && let Some(view) = canvas.screen(item.id)
+                && let Some(screen) = view.screen(item.id)
             {
-                let view = view.read(cx);
-                if view.focus_handle(cx).is_focused(window) {
-                    focused = format!("screen:{}", view.stream().0);
+                let screen = screen.read(cx);
+                if screen.focus_handle(cx).is_focused(window) {
+                    focused = format!("screen:{}", screen.stream().0);
                 }
-                dump.screens.push(screen_info(item.id, view));
+                dump.screens.push(screen_info(item.id, screen));
             }
             if let ItemKind::Terminal { session } = item.kind
-                && let Some(view) = canvas.terminal(session)
+                && let Some(terminal) = view.terminal(session)
             {
-                let view = view.read(cx);
-                if view.focus_handle(cx).is_focused(window) {
+                let terminal = terminal.read(cx);
+                if terminal.focus_handle(cx).is_focused(window) {
                     focused = format!("terminal:{session}");
                 }
-                let size = view.size();
-                let cursor = view.cursor();
+                let size = terminal.size();
+                let cursor = terminal.cursor();
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
                     kind: "terminal".to_owned(),
-                    title: Some(canvas.terminal_title(session, cx)),
+                    title: Some(view.terminal_title(session, cx)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
-                    rows: view.rows(),
-                    epoch: view.state().epoch(),
-                    agent: view.agent_status().map(agent_line),
-                    agent_detail: canvas.agent(session).and_then(|a| a.detail.clone()),
-                    agent_source: canvas
+                    rows: terminal.rows(),
+                    epoch: terminal.state().epoch(),
+                    agent: terminal.agent_status().map(agent_line),
+                    agent_detail: view.agent(session).and_then(|a| a.detail.clone()),
+                    agent_source: view
                         .agent(session)
                         .map(|a| match a.source {
                             AgentSource::Process => "process",
@@ -807,10 +846,10 @@ impl Workspace {
                             AgentSource::Hook => "hook",
                         })
                         .map(str::to_owned),
-                    latency: latency_info(view.latency()),
-                    face: view.metrics().map(|m| face_info(&m)),
-                    driving: view.driving(),
-                    images: view.state().placements().len(),
+                    latency: latency_info(terminal.latency()),
+                    face: terminal.metrics().map(|m| face_info(&m)),
+                    driving: terminal.driving(),
+                    images: terminal.state().placements().len(),
                 });
             }
         }

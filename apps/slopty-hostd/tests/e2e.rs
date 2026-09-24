@@ -241,12 +241,12 @@ mod tests {
             }))
             .await
             .unwrap();
-        // The canvas snapshot (sent right after HelloAck) and the canvas delta for the new
+        // The item snapshot (sent right after HelloAck) and the item delta for the new
         // terminal item interleave with SessionOpened on the control stream; skip them.
         let session = loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
                 HostMsg::SessionOpened(summary) => break summary.id,
-                HostMsg::Canvas(_sync) => {}
+                HostMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
@@ -300,7 +300,7 @@ mod tests {
         loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
                 HostMsg::Pong { .. } => break,
-                HostMsg::Canvas(_sync) => {}
+                HostMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before Pong: {other:?}"),
             }
         }
@@ -326,7 +326,7 @@ mod tests {
         let session = loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
                 HostMsg::SessionOpened(summary) => break summary.id,
-                HostMsg::Canvas(_sync) => {}
+                HostMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
@@ -360,57 +360,23 @@ mod tests {
     }
 
     /// The terminal lives in ptyd; the screen lives in hostd's engine. When hostd dies and comes
-    /// Two clients on one host: where one looks reaches the other as `CanvasSync::Presence`,
-    /// a newcomer hears where everyone already looks, and a client that drops off is announced
-    /// gone.
+    /// Two clients on one host: one pointing at an item reaches the other in its name, as is
+    /// (the host keeps nothing and checks nothing: an item the other lacks is its to ignore).
     #[tokio::test]
-    async fn where_a_client_looks_reaches_the_others() {
-        use slopty_proto::canvas::{CanvasSync, Rect};
+    async fn a_pointing_reaches_the_others() {
+        use slopty_proto::items::ItemSync;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut guard, addr) = daemons(dir.path()).await;
         let (endpoint_a, mut a) = dial(addr).await;
         guard.1 = Some(endpoint_a);
-        let view = Rect { x: 10.0, y: 20.0, w: 1200.0, h: 800.0 };
-        a.tx.send(&ClientMsg::Look { view: Some(view) }).await.unwrap();
-        // A's own presence comes back to it too (the client filters its own).
-        let mine = next_presence(&mut a).await;
-        assert!(
-            matches!(mine, CanvasSync::Presence { view: Some(v), .. } if v == view),
-            "{mine:?}"
-        );
-
-        // B connects afterwards and is told where A looks before anything else happens.
         let (endpoint_b, mut b) = dial(addr).await;
-        let heard = next_presence(&mut b).await;
-        let CanvasSync::Presence { client: a_client, name, view: Some(seen), .. } = heard else {
-            panic!("{heard:?}");
-        };
-        assert_eq!((name.as_str(), seen), ("e2e", view));
-
-        // A moves; B hears it. A repeats itself; nothing more is said.
-        let moved = Rect { x: -300.0, ..view };
-        a.tx.send(&ClientMsg::Look { view: Some(moved) }).await.unwrap();
-        a.tx.send(&ClientMsg::Look { view: Some(moved) }).await.unwrap();
-        let heard = next_presence(&mut b).await;
-        assert!(
-            matches!(heard, CanvasSync::Presence { client, view: Some(v), .. } if client == a_client && v == moved)
-        );
-
-        // A points at a card: B hears who and at what, in A's name, as is (the host
-        // keeps nothing and checks nothing: a card B lacks is B's to ignore).
         let item = slopty_core::ItemId::new();
         a.tx.send(&ClientMsg::Point { item }).await.unwrap();
-        let heard = next_canvas(&mut b, |s| matches!(s, CanvasSync::Pointed { .. })).await;
-        assert_eq!(heard, CanvasSync::Pointed { client: a_client, name: "e2e".to_owned(), item });
-
-        // A goes away: B is told.
-        drop(a);
-        let heard = next_presence(&mut b).await;
-        assert!(
-            matches!(heard, CanvasSync::Presence { client, view: None, .. } if client == a_client),
-            "{heard:?}"
-        );
+        let mine = next_items(&mut a, |s| matches!(s, ItemSync::Pointed { .. })).await;
+        let ItemSync::Pointed { client: a_client, .. } = mine else { panic!("{mine:?}") };
+        let heard = next_items(&mut b, |s| matches!(s, ItemSync::Pointed { .. })).await;
+        assert_eq!(heard, ItemSync::Pointed { client: a_client, name: "e2e".to_owned(), item });
         drop(endpoint_b);
     }
 
@@ -457,25 +423,20 @@ mod tests {
         }
     }
 
-    /// The next presence sync on `host`'s control stream, skipping everything else.
-    async fn next_presence(host: &mut HostConn) -> slopty_proto::canvas::CanvasSync {
-        next_canvas(host, |s| matches!(s, slopty_proto::canvas::CanvasSync::Presence { .. })).await
-    }
-
-    /// The next canvas sync `wanted` on `host`'s control stream, skipping everything else.
-    async fn next_canvas(
+    /// The next item sync `wanted` on `host`'s control stream, skipping everything else.
+    async fn next_items(
         host: &mut HostConn,
-        wanted: impl Fn(&slopty_proto::canvas::CanvasSync) -> bool,
-    ) -> slopty_proto::canvas::CanvasSync {
+        wanted: impl Fn(&slopty_proto::items::ItemSync) -> bool,
+    ) -> slopty_proto::items::ItemSync {
         loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
-                HostMsg::Canvas(sync) if wanted(&sync) => break sync,
+                HostMsg::Items(sync) if wanted(&sync) => break sync,
                 _other => {}
             }
         }
     }
 
-    /// back on the same ptyd, the screen it shows is the one the shell drew before, rebuilt
+    /// A hostd that comes back on the same ptyd shows the screen the shell drew before, rebuilt
     /// from the checkpoint and the tapped output ptyd kept, not a blank grid.
     #[tokio::test]
     async fn a_host_restart_keeps_the_screen() {
@@ -550,7 +511,7 @@ mod tests {
                     eprintln!("{} windows, {} displays", windows.len(), displays.len());
                     break displays.first().expect("a display").id;
                 }
-                LinkEvent::Control(HostMsg::Canvas(_sync)) => {}
+                LinkEvent::Control(HostMsg::Items(_sync)) => {}
                 other => panic!("unexpected event before Listing: {other:?}"),
             }
         };
@@ -570,7 +531,7 @@ mod tests {
                 LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
                     panic!("open failed: {reason}")
                 }
-                LinkEvent::Control(HostMsg::Canvas(_sync)) => {}
+                LinkEvent::Control(HostMsg::Items(_sync)) => {}
                 other => panic!("unexpected event before Opened: {other:?}"),
             }
         };
@@ -1165,7 +1126,7 @@ mod tests {
         let session = loop {
             match tokio::time::timeout(STEP, host.rx.recv()).await.unwrap().unwrap() {
                 HostMsg::SessionOpened(summary) => break summary.id,
-                HostMsg::Canvas(_sync) => {}
+                HostMsg::Items(_sync) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };

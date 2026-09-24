@@ -1,7 +1,7 @@
 //! `CommandPalette`: every action by name with its shortcut, filtered as you type; ↩ runs the
 //! selected one, a click runs any, Esc dismisses.
 //!
-//! Shown by the canvas on ⌘⇧P over whatever has the keyboard; the action runs once the
+//! Shown by the workspace on ⌘⇧P over whatever has the keyboard; the action runs once the
 //! palette is gone and the focus is back where it was, so a terminal's own actions (find,
 //! the prompts) reach the terminal that was focused.
 
@@ -24,12 +24,10 @@ pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 pub enum PaletteRun {
     /// Dispatch this from the element that had the keyboard.
     Action(Box<dyn Action>),
-    /// Reveal and focus this session's terminal on the canvas.
+    /// Reveal and focus this session's terminal in the workspace.
     Session(SessionId),
-    /// Reveal this item (a file card, a note) on the canvas.
+    /// Reveal this item (a file card, a note) in the workspace.
     Item(slopty_core::ItemId),
-    /// Follow another client's viewport on the canvas.
-    Follow(slopty_core::ClientId),
     /// Open a file card for the path the field holds (relative to the active shell, `~` the
     /// host's home), landing on `line`.
     OpenFile {
@@ -77,7 +75,6 @@ impl Clone for PaletteRun {
             Self::Action(action) => Self::Action(action.boxed_clone()),
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
-            Self::Follow(client) => Self::Follow(*client),
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
@@ -100,7 +97,6 @@ impl std::fmt::Debug for PaletteRun {
             Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
-            Self::Follow(client) => f.debug_tuple("Follow").field(client).finish(),
             Self::OpenFile { path, line } => {
                 f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
             }
@@ -142,7 +138,7 @@ impl PaletteItem {
         Self { label: label.to_owned(), keys, run: PaletteRun::Action(action) }
     }
 
-    /// A line that goes to a session on the canvas: `Go to <title>`, its status on the right.
+    /// A line that goes to a session in the workspace: `Go to <title>`, its status on the right.
     #[must_use]
     pub fn session(title: &str, status: &str, session: SessionId) -> Self {
         Self {
@@ -152,7 +148,7 @@ impl PaletteItem {
         }
     }
 
-    /// `Go to <title>` for an item on the canvas, `what` ("file") on the right.
+    /// `Go to <title>` for an item in the workspace, `what` ("file") on the right.
     #[must_use]
     pub fn item(title: &str, what: &str, item: slopty_core::ItemId) -> Self {
         Self { label: format!("Go to {title}"), keys: what.to_owned(), run: PaletteRun::Item(item) }
@@ -172,16 +168,6 @@ impl PaletteItem {
             label,
             keys: "shell".to_owned(),
             run: PaletteRun::Rerun { session, command: command.to_owned() },
-        }
-    }
-
-    /// `Follow <name>` for another client on the canvas, what device it is on the right.
-    #[must_use]
-    pub fn looker(name: &str, device: &str, client: slopty_core::ClientId) -> Self {
-        Self {
-            label: format!("Follow {name}"),
-            keys: device.to_owned(),
-            run: PaletteRun::Follow(client),
         }
     }
 
@@ -488,6 +474,12 @@ impl CommandPalette {
             theme,
             _events: events,
         }
+    }
+
+    /// Start the field at `text` (a path to finish), its path lines listed at once.
+    pub fn seed(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
+        self.path_items = path_items(text);
     }
 
     /// Replace the lines under the commands (the hits of a find in every card).

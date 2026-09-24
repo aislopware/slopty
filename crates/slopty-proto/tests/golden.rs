@@ -51,27 +51,12 @@ mod golden {
     }
 
     #[test]
-    fn look_and_presence() {
-        let view = slopty_proto::canvas::Rect { x: -120.0, y: 40.0, w: 1440.0, h: 900.0 };
-        snap("client_look", &ClientMsg::Look { view: Some(view) });
-        snap(
-            "host_presence",
-            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Presence {
-                client: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                kind: ClientKind::IPhone,
-                name: "iPhone".to_owned(),
-                view: Some(view),
-            }),
-        );
-    }
-
-    #[test]
     fn point_and_pointed() {
         let item = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77));
         snap("client_point", &ClientMsg::Point { item });
         snap(
             "host_pointed",
-            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Pointed {
+            &HostMsg::Items(slopty_proto::items::ItemSync::Pointed {
                 client: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 name: "iPhone".to_owned(),
                 item,
@@ -301,36 +286,30 @@ mod golden {
             },
         );
         snap(
-            "host_canvas_file",
-            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Delta {
+            "host_item_file",
+            &HostMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 9,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::canvas::CanvasOp::Upsert(slopty_proto::canvas::CanvasItem {
+                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
-                    kind: slopty_proto::canvas::ItemKind::File {
+                    kind: slopty_proto::items::ItemKind::File {
                         path: "/w/slopty/src/main.rs".to_owned(),
                     },
-                    rect: slopty_proto::canvas::Rect { x: 10.0, y: 20.0, w: 520.0, h: 400.0 },
-                    z: 3,
-                    group: None,
                     sleeping: false,
                     name: None,
                 }),
             }),
         );
         snap(
-            "host_canvas_named",
-            &HostMsg::Canvas(slopty_proto::canvas::CanvasSync::Delta {
+            "host_item_named",
+            &HostMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 10,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::canvas::CanvasOp::Upsert(slopty_proto::canvas::CanvasItem {
+                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x78)),
-                    kind: slopty_proto::canvas::ItemKind::Terminal {
+                    kind: slopty_proto::items::ItemKind::Terminal {
                         session: SessionId::from_uuid(Uuid::from_u128(0x79)),
                     },
-                    rect: slopty_proto::canvas::Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 },
-                    z: 4,
-                    group: Some("slopty".to_owned()),
                     sleeping: false,
                     name: Some("build box".to_owned()),
                 }),

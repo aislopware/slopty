@@ -134,3 +134,12 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   `viewers_joining_a_busy_session_never_make_the_others_resync`,
   `a_slow_viewer_is_skipped_then_caught_up_never_dropped`; engine
   `a_joiners_frame_takes_nothing_from_the_other_viewers`.
+
+- ✅ **Superseded 2026-09-24: geometry, presence and camera are gone from the wire** (see
+  `workspace.md`). The arrangement is now each device's own layout, so there is nothing for
+  two clients to share about where an item sits: the entry on item geometry and z as host
+  state, and the one drawing where each client looks (`ClientMsg::Look`,
+  `CanvasSync::Presence`, the outlines, the "here" row, following) no longer hold. The host
+  keeps the item registry (`ItemSync`), and pointing stays: ⌘⇧O relays `ItemSync::Pointed` to
+  the other clients of the focused tile's worker, whose toast goes to that tile in their own
+  layout. Tested by `a_pointing_reaches_the_others` against a live hostd.

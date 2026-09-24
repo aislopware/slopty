@@ -1,0 +1,717 @@
+//! Workers coming and going, and what they say: the registry sync that places tiles, the
+//! sessions, the streams and the files behind the tiles.
+
+use gpui::{AppContext as _, Context, Window};
+use slopty_client::ItemChange;
+use slopty_client::layout::{Placement, TileRef, WorkerKey};
+use slopty_core::{ItemId, SessionId, StreamId};
+use slopty_proto::ClientMsg;
+use slopty_proto::file::FileRead;
+use slopty_proto::items::{ItemKind, ItemSync};
+use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::terminal::{SessionKind, SessionSummary, TermEvent, TermRequest, TermSize};
+
+use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
+use crate::file::{FileView, FileViewEvent};
+use crate::note::{NoteView, NoteViewEvent};
+use crate::screen::ScreenView;
+use crate::terminal::{TerminalView, TerminalViewEvent};
+
+impl WorkspaceView {
+    /// A worker this client has added, before its first connection: its tiles (from the
+    /// saved layout) stay where they were, waiting.
+    pub fn add_worker(&mut self, key: WorkerKey, name: String, cx: &mut Context<Self>) {
+        match self.workers.get_mut(&key) {
+            Some(w) => w.name = name,
+            None => {
+                self.workers.insert(key, Worker::new(name));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The link to `key` is up: this client's id there, where its messages go, and the
+    /// sessions the worker has. The registry snapshot follows on the link.
+    pub fn connect_worker(
+        &mut self,
+        key: WorkerKey,
+        name: String,
+        link: WorkerLink,
+        sessions: Vec<SessionSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
+        w.name = name;
+        w.status = WorkerStatus::Connected;
+        w.link = Some(link);
+        w.awaiting_snapshot = true;
+        w.titles_requested = false;
+        w.watched.clear();
+        w.pending_opens.clear();
+        for s in &sessions {
+            if s.kind == SessionKind::Terminal && !self.shell_recency.contains(&s.id) {
+                self.shell_recency.push(s.id);
+            }
+        }
+        w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
+        cx.notify();
+    }
+
+    /// The link to `key` dropped (or never came up): its tiles stay where they are and say
+    /// the worker is away; the views that spoke to the old link go, and come back with the
+    /// next one. Notes and file cards keep what they show.
+    pub fn disconnect_worker(
+        &mut self,
+        key: WorkerKey,
+        status: WorkerStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        w.status = status;
+        w.link = None;
+        w.rtt = None;
+        w.pending_opens.clear();
+        w.picker_wanted = false;
+        w.display_wanted = false;
+        let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
+        let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
+        for session in &sessions {
+            self.terminals.remove(session);
+            self.agents.remove(session);
+        }
+        for item in &items {
+            self.screens.remove(item);
+        }
+        if self.picker.as_ref().is_some_and(|(k, _)| *k == key) {
+            self.picker = None;
+            self.pending_focus_self = true;
+        }
+        self.update_awake(cx);
+        self.count_needs_you(cx);
+        cx.notify();
+    }
+
+    /// A worker's link state changed without a link coming or going (a failed attempt).
+    pub fn set_worker_status(
+        &mut self,
+        key: WorkerKey,
+        status: WorkerStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(w) = self.workers.get_mut(&key)
+            && w.status != status
+        {
+            w.status = status;
+            cx.notify();
+        }
+    }
+
+    /// The human forgot a worker: its tiles leave the layout with it.
+    pub fn remove_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        self.disconnect_worker(key, WorkerStatus::Connecting, cx);
+        let Some(w) = self.workers.remove(&key) else { return };
+        for item in w.doc.items() {
+            self.drop_item_views(item.id);
+        }
+        self.tick();
+        self.layout.retain_worker(key, |_| false);
+        self.layout_touched(cx);
+        self.after_focus_moved(cx);
+        cx.notify();
+    }
+
+    /// Link RTT of `key`, fanned out to its terminals' predictors and its windows' overlays.
+    pub fn set_rtt(
+        &mut self,
+        key: WorkerKey,
+        rtt: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        let changed = w.rtt != rtt;
+        w.rtt = rtt;
+        let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
+        let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
+        for session in sessions {
+            if let Some(view) = self.terminals.get(&session) {
+                view.update(cx, |v, _| v.set_rtt(rtt));
+            }
+        }
+        for item in items {
+            if let Some(view) = self.screens.get(&item) {
+                view.update(cx, |v, _| v.set_rtt(rtt));
+            }
+        }
+        // The bar shows it: repaint only when what it shows moved.
+        if changed && self.rtt_shown(key) {
+            cx.notify();
+        }
+    }
+
+    /// A registry snapshot, delta or pointing from `key`.
+    pub fn apply_sync(&mut self, key: WorkerKey, sync: ItemSync, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        let Some(me) = w.link.as_ref().map(|l| l.me) else { return };
+        // A pointing carries the pointer's name only on the wire: taken before the registry
+        // reduces it to the item. One at an item this client does not have is nothing.
+        if let ItemSync::Pointed { client, name, item } = &sync
+            && *client != me
+            && w.doc.get(*item).is_some()
+        {
+            let tile = TileRef { worker: key, item: *item };
+            self.show_toast(super::toast::ToastKind::Pointed { name: name.clone(), tile }, cx);
+            return;
+        }
+        let snapshot = matches!(sync, ItemSync::Snapshot { .. });
+        let change = w.doc.apply_sync(sync, me);
+        tracing::debug!(?change, version = w.doc.version(), "item sync");
+        if snapshot {
+            w.awaiting_snapshot = false;
+        }
+        self.item_changed(key, change, cx);
+        if snapshot {
+            self.first_snapshot(key, cx);
+        }
+    }
+
+    /// Bring the layout and the views in line with one change to `key`'s registry.
+    pub(super) fn item_changed(
+        &mut self,
+        key: WorkerKey,
+        change: ItemChange,
+        cx: &mut Context<Self>,
+    ) {
+        self.tick();
+        match change {
+            ItemChange::Reset => {
+                let Some(w) = self.workers.get(&key) else { return };
+                let present: std::collections::HashSet<ItemId> =
+                    w.doc.items().map(|i| i.id).collect();
+                // A tile whose item the worker no longer has leaves; the rest stay where this
+                // device put them, and anything new joins at the end of its workspace.
+                self.layout.retain_worker(key, |id| present.contains(&id));
+                let new: Vec<ItemId> = w
+                    .doc
+                    .items()
+                    .map(|i| i.id)
+                    .filter(|id| !self.layout.contains(TileRef { worker: key, item: *id }))
+                    .collect();
+                for item in new {
+                    self.layout.open(TileRef { worker: key, item }, Placement::Remote);
+                }
+                let gone: Vec<ItemId> = self
+                    .notes
+                    .keys()
+                    .chain(self.files.keys())
+                    .chain(self.screens.keys())
+                    .copied()
+                    .filter(|id| self.tile_of(*id).is_none())
+                    .collect();
+                for id in gone {
+                    self.drop_item_views(id);
+                }
+            }
+            ItemChange::Added { id, by_me } => {
+                let tile = TileRef { worker: key, item: id };
+                let placement = if by_me { Placement::Local } else { Placement::Remote };
+                self.layout.open(tile, placement);
+                if by_me {
+                    self.after_focus_moved(cx);
+                }
+            }
+            ItemChange::Removed(id) => {
+                self.layout.remove(TileRef { worker: key, item: id });
+                self.drop_item_views(id);
+                self.after_focus_moved(cx);
+            }
+            ItemChange::Changed(_) | ItemChange::Echo | ItemChange::Pointed(_) => {}
+        }
+        self.layout_touched(cx);
+        self.reconcile(cx);
+        cx.notify();
+    }
+
+    /// A worker's first snapshot since its link came up: a worker with nothing on it gets one
+    /// shell, once per run, so a newly added worker has something to type into (there is no
+    /// other way to open the first tile on a worker, since a new tile goes to the focused
+    /// tile's worker).
+    fn first_snapshot(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let empty = self.workers.get(&key).is_some_and(|w| w.doc.is_empty());
+        if !empty || !self.given_shell.insert(key) {
+            return;
+        }
+        self.open_session_on(key, None, Vec::new(), None, cx);
+    }
+
+    fn drop_item_views(&mut self, id: ItemId) {
+        self.notes.remove(&id);
+        self.files.remove(&id);
+        self.screens.remove(&id);
+        self.titles.remove(&id);
+        self.unseen.remove(&id);
+        self.parked.remove(&id);
+    }
+
+    /// A session appeared on `key` (this client's or another's).
+    pub fn session_opened(
+        &mut self,
+        key: WorkerKey,
+        summary: SessionSummary,
+        cx: &mut Context<Self>,
+    ) {
+        if summary.kind == SessionKind::Terminal && !self.shell_recency.contains(&summary.id) {
+            self.shell_recency.push(summary.id);
+        }
+        if let Some(w) = self.workers.get_mut(&key) {
+            w.sessions.insert(summary.id, summary);
+        }
+        self.reconcile(cx);
+        cx.notify();
+    }
+
+    /// A session is gone.
+    pub fn session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        for w in self.workers.values_mut() {
+            w.sessions.remove(&session);
+        }
+        self.agents.remove(&session);
+        self.shell_recency.retain(|s| *s != session);
+        self.update_awake(cx);
+        self.reconcile(cx);
+        self.count_needs_you(cx);
+        cx.notify();
+    }
+
+    /// A session changed directory (OSC 7), and the worker says which repository that is in.
+    pub fn session_moved(&mut self, session: SessionId, cwd: &str, repo: Option<&str>) {
+        for w in self.workers.values_mut() {
+            if let Some(summary) = w.sessions.get_mut(&session) {
+                summary.cwd = Some(cwd.to_owned());
+                summary.repo = repo.map(str::to_owned);
+            }
+        }
+    }
+
+    /// The session's summary, whichever worker runs it.
+    pub(super) fn summary(&self, session: SessionId) -> Option<&SessionSummary> {
+        self.workers.values().find_map(|w| w.sessions.get(&session))
+    }
+
+    /// A session-stream event.
+    pub fn term_event(&mut self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
+        if let TermEvent::Matches { needle, total, .. } = &event
+            && self.find_needle.is_some()
+        {
+            let needle = needle.clone();
+            self.find_answered(session, &needle, *total, cx);
+        }
+        match (self.terminals.get(&session), event) {
+            (Some(view), event) => view.update(cx, |v, cx| v.apply(event, cx)),
+            (None, TermEvent::Error(e)) => tracing::warn!(%session, error = %e, "worker"),
+            (None, _other) => {}
+        }
+    }
+
+    /// Views for every tile whose content is alive, none for the rest: terminals attached,
+    /// streams open for the remote tiles that are on screen (or were, within the grace).
+    pub(super) fn reconcile(&mut self, cx: &mut Context<Self>) {
+        let workers = &self.workers;
+        self.closed.retain(|c| {
+            c.session.is_none_or(|s| workers.values().any(|w| w.sessions.contains_key(&s)))
+        });
+        let wanted: Vec<(WorkerKey, SessionId)> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| w.link.is_some())
+            .flat_map(|(key, w)| {
+                w.doc.items().filter_map(move |i| match i.kind {
+                    ItemKind::Terminal { session } if !i.sleeping => Some((*key, session)),
+                    _ => None,
+                })
+            })
+            .chain(self.closed.iter().filter_map(|c| c.session.map(|s| (c.tile.worker, s))))
+            .filter(|(key, s)| self.workers.get(key).is_some_and(|w| w.sessions.contains_key(s)))
+            .collect();
+        for &(key, session) in &wanted {
+            if self.terminals.contains_key(&session) {
+                continue;
+            }
+            self.attach_terminal(key, session, cx);
+        }
+        let gone: Vec<SessionId> = self
+            .terminals
+            .keys()
+            .filter(|s| !wanted.iter().any(|(_, w)| w == *s))
+            .copied()
+            .collect();
+        for session in gone {
+            if self.summary(session).is_some() {
+                self.send_session(session, ClientMsg::Term { session, req: TermRequest::Detach });
+            }
+            self.terminals.remove(&session);
+        }
+        self.reconcile_screens();
+        self.update_run_targets(cx);
+    }
+
+    fn attach_terminal(&mut self, key: WorkerKey, session: SessionId, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&key) else { return };
+        let Some(link) = w.link.clone() else { return };
+        let size = w.sessions.get(&session).map_or_else(TermSize::default, |s| TermSize {
+            cols: s.cols,
+            rows: s.rows,
+            ..TermSize::default()
+        });
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| TerminalView::new(session, size, link.out.clone(), theme, cx));
+        let sid = session;
+        self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| match event {
+            TerminalViewEvent::Bell => cx.emit(WorkspaceEvent::Bell(sid)),
+            TerminalViewEvent::Notification { title, body } => {
+                this.notify_program(sid, title, body, cx);
+            }
+            TerminalViewEvent::Exited(_) => {
+                this.send_session(sid, ClientMsg::Term { session: sid, req: TermRequest::Close });
+            }
+            TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
+            TerminalViewEvent::Title(_) => cx.notify(),
+            TerminalViewEvent::Cwd { path, repo } => {
+                this.session_moved(sid, path, repo.as_deref());
+            }
+            TerminalViewEvent::Notice(text) => this.show_notice(text.clone(), cx),
+            TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
+                let done = Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
+                this.command_finished(sid, done, cx);
+            }
+            TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
+            TerminalViewEvent::ViewFile { path, line } => {
+                let path = this.absolute_in_session(sid, path);
+                this.open_file_on(this.worker_of_session(sid), &path, *line, cx);
+            }
+        }));
+        w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
+        // What this client paints with, so the driver's colours answer colour queries.
+        w.send(ClientMsg::Term { session, req: TermRequest::Colors(self.theme.terminal.wire()) });
+        // A view born after the worker reported the agent starts with its state.
+        if let Some(agent) = self.agents.get(&session) {
+            let status = agent.status.clone();
+            view.update(cx, |v, cx| v.set_agent_status(Some(status), cx));
+        }
+        if let Some(rtt) = w.rtt {
+            view.update(cx, |v, _| v.set_rtt(Some(rtt)));
+        }
+        self.terminals.insert(session, view);
+    }
+
+    /// Requested quality for a new stream: the settings' rate, ceiling and depth at full
+    /// scale; the view then asks for a scale matching the width it paints at.
+    const fn quality_for(&self) -> Quality {
+        crate::screen::quality_of(self.theme.behaviour.stream, 1.0)
+    }
+
+    /// Open streams for remote tiles that should have one and lack it; let go of the rest.
+    /// A tile off screen for [`super::STREAM_GRACE`] is parked: its stream goes and comes back
+    /// when the tile is on screen again.
+    pub(super) fn reconcile_screens(&mut self) {
+        let now = std::time::Instant::now();
+        let parked: Vec<ItemId> = self
+            .unseen
+            .iter()
+            .filter(|(_, since)| now.saturating_duration_since(**since) >= self.stream_grace)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in parked {
+            self.parked.insert(id);
+        }
+        let quality = self.quality_for();
+        let mut keep: Vec<ItemId> = Vec::new();
+        for w in self.workers.values_mut() {
+            if w.link.is_none() {
+                continue;
+            }
+            let untitled = w.doc.items().any(|i| {
+                matches!(i.kind, ItemKind::Window { .. }) && !self.titles.contains_key(&i.id)
+            });
+            if untitled && !w.titles_requested {
+                w.titles_requested = true;
+                w.send(ClientMsg::Screen(ScreenRequest::List));
+            }
+            let wanted: Vec<(ItemId, CaptureTarget)> = w
+                .doc
+                .items()
+                .filter(|i| !i.sleeping && !self.parked.contains(&i.id))
+                .filter_map(|i| match i.kind {
+                    ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
+                    ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
+                    ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => {
+                        None
+                    }
+                })
+                .collect();
+            for &(id, target) in &wanted {
+                keep.push(id);
+                if self.screens.contains_key(&id) || w.pending_opens.values().any(|&p| p == id) {
+                    continue;
+                }
+                if w.pending_opens.contains_key(&target) {
+                    continue;
+                }
+                w.pending_opens.insert(target, id);
+                w.send(ClientMsg::Screen(ScreenRequest::Open { target, quality }));
+            }
+            w.pending_opens.retain(|_, id| wanted.iter().any(|(k, _)| k == id));
+        }
+        // Dropping a view sends `Close` for its stream.
+        self.screens.retain(|id, _| keep.contains(id));
+    }
+
+    /// A remote-window event from `key`.
+    pub fn screen_event(&mut self, key: WorkerKey, event: ScreenEvent, cx: &mut Context<Self>) {
+        match event {
+            ScreenEvent::Listing { windows, displays } => {
+                self.fill_titles(key, &windows);
+                let Some(w) = self.workers.get_mut(&key) else { return };
+                w.titles_requested = false;
+                if std::mem::take(&mut w.display_wanted)
+                    && let Some(d) = displays.first()
+                {
+                    self.add_screen_item(
+                        key,
+                        CaptureTarget::Display(d.id),
+                        format!("Display {}", d.id),
+                        cx,
+                    );
+                }
+                let Some(w) = self.workers.get_mut(&key) else { return };
+                if std::mem::take(&mut w.picker_wanted) {
+                    self.show_picker(key, windows, displays, cx);
+                }
+            }
+            ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
+                let theme = self.theme.clone();
+                let quality = self.quality_for();
+                let show_stats = self.show_stats;
+                let Some(w) = self.workers.get_mut(&key) else { return };
+                let Some(link) = w.link.clone() else { return };
+                let Some(id) = w.pending_opens.remove(&target) else {
+                    tracing::debug!(%stream, ?target, "opened stream nobody asked for; closing");
+                    w.send(ClientMsg::Screen(ScreenRequest::Close(stream)));
+                    return;
+                };
+                let handle = (link.open_screen)(stream, codec);
+                let opened =
+                    crate::screen::Opened { stream, target, size: (width, height), quality };
+                let view =
+                    cx.new(|cx| ScreenView::new(opened, handle, link.out.clone(), theme, cx));
+                let rtt = w.rtt;
+                view.update(cx, |v, cx| {
+                    v.set_rtt(rtt);
+                    if show_stats {
+                        v.set_hud(true, cx);
+                    }
+                });
+                let tile = TileRef { worker: key, item: id };
+                self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+                    match event {
+                        crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
+                        crate::screen::ScreenViewEvent::Ready => cx.notify(),
+                    }
+                }));
+                self.screens.insert(id, view);
+            }
+            ScreenEvent::Closed { stream, reason } => {
+                let gone: Vec<ItemId> = self.streams_of(key, stream, cx);
+                for id in gone {
+                    tracing::info!(%stream, %reason, "screen closed by worker");
+                    self.screens.remove(&id);
+                }
+            }
+            ScreenEvent::Geometry { stream, width, height } => {
+                if width > 0 && height > 0 {
+                    for id in self.streams_of(key, stream, cx) {
+                        if let Some(view) = self.screens.get(&id) {
+                            view.update(cx, |v, _| v.set_geometry(width, height));
+                        }
+                    }
+                }
+            }
+            ScreenEvent::Clipboard { text } => {
+                // Every open window shares the one worker pasteboard.
+                for view in self.screens.values() {
+                    view.update(cx, |v, _| v.host_clipboard_changed(&text));
+                }
+                // Same text already here: leave the clipboard alone. With the worker on this
+                // very Mac (the dev loop) the write would bump the change count the worker
+                // watches and the two would echo the text back and forth forever.
+                let same =
+                    cx.read_from_clipboard().and_then(|i| i.text()).as_deref() == Some(&*text);
+                if !same {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            ScreenEvent::Rate { stream, target_bps, verdict, capped } => {
+                for id in self.streams_of(key, stream, cx) {
+                    if let Some(view) = self.screens.get(&id) {
+                        view.update(cx, |v, _| v.set_rate(target_bps, verdict, capped));
+                    }
+                }
+            }
+            ScreenEvent::Source { stream, state } => {
+                for id in self.streams_of(key, stream, cx) {
+                    if let Some(view) = self.screens.get(&id) {
+                        view.update(cx, |v, cx| v.set_source_state(state, cx));
+                    }
+                }
+            }
+            ScreenEvent::Cursor { stream, shape } => {
+                for id in self.streams_of(key, stream, cx) {
+                    if let Some(view) = self.screens.get(&id) {
+                        view.update(cx, |v, cx| v.set_cursor_shape(shape.clone(), cx));
+                    }
+                }
+            }
+            ScreenEvent::ListingChanged => {}
+        }
+        cx.notify();
+    }
+
+    /// The items of `key` whose view shows `stream` (stream ids are per worker).
+    fn streams_of(&self, key: WorkerKey, stream: StreamId, cx: &Context<Self>) -> Vec<ItemId> {
+        let Some(w) = self.workers.get(&key) else { return Vec::new() };
+        w.doc
+            .items()
+            .filter(|i| self.screens.get(&i.id).is_some_and(|v| v.read(cx).stream() == stream))
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// Window items restored from the registry have no title until a `Listing` names them.
+    fn fill_titles(&mut self, key: WorkerKey, windows: &[slopty_proto::screen::WindowInfo]) {
+        let Some(w) = self.workers.get(&key) else { return };
+        for item in w.doc.items() {
+            let ItemKind::Window { window } = item.kind else { continue };
+            if self.titles.contains_key(&item.id) {
+                continue;
+            }
+            if let Some(info) = windows.iter().find(|w| w.id == window) {
+                let title =
+                    if info.title.is_empty() { info.app.clone() } else { info.title.clone() };
+                self.titles.insert(item.id, title);
+            }
+        }
+    }
+
+    /// The worker read a file: every card for that path shows it.
+    pub fn file_read(&self, key: WorkerKey, path: &str, read: &FileRead, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&key) else { return };
+        for item in w.doc.items() {
+            if let Some(view) = self.files.get(&item.id)
+                && view.read(cx).path() == path
+            {
+                view.update(cx, |v, cx| v.set_read(read.clone(), cx));
+            }
+        }
+    }
+
+    /// Editors for note items and cards for file items; the ones whose items are gone go.
+    /// Needs the window (a note's editor does), so it runs from `render`.
+    pub(super) fn reconcile_notes_and_files(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut notes: Vec<(ItemId, String)> = Vec::new();
+        let mut files: Vec<(WorkerKey, ItemId, String)> = Vec::new();
+        for (key, item) in self.items() {
+            match &item.kind {
+                ItemKind::Note { text } => notes.push((item.id, text.clone())),
+                ItemKind::File { path } => files.push((key, item.id, path.clone())),
+                _ => {}
+            }
+        }
+        for (id, text) in &notes {
+            if let Some(view) = self.notes.get(id) {
+                let editing = view.read(cx).editing(window, cx);
+                if !editing && view.read(cx).synced() != text {
+                    view.update(cx, |v, cx| v.set_text(text, window, cx));
+                }
+                continue;
+            }
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| NoteView::new(*id, text, theme, window, cx));
+            let item = *id;
+            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+                match event {
+                    NoteViewEvent::Commit(text) => this.commit_note(item, text.clone(), cx),
+                    NoteViewEvent::Run(code) => this.run_in_shell(code.clone(), cx),
+                }
+                cx.notify();
+            }));
+            view.update(cx, |n, cx| n.set_can_run(self.run_target().is_some(), cx));
+            self.notes.insert(*id, view);
+        }
+        self.notes.retain(|id, _| notes.iter().any(|(n, _)| n == id));
+        for (key, id, path) in &files {
+            if self.files.contains_key(id) {
+                continue;
+            }
+            let Some(w) = self.workers.get(key) else { continue };
+            if w.link.is_none() {
+                continue;
+            }
+            let view = cx.new(|_cx| FileView::new(*id, path, self.theme.clone()));
+            self.subscriptions.push(cx.subscribe(&view, |this, _view, event, cx| match event {
+                FileViewEvent::FindClosed => {
+                    this.pending_focus_self = true;
+                    cx.notify();
+                }
+            }));
+            if let Some(line) = self.file_focus.remove(id) {
+                view.update(cx, |v, cx| v.focus_line(Some(line), cx));
+            }
+            self.files.insert(*id, view);
+            w.send(ClientMsg::ReadFile { path: path.clone() });
+        }
+        self.files.retain(|id, _| files.iter().any(|(_, f, _)| f == id));
+        // Each worker watches the set behind its cards and re-reads one that changes on disk.
+        for (key, w) in &mut self.workers {
+            if w.link.is_none() {
+                continue;
+            }
+            let mut paths: Vec<String> =
+                files.iter().filter(|(k, ..)| k == key).map(|(_, _, p)| p.clone()).collect();
+            paths.sort_unstable();
+            paths.dedup();
+            if paths != w.watched {
+                w.watched.clone_from(&paths);
+                w.send(ClientMsg::WatchFiles { paths });
+            }
+        }
+    }
+
+    /// Mark which remote tiles are off screen this frame, and park or wake streams: called
+    /// with the frame's visible items.
+    pub(super) fn note_visible(&mut self, visible: &[ItemId]) {
+        let now = std::time::Instant::now();
+        let remote: Vec<ItemId> = self
+            .items()
+            .filter(|(_, i)| matches!(i.kind, ItemKind::Window { .. } | ItemKind::Display { .. }))
+            .map(|(_, i)| i.id)
+            .collect();
+        let mut changed = false;
+        for id in remote {
+            if visible.contains(&id) {
+                self.unseen.remove(&id);
+                changed |= self.parked.remove(&id);
+            } else {
+                self.unseen.entry(id).or_insert(now);
+            }
+        }
+        let due = self.unseen.iter().any(|(id, since)| {
+            !self.parked.contains(id) && now.saturating_duration_since(*since) >= self.stream_grace
+        });
+        if changed || due {
+            self.reconcile_screens();
+        }
+    }
+}

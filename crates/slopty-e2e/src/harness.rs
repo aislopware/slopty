@@ -406,7 +406,7 @@ async fn add_host(driver: &mut Driver, address: &str) -> Result<()> {
     driver.ok(&crate::Command::AddHost { address: address.to_owned() }).await?;
     driver
         .wait_for("the host to connect", STARTUP, |d| {
-            d.hosts.iter().any(|h| h.active && h.status == "connected")
+            d.workers.iter().any(|w| w.status == "connected")
         })
         .await?;
     Ok(())
@@ -529,7 +529,7 @@ impl Stack {
         driver.ok(&crate::Command::Ping).await?;
         driver
             .wait_for("the relaunched app to reconnect", STARTUP, |d| {
-                d.hosts.iter().any(|h| h.active && h.status == "connected")
+                d.workers.iter().any(|w| w.status == "connected")
             })
             .await?;
         self.driver = driver;

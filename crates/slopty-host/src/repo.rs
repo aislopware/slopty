@@ -1,6 +1,6 @@
 //! Which repository a working directory is in.
 //!
-//! The canvas groups shells by repository (`slopty_client::arrange`), and the only machine
+//! The workspace names shells by repository, and the only machine
 //! that can answer "which repository is this" is the one the shell runs on. This is that
 //! answer: a walk up the directory tree for a `.git` entry, no `git` subprocess and no libgit,
 //! so it costs a handful of `stat` calls per `cd` and cannot hang on a lock or an index.
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// The root is the nearest ancestor — starting at `cwd` itself — holding a `.git` entry. That
 /// entry is a **directory** in an ordinary checkout and a **file** in a worktree or a
 /// submodule; the `gitdir:` link inside such a file is deliberately not followed, so a worktree
-/// is its own repository and not the checkout it was made from. That is what the canvas wants:
+/// is its own repository and not the checkout it was made from. That is what the client wants:
 /// two worktrees of one project are two places to work, not one.
 ///
 /// A repository nested inside another wins over the outer one, because the walk stops at the

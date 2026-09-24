@@ -3,8 +3,8 @@
 //! Runs only with `SLOPTY_IOS_E2E=1` (`cargo xtask e2e ios [--sim iphone|ipad]`): the daemons
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
 //! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. Phone or tablet: a
-//! shell opens, its rows come back, typed text echoes, and the terminal is sized for the
-//! screen it is on (a phone shrinks it to the viewport, an iPad keeps the desktop size). The
+//! shell opens, its rows come back, typed text echoes, and its column is sized for the screen
+//! it is on (a phone's fills the screen but for the neighbours' peeks, an iPad's is half). The
 //! scenario renders the app's own frame (the fork's iOS `render_to_image`) and compares it
 //! with a golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
 
@@ -12,13 +12,14 @@
 mod tests {
     use std::time::Duration;
 
+    use slopty_e2e::Driver;
     use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
-    /// The desktop terminal size a viewport this wide keeps (`slopty_client::canvas`).
-    const DESKTOP_TERMINAL_WIDTH: f32 = 720.0;
+    /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`).
+    const PHONE_BELOW: f32 = 700.0;
     /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
     const TOLERANCE: f64 = 0.01;
     /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
@@ -27,7 +28,31 @@ mod tests {
 
     /// Which device family the app is on, from its viewport: the golden's name prefix.
     fn device(window_width: f32) -> &'static str {
-        if window_width >= DESKTOP_TERMINAL_WIDTH + 100.0 { "pad" } else { "phone" }
+        if window_width >= PHONE_BELOW { "pad" } else { "phone" }
+    }
+
+    /// Tap the middle of the `role` node labelled `label`.
+    async fn tap(drv: &mut Driver, role: &str, label: &str) {
+        let d = drv.dump().await.unwrap();
+        let node =
+            d.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{label}: {:#?}", d.a11y));
+        let [left, top, width, height] = node.bounds;
+        drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
+    }
+
+    /// Without a hardware keyboard the titlebar's "…" is the way to every action: a tap opens
+    /// its menu, "Command palette" opens the palette with the soft keyboard up.
+    async fn open_palette(drv: &mut Driver) {
+        tap(drv, "Button", "More").await;
+        drv.wait_for("the … menu", STEP, |d| {
+            d.a11y_node("MenuItem", Some("Command palette")).is_some()
+        })
+        .await
+        .unwrap();
+        tap(drv, "MenuItem", "Command palette").await;
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+            .await
+            .unwrap();
     }
 
     fn simulator() -> Option<Simulator> {
@@ -55,7 +80,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(dump.hosts.len(), 1, "{dump:#?}");
+        assert_eq!(dump.workers.len(), 1, "{dump:#?}");
         assert_eq!(dump.items.len(), 1, "{dump:#?}");
         let term = dump.item("terminal").unwrap().clone();
         // The grid as VoiceOver gets it: a terminal whose value is the cursor row, on screen.
@@ -65,15 +90,15 @@ mod tests {
         let [x, y, w, h] = term.bounds;
         let (vw, vh) = (dump.window.width, dump.window.height);
         assert!(vw > 300.0 && vh > 300.0, "window: {vw}x{vh}");
-        // The host placed a desktop-sized terminal; the client fitted it to this screen.
+        // The column is on screen and sized for it.
         assert!(
             x >= 0.0 && y >= 0.0 && x + w <= vw + 1.0 && y + h <= vh + 1.0,
             "{term:?} in {vw}x{vh}"
         );
-        if vw >= DESKTOP_TERMINAL_WIDTH + 100.0 {
-            assert!(w >= DESKTOP_TERMINAL_WIDTH - 1.0, "tablet kept the desktop size: {term:?}");
+        if vw < PHONE_BELOW {
+            assert!(w > vw * 0.85, "a phone column fills the screen: {term:?} in {vw}");
         } else {
-            assert!(w < DESKTOP_TERMINAL_WIDTH, "phone shrank the terminal: {term:?}");
+            assert!(w > vw * 0.4 && w < vw * 0.6, "a tablet column is half the screen: {term:?}");
         }
 
         drv.type_text("echo ios-$((6*7))").await.unwrap();
@@ -106,19 +131,11 @@ mod tests {
         let dump = drv.wait_for("a second shell", STEP, |d| d.items.len() == 2).await.unwrap();
         assert!(dump.items.iter().any(|i| i.id != term.id && i.active), "{dump:#?}");
         drv.keys("cmd-w").await.unwrap();
-        let dump =
-            drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
+        drv.wait_for("the second shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
 
-        // Without a hardware keyboard the top bar's "⋯" is the way to every action: a tap
-        // opens the command palette, the soft keyboard types into its field, ↩ runs the line.
-        let commands = dump
-            .a11y_node("Button", Some("Commands"))
-            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
-        let [x, y, w, h] = commands.bounds;
-        drv.ui_tap(x + w / 2.0, y + h / 2.0).await.unwrap();
-        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
-            .await
-            .unwrap();
+        // Without a hardware keyboard: the palette from the titlebar's "…", the soft keyboard
+        // types into its field, ↩ runs the line.
+        open_palette(drv).await;
         drv.ui_insert_text("new note").await.unwrap();
         drv.wait_for("one line", STEP, |d| {
             d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
@@ -135,15 +152,7 @@ mod tests {
         // The phone has no editor for a file in its sandbox: "Open settings" from the palette
         // puts `settings.toml` (the commented defaults here) in the in-app editor, ⌘A and the
         // soft keyboard replace it with one section, ⌘↩ writes the file.
-        let dump = drv.dump().await.unwrap();
-        let commands = dump
-            .a11y_node("Button", Some("Commands"))
-            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
-        let [x, y, w, h] = commands.bounds;
-        drv.ui_tap(x + w / 2.0, y + h / 2.0).await.unwrap();
-        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
-            .await
-            .unwrap();
+        open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
         drv.wait_for("one line", STEP, |d| {
             d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
@@ -168,17 +177,9 @@ mod tests {
             std::fs::read_to_string(stack.dir.path().join("app").join("settings.toml")).unwrap();
         assert!(saved.contains("bell_alert = false"), "{saved}");
 
-        // The phone names a card the same way: "Name this card" from the palette puts the
-        // field in the active card's title bar, the soft keyboard types into it, ↩ keeps it.
-        let dump = drv.dump().await.unwrap();
-        let commands = dump
-            .a11y_node("Button", Some("Commands"))
-            .unwrap_or_else(|| panic!("{:#?}", dump.a11y));
-        let [x, y, w, h] = commands.bounds;
-        drv.ui_tap(x + w / 2.0, y + h / 2.0).await.unwrap();
-        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
-            .await
-            .unwrap();
+        // The phone names a tile the same way: "Name this tile" from the palette puts the
+        // field in the focused tile's header, the soft keyboard types into it, ↩ keeps it.
+        open_palette(drv).await;
         drv.ui_insert_text("name this").await.unwrap();
         drv.wait_for("one line", STEP, |d| {
             d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
@@ -187,7 +188,7 @@ mod tests {
         .unwrap();
         drv.keys("enter").await.unwrap();
         drv.wait_for("the name field", STEP, |d| {
-            d.a11y_node("TextInput", Some("Card name")).is_some()
+            d.a11y_node("TextInput", Some("Tile name")).is_some()
         })
         .await
         .unwrap();
@@ -195,7 +196,7 @@ mod tests {
         drv.keys("enter").await.unwrap();
         drv.wait_for("the note named", STEP, |d| {
             d.a11y_node("Heading", Some("note scratch")).is_some()
-                && d.a11y_node("TextInput", Some("Card name")).is_none()
+                && d.a11y_node("TextInput", Some("Tile name")).is_none()
         })
         .await
         .unwrap();

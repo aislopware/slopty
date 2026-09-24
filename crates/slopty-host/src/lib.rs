@@ -3,22 +3,21 @@
 //! A session ([`session::spawn`]) is an actor on its own OS thread (the VT engine is `!Send`): it
 //! reads the PTY master, feeds the engine, coalesces frames, and fans them out to attached client
 //! sinks. [`manager::Host`] owns the session table and talks to `slopty-ptyd`.
-//! [`canvas::CanvasStore`] is the authoritative, persisted canvas document.
+//! [`items::ItemStore`] is the authoritative, persisted item registry.
 //! [`repo`] answers which repository a session's working directory is in, which only the
 //! machine the shell runs on can know; [`file::read`] reads a file for a file card.
 
-pub mod canvas;
 pub mod ctl;
 pub mod file;
 pub mod find;
+pub mod items;
 pub mod manager;
-pub mod presence;
 pub mod repo;
 pub mod screen;
 pub mod session;
 pub mod wake;
 
-pub use canvas::CanvasStore;
+pub use items::ItemStore;
 pub use manager::Host;
 pub use screen::{DatagramBudget, ScreenError, ScreenStream};
 pub use session::{ClientSink, SessionHandle};
@@ -38,12 +37,12 @@ pub enum HostError {
     /// The session actor is gone.
     #[error("session closed")]
     SessionClosed,
-    /// Unknown canvas item.
-    #[error("no such canvas item")]
+    /// Unknown item.
+    #[error("no such item")]
     NoSuchItem,
-    /// Canvas document problem.
-    #[error("canvas: {0}")]
-    Canvas(String),
+    /// Item registry problem.
+    #[error("items: {0}")]
+    Items(String),
     /// Remote window pipeline.
     #[error(transparent)]
     Screen(#[from] ScreenError),

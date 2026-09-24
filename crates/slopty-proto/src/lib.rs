@@ -16,11 +16,11 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
-pub mod canvas;
 pub mod codec;
 pub mod file;
 pub mod handshake;
 pub mod input;
+pub mod items;
 pub mod media;
 pub mod orchestration;
 pub mod screen;
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 50;
+pub const PROTOCOL_VERSION: u16 = 51;
 
 /// First message on every host → client session stream, naming the session whose
 /// [`terminal::TermEvent`]s follow.
@@ -55,8 +55,8 @@ pub enum ClientMsg {
     },
     /// Create a new session; the host answers with `HostMsg::SessionOpened`.
     OpenSession(terminal::OpenSession),
-    /// Canvas document operation (host is authoritative; this is a proposal).
-    Canvas(canvas::CanvasOp),
+    /// Item registry operation (host is authoritative; this is a proposal).
+    Items(items::ItemOp),
     /// Remote window request.
     Screen(screen::ScreenRequest),
     /// Liveness probe; the host echoes it.
@@ -80,18 +80,11 @@ pub enum ClientMsg {
         /// What was typed.
         query: String,
     },
-    /// Where this client's viewport is on the canvas, in canvas units, whenever it settles;
-    /// `None` when the canvas is no longer on show. The host fans it out as
-    /// `CanvasSync::Presence` so the other clients can draw where each other looks.
-    Look {
-        /// The viewport, or nothing.
-        view: Option<canvas::Rect>,
-    },
-    /// Point the other clients at one card: the host fans it out as `CanvasSync::Pointed`
+    /// Point the other clients at one item: the host fans it out as `ItemSync::Pointed`
     /// and each of them offers a jump to it. Nothing is said about the item itself; a
     /// client that does not know it ignores the pointing.
     Point {
-        /// The card.
+        /// The item.
         item: slopty_core::ItemId,
     },
     /// The files this client's file cards show, the whole set each time it changes: the host
@@ -111,11 +104,10 @@ impl ClientMsg {
             Self::Hello(_) => "Hello",
             Self::Term { .. } => "Term",
             Self::OpenSession(_) => "OpenSession",
-            Self::Canvas(_) => "Canvas",
+            Self::Items(_) => "Items",
             Self::Screen(_) => "Screen",
             Self::Ping { .. } => "Ping",
             Self::InstallHooks => "InstallHooks",
-            Self::Look { .. } => "Look",
             Self::Point { .. } => "Point",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
@@ -147,8 +139,8 @@ pub enum HostMsg {
         /// Event.
         event: terminal::TermEvent,
     },
-    /// Canvas document snapshot or delta.
-    Canvas(canvas::CanvasSync),
+    /// Item registry snapshot, delta or pointing.
+    Items(items::ItemSync),
     /// Remote window event.
     Screen(screen::ScreenEvent),
     /// Agent state change.
@@ -193,7 +185,7 @@ impl HostMsg {
             Self::SessionOpened(_) => "SessionOpened",
             Self::SessionClosed { .. } => "SessionClosed",
             Self::Term { .. } => "Term",
-            Self::Canvas(_) => "Canvas",
+            Self::Items(_) => "Items",
             Self::Screen(_) => "Screen",
             Self::Agent(_) => "Agent",
             Self::Pong { .. } => "Pong",

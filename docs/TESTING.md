@@ -2,13 +2,13 @@
 
 ## Four layers, fastest first
 1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`
-   for the injector, `Camera`/`CanvasDoc` in `slopty-client`). Runs under `cargo gate`.
+   for the injector, `Layout`/`ItemDoc` in `slopty-client`). Runs under `cargo gate`.
 2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui`: a `VisualTestContext` window with real
    layout, `simulate_keystrokes`/`simulate_click`, a channel for the host. Read the UI like
    a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
    for colours and borders, view accessors (`rows()`, `zoom()`, `active_item()`),
    `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
-   the focused node. No pixels, no process, runs under `cargo gate`. Every canvas/terminal
+   the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
    behaviour gets a test here first.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`, gate `SLOPTY_APP_E2E`):
    launches ptyd + hostd + the app (built with `--features slopty/e2e`) in a temp dir, pairs

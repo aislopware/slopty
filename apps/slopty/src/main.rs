@@ -35,14 +35,19 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 /// The application menu. Items name the same actions the key bindings do, so the shortcuts
 /// shown next to them come from the keymap and the two can never disagree.
 fn menus() -> Vec<Menu> {
-    use slopty_ui::canvas::{
-        AddWindow, CloseItem, FitAll, NewAgent, NewNote, NewTerminal, NextAttention, OpenPalette,
-        ToggleMute, ToggleStats, ZoomIn, ZoomOut, ZoomReset,
-    };
     use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
+    use slopty_ui::workspace::{
+        AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
+        FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller,
+        FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp,
+        NewAgent, NewNote, NewTerminal, NextAttention, OpenPalette, ToggleMute, ToggleOverview,
+        ToggleStats, ToggleTabbed, UndoClose,
+    };
     vec![
         Menu::new("Slopty").items([
             MenuItem::action("Settings…", slopty_app::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Add Worker…", slopty_app::AddWorker),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -52,6 +57,15 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Quit Slopty", Quit),
         ]),
+        Menu::new("File").items([
+            MenuItem::action("New Shell", NewTerminal),
+            MenuItem::action("New Agent", NewAgent),
+            MenuItem::action("New Note", NewNote),
+            MenuItem::action("Add Window…", AddWindow),
+            MenuItem::separator(),
+            MenuItem::action("Close Tile", CloseItem),
+            MenuItem::action("Undo Close", UndoClose),
+        ]),
         Menu::new("Edit").items([
             MenuItem::os_action("Copy", Copy, OsAction::Copy),
             MenuItem::os_action("Paste", Paste, OsAction::Paste),
@@ -60,32 +74,37 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Find Next", FindNext),
             MenuItem::action("Find Previous", FindPrev),
         ]),
-        Menu::new("Canvas").items([
-            MenuItem::action("New Shell", NewTerminal),
-            MenuItem::action("New Agent", NewAgent),
-            MenuItem::action("New Note", NewNote),
-            MenuItem::action("Add Window…", AddWindow),
-            MenuItem::separator(),
-            MenuItem::action("Next Agent Needing You", NextAttention),
-            MenuItem::action("Mute Window", ToggleMute),
-            MenuItem::action("Stream Stats", ToggleStats),
-            MenuItem::separator(),
-            MenuItem::action("Close Item", CloseItem),
-        ]),
-        Menu::new("Host").items([
-            MenuItem::action("Next Host", slopty_app::NextHost),
-            MenuItem::action("Previous Host", slopty_app::PrevHost),
-            MenuItem::separator(),
-            MenuItem::action("Add Host…", slopty_app::AddHost),
-            MenuItem::action("Forget Host", slopty_app::ForgetHost),
-        ]),
         Menu::new("View").items([
             MenuItem::action("Commands…", OpenPalette),
+            MenuItem::action("Overview", ToggleOverview),
             MenuItem::separator(),
-            MenuItem::action("Zoom In", ZoomIn),
-            MenuItem::action("Zoom Out", ZoomOut),
-            MenuItem::action("Actual Size", ZoomReset),
-            MenuItem::action("Fit All", FitAll),
+            MenuItem::action("Bigger Text", FontLarger),
+            MenuItem::action("Smaller Text", FontSmaller),
+            MenuItem::action("Actual Text Size", FontReset),
+            MenuItem::separator(),
+            MenuItem::action("Stream Stats", ToggleStats),
+            MenuItem::action("Mute Window", ToggleMute),
+        ]),
+        Menu::new("Layout").items([
+            MenuItem::action("Focus Column Left", FocusColumnLeft),
+            MenuItem::action("Focus Column Right", FocusColumnRight),
+            MenuItem::action("Focus Up", FocusUp),
+            MenuItem::action("Focus Down", FocusDown),
+            MenuItem::separator(),
+            MenuItem::action("Move Column Left", MoveColumnLeft),
+            MenuItem::action("Move Column Right", MoveColumnRight),
+            MenuItem::action("Move Up", MoveUp),
+            MenuItem::action("Move Down", MoveDown),
+            MenuItem::action("Consume or Expel Left", ConsumeOrExpelLeft),
+            MenuItem::action("Consume or Expel Right", ConsumeOrExpelRight),
+            MenuItem::separator(),
+            MenuItem::action("Cycle Column Width", CycleWidth),
+            MenuItem::action("Maximize Column", MaximizeColumn),
+            MenuItem::action("Fullscreen Tile", FullscreenTile),
+            MenuItem::action("Center Column", CenterColumn),
+            MenuItem::action("Tabbed Column", ToggleTabbed),
+            MenuItem::separator(),
+            MenuItem::action("Next Agent Needing You", NextAttention),
         ]),
     ]
 }

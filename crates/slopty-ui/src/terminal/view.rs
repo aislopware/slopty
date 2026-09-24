@@ -132,7 +132,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-end", ScrollToBottom, CTX),
         KeyBinding::new("cmd-a", SelectAll, CTX),
         KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
-        KeyBinding::new("cmd-shift-enter", RerunLast, CTX),
+        // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
         KeyBinding::new("cmd-k", ClearScreen, CTX),
         // Only while the search field itself is focused: Esc in the grid goes to the program.
         KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),

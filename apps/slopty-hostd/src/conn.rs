@@ -11,8 +11,8 @@ use slopty_host::session::{ClientSink, Outbound};
 use slopty_net::host::{AcceptedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
-use slopty_proto::canvas::CanvasSync;
-use slopty_proto::handshake::{Caps, ClientKind, HelloAck};
+use slopty_proto::handshake::{Caps, HelloAck};
+use slopty_proto::items::ItemSync;
 use slopty_proto::screen::{Feedback, MAX_CLIPBOARD_BYTES, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use tokio::sync::mpsc;
@@ -68,12 +68,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         sessions: daemon.host.summaries().await,
     };
     out.send(HostMsg::HelloAck(ack)).await.map_err(|_gone| NetError::Closed)?;
-    out.send(HostMsg::Canvas(daemon.canvas.snapshot())).await.map_err(|_gone| NetError::Closed)?;
-    // Collected first: the lock must not be held across the sends.
-    let lookers = daemon.presence.lock().all_but(hello.client);
-    for presence in lookers {
-        out.send(HostMsg::Canvas(presence)).await.map_err(|_gone| NetError::Closed)?;
-    }
+    out.send(HostMsg::Items(daemon.items.snapshot())).await.map_err(|_gone| NetError::Closed)?;
     // Collected first: the lock must not be held across the sends.
     let agents = daemon.agents.lock().snapshot();
     for event in agents {
@@ -91,7 +86,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         daemon,
         conn,
         client: hello.client,
-        kind: hello.kind,
         name: hello.name,
         out,
         attached: HashMap::new(),
@@ -438,9 +432,7 @@ struct Peer<'d> {
     daemon: &'d Daemon,
     conn: Connection,
     client: ClientId,
-    /// What kind of device, for the presence it broadcasts.
-    kind: ClientKind,
-    /// Its name from `Hello`, for the same.
+    /// Its name from `Hello`, for the pointings it relays.
     name: String,
     out: mpsc::Sender<HostMsg>,
     /// Per attached session: the stream pump and the sink the actor writes into.
@@ -471,10 +463,6 @@ impl Drop for Peer<'_> {
         self.health.abort();
         self.feedback.abort();
         self.daemon.wake.lock().client_left();
-        let gone = self.daemon.presence.lock().leave(self.client);
-        if let Some(gone) = gone {
-            let _sent = self.daemon.events.send(HostMsg::Canvas(gone));
-        }
     }
 }
 
@@ -496,8 +484,8 @@ impl Peer<'_> {
                     if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
                         let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));
                     }
-                    if let Some(delta) = self.daemon.canvas.ensure_terminal(session, self.client) {
-                        let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                    if let Some(delta) = self.daemon.items.ensure_terminal(session, self.client) {
+                        let _sent = self.daemon.events.send(HostMsg::Items(delta));
                     }
                     if req.attach {
                         self.attach(session, req.size).await;
@@ -511,23 +499,16 @@ impl Peer<'_> {
                 }
                 self.term(session, req).await;
             }
-            ClientMsg::Look { view } => {
-                let told =
-                    self.daemon.presence.lock().look(self.client, self.kind, &self.name, view);
-                if let Some(presence) = told {
-                    let _sent = self.daemon.events.send(HostMsg::Canvas(presence));
-                }
-            }
             ClientMsg::Point { item } => {
-                // Ephemeral like presence: relayed as is, never in the document. A card the
-                // host no longer has is for each client to ignore.
+                // Ephemeral: relayed as is, never in the registry. An item the host no longer
+                // has is for each client to ignore.
                 let pointed =
-                    CanvasSync::Pointed { client: self.client, name: self.name.clone(), item };
-                let _sent = self.daemon.events.send(HostMsg::Canvas(pointed));
+                    ItemSync::Pointed { client: self.client, name: self.name.clone(), item };
+                let _sent = self.daemon.events.send(HostMsg::Items(pointed));
             }
-            ClientMsg::Canvas(op) => match self.daemon.canvas.apply(op, self.client) {
+            ClientMsg::Items(op) => match self.daemon.items.apply(op, self.client) {
                 Ok(delta) => {
-                    let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                    let _sent = self.daemon.events.send(HostMsg::Items(delta));
                 }
                 Err(e) => self.report(SessionId::nil(), &e).await,
             },
@@ -844,8 +825,8 @@ impl Peer<'_> {
                         let reason = CloseReason::Requested;
                         let _sent =
                             self.daemon.events.send(HostMsg::SessionClosed { session, reason });
-                        for delta in self.daemon.canvas.remove_session(session, self.client) {
-                            let _sent = self.daemon.events.send(HostMsg::Canvas(delta));
+                        for delta in self.daemon.items.remove_session(session, self.client) {
+                            let _sent = self.daemon.events.send(HostMsg::Items(delta));
                         }
                     }
                     Err(e) => self.report(session, &e).await,
