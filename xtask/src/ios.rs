@@ -16,10 +16,9 @@ use crate::tools::step;
 pub const BUNDLE_ID: &str = "dev.aislopware.slopty";
 /// Product / scheme name.
 const PRODUCT: &str = "Slopty";
-/// Deployment target (the project floor).
+/// Deployment target (the project floor). Simulators run the newest installed iOS runtime at
+/// or above it ([`sim_runtime`]): the floor is what the app needs, not what the tests run on.
 const IOS_VERSION: &str = "26.5";
-/// Runtime for the simulator.
-const SIM_RUNTIME: &str = "com.apple.CoreSimulator.SimRuntime.iOS-26-5";
 
 /// Which simulator `sim` boots; each is created on first use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -327,8 +326,8 @@ fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String>
     let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().ignore_stderr().quiet();
     boot.run()?;
     // A device created a moment ago is still booting; `launch` on it blocks for minutes.
+    // Headless: simctl boots and drives it, and nothing needs Simulator.app's window.
     step("simctl bootstatus", &cmd!(sh, "xcrun simctl bootstatus {udid} -b"))?;
-    step("open Simulator.app", &cmd!(sh, "open -a Simulator"))?;
     step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))?;
     Ok(udid)
 }
@@ -355,8 +354,45 @@ fn simulator_udid(sh: &Shell, kind: SimKind) -> Result<String> {
     }
     println!("▶ creating simulator {name:?}");
     let device_type = kind.device_type();
-    let udid = cmd!(sh, "xcrun simctl create {name} {device_type} {SIM_RUNTIME}").read()?;
+    let runtime = sim_runtime(sh)?;
+    let udid = cmd!(sh, "xcrun simctl create {name} {device_type} {runtime}").read()?;
     Ok(udid.trim().to_owned())
+}
+
+/// The newest available iOS simulator runtime at or above [`IOS_VERSION`], by identifier.
+fn sim_runtime(sh: &Shell) -> Result<String> {
+    let json = cmd!(sh, "xcrun simctl list runtimes -j").read()?;
+    newest_runtime(&json)?.with_context(|| {
+        format!(
+            "no iOS simulator runtime {IOS_VERSION} or newer is installed \
+             (`xcodebuild -downloadPlatform iOS`)"
+        )
+    })
+}
+
+/// [`sim_runtime`] over `simctl list runtimes -j` output.
+fn newest_runtime(json: &str) -> Result<Option<String>> {
+    #[derive(serde::Deserialize)]
+    struct List {
+        runtimes: Vec<Runtime>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Runtime {
+        identifier: String,
+        version: String,
+        platform: String,
+        is_available: bool,
+    }
+    let version = |v: &str| -> Vec<u32> { v.split('.').map_while(|n| n.parse().ok()).collect() };
+    let floor = version(IOS_VERSION);
+    let list: List = serde_json::from_str(json).context("simctl's runtime list")?;
+    Ok(list
+        .runtimes
+        .into_iter()
+        .filter(|r| r.platform == "iOS" && r.is_available && version(&r.version) >= floor)
+        .max_by_key(|r| version(&r.version))
+        .map(|r| r.identifier))
 }
 
 /// The UDID of the device called exactly `name` in `simctl list devices` output.
@@ -414,4 +450,33 @@ fn first_device(sh: &Shell) -> Result<String> {
         }
     }
     bail!("no connected device; pass --device <name-or-udid> (see `xcrun devicectl list devices`)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_runtime;
+
+    #[test]
+    fn the_newest_available_ios_runtime_at_or_above_the_floor_is_picked() {
+        let runtime = |id: &str, version: &str, platform: &str, available: bool| {
+            serde_json::json!({
+                "identifier": id, "version": version, "platform": platform,
+                "isAvailable": available, "buildversion": "x",
+            })
+        };
+        let list = |runtimes: Vec<serde_json::Value>| {
+            serde_json::json!({ "runtimes": runtimes }).to_string()
+        };
+        let installed = list(vec![
+            runtime("ios-26-4", "26.4", "iOS", true),
+            runtime("ios-26-5", "26.5", "iOS", true),
+            runtime("ios-27-0", "27.0", "iOS", true),
+            runtime("ios-27-1", "27.1", "iOS", false),
+            runtime("tvos-28-0", "28.0", "tvOS", true),
+        ]);
+        assert_eq!(newest_runtime(&installed).unwrap().as_deref(), Some("ios-27-0"));
+        let old = list(vec![runtime("ios-26-4", "26.4", "iOS", true)]);
+        assert_eq!(newest_runtime(&old).unwrap(), None, "below the floor");
+        newest_runtime("not json").unwrap_err();
+    }
 }
