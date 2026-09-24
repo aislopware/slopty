@@ -919,10 +919,8 @@ mod tests {
         let dump = shell_in(drv, &work).await;
         let tile = dump.item("terminal").unwrap().bounds;
         let (x, y) = (tile[0] + tile[2] / 2.0, tile[1] + tile[3] / 2.0);
-        // GPUI leaves the input modality at keyboard through a file drag, and a keyboard
-        // modality makes every hitbox unhovered, so a drop right after typing falls through.
-        // Until the fork counts a file drag as the pointer, the pointer arrives first.
-        drv.ok(&Command::Move { x, y }).await.unwrap();
+        // Straight after typing: a file drag must count as the pointer (keyboard modality
+        // unhovers every hitbox, and the drop would fall through).
         drv.drop_files(&[source.as_path()], x, y).await.unwrap();
 
         let dump = drv
