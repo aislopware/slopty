@@ -126,6 +126,21 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
+        let server = self.server_status.clone().map(|text| {
+            div()
+                .id("server-status")
+                .debug_selector(|| "server-status".to_owned())
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .text_size(px(small))
+                .text_color(hsla(s.text_muted))
+                .child(div().size(px(spacing.xs)).rounded_full().bg(hsla(s.text_muted)))
+                .child(text)
+        });
         let name = div()
             .id("workspace-name")
             .debug_selector(|| "workspace-name".to_owned())
@@ -208,6 +223,7 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(spacing.md))
                     .child(name)
+                    .when_some(server, gpui::ParentElement::child)
                     .children(down),
             )
             .child(self.render_indicator(cx))

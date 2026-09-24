@@ -1,4 +1,5 @@
-//! The workers this app has added: one link each, all of them feeding one workspace.
+//! The workers this app reaches, from the server's directory or added by address: one direct
+//! link each, all of them feeding one workspace.
 
 use std::time::Duration;
 
@@ -19,6 +20,10 @@ pub mod actions {
         [
             /// Open the panel that adds a worker by address.
             AddWorker,
+            /// Open the panel that connects to a server, whose directory lists the workers.
+            ConnectServer,
+            /// Stop using the server: its workers leave, the ones added by address stay.
+            DisconnectServer,
         ]
     );
 }
@@ -29,10 +34,15 @@ pub const fn worker_key(id: WorkerId) -> WorkerKey {
     WorkerKey::new(id.as_uuid().as_u128())
 }
 
-/// One added worker as the app keeps it, beside what the workspace keeps.
+/// One worker as the app keeps it, beside what the workspace keeps.
 pub struct WorkerSlot {
-    /// Its identity (the known-workers store's key).
+    /// Its identity (the directory's and the known-workers store's key).
     pub id: WorkerId,
+    /// It was added by address, so it stays without the server.
+    pub added: bool,
+    /// Wakes its connect loop out of a wait: it came back online, or the server went away and
+    /// its cached address is worth a try.
+    pub wake: std::sync::Arc<tokio::sync::Notify>,
     /// The workspace's key for it.
     pub key: WorkerKey,
     /// Display name (from the store, refreshed by each `HelloAck`).
@@ -51,10 +61,22 @@ impl std::fmt::Debug for WorkerSlot {
 }
 
 impl WorkerSlot {
-    /// A slot for an added worker, before its first connection attempt.
+    /// A slot for a worker, before its first connection attempt.
     #[must_use]
-    pub const fn new(id: WorkerId, name: String) -> Self {
-        Self { id, key: worker_key(id), name, link: None }
+    pub fn new(id: WorkerId, name: String, added: bool) -> Self {
+        let wake = std::sync::Arc::default();
+        Self { id, added, wake, key: worker_key(id), name, link: None }
+    }
+
+    /// Cut a wait short.
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// The direct link is up.
+    #[must_use]
+    pub fn linked(&self) -> bool {
+        self.link.as_ref().is_some_and(|l| l.strong_count() > 0)
     }
 }
 

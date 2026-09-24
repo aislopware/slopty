@@ -257,3 +257,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - An orchestrator that wants a program's last output reads it before the program exits: run
     it in a shell and wait with `command_done`, not `exit`. `WaitFor { Exit }` still resolves
     when the session is closed under it.
+
+- ✅ **The app takes its workers from the server's directory and dials each one itself**
+  (2026-09-25).
+  - **Setting.** `[client] server` in `settings.toml` names the server, `host[:port]` with
+    port 45560 when none is given; it is typed (`slopty_settings::ClientSettings`, a
+    `HostAddr`), and empty means no server. The panel's "Connect to a server" dials the address
+    once as a client, and only an address that answered is written into the file, with the
+    rest of the file and its comments left as they were. "Disconnect from the server" clears
+    it. A file that fails to parse keeps the server in use rather than dropping it.
+  - **Link.** One `Role::Client` link (`slopty_client::server`), redialled 250 ms doubling to
+    5 s, reset by a link that lived 10 s, the same rule as the worker's. `Directory`, `Worker`
+    and `Event` feed a pure model (`slopty_client::directory::Directory`) that reports each
+    liveness move once and says, per worker, whether to dial it and where.
+  - **Data path.** The app dials every listed worker directly at its `address`, with the
+    existing per-worker connection. While the server answers, a worker it calls unreachable
+    or gone is not redialled on the fast backoff: its tiles show stale ("studio is
+    unreachable") until it is back online, which wakes the dial at once. The server's view can
+    be wrong, so such a worker is still tried every 10 s.
+  - **A live direct link outranks the server.** A worker the server calls away keeps a direct
+    link that still works. The link is the data path's own judge, and a restarted server lists
+    every worker as gone until each registers again, so tearing links down on its word would
+    blink every tile after each server restart.
+  - **Degraded mode.** The directory is cached as `directory.json` in the app's data
+    directory, tagged with its server and written off the main thread. With the server down,
+    at launch or later, every cached worker is dialled at its cached address, and the
+    titlebar shows one quiet "server unreachable" line. The app never shows a modal for it.
+  - **Adding by address stays, as the fallback.** The panel opens on "Connect to a server"
+    and offers "Add a worker by address instead". Workers added that way stay without the
+    server. A worker only the directory listed leaves, tiles included, when the server is
+    disconnected or its directory stops listing it.
+  - **Agents.** `Event::Agent` relayed by the server counts toward the agents that need the
+    human even where the worker's own link is down or no tile shows the session. ⌘⇧A walks
+    the tiled ones in reading order, then the rest. For one without a tile it proposes a
+    terminal item for that session on its worker, or says the worker is not reachable from
+    here. The banner comes from the worker's link when there is one, from the server's
+    otherwise.
+  - The palette gained "Connect to a server", "Disconnect from the server" and "List
+    workers". The list shows each worker with its state, and ↩ goes to its first tile or
+    opens a shell on it.

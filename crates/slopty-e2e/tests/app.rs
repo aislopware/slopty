@@ -757,4 +757,125 @@ mod tests {
             }
         }
     }
+
+    /// The app launched with only `[client] server` in its settings: `slopty-app` from this
+    /// build with its data in `dir`, its test socket beside it, and a driver on the socket.
+    async fn launch_app_for(
+        dir: &std::path::Path,
+        server: &str,
+    ) -> anyhow::Result<(tokio::process::Child, slopty_e2e::Driver)> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("settings.toml"), format!("[client]\nserver = \"{server}\"\n"))?;
+        let sock = dir.with_extension("sock");
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let mut app =
+            tokio::process::Command::new(slopty_e2e::harness::bin_dir()?.join("slopty-app"))
+                .env("RUST_LOG", log)
+                .env("SLOPTY_DATA_DIR", dir)
+                .env(slopty_e2e::SOCKET_ENV, &sock)
+                .env("SLOPTY_PREDICT", "never")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()?;
+        let deadline = tokio::time::Instant::now().checked_add(STEP);
+        loop {
+            if let Some(status) = app.try_wait()? {
+                anyhow::bail!("slopty-app exited early: {status}");
+            }
+            if let Ok(driver) = slopty_e2e::Driver::connect(&sock).await {
+                return Ok((app, driver));
+            }
+            anyhow::ensure!(
+                deadline.is_some_and(|d| tokio::time::Instant::now() < d),
+                "no test socket"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// `slopty-server` again on the ports and data directory of the one that was killed.
+    fn restart_server(
+        server: &slopty_e2e::harness::ServerDaemon,
+    ) -> anyhow::Result<tokio::process::Child> {
+        let port = server.address().rsplit_once(':').map_or("", |(_, p)| p).to_owned();
+        Ok(tokio::process::Command::new(slopty_e2e::harness::bin_dir()?.join("slopty-server"))
+            .args(["--port", &port, "--mcp-port", &server.mcp().port().to_string()])
+            .arg("--data-dir")
+            .arg(server.data_dir())
+            .args(["--name", "e2e-server"])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()?)
+    }
+
+    /// Type `echo <tag>-$((6*7))` into the focused shell and wait for `<tag>-42` in its rows.
+    async fn echo(drv: &mut slopty_e2e::Driver, tag: &str) {
+        drv.type_text(&format!("echo {tag}-$((6*7))")).await.unwrap();
+        drv.keys("enter").await.unwrap();
+        let want = format!("{tag}-42");
+        drv.wait_for(tag, STEP, |d| d.rows_containing(&want).iter().any(|r| r.trim() == want))
+            .await
+            .unwrap();
+    }
+
+    fn server_unreachable(d: &slopty_e2e::Dump) -> bool {
+        d.a11y_node("Status", Some("server unreachable")).is_some()
+    }
+
+    /// The app finds its worker through the server, opens a terminal on it directly, keeps
+    /// typing into it while the server is dead, and links to the server again once it is back.
+    #[tokio::test]
+    async fn the_app_reaches_its_worker_through_the_server_and_outlives_it() {
+        if !gated() {
+            return;
+        }
+        let mut stack = slopty_e2e::harness::ServerStack::launch("e2e-worker").await.unwrap();
+        let app_dir = stack.path("app");
+        let (mut app, mut drv) = launch_app_for(&app_dir, stack.server.address()).await.unwrap();
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+
+        // Listed by the server, dialled directly: the first shell on the empty worker.
+        let dump = drv
+            .wait_for("the worker listed and a shell open on it", STEP, |d| {
+                d.workers.iter().any(|w| w.name == "e2e-worker" && w.status == "connected")
+                    && d.item("terminal").is_some()
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await
+            .unwrap();
+        assert!(!dump.adding, "no panel with a server set: {dump:#?}");
+        assert!(!server_unreachable(&dump), "{:#?}", dump.a11y);
+        echo(&mut drv, "direct").await;
+        let cache = std::fs::read_to_string(app_dir.join("directory.json")).unwrap_or_default();
+        assert!(cache.contains("e2e-worker"), "the directory is cached: {cache}");
+
+        // The server dies: one quiet line says so, and the terminal goes on.
+        stack.server.kill().await;
+        let dump = drv.wait_for("the server line", STEP, server_unreachable).await.unwrap();
+        assert!(!dump.adding, "no modal: {dump:#?}");
+        echo(&mut drv, "degraded").await;
+        let dump = drv.dump().await.unwrap();
+        assert_eq!(dump.workers.len(), 1, "{dump:#?}");
+        assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
+        let frame = drv.render(&artifacts_dir().join("server-unreachable.png")).await.unwrap();
+        assert!(foreground_fraction(&frame) > 0.01, "the degraded frame is blank");
+
+        // Back on the same port: the app links again, and the terminal never noticed.
+        let mut server = restart_server(&stack.server).unwrap();
+        drv.wait_for("the relink", STEP, |d| !server_unreachable(d)).await.unwrap();
+        echo(&mut drv, "relinked").await;
+        let dump = drv.dump().await.unwrap();
+        assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
+        assert_eq!(dump.items.len(), 1, "one tile throughout: {dump:#?}");
+
+        let _killed = app.start_kill();
+        let _reaped = app.wait().await;
+        let _killed = server.start_kill();
+        let _reaped = server.wait().await;
+    }
 }

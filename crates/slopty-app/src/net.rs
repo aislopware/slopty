@@ -1,13 +1,16 @@
 //! Networking on the tokio side.
 
 use anyhow::{Context as _, Result};
+use slopty_client::server::{ServerEvent, ServerTask};
 use slopty_client::{HostLink, LinkEvent};
 use slopty_core::{ClientId, WorkerId};
 use slopty_net::HostAddr;
 use slopty_net::client::{bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
+use slopty_net::server::ServerLink;
 use slopty_proto::ClientMsg;
 use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
+use slopty_proto::server::Role;
 use tokio::sync::mpsc;
 
 /// What the UI needs once the link is up.
@@ -107,24 +110,30 @@ pub async fn add_worker(address: &str) -> Result<Added> {
     Ok(added)
 }
 
-/// Connect to one known worker on the shared endpoint. The error is a line for the status.
-pub async fn connect_to(id: WorkerId) -> Result<Connected, String> {
+/// Connect to worker `id` on the shared endpoint: at `address` (the directory's), else at the
+/// address it was added with. The error is a line for the status.
+pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Connected, String> {
     let other = |e: &dyn std::fmt::Display| format!("{e:#}");
     let mut me = known().map_err(|e| other(&e))?;
-    let worker = me.get(id).cloned().ok_or_else(|| "worker forgotten".to_owned())?;
+    let added = me.get(id).cloned();
+    let address = match (address, &added) {
+        (Some(address), _) => address,
+        (None, Some(added)) => added.address.clone(),
+        (None, None) => return Err("worker forgotten".to_owned()),
+    };
     let endpoint = endpoint()?;
-    tracing::debug!(worker = %id, address = %worker.address, "dialing");
-    let conn =
-        connect(&endpoint, &worker.address, hello(me.client())).await.map_err(|e| other(&e))?;
+    tracing::debug!(worker = %id, %address, "dialing");
+    let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| other(&e))?;
     let ack = conn.ack.clone();
     if ack.worker != id {
         conn.close();
-        return Err(format!("{} now answers as another worker; add it again", worker.address));
+        return Err(format!("{address} now answers as another worker"));
     }
     tracing::debug!(worker = %id, name = %ack.name, sessions = ack.sessions.len(), "connected");
-    // The switcher shows the stored name until the link is up; keep it current.
-    if ack.name != worker.name
-        && let Err(e) = me.remember(KnownWorker { name: ack.name.clone(), ..worker })
+    // A worker added by address shows the stored name until the link is up; keep it current.
+    if let Some(added) = added
+        && ack.name != added.name
+        && let Err(e) = me.remember(KnownWorker { name: ack.name.clone(), ..added })
     {
         tracing::warn!(error = %e, "refresh worker name");
     }
@@ -132,4 +141,46 @@ pub async fn connect_to(id: WorkerId) -> Result<Connected, String> {
     let events = link.events().ok_or_else(|| "events".to_owned())?;
     let sender = link.sender();
     Ok(Connected { me: me.client(), ack, sender, events, link })
+}
+
+/// Whether worker `id` was added by address (rather than listed by the server).
+#[must_use]
+pub fn is_added(id: WorkerId) -> bool {
+    known().is_ok_and(|k| k.get(id).is_some())
+}
+
+/// Who this app is to the server.
+fn server_role(client: ClientId) -> Role {
+    let Hello { client, kind, name, .. } = hello(client);
+    Role::Client { client, kind, name }
+}
+
+/// Dial the server at `address` once, to prove it answers before it is saved; the link goes on
+/// to [`serve_directory`].
+///
+/// # Errors
+///
+/// When nothing answers there, or it refuses this app.
+pub async fn link_server(address: &HostAddr) -> Result<ServerLink> {
+    let endpoint = endpoint().map_err(anyhow::Error::msg)?;
+    let role = server_role(known()?.client());
+    slopty_net::server::connect(&endpoint, address, role)
+        .await
+        .with_context(|| format!("connect to {address}"))
+}
+
+/// Keep a link to the server at `address` on this runtime, starting with `first` when the
+/// address was just proven. Must run on the runtime.
+///
+/// # Errors
+///
+/// When the endpoint cannot be bound or the store read.
+pub fn serve_directory(
+    address: HostAddr,
+    first: Option<ServerLink>,
+) -> Result<(ServerTask, mpsc::Receiver<ServerEvent>), String> {
+    let endpoint = endpoint()?;
+    let role = server_role(known().map_err(|e| format!("{e:#}"))?.client());
+    let runtime = tokio::runtime::Handle::current();
+    Ok(slopty_client::server::spawn(&runtime, endpoint, address, role, first))
 }

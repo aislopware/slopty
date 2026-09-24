@@ -20,6 +20,17 @@ use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 
+/// An agent waiting on the human: where, and the tile that shows it, if one does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Waiting {
+    /// The worker it runs on.
+    pub worker: WorkerKey,
+    /// Its tile here.
+    pub tile: Option<TileRef>,
+    /// Its session.
+    pub session: SessionId,
+}
+
 /// A banner's title: what the agent is doing, led by the tile's name when the human gave it
 /// one, so a banner from several agents says which tile it is about.
 #[must_use]
@@ -170,20 +181,87 @@ impl WorkspaceView {
         cx.emit(WorkspaceEvent::Attention(session));
     }
 
-    /// Sessions whose agent is waiting on the human, in reading order (workspace, column,
-    /// tile) so ⌘⇧A walks the strip predictably.
-    pub(super) fn needs_you(&self) -> Vec<(TileRef, SessionId)> {
-        let mut out: Vec<(Option<slopty_client::layout::Pos>, TileRef, SessionId)> = self
+    /// Sessions whose agent is waiting on the human: those with a tile in reading order
+    /// (workspace, column, tile) so ⌘⇧A walks the strip predictably, then those the server
+    /// reported on a worker with no tile for them here.
+    pub(super) fn needs_you(&self) -> Vec<Waiting> {
+        let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
             .items()
             .filter_map(|(worker, i)| match i.kind {
-                ItemKind::Terminal { session } => Some((TileRef { worker, item: i.id }, session)),
+                ItemKind::Terminal { session } => {
+                    Some(Waiting { worker, tile: Some(TileRef { worker, item: i.id }), session })
+                }
                 _ => None,
             })
-            .filter(|(_, s)| self.agents.get(s).is_some_and(needs_human))
-            .map(|(t, s)| (self.layout.position(t), t, s))
+            .filter(|w| self.agent_state(w.session).is_some_and(needs_human))
+            .map(|w| (w.tile.and_then(|t| self.layout.position(t)), w))
             .collect();
-        out.sort_by_key(|(pos, t, _)| (pos.map(|p| (p.workspace, p.column, p.tile)), t.item));
-        out.into_iter().map(|(_, t, s)| (t, s)).collect()
+        shown.sort_by_key(|(pos, w)| {
+            (pos.map(|p| (p.workspace, p.column, p.tile)), w.tile.map(|t| t.item))
+        });
+        let mut unshown: Vec<Waiting> = self
+            .server_agents
+            .iter()
+            .filter(|(session, (_, agent))| {
+                needs_human(agent) && self.tile_of_session(**session).is_none()
+            })
+            .map(|(session, (worker, _))| Waiting {
+                worker: *worker,
+                tile: None,
+                session: *session,
+            })
+            .collect();
+        unshown.sort_by_key(|w| (w.worker, w.session));
+        shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
+    }
+
+    /// What is known about a session's agent: the worker's own word while its link is up,
+    /// else the server's.
+    pub(super) fn agent_state(&self, session: SessionId) -> Option<&AgentEvent> {
+        self.agents.get(&session).or_else(|| self.server_agents.get(&session).map(|(_, a)| a))
+    }
+
+    /// The server relayed an agent's change on `worker`. It counts toward the agents that need
+    /// the human whether or not the worker's own link is up or a tile shows the session, and
+    /// raises the banner when no link of this client's would.
+    pub fn server_agent_event(
+        &mut self,
+        worker: WorkerKey,
+        event: AgentEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let session = event.session;
+        let linked = self.workers.get(&worker).is_some_and(|w| w.link.is_some());
+        if event.status == AgentStatus::None {
+            self.server_agents.remove(&session);
+        } else {
+            if event.attention && !linked {
+                self.notify_system(&event, cx);
+                cx.emit(WorkspaceEvent::Attention(session));
+            }
+            self.server_agents.insert(session, (worker, event));
+        }
+        self.count_needs_you(cx);
+        cx.notify();
+    }
+
+    /// The server says a session ended.
+    pub fn server_session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        if self.server_agents.remove(&session).is_some() {
+            self.count_needs_you(cx);
+            cx.notify();
+        }
+    }
+
+    /// Drop what the server said about agents: on `worker` (gone), or everywhere (`None`,
+    /// the server was disconnected).
+    pub fn forget_server_agents(&mut self, worker: Option<WorkerKey>, cx: &mut Context<Self>) {
+        let before = self.server_agents.len();
+        self.server_agents.retain(|_, (w, _)| worker.is_some_and(|gone| *w != gone));
+        if self.server_agents.len() != before {
+            self.count_needs_you(cx);
+            cx.notify();
+        }
     }
 
     /// How many agents are waiting on the human, on every worker.
@@ -195,7 +273,7 @@ impl WorkspaceView {
     /// Agents waiting on the human on one worker.
     #[must_use]
     pub fn needs_you_on(&self, worker: WorkerKey) -> usize {
-        self.needs_you().iter().filter(|(t, _)| t.worker == worker).count()
+        self.needs_you().iter().filter(|w| w.worker == worker).count()
     }
 
     /// Tell the app the count (the Dock badge).
@@ -212,13 +290,35 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let waiting = self.needs_you();
-        let Some(&(_, first)) = waiting.first() else { return };
+        let Some(first) = waiting.first() else { return };
         let next = self
             .focused()
-            .and_then(|focused| waiting.iter().position(|(t, _)| *t == focused))
+            .and_then(|focused| waiting.iter().position(|w| w.tile == Some(focused)))
             .and_then(|i| waiting.iter().cycle().nth(i.saturating_add(1)))
-            .map_or(first, |(_, s)| *s);
-        self.reveal_session(next, cx);
+            .unwrap_or(first);
+        match next.tile {
+            Some(_) => self.reveal_session(next.session, cx),
+            None => self.show_untiled(next.worker, next.session, cx),
+        }
+    }
+
+    /// An agent that needs the human in a session with no tile here: give it one, which the
+    /// worker then syncs to every client. A worker this client cannot reach says so instead.
+    fn show_untiled(&mut self, worker: WorkerKey, session: SessionId, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&worker) else { return };
+        if w.link.is_none() {
+            let text = format!("{} is not reachable from here", w.name);
+            self.show_notice(text, cx);
+            return;
+        }
+        let item = slopty_proto::items::Item {
+            id: slopty_core::ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            sleeping: false,
+            name: None,
+        };
+        self.propose(worker, slopty_proto::items::ItemOp::Upsert(item), cx);
+        self.pending_focus = Some(session);
     }
 
     /// A shell command ended in `session`. Long enough, and in a tile the human is not on, it

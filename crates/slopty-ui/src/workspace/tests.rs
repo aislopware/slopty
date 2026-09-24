@@ -971,6 +971,115 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     assert!(terminal_focused(&view, cx, session));
 }
 
+fn blocked(session: SessionId) -> AgentEvent {
+    AgentEvent {
+        session,
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Blocked(BlockReason::Question),
+        agent_session: None,
+        detail: None,
+        attention: true,
+        source: AgentSource::Hook,
+    }
+}
+
+/// An agent the server reports on a session with no tile here still counts, and ⌘⇧A gives it
+/// a tile on its worker; on a worker this client cannot reach, ⌘⇧A says so instead.
+#[gpui::test]
+fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let laptop = WorkerKey::new(2);
+    let (untiled, unreachable) = (SessionId::new(), SessionId::new());
+    view.update_in(cx, |v, _w, cx| {
+        v.add_worker(laptop, "laptop".into(), cx);
+        v.server_agent_event(studio.key, blocked(untiled), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.needs_you_count(), v.needs_you_on(studio.key))),
+        (1, 1)
+    );
+    assert!(cx.debug_bounds("needs-you").is_some(), "the titlebar counts it");
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-a");
+    cx.run_until_parked();
+    let asked = studio.drain();
+    assert!(
+        asked.iter().any(|m| matches!(
+            m,
+            ClientMsg::Items(ItemOp::Upsert(Item { kind: ItemKind::Terminal { session }, .. }))
+                if *session == untiled
+        )),
+        "a tile for the waiting session: {asked:?}"
+    );
+
+    view.update_in(cx, |v, _w, cx| {
+        v.server_session_closed(untiled, cx);
+        v.server_agent_event(laptop, blocked(unreachable), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.needs_you_on(laptop)), 1);
+    cx.simulate_keystrokes("cmd-shift-a");
+    cx.run_until_parked();
+    let notice = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(notice.as_deref(), Some("laptop is not reachable from here"));
+
+    view.update_in(cx, |v, _w, cx| v.forget_server_agents(Some(laptop), cx));
+    assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 0, "a gone worker's agents go");
+}
+
+/// A worker the server says is away reads so in the titlebar, and the server's own line
+/// shows only while it does not answer.
+#[gpui::test]
+fn the_servers_word_shows_quietly_in_the_titlebar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Unreachable, cx);
+        v.set_server_status(Some("server unreachable".into()), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("server-status").is_some());
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let labels: Vec<&str> = tree.iter().filter_map(|n| n.label.as_deref()).collect();
+    assert!(labels.contains(&"studio, unreachable"), "{labels:#?}");
+    assert!(labels.contains(&"server unreachable"), "{labels:#?}");
+
+    view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("server-status").is_none(), "gone once the server answers");
+}
+
+/// "List workers" lists each worker with its state, and going to one without a tile asks it
+/// for a shell.
+#[gpui::test]
+fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    view.update_in(cx, |v, window, cx| v.list_workers(&ListWorkers, window, cx));
+    cx.run_until_parked();
+    let lines = view.read_with(cx, |v, cx| {
+        v.palette.as_ref().map(|p| {
+            p.read(cx)
+                .matches(cx)
+                .iter()
+                .map(|l| (l.label.clone(), l.keys.clone()))
+                .collect::<Vec<_>>()
+        })
+    });
+    assert_eq!(lines, Some(vec![("Go to studio".to_owned(), "connected".to_owned())]));
+    studio.drain();
+    view.update_in(cx, |v, _w, cx| v.go_to_worker(studio.key, cx));
+    cx.run_until_parked();
+    assert!(!studio.drain().is_empty(), "a worker with no tile is asked for a shell");
+}
+
 // ----- the layout on disk ------------------------------------------------------------------
 
 /// The layout is written after it changes, and a new workspace read from the file puts every

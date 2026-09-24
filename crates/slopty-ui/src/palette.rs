@@ -28,6 +28,8 @@ pub enum PaletteRun {
     Session(SessionId),
     /// Reveal this item (a file card, a note) in the workspace.
     Item(slopty_core::ItemId),
+    /// Go to this worker's tiles, or give it a shell when it has none.
+    Worker(slopty_client::layout::WorkerKey),
     /// Open a file card for the path the field holds (relative to the active shell, `~` the
     /// host's home), landing on `line`.
     OpenFile {
@@ -75,6 +77,7 @@ impl Clone for PaletteRun {
             Self::Action(action) => Self::Action(action.boxed_clone()),
             Self::Session(session) => Self::Session(*session),
             Self::Item(item) => Self::Item(*item),
+            Self::Worker(worker) => Self::Worker(*worker),
             Self::OpenFile { path, line } => Self::OpenFile { path: path.clone(), line: *line },
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
@@ -97,6 +100,7 @@ impl std::fmt::Debug for PaletteRun {
             Self::Action(action) => f.debug_tuple("Action").field(&action.name()).finish(),
             Self::Session(session) => f.debug_tuple("Session").field(session).finish(),
             Self::Item(item) => f.debug_tuple("Item").field(item).finish(),
+            Self::Worker(worker) => f.debug_tuple("Worker").field(worker).finish(),
             Self::OpenFile { path, line } => {
                 f.debug_struct("OpenFile").field("path", path).field("line", line).finish()
             }
@@ -145,6 +149,16 @@ impl PaletteItem {
             label: format!("Go to {title}"),
             keys: status.to_owned(),
             run: PaletteRun::Session(session),
+        }
+    }
+
+    /// `Go to <name>` for a worker, whether it is reachable on the right.
+    #[must_use]
+    pub fn worker(name: &str, status: &str, worker: slopty_client::layout::WorkerKey) -> Self {
+        Self {
+            label: format!("Go to {name}"),
+            keys: status.to_owned(),
+            run: PaletteRun::Worker(worker),
         }
     }
 

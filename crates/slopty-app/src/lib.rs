@@ -10,6 +10,7 @@
 
 mod e2e;
 pub mod net;
+mod server;
 pub mod settings;
 pub mod workers;
 
@@ -40,7 +41,7 @@ use slopty_ui::terminal::TerminalView;
 use slopty_ui::workspace::{
     KeyTarget, MenuEntry, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
 };
-pub use workers::actions::AddWorker;
+pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{WorkerSlot, retry_delay};
 
 /// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
@@ -106,10 +107,21 @@ const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 /// timeout. Three missed keep-alives, the same bar noq uses to abandon a path.
 const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The panel that adds a worker by address: shown until this installation knows one, and on
-/// "Add worker".
+/// What the panel over the workspace connects to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Panel {
+    /// A server, whose directory lists the workers: the usual way in.
+    Server,
+    /// One worker by address, for a setup without a server.
+    Worker,
+}
+
+/// The panel that connects to a server or adds a worker by address: shown until this
+/// installation reaches some worker, and on "Connect to a server" or "Add a worker".
 #[derive(Debug)]
 struct Adding {
+    /// Which of the two.
+    mode: Panel,
     /// Where the address is typed or pasted.
     address: Entity<InputState>,
     /// A connection attempt is in flight.
@@ -121,8 +133,14 @@ struct Adding {
 /// The window's root view.
 #[derive(Debug)]
 pub struct Workspace {
-    /// Every added worker, each with its own link.
+    /// Every worker, each with its own link.
     workers: Vec<WorkerSlot>,
+    /// The server's worker directory as last heard (the cache while it does not answer).
+    directory: slopty_client::directory::Directory,
+    /// The server in use, if any.
+    server: Option<server::ServerSlot>,
+    /// Bumped whenever the server changes, so a late event from the old link is dropped.
+    server_generation: u64,
     /// Every worker's tiles, in one layout.
     view: Entity<WorkspaceView>,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
@@ -234,8 +252,14 @@ impl Workspace {
             };
             self.show_notice(text, cx);
         }
+        // A file that did not parse keeps the server in use rather than dropping it.
+        let server = loaded.error.is_none().then(|| loaded.settings.client.server.clone());
         self.settings = loaded.settings;
         self.rebuild_theme(cx);
+        if let Some(server) = server {
+            self.set_server(server, None, cx);
+            self.refresh_menu(cx);
+        }
     }
 
     /// The window turned dark or light.
@@ -288,15 +312,17 @@ impl Workspace {
     }
 
     /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
-    /// own brings them to life.
-    fn add_worker(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
+    /// own brings them to life. `added` marks one added by address, which stays without the
+    /// server.
+    fn add_worker(&mut self, id: WorkerId, name: String, added: bool, cx: &mut Context<Self>) {
         if let Some(slot) = self.slot_mut(id) {
             slot.name.clone_from(&name);
+            slot.added |= added;
             let key = slot.key;
             self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
             return;
         }
-        let slot = WorkerSlot::new(id, name.clone());
+        let slot = WorkerSlot::new(id, name.clone(), added);
         let key = slot.key;
         self.workers.push(slot);
         self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
@@ -304,22 +330,36 @@ impl Workspace {
         self.refresh_menu(cx);
     }
 
-    /// Drop a worker: its entry in the store, the link, the slot, and its tiles. With none
-    /// left the add-worker panel returns.
+    /// Forget a worker added by address: its entry in the store, then the slot. With none
+    /// left the panel returns.
     fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = net::forget_worker(id) {
             self.show_notice(format!("forget worker: {e:#}"), cx);
             return;
         }
+        if self.directory.get(id).is_some() {
+            if let Some(slot) = self.slot_mut(id) {
+                slot.added = false;
+            }
+        } else {
+            self.drop_slot(id, cx);
+        }
+        if self.workers.is_empty() && self.server.is_none() {
+            self.show_add_worker(Panel::Server, window, cx);
+        }
+        self.refresh_menu(cx);
+        cx.notify();
+    }
+
+    /// Drop a worker's slot: its link, and its tiles.
+    fn drop_slot(&mut self, id: WorkerId, cx: &mut Context<Self>) {
         let Some(at) = self.workers.iter().position(|w| w.id == id) else { return };
         let slot = self.workers.remove(at);
         if let Some(link) = slot.link.as_ref().and_then(std::sync::Weak::upgrade) {
-            link.abandon("worker forgotten");
+            link.abandon("worker dropped");
         }
+        slot.wake();
         self.view.update(cx, |v, cx| v.remove_worker(slot.key, cx));
-        if self.workers.is_empty() {
-            self.show_add_worker(window, cx);
-        }
         self.refresh_menu(cx);
         cx.notify();
     }
@@ -342,15 +382,37 @@ impl Workspace {
         }
         {
             let this = this.clone();
+            let entry = match self.server_address() {
+                Some(address) => MenuEntry {
+                    label: "Disconnect from the server".into(),
+                    detail: address.host().to_owned().into(),
+                    run: Rc::new(move |window, cx| {
+                        let _gone = this.update(cx, |ws, cx| ws.disconnect_server(window, cx));
+                    }),
+                },
+                None => MenuEntry {
+                    label: "Connect to a server".into(),
+                    detail: SharedString::default(),
+                    run: Rc::new(move |window, cx| {
+                        let _gone =
+                            this.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+                    }),
+                },
+            };
+            entries.push(entry);
+        }
+        {
+            let this = this.clone();
             entries.push(MenuEntry {
-                label: "Add worker".into(),
+                label: "Add a worker".into(),
                 detail: hint("⌘⇧H").into(),
                 run: Rc::new(move |window, cx| {
-                    let _gone = this.update(cx, |ws, cx| ws.show_add_worker(window, cx));
+                    let _gone =
+                        this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
                 }),
             });
         }
-        for slot in &self.workers {
+        for slot in self.workers.iter().filter(|s| s.added) {
             let (this, id) = (this.clone(), slot.id);
             entries.push(MenuEntry {
                 label: format!("Forget {}", slot.name).into(),
@@ -364,32 +426,46 @@ impl Workspace {
     }
 
     /// Connect to `id` and keep it connected: each drop (worker restart, network change,
-    /// silence) is retried with a capped backoff; the loop ends when the worker is forgotten.
+    /// silence) is retried with a capped backoff; the loop ends when the worker is dropped.
+    /// While the server says the worker is away the loop waits for it to come back online
+    /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it).
     fn spawn_worker_loop(&self, id: WorkerId, cx: &Context<Self>) {
         let handle = self.runtime.clone();
         let view = self.view.clone();
         cx.spawn(async move |this, cx| {
             let mut failures: u32 = 0;
+            let mut held = false;
             loop {
-                let Ok(Some(key)) = this.update(cx, |ws, _cx| ws.slot(id).map(|s| s.key)) else {
+                let Ok(Some(plan)) = this.update(cx, |ws, _cx| ws.plan(id)) else {
                     break;
                 };
+                let server::Plan { key, wake, address, hold } = plan;
+                if let Some(status) = hold
+                    && !held
+                {
+                    view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
+                    // Woken: back online, or the server went away. Timed out: try it anyway.
+                    held = !wait_or_wake(cx, &wake, server::HOLD_RETRY).await;
+                    continue;
+                }
+                held = false;
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 handle.spawn(async move {
-                    let _sent = ready_tx.send(net::connect_to(id).await);
+                    let _sent = ready_tx.send(net::connect_to(id, address).await);
                 });
                 let outcome = ready_rx.await;
                 let Ok(Ok(connected)) = outcome else {
-                    let status = match outcome {
-                        Ok(Err(why)) => WorkerStatus::Reconnecting(why),
-                        Ok(Ok(_)) | Err(_) => {
-                            WorkerStatus::Reconnecting("connection task died".to_owned())
-                        }
+                    let why = match outcome {
+                        Ok(Err(why)) => why,
+                        Ok(Ok(_)) | Err(_) => "connection task died".to_owned(),
+                    };
+                    let Ok(status) = this.update(cx, |ws, _cx| ws.failure_status(id, why)) else {
+                        break;
                     };
                     failures = failures.saturating_add(1);
                     let delay = retry_delay(failures);
                     view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
-                    cx.background_executor().timer(delay).await;
+                    wait_or_wake(cx, &wake, delay).await;
                     continue;
                 };
                 failures = 0;
@@ -477,33 +553,38 @@ impl Workspace {
                 }
                 // Dropping the link closes the connection; the endpoint stays for the retry.
                 drop(link);
-                cx.background_executor().timer(retry_delay(0)).await;
+                wait_or_wake(cx, &wake, retry_delay(0)).await;
             }
         })
         .detach();
     }
 
-    /// Show the add-worker panel (idempotent).
-    fn show_add_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.adding.is_some() {
+    /// Show the panel, connecting to a server or adding a worker; an open panel switches to
+    /// `mode` and keeps what was typed.
+    fn show_add_worker(&mut self, mode: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(adding) = &mut self.adding {
+            if adding.mode != mode {
+                adding.mode = mode;
+                adding.error = None;
+                cx.notify();
+            }
             return;
         }
-        let address = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("mac-studio, 100.64.0.3 or host:port")
-        });
+        let address =
+            cx.new(|cx| InputState::new(window, cx).placeholder("studio, 100.64.0.3 or host:port"));
         self.subscriptions.push(cx.subscribe(&address, |this, _input, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.add_from_panel(cx);
             }
         }));
         address.update(cx, |input, cx| input.focus(window, cx));
-        self.adding = Some(Adding { address, busy: false, error: None });
+        self.adding = Some(Adding { mode, address, busy: false, error: None });
         cx.notify();
     }
 
-    /// Close the add-worker panel (only offered while some worker is known).
+    /// Close the panel (only offered while there is somewhere else to be).
     fn cancel_add_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workers.is_empty() {
+        if self.workers.is_empty() && self.server.is_none() {
             return;
         }
         self.adding = None;
@@ -512,7 +593,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Put the clipboard's text into the address field and add it.
+    /// Put the clipboard's text into the address field and go.
     fn paste_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(adding) = &self.adding else { return };
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
@@ -520,7 +601,17 @@ impl Workspace {
         self.add_from_panel(cx);
     }
 
-    /// Connect to the address in the field on the runtime; report back to the panel.
+    /// The panel's report: the attempt ended with `error`, or it is still going.
+    fn panel_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.adding {
+            p.busy = false;
+            p.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    /// Connect to the address in the field on the runtime, as the panel's mode says; report
+    /// back to the panel.
     fn add_from_panel(&mut self, cx: &mut Context<Self>) {
         let Some(adding) = &mut self.adding else { return };
         if adding.busy {
@@ -530,39 +621,97 @@ impl Workspace {
         if address.is_empty() {
             return;
         }
+        let mode = adding.mode;
         adding.busy = true;
         adding.error = None;
         cx.notify();
+        match mode {
+            Panel::Server => self.connect_from_panel(&address, cx),
+            Panel::Worker => self.add_worker_from_panel(address, cx),
+        }
+    }
+
+    fn add_worker_from_panel(&self, address: String, cx: &Context<Self>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
             let _sent = tx.send(net::add_worker(&address).await);
         });
         cx.spawn(async move |this, cx| {
             let outcome = rx.await;
-            let _updated = this.update(cx, |ws, cx| {
-                match outcome {
-                    Ok(Ok(net::Added { id, name })) => {
-                        ws.adding = None;
-                        ws.show_notice(format!("Added {name}"), cx);
-                        ws.add_worker(id, name, cx);
-                    }
-                    Ok(Err(e)) => {
-                        if let Some(p) = &mut ws.adding {
-                            p.busy = false;
-                            p.error = Some(format!("{e:#}"));
-                        }
-                    }
-                    Err(_dropped) => {
-                        if let Some(p) = &mut ws.adding {
-                            p.busy = false;
-                            p.error = Some("connection task died".to_owned());
-                        }
-                    }
+            let _updated = this.update(cx, |ws, cx| match outcome {
+                Ok(Ok(net::Added { id, name })) => {
+                    ws.adding = None;
+                    ws.show_notice(format!("Added {name}"), cx);
+                    ws.add_worker(id, name, true, cx);
+                    cx.notify();
                 }
-                cx.notify();
+                Ok(Err(e)) => ws.panel_failed(format!("{e:#}"), cx),
+                Err(_dropped) => ws.panel_failed("connection task died".to_owned(), cx),
             });
         })
         .detach();
+    }
+
+    /// Prove the server answers, then save it as `[client] server` and keep its link.
+    fn connect_from_panel(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let address =
+            match slopty_net::HostAddr::parse_with_port(typed, slopty_net::endpoint::SERVER_PORT) {
+                Ok(address) => address,
+                Err(e) => return self.panel_failed(e.to_string(), cx),
+            };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let dial = address.clone();
+        self.runtime.spawn(async move {
+            let _sent = tx.send(net::link_server(&dial).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = rx.await;
+            let _updated = this.update(cx, |ws, cx| match outcome {
+                Ok(Ok(link)) => {
+                    let name = link.name.clone();
+                    if let Err(e) = ws.save_server(Some(&address)) {
+                        link.close();
+                        return ws.panel_failed(e, cx);
+                    }
+                    ws.adding = None;
+                    ws.show_notice(format!("Connected to {name}"), cx);
+                    ws.set_server(Some(address), Some(link), cx);
+                    ws.refresh_menu(cx);
+                    cx.notify();
+                }
+                Ok(Err(e)) => ws.panel_failed(format!("{e:#}"), cx),
+                Err(_dropped) => ws.panel_failed("connection task died".to_owned(), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
+    /// it as loaded so the watcher sees nothing new.
+    fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
+        let text = settings::editable_text(&self.settings_path);
+        let text = slopty_settings::with_client_server(&text, server)?;
+        let loaded = settings::save(&self.settings_path, &text)?;
+        self.settings = loaded.settings;
+        Ok(())
+    }
+
+    /// Stop using the server: the setting is cleared and its workers leave.
+    fn disconnect_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server.is_none() {
+            return;
+        }
+        if let Err(e) = self.save_server(None) {
+            self.show_notice(format!("settings: {e}"), cx);
+            return;
+        }
+        self.set_server(None, None, cx);
+        self.show_notice("Disconnected from the server".to_owned(), cx);
+        if self.workers.is_empty() {
+            self.show_add_worker(Panel::Server, window, cx);
+        }
+        self.refresh_menu(cx);
+        cx.notify();
     }
 
     fn add_worker_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
@@ -585,6 +734,43 @@ impl Workspace {
                 .child(text);
             tab_stop(pill, s.accent)
         };
+        let (title, blurb, field, go, paste, other, other_mode) = match adding.mode {
+            Panel::Server => (
+                "Connect to a server",
+                "The server lists your workers; terminals and screens still go to each worker \
+                 directly. Its Tailscale name, LAN name or IP, with :port unless it listens on \
+                 45560. Slopty does not encrypt: the tailnet or VPN is the boundary.",
+                "Server address",
+                "Connect",
+                "Paste & connect",
+                "Add a worker by address instead",
+                Panel::Worker,
+            ),
+            Panel::Worker => (
+                "Add a worker",
+                "For a setup without a server. Its Tailscale name, LAN name or IP, with :port \
+                 unless it listens on 45550. Slopty does not encrypt: the tailnet or VPN is the \
+                 boundary.",
+                "Worker address",
+                "Add",
+                "Paste & add",
+                "Connect to a server instead",
+                Panel::Server,
+            ),
+        };
+        let can_cancel = !self.workers.is_empty() || self.server.is_some();
+        let switch = div()
+            .id("panel-switch")
+            .role(Role::Button)
+            .aria_label(other)
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .hover(move |el| el.text_color(hsla(s.text)))
+            .cursor_pointer()
+            .child(other)
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.show_add_worker(other_mode, window, cx);
+            }));
         div()
             .id("add-worker")
             .occlude()
@@ -602,32 +788,32 @@ impl Workspace {
                 div()
                     .id("add-worker-title")
                     .role(Role::Heading)
-                    .aria_label("Add a worker")
+                    .aria_label(title)
                     .text_size(px(theme.typography.title()))
                     .text_color(hsla(s.text))
-                    .child("Add a worker"),
+                    .child(title),
             )
             .child(
-                div().text_size(px(theme.typography.small())).text_color(hsla(s.text_muted)).child(
-                    "Its Tailscale name, LAN name or IP, with :port unless it listens on \
-                     45550. Slopty does not encrypt: the tailnet or VPN is the boundary.",
-                ),
+                div()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(blurb),
             )
-            .child(Input::new(&adding.address).aria_label("Worker address"))
+            .child(Input::new(&adding.address).aria_label(field))
             .child(
                 div()
                     .flex()
                     .gap(px(spacing.sm))
                     .items_center()
                     .child(
-                        button("add", "Add", true).on_click(
+                        button("add", go, true).on_click(
                             cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
                         ),
                     )
-                    .child(button("paste-address", "Paste & add", false).on_click(
+                    .child(button("paste-address", paste, false).on_click(
                         cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
                     ))
-                    .when(!self.workers.is_empty(), |row| {
+                    .when(can_cancel, |row| {
                         row.child(button("cancel-add", "Cancel", false).on_click(
                             cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
                         ))
@@ -648,6 +834,7 @@ impl Workspace {
                             })),
                     ),
             )
+            .child(tab_stop(switch, s.accent))
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
@@ -843,6 +1030,19 @@ impl Workspace {
     }
 }
 
+/// Wait `delay`, or less if `wake` is notified first; whether it was.
+async fn wait_or_wake(
+    cx: &gpui::AsyncApp,
+    wake: &tokio::sync::Notify,
+    delay: std::time::Duration,
+) -> bool {
+    let timer = cx.background_executor().timer(delay);
+    tokio::select! {
+        () = wake.notified() => true,
+        () = timer => false,
+    }
+}
+
 /// A key-bar key as a screen reader names it; an armed modifier says so.
 fn key_label(label: &str, lit: bool) -> String {
     let name = key_name(label);
@@ -882,9 +1082,15 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .bg(hsla(surfaces.canvas))
-            .on_action(
-                cx.listener(|this, _: &AddWorker, window, cx| this.show_add_worker(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &AddWorker, window, cx| {
+                this.show_add_worker(Panel::Worker, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConnectServer, window, cx| {
+                this.show_add_worker(Panel::Server, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DisconnectServer, window, cx| {
+                this.disconnect_server(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
@@ -985,7 +1191,12 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     let item = |label: &str, action: Box<dyn gpui::Action>| {
         slopty_ui::palette::PaletteItem::new(label, action, &bindings)
     };
-    vec![item("Open settings", Box::new(OpenSettings)), item("Add a worker", Box::new(AddWorker))]
+    vec![
+        item("Open settings", Box::new(OpenSettings)),
+        item("Connect to a server", Box::new(ConnectServer)),
+        item("Disconnect from the server", Box::new(DisconnectServer)),
+        item("Add a worker", Box::new(AddWorker)),
+    ]
 }
 
 /// Where this device keeps its layout: beside the settings, in the client's data directory.
@@ -1056,6 +1267,9 @@ pub fn open_workspace(
         let changes = cx.observe(&view, |_ws, _view, cx| cx.notify());
         Workspace {
             workers: Vec::new(),
+            directory: slopty_client::directory::Directory::default(),
+            server: None,
+            server_generation: 0,
             view: view.clone(),
             hardware_keyboard: hardware_keyboard_attached(),
             theme: Theme::default(),
@@ -1099,7 +1313,8 @@ pub fn open_workspace(
             });
         });
     });
-    // Every known worker gets a link now; with none, the add-worker panel.
+    // Every worker added by address gets a link now, and the server's (cached) directory has
+    // been read by the settings above; with neither, the panel.
     let known = match net::known_workers() {
         Ok(known) => known,
         Err(e) => {
@@ -1111,11 +1326,11 @@ pub fn open_workspace(
         workspace.update(cx, |ws, cx| {
             ws.window = Some(window.window_handle());
             for worker in known {
-                ws.add_worker(worker.worker_id, worker.name, cx);
+                ws.add_worker(worker.worker_id, worker.name, true, cx);
             }
             ws.refresh_menu(cx);
-            if ws.workers.is_empty() {
-                ws.show_add_worker(window, cx);
+            if ws.workers.is_empty() && ws.server.is_none() {
+                ws.show_add_worker(Panel::Server, window, cx);
             } else {
                 let handle = ws.view.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);

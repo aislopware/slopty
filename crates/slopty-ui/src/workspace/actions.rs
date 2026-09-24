@@ -38,6 +38,8 @@ actions!(
         FocusPrev,
         /// Open the command palette: every action by name, run by ↩.
         OpenPalette,
+        /// The palette as a list of every worker and whether it is reachable; ↩ goes to one.
+        ListWorkers,
         /// Name the focused tile: a field in its header, ↩ keeps the name (blank clears
         /// it), Esc leaves it as it was.
         RenameItem,
@@ -219,6 +221,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Name this tile", Box::new(RenameItem)),
         w("Point the others at this tile", Box::new(PointOthers)),
         w("Find in every tile", Box::new(FindEverywhere)),
+        w("List workers", Box::new(ListWorkers)),
         w("Column to the left", Box::new(FocusColumnLeft)),
         w("Column to the right", Box::new(FocusColumnRight)),
         w("First column", Box::new(FocusColumn { index: 0 })),

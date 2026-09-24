@@ -9,7 +9,7 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::terminal::TermRequest;
 
-use super::actions::{FindEverywhere, OpenFile, OpenPalette};
+use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenPalette};
 use super::agents::{agent_status_text, needs_human};
 use super::tile::kind_name;
 use super::{AGENT_COMMAND, WorkspaceView};
@@ -84,6 +84,37 @@ impl WorkspaceView {
         let theme = self.theme.clone();
         let palette = cx.new(|cx| CommandPalette::new(items, theme, window, cx));
         self.show_palette(palette, window, cx);
+    }
+
+    /// "List workers": the palette with a line per worker, its state on the right.
+    pub fn list_workers(&mut self, _: &ListWorkers, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let lines = self
+            .workers
+            .iter()
+            .map(|(key, w)| PaletteItem::worker(&w.name, &w.status.text(), *key))
+            .collect();
+        let theme = self.theme.clone();
+        let palette = cx.new(|cx| CommandPalette::new(lines, theme, window, cx));
+        self.show_palette(palette, window, cx);
+    }
+
+    /// Focus `worker`'s first tile in reading order; one with no tile gets a shell, and one
+    /// this client cannot reach says so.
+    pub fn go_to_worker(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
+        if let Some(tile) = self.reading_order().into_iter().find(|t| t.worker == worker) {
+            self.focus_tile(tile, cx);
+            return;
+        }
+        let Some(w) = self.workers.get(&worker) else { return };
+        if w.link.is_none() {
+            let text = format!("{} is {}", w.name, w.status.text());
+            self.show_notice(text, cx);
+            return;
+        }
+        self.open_session_on(worker, None, Vec::new(), None, cx);
     }
 
     /// "Open a file": the palette, its field ready for a path on the focused tile's worker.
@@ -176,6 +207,10 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::Item(item)) => {
                     this.palette_return = None;
                     this.go_to(*item, cx);
+                }
+                PaletteEvent::Run(PaletteRun::Worker(worker)) => {
+                    this.palette_return = None;
+                    this.go_to_worker(*worker, cx);
                 }
                 PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
                     let path = this.absolute_in_active_shell(path);
@@ -367,7 +402,7 @@ impl WorkspaceView {
             .filter_map(|(at, tile)| {
                 let item = self.item(*tile)?;
                 let ItemKind::Terminal { session } = item.kind else { return None };
-                let agent = self.agents.get(&session);
+                let agent = self.agent_state(session);
                 let needs_you = agent.is_some_and(needs_human);
                 let rank = match agent {
                     _ if needs_you => 0,

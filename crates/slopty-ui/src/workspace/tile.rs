@@ -15,8 +15,8 @@ use slopty_proto::agent::AgentSource;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::{Theme, alpha};
 
-use super::WorkspaceView;
 use super::agents::needs_human;
+use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
@@ -166,7 +166,7 @@ impl WorkspaceView {
         let id = item.id;
         let focused = placed.focused;
         let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
+            ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
         };
         let needs_you = agent.is_some_and(|(_, a)| needs_human(a));
@@ -267,7 +267,7 @@ impl WorkspaceView {
         let title = self.card_title(tile, item, cx);
         let kind = kind_name(item);
         let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agents.get(&session).map(|a| (session, a)),
+            ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
         };
         let badge = agent.map(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
@@ -514,8 +514,13 @@ impl WorkspaceView {
                 .into_any_element()
         };
         let reconnecting = || -> SharedString {
-            let name = self.workers.get(&placed.tile.worker).map_or("worker", |w| w.name.as_str());
-            format!("{name} is away · reconnecting…").into()
+            let worker = self.workers.get(&placed.tile.worker);
+            let name = worker.map_or("worker", |w| w.name.as_str());
+            match worker.map(|w| &w.status) {
+                Some(WorkerStatus::Unreachable) => format!("{name} is unreachable").into(),
+                Some(WorkerStatus::Gone) => format!("{name} is gone").into(),
+                _ => format!("{name} is away · reconnecting…").into(),
+            }
         };
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {

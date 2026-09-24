@@ -106,6 +106,22 @@ impl WorkspaceView {
         }
     }
 
+    /// The quiet line about the server in the titlebar ("server unreachable"); `None` hides
+    /// it.
+    pub fn set_server_status(&mut self, text: Option<String>, cx: &mut Context<Self>) {
+        let text = text.map(gpui::SharedString::from);
+        if self.server_status != text {
+            self.server_status = text;
+            cx.notify();
+        }
+    }
+
+    /// The server's line, as shown.
+    #[must_use]
+    pub fn server_status(&self) -> Option<&str> {
+        self.server_status.as_deref()
+    }
+
     /// The human forgot a worker: its tiles leave the layout with it.
     pub fn remove_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         self.disconnect_worker(key, WorkerStatus::Connecting, cx);

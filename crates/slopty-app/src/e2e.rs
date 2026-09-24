@@ -66,7 +66,7 @@ pub fn serve(
                         Ok(Ok(net::Added { id, name })) => {
                             workspace.update(cx, |ws, cx| {
                                 ws.adding = None;
-                                ws.add_worker(id, name, cx);
+                                ws.add_worker(id, name, true, cx);
                                 cx.notify();
                             });
                             Reply::Ok

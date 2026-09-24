@@ -107,6 +107,10 @@ pub enum WorkerStatus {
     Silent(u64),
     /// Link lost or the attempt failed; retrying, with the reason.
     Reconnecting(String),
+    /// The server says the worker went quiet; dialled again when it is back online.
+    Unreachable,
+    /// The server has not heard from the worker for long enough to presume it gone.
+    Gone,
 }
 
 impl WorkerStatus {
@@ -118,6 +122,8 @@ impl WorkerStatus {
             Self::Connected => "connected".to_owned(),
             Self::Silent(secs) => format!("silent {secs} s"),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
+            Self::Unreachable => "unreachable".to_owned(),
+            Self::Gone => "gone".to_owned(),
         }
     }
 
@@ -291,6 +297,11 @@ pub struct WorkspaceView {
     titles: HashMap<ItemId, String>,
     /// Coding agents the workers observed, by session.
     agents: HashMap<SessionId, AgentEvent>,
+    /// Coding agents the server reported, by session: they stand in for a worker whose own
+    /// link is down or whose session has no tile here.
+    server_agents: HashMap<SessionId, (WorkerKey, AgentEvent)>,
+    /// The quiet line about the server in the titlebar ("server unreachable"), if any.
+    server_status: Option<SharedString>,
     /// Long shell commands that finished unwatched, by session.
     finished: HashMap<SessionId, Finished>,
     slow_command: Duration,
@@ -404,6 +415,8 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             titles: HashMap::new(),
             agents: HashMap::new(),
+            server_agents: HashMap::new(),
+            server_status: None,
             finished: HashMap::new(),
             slow_command: SLOW_COMMAND,
             shell_recency: Vec::new(),
@@ -546,10 +559,10 @@ impl WorkspaceView {
         self.files.get(&id)
     }
 
-    /// What the worker last said about a session's agent.
+    /// What the worker last said about a session's agent, else what the server relayed.
     #[must_use]
     pub fn agent(&self, session: SessionId) -> Option<&AgentEvent> {
-        self.agents.get(&session)
+        self.agent_state(session)
     }
 
     /// This client's id on `worker`'s wire, while linked.
@@ -883,6 +896,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
+            .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::close_item))
             .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::next_attention))
