@@ -8,6 +8,7 @@ Status: ✅ decided · 🔬 measure before relying on it · ⏸ deferred.
 
 One file per topic under `docs/decisions/`; an entry is cited by its bold title (grep the directory):
 
+- [Topology](decisions/topology.md)
 - [Platform](decisions/platform.md)
 - [UI](decisions/ui.md)
 - [Terminal](decisions/terminal.md)
