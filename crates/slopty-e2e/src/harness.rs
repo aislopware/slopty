@@ -434,6 +434,8 @@ async fn spawn_simulator_app(
         // Glass only: the key bar stays in the frame whatever the simulator has attached.
         .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
+        // A named pasteboard: the simulator's general one follows this Mac's clipboard.
+        .env(format!("SIMCTL_CHILD_{PASTEBOARD_ENV}"), pasteboard_name(root, name))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

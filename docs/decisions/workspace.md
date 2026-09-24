@@ -146,9 +146,15 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   A remote window or display off screen for 5 s (`STREAM_GRACE`) lets its stream go and asks
   for it again when it is back in view (a timer wakes the strip for it, since an idle strip
   draws nothing). Frames are requested only while the frame says something still moves.
-  Terminal and screen bodies are `Entity::cached` views, so a video frame, a flooding shell or
-  the cursor blink repaints only its own tile; the app's once-a-second RTT tick notifies only
-  when the shown value changed.
+  Terminal, screen and file bodies are `Entity::cached` views, so a video frame, a flooding
+  shell or the cursor blink repaints only its own tile; the app's once-a-second RTT tick
+  notifies only when the shown value changed. A file view redraws on every change of its
+  editor (it observes it), and a terminal is drawn afresh on the frame its zoom starts or stops
+  moving, since that changes its paint at the same bounds. A browser body is not cached: it
+  measures where it was drawn on every frame so the native page can follow it, and it costs
+  one element. The cache saves little today (MEASUREMENTS 2026-09-25, "the view cache"): a
+  terminal whose output did not change redraws from the word cache in well under a
+  millisecond, and six streaming shells are all dirty on every frame anyway.
 
 - ✅ **A browser tile is a native page that follows its tile** (2026-09-25). A forwarded
   port is usually a dev server, and the user wanted it beside the shell that runs it rather

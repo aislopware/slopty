@@ -708,11 +708,11 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
                 Some(view) => {
-                    view.update(cx, |v, _| {
+                    let restyled = view.update(cx, |v, _| {
                         v.set_zoom(k);
-                        v.set_zooming(chrome.zooming);
+                        v.set_zooming(chrome.zooming)
                     });
-                    let body = if self.cacheable(placed) {
+                    let body = if self.cacheable(placed) && !restyled {
                         view.clone()
                             .cached(StyleRefinement::default().size_full())
                             .into_any_element()
@@ -779,12 +779,19 @@ impl WorkspaceView {
                 Some(view) => {
                     let (pad, text_size) = (theme.spacing.sm, theme.typography.mono_size);
                     view.update(cx, |v, _| v.set_layout(k, pad, text_size));
+                    let body = if self.cacheable(placed) {
+                        view.clone()
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    } else {
+                        view.clone().into_any_element()
+                    };
                     div()
                         .flex_1()
                         .min_h_0()
                         .w_full()
                         .overflow_hidden()
-                        .child(view.clone())
+                        .child(body)
                         .into_any_element()
                 }
                 None if !worker_up => muted_line(reconnecting()),

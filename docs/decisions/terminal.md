@@ -1146,11 +1146,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   predictor and muted it for two seconds. `key_down` sends both through one path.
   (6) **A guess expires by age when it is drawn**, not only when a frame reconciles it, so a
   quiet link cannot leave an unconfirmed guess on screen.
-  (7) **Keystroke latency is read at presentation.** Presentation is vsync-synced, so a paint
-  reaches the display up to a refresh after its own clock. A paint that holds a waiting key
-  registers `Window::on_next_frame` and is timed there, at the display tick that presents it.
-  The exact figure would be the drawable's presented time, which needs a fork change
-  (see MEASUREMENTS).
+  (7) **Keystroke latency is read at the glass** (revised 2026-09-25). Presentation is
+  vsync-synced and the compositor adds about a refresh, so a paint reaches the display a
+  refresh or more after its own clock. A paint that holds a waiting key hands the work to
+  `slopty_ui::shown::after_paint`, which runs it at `presented_at` of the first frame submitted
+  after the paint (`Window::on_frame_presented`, from the fork), and keeps the window's
+  presentation reports on only while something waits. The next display tick, used before,
+  read 15 ms low on this Mac (MEASUREMENTS 2026-09-25, "keystrokes timed at the glass"). The
+  iOS simulator reports no presentation, so there the next tick still stands in.
   Tests: element `the_word_cache_forgets_the_least_recently_used_past_its_budget`,
   `a_pass_never_evicts_its_own_words`, `the_word_key_holds_the_cell_width_and_not_the_focus`,
   `a_guess_is_a_cell_of_its_row`, `text_under_a_block_cursor_takes_the_cursor_text_colour`,
@@ -1158,7 +1161,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (the mask as GPUI's renderer rasterises it, pixel by pixel); view
   `a_screen_shown_again_shapes_nothing`, `a_sprite_is_masked_once_and_not_while_zooming`,
   `a_held_key_is_predicted_timed_and_follows_the_output`,
-  `a_key_is_timed_when_its_frame_is_presented`; predict `a_stale_guess_is_hidden_without_a_frame`.
+  `a_key_is_timed_when_its_frame_is_presented`; shown
+  `a_paint_is_timed_at_the_first_frame_after_it_that_is_shown`; predict
+  `a_stale_guess_is_hidden_without_a_frame`.
 
 - ✅ **libghostty-vt at ghostty `7c40388b2`: synchronized output is a render hold** (2026-09-24).
   `vendor/ghostty` moved 145 commits (from `5252b193c`); the libghostty-rs fork pins the same

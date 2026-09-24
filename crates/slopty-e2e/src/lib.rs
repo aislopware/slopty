@@ -559,6 +559,9 @@ pub struct WorkerInfo {
     /// readout); `None` before the first sample.
     #[serde(default)]
     pub rtt_us: Option<u64>,
+    /// This client asked the worker for its clipboard's changes (its tile has the keyboard
+    /// and the app is frontmost); the worker may not have heard it yet.
+    pub clipboard_watched: bool,
 }
 
 /// One tile.
@@ -694,6 +697,8 @@ pub struct LatencyInfo {
     pub echo_p50_us: u64,
     /// Same, 95th percentile.
     pub echo_p95_us: u64,
+    /// Same, 99th percentile.
+    pub echo_p99_us: u64,
     /// Same, worst.
     pub echo_max_us: u64,
     /// Keys predicted.
@@ -702,6 +707,8 @@ pub struct LatencyInfo {
     pub predicted_p50_us: u64,
     /// Same, 95th percentile.
     pub predicted_p95_us: u64,
+    /// Same, 99th percentile.
+    pub predicted_p99_us: u64,
     /// Same, worst.
     pub predicted_max_us: u64,
 }
@@ -712,13 +719,15 @@ impl LatencyInfo {
     pub fn row(&self) -> String {
         let ms = FrameInfo::ms;
         format!(
-            "echo {:.1} / {:.1} / {:.1} ms ({} keys) · predicted {:.1} / {:.1} / {:.1} ms ({} keys)",
+            "echo {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys) · predicted {:.1} / {:.1} / {:.1} / {:.1} ms ({} keys)",
             ms(self.echo_p50_us),
             ms(self.echo_p95_us),
+            ms(self.echo_p99_us),
             ms(self.echo_max_us),
             self.echoed,
             ms(self.predicted_p50_us),
             ms(self.predicted_p95_us),
+            ms(self.predicted_p99_us),
             ms(self.predicted_max_us),
             self.predicted,
         )

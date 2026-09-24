@@ -14,7 +14,6 @@ use std::collections::hash_map::Entry;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
@@ -1675,14 +1674,13 @@ impl Element for TerminalElement {
             // The visual bell: the text colour laid thinly over the whole grid.
             window.paint_quad(fill(bounds, Hsla { a: alpha::FAINT, ..prepared.link }));
         }
-        // Keystroke → paint is timed when this frame reaches the glass, not now: the next
-        // frame callback runs at the display tick that presents what was just drawn.
+        // Keystroke → paint is timed when this frame reaches the glass, not now.
         if self.view.read(cx).latency_waiting() {
             let shown = std::mem::take(&mut prepared.shown);
             let ack = self.view.read(cx).state().input_ack();
             let view = self.view.clone();
-            window.on_next_frame(move |_window, cx| {
-                view.update(cx, |view, _cx| view.presented(Instant::now(), &shown, ack));
+            crate::shown::after_paint(window, cx, move |at, cx| {
+                view.update(cx, |view, _cx| view.presented(at, &shown, ack));
             });
         }
     }
@@ -1926,6 +1924,8 @@ pub fn captions_drawn(cx: &App) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use slopty_grid::Line;
 
     use super::*;

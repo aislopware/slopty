@@ -3501,3 +3501,64 @@ cargo test -p slopty-ui --release --lib timing_of_a_frame_and_a_keystroke -- --i
 Both are two to three orders under a 16.7 ms frame. Most of the splice is cloning the
 2 000 per-line handles (`Arc<[Span]>`); a keystroke on a line recolours that line only when the
 next background parse lands.
+
+## 2026-09-25 — the view cache under streaming shells, and keystrokes timed at the glass
+
+The e2e app build (debug profile, `opt-level = 1`), mac-studio, window 1280 × 800, with a load
+average of 4–9 from other sessions. The new smooth scenario
+`six_streaming_shells_in_view_on_the_mac` measures three things. **(g)** six shells flooding
+in the overview while nothing moves, 5 s. **(h)** 60 keys typed into a seventh shell with the
+six flooding beside it. **(i)** one flooding shell beside five still ones (a screen of `seq`,
+then `sleep`), in the overview, 5 s. Draw is the frame probe's `begin` → `end` (ms, p50 / p95 /
+p99 / max). Echo is the key → display meter (ms, p50 / p95 / p99). With 60 keys the nearest-rank
+p99 is the worst key.
+
+```
+cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+D=$PWD/target/e2e-perf; mkdir -p $D/run $D/artifacts
+SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/run/worker.sock \
+  SLOPTY_E2E_BIN_DIR=$PWD/target/debug SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
+  cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(six_streaming) | test(typing_is_timed)'
+# the "cache off" arm: `WorkspaceView::cacheable` (workspace/tile.rs) returning false
+```
+
+**The view cache.** Tile bodies are `Entity::cached` views, so a tile whose view was not
+notified is replayed and not rendered. The cache off and on, alternating builds, one row per
+run:
+
+| arm | (g) 6 flooding, draw | (i) 1 flooding + 5 still, draw | (h) echo beside 6 flooding (next display tick) |
+| --- | --- | --- | --- |
+| off | 1.6 / 2.4 / 5.8 / 114.4 | — | 29.8 / 64.6 / 111.3 |
+| off | 1.6 / 2.4 / 3.0 / 3.3 | — | 29.8 / 40.1 / 40.9 |
+| off | 1.6 / 2.4 / 3.8 / 4.5 | **0.9 / 1.1 / 1.2 / 1.3** | 29.0 / 40.4 / 41.7 |
+| off | 1.6 / 2.3 / 3.3 / 3.5 | **0.9 / 1.1 / 1.3 / 1.3** | 29.7 / 42.2 / 43.0 |
+| on | 1.7 / 2.5 / 3.3 / 3.4 | — | 29.4 / 42.9 / 52.8 |
+| on | 1.6 / 2.5 / 3.0 / 3.5 | — | 29.6 / 39.1 / 41.5 |
+| on | 1.6 / 2.7 / 3.4 / 9.1 | **0.7 / 0.9 / 1.0 / 1.0** | 29.2 / 42.6 / 55.0 |
+| on, with the file tile cached and the glass meter | 1.6 / 2.5 / 3.2 / 3.4 | **0.7 / 0.9 / 1.1 / 1.1** | 44.3 / 56.5 / 59.7 (glass) |
+
+With six shells flooding, all six are dirty in every frame (the self-test link applies one
+batch per nominal frame, and each shell sends a frame every 8 ms), so the cache has nothing to
+replay: p50 is 1.6 ms in both arms. With one shell flooding beside five still ones, it saves
+0.2 ms of a 0.9 ms draw. A still terminal that is rendered anyway redraws from the word cache,
+which is already cheap. The draw is not where a keystroke's time goes: the echo beside six
+floods (29 ms) is 6 ms over the echo into a lone shell (23 ms, below), and that difference is on
+the worker and the link, not the frame.
+
+**Keystrokes timed at the glass.** The meter used to stop at the next display tick after the
+paint. It now stops at `presented_at` of the first frame submitted after the paint
+(`slopty_ui::shown`, from `Window::on_frame_presented`). Scenario (d), 60 keys at 15/s into one
+shell:
+
+| meter | never: echo | always: echo | always: predicted |
+| --- | --- | --- | --- |
+| next display tick | 23.3 / 32.4 / 40.5 | 21.9 / 28.6 / 39.2 | 7.1 / 13.2 / 14.3 |
+| glass, run 1 | 38.3 / 46.4 / 54.9 | 38.3 / 45.1 / 47.8 | 23.9 / 30.2 / 31.8 |
+| glass, run 2 | 38.9 / 45.6 / 46.7 | 35.0 / 46.3 / 59.2 | 20.9 / 29.2 / 39.4 |
+
+The 15 ms added is the meter reading what it always should have. The app got no slower. A key
+the predictor echoes locally reaches the glass 21–24 ms after it is typed. The fork's
+`frame_latency` example measured 20–22 ms from notify to glass for an idle window on this
+display ("submit to glass", above), so nearly all of that is the compositor. The video pacer's
+arrival → present clock now stops at the glass the same way. It has no number here: the
+display scenarios need Screen Recording.

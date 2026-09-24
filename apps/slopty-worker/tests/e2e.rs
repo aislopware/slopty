@@ -920,7 +920,7 @@ mod tests {
         paint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                _paint = paint.tick() => pacer.presented(),
+                _paint = paint.tick() => if let Some(stamp) = pacer.painted() { pacer.shown(stamp, std::time::Instant::now()); },
                 changed = frames.changed() => {
                     if changed.is_err() { break; }
                     let Some(frame) = frames.borrow_and_update().clone() else { continue };
@@ -3210,6 +3210,107 @@ mod tests {
         assert_eq!(std::fs::read(dropped).unwrap(), b"yours");
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();
+    }
+
+    /// A fetched directory comes down as its files, each followed by the digest of all of it.
+    /// A retry that holds part of a file gets the rest from there and a file it holds whole as
+    /// an empty stream; a file that changed since comes again from the start.
+    #[tokio::test]
+    async fn a_download_resumes_what_the_client_holds_unless_the_file_changed() {
+        use slopty_core::XferId;
+        use slopty_proto::transfer::{BulkHeader, Purpose, XferMsg};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let small = b"a small file".to_vec();
+        let big: Vec<u8> = (0..16_000_000_u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(out.join("small.txt"), &small).unwrap();
+        std::fs::write(out.join("big.bin"), &big).unwrap();
+        let path = out.to_string_lossy().into_owned();
+        let next_bulk = async |conn: slopty_net::Connection| {
+            let uni =
+                tokio::time::timeout(STEP, streams::accept_uni(&conn)).await.unwrap().unwrap();
+            match uni {
+                Uni::Bulk { header, rx } => (header, rx),
+                Uni::Session { .. } => panic!("a bulk stream"),
+            }
+        };
+        let digest_of = |xfer: XferId, want: &'static str| {
+            move |m| match m {
+                WorkerMsg::Xfer(XferMsg::Done { xfer: x, name, hash, .. })
+                    if x == xfer && name == want =>
+                {
+                    Some(hash)
+                }
+                _ => None,
+            }
+        };
+
+        // The first fetch: the big file is cut a megabyte in.
+        let first = XferId::new();
+        let fetch = XferMsg::Fetch { xfer: first, path: path.clone(), held: Vec::new() };
+        worker.tx.send(&ClientMsg::Xfer(fetch)).await.unwrap();
+        let (header, mut rx): (BulkHeader, _) = next_bulk(worker.conn.clone()).await;
+        assert_eq!((header.name.as_str(), header.offset), ("out/big.bin", 0));
+        assert_eq!(header.purpose, Purpose::Download);
+        let mut held = Vec::new();
+        while held.len() < 1_000_000 {
+            held.extend_from_slice(&rx.chunk(64 << 10).await.unwrap().unwrap());
+        }
+        rx.stop();
+        let held_len = held.len() as u64;
+
+        let second = XferId::new();
+        let claims = vec![
+            ("out/big.bin".to_owned(), held_len),
+            ("out/small.txt".to_owned(), small.len() as u64),
+        ];
+        let fetch = XferMsg::Fetch { xfer: second, path: path.clone(), held: claims };
+        worker.tx.send(&ClientMsg::Xfer(fetch)).await.unwrap();
+        let mut got = std::collections::HashMap::new();
+        while got.len() < 2 {
+            let (header, mut rx) = next_bulk(worker.conn.clone()).await;
+            if header.xfer != second {
+                rx.stop();
+                continue;
+            }
+            got.insert(header.name.clone(), (header.offset, drain(&mut rx).await));
+        }
+        let (offset, rest) = got.remove("out/big.bin").unwrap();
+        assert_eq!(offset, held_len, "the big file resumes where the client stopped");
+        held.extend_from_slice(&rest);
+        assert!(held == big, "whole across the cut");
+        let (offset, rest) = got.remove("out/small.txt").unwrap();
+        assert_eq!((offset, rest.len()), (small.len() as u64, 0), "held whole: nothing sent");
+        assert_eq!(next_msg(&mut worker, digest_of(second, "out/big.bin")).await, digest(&big));
+
+        // The big file changes; a claim on the old one starts it over.
+        let newer: Vec<u8> = big.iter().rev().copied().collect();
+        std::fs::write(out.join("big.bin"), &newer).unwrap();
+        let file = std::fs::File::options().write(true).open(out.join("big.bin")).unwrap();
+        let later = std::time::SystemTime::now().checked_add(Duration::from_secs(5)).unwrap();
+        file.set_modified(later).unwrap();
+        drop(file);
+        let third = XferId::new();
+        let claims = vec![("out/big.bin".to_owned(), held_len)];
+        worker
+            .tx
+            .send(&ClientMsg::Xfer(XferMsg::Fetch { xfer: third, path, held: claims }))
+            .await
+            .unwrap();
+        loop {
+            let (header, mut rx) = next_bulk(worker.conn.clone()).await;
+            if header.xfer != third || header.name != "out/big.bin" {
+                drop(drain(&mut rx).await);
+                continue;
+            }
+            assert_eq!(header.offset, 0, "a changed file comes from the start");
+            assert_eq!(digest(&drain(&mut rx).await), digest(&newer), "the new contents");
+            break;
+        }
+        assert_eq!(next_msg(&mut worker, digest_of(third, "out/big.bin")).await, digest(&newer));
     }
 
     /// A client's tunnel reaches a TCP server on the worker's loopback, both ways, and a

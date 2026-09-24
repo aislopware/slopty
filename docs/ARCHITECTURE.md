@@ -280,7 +280,7 @@ SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInt
   → packetize (≤1200 B datagrams, 16 B header) → reed-solomon-simd parity per frame
   → QUIC datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
 client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffer (IOSurface)
-  → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (vsync off)
+  → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (next vsync)
 ```
 
 Loss recovery order: FEC (free) → NACK inside the playout window → `ForceLTRRefresh` (small
@@ -446,6 +446,11 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
     echoes, also when client and worker share a Mac.
   - The pasteboard sits behind `slopty_input::pasteboard::Board`, and tests use named
     pasteboards (`--pasteboard`), never the user's.
+  - On iOS (`slopty_platform::pasteboard::IosPasteboard`) writing is free: an offer becomes
+    one local-only `NSItemProvider`, inline text at once and the rest loaded on paste. Reading
+    another app's contents can prompt, so the client reads only for a paste into a remote tile
+    (`Pasteboard::reads_ask`), never when a tile takes focus. The change count, which never
+    prompts, decides whether a paste reads again.
 - **Files.** A drop on a terminal tile uploads with `Begin { dest: SessionCwd }`, one bulk
   stream per file.
   - The worker writes `name.partial`, fsyncs, renames, then fsyncs the directory, and sends `Done`
@@ -457,7 +462,17 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
   - A drop on a streamed window goes to staging, and the files go on the worker's pasteboard
     as file URLs.
   - ⌘-drag on a path in a terminal drags the file out as an `NSFilePromiseProvider` that
-    fetches it (`XferMsg::Fetch`, `Purpose::Download`, from the start).
+    fetches it (`XferMsg::Fetch`, `Purpose::Download`). The client writes `name.partial`,
+    syncs it every 8 MiB, checks it against the digest in the worker's `Done` and renames it.
+    A cut attempt is called off (`Cancel`) and fetched again under a new transfer whose `held`
+    names the durable bytes of each partial and each file already landed. The worker resumes a
+    held file only when it sent that same version (size and modification time) before, and
+    otherwise sends it from 0 (`Transfers::resume_points`).
+  - Files that apps promise rather than name (Mail, Photos) are received by a view beneath
+    the web pages that registers only the promise types (`slopty_platform::file_drop`), and
+    on iPad every drop comes through a `UIDropInteraction`. Each drop lands in a temporary
+    directory of its own and then reaches the tile under it as an ordinary file drop. A file
+    that failed is named in a notice, and what it wrote is deleted.
 - **File cards.** `ReadFile` answers the first 512 KiB and 2 000 lines of a text file,
   `WatchFiles` looks at each watched file's size and modification time every second and sends
   a changed one again, and `WriteFile { path, text, base_modified_ms }` saves an edit
@@ -962,9 +977,13 @@ cost one update per batch; a session itself never sends more than 125 frames a s
 frame slots long draws swallowed; it is the fourth line of the ⌘⇧I overlay and the `frames`
 block of the self-test `dump`, and `terminal::latency` stamps each keystroke so `dump` can say
 how long the local echo and the worker's echo took to reach the display: a paint that holds a
-waiting key registers a next-frame callback, and the frame is timed there, at the display
-tick that presents it, since presentation is vsync-synced (the fork's `CAMetalLayer` keeps
-`displaySyncEnabled` at its default) and a paint's own clock reads up to a refresh early. `cargo xtask e2e smooth`
+waiting key hands `slopty_ui::shown::after_paint` the work, and the key is timed when the
+window's presentation report (`Window::on_frame_presented`) says the first frame submitted
+after that paint reached the glass. Presentation is vsync-synced (the fork's `CAMetalLayer`
+keeps `displaySyncEnabled` at its default) and the compositor adds about a refresh, so a
+paint's own clock, or the next display tick, reads a refresh or more early. The video pacer
+stops its arrival → present clock the same way. The iOS simulator reports no presentation;
+there the next display tick stands in. `cargo xtask e2e smooth`
 runs the load scenarios (MEASUREMENTS, "canvas frame time", measured before the workspace).
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu

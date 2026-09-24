@@ -15,6 +15,7 @@
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
+//! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
 pub mod a11y;
@@ -35,5 +36,6 @@ pub mod palette;
 pub mod picker;
 pub mod screen;
 pub mod settings_editor;
+pub mod shown;
 pub mod terminal;
 pub mod workspace;

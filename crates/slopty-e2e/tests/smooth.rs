@@ -35,6 +35,8 @@ mod tests {
     }
     /// Shells beside the display stream.
     const SHELLS_WITH_DISPLAY: u32 = 5;
+    /// Streaming shells all in view for the view-cache scenario.
+    const BUSY: u32 = 6;
     /// Typing rate for the keystroke scenario, characters per second.
     const TYPING_CPS: u64 = 15;
     /// Characters typed.
@@ -322,6 +324,75 @@ mod tests {
         measure("(c) mac: 1 display stream + 5 streaming shells, strip column to column", &panned);
         stack.shutdown().await;
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
+    }
+
+    /// A shell that fills its screen once and then sits still.
+    const STILL: &[&str] = &["/bin/sh", "-c", "seq 1 60; exec sleep 3600"];
+
+    /// Open the overview and, once its zoom has settled, time the frames drawn over [`RUN`]
+    /// while nothing moves. Returns the dumps either side.
+    async fn overview_still(drv: &mut Driver) -> (Dump, Dump) {
+        drv.keys("cmd-alt-o").await.unwrap();
+        drv.wait_for("the overview open", STEP, |d| d.overview).await.unwrap();
+        tokio::time::sleep(OVERVIEW_STEP).await;
+        let before = drv.dump().await.unwrap();
+        drv.frames_reset().await.unwrap();
+        tokio::time::sleep(RUN).await;
+        (before, drv.dump().await.unwrap())
+    }
+
+    /// Six shells streaming in view at once (the overview) while nothing moves, then typing
+    /// into a seventh with the six streaming beside it; then one streaming shell beside five
+    /// still ones. A frame should redraw the terminals whose output changed, not every tile,
+    /// so these numbers are the view cache's.
+    #[tokio::test]
+    async fn six_streaming_shells_in_view_on_the_mac() {
+        if !gated("SLOPTY_SMOOTH_E2E", "cargo xtask e2e smooth") {
+            return;
+        }
+        let mut stack = Stack::launch("e2e-smooth-busy").await.unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        load(drv, BUSY.saturating_add(1)).await;
+        focus_first_shell(drv).await;
+        let (before, after) = overview_still(drv).await;
+        assert_floods_advanced(&before, &after);
+        measure(&format!("(g) mac: {BUSY} streaming shells in the overview, still"), &after.frames);
+        drv.keys("cmd-alt-o").await.unwrap();
+        drv.wait_for("the overview closed", STEP, |d| !d.overview).await.unwrap();
+        focus_first_shell(drv).await;
+        let latency = typing(drv).await;
+        println!("MEASURE (h) mac: typing beside {BUSY} streaming shells: {}", latency.row());
+        stack.shutdown().await;
+        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
+        assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
+
+        let mut stack = Stack::launch("e2e-smooth-still").await.unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        // The streaming shell goes next to the first column, where the overview shows it.
+        load(drv, 2).await;
+        let still = BUSY.saturating_sub(1);
+        drv.open(STILL, still).await.unwrap();
+        let shells = usize::try_from(still).unwrap().saturating_add(2);
+        drv.wait_for("the still shells full", STEP, |d| {
+            d.terminals.len() == shells
+                && d.terminals.iter().filter(|t| t.rows.iter().any(|r| r == "60")).count()
+                    == usize::try_from(still).unwrap()
+        })
+        .await
+        .unwrap();
+        focus_first_shell(drv).await;
+        let (before, after) = overview_still(drv).await;
+        assert_floods_advanced(&before, &after);
+        measure(
+            &format!("(i) mac: 1 streaming shell beside {still} still ones in the overview"),
+            &after.frames,
+        );
+        stack.shutdown().await;
+        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
     }
 
     #[tokio::test]

@@ -349,7 +349,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   finished it (`FrameOut::arrived`), the worker parks that instant under the frame's
   presentation timestamp (VideoToolbox's callback is handed nothing else to correlate on) and
   the callback picks it up, so the element receives a `Presentable` and its `Pacer` can close
-  the clock at the paint. A ring of the last 240 presented frames gives arrival → present
+  the clock when the display shows the frame. The paint only says which frame went up
+  (`Pacer::painted`); the window's presentation report says when it reached the glass
+  (`Pacer::shown`, through `slopty_ui::shown`, since 2026-09-25; before, the clock stopped at
+  the paint and read a refresh or more early). A ring of the last 240 presented frames gives arrival → present
   p50/p95/max, the decoder's share, the paint spacing and its jitter, plus `skipped` /
   `repeats` / `late` — the third line of the ⌘⇧I overlay and `ScreenInfo` in the app self-test's
   dump. The policy is pure with an injected clock (`slopty_client::pacing`), so a steady source,

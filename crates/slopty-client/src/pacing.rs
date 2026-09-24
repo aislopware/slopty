@@ -10,8 +10,9 @@
 //!
 //! The [`Pacer`] is also the instrument. It keeps a ring of the last [`RING`] presented frames and
 //! reports, over that window, how long each took from the arrival of the datagram that completed
-//! it to the paint that showed it, how far apart the paints were, and how often the display saw
-//! the same picture twice ([`PacingStats::repeats`]) or never saw one at all
+//! it to the display showing it ([`Pacer::shown`], from the window's presentation report, a
+//! refresh or more after the paint), how far apart those were, and how often a paint showed the
+//! same picture again ([`PacingStats::repeats`]) or the display never saw one at all
 //! ([`PacingStats::skipped`]). Those two counters are the double-present / skipped-present
 //! pattern; on a steady source matched to the display both stay near zero.
 //!
@@ -113,7 +114,7 @@ pub enum Pace {
 /// One presented frame, as the ring remembers it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Sample {
-    /// Arrival of the completing datagram → the paint that showed it.
+    /// Arrival of the completing datagram → the display showing it.
     latency: Duration,
     /// Arrival → the decoder handing the picture back.
     decode: Duration,
@@ -136,7 +137,7 @@ pub struct PacingStats {
     pub repeats: u64,
     /// Frames dropped as not newer than what was already up (reordering, a stale retransmit).
     pub late: u64,
-    /// Median arrival → present over the ring.
+    /// Median arrival → shown over the ring.
     pub latency_p50: Duration,
     /// 95th percentile of the same.
     pub latency_p95: Duration,
@@ -144,7 +145,7 @@ pub struct PacingStats {
     pub latency_max: Duration,
     /// Median arrival → decoded over the ring: the part of the latency the decoder owns.
     pub decode_p50: Duration,
-    /// Median gap between presented frames.
+    /// Median gap between shown frames.
     pub interval_p50: Duration,
     /// Mean absolute deviation of that gap: the cadence's own jitter. A double- or
     /// skipped-present on an otherwise steady source shows up here before it shows up anywhere
@@ -162,7 +163,7 @@ pub struct Pacer<C: Clock = SystemClock> {
     pending: Option<FrameStamp>,
     /// Presentation timestamp of the picture on screen.
     shown: Option<u64>,
-    /// When the picture on screen went up.
+    /// When the picture on screen reached the display.
     shown_at: Option<Instant>,
     /// Decode sequence of the newest frame offered, whether it was taken or dropped.
     last_seq: Option<u64>,
@@ -219,28 +220,35 @@ impl<C: Clock> Pacer<C> {
         Pace::Present
     }
 
-    /// The element painted. Records what the paint showed; call once per paint.
-    pub fn presented(&mut self) {
-        let now = self.clock.now();
+    /// The element painted: the frame this paint put up, to be passed to [`Self::shown`] when
+    /// the display shows it, or `None` when the paint showed the picture already up (a repeat).
+    /// Call once per paint.
+    pub const fn painted(&mut self) -> Option<FrameStamp> {
         let Some(stamp) = self.pending.take() else {
             self.stats.repeats = self.stats.repeats.saturating_add(1);
-            return;
+            return None;
         };
+        self.shown = Some(stamp.pts_us);
+        Some(stamp)
+    }
+
+    /// The frame `stamp` a paint put up reached the display `at`: the ring's clocks stop here,
+    /// not at the paint, which runs a refresh or more earlier.
+    pub fn shown(&mut self, stamp: FrameStamp, at: Instant) {
         let sample = Sample {
-            latency: now.saturating_duration_since(stamp.arrived),
+            latency: at.saturating_duration_since(stamp.arrived),
             decode: stamp.decoded.saturating_duration_since(stamp.arrived),
-            interval: self.shown_at.map(|t| now.saturating_duration_since(t)),
+            interval: self.shown_at.map(|t| at.saturating_duration_since(t)),
         };
         if self.ring.len() >= RING {
             self.ring.pop_front();
         }
         self.ring.push_back(sample);
-        self.shown = Some(stamp.pts_us);
-        self.shown_at = Some(now);
+        self.shown_at = Some(at);
         self.stats.presented = self.stats.presented.saturating_add(1);
     }
 
-    /// Age of the picture on screen: how long ago the paint that put it up happened.
+    /// Age of the picture on screen: how long ago it reached the display.
     #[must_use]
     pub fn age(&self) -> Option<Duration> {
         self.shown_at.map(|t| self.clock.now().saturating_duration_since(t))
@@ -351,6 +359,35 @@ mod tests {
         }
     }
 
+    /// A paint that the display shows at once, as the tests' clock reads it.
+    fn present(pacer: &mut Pacer<&FakeClock>, clock: &FakeClock) {
+        if let Some(stamp) = pacer.painted() {
+            pacer.shown(stamp, clock.now_instant());
+        }
+    }
+
+    /// The clocks stop when the display shows the frame, not at the paint: a frame painted
+    /// 4 ms after it arrived and shown a refresh later is a refresh and 4 ms late, and its
+    /// picture ages from the glass.
+    #[test]
+    fn a_frame_is_timed_at_the_glass_not_the_paint() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        let arrived = FRAME;
+        clock.advance(arrived.saturating_add(4 * MS));
+        assert_eq!(pacer.offer(stamp(&clock, 0, arrived, MS)), Pace::Present);
+        let painted = pacer.painted().expect("a new frame went up");
+        assert_eq!(pacer.stats().presented, 0, "painted, not yet shown");
+        // Once painted it is the picture up, shown or not: the same frame again is late.
+        assert_eq!(pacer.offer(stamp(&clock, 0, arrived, MS)), Pace::Drop);
+        clock.advance(FRAME);
+        pacer.shown(painted, clock.now_instant());
+        let stats = pacer.stats();
+        assert_eq!(stats.presented, 1);
+        assert_eq!(stats.latency_max, FRAME.saturating_add(4 * MS));
+        assert_eq!(pacer.age(), Some(Duration::ZERO));
+    }
+
     /// A steady 60 fps source painted at 60 Hz: every frame goes up on the paint that follows
     /// it, one interval apart, and nothing is skipped or repeated.
     #[test]
@@ -361,7 +398,7 @@ mod tests {
             let arrived = FRAME.saturating_mul(i);
             clock.advance(FRAME);
             assert_eq!(pacer.offer(stamp(&clock, i, arrived, 2 * MS)), Pace::Present);
-            pacer.presented();
+            present(&mut pacer, &clock);
         }
         let stats = pacer.stats();
         assert_eq!((stats.presented, stats.skipped, stats.repeats, stats.late), (120, 0, 0, 0));
@@ -385,13 +422,13 @@ mod tests {
         let mut pacer = Pacer::new(&clock);
         clock.advance(FRAME);
         assert_eq!(pacer.offer(stamp(&clock, 0, Duration::ZERO, MS)), Pace::Present);
-        pacer.presented();
+        present(&mut pacer, &clock);
 
         // Two decodes land before the next paint.
         assert_eq!(pacer.offer(stamp(&clock, 1, FRAME, MS)), Pace::Present);
         assert_eq!(pacer.offer(stamp(&clock, 2, FRAME + 8 * MS, MS)), Pace::Present);
         clock.advance(FRAME);
-        pacer.presented();
+        present(&mut pacer, &clock);
 
         let stats = pacer.stats();
         assert_eq!((stats.presented, stats.skipped, stats.repeats), (2, 1, 0));
@@ -402,7 +439,7 @@ mod tests {
         assert_eq!(stats.latency_max, FRAME);
         assert_eq!(stats.latency_p50, FRAME);
         // Nothing is left over: the next paint has no new frame, so it repeats.
-        pacer.presented();
+        present(&mut pacer, &clock);
         assert_eq!(pacer.stats().repeats, 1);
     }
 
@@ -414,18 +451,18 @@ mod tests {
         let mut pacer = Pacer::new(&clock);
         clock.advance(FRAME);
         pacer.offer(stamp(&clock, 4, Duration::ZERO, MS));
-        pacer.presented();
+        present(&mut pacer, &clock);
         // Three paints with nothing new.
         for _ in 0..3 {
             clock.advance(FRAME);
-            pacer.presented();
+            present(&mut pacer, &clock);
         }
         // A straggler from before the picture on screen.
         assert_eq!(pacer.offer(stamp(&clock, 3, 4 * FRAME, MS)), Pace::Drop);
         // …and the same frame again.
         assert_eq!(pacer.offer(stamp(&clock, 4, 4 * FRAME, MS)), Pace::Drop);
         clock.advance(FRAME);
-        pacer.presented();
+        present(&mut pacer, &clock);
 
         let stats = pacer.stats();
         assert_eq!((stats.presented, stats.skipped, stats.repeats, stats.late), (1, 0, 4, 2));
@@ -444,7 +481,7 @@ mod tests {
             arrived = arrived.saturating_add(step);
             clock.advance(step);
             pacer.offer(stamp(&clock, i, arrived, MS));
-            pacer.presented();
+            present(&mut pacer, &clock);
         }
         let stats = pacer.stats();
         assert_eq!(stats.interval_p50, FRAME);
@@ -467,13 +504,13 @@ mod tests {
         let mut pacer = Pacer::new(&clock);
         clock.advance(FRAME);
         assert_eq!(pacer.offer(stamp(&clock, 0, Duration::ZERO, MS)), Pace::Present);
-        pacer.presented();
+        present(&mut pacer, &clock);
 
         // Three decoder callbacks finished between paints; the channel kept only the last.
         clock.swallow(3);
         clock.advance(FRAME);
         assert_eq!(pacer.offer(stamp(&clock, 4, 3 * FRAME, MS)), Pace::Present);
-        pacer.presented();
+        present(&mut pacer, &clock);
 
         let stats = pacer.stats();
         assert_eq!((stats.presented, stats.skipped, stats.repeats), (2, 3, 0));
@@ -485,7 +522,7 @@ mod tests {
         assert_eq!(pacer.offer(stamp(&clock, 1, 4 * FRAME, MS)), Pace::Drop);
         clock.advance(FRAME);
         assert_eq!(pacer.offer(stamp(&clock, 5, 4 * FRAME, MS)), Pace::Present);
-        pacer.presented();
+        present(&mut pacer, &clock);
         let stats = pacer.stats();
         assert_eq!((stats.presented, stats.skipped, stats.late), (3, 5, 1));
     }
@@ -539,7 +576,7 @@ mod tests {
                 decoded: fake.now_instant(),
             };
             assert_eq!(pacer.offer(s), Pace::Present, "raw {raw} was refused");
-            pacer.presented();
+            present(&mut pacer, &fake);
             raw = raw.wrapping_add(16_667);
         }
         assert_eq!(pacer.stats().late, 0);
@@ -577,7 +614,7 @@ mod tests {
             let decode = if i < 100 { 50 * MS } else { MS };
             clock.advance(FRAME);
             pacer.offer(stamp(&clock, i, arrived, decode));
-            pacer.presented();
+            present(&mut pacer, &clock);
         }
         let stats = pacer.stats();
         assert_eq!(stats.window, RING);

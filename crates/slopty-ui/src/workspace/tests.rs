@@ -715,6 +715,42 @@ fn tiles_far_from_the_view_are_not_drawn(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("item", tiles[5].item)).is_none(), "far right now");
 }
 
+/// A shell's output redraws that shell's tile only: its neighbours are replayed from the view
+/// cache. A neighbour whose zoom stopped moving is drawn afresh at the same bounds, since its
+/// paint changed.
+#[gpui::test]
+fn output_redraws_its_own_tile_only(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(_, left), (busy, right), _] = three_shells(&view, cx, &fake);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(right, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("item", left.item)).is_some(), "the neighbour is drawn");
+    let quiet = view.read_with(cx, |v, _| v.terminal(session_of(v, left)).cloned()).unwrap();
+    let loud = view.read_with(cx, |v, _| v.terminal(busy).cloned()).unwrap();
+    let renders = |cx: &mut VisualTestContext| {
+        (quiet.read_with(cx, |t, _| t.renders()), loud.read_with(cx, |t, _| t.renders()))
+    };
+    let (quiet_before, loud_before) = renders(cx);
+    for i in 0..3 {
+        let line = format!("line {i}");
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&[&line, ""]), cx));
+        cx.run_until_parked();
+    }
+    let (quiet_after, loud_after) = renders(cx);
+    assert_eq!(quiet_after, quiet_before, "the quiet neighbour was replayed, not rendered");
+    assert!(loud_after >= loud_before.saturating_add(3), "{loud_before} → {loud_after}");
+
+    quiet.update(cx, |t, _| t.set_zooming(true));
+    view.update_in(cx, |_v, _w, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        renders(cx).0,
+        quiet_after.saturating_add(1),
+        "the zoom settled: drawn afresh at the same bounds"
+    );
+}
+
 /// A remote window scrolled off screen lets its stream go after the grace, and asks for it
 /// again when it is back in view.
 #[gpui::test]

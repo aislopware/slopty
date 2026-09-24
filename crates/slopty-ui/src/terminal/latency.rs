@@ -28,6 +28,8 @@ pub struct LatencyStats {
     pub echo_p50: Duration,
     /// Same, 95th percentile.
     pub echo_p95: Duration,
+    /// Same, 99th percentile.
+    pub echo_p99: Duration,
     /// Same, worst in the ring.
     pub echo_max: Duration,
     /// Keys the local-echo overlay showed before the worker answered.
@@ -36,6 +38,8 @@ pub struct LatencyStats {
     pub predicted_p50: Duration,
     /// Same, 95th percentile.
     pub predicted_p95: Duration,
+    /// Same, 99th percentile.
+    pub predicted_p99: Duration,
     /// Same, worst in the ring.
     pub predicted_max: Duration,
 }
@@ -107,10 +111,12 @@ impl KeyLatency {
             echoed: self.echoed_count,
             echo_p50: percentile(&echo, 50),
             echo_p95: percentile(&echo, 95),
+            echo_p99: percentile(&echo, 99),
             echo_max: echo.last().copied().unwrap_or_default(),
             predicted: self.predicted_count,
             predicted_p50: percentile(&predicted, 50),
             predicted_p95: percentile(&predicted, 95),
+            predicted_p99: percentile(&predicted, 99),
             predicted_max: predicted.last().copied().unwrap_or_default(),
         }
     }

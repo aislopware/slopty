@@ -1134,9 +1134,13 @@ impl Render for ScreenView {
             // Registering as a text input is what raises the soft keyboard on iOS and lets an
             // input method compose; typed text arrives in `replace_text_in_range`.
             move |bounds, (), window, cx| {
-                // The paint pass is the present: this is the only place that knows the picture
-                // actually reached the screen, so it is where the pacer's clock stops.
-                handler.update(cx, |view, _cx| view.pacer.presented());
+                // What this paint put up is timed when the display shows it.
+                if let Some(stamp) = handler.update(cx, |view, _cx| view.pacer.painted()) {
+                    let view = handler.clone();
+                    crate::shown::after_paint(window, cx, move |at, cx| {
+                        view.update(cx, |view, _cx| view.pacer.shown(stamp, at));
+                    });
+                }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
                 window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble {

@@ -309,6 +309,9 @@ pub struct TerminalView {
     /// Frames drawn while zooming (tests).
     #[cfg(test)]
     motion_frames: u32,
+    /// Times this view was rendered rather than replayed from the view cache (tests).
+    #[cfg(test)]
+    renders: u32,
     predictor: Predictor,
     /// Keystroke → paint, predicted and echoed (see [`latency`]).
     latency: latency::KeyLatency,
@@ -430,6 +433,8 @@ impl TerminalView {
             zooming: false,
             #[cfg(test)]
             motion_frames: 0,
+            #[cfg(test)]
+            renders: 0,
             predictor: Predictor::new(policy_from_env()),
             latency: latency::KeyLatency::default(),
             marked: None,
@@ -1523,14 +1528,24 @@ impl TerminalView {
 
     /// Whether the zoom is in motion this frame (set by the canvas before each frame): the
     /// grid paints from the raster ladder instead of rasterising every glyph at a new size.
-    pub const fn set_zooming(&mut self, on: bool) {
+    /// Returns whether that changed: the grid then paints differently at the same bounds, so a
+    /// cached drawing of it is stale.
+    pub const fn set_zooming(&mut self, on: bool) -> bool {
+        let changed = self.zooming != on;
         self.zooming = on;
+        changed
     }
 
     /// How many frames this view drew while the zoom was in motion.
     #[cfg(test)]
     pub const fn motion_frames(&self) -> u32 {
         self.motion_frames
+    }
+
+    /// Times this view was rendered rather than replayed from the view cache.
+    #[cfg(test)]
+    pub const fn renders(&self) -> u32 {
+        self.renders
     }
 
     /// Link RTT, for the prediction policy.
@@ -2684,8 +2699,11 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let zooming = self.zooming;
         #[cfg(test)]
-        if zooming {
-            self.motion_frames = self.motion_frames.saturating_add(1);
+        {
+            self.renders = self.renders.saturating_add(1);
+            if zooming {
+                self.motion_frames = self.motion_frames.saturating_add(1);
+            }
         }
         let search_focused = self
             .search
@@ -5176,8 +5194,8 @@ mod tests {
         assert_eq!(drain_words(&mut rx), ["key"], "and sent");
     }
 
-    /// The meter reads a frame when it is presented — at the next frame callback — not when
-    /// it is painted: the worker's echo drawn now counts only once the display takes it.
+    /// The meter reads a frame when the display shows it, not when it is painted: the
+    /// worker's echo drawn now counts only once a frame holding it reaches the glass.
     #[gpui::test]
     fn a_key_is_timed_when_its_frame_is_presented(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
@@ -5192,8 +5210,9 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 0, "painted, not yet shown");
-        let ran = cx.update(Window::simulate_next_frame);
-        assert!(ran >= 1, "the paint asked for the next frame");
+        let now = Instant::now();
+        let frame = gpui::PresentedFrame { submitted_at: now, presented_at: Some(now) };
+        cx.update(|_window, cx| crate::shown::presented(frame, cx));
         assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 1, "presented: timed");
         assert!(!view.read_with(cx, |v, _| v.latency_waiting()), "nothing left to time");
     }

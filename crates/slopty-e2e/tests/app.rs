@@ -969,8 +969,19 @@ mod tests {
         let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
         let drv = &mut stack.driver;
-        drv.wait_for("the first shell focused", STEP, |d| {
-            d.status == "connected" && d.focus.as_deref() == Some("terminal")
+        drv.wait_for("the worker's clipboard watched", STEP, |d| {
+            d.status == "connected"
+                && d.focus.as_deref() == Some("terminal")
+                && d.workers.iter().any(|w| w.clipboard_watched)
+        })
+        .await
+        .unwrap();
+        // A copy the worker makes before it hears the watch is, by design, never announced.
+        // The watch went out on the control stream ahead of these keys, and the worker reads
+        // that stream in order: once their echo is back, it watches.
+        drv.type_text("clipboard-watched").await.unwrap();
+        drv.wait_for("the keys behind the watch echoed", STEP, |d| {
+            !d.rows_containing("clipboard-watched").is_empty()
         })
         .await
         .unwrap();

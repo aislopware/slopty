@@ -189,7 +189,10 @@ pub struct FileView {
     search: Option<FileSearch>,
     /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
     syntax: Option<Syntax>,
-    _editor_events: Subscription,
+    /// The editor's events, and its every change marking this view dirty: the tile draws
+    /// this view from GPUI's view cache, which a change inside the editor would not otherwise
+    /// invalidate.
+    _editor_events: [Subscription; 2],
 }
 
 impl std::fmt::Debug for FileView {
@@ -221,6 +224,7 @@ impl FileView {
             InputEvent::Change => this.edited(cx),
             InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
         });
+        let redraw = cx.observe(&editor, |_this, _editor, cx| cx.notify());
         Self {
             id,
             path: path.to_owned(),
@@ -243,7 +247,7 @@ impl FileView {
             theme,
             search: None,
             syntax: None,
-            _editor_events: events,
+            _editor_events: [events, redraw],
         }
     }
 

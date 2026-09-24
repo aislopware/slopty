@@ -745,10 +745,12 @@ fn latency_info(s: slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
         echoed: s.echoed,
         echo_p50_us: us(s.echo_p50),
         echo_p95_us: us(s.echo_p95),
+        echo_p99_us: us(s.echo_p99),
         echo_max_us: us(s.echo_max),
         predicted: s.predicted,
         predicted_p50_us: us(s.predicted_p50),
         predicted_p95_us: us(s.predicted_p95),
+        predicted_p99_us: us(s.predicted_p99),
         predicted_max_us: us(s.predicted_max),
     }
 }
@@ -758,6 +760,7 @@ impl Workspace {
     fn dump(&self, window: &Window, cx: &App) -> Dump {
         let viewport = window.viewport_size();
         let view = self.view.read(cx);
+        let watching = view.watching();
         let workers: Vec<WorkerInfo> = view
             .workers()
             .map(|(key, name, status)| WorkerInfo {
@@ -765,6 +768,7 @@ impl Workspace {
                 status: status.text(),
                 needs_you: view.needs_you_on(key),
                 rtt_us: view.rtt(key).map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
+                clipboard_watched: watching.contains(&key),
             })
             .collect();
         let status = if workers.is_empty() {
