@@ -234,7 +234,9 @@ mod tests {
         .await
         .unwrap();
 
-        // The shell and the note side by side, the note focused: columns and their marks.
+        // The shell and the note side by side, the note focused: columns and their marks,
+        // once the take-back offer for the closed shell has gone (it lasts five seconds).
+        drv.wait_for("the undo offer to lapse", STEP, |d| d.notice.is_none()).await.unwrap();
         golden(drv, &dir, dev, "columns", None).await;
         // The palette as the phone reaches it, from "…".
         open_palette(drv).await;
@@ -246,16 +248,21 @@ mod tests {
         .await
         .unwrap();
         if dev == "pad" {
-            // Split View, the app on half the screen: under 700 pt it is laid out as a phone.
+            // Split View, the app on half the screen.
             let (w, h) = (dump.window.width / 2.0 - 5.0, dump.window.height);
             drv.ok(&Command::Resize { width: w, height: h }).await.unwrap();
-            let split = drv
-                .wait_for("the half-width layout", STEP, |d| {
-                    d.items.iter().any(|i| i.active && i.bounds[2] > w * 0.85 && i.bounds[2] < w)
+            // The columns keep their proportions of the narrower window; the active one rests
+            // inside it.
+            drv.wait_for("the half-width layout", STEP, |d| {
+                d.items.iter().any(|i| {
+                    i.active
+                        && i.bounds[2] < w / 2.0
+                        && i.bounds[0] >= 0.0
+                        && i.bounds[0] + i.bounds[2] <= w + 1.0
                 })
-                .await
-                .unwrap();
-            assert!(split.items.iter().all(|i| i.bounds[0] + i.bounds[2] <= w + 1.0 || !i.active));
+            })
+            .await
+            .unwrap();
             golden(drv, &dir, dev, "split", Some((w, h))).await;
         }
         stack.shutdown().await;

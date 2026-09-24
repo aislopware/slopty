@@ -139,13 +139,13 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
     let mut l = still();
     l.open(t(1), Placement::Local);
     let a = rect(&l, t(1));
-    near(a.x, 8.0);
+    near(a.x, (1280.0 - HALF) / 2.0);
     near(a.w, HALF);
     near(a.y, 8.0);
     near(a.h, 800.0 - 16.0);
     assert_eq!(l.focused(), Some(t(1)));
 
-    // The second fits beside it: the camera does not move.
+    // The second: the view leaves the lone column's centre only as far as showing both needs.
     l.open(t(2), Placement::Local);
     near(view_pos(&l), -8.0);
     near(rect(&l, t(2)).x, 8.0 + STEP);
@@ -253,7 +253,7 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     l.focus_column_first();
     l.remove(t(1));
     assert_eq!(l.focused(), Some(t(2)), "the column that slid into its place");
-    near(rect(&l, t(2)).x, 8.0);
+    near(rect(&l, t(2)).x, (1280.0 - HALF) / 2.0);
     l.remove(t(2));
     assert_eq!(l.focused(), None);
     l.remove(t(2));
@@ -664,8 +664,8 @@ fn a_tabbed_column_shows_one_tile_at_full_height() {
     }
     l.focus_window_down();
     assert!(!placed(&l, t(2)).hidden && placed(&l, t(1)).hidden);
-    // Dropping onto a tabbed column appends.
-    let target = l.drop_target(300.0, 100.0);
+    // Dropping onto a tabbed column (alone, so centred) appends.
+    let target = l.drop_target(640.0, 100.0);
     assert_eq!(target, Some(DropTarget::IntoColumn { workspace: 0, column: 0, index: 3 }));
     l.toggle_tabbed();
     assert!(l.frame().tiles.iter().all(|p| !p.hidden && p.tabs.is_none()));
@@ -730,10 +730,53 @@ fn the_overview_zooms_out_by_half_with_a_gap_between_rows() {
     assert_eq!(f.workspaces[0].1, Rect { x: 320.0, y: 200.0, w: 640.0, h: 400.0 });
     near(f.workspaces[1].1.y, 200.0 + 400.0 + 40.0);
     let a = rect(&l, t(1));
-    near(a.x, 320.0 + 4.0);
+    near(a.x, 320.0 + (1280.0 - HALF) / 4.0);
     near(a.w, HALF / 2.0);
     l.toggle_overview();
     near(l.frame().zoom, 1.0);
+}
+
+/// niri's `always-center-single-column`: a lone column sits in the middle of the window, and
+/// stays there when the window or the column changes width; a second column brings back the
+/// usual fit.
+#[test]
+fn a_lone_column_is_centred_and_stays_centred() {
+    let mut l = columns(1);
+    let centred = |l: &Layout| {
+        let r = rect(l, t(1));
+        near(r.x, (l.viewport().0 - r.w) / 2.0);
+    };
+    centred(&l);
+    l.set_viewport(1600.0, 900.0);
+    centred(&l);
+    l.switch_preset_width(true);
+    centred(&l);
+    l.set_viewport(1280.0, 800.0);
+    centred(&l);
+    l.open(t(2), Placement::Local);
+    l.focus_column_first();
+    l.remove(t(2));
+    centred(&l);
+}
+
+/// In the overview a strip that fits the zoomed-out window is centred in it, whatever column
+/// the view was scrolled to; the view itself does not move, so closing the overview lands
+/// where it was, and a drop is found where the tile is drawn.
+#[test]
+fn the_overview_centres_a_strip_that_fits() {
+    let mut l = columns(3);
+    let before = view_pos(&l);
+    l.set_overview(true);
+    let (first, last) = (rect(&l, t(1)), rect(&l, t(3)));
+    near(first.x, 1280.0 - last.right());
+    near(view_pos(&l), before);
+    let panel = l.frame().workspaces[0].1;
+    assert!(panel.x < first.x && panel.right() > last.right(), "the panel holds it: {panel:?}");
+    let hit = l.drop_target(first.x + first.w / 2.0, first.y + first.h / 2.0);
+    assert!(matches!(hit, Some(DropTarget::IntoColumn { workspace: 0, column: 0, .. })), "{hit:?}");
+    l.set_overview(false);
+    near(view_pos(&l), before);
+    near(rect(&l, t(3)).right(), 1280.0 - 8.0);
 }
 
 #[test]

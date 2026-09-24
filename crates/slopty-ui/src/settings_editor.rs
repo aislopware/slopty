@@ -144,7 +144,7 @@ impl Focusable for SettingsEditor {
 }
 
 impl Render for SettingsEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let (s, spacing, radii) = (theme.surfaces, theme.spacing, theme.radii);
         // A button says what it does; the keys (Esc, ⌘↩) are the palette's to list.
@@ -180,7 +180,7 @@ impl Render for SettingsEditor {
                 .text_color(hsla(s.warn))
                 .child(SharedString::from(error))
         });
-        crate::kit::backdrop(&theme)
+        crate::kit::backdrop(&theme, window)
             .id("settings-backdrop")
             .key_context(CTX)
             .on_key_down(cx.listener(Self::key_down))

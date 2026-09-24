@@ -54,6 +54,20 @@ impl Rgb {
             .mul_add(linear(self.b), 0.7152_f32.mul_add(linear(self.g), 0.2126 * linear(self.r)))
     }
 
+    /// `self` moved `t` (0 to 1) of the way to `other`, channel by channel.
+    #[must_use]
+    pub fn mix(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 255")]
+        let channel =
+            |a: u8, b: u8| (f32::from(b) - f32::from(a)).mul_add(t, f32::from(a)).round() as u8;
+        Self {
+            r: channel(self.r, other.r),
+            g: channel(self.g, other.g),
+            b: channel(self.b, other.b),
+        }
+    }
+
     /// WCAG contrast ratio with `other`: 1.0 (the same) to 21.0 (black on white).
     #[must_use]
     pub fn contrast(self, other: Self) -> f32 {
@@ -110,7 +124,7 @@ impl TerminalPalette {
             Rgb::hex(0xc678dd),
             Rgb::hex(0x56b6c2),
             Rgb::hex(0xc8ccd4),
-            Rgb::hex(0x5c6370),
+            Rgb::hex(0x747d8d),
             Rgb::hex(0xff7b86),
             Rgb::hex(0xa6d68a),
             Rgb::hex(0xf0cc8c),
@@ -144,10 +158,10 @@ impl TerminalPalette {
             Rgb::hex(0x57606a),
             Rgb::hex(0xa40e26),
             Rgb::hex(0x1a7f37),
-            Rgb::hex(0xbf8700),
-            Rgb::hex(0x218bff),
-            Rgb::hex(0xa475f9),
-            Rgb::hex(0x3192aa),
+            Rgb::hex(0x996c00),
+            Rgb::hex(0x0070ea),
+            Rgb::hex(0x8a4ef7),
+            Rgb::hex(0x2a7e92),
             Rgb::hex(0x8c959f),
         ],
         minimum_contrast: 100,
@@ -262,7 +276,9 @@ impl Colors {
     }
 
     /// The colour text `fg` is painted in over `bg`: itself, unless the theme's minimum
-    /// contrast says it would not read, then black or white, whichever contrasts more.
+    /// contrast says it would not read. Then it is moved toward black or white, whichever
+    /// contrasts more with `bg`, only as far as the minimum needs, so its hue survives: a
+    /// pale mint prompt on white turns teal, where ghostty's snap would turn it black.
     #[must_use]
     pub fn text_over(&self, fg: Rgb, bg: Rgb) -> Rgb {
         let least = f32::from(self.theme.minimum_contrast) / 100.0;
@@ -270,7 +286,21 @@ impl Colors {
             return fg;
         }
         let (black, white) = (Rgb::hex(0), Rgb::hex(0xff_ffff));
-        if bg.contrast(white) >= bg.contrast(black) { white } else { black }
+        let pole = if bg.contrast(white) >= bg.contrast(black) { white } else { black };
+        if pole.contrast(bg) <= least {
+            return pole;
+        }
+        // Contrast grows with the mix toward the pole: bisect for the least mix that reads.
+        let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+        for _ in 0..12 {
+            let mid = f32::midpoint(lo, hi);
+            if fg.mix(pole, mid).contrast(bg) >= least {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        fg.mix(pole, hi)
     }
 }
 
@@ -846,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn text_under_the_minimum_contrast_turns_black_or_white() {
+    fn text_under_the_minimum_contrast_moves_toward_black_or_white() {
         let rgb = |r, g, b| Rgb { r, g, b };
         let (black, white) = (rgb(0, 0, 0), rgb(255, 255, 255));
         assert!((black.contrast(white) - 21.0).abs() < 0.01, "{}", black.contrast(white));
@@ -857,13 +887,49 @@ mod tests {
         assert_eq!(off.text_over(navy, black), navy, "1.0 keeps every colour");
         theme.minimum_contrast = 300;
         let on = Colors::from(&theme);
-        assert_eq!(on.text_over(navy, black), white, "navy on black does not read");
-        assert_eq!(on.text_over(navy, white), navy, "navy on white does");
-        assert_eq!(on.text_over(rgb(200, 200, 200), rgb(220, 220, 220)), black);
+        let lifted = on.text_over(navy, black);
+        assert!(lifted.contrast(black) >= 3.0, "{lifted:?}");
+        assert!(lifted.contrast(black) < 3.2, "no further than it needs: {lifted:?}");
+        assert!(lifted.b > lifted.r, "still blue: {lifted:?}");
+        assert_eq!(on.text_over(navy, white), navy, "navy on white reads");
+        let mint = rgb(0x80, 0xff, 0xea);
+        let teal = on.text_over(mint, white);
+        assert!(teal.contrast(white) >= 3.0 && teal.g > teal.r, "mint on white: {teal:?}");
         assert_eq!(on.text_over(theme.fg, theme.bg), theme.fg, "the theme itself reads");
+        // A minimum past what black or white can give is as far as they go.
+        theme.minimum_contrast = 2100;
+        let most = Colors::from(&theme);
+        assert_eq!(most.text_over(rgb(200, 200, 200), rgb(128, 128, 128)), black);
         // The minimum rides on the theme, so a program's colours are held to it too.
+        theme.minimum_contrast = 300;
         let set = ColorOverrides { fg: Some([0, 0, 95]), ..ColorOverrides::default() };
         let program = Colors::new(&theme, &set);
-        assert_eq!(program.text_over(program.theme.fg, program.theme.bg), white);
+        let fg = program.text_over(program.theme.fg, program.theme.bg);
+        assert!(fg.contrast(program.theme.bg) >= 3.0, "{fg:?}");
+    }
+
+    /// Terminal text in the theme's own colours reads without any minimum contrast: every ANSI
+    /// colour clears WCAG AA against the terminal background in both variants, except the one
+    /// that names the background itself (black in dark, bright white in light), which programs
+    /// use as a fill. The light brights read 3.0–3.6 before this test (GitHub light's).
+    #[test]
+    fn ansi_text_clears_wcag_aa_on_the_terminal_background() {
+        const AA: f32 = 4.5;
+        for (name, palette, namesake) in
+            [("dark", TerminalPalette::DARK, 0), ("light", TerminalPalette::LIGHT, 15)]
+        {
+            let fg = palette.fg.contrast(palette.bg);
+            assert!(fg >= AA, "{name}: the default text is {fg:.2}");
+            for (ix, ink) in palette.ansi.iter().enumerate() {
+                if ix == namesake {
+                    continue;
+                }
+                let ratio = ink.contrast(palette.bg);
+                assert!(
+                    ratio >= AA,
+                    "{name}: ANSI {ix} is {ratio:.2} on the background, under {AA}"
+                );
+            }
+        }
     }
 }

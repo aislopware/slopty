@@ -996,9 +996,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   see a word): `first-run`, `add-worker`, `workspace` and `workspace-dark`, `overview`,
   `palette` and `palette-dark`, `settings`, `empty-workspace`, `agent-needs-you`,
   `remote-window`, `transfers` (upload pill and port chip) and `server-unreachable`; the iOS
-  test adds `ios-<device>-first-run`, `-columns`, `-palette` and `ios-pad-split` (not yet
-  rendered: since the frame-pacer pin the simulator app aborts in `MetalRenderer::draw` on an
-  unrecognised selector, so they are written on the first green run). Reaching two
+  test adds `ios-<device>-first-run`, `-columns`, `-palette` and `ios-pad-split`. Reaching two
   of them took a socket command each: `PickWindow` (a window id that names no window, so a
   remote tile's placeholder renders without the capture grant, and no screen ever lands in a
   golden) and `Resize` on iOS, which lays the app out in the size asked at the window's top
@@ -1039,6 +1037,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     their edges). Caps now have a floor (36 pt, 52 for a word) and the row scrolls past it;
     the keys the soft keyboard cannot type come first and the clipboard key follows the
     arrows, so both are in view before the row scrolls.
-  Left for later: a lone column still sits at the left half of a wide window (niri's
-  `always-center-single-column` would centre it; the layout is `slopty-client`'s), and the
-  overview zooms about the view, so a strip that starts at the view sits right of centre.
+  The same day a lone column became centred and the overview centres a strip that fits
+  (workspace.md, the niri port's deviations).
+  The iOS renders, reviewed once the fork's simulator fix landed, added three fixes: an
+  overlay's backdrop starts under the window's safe area (the phone's palette sat on the
+  Dynamic Island); key caps take a fixed basis and share out any spare width equally (a
+  phone keeps 36/52 pt caps and scrolls, an iPad's row fills the width, where equal flex
+  shares had grown "esc" and "paste" and not the arrows); the phone's `columns` golden waits
+  for the take-back toast to lapse. In Split View (511 pt) columns keep their proportions, as
+  in niri, so two half columns of 231 pt stand side by side.
+  Terminal colours, the same day: the pale mint prompt in `workspace` was the prompt's own
+  24-bit colour (`#80FFEA`, 1.2:1 on white), not the palette, so no ANSI tuning could reach it.
+  libghostty draws nothing here; the minimum contrast is the app's own ghostty-style check
+  (`Colors::text_over`) and `[terminal] minimum_contrast` defaults to 1.0, off, as ghostty's
+  does, so it never ran. It now moves a colour toward black or white only as far as the
+  minimum needs, hue kept (mint on white becomes teal, where the snap made it black), and the
+  light brights 11–14 and dark 8 were darkened or lightened, hue held, until every ANSI colour
+  but the background's namesake clears 4.5:1 (`ansi_text_clears_wcag_aa_on_the_terminal_background`;
+  11–14 read 3.1–3.6 before). Turning the minimum on by default is `slopty-settings`' call.

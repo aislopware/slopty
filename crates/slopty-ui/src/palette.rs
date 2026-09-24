@@ -629,7 +629,7 @@ impl CommandPalette {
 }
 
 impl Render for CommandPalette {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let matches: Vec<PaletteItem> = self.matches(cx).into_iter().cloned().collect();
@@ -640,7 +640,7 @@ impl Render for CommandPalette {
             .map(|(ix, item)| self.row(ix, item, ix == chosen, cx).into_any_element())
             .collect();
         let empty = rows.is_empty();
-        crate::kit::backdrop(&theme)
+        crate::kit::backdrop(&theme, window)
             .id("palette-backdrop")
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))

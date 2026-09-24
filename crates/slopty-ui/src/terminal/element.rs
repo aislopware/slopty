@@ -2338,32 +2338,27 @@ mod tests {
         );
         theme.minimum_contrast = 300;
         let colors = Colors::from(&theme);
-        let white = hsla(Rgb::hex(0xff_ffff));
-        assert_eq!(cell_color(&navy_on_black, &colors, false, &mut Contrast::default()), white);
+        let lifted = hsla(colors.text_over(Rgb { r: 0, g: 0, b: 95 }, Rgb::hex(0)));
+        assert_ne!(lifted, navy, "lifted toward white");
+        assert_eq!(cell_color(&navy_on_black, &colors, false, &mut Contrast::default()), lifted);
         // Two greys either side of the luminance where black and white swap: the painted
-        // background decides, so inverse video flips the answer.
+        // background decides, so inverse video flips the direction.
+        let (white, black) = (hsla(Rgb::hex(0xff_ffff)), hsla(Rgb::hex(0)));
         let greys = CellStyle {
             fg: slopty_grid::Color::Rgb(118, 118, 118),
             bg: slopty_grid::Color::Rgb(116, 116, 116),
             ..CellStyle::default()
         };
-        assert_eq!(
-            cell_color(&greys, &colors, false, &mut Contrast::default()),
-            white,
-            "over the darker grey"
-        );
+        let over_darker = cell_color(&greys, &colors, false, &mut Contrast::default());
+        assert!(over_darker.l > 0.46 && over_darker.l < white.l, "lighter: {over_darker:?}");
         let mut inverse = greys;
         inverse.flags |= StyleFlags::INVERSE;
-        let black = hsla(Rgb::hex(0));
-        assert_eq!(
-            cell_color(&inverse, &colors, false, &mut Contrast::default()),
-            black,
-            "over the lighter grey"
-        );
+        let over_lighter = cell_color(&inverse, &colors, false, &mut Contrast::default());
+        assert!(over_lighter.l < 0.46 && over_lighter.l > black.l, "darker: {over_lighter:?}");
         let mut faint = navy_on_black;
         faint.flags |= StyleFlags::FAINT;
         let painted = cell_color(&faint, &colors, false, &mut Contrast::default());
-        assert!((painted.a - 0.6).abs() < f32::EPSILON && painted.l > 0.9, "{painted:?}");
+        assert!((painted.a - 0.6).abs() < f32::EPSILON && painted.l > navy.l, "{painted:?}");
     }
 
     fn word(glyphs: usize) -> Word {

@@ -56,7 +56,10 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   these deviations: moves animate FLIP-style from where each tile was drawn; a retargeted
   spring keeps its velocity; a cancelled strip gesture settles where it is and brings the focus
   back into view; one workspace of gesture travel is 1.1 viewport heights; fullscreen is not
-  saved. 65 unit tests pin the maths.
+  saved. Added 2026-09-25: a lone column is centred (niri's `always-center-single-column`, off
+  by default there), including when a removal leaves one, and the overview centres a strip
+  that fits the zoomed-out window without moving the view (`shown_view_pos`). 67 unit tests
+  pin the maths.
 
 - ✅ **The keys** (2026-09-24). ⌘ is the app's modifier; ⌃ and ⌥ without ⌘ belong to the
   terminal. Where the old keys conflicted the table won: ⌘⌥←/→ no longer switch host, ⌘[/⌘]

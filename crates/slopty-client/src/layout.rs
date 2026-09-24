@@ -942,7 +942,17 @@ impl Workspace {
         self.column_x(self.active, g) + self.view.target()
     }
 
+    /// The offset that shows column `idx`: niri's fit, except that a lone column is centred
+    /// (niri's `always-center-single-column`). Left-aligned, one column on a wide window
+    /// leaves half of it empty on one side, which reads as something missing.
     fn fit_offset(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
+        if self.columns.len() == 1 {
+            return self.centred_offset(g, idx);
+        }
+        self.fit_offset_niri(g, target_x, idx)
+    }
+
+    fn fit_offset_niri(&self, g: &Geom, target_x: Option<f32>, idx: usize) -> f32 {
         let Some(col) = self.columns.get(idx) else { return 0.0 };
         if col.fullscreen {
             return 0.0;
@@ -961,7 +971,7 @@ impl Workspace {
         let Some(col) = self.columns.get(idx) else { return 0.0 };
         let w = col.resolved_width(g);
         if col.fullscreen || g.working_w() <= w {
-            return self.fit_offset(g, None, idx);
+            return self.fit_offset_niri(g, None, idx);
         }
         -(g.working_w() - w) / 2.0 - g.working_x()
     }
@@ -1104,6 +1114,10 @@ impl Workspace {
             }
         } else {
             self.activate_column(ctx, self.active.min(last));
+        }
+        if last == 0 {
+            // Alone now: to the centre, wherever the view was.
+            self.animate_view_to_column(ctx, None, 0);
         }
         Some(column)
     }
@@ -2474,6 +2488,24 @@ impl Layout {
         self.overview_progress().mul_add(-(1.0 - OVERVIEW_ZOOM), 1.0).max(0.01)
     }
 
+    /// Where `ws`'s view sits as drawn: its own position, moved in the overview (by the
+    /// overview's progress) to centre the whole strip when it fits the zoomed-out window. The
+    /// view scrolled to its focus would otherwise hang the strip off to one side of the panel.
+    fn shown_view_pos(&self, ws: &Workspace, ctx: &Ctx) -> f32 {
+        let pos = ws.view_pos(ctx);
+        let progress = self.overview_progress();
+        if progress <= 0.0 || ws.columns.is_empty() {
+            return pos;
+        }
+        let g = &ctx.g;
+        let strip_w = ws.column_x(ws.columns.len(), g) - g.gaps;
+        if strip_w > g.view_w / OVERVIEW_ZOOM {
+            return pos;
+        }
+        let centred = (strip_w - g.view_w) / 2.0;
+        (centred - pos).mul_add(progress, pos)
+    }
+
     // ----- gestures --------------------------------------------------------------------------
 
     /// A horizontal two-finger or touch drag of the strip begins.
@@ -2644,7 +2676,7 @@ impl Layout {
             }
             if y >= row.y && y < row.bottom() {
                 let ws = self.workspaces.get(idx)?;
-                let strip_x = (x - row.x) / zoom + ws.view_pos(&ctx);
+                let strip_x = (x - row.x) / zoom + self.shown_view_pos(ws, &ctx);
                 return Some(Self::drop_in(&ctx.g, idx, ws, strip_x, (y - row.y) / zoom));
             }
             if y >= row.bottom() {
@@ -2846,8 +2878,9 @@ impl Layout {
     fn screen_rect(&self, pos: Pos) -> Option<Rect> {
         let ctx = self.ctx();
         let zoom = self.zoom();
-        let wr = *self.ws_rects(zoom).get(pos.workspace)?;
         let ws = self.workspaces.get(pos.workspace)?;
+        let mut wr = *self.ws_rects(zoom).get(pos.workspace)?;
+        wr.x = (ws.view_pos(&ctx) - self.shown_view_pos(ws, &ctx)).mul_add(zoom, wr.x);
         let flat = ws
             .columns
             .iter()
@@ -2875,14 +2908,27 @@ impl Layout {
         let focused = self.focused();
         let step = self.view_h * (1.0 + WORKSPACE_GAP);
         let mut tiles = Vec::new();
-        for (wi, (ws, wr)) in self.workspaces.iter().zip(&rects).enumerate() {
-            let shown = wr.intersects(&viewport);
-            let view_pos = ws.view_pos(&ctx);
+        let mut panels = rects.clone();
+        for (wi, (ws, panel)) in self.workspaces.iter().zip(&rects).enumerate() {
+            let shown = panel.intersects(&viewport);
+            let view_pos = self.shown_view_pos(ws, &ctx);
+            // A centred strip wider than the view gets a panel as wide as it is.
+            if let Some(out) = panels.get_mut(wi)
+                && !ws.columns.is_empty()
+            {
+                let strip_w = ws.column_x(ws.columns.len(), &g) + g.gaps;
+                let left = (-g.gaps - view_pos).mul_add(zoom, panel.x);
+                if (view_pos - ws.view_pos(&ctx)).abs() > f32::EPSILON && strip_w * zoom > out.w {
+                    *out = Rect { x: left, w: strip_w * zoom, ..*out };
+                }
+            }
+            // The tiles as the workspace lays them out, moved by what the overview centred.
+            let wr = &Rect { x: (ws.view_pos(&ctx) - view_pos).mul_add(zoom, panel.x), ..*panel };
             let mut visible: Option<(usize, usize)> = None;
             let mut x = 0.0;
             for (ci, col) in ws.columns.iter().enumerate() {
                 let width = col.resolved_width(&g);
-                let left = (x - view_pos).mul_add(zoom, wr.x);
+                let left = (x - view_pos).mul_add(zoom, panel.x);
                 let right = width.mul_add(zoom, left);
                 if shown && right > 0.0 && left < g.view_w {
                     visible = Some(visible.map_or((ci, ci), |(lo, hi)| (lo.min(ci), hi.max(ci))));
@@ -2960,7 +3006,7 @@ impl Layout {
         Frame {
             tiles,
             closing,
-            workspaces: rects.into_iter().enumerate().collect(),
+            workspaces: panels.into_iter().enumerate().collect(),
             overview: self.overview_progress(),
             zoom,
             strip,

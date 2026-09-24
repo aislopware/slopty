@@ -363,7 +363,7 @@ impl Render for WindowPicker {
         let title = "Jump to a session, or add a window from the host";
         let nothing = if self.query.is_empty() { NOTHING_TO_JUMP_TO } else { NOTHING_MATCHES };
 
-        crate::kit::backdrop(&theme)
+        crate::kit::backdrop(&theme, window)
             .id("picker-backdrop")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))

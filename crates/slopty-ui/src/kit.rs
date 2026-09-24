@@ -45,19 +45,22 @@ impl Overlay {
     }
 }
 
-/// The backdrop an overlay sits on: the canvas dimmed, the dialog near the top so a phone's
-/// keyboard — which rises from the bottom — covers fewer of its rows.
+/// The backdrop an overlay sits on: the canvas dimmed, the dialog near the top.
+///
+/// Near the top so a phone's keyboard, which rises from the bottom, covers fewer of its rows;
+/// under the window's safe area, so a phone's status bar and Dynamic Island never sit on it.
 ///
 /// The caller adds the identity, the key handling and the dismiss on a click through.
 #[must_use]
-pub fn backdrop(theme: &Theme) -> Div {
+pub fn backdrop(theme: &Theme, window: &Window) -> Div {
+    let safe = window.insets().effective();
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_start()
         .justify_center()
-        .pt(px(theme.spacing.xl * 2.0))
+        .pt(px(theme.spacing.xl * 2.0) + safe.top)
         .bg(hsla_alpha(theme.surfaces.canvas, alpha::SCRIM))
 }
 

@@ -91,8 +91,8 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
 ];
 /// Where the arrows end in [`BAR_KEYS`]: the clipboard key follows them.
 const ARROWS_END: usize = 7;
-/// The narrowest a key cap gets: a symbol's, and a word's. Below these a finger misses; past
-/// them the row scrolls instead of crowding.
+/// A key cap's width before a wide screen shares out its spare room: a symbol's, and a
+/// word's. Below these a finger misses; on a phone the row scrolls instead of crowding.
 const KEY_W: f32 = 36.0;
 const KEY_WORD_W: f32 = 52.0;
 /// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
@@ -745,7 +745,12 @@ impl Workspace {
     /// other way in as a quiet link. On the first run it stands alone on the canvas; later
     /// ("Add a worker…", "Connect to a server…") it is a dialog over the workspace with a
     /// Cancel. The phone gets a Paste, since it has no ⌘V; the Mac's field takes ⌘V.
-    fn add_worker_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
+    fn add_worker_panel(
+        &self,
+        adding: &Adding,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
@@ -889,7 +894,7 @@ impl Workspace {
                 .child(panel)
                 .into_any_element()
         } else {
-            kit::backdrop(theme)
+            kit::backdrop(theme, window)
                 .id("add-worker-backdrop")
                 .flex()
                 .items_center()
@@ -920,12 +925,14 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
         let pressed = if lit { s.accent } else { s.overlay };
-        let min = if label.chars().count() > 1 { KEY_WORD_W } else { KEY_W };
+        let basis = if label.chars().count() > 1 { KEY_WORD_W } else { KEY_W };
+        // Every cap grows by the same share of any room left over, so a tablet's row fills
+        // its width while a phone's keeps these widths and scrolls.
         div()
             .id(SharedString::from(id))
-            .flex_1()
+            .flex_grow(1.0)
             .flex_shrink_0()
-            .min_w(px(min))
+            .flex_basis(px(basis))
             .h(px(KEY_BAR_H - self.theme.spacing.sm))
             .flex()
             .items_center()
@@ -1154,7 +1161,7 @@ impl Render for Workspace {
         }
         let settings_editor = self.settings_editor.clone();
         let welcome = self.welcome();
-        let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, cx));
+        let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
             None => div().size_full(),
