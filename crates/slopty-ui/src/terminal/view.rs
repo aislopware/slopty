@@ -1,6 +1,6 @@
 //! `TerminalView`: one attached session on screen.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -293,7 +293,7 @@ pub struct TerminalView {
     key_seq: u64,
     metrics: Option<CellMetrics>,
     pending_size: Option<TermSize>,
-    font_family: Option<String>,
+    font_family: Option<SharedString>,
     zoom: f32,
     /// The canvas zoom is in motion this frame (set by the canvas before each frame).
     zooming: bool,
@@ -1166,7 +1166,10 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let prompt = block.prompt;
-        let family = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        // The family the grid resolved, so the header's text is the grid's.
+        let family = self.font_family.clone().unwrap_or_else(|| {
+            theme.typography.mono_families.first().cloned().unwrap_or_default().into()
+        });
         // The block's duration at the right end, as its prompt row would show it.
         let took = self.took(prompt).map(|elapsed| {
             div()
@@ -1491,12 +1494,12 @@ impl TerminalView {
 
     /// The monospace family the element resolved (first installed from the theme's list).
     #[must_use]
-    pub fn font_family(&self) -> Option<&str> {
-        self.font_family.as_deref()
+    pub fn font_family(&self) -> Option<SharedString> {
+        self.font_family.clone()
     }
 
     /// Record the resolved family.
-    pub fn set_font_family(&mut self, family: String) {
+    pub fn set_font_family(&mut self, family: SharedString) {
         self.font_family = Some(family);
     }
 
@@ -1522,20 +1525,26 @@ impl TerminalView {
         self.predictor.set_rtt(rtt);
     }
 
-    /// Predicted cells to overlay and the cursor to draw, when prediction is showing.
+    /// The guesses to draw and the cursor after them, when prediction is showing.
     #[must_use]
-    pub fn predictions(&self) -> Option<(Vec<Prediction>, Cursor)> {
+    pub fn predictions(&self) -> Option<(&VecDeque<Prediction>, Cursor)> {
         if !self.predictor.visible(Instant::now()) || self.state.view_offset() != 0 {
             return None;
         }
-        let pending: Vec<Prediction> = self.predictor.pending().iter().cloned().collect();
-        Some((pending, self.predictor.cursor(self.state.cursor())))
+        Some((self.predictor.pending(), self.predictor.cursor(self.state.cursor())))
     }
 
-    /// The element painted a frame whose local-echo overlay showed guesses for the keys in
-    /// `shown` (their sequence numbers).
-    pub fn painted(&mut self, shown: &[u64]) {
-        self.latency.painted(Instant::now(), shown, self.state.input_ack());
+    /// Whether a typed key still waits to be seen on screen: the element times the frames it
+    /// presents only then.
+    #[must_use]
+    pub fn latency_waiting(&self) -> bool {
+        self.latency.waiting()
+    }
+
+    /// A frame reached the display at `now`: its guesses showed the keys in `shown` (their
+    /// sequence numbers) and its grid the host's state after key `input_ack`.
+    pub fn presented(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
+        self.latency.painted(now, shown, input_ack);
     }
 
     /// Keystroke → paint percentiles (see [`latency`]).
@@ -1581,7 +1590,13 @@ impl TerminalView {
     }
 
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
-    pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
+    pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
+        self.type_key(keystroke, false, cx);
+    }
+
+    /// A key typed, first press or auto-repeat (`held`): both go to the predictor, the
+    /// latency meter and the bottom of the history, so a held key echoes locally like a tap.
+    fn type_key(&mut self, mut keystroke: Keystroke, held: bool, cx: &mut Context<Self>) {
         // An armed ⌘ with the bar's ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
         if self.sticky_command && matches!(keystroke.key.as_str(), "up" | "down") {
             self.sticky_command = false;
@@ -1609,7 +1624,7 @@ impl TerminalView {
             keystroke.modifiers.control = true;
         }
         self.key_seq = self.key_seq.wrapping_add(1);
-        let key = keys::key_event(self.key_seq, &keystroke, false, self.alt_is_alt());
+        let key = keys::key_event(self.key_seq, &keystroke, held, self.alt_is_alt());
         tracing::trace!(session = %self.session, ?key, "key");
         if self.state.view_offset() != 0 {
             self.state.scroll_to_bottom();
@@ -2017,13 +2032,7 @@ impl TerminalView {
         if self.theme.behaviour.hide_pointer_while_typing {
             slopty_platform::hide_pointer_until_moved();
         }
-        if event.is_held {
-            self.key_seq = self.key_seq.wrapping_add(1);
-            let key = keys::key_event(self.key_seq, &event.keystroke, true, self.alt_is_alt());
-            self.send(TermRequest::Key(key));
-        } else {
-            self.press(event.keystroke.clone(), cx);
-        }
+        self.type_key(event.keystroke.clone(), event.is_held, cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -4995,6 +5004,186 @@ mod tests {
             let tall = item.size.height - pad * 2.0 * zoom;
             assert!(rows <= tall, "at zoom {zoom}: {rows:?} > {tall:?}");
         }
+    }
+
+    /// The screen of [`with_command_blocks`] again, the cursor showing after the prompt.
+    fn cursor_at_the_prompt(view: &Entity<TerminalView>, cx: &mut VisualTestContext) {
+        let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
+        let cursor = Cursor { row: 2, col: 2, visible: true, ..Cursor::default() };
+        view.update_in(cx, |view, _window, cx| {
+            let rows = ["2".to_owned(), String::new(), "$ ".to_owned()];
+            let TermEvent::Frame(mut frame) = screen_of(2, 10, &rows) else { panic!("a frame") };
+            frame.first_visible_line = LineIndex(6);
+            frame.total_lines = 9;
+            frame.cursor = cursor;
+            if let Some(last) = frame.updates.last_mut() {
+                last.line.mark = prompt;
+            }
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// An auto-repeated key goes the way a first press does: to the predictor (it echoes
+    /// locally), to the latency meter, and back to the bottom of the history.
+    #[gpui::test]
+    fn a_held_key_is_predicted_timed_and_follows_the_output(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        cursor_at_the_prompt(&view, cx);
+        view.update(cx, |view, _cx| {
+            view.predictor.set_policy(Policy::Always);
+            let _effects = view.state.scroll_to(3);
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3, "scrolled up");
+        let keystroke =
+            Keystroke { key: "a".into(), key_char: Some("a".into()), ..Keystroke::default() };
+        cx.simulate_event(KeyDownEvent { keystroke, is_held: true, prefer_character_input: false });
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.state.view_offset(), 0, "back at the bottom");
+            assert_eq!(view.predictor.pending().len(), 1, "guessed");
+            assert!(view.latency.waiting(), "timed");
+        });
+        assert_eq!(drain_words(&mut rx), ["key"], "and sent");
+    }
+
+    /// The meter reads a frame when it is presented — at the next frame callback — not when
+    /// it is painted: the host's echo drawn now counts only once the display takes it.
+    #[gpui::test]
+    fn a_key_is_timed_when_its_frame_is_presented(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.simulate_keystrokes("a");
+        let seq = view.read_with(cx, |v, _| v.key_seq);
+        view.update_in(cx, |view, _window, cx| {
+            let TermEvent::Frame(mut frame) = screen_of(1, 10, &["a".to_owned()]) else {
+                panic!("a frame")
+            };
+            frame.input_ack = seq;
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 0, "painted, not yet shown");
+        let ran = cx.update(Window::simulate_next_frame);
+        assert!(ran >= 1, "the paint asked for the next frame");
+        assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 1, "presented: timed");
+        assert!(!view.read_with(cx, |v, _| v.latency_waiting()), "nothing left to time");
+    }
+
+    /// Box drawing is masked once per character and cell size and painted from the atlas on
+    /// every later frame; while the zoom is in motion no mask is written for the passing sizes.
+    #[gpui::test]
+    fn a_sprite_is_masked_once_and_not_while_zooming(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let masks = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::terminal::element::sprite_masks(cx))
+        };
+        let boxed = ["╭──╮".to_owned(), "│  │".to_owned(), "╰──╯".to_owned()];
+        view.update_in(cx, |view, _window, cx| view.apply(screen_of(1, 10, &boxed), cx));
+        cx.run_until_parked();
+        let first = masks(cx);
+        assert_eq!(first, 6, "╭ ─ ╮ │ ╰ ╯");
+        let again = ["╰──╯".to_owned(), "╭──╮".to_owned(), "││││".to_owned()];
+        view.update_in(cx, |view, _window, cx| view.apply(screen_of(2, 10, &again), cx));
+        cx.run_until_parked();
+        assert_eq!(masks(cx), first, "the same characters in the same cell: no new mask");
+        for (seq, zoom) in [(3, 1.3), (4, 1.7)] {
+            view.update_in(cx, |view, _window, cx| {
+                view.set_zoom(zoom);
+                view.set_zooming(true);
+                view.apply(screen_of(seq, 10, &boxed), cx);
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(masks(cx), first, "in motion the geometry is painted instead");
+    }
+
+    /// `rows` rows of lowercase words, about `width` columns each, from `seed`.
+    fn prose(mut seed: u32, rows: usize, width: usize) -> Vec<String> {
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        std::iter::repeat_with(|| {
+            let mut row = String::new();
+            while row.len() < width {
+                for _ in 0..next().wrapping_rem(6).wrapping_add(3) {
+                    row.push(char::from(b'a'.wrapping_add(u8::try_from(next() % 26).unwrap())));
+                }
+                row.push(' ');
+            }
+            row
+        })
+        .take(rows)
+        .collect()
+    }
+
+    /// A full frame of `text`, one row each, `cols` wide.
+    fn screen_of(seq: u64, cols: u16, text: &[String]) -> TermEvent {
+        let rows = u16::try_from(text.len()).unwrap();
+        TermEvent::Frame(Frame {
+            seq,
+            full: true,
+            epoch: 0,
+            cols,
+            rows,
+            cursor: Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: LineIndex(0),
+            first_visible_line: LineIndex(0),
+            total_lines: u64::from(rows),
+            input_ack: 0,
+            images: Vec::new(),
+            updates: text
+                .iter()
+                .enumerate()
+                .map(|(row, text)| RowUpdate {
+                    row: u16::try_from(row).unwrap(),
+                    line: Line::from_text(text, cols, Style::DEFAULT),
+                })
+                .collect(),
+        })
+    }
+
+    /// A 100 × 40 grid of prose is shown, then another for three frames, then the first again:
+    /// what a pan back or a scroll back does. Nothing is shaped on the return — the word cache
+    /// forgets by a budget, not by frames unseen. Prints the numbers MEASUREMENTS records.
+    #[gpui::test]
+    fn a_screen_shown_again_shapes_nothing(cx: &mut TestAppContext) {
+        let (tx, _rx) = mpsc::channel(4096);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(1000.0), px(900.0)));
+        cx.run_until_parked();
+        let (a, b) = (prose(0x2545_f491, 40, 90), prose(0x9e37_79b9, 40, 90));
+        let shaped = |cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| crate::terminal::element::shaped_words(cx))
+        };
+        let draw = |seq: u64, rows: &[String], cx: &mut VisualTestContext| {
+            let started = Instant::now();
+            view.update_in(cx, |view, _window, cx| view.apply(screen_of(seq, 100, rows), cx));
+            cx.run_until_parked();
+            started.elapsed()
+        };
+        let first = draw(1, &a, cx);
+        let mut steady = Duration::ZERO;
+        for seq in 2..=4 {
+            steady = steady.max(draw(seq, &b, cx));
+        }
+        let before = shaped(cx);
+        let back = draw(5, &a, cx);
+        let reshaped = shaped(cx).saturating_sub(before);
+        println!(
+            "MEASURE word cache: first {first:?}, steady max {steady:?}, return {back:?}, \
+             words reshaped on the return {reshaped}"
+        );
+        assert_eq!(reshaped, 0, "the first screen is still shaped");
     }
 
     /// Every message the host received that types or clears, oldest first, as one word each.

@@ -3140,3 +3140,44 @@ perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
 perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
   | grep -oE "keyframes_deferred: [0-9]+|dropped: [0-9]+"   # per-rung counters
 ```
+
+## 2026-09-24 — the word cache on a return, and the hash behind its keys
+
+**Words shaped when a screen comes back.** `terminal::view::tests::a_screen_shown_again_shapes_nothing`
+draws a 100 × 40 grid of prose (A), another (B) for three frames, then A again, and counts the
+words shaped on the return (the element's `cfg(test)` shape counter). Headless GPUI runs on
+`NoopTextSystem`, so its draw times say nothing about CoreText; the count is the number that
+transfers.
+
+| tree | words shaped on the return | cache after |
+| --- | --- | --- |
+| main `a88e2e3` (forget after two frames unused) | **574** (all of A) | 1144 |
+| LRU under a 2¹⁸-glyph budget | **0** | 1144 |
+
+The same test printed draw times of 0.90 ms (return, before) and 0.25 ms (return, after) on the
+no-op shaper. That shows the reshaping was the return frame's whole extra cost, but it is not a
+CoreText figure. The end-to-end `cargo xtask e2e smooth` rerun (the 44–65 ms zoom p99s) is still
+owed. This session could not build the app, because other crates in the shared checkout were
+mid-change.
+
+**Key hash.** A throwaway release-build loop hashed 20 000 words the way `segment_hash` does:
+per cell, the text, a 13-byte style and the width, 200 passes, five rounds, on mac-studio. The
+table gives ns per word, taking the last three rounds after warm-up.
+
+| hasher | ns / word |
+| --- | --- |
+| `std` SipHash (`DefaultHasher`, the old key) | 176–192 |
+| `foldhash::fast` 0.2.0 | 57–68 |
+| `foldhash::quality` 0.2.0 | 67–77 |
+| `rustc-hash` 2.1.3 `FxHasher` | **46–56** |
+
+FxHash wins on this pattern of many small writes, so the keys use `rustc-hash`. The map holds
+the key's own 64-bit hash, so a collision paints the wrong word; that needs 2⁶⁴-scale luck,
+exactly as it did with the fixed-key SipHash before.
+
+```sh
+cargo nextest run -p slopty-ui --no-capture -E 'test(a_screen_shown_again_shapes_nothing)' | grep MEASURE
+# /tmp/hashbench (Cargo.toml: foldhash =0.2.0, rustc-hash =2.1.3; src/main.rs hashes the words
+# as segment_hash does, per hasher, and prints ns/word)
+cd /tmp/hashbench && cargo run --release --offline -q
+```

@@ -482,9 +482,11 @@ impl TermState {
         if self.running.is_some() {
             return;
         }
+        // Idle at a prompt, the cursor is still on its rows: settled from the marks alone,
+        // without reading the command's text.
         let cursor = self.first_visible.offset(u64::from(self.screen.cursor().row));
-        if let Some(head) = self.block_head(prompt)
-            && cursor.0 >= head.body.0
+        if cursor.0 >= self.block_body(prompt).0
+            && let Some(head) = self.block_head(prompt)
             && let Some(command) = head.command
         {
             self.running = Some((prompt, command.clone()));
@@ -620,36 +622,46 @@ impl TermState {
         } else {
             self.prompt_before(index)?
         };
-        let first = self.line(prompt)?;
-        let exit = first.mark.exit();
-        // The prompt's rows (a start, then continuations) up to the one the command was typed
-        // on, from its input column; further `Input` rows continue a multi-line command.
-        let mut command: Vec<String> = Vec::new();
-        let mut i = prompt.0;
-        let newest = self.newest().0;
-        while i <= newest {
-            match self.line(LineIndex(i)) {
-                Some(line)
-                    if line.mark.is_prompt() && (i == prompt.0 || !line.mark.starts_prompt()) =>
-                {
-                    if let Some(col) = line.mark.input_col() {
-                        command.push(line.text_from(col).trim_end().to_owned());
-                    }
-                }
-                Some(line) if line.mark == SemanticMark::Input => {
-                    command.push(line.text().trim_end().to_owned());
-                }
-                _ => break,
-            }
-            i = i.saturating_add(1);
-        }
+        let exit = self.line(prompt)?.mark.exit();
+        let body = self.block_body(prompt);
+        // From each prompt row its input column on; an `Input` row whole.
+        let command: Vec<String> = (prompt.0..body.0)
+            .filter_map(|i| {
+                let line = self.line(LineIndex(i))?;
+                let typed = match line.mark.input_col() {
+                    Some(col) => line.text_from(col),
+                    None if line.mark == SemanticMark::Input => line.text(),
+                    None => return None,
+                };
+                Some(typed.trim_end().to_owned())
+            })
+            .collect();
         let command = command.join("\n");
         Some(BlockHead {
             prompt,
             exit,
             command: (!command.trim().is_empty()).then_some(command),
-            body: LineIndex(i),
+            body,
         })
+    }
+
+    /// The first line after the rows a command was typed on: the prompt's rows (a start, then
+    /// continuations) and any `Input` rows continuing a multi-line command. Reads the marks
+    /// only, so it costs nothing to ask on every frame.
+    fn block_body(&self, prompt: LineIndex) -> LineIndex {
+        let newest = self.newest().0;
+        let mut i = prompt.0;
+        while i <= newest {
+            let typed_on = self.line(LineIndex(i)).is_some_and(|line| {
+                (line.mark.is_prompt() && (i == prompt.0 || !line.mark.starts_prompt()))
+                    || line.mark == SemanticMark::Input
+            });
+            if !typed_on {
+                break;
+            }
+            i = i.saturating_add(1);
+        }
+        LineIndex(i)
     }
 
     /// The arrow keys that take the shell's cursor to a click at (`index`, `col`): rows
@@ -729,7 +741,6 @@ impl TermState {
         Some(count)
     }
 
-    /// The command block a line belongs to: its head ([`Self::block_head`]) and its output
     /// The command block a line belongs to: its head ([`Self::block_head`]) and its output
     /// (the rows from the command's end to the next prompt, trailing blank rows trimmed),
     /// among the lines held here. Reads the whole block: not for every frame.

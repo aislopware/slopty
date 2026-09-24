@@ -4,8 +4,11 @@
 //! where the ink stops: a border seams at every row when the line height is not the font's,
 //! and a heavy line changes weight across a fallback boundary. ghostty draws them itself
 //! (`src/font/sprite/draw/`), from the cell's size and the underline thickness, and so does
-//! this: [`shapes`] answers the geometry of one cell in points, snapped to device pixels,
-//! and the element paints it in the cell's colours. Nothing here shapes text.
+//! this: [`shapes`] answers the geometry of one cell in points, snapped to device pixels.
+//! [`svg`] writes that geometry as a mask the size of the cell in device pixels, which the
+//! element hands GPUI's sprite atlas once per character and cell and then tints with each
+//! cell's colour, as ghostty rasterises a sprite into its atlas once. Nothing here shapes
+//! text.
 
 /// The paint of one shape.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -240,6 +243,54 @@ pub fn shapes(c: char, cell: Cell) -> Option<Vec<Shape>> {
         0x1cd00..=0x1cde5 => octant(n, cell),
         _ => return None,
     })
+}
+
+/// The sprite of `c` as an SVG mask of a cell `w`×`h` device pixels, the light line
+/// `thickness` device pixels: the geometry of [`shapes`] at one device pixel per unit, so it
+/// fills the atlas tile edge to edge and a one-pixel line stays one pixel. Everything is
+/// black; the shades are its opacity. `None` when the font draws `c`.
+#[must_use]
+pub fn svg(c: char, w: u16, h: u16, thickness: f32) -> Option<String> {
+    let cell = Cell { w: f32::from(w), h: f32::from(h), thickness, scale: 1.0 };
+    let opacity = |ink: Ink| match ink {
+        Ink::Fg => String::new(),
+        Ink::Shade(a) => format!(" fill-opacity=\"{a}\""),
+    };
+    let points = |points: &[(f32, f32)]| {
+        points.iter().map(|(x, y)| format!("{x},{y}")).collect::<Vec<_>>().join(" ")
+    };
+    let body: String = shapes(c, cell)?
+        .iter()
+        .map(|shape| match shape {
+            Shape::Rect { x, y, w, h, ink, round } => {
+                let rx = if *round { format!(" rx=\"{}\"", w / 2.0) } else { String::new() };
+                format!(
+                    "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"{rx}{}/>",
+                    opacity(*ink)
+                )
+            }
+            Shape::Stroke { points: p, thickness } => format!(
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"#000\" stroke-width=\"{thickness}\"/>",
+                points(p)
+            ),
+            Shape::Arc { from, to, r, sweep, thickness } => format!(
+                "<path d=\"M{},{} A{r},{r} 0 0 {} {},{}\" fill=\"none\" stroke=\"#000\" \
+                 stroke-width=\"{thickness}\"/>",
+                from.0,
+                from.1,
+                u8::from(*sweep),
+                to.0,
+                to.1
+            ),
+            Shape::Poly { points: p, ink } => {
+                format!("<polygon points=\"{}\"{}/>", points(p), opacity(*ink))
+            }
+        })
+        .collect();
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\">{body}</svg>"
+    ))
 }
 
 /// The side of the cell an arm leaves by.
@@ -1017,6 +1068,42 @@ mod tests {
         assert_eq!(shapes('\u{1FBAE}', CELL).expect("all four").len(), 4);
         // U+1FBAF is a junction: heavy stem, light bar.
         assert!(rects('\u{1FBAF}').iter().any(|r| r.2 == 3.0));
+    }
+
+    /// The alpha of every device pixel of `c`'s mask as GPUI's atlas rasterises it, row by row.
+    fn mask(c: char, w: u16, h: u16, thickness: f32) -> Vec<Vec<u8>> {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(()));
+        let doc = svg(c, w, h, thickness).expect("a sprite");
+        let parsed = renderer.parse_svg(doc.as_bytes()).expect("the document parses");
+        let size = gpui::size(gpui::DevicePixels(i32::from(w)), gpui::DevicePixels(i32::from(h)));
+        let image = renderer.render_parsed(&parsed, gpui::SvgSize::ExactSize(size)).expect("drawn");
+        let alpha: Vec<u8> =
+            image.as_bytes(0).expect("one frame").as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+        alpha.chunks(usize::from(w)).map(<[u8]>::to_vec).collect()
+    }
+
+    /// The mask fills the cell edge to edge in whole device pixels: `─` is one full row
+    /// through the centre and nothing else, `█` covers every pixel, `▀` the top half, `░` a
+    /// quarter of the ink, and a rounded corner is ink on both its stubs.
+    #[test]
+    fn a_sprite_mask_covers_whole_device_pixels() {
+        let line = mask('─', 8, 17, 1.0);
+        let full: Vec<usize> = (0..17).filter(|&y| line[y].iter().all(|&a| a == 255)).collect();
+        assert_eq!(full, vec![8], "one full row");
+        let inked = line.iter().flatten().filter(|&&a| a > 0).count();
+        assert_eq!(inked, 8, "and no bleed around it");
+        assert!(mask('█', 8, 17, 1.0).iter().flatten().all(|&a| a == 255), "a full block");
+        let upper = mask('▀', 8, 16, 1.0);
+        assert!(upper[..8].iter().flatten().all(|&a| a == 255), "top half");
+        assert!(upper[8..].iter().flatten().all(|&a| a == 0), "nothing below");
+        let shade = mask('░', 8, 16, 1.0);
+        let a = shade[4][4];
+        assert!((60..=68).contains(&a), "a quarter: {a}");
+        let corner = mask('╭', 8, 16, 1.0);
+        assert!(corner[15][4] > 0, "ink down to the bottom edge");
+        assert!(corner[8][7] > 0, "ink out to the right edge");
+        assert_eq!(corner[0][0], 0, "nothing in the far corner");
+        assert_eq!(svg('a', 8, 16, 1.0), None, "a letter is the font's");
     }
 
     #[test]

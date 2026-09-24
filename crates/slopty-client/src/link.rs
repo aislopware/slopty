@@ -2,16 +2,13 @@
 //!
 //! Runs on tokio; a UI on another executor just holds the receiver and the sender.
 
-use std::sync::Arc;
-
 use slopty_core::{SessionId, StreamId};
 use slopty_net::client::HostConn;
-use slopty_net::framed::FramedSend;
 use slopty_net::{ClientMsg, HostMsg, NetError};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::TermEvent;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::screen::{ScreenHandle, ScreenRouter, Uplink, spawn_screen};
@@ -54,12 +51,11 @@ impl HostLink {
     #[must_use]
     pub fn start(conn: HostConn) -> Self {
         warm_up_decoder();
-        let HostConn { conn: quic, ack, tx, mut rx, .. } = conn;
+        let HostConn { conn: quic, ack, mut tx, mut rx, .. } = conn;
         let (events_tx, events_rx) = mpsc::channel(EVENT_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(OUT_DEPTH);
         let mut tasks = JoinSet::new();
 
-        let writer_tx: Arc<Mutex<FramedSend<ClientMsg>>> = Arc::new(Mutex::new(tx));
         let control_events = events_tx.clone();
         tasks.spawn(async move {
             loop {
@@ -121,7 +117,6 @@ impl HostLink {
         tasks.spawn(async move {
             while let Some(msg) = out_rx.recv().await {
                 tracing::trace!(kind = msg.kind(), "control send");
-                let mut tx = writer_tx.lock().await;
                 if let Err(e) = tx.send(&msg).await {
                     tracing::debug!(error = %e, "control write failed");
                     break;

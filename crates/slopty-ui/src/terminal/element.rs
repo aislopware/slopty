@@ -2,27 +2,32 @@
 //!
 //! Per row: the words (a row split at its plain spaces), each shaped once at the base font
 //! size and painted glyph by glyph at the zoomed size, background quads for non-default
-//! backgrounds, underlines and strikethroughs where the font puts them, and the cursor. Shaping
-//! is cached across frames and views by the content hash of each word, and the cache is
+//! backgrounds, underlines and strikethroughs where the font puts them, the cell-drawn sprites
+//! from the atlas, and the cursor. Shaping is cached across frames and views by the content
+//! hash of each word, least recently used first out under a glyph budget, and the cache is
 //! independent of the zoom: a zoom step re-shapes nothing, it repaints the same glyph ids at
 //! another size (positions come from the cell grid, and a fixed-pitch font's advances scale
 //! with the size).
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
     ElementId, ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId,
     Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseMoveEvent, PathBuilder,
     Pixels, Point, RenderImage, ShapedLine, SharedString, Size, Style, TextAlign, TextRun,
-    UnderlineStyle, Window, fill, point, px, quad, relative, size,
+    TransformationMatrix, UnderlineStyle, Window, fill, point, px, quad, relative, size,
 };
+use rustc_hash::{FxHashMap, FxHasher};
 use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
+use slopty_predict::Prediction;
 use slopty_proto::terminal::{Placement, TermSize};
-use slopty_theme::{Colors, Theme, alpha};
+use slopty_theme::{Colors, Rgb, Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::fonts;
@@ -113,12 +118,14 @@ pub struct Prepared {
     grid: Grid,
     rows: Vec<PreparedRow>,
     cursor: Option<(Bounds<Pixels>, CursorShape, Hsla)>,
+    /// The cells a block cursor covers and the colour their text takes there.
+    cursor_text: Option<CursorText>,
     background: Hsla,
     /// Colour of the ⌘-hover link underline.
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
-    /// Glyphs drawn over the grid: local-echo predictions and the input method's composition.
+    /// Text drawn over the grid: the input method's composition and the "took" captions.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
     /// sequence number), for the keystroke → paint meter.
@@ -148,8 +155,30 @@ struct PreparedImage {
     over_text: bool,
 }
 
+/// The columns `start..end` of screen row `row` sit under a block cursor: their text is
+/// painted in `color`, the theme's text-under-cursor colour.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CursorText {
+    row: u16,
+    start: u16,
+    end: u16,
+    color: Hsla,
+}
+
+impl CursorText {
+    /// The colour of text at column `col` of screen row `row` that is otherwise `color`.
+    fn over(this: Option<Self>, row: u16, col: u16, color: Hsla) -> Hsla {
+        match this {
+            Some(c) if c.row == row && (c.start..c.end).contains(&col) && color.a > 0.0 => c.color,
+            _ => color,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PreparedRow {
+    /// The screen row (0 = the top of the viewport).
+    row: u16,
     y: Pixels,
     quads: Vec<(u16, u16, Hsla)>,
     /// Underlines and strikethroughs, at ghostty's offsets rather than GPUI's.
@@ -165,12 +194,28 @@ struct PreparedRow {
 }
 
 /// One cell the element draws itself (see [`sprite`]), in the cell's own colours.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 struct SpriteCell {
     col: u16,
     ch: char,
     fg: Hsla,
+    /// The atlas tile it paints from: its name and its mask. `None` while the zoom is in
+    /// motion, when the geometry is painted directly rather than filling the atlas with a tile
+    /// per intermediate size.
+    tile: Option<Rc<SpriteTile>>,
 }
+
+/// One sprite's atlas tile: the name GPUI's atlas keys it by (with the size) and the SVG mask
+/// it rasterises once, on first use.
+#[derive(PartialEq, Eq, Debug)]
+struct SpriteTile {
+    path: SharedString,
+    svg: Box<[u8]>,
+}
+
+/// What a sprite tile is rasterised for: the character, the cell in device pixels and the light
+/// line's thickness in device pixels (ghostty's sprite key: the cell and the box thickness).
+type SpriteKey = (char, u16, u16, u32);
 
 /// One decoration stroke over a run of columns, relative to the row's top-left corner.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -343,51 +388,158 @@ impl IntoElement for TerminalElement {
     }
 }
 
+/// Most glyphs the word cache holds before it forgets the words used least recently: about
+/// ten megabytes, and some forty screens of 20 × 200 × 50 cells of distinct text, so what the
+/// canvas showed a moment ago is still shaped when a pan or a scroll brings it back.
+const WORD_BUDGET: usize = 1 << 18;
+
+/// Shaped words by the hash of their text, styles and look ([`segment_hash`]), each stamped
+/// with the pass that last used it.
+///
+/// A pass is one prepaint of one element. Every word a frame uses is stamped later than
+/// anything an earlier frame used, so evicting the oldest stamps first never drops what is on
+/// screen, however many terminals share the frame, and needs no frame counter. Nothing is
+/// swept per frame: past [`WORD_BUDGET`] glyphs, the oldest quarter of the words goes at once.
+#[derive(Default)]
+struct Words {
+    map: FxHashMap<u64, (Rc<Word>, u64)>,
+    glyphs: usize,
+    pass: u64,
+}
+
+impl Words {
+    /// A new pass begins: evict first if the last ones went over the budget.
+    fn begin(&mut self, budget: usize) {
+        self.pass = self.pass.wrapping_add(1);
+        while self.glyphs > budget && !self.map.is_empty() {
+            self.evict_oldest_quarter();
+        }
+    }
+
+    /// The word under `key`, shaped by `shape` if it is not held.
+    fn get_or_shape(&mut self, key: u64, shape: impl FnOnce() -> Word) -> Rc<Word> {
+        match self.map.entry(key) {
+            Entry::Occupied(mut held) => {
+                held.get_mut().1 = self.pass;
+                Rc::clone(&held.get().0)
+            }
+            Entry::Vacant(slot) => {
+                let word = Rc::new(shape());
+                self.glyphs = self.glyphs.saturating_add(word.weight());
+                slot.insert((Rc::clone(&word), self.pass));
+                word
+            }
+        }
+    }
+
+    /// Drop the quarter of the words stamped longest ago, at least one, never one stamped by
+    /// the current pass.
+    fn evict_oldest_quarter(&mut self) {
+        let mut stamps: Vec<u64> = self.map.values().map(|(_, pass)| *pass).collect();
+        let nth = (stamps.len() / 4).min(stamps.len().saturating_sub(1));
+        let (_, cutoff, _) = stamps.select_nth_unstable(nth);
+        let cutoff = (*cutoff).min(self.pass.wrapping_sub(1));
+        let mut glyphs = 0_usize;
+        self.map.retain(|_, (word, pass)| {
+            let keep = *pass > cutoff;
+            if keep {
+                glyphs = glyphs.saturating_add(word.weight());
+            }
+            keep
+        });
+        self.glyphs = glyphs;
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// Text colours held to the theme's minimum contrast, remembered per (text, background): the
+/// check is six `powf`s, and a frame asks it of every decorated cell.
+#[derive(Default)]
+struct Contrast {
+    least: u16,
+    memo: FxHashMap<(Rgb, Rgb), Rgb>,
+}
+
+/// Pairs remembered before the memo starts over (a program cycling true colours).
+const CONTRAST_MEMO: usize = 4096;
+
+impl Contrast {
+    /// [`Colors::text_over`], remembered.
+    fn text_over(&mut self, palette: &Colors, fg: Rgb, bg: Rgb) -> Rgb {
+        let least = palette.theme.minimum_contrast;
+        if least <= 100 {
+            return fg;
+        }
+        if self.least != least || self.memo.len() >= CONTRAST_MEMO {
+            self.memo.clear();
+            self.least = least;
+        }
+        *self.memo.entry((fg, bg)).or_insert_with(|| palette.text_over(fg, bg))
+    }
+}
+
 /// The cell geometry derived for one family, size and scale: the grid in points, the whole-pixel
 /// metrics and the face they came from.
 type Derived = (Grid, metrics::Metrics, metrics::Face);
 
-/// Shaped-word cache keyed by (text + styles + palette) hash, kept on the App as a global so it
-/// survives across frames and views. Words are shaped at the base size only.
+/// What the element keeps across frames and views, on the App as a global: the shaped words
+/// (at the base size only), the sprite tiles, the derived grids and the resolved families.
 #[derive(Default)]
 struct ShapeCache {
-    lines: HashMap<u64, Rc<Word>>,
-    generation: u64,
-    touched: HashMap<u64, u64>,
-    /// The frame the last sweep ran in, so twenty terminals in one frame sweep once.
-    frame: Option<u64>,
+    words: Words,
+    contrast: Contrast,
+    /// The sprite tiles by (character, cell, thickness); `None` for a character that turned
+    /// out to have no drawing.
+    sprites: FxHashMap<SpriteKey, Option<Rc<SpriteTile>>>,
     /// The derived grid per (family, font size, scale, line-height multiplier): deriving it
     /// walked the font system every frame for nothing.
-    grids: HashMap<(String, u32, u32, u32), Derived>,
+    grids: FxHashMap<(SharedString, u32, u32, u32), Derived>,
     /// The monospace family resolved per theme list: the first installed candidate. Listing
     /// the installed fonts is a trip to the font server (tens of milliseconds), so it happens
     /// once per list for the whole app, not once per view.
-    families: HashMap<Vec<String>, String>,
-    /// How many times the installed fonts were listed (tests).
-    #[cfg(test)]
-    picks: usize,
-    /// How many rows the last prepaint built (tests: the rows the clip shows, not the grid's).
-    #[cfg(test)]
-    rows_prepared: usize,
-    /// The "took" captions the last prepaint drew, top row first (tests).
-    #[cfg(test)]
-    captions: Vec<String>,
+    families: FxHashMap<Vec<String>, SharedString>,
 }
 
 impl gpui::Global for ShapeCache {}
+
+/// What the tests read back about the element's work; nothing in a release build.
+#[cfg(test)]
+#[derive(Default)]
+struct Probe {
+    /// How many times the installed fonts were listed.
+    picks: usize,
+    /// How many rows the last prepaint built (the rows the clip shows, not the grid's).
+    rows_prepared: usize,
+    /// The "took" captions the last prepaint drew, top row first.
+    captions: Vec<String>,
+    /// Words shaped since the app started.
+    shaped: usize,
+    /// Sprite masks written since the app started.
+    sprite_masks: usize,
+}
+
+#[cfg(test)]
+impl gpui::Global for Probe {}
+
+/// Sprite tiles remembered before the table starts over (every settled zoom adds a cell size).
+const SPRITE_TILES: usize = 4096;
 
 impl ShapeCache {
     /// The cell geometry for `family` at `font_size` on this window (see [`measure`]).
     fn grid(
         &mut self,
         window: &Window,
-        family: &str,
-        font: &Font,
+        family: &SharedString,
+        ligatures: bool,
         font_size: Pixels,
         height_mult: f32,
     ) -> Derived {
         let key = (
-            family.to_owned(),
+            family.clone(),
             f32::from(font_size).to_bits(),
             window.scale_factor().to_bits(),
             height_mult.to_bits(),
@@ -395,57 +547,61 @@ impl ShapeCache {
         if let Some(grid) = self.grids.get(&key) {
             return *grid;
         }
-        let (grid, derived, _font_id, face) = measure(window, font, font_size, height_mult);
+        let font = fonts::terminal_font(family, false, false, ligatures);
+        let (grid, derived, _font_id, face) = measure(window, &font, font_size, height_mult);
         self.grids.insert(key, (grid, derived, face));
         (grid, derived, face)
     }
 
-    /// The first of `candidates` that is installed, resolved once per list (see [`pick_family`]).
-    fn family(&mut self, window: &Window, candidates: &[String]) -> String {
+    /// The first of `candidates` that is installed, resolved once per list (see
+    /// [`pick_family`]).
+    fn family(&mut self, window: &Window, candidates: &[String]) -> SharedString {
         if let Some(family) = self.families.get(candidates) {
             return family.clone();
         }
-        #[cfg(test)]
-        {
-            self.picks = self.picks.saturating_add(1);
-        }
-        let picked = pick_family(window, candidates);
+        let picked = SharedString::from(pick_family(window, candidates));
         self.families.insert(candidates.to_vec(), picked.clone());
         picked
     }
 
-    /// Drop entries not used in the last two generations. A generation is a frame when the
-    /// frame probe counts them (`frame`), else one call: without the frame index every
-    /// element's prepaint would be a generation and four terminals on screen would evict each
-    /// other's rows every frame.
-    fn sweep(&mut self, frame: Option<u64>) {
-        if let Some(frame) = frame {
-            if self.frame == Some(frame) {
-                return;
-            }
-            self.frame = Some(frame);
+    /// The atlas tile of `ch` in a cell `w`×`h` device pixels with a light line `thickness`
+    /// device pixels thick, its mask written once.
+    fn sprite(&mut self, ch: char, w: u16, h: u16, thickness: f32) -> Option<Rc<SpriteTile>> {
+        let key = (ch, w, h, thickness.to_bits());
+        if let Some(tile) = self.sprites.get(&key) {
+            return tile.clone();
         }
-        self.generation = self.generation.wrapping_add(1);
-        let keep_after = self.generation.saturating_sub(2);
-        self.touched.retain(|_, g| *g >= keep_after);
-        let touched = &self.touched;
-        self.lines.retain(|k, _| touched.contains_key(k));
+        if self.sprites.len() >= SPRITE_TILES {
+            self.sprites.clear();
+        }
+        let tile = sprite::svg(ch, w, h, thickness).map(|svg| {
+            Rc::new(SpriteTile {
+                path: SharedString::from(format!(
+                    "slopty-sprite/{:x}/{w}x{h}/{thickness}",
+                    u32::from(ch)
+                )),
+                svg: svg.into_bytes().into_boxed_slice(),
+            })
+        });
+        self.sprites.insert(key, tile.clone());
+        tile
     }
 }
 
-/// The part of a shaped word's key that is the same for every word of a view this frame:
-/// size, family and the palette the styles were resolved through, so a theme swap never
-/// replays old colours.
+/// The part of a shaped word's key that is the same for every word of a view this frame: size,
+/// family, the palette the styles were resolved through (so a theme swap never replays old
+/// colours) and the cell width the glyphs were placed on (it is whole device pixels, so it
+/// differs between a 1× and a 2× display and a word must be placed again after a move).
 fn hash_base(
-    focused: bool,
     font_size: Pixels,
+    cell_width: Pixels,
     family: &str,
     ligatures: bool,
     palette: &Colors,
 ) -> u64 {
-    let mut h = std::hash::DefaultHasher::new();
-    focused.hash(&mut h);
+    let mut h = FxHasher::default();
     f32::from(font_size).to_bits().hash(&mut h);
+    f32::from(cell_width).to_bits().hash(&mut h);
     family.hash(&mut h);
     ligatures.hash(&mut h);
     palette.hash(&mut h);
@@ -454,7 +610,7 @@ fn hash_base(
 
 /// Key of a shaped word: the base plus everything the shaped runs bake in (text, styles).
 fn segment_hash(base: u64, cells: &[Cell], blink_off: bool) -> u64 {
-    let mut h = std::hash::DefaultHasher::new();
+    let mut h = FxHasher::default();
     base.hash(&mut h);
     (blink_off && blinks(cells)).hash(&mut h);
     for cell in cells {
@@ -504,32 +660,74 @@ fn stands_alone(cell: &Cell) -> bool {
 
 /// The words of a row: maximal runs of cells that are not plain spaces, digits on their own,
 /// with the column each starts at. Positions inside a word come from its cluster index, so a
-/// word shapes the same wherever it sits.
-fn segments(cells: &[Cell]) -> Vec<(u16, &[Cell])> {
+/// word shapes the same wherever it sits. An iterator, so a frame allocates nothing for it.
+fn segments(cells: &[Cell]) -> impl Iterator<Item = (u16, &[Cell])> {
     let col = |i: usize| u16::try_from(i).unwrap_or(u16::MAX);
-    let mut out = Vec::new();
+    let mut i = 0_usize;
     let mut start: Option<usize> = None;
-    for (i, cell) in cells.iter().enumerate() {
-        let space = plain_space(cell) || drawn_here(cell).is_some();
-        let alone = stands_alone(cell);
-        if (space || alone)
-            && let Some(s) = start.take()
-            && let Some(word) = cells.get(s..i)
-        {
-            out.push((col(s), word));
+    // A digit met right after a word: it comes out next.
+    let mut queued: Option<(u16, &[Cell])> = None;
+    std::iter::from_fn(move || {
+        if let Some(digit) = queued.take() {
+            return Some(digit);
         }
-        if alone {
-            if let Some(digit) = cells.get(i..=i) {
-                out.push((col(i), digit));
+        while let Some(cell) = cells.get(i) {
+            let at = i;
+            i = i.saturating_add(1);
+            let space = plain_space(cell) || drawn_here(cell).is_some();
+            let digit =
+                stands_alone(cell).then(|| cells.get(at..=at).map(|d| (col(at), d))).flatten();
+            if space || digit.is_some() {
+                if let Some(s) = start.take()
+                    && let Some(word) = cells.get(s..at)
+                {
+                    queued = digit;
+                    return Some((col(s), word));
+                }
+                if digit.is_some() {
+                    return digit;
+                }
+            } else if start.is_none() {
+                start = Some(at);
             }
-        } else if !space && start.is_none() {
-            start = Some(i);
+        }
+        let s = start.take()?;
+        cells.get(s..).map(|word| (col(s), word))
+    })
+}
+
+/// How a local-echo guess is drawn: faint and underlined, so a guess never reads as the host's.
+const PREDICTED: CellStyle =
+    CellStyle { flags: StyleFlags::FAINT, underline: Underline::Single, ..CellStyle::DEFAULT };
+
+/// Screen row `row`'s cells with the predictor's guesses for it written in, or `None` when it
+/// has none: the guesses are then shaped, cached and painted as the host's text is.
+fn predicted_cells(cells: &[Cell], guesses: &VecDeque<Prediction>, row: u16) -> Option<Vec<Cell>> {
+    let mut on_row = guesses.iter().filter(|p| p.row == row).peekable();
+    on_row.peek()?;
+    let mut cells = cells.to_vec();
+    for guess in on_row {
+        if let (Some(cell), Some(ch)) =
+            (cells.get_mut(usize::from(guess.col)), guess.text.chars().next())
+        {
+            *cell = Cell::narrow(ch, PREDICTED);
         }
     }
-    if let Some(word) = start.and_then(|s| cells.get(s..).map(|w| (s, w))) {
-        out.push((col(word.0), word.1));
-    }
-    out
+    Some(cells)
+}
+
+/// The whole device pixels `start..start + len` (points) covers when GPUI snaps it: each edge
+/// rounded half toward zero on its own, as `Window::paint_svg` snaps a bounds. The size a
+/// sprite's atlas tile is rasterised at.
+fn device_span(start: Pixels, len: Pixels, scale: f32) -> u16 {
+    let edge = |v: Pixels| {
+        let v = f32::from(v) * scale;
+        (v.abs() - 0.5).ceil().copysign(v)
+    };
+    let span = (edge(start + len) - edge(start)).clamp(0.0, f32::from(u16::MAX));
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to u16")]
+    let span = span as u16;
+    span
 }
 
 /// A word shaped once, at the base font size, and what painting it at any size needs: every
@@ -540,11 +738,20 @@ struct Word {
     glyphs: Vec<Glyph>,
 }
 
+impl Word {
+    /// What the word counts against [`WORD_BUDGET`]: its glyphs, and at least one.
+    fn weight(&self) -> usize {
+        self.glyphs.len().max(1)
+    }
+}
+
 /// One glyph of a [`Word`], at the base size, relative to the word's origin on the baseline.
 #[derive(Debug, Clone, Copy)]
 struct Glyph {
     font: FontId,
     id: GlyphId,
+    /// The column of the cell it belongs to, counted from the word's first.
+    col: u16,
     position: Point<Pixels>,
     emoji: bool,
     color: Hsla,
@@ -577,8 +784,8 @@ fn shape_cells(
     font_size: Pixels,
     cell_width: Pixels,
     look: Look<'_>,
+    contrast: &mut Contrast,
 ) -> Word {
-    let Look { family, ligatures, palette, blink_off } = look;
     let mut text = String::with_capacity(cells.len());
     let mut runs: Vec<TextRun> = Vec::new();
     let mut colors: Vec<(usize, Hsla)> = Vec::new();
@@ -605,7 +812,7 @@ fn shape_cells(
             }
             _ => {
                 if let Some((style, acc)) = current.take() {
-                    let run = text_run(acc, family, ligatures, &style, palette, blink_off);
+                    let run = text_run(acc, &style, look, contrast);
                     colors.push((text.len().saturating_sub(len), run.color));
                     runs.push(run);
                 }
@@ -614,7 +821,7 @@ fn shape_cells(
         }
     }
     if let Some((style, acc)) = current.take() {
-        let run = text_run(acc, family, ligatures, &style, palette, blink_off);
+        let run = text_run(acc, &style, look, contrast);
         colors.push((text.len(), run.color));
         runs.push(run);
     }
@@ -646,6 +853,7 @@ fn place(
             glyphs.push(Glyph {
                 font: run.font_id,
                 id: glyph.id,
+                col,
                 position: point(
                     cell_width * f32::from(col) + (glyph.position.x - first),
                     glyph.position.y,
@@ -681,13 +889,18 @@ const fn cursor_shape_for(style: slopty_theme::CursorStyle, program: CursorShape
 /// The colour a cell's glyphs take, with inverse, faint and invisible applied, held to the
 /// theme's minimum contrast against the cell's background. In the off phase of the blink
 /// clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
-fn cell_color(style: &CellStyle, palette: &Colors, blink_off: bool) -> Hsla {
+fn cell_color(
+    style: &CellStyle,
+    palette: &Colors,
+    blink_off: bool,
+    contrast: &mut Contrast,
+) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
     let fg = palette.bold_slot(style.fg, style.flags.contains(StyleFlags::BOLD));
     let (fg_slot, bg_slot) = if inverse { (style.bg, fg) } else { (fg, style.bg) };
     let fg = palette.resolve(fg_slot, inverse);
     let bg = palette.resolve(bg_slot, !inverse);
-    let mut color = hsla(palette.text_over(fg, bg));
+    let mut color = hsla(contrast.text_over(palette, fg, bg));
     if style.flags.contains(StyleFlags::FAINT) {
         color.a = 0.6;
     }
@@ -709,18 +922,11 @@ fn underline_color(style: &CellStyle, palette: &Colors, text: Hsla) -> Hsla {
 
 /// A run of `len` bytes in `style`. Underlines of every kind and strikethroughs are
 /// [`Decoration`]s drawn from the cells, so the run carries only the font and the colour.
-fn text_run(
-    len: usize,
-    family: &str,
-    ligatures: bool,
-    style: &CellStyle,
-    palette: &Colors,
-    blink_off: bool,
-) -> TextRun {
+fn text_run(len: usize, style: &CellStyle, look: Look<'_>, contrast: &mut Contrast) -> TextRun {
     TextRun {
         len,
-        font: mono_font(family, ligatures, style),
-        color: cell_color(style, palette, blink_off),
+        font: mono_font(look.family, look.ligatures, style),
+        color: cell_color(style, look.palette, look.blink_off, contrast),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -843,13 +1049,23 @@ impl Element for TerminalElement {
         if !cx.has_global::<ShapeCache>() {
             cx.set_global(ShapeCache::default());
         }
+        #[cfg(test)]
+        if !cx.has_global::<Probe>() {
+            cx.set_global(Probe::default());
+        }
         // Resolving the family walks every installed font: once per app for a theme's list
         // (the cache), remembered per view so a frame costs neither the walk nor the lookup.
-        let known_family = self.view.read(cx).font_family().map(str::to_owned);
+        let known_family = self.view.read(cx).font_family();
         let family = known_family.unwrap_or_else(|| {
             let candidates = self.view.read(cx).theme().typography.mono_families.clone();
+            #[cfg(test)]
+            let listed = cx.global::<ShapeCache>().families.len();
             let picked =
                 cx.update_global::<ShapeCache, _>(|cache, _| cache.family(window, &candidates));
+            #[cfg(test)]
+            if cx.global::<ShapeCache>().families.len() > listed {
+                cx.global_mut::<Probe>().picks = cx.global::<Probe>().picks.saturating_add(1);
+            }
             self.view.update(cx, |view, _cx| view.set_font_family(picked.clone()));
             picked
         });
@@ -867,9 +1083,8 @@ impl Element for TerminalElement {
         };
         // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
         // cell is derived once per family, size and scale, not once per frame.
-        let base_font = fonts::terminal_font(&family, false, false, ligatures);
         let (base_grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
-            cache.grid(window, &family, &base_font, base_size, height_mult)
+            cache.grid(window, &family, ligatures, base_size, height_mult)
         });
         let (base_cell_width, base_line_height) = (base_grid.cell_width, base_grid.line_height);
         let unscaled = size(bounds.size.width / zoom, bounds.size.height / zoom);
@@ -888,15 +1103,16 @@ impl Element for TerminalElement {
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad * zoom;
         let origin = bounds.origin + point(pad, pad);
+        let scale = window.scale_factor().max(1.0);
         let metrics = CellMetrics {
             origin,
             cell_width,
             line_height,
             cols,
             rows,
-            pixel_scale: window.scale_factor().max(1.0) / zoom,
+            pixel_scale: scale / zoom,
             face,
-            face_size: f32::from(base_size) * window.scale_factor().max(1.0),
+            face_size: f32::from(base_size) * scale,
         };
         let fitted = TermSize {
             cols,
@@ -911,10 +1127,20 @@ impl Element for TerminalElement {
         // Shaping reads the view's rows in place (no copy of the grid per frame) while the
         // cache is out of the app: put it back before anything else touches `cx`.
         let mut cache = std::mem::take(cx.global_mut::<ShapeCache>());
+        #[cfg(test)]
+        let sprite_masks = cache.sprites.len();
+        #[cfg(test)]
+        let mut shaped = 0_usize;
         let text_system = Arc::clone(window.text_system());
         let focused = self.focused;
+        // A sprite is painted from its atlas tile once the zoom settles; in motion, from its
+        // geometry, so the atlas does not fill with a tile per intermediate size.
+        let sprite_tiles = !self.zooming;
+        let sprite_thickness = (f32::from(grid.underline.thickness) * scale).round().max(1.0);
         // Textures for the placed images are made (and stale ones dropped) before the read.
         let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
+        #[cfg(test)]
+        let mut caption_texts: Vec<String> = Vec::new();
         let prepared = {
             let view = self.view.read(cx);
             let theme = view.theme();
@@ -923,14 +1149,13 @@ impl Element for TerminalElement {
             let palette = &colors;
             let rows_view = state.view();
             let predicted = view.predictions();
-            let cursor = predicted.as_ref().map_or_else(|| state.cursor(), |(_, c)| *c);
+            let cursor = predicted.map_or_else(|| state.cursor(), |(_, c)| c);
             let view_offset = state.view_offset();
             let modes = state.modes();
             let marked = view.marked();
             let selection = view.selection();
             let blink_off = !view.blink_on();
             let mut blinking = false;
-            let top_index = state.index_at_row(0);
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
             let link = view.link_highlight();
@@ -939,9 +1164,10 @@ impl Element for TerminalElement {
                 let alpha = if held { alpha::PRESSED } else { alpha::TINT };
                 (hsla_alpha(palette.theme.fg, alpha), state.history_len(), view_offset)
             });
+            let look = |blink_off| Look { family: &family, ligatures, palette, blink_off };
 
-            cache.sweep(crate::frames::index(cx));
-            let base = hash_base(focused, base_size, &family, ligatures, palette);
+            cache.words.begin(WORD_BUDGET);
+            let base = hash_base(base_size, base_cell_width, &family, ligatures, palette);
             // Rows the clip cannot show (a grid half off the viewport) are not built at all:
             // no quads, no words, no hashing. Paint walks only the rows prepared here.
             let clip = window.content_mask().bounds.intersect(&bounds);
@@ -952,20 +1178,28 @@ impl Element for TerminalElement {
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             // "took 3.2 s" at the right end of a prompt row whose command took a while.
             let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
-            #[cfg(test)]
-            let mut caption_texts: Vec<String> = Vec::new();
             for (i, row) in rows_view.iter().enumerate() {
-                let y = origin.y + line_height * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
+                let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
+                let y = origin.y + line_height * f32::from(screen_row);
                 if !row_in_band(y, line_height, overhang, clip_top, clip_bottom) {
                     continue;
                 }
                 let Some(line) = row.line else {
                     let filler = filler.get_or_insert_with(|| {
                         let cells = [Cell::narrow('~', CellStyle::DEFAULT)];
-                        let look = Look { family: &family, ligatures, palette, blink_off: false };
-                        Rc::new(shape_cells(&text_system, &cells, base_size, base_cell_width, look))
+                        let (size, width) = (base_size, base_cell_width);
+                        let word = shape_cells(
+                            &text_system,
+                            &cells,
+                            size,
+                            width,
+                            look(false),
+                            &mut cache.contrast,
+                        );
+                        Rc::new(word)
                     });
                     prepared_rows.push(PreparedRow {
+                        row: screen_row,
                         y,
                         quads: Vec::new(),
                         decorations: Vec::new(),
@@ -976,10 +1210,14 @@ impl Element for TerminalElement {
                     });
                     continue;
                 };
+                // The local-echo guesses on this row are cells like the host's.
+                let guessed = predicted
+                    .and_then(|(guesses, _)| predicted_cells(&line.cells, guesses, screen_row));
+                let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
                 let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
                 let mut decorations: Vec<Decoration> = Vec::new();
                 let mut sprites: Vec<SpriteCell> = Vec::new();
-                for (col, cell) in line.cells.iter().enumerate() {
+                for (col, cell) in cells.iter().enumerate() {
                     let col = u16::try_from(col).unwrap_or(u16::MAX);
                     let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
                     let bg = if inverse { cell.style.fg } else { cell.style.bg };
@@ -995,12 +1233,28 @@ impl Element for TerminalElement {
                             quads.push((col, col.saturating_add(1), color));
                         }
                     }
+                    let drawn = drawn_here(cell);
+                    let struck = cell.style.flags.contains(StyleFlags::STRIKETHROUGH);
+                    if drawn.is_none() && cell.style.underline == Underline::None && !struck {
+                        // Its glyphs' colour is the shaped word's business.
+                        continue;
+                    }
+                    let text = cell_color(&cell.style, palette, blink_off, &mut cache.contrast);
+                    if let Some(ch) = drawn {
+                        let tile = if sprite_tiles {
+                            let x = origin.x + cell_width * f32::from(col);
+                            let (w, h) = (
+                                device_span(x, cell_width, scale),
+                                device_span(y, line_height, scale),
+                            );
+                            cache.sprite(ch, w, h, sprite_thickness)
+                        } else {
+                            None
+                        };
+                        sprites.push(SpriteCell { col, ch, fg: text, tile });
+                    }
                     // Underline and strikethrough go where the font says, not where GPUI
                     // would put them; a curly underline is GPUI's wave at that position.
-                    let text = cell_color(&cell.style, palette, blink_off);
-                    if let Some(ch) = drawn_here(cell) {
-                        sprites.push(SpriteCell { col, ch, fg: text });
-                    }
                     if cell.style.underline != Underline::None {
                         let color = underline_color(&cell.style, palette, text);
                         let wavy = cell.style.underline == Underline::Curly;
@@ -1014,14 +1268,12 @@ impl Element for TerminalElement {
                             stroke(&mut decorations, col, color, above, false, Layer::Under);
                         }
                     }
-                    if cell.style.flags.contains(StyleFlags::STRIKETHROUGH) {
+                    if struck {
                         stroke(&mut decorations, col, text, grid.strikethrough, false, Layer::Over);
                     }
                 }
                 // The selection paints over cell backgrounds and under the text.
-                let index = slopty_grid::LineIndex(
-                    top_index.0.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
-                );
+                let index = row.index;
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
                     quads.push((range.start, range.end, hsla(palette.theme.selection)));
                 }
@@ -1038,22 +1290,20 @@ impl Element for TerminalElement {
                     };
                     quads.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
                 }
-                let segments = segments(&line.cells)
-                    .into_iter()
-                    .map(|(col, cells)| {
-                        blinking |= blinks(cells);
-                        let key = segment_hash(base, cells, blink_off);
-                        cache.touched.insert(key, cache.generation);
-                        let shaped = cache.lines.entry(key).or_insert_with(|| {
-                            Rc::new(shape_cells(
-                                &text_system,
-                                cells,
-                                base_size,
-                                base_cell_width,
-                                Look { family: &family, ligatures, palette, blink_off },
-                            ))
+                let segments = segments(cells)
+                    .map(|(col, word)| {
+                        blinking |= blinks(word);
+                        let key = segment_hash(base, word, blink_off);
+                        let shaped_word = cache.words.get_or_shape(key, || {
+                            #[cfg(test)]
+                            {
+                                shaped = shaped.saturating_add(1);
+                            }
+                            let (size, width) = (base_size, base_cell_width);
+                            let look = look(blink_off);
+                            shape_cells(&text_system, word, size, width, look, &mut cache.contrast)
                         });
-                        (col, Rc::clone(shaped))
+                        (col, shaped_word)
                     })
                     .collect();
                 let link = link
@@ -1067,33 +1317,31 @@ impl Element for TerminalElement {
                 {
                     let text = super::view::took_label(elapsed);
                     let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+                    // The columns the command's text reaches, trailing blanks aside.
                     let typed =
-                        u16::try_from(line.text().trim_end().chars().count()).unwrap_or(u16::MAX);
+                        line.cells.iter().rposition(|cell| !plain_space(cell)).map_or(0, |last| {
+                            u16::try_from(last).unwrap_or(u16::MAX).saturating_add(1)
+                        });
                     // Flush with the right edge, a cell clear of the command's text.
                     if let Some(col) = grid_cols.checked_sub(width)
                         && typed < col
                     {
-                        let mut run = text_run(
-                            text.len(),
-                            &family,
-                            ligatures,
-                            &CellStyle::DEFAULT,
-                            palette,
-                            false,
-                        );
+                        let style = &CellStyle::DEFAULT;
+                        let mut run = text_run(text.len(), style, look(false), &mut cache.contrast);
                         run.color = hsla_alpha(palette.theme.fg, alpha::TINT);
+                        #[cfg(test)]
+                        caption_texts.push(text.clone());
                         let shaped = text_system.shape_line(
-                            SharedString::from(text.clone()),
+                            SharedString::from(text),
                             font_size,
                             &[run],
                             Some(cell_width),
                         );
                         captions.push((point(origin.x + cell_width * f32::from(col), y), shaped));
-                        #[cfg(test)]
-                        caption_texts.push(text);
                     }
                 }
                 prepared_rows.push(PreparedRow {
+                    row: screen_row,
                     y,
                     quads,
                     decorations,
@@ -1102,12 +1350,6 @@ impl Element for TerminalElement {
                     separator,
                     sprites,
                 });
-            }
-
-            #[cfg(test)]
-            {
-                cache.rows_prepared = prepared_rows.len();
-                cache.captions = caption_texts;
             }
 
             let cursor_visible = cursor.visible
@@ -1119,6 +1361,8 @@ impl Element for TerminalElement {
             let cursor_blinks = cursor_visible && cursor_blink.blinks(cursor.blink) && focused;
             blinking |= cursor_blinks;
             let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
+            let cursor_line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
+            let span = cursor_span(cursor_line, cursor.col);
             // While an input method composes, its underlined preview stands in for the cursor.
             let cursor_prepared = (cursor_shown && marked.is_none()).then(|| {
                 let x = origin.x + cell_width * f32::from(cursor.col);
@@ -1128,51 +1372,29 @@ impl Element for TerminalElement {
                 } else {
                     CursorShape::BlockHollow
                 };
-                let line = rows_view.get(usize::from(cursor.row)).and_then(|row| row.line);
-                let width = cell_width * f32::from(cursor_span(line, cursor.col));
+                let width = cell_width * f32::from(span);
                 (
                     Bounds::new(point(x, y), size(width, line_height)),
                     shape,
                     hsla(palette.theme.cursor),
                 )
             });
+            // A block hides its cell's text: that text is drawn over it in the cursor-text
+            // colour, as ghostty does.
+            let cursor_text = cursor_prepared
+                .filter(|(_, shape, _)| *shape == CursorShape::Block)
+                .map(|_| CursorText {
+                    row: cursor.row,
+                    start: cursor.col,
+                    end: cursor.col.saturating_add(span),
+                    color: hsla(palette.theme.cursor_text),
+                });
 
-            // Local echo: predicted glyphs, slightly dimmed so a wrong guess never looks final.
-            let predicted = predicted.map(|(p, _)| p).unwrap_or_default();
-            let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = predicted
-                .iter()
-                .map(|p| {
-                    let mut run = text_run(
-                        p.text.len(),
-                        &family,
-                        ligatures,
-                        &CellStyle::DEFAULT,
-                        palette,
-                        false,
-                    );
-                    run.color.a = 0.75;
-                    run.underline = Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(run.color),
-                        wavy: false,
-                    });
-                    let shaped = text_system.shape_line(
-                        SharedString::from(p.text.clone()),
-                        font_size,
-                        &[run],
-                        Some(cell_width),
-                    );
-                    let at = point(
-                        origin.x + cell_width * f32::from(p.col),
-                        origin.y + line_height * f32::from(p.row),
-                    );
-                    (at, shaped)
-                })
-                .collect();
             // The input method's composition, underlined at the cursor (what Terminal.app does).
+            let mut overlay: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
             if let Some(text) = marked.filter(|_| cursor_visible) {
-                let mut run =
-                    text_run(text.len(), &family, ligatures, &CellStyle::DEFAULT, palette, false);
+                let style = &CellStyle::DEFAULT;
+                let mut run = text_run(text.len(), style, look(false), &mut cache.contrast);
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(run.color),
@@ -1218,17 +1440,29 @@ impl Element for TerminalElement {
                 raster_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
+                cursor_text,
                 background: hsla(palette.theme.bg),
                 link: hsla(palette.theme.fg),
                 scrollbar: scrollbar.and_then(|(color, history, offset)| {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
                 overlay,
-                shown: predicted.iter().map(|p| p.seq).collect(),
+                shown: predicted
+                    .map(|(guesses, _)| guesses.iter().map(|p| p.seq).collect())
+                    .unwrap_or_default(),
                 blinking,
                 images,
             }
         };
+        #[cfg(test)]
+        {
+            let masks = cache.sprites.len().saturating_sub(sprite_masks);
+            let probe = cx.global_mut::<Probe>();
+            probe.rows_prepared = prepared.rows.len();
+            probe.captions = caption_texts;
+            probe.shaped = probe.shaped.saturating_add(shaped);
+            probe.sprite_masks = probe.sprite_masks.saturating_add(masks);
+        }
         *cx.global_mut::<ShapeCache>() = cache;
         // The clock ticks only while a painted frame has something to blink.
         self.view.update(cx, |view, cx| view.blinking(prepared.blinking, cx));
@@ -1319,19 +1553,38 @@ impl Element for TerminalElement {
         for row in &prepared.rows {
             paint_decorations(window, &m, row, Layer::Under);
         }
-        // Box drawing, blocks, Braille and Powerline: geometry in the cell's colours, so a
-        // border never seams between rows and a heavy line keeps its weight.
+        // Box drawing, blocks, Braille and Powerline: drawn from the cell in its colours, so a
+        // border never seams between rows and a heavy line keeps its weight. Settled, each is
+        // its atlas tile, rasterised once and tinted here (one sprite, like a glyph); in motion,
+        // its geometry.
         let cell = sprite::Cell {
             w: f32::from(m.cell_width),
             h: f32::from(m.line_height),
             thickness: f32::from(grid.underline.thickness),
             scale: m.pixel_scale,
         };
-        for row in &prepared.rows {
-            for sprite in &row.sprites {
-                let origin = point(m.origin.x + m.cell_width * f32::from(sprite.col), row.y);
-                paint_sprite(window, origin, cell, sprite);
-            }
+        let cursor_text = prepared.cursor_text;
+        // One layer for them, as for the glyphs below.
+        if prepared.rows.iter().any(|row| !row.sprites.is_empty()) {
+            window.paint_layer(bounds, |window| {
+                for row in &prepared.rows {
+                    for sprite in &row.sprites {
+                        let x = m.origin.x + m.cell_width * f32::from(sprite.col);
+                        let origin = point(x, row.y);
+                        let color = CursorText::over(cursor_text, row.row, sprite.col, sprite.fg);
+                        let Some(tile) = &sprite.tile else {
+                            paint_sprite(window, origin, cell, sprite.ch, color);
+                            continue;
+                        };
+                        let bounds = Bounds::new(origin, size(m.cell_width, m.line_height));
+                        let (path, svg) = (tile.path.clone(), Some(&*tile.svg));
+                        let unit = TransformationMatrix::unit();
+                        if let Err(e) = window.paint_svg(bounds, path, svg, unit, color, cx) {
+                            tracing::debug!(error = %e, "paint sprite");
+                        }
+                    }
+                }
+            });
         }
         // The words: every glyph at the derived baseline, from the base-size shaping, at the
         // zoomed size. Nothing is shaped here and the word cache never sees the zoom. One
@@ -1346,14 +1599,16 @@ impl Element for TerminalElement {
                     let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
                     for glyph in &word.glyphs {
                         let at = glyph_origin(origin, glyph.position, zoom);
+                        let cell = col.saturating_add(glyph.col);
+                        let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
                         let painted = if glyph.emoji {
                             window.paint_emoji(at, glyph.font, glyph.id, font_size)
                         } else if raster == font_size {
-                            window.paint_glyph(at, glyph.font, glyph.id, font_size, glyph.color)
+                            window.paint_glyph(at, glyph.font, glyph.id, font_size, color)
                         } else {
                             // In motion: the nearest rung's raster, stretched (the fork).
-                            let (f, g, c) = (glyph.font, glyph.id, glyph.color);
-                            window.paint_glyph_scaled(at, f, g, raster, font_size, c)
+                            let (f, g) = (glyph.font, glyph.id);
+                            window.paint_glyph_scaled(at, f, g, raster, font_size, color)
                         };
                         if let Err(e) = painted {
                             tracing::debug!(error = %e, "paint glyph");
@@ -1383,13 +1638,13 @@ impl Element for TerminalElement {
             }
         }
         for (at, line) in &prepared.overlay {
-            // Cover whatever the host currently shows there, then draw the guess or preview.
+            // Cover whatever the host currently shows there, then draw the preview or caption.
             window.paint_quad(fill(
                 Bounds::new(*at, size(line.width.max(m.cell_width), m.line_height)),
                 prepared.background,
             ));
             if let Err(e) = line.paint(*at, m.line_height, TextAlign::Left, None, window, cx) {
-                tracing::debug!(error = %e, "paint prediction");
+                tracing::debug!(error = %e, "paint overlay text");
             }
         }
         if let Some((thumb, color)) = prepared.scrollbar {
@@ -1407,8 +1662,16 @@ impl Element for TerminalElement {
             // The visual bell: the text colour laid thinly over the whole grid.
             window.paint_quad(fill(bounds, Hsla { a: alpha::FAINT, ..prepared.link }));
         }
-        let shown = std::mem::take(&mut prepared.shown);
-        self.view.update(cx, |view, _cx| view.painted(&shown));
+        // Keystroke → paint is timed when this frame reaches the glass, not now: the next
+        // frame callback runs at the display tick that presents what was just drawn.
+        if self.view.read(cx).latency_waiting() {
+            let shown = std::mem::take(&mut prepared.shown);
+            let ack = self.view.read(cx).state().input_ack();
+            let view = self.view.clone();
+            window.on_next_frame(move |_window, cx| {
+                view.update(cx, |view, _cx| view.presented(Instant::now(), &shown, ack));
+            });
+        }
     }
 }
 
@@ -1464,16 +1727,22 @@ pub fn placement_bounds(
 const THUMB_CELLS: f32 = 0.6;
 const THUMB_MIN_ROWS: f32 = 1.5;
 
-/// Paint one cell-drawn glyph at `origin` (see [`sprite`]).
-fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, s: &SpriteCell) {
-    let Some(shapes) = sprite::shapes(s.ch, cell) else { return };
+/// Paint one cell-drawn glyph's geometry at `origin` in `fg` (see [`sprite`]).
+fn paint_sprite(
+    window: &mut Window,
+    origin: Point<Pixels>,
+    cell: sprite::Cell,
+    ch: char,
+    fg: Hsla,
+) {
+    let Some(shapes) = sprite::shapes(ch, cell) else { return };
     let at = |(x, y): (f32, f32)| point(origin.x + px(x), origin.y + px(y));
     for shape in shapes {
         match shape {
             sprite::Shape::Rect { x, y, w, h, ink, round } => {
                 let color = match ink {
-                    sprite::Ink::Fg => s.fg,
-                    sprite::Ink::Shade(a) => Hsla { a: s.fg.a * a, ..s.fg },
+                    sprite::Ink::Fg => fg,
+                    sprite::Ink::Shade(a) => Hsla { a: fg.a * a, ..fg },
                 };
                 let mut quad = fill(Bounds::new(at((x, y)), size(px(w), px(h))), color);
                 if round {
@@ -1491,7 +1760,7 @@ fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, 
                     path.line_to(at(p));
                 }
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, s.fg);
+                    window.paint_path(path, fg);
                 }
             }
             sprite::Shape::Arc { from, to, r, sweep, thickness } => {
@@ -1499,13 +1768,13 @@ fn paint_sprite(window: &mut Window, origin: Point<Pixels>, cell: sprite::Cell, 
                 path.move_to(at(from));
                 path.arc_to(point(px(r), px(r)), px(0.0), false, sweep, at(to));
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, s.fg);
+                    window.paint_path(path, fg);
                 }
             }
             sprite::Shape::Poly { points, ink } => {
                 let color = match ink {
-                    sprite::Ink::Fg => s.fg,
-                    sprite::Ink::Shade(a) => Hsla { a: s.fg.a * a, ..s.fg },
+                    sprite::Ink::Fg => fg,
+                    sprite::Ink::Shade(a) => Hsla { a: fg.a * a, ..fg },
                 };
                 let mut path = PathBuilder::fill();
                 let mut points = points.into_iter();
@@ -1608,25 +1877,38 @@ pub fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
 /// How many shaped words the cache holds (tests: a word shaped once serves every row).
 #[cfg(test)]
 pub fn cached_words(cx: &App) -> usize {
-    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.lines.len())
+    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.words.len())
+}
+
+/// How many words were shaped since the app started (tests: a word seen before shapes nothing).
+#[cfg(test)]
+pub fn shaped_words(cx: &App) -> usize {
+    cx.try_global::<Probe>().map_or(0, |probe| probe.shaped)
+}
+
+/// How many sprite masks were written since the app started (tests: once per character and
+/// cell, not per frame).
+#[cfg(test)]
+pub fn sprite_masks(cx: &App) -> usize {
+    cx.try_global::<Probe>().map_or(0, |probe| probe.sprite_masks)
 }
 
 /// How many times the installed fonts were listed (tests: once for every view of the app).
 #[cfg(test)]
 pub fn family_picks(cx: &App) -> usize {
-    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.picks)
+    cx.try_global::<Probe>().map_or(0, |probe| probe.picks)
 }
 
 /// How many rows the last prepaint built (tests: only the rows inside the clip).
 #[cfg(test)]
 pub fn rows_prepared(cx: &App) -> usize {
-    cx.try_global::<ShapeCache>().map_or(0, |cache| cache.rows_prepared)
+    cx.try_global::<Probe>().map_or(0, |probe| probe.rows_prepared)
 }
 
 /// The "took" captions the last prepaint drew, top row first (tests).
 #[cfg(test)]
 pub fn captions_drawn(cx: &App) -> Vec<String> {
-    cx.try_global::<ShapeCache>().map_or_else(Vec::new, |cache| cache.captions.clone())
+    cx.try_global::<Probe>().map_or_else(Vec::new, |probe| probe.captions.clone())
 }
 
 #[cfg(test)]
@@ -1805,7 +2087,7 @@ mod tests {
     }
 
     fn cols(text: &str) -> Vec<(u16, usize)> {
-        segments(&cells(text)).into_iter().map(|(col, word)| (col, word.len())).collect()
+        segments(&cells(text)).map(|(col, word)| (col, word.len())).collect()
     }
 
     #[test]
@@ -1823,7 +2105,7 @@ mod tests {
         row[0].style.underline = Underline::Curly;
         row[1].style.underline = Underline::Curly;
         assert_eq!(
-            segments(&row).len(),
+            segments(&row).count(),
             2,
             "a curly underline changes nothing: it is a decoration"
         );
@@ -1873,16 +2155,16 @@ mod tests {
     fn no_decoration_keeps_a_space_in_its_word() {
         let mut row = cells("a b");
         row[1].style.underline = Underline::Curly;
-        assert_eq!(segments(&row).len(), 2, "the wave is a decoration drawn from the cells");
+        assert_eq!(segments(&row).count(), 2, "the wave is a decoration drawn from the cells");
         let mut row = cells("a b");
         row[1].style.underline = Underline::Single;
-        assert_eq!(segments(&row).len(), 2, "a straight underline is a decoration quad");
+        assert_eq!(segments(&row).count(), 2, "a straight underline is a decoration quad");
         let mut row = cells("a b");
         row[1].style.flags |= StyleFlags::STRIKETHROUGH;
-        assert_eq!(segments(&row).len(), 2, "so is a strikethrough");
+        assert_eq!(segments(&row).count(), 2, "so is a strikethrough");
         let mut row = cells("a b");
         row[1].style.bg = slopty_grid::Color::Palette(1);
-        assert_eq!(segments(&row).len(), 2, "a background is a quad, not a glyph");
+        assert_eq!(segments(&row).count(), 2, "a background is a quad, not a glyph");
     }
 
     /// A wide cell — a CJK character, an emoji, one with a variation selector, a ZWJ family,
@@ -1911,7 +2193,14 @@ mod tests {
                     palette: &colors,
                     blink_off: false,
                 };
-                shape_cells(window.text_system(), &cells, px(13.0), width, look)
+                shape_cells(
+                    window.text_system(),
+                    &cells,
+                    px(13.0),
+                    width,
+                    look,
+                    &mut Contrast::default(),
+                )
             });
             let last = word.glyphs.last().expect("the x");
             assert_eq!(last.position.x, width * 2.0, "{cluster:?} then x");
@@ -1932,7 +2221,7 @@ mod tests {
             width: CellWidth::SpacerTail,
         };
         let row = [wide('日'), tail.clone(), wide('本'), tail, Cell::BLANK, cells("x")[0].clone()];
-        let words = segments(&row);
+        let words: Vec<_> = segments(&row).collect();
         assert_eq!(words.len(), 2, "{words:?}");
         assert_eq!(words[0].0, 0);
         assert_eq!(words[0].1.len(), 4, "two wide cells with their spacer tails");
@@ -1943,7 +2232,7 @@ mod tests {
     fn a_word_hashes_the_same_wherever_it_sits() {
         let a = cells("foo bar");
         let b = cells("    bar foo");
-        let (wa, wb) = (segments(&a), segments(&b));
+        let (wa, wb): (Vec<_>, Vec<_>) = (segments(&a).collect(), segments(&b).collect());
         assert_eq!(segment_hash(1, wa[1].1, false), segment_hash(1, wb[0].1, false), "bar");
         assert_eq!(segment_hash(1, wa[0].1, false), segment_hash(1, wb[1].1, false), "foo");
         assert_ne!(segment_hash(1, wa[0].1, false), segment_hash(2, wa[0].1, false), "base");
@@ -1960,13 +2249,23 @@ mod tests {
             "a blinking word is shaped once per phase"
         );
         assert!(
-            cell_color(&blinking[1].style, &Colors::from(&Theme::default().terminal), true).a
-                <= 0.0,
+            cell_color(
+                &blinking[1].style,
+                &Colors::from(&Theme::default().terminal),
+                true,
+                &mut Contrast::default()
+            )
+            .a <= 0.0,
             "off phase: the glyph is hidden"
         );
         assert!(
-            cell_color(&blinking[1].style, &Colors::from(&Theme::default().terminal), false).a
-                > 0.5
+            cell_color(
+                &blinking[1].style,
+                &Colors::from(&Theme::default().terminal),
+                false,
+                &mut Contrast::default()
+            )
+            .a > 0.5
         );
     }
 
@@ -1992,12 +2291,22 @@ mod tests {
             flags: StyleFlags::BOLD,
             ..CellStyle::default()
         };
-        assert_eq!(cell_color(&bold_red, &Colors::from(&theme), false), hsla(theme.ansi[1]));
+        assert_eq!(
+            cell_color(&bold_red, &Colors::from(&theme), false, &mut Contrast::default()),
+            hsla(theme.ansi[1])
+        );
         theme.bold_is_bright = true;
         let colors = Colors::from(&theme);
-        assert_eq!(cell_color(&bold_red, &colors, false), hsla(theme.ansi[9]));
+        assert_eq!(
+            cell_color(&bold_red, &colors, false, &mut Contrast::default()),
+            hsla(theme.ansi[9])
+        );
         let inverse = CellStyle { flags: StyleFlags::BOLD | StyleFlags::INVERSE, ..bold_red };
-        assert_eq!(cell_color(&inverse, &colors, false), hsla(theme.bg), "inverse: the bg slot");
+        assert_eq!(
+            cell_color(&inverse, &colors, false, &mut Contrast::default()),
+            hsla(theme.bg),
+            "inverse: the bg slot"
+        );
     }
 
     #[test]
@@ -2008,12 +2317,16 @@ mod tests {
             bg: slopty_grid::Color::Rgb(0, 0, 0),
             ..CellStyle::default()
         };
-        let navy = hsla(slopty_theme::Rgb { r: 0, g: 0, b: 95 });
-        assert_eq!(cell_color(&navy_on_black, &Colors::from(&theme), false), navy, "off");
+        let navy = hsla(Rgb { r: 0, g: 0, b: 95 });
+        assert_eq!(
+            cell_color(&navy_on_black, &Colors::from(&theme), false, &mut Contrast::default()),
+            navy,
+            "off"
+        );
         theme.minimum_contrast = 300;
         let colors = Colors::from(&theme);
-        let white = hsla(slopty_theme::Rgb::hex(0xff_ffff));
-        assert_eq!(cell_color(&navy_on_black, &colors, false), white);
+        let white = hsla(Rgb::hex(0xff_ffff));
+        assert_eq!(cell_color(&navy_on_black, &colors, false, &mut Contrast::default()), white);
         // Two greys either side of the luminance where black and white swap: the painted
         // background decides, so inverse video flips the answer.
         let greys = CellStyle {
@@ -2021,28 +2334,158 @@ mod tests {
             bg: slopty_grid::Color::Rgb(116, 116, 116),
             ..CellStyle::default()
         };
-        assert_eq!(cell_color(&greys, &colors, false), white, "over the darker grey");
+        assert_eq!(
+            cell_color(&greys, &colors, false, &mut Contrast::default()),
+            white,
+            "over the darker grey"
+        );
         let mut inverse = greys;
         inverse.flags |= StyleFlags::INVERSE;
-        let black = hsla(slopty_theme::Rgb::hex(0));
-        assert_eq!(cell_color(&inverse, &colors, false), black, "over the lighter grey");
+        let black = hsla(Rgb::hex(0));
+        assert_eq!(
+            cell_color(&inverse, &colors, false, &mut Contrast::default()),
+            black,
+            "over the lighter grey"
+        );
         let mut faint = navy_on_black;
         faint.flags |= StyleFlags::FAINT;
-        let painted = cell_color(&faint, &colors, false);
+        let painted = cell_color(&faint, &colors, false, &mut Contrast::default());
         assert!((painted.a - 0.6).abs() < f32::EPSILON && painted.l > 0.9, "{painted:?}");
     }
 
+    fn word(glyphs: usize) -> Word {
+        let glyph = Glyph {
+            font: FontId(0),
+            id: GlyphId(0),
+            col: 0,
+            position: point(px(0.0), px(0.0)),
+            emoji: false,
+            color: Hsla::default(),
+        };
+        Word { glyphs: vec![glyph; glyphs] }
+    }
+
+    /// Words stay until the budget is passed, then the least recently used go first: a word
+    /// the last pass used survives however many older ones there are, and a word used once
+    /// long ago goes before one used every pass.
     #[test]
-    fn the_cache_sweeps_once_per_frame_and_keeps_what_the_frame_touched() {
-        let mut cache = ShapeCache::default();
-        cache.sweep(Some(1));
-        let g = cache.generation;
-        cache.sweep(Some(1));
-        cache.sweep(Some(1));
-        assert_eq!(cache.generation, g, "twenty terminals in one frame sweep once");
-        cache.sweep(Some(2));
-        assert_eq!(cache.generation, g.wrapping_add(1));
-        cache.sweep(None);
-        assert_eq!(cache.generation, g.wrapping_add(2), "without a frame index every call sweeps");
+    fn the_word_cache_forgets_the_least_recently_used_past_its_budget() {
+        let mut words = Words::default();
+        words.begin(100);
+        for key in 0..10 {
+            let _w = words.get_or_shape(key, || word(10));
+        }
+        assert_eq!((words.len(), words.glyphs), (10, 100), "at the budget, nothing goes");
+        // Many passes later, keys 5..10 are used again; nothing unused is forgotten yet.
+        for _ in 0..50 {
+            words.begin(100);
+        }
+        for key in 5..10 {
+            let _w = words.get_or_shape(key, || panic!("{key} is held"));
+        }
+        assert_eq!(words.len(), 10, "no sweep: a word unused for fifty passes is still there");
+        // A new word goes over the budget: the next pass drops the oldest quarter, all unused.
+        let _w = words.get_or_shape(10, || word(10));
+        words.begin(100);
+        assert!(words.glyphs <= 100, "{}", words.glyphs);
+        for key in 5..=10 {
+            let _w = words.get_or_shape(key, || panic!("{key} was used recently"));
+        }
+        let mut reshaped = 0;
+        for key in 0..5 {
+            let _w = words.get_or_shape(key, || {
+                reshaped += 1;
+                word(10)
+            });
+        }
+        assert!((2..=5).contains(&reshaped), "the oldest went: {reshaped}");
+    }
+
+    /// A single pass larger than the budget keeps everything it used until the next pass.
+    #[test]
+    fn a_pass_never_evicts_its_own_words() {
+        let mut words = Words::default();
+        words.begin(10);
+        for key in 0..40 {
+            let _w = words.get_or_shape(key, || word(1));
+        }
+        assert_eq!(words.len(), 40, "within the pass");
+        words.begin(10);
+        assert!(words.glyphs <= 10, "{}", words.glyphs);
+    }
+
+    /// The word key is the same whether the view is focused or not (focus shapes nothing),
+    /// and differs when the cell the glyphs are placed on does (a move to a 2× display).
+    #[test]
+    fn the_word_key_holds_the_cell_width_and_not_the_focus() {
+        let colors = Colors::from(&Theme::default().terminal);
+        let at = |width: f32| hash_base(px(13.0), px(width), "Mono", true, &colors);
+        assert_eq!(at(8.0), at(8.0), "nothing but the look");
+        assert_ne!(at(8.0), at(7.5), "a 1× cell and a 2× cell place glyphs apart");
+    }
+
+    /// A span of points is the device pixels GPUI's snap gives it, each edge on its own.
+    #[test]
+    fn a_sprite_tile_is_the_snapped_cell() {
+        assert_eq!(device_span(px(10.0), px(8.0), 2.0), 16);
+        assert_eq!(device_span(px(10.25), px(8.0), 2.0), 16, "a fractional origin");
+        assert_eq!(device_span(px(0.3), px(7.5), 1.0), 8, "0.3 → 0, 7.8 → 8");
+        assert_eq!(device_span(px(0.0), px(-4.0), 1.0), 0, "never negative");
+    }
+
+    /// The minimum-contrast check is remembered per pair and forgotten when the setting moves.
+    #[test]
+    fn the_contrast_check_is_remembered_per_pair() {
+        let mut theme = Theme::default().terminal;
+        theme.minimum_contrast = 300;
+        let colors = Colors::from(&theme);
+        let mut memo = Contrast::default();
+        let (navy, black) = (Rgb { r: 0, g: 0, b: 95 }, Rgb::hex(0));
+        let first = memo.text_over(&colors, navy, black);
+        assert_eq!(first, colors.text_over(navy, black));
+        assert_eq!(memo.memo.len(), 1);
+        assert_eq!(memo.text_over(&colors, navy, black), first);
+        assert_eq!(memo.memo.len(), 1, "asked again: remembered");
+        theme.minimum_contrast = 100;
+        let off = Colors::from(&theme);
+        assert_eq!(memo.text_over(&off, navy, black), navy, "off: the colour as it is");
+    }
+
+    /// A guess replaces the host's cell on its row, in the faint, underlined look; other rows
+    /// have none.
+    #[test]
+    fn a_guess_is_a_cell_of_its_row() {
+        let guesses: VecDeque<Prediction> = [(2, 'x', 1), (3, 'y', 1)]
+            .into_iter()
+            .map(|(col, ch, seq)| Prediction {
+                seq,
+                row: 0,
+                col,
+                text: ch.to_string(),
+                at: Instant::now(),
+            })
+            .collect();
+        let row = cells("ab");
+        assert_eq!(predicted_cells(&row, &guesses, 1), None, "not on this row");
+        let guessed = predicted_cells(&row, &guesses, 0).expect("guessed");
+        assert_eq!(guessed[2].text.as_str(), "x");
+        assert_eq!(guessed[3].text.as_str(), "y");
+        assert_eq!(guessed[2].style, PREDICTED);
+        let words: Vec<_> = segments(&guessed).map(|(col, w)| (col, w.len())).collect();
+        assert_eq!(words, vec![(0, 4)], "shaped with the text it continues");
+    }
+
+    /// Under a block cursor a glyph takes the cursor-text colour; beside it, or hidden, not.
+    #[test]
+    fn text_under_a_block_cursor_takes_the_cursor_text_colour() {
+        let (red, blue) = (gpui::red(), gpui::blue());
+        let under = Some(CursorText { row: 2, start: 4, end: 6, color: blue });
+        assert_eq!(CursorText::over(under, 2, 4, red), blue);
+        assert_eq!(CursorText::over(under, 2, 5, red), blue, "both halves of a wide cell");
+        assert_eq!(CursorText::over(under, 2, 6, red), red, "the next cell");
+        assert_eq!(CursorText::over(under, 1, 4, red), red, "another row");
+        assert_eq!(CursorText::over(None, 2, 4, red), red, "no block cursor");
+        let hidden = Hsla { a: 0.0, ..red };
+        assert_eq!(CursorText::over(under, 2, 4, hidden), hidden, "invisible text stays so");
     }
 }

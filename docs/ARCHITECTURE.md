@@ -181,7 +181,10 @@ block elements, sextants, octants, the legacy computing symbols (wedges, eighth 
 halves, checkerboards, hatching, corner diagonals), Braille and Powerline cells are not
 shaped at all: `terminal::sprite` turns each into rectangles, polygons, arcs and strokes from
 the cell size and the underline thickness, snapped to device pixels, so borders never seam
-between rows. The face comes from the font's own
+between rows. As in ghostty, each is rasterised once per (character, cell in device pixels,
+line thickness) into GPUI's atlas, as an SVG mask the element writes and `Window::paint_svg`
+tints with the cell's colour; only while the zoom is in motion is the geometry painted
+directly. The face comes from the font's own
 tables through the fork's `TextSystem::font_metrics` (`hhea` line gap, `post` underline
 position and thickness; Core Text on both platforms), with ghostty's estimates only where a
 font says zero; the self-test dump reports it (`terminals[].face`). The element measures the
@@ -804,15 +807,19 @@ is a synchronous trip to the font server), reads the view's rows in place — on
 inside the window's content mask, so a grid hanging off the viewport builds nothing for the
 rest — splits each into words (plain spaces and digits are the boundaries) and looks every word up in
 the `ShapeCache` global — an `Rc<Word>` (the `ShapedLine` at the base size plus its per-byte
-colours) per (text, styles, family, palette, focus, and the blink phase for a word with an
-SGR 5 cell), never per zoom, swept once per frame; a word is shaped with no forced width and
+colours) per FxHash of (text, styles, family, palette, cell width, and the blink phase for a
+word with an SGR 5 cell), never per zoom or focus. Nothing is swept per frame: each prepaint
+stamps the words it uses, and past a budget of 2¹⁸ glyphs the quarter stamped longest ago
+goes, so a pan or a scroll back finds what it showed a moment ago still shaped; a word is shaped with no forced width and
 each glyph placed at the column of the cell its byte came from, so a wide cluster spans two
 cells however many glyphs it shaped to — so
 a frame of streaming output shapes only the words it has never seen and a zoom step shapes
 nothing; paint puts every glyph of a word at column × cell width plus its shaped position
 scaled by the zoom, on the derived baseline, through `Window::paint_glyph` at the zoomed font
 size (the fork's `ShapedLine::layout` hands out the runs), over the row's background quads and
-under the cursor, the link underline and the prediction overlay. The cursor's blink flag and
+under the cursor and the link underline. The predictor's guesses are cells of their row
+(faint, underlined) shaped and painted as the host's text is, and a block cursor's cell has
+its text drawn over it in the theme's `cursor_text`. The cursor's blink flag and
 SGR 5 text share one 600 ms clock on the view, started by the first prepared frame that holds
 either and stopped by the first that holds neither (an unfocused cursor is a steady hollow
 block); a keystroke pins the phase on for a half. While the canvas zoom is **in
@@ -830,7 +837,10 @@ sessions cost one notify a frame; a session itself never sends more than 125 fra
 `end` in the probe) into a 1024-frame ring with nearest-rank percentiles and a count of the
 frame slots long draws swallowed; it is the fourth line of the ⌘⇧I overlay and the `frames`
 block of the self-test `dump`, and `terminal::latency` stamps each keystroke so `dump` can say
-how long the local echo and the host's echo took to reach a paint. `cargo xtask e2e smooth`
+how long the local echo and the host's echo took to reach the display: a paint that holds a
+waiting key registers a next-frame callback, and the frame is timed there, at the display
+tick that presents it, since presentation is vsync-synced (the fork's `CAMetalLayer` keeps
+`displaySyncEnabled` at its default) and a paint's own clock reads up to a refresh early. `cargo xtask e2e smooth`
 runs the load scenarios (MEASUREMENTS, "canvas frame time").
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu

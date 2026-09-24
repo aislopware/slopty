@@ -1107,3 +1107,50 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and checks a `Lines` notch still scrolls a grid whose latch says canvas;
   `a_finger_pan_over_a_shell_scrolls_its_history_before_the_canvas` holds the zero-delta start,
   from the canvas's side where the consequence is visible.
+
+- ✅ **The terminal paints from caches that hold what the screen showed** (2026-09-24). A read of
+  the client's hot paths found the element doing per-frame work ghostty does once, and four
+  places where it drew the wrong thing. Rulings:
+  (1) **The word cache is least recently used under a budget, not swept.** It used to forget a
+  word two frames after its last use, so panning or scrolling back to text shown a moment ago
+  shaped all of it again (574 words for one 100 × 40 screen; the audit tied this to the
+  44–65 ms zoom p99s in MEASUREMENTS, not re-run end to end here); the sweep also walked two
+  maps every frame and read the frame probe's diagnostics counter to know what a frame was.
+  Now each prepaint stamps the words it uses, nothing is swept, and past 2¹⁸ glyphs (about
+  10 MB) the oldest quarter goes, which never touches the current frame's words. GPUI has no
+  public frame id, and the stamps make one unnecessary. Keys are FxHash (`rustc-hash`): on the
+  terminal's many short writes it measured 46–56 ns a word against foldhash's 57–68 ns and
+  SipHash's 176–192 ns. The key drops the focus, which nothing shaped depends on (a click
+  reshaped the grid), and gains the cell width the glyphs are placed on, which differs between
+  a 1× and a 2× display. Test-only counters left the hot cache for a `cfg(test)` global.
+  (2) **Sprites are rasterised once into the atlas.** Box drawing, blocks, Braille and
+  Powerline were rebuilt as quads and tessellated paths every frame, with MSAA on each path.
+  Each is now an SVG mask, written once per (character, cell in device pixels, thickness) and
+  handed to `Window::paint_svg`, whose atlas key is the name plus the size, and tinted with the
+  cell's colour. The mask is drawn in device pixels, so a one-pixel line fills one pixel of the
+  tile. While the zoom is in motion the geometry is painted instead, so the atlas does not fill
+  up with a tile for every size along the way. No fork change was needed.
+  (3) **A guess is a cell.** The local echo was a `ShapedLine` painted on GPUI's centred
+  baseline in the default style, with a `Font` built and the pending guesses cloned every
+  frame. Guesses are now written into their row's cells (faint, single underline), so they are
+  shaped, cached, placed on `grid.baseline` and painted in the glyph layer like the host's text.
+  (4) **The block cursor shows its character.** Its cell's glyphs and sprite are painted in the
+  theme's `cursor_text`, as in ghostty; before, the character under a block read at about 1.9:1.
+  (5) **A held key is a typed key.** Auto-repeat skipped the predictor, the latency meter and
+  the jump to the bottom; on a slow link the host's echo of the repeats then contradicted the
+  predictor and muted it for two seconds. `key_down` sends both through one path.
+  (6) **A guess expires by age when it is drawn**, not only when a frame reconciles it, so a
+  quiet link cannot leave an unconfirmed guess on screen.
+  (7) **Keystroke latency is read at presentation.** Presentation is vsync-synced, so a paint
+  reaches the display up to a refresh after its own clock. A paint that holds a waiting key
+  registers `Window::on_next_frame` and is timed there, at the display tick that presents it.
+  The exact figure would be the drawable's presented time, which needs a fork change
+  (see MEASUREMENTS).
+  Tests: element `the_word_cache_forgets_the_least_recently_used_past_its_budget`,
+  `a_pass_never_evicts_its_own_words`, `the_word_key_holds_the_cell_width_and_not_the_focus`,
+  `a_guess_is_a_cell_of_its_row`, `text_under_a_block_cursor_takes_the_cursor_text_colour`,
+  `the_contrast_check_is_remembered_per_pair`; sprite `a_sprite_mask_covers_whole_device_pixels`
+  (the mask as GPUI's renderer rasterises it, pixel by pixel); view
+  `a_screen_shown_again_shapes_nothing`, `a_sprite_is_masked_once_and_not_while_zooming`,
+  `a_held_key_is_predicted_timed_and_follows_the_output`,
+  `a_key_is_timed_when_its_frame_is_presented`; predict `a_stale_guess_is_hidden_without_a_frame`.

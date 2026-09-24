@@ -1,7 +1,9 @@
 //! Keystroke → paint: how long a typed key takes to show, predicted and echoed.
 //!
 //! The view records each key it sends ([`KeyLatency::pressed`]) and the element reports every
-//! paint ([`KeyLatency::painted`]) with two facts: which keys the local-echo overlay is showing
+//! frame it drew as that frame reaches the display ([`KeyLatency::painted`], from the next
+//! frame callback: the display tick that presents it, not the paint, which runs up to a refresh
+//! more earlier) with two facts: which keys the local-echo overlay is showing
 //! (the predictor stamps each guess with the key's sequence number) and which key the host had
 //! applied in the frame on screen (`Frame::input_ack`). The first paint that shows a key's
 //! guess is that key's *predicted* time; the first paint whose frame acknowledges it is its
@@ -64,7 +66,13 @@ impl KeyLatency {
         }
     }
 
-    /// A frame was painted at `now`: the local-echo overlay showed guesses for the keys in
+    /// Whether a key is still waiting for its guess or its echo to be painted.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// A frame was presented at `now`: the local-echo overlay showed guesses for the keys in
     /// `shown` and the picture on screen carries the host's state after key `input_ack`.
     pub fn painted(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
         let mut keep = VecDeque::with_capacity(self.pending.len());

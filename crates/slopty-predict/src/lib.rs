@@ -128,9 +128,14 @@ impl Predictor {
     }
 
     /// Whether the overlay should be drawn right now.
+    ///
+    /// A guess older than [`STALE`] is never drawn, even while no frame has come to count it
+    /// as a miss: a link that went quiet must not leave a guess on screen that the host never
+    /// confirmed.
     #[must_use]
     pub fn visible(&self, now: Instant) -> bool {
-        if self.pending.is_empty() {
+        let Some(oldest) = self.pending.front() else { return false };
+        if now.saturating_duration_since(oldest.at) > STALE {
             return false;
         }
         match self.policy {
@@ -353,9 +358,9 @@ mod tests {
         let r = p.on_frame(&screen_with(0, "ab"), 3, 0, now);
         assert_eq!((r.hits, r.misses, r.pending), (0, 1, 0));
         assert!(!p.visible(now));
-        let _d = p.on_key(&key(4, "d"), cursor(0, 2), 80, TermModes::CANONICAL, now);
-        assert!(!p.visible(now), "muted after a miss");
         let later = now + MUTE + Duration::from_millis(1);
+        let _d = p.on_key(&key(4, "d"), cursor(0, 2), 80, TermModes::CANONICAL, later);
+        assert!(!p.visible(now), "muted after a miss");
         assert!(!p.visible(later), "after the mute a slow link must re-warm");
         p.set_rtt(Some(VERY_SLOW_LINK));
         assert!(p.visible(later), "a very slow link draws without warm-up");
@@ -378,6 +383,16 @@ mod tests {
         let _r = p.on_frame(&Screen::new(80, 24), 0, 1, now);
         let r = p.on_frame(&Screen::new(80, 24), 0, 2, now);
         assert_eq!(r.pending, 0);
+    }
+
+    /// With no frame arriving to reconcile it, a guess past [`STALE`] stops being drawn.
+    #[test]
+    fn a_stale_guess_is_hidden_without_a_frame() {
+        let mut p = Predictor::new(Policy::Always);
+        let t0 = Instant::now();
+        let _a = p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::empty(), t0);
+        assert!(p.visible(t0 + STALE), "at the limit it still shows");
+        assert!(!p.visible(t0 + STALE + Duration::from_millis(1)), "past it, hidden");
     }
 
     #[test]
