@@ -272,6 +272,15 @@ impl Default for RemoteSettings {
     }
 }
 
+/// `[host]`: what `slopty-hostd` reads from the same file when it starts.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostSettings {
+    /// Address ranges (`100.64.0.0/10`, `fd00::/8`, a bare address) whose peers may connect,
+    /// replacing the default of the tailnet and private LANs. Loopback is always admitted.
+    pub allow: Vec<String>,
+}
+
 /// The whole file.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -286,6 +295,8 @@ pub struct Settings {
     pub remote: RemoteSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
+    /// The host daemon.
+    pub host: HostSettings,
 }
 
 /// Why a file could not be used.
@@ -443,6 +454,15 @@ selection = \"\"
 # ANSI 0-15 in order: black, red, green, yellow, blue, magenta, cyan, white,
 # then their bright forms. Fewer than 16 keep the rest.
 ansi = []
+
+[host]
+# Who may connect to the host daemon on this Mac, as address ranges
+# (\"100.64.0.0/10\", \"fd00::/8\", \"192.168.1.20\"). Empty admits the tailnet
+# (100.64.0.0/10, fd7a:115c:a1e0::/48) and private LANs (10/8, 172.16/12,
+# 192.168/16, fc00::/7, link-local); a list replaces those. Loopback always
+# connects. Traffic is not encrypted by Slopty: the VPN or tailnet is the
+# boundary. Read when slopty-hostd starts.
+allow = []
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
@@ -768,6 +788,15 @@ mod tests {
         assert!(text.contains("minimum_contrast = 1.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
+        assert!(text.contains("allow = []"), "{text}");
+    }
+
+    #[test]
+    fn host_keys() {
+        let loaded = Settings::parse("[host]\nallow = [\"100.64.0.3\", \"fd00::/8\"]\n");
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        assert_eq!(loaded.settings.host.allow, ["100.64.0.3", "fd00::/8"]);
+        assert!(Settings::default().host.allow.is_empty(), "the private ranges by default");
     }
 
     #[test]

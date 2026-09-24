@@ -79,8 +79,9 @@ uuid_id!(
     ClientId
 );
 uuid_id!(
-    /// A host machine. Derived from the host's iroh node identity at pairing time.
-    HostId
+    /// A worker installation (the machine that runs shells and serves windows, today's
+    /// `slopty-hostd`): a UUID created on its first run and kept in its data dir.
+    WorkerId
 );
 uuid_id!(
     /// An item on the canvas (terminal tile, remote window tile, note, agent card).
@@ -132,8 +133,8 @@ mod tests {
 
     #[test]
     fn ids_parse_from_display() {
-        let id = HostId::new();
-        let parsed: HostId = id.to_string().parse().unwrap();
+        let id = WorkerId::new();
+        let parsed: WorkerId = id.to_string().parse().unwrap();
         assert_eq!(id, parsed);
     }
 

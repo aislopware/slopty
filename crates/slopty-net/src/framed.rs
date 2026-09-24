@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use bytes::BytesMut;
-use iroh::endpoint::{RecvStream, SendStream};
+use noq::{RecvStream, SendStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use slopty_proto::codec;

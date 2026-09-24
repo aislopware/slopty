@@ -1,6 +1,6 @@
 //! The Slopty app shell, shared by the macOS and iOS apps.
 //!
-//! Connects to every paired host at once and shows one host's canvas at a time (the switcher
+//! Connects to every added host at once and shows one host's canvas at a time (the switcher
 //! in the top bar, ⌘⌥→/←): every terminal that host knows about, on one plane shared by all its
 //! clients. Networking runs on a tokio runtime thread; GPUI owns the main thread. The two talk
 //! through channels only. The platform binaries set up logging, the runtime and the GPUI
@@ -28,8 +28,7 @@ pub use hosts::actions::{AddHost, ForgetHost, NextHost, PrevHost};
 use hosts::{HostSlot, HostStatus};
 pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
-use slopty_core::SessionId;
-use slopty_net::EndpointId;
+use slopty_core::{SessionId, WorkerId};
 use slopty_proto::HostMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Theme, alpha};
@@ -120,12 +119,13 @@ const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
 /// Three missed keep-alives, the same bar noq uses to abandon a path.
 const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The pairing panel: shown until this installation knows a host, and on "Add host…".
+/// The panel that adds a host by address: shown until this installation knows one, and on
+/// "Add host…".
 #[derive(Debug)]
-struct Pairing {
-    /// Where the ticket is typed or pasted.
-    ticket: Entity<InputState>,
-    /// A pairing attempt is in flight.
+struct Adding {
+    /// Where the address is typed or pasted.
+    address: Entity<InputState>,
+    /// A connection attempt is in flight.
     busy: bool,
     /// Why the last attempt failed.
     error: Option<String>,
@@ -134,10 +134,10 @@ struct Pairing {
 /// The window's root view.
 #[derive(Debug)]
 pub struct Workspace {
-    /// Every paired host, each with its own link and canvas, in switcher order.
+    /// Every added host, each with its own link and canvas, in switcher order.
     hosts: Vec<HostSlot>,
     /// The host whose canvas is shown.
-    active: Option<EndpointId>,
+    active: Option<WorkerId>,
     /// The host switcher is open.
     switcher: bool,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
@@ -151,8 +151,8 @@ pub struct Workspace {
     notice: Option<(u64, String)>,
     notice_seq: u64,
     subscriptions: Vec<gpui::Subscription>,
-    pairing: Option<Pairing>,
-    /// Networking runtime; connects and pairing run there.
+    adding: Option<Adding>,
+    /// Networking runtime; connects run there.
     runtime: tokio::runtime::Handle,
     /// The window, for focusing a canvas from a task or a banner.
     window: Option<gpui::AnyWindowHandle>,
@@ -305,11 +305,11 @@ impl Workspace {
         .detach();
     }
 
-    fn slot(&self, id: EndpointId) -> Option<&HostSlot> {
+    fn slot(&self, id: WorkerId) -> Option<&HostSlot> {
         self.hosts.iter().find(|h| h.id == id)
     }
 
-    fn slot_mut(&mut self, id: EndpointId) -> Option<&mut HostSlot> {
+    fn slot_mut(&mut self, id: WorkerId) -> Option<&mut HostSlot> {
         self.hosts.iter_mut().find(|h| h.id == id)
     }
 
@@ -335,13 +335,13 @@ impl Workspace {
     fn status_text(&self) -> String {
         match self.active_slot() {
             Some(host) => host.status.text(),
-            None if self.hosts.is_empty() => "not paired".to_owned(),
+            None if self.hosts.is_empty() => "no hosts".to_owned(),
             None => String::new(),
         }
     }
 
     /// The host whose canvas holds `session` (a banner names only the session).
-    fn host_of_session(&self, session: SessionId, cx: &App) -> Option<EndpointId> {
+    fn host_of_session(&self, session: SessionId, cx: &App) -> Option<WorkerId> {
         self.hosts
             .iter()
             .find(|h| h.canvas.as_ref().is_some_and(|c| c.read(cx).has_session(session)))
@@ -367,12 +367,9 @@ impl Workspace {
     }
 
     /// Start (or refresh) a host: a slot in the switcher and a connect loop of its own.
-    fn add_host(&mut self, id: EndpointId, name: String, cx: &mut Context<Self>) {
+    fn add_host(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
         if let Some(slot) = self.slot_mut(id) {
             slot.name = name;
-            if slot.status == HostStatus::NeedsPairing {
-                slot.status = HostStatus::Connecting;
-            }
             cx.notify();
             return;
         }
@@ -385,7 +382,7 @@ impl Workspace {
     }
 
     /// Show `id`'s canvas and give it the keyboard.
-    fn activate(&mut self, id: EndpointId, window: &mut Window, cx: &mut Context<Self>) {
+    fn activate(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
         if self.slot(id).is_none() {
             return;
         }
@@ -414,10 +411,10 @@ impl Workspace {
         }
     }
 
-    /// Drop a host: the pairing, the link and the slot. The next host takes the stage; with
-    /// none left the pairing panel returns.
-    fn forget_host(&mut self, id: EndpointId, window: &mut Window, cx: &mut Context<Self>) {
-        match net::forget_host(id) {
+    /// Drop a host: its entry in the store, the link and the slot. The next host takes the
+    /// stage; with none left the add-host panel returns.
+    fn forget_host(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
+        match net::forget_worker(id) {
             Ok(_removed) => {}
             Err(e) => {
                 self.show_notice(format!("forget host: {e:#}"), cx);
@@ -438,7 +435,7 @@ impl Workspace {
             }
         }
         if self.hosts.is_empty() {
-            self.show_pairing(window, cx);
+            self.show_add_host(window, cx);
         }
         self.refresh_badge();
         cx.notify();
@@ -460,7 +457,7 @@ impl Workspace {
 
     /// Connect to `id` and keep it connected: each drop (host restart, network change,
     /// silence) is retried with a capped backoff; the loop ends when the host is forgotten.
-    fn spawn_host_loop(&self, id: EndpointId, cx: &Context<Self>) {
+    fn spawn_host_loop(&self, id: WorkerId, cx: &Context<Self>) {
         let handle = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let mut failures: u32 = 0;
@@ -473,8 +470,7 @@ impl Workspace {
                 let outcome = ready_rx.await;
                 let Ok(Ok(connected)) = outcome else {
                     let status = match outcome {
-                        Ok(Err(net::ConnectError::NotPaired)) => HostStatus::NeedsPairing,
-                        Ok(Err(e)) => HostStatus::Reconnecting(e.to_string()),
+                        Ok(Err(why)) => HostStatus::Reconnecting(why),
                         Ok(Ok(_)) | Err(_) => {
                             HostStatus::Reconnecting("connection task died".to_owned())
                         }
@@ -583,16 +579,15 @@ impl Workspace {
                         cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                         let Some(link) = rtt_link.upgrade() else { break };
                         let rtt = link.rtt();
-                        let relayed = link.relayed();
                         let received = link.received_datagrams();
                         if received != heard.0 {
                             heard = (received, std::time::Instant::now());
                         }
                         let gap = heard.1.elapsed();
                         let silent = (gap >= SILENCE_WARN).then_some(gap);
-                        tracing::debug!(host = %id.fmt_short(), paths = %link.paths(), received, "link paths");
+                        tracing::debug!(host = %id, path = %link.path(), received, "link path");
                         if gap >= SILENCE_DROP {
-                            tracing::warn!(host = %id.fmt_short(), ?gap, paths = %link.paths(), "host silent; reconnecting");
+                            tracing::warn!(host = %id, ?gap, path = %link.path(), "host silent; reconnecting");
                             link.abandon("host silent");
                             break;
                         }
@@ -600,7 +595,6 @@ impl Workspace {
                         let _set = rtt_workspace.update(cx, |ws, cx| {
                             if let Some(slot) = ws.slot_mut(id) {
                                 slot.rtt = rtt;
-                                slot.relayed = relayed;
                                 slot.silent = silent;
                             }
                             cx.notify();
@@ -609,7 +603,7 @@ impl Workspace {
                 })
                 .detach();
                 let mut first_snapshot = true;
-                tracing::debug!(host = %id.fmt_short(), sessions = ack.sessions.len(), "link up; pumping events");
+                tracing::debug!(host = %id, sessions = ack.sessions.len(), "link up; pumping events");
                 // One foreground turn per frame, not per event: a flood of terminal frames
                 // from many sessions would otherwise run a GPUI update (and, when the window
                 // is drawn from the update, a whole frame) for each of them. The first event
@@ -649,82 +643,82 @@ impl Workspace {
         .detach();
     }
 
-    /// Show the pairing panel (idempotent).
-    fn show_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pairing.is_some() {
+    /// Show the add-host panel (idempotent).
+    fn show_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adding.is_some() {
             return;
         }
-        let ticket = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("sloptypair… (from `slopty host ticket`)")
+        let address = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("mac-studio, 100.64.0.3 or host:port")
         });
-        self.subscriptions.push(cx.subscribe(&ticket, |this, _input, event, cx| {
+        self.subscriptions.push(cx.subscribe(&address, |this, _input, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                this.pair(cx);
+                this.add_from_panel(cx);
             }
         }));
-        ticket.update(cx, |input, cx| input.focus(window, cx));
-        self.pairing = Some(Pairing { ticket, busy: false, error: None });
+        address.update(cx, |input, cx| input.focus(window, cx));
+        self.adding = Some(Adding { address, busy: false, error: None });
         self.switcher = false;
         cx.notify();
     }
 
-    /// Close the pairing panel (only offered while some host is paired).
-    fn cancel_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close the add-host panel (only offered while some host is known).
+    fn cancel_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hosts.is_empty() {
             return;
         }
-        self.pairing = None;
+        self.adding = None;
         if let Some(id) = self.active {
             self.activate(id, window, cx);
         }
         cx.notify();
     }
 
-    /// Put the clipboard's text into the ticket field.
-    fn paste_ticket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pairing) = &self.pairing else { return };
+    /// Put the clipboard's text into the address field and add it.
+    fn paste_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(adding) = &self.adding else { return };
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        pairing.ticket.update(cx, |input, cx| input.set_value(text.trim().to_owned(), window, cx));
-        self.pair(cx);
+        adding.address.update(cx, |input, cx| input.set_value(text.trim().to_owned(), window, cx));
+        self.add_from_panel(cx);
     }
 
-    /// Redeem the ticket in the field on the runtime; report back to the panel.
-    fn pair(&mut self, cx: &mut Context<Self>) {
-        let Some(pairing) = &mut self.pairing else { return };
-        if pairing.busy {
+    /// Connect to the address in the field on the runtime; report back to the panel.
+    fn add_from_panel(&mut self, cx: &mut Context<Self>) {
+        let Some(adding) = &mut self.adding else { return };
+        if adding.busy {
             return;
         }
-        let ticket = pairing.ticket.read(cx).value().trim().to_owned();
-        if ticket.is_empty() {
+        let address = adding.address.read(cx).value().trim().to_owned();
+        if address.is_empty() {
             return;
         }
-        pairing.busy = true;
-        pairing.error = None;
+        adding.busy = true;
+        adding.error = None;
         cx.notify();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let _sent = tx.send(net::pair_host(&ticket).await);
+            let _sent = tx.send(net::add_worker(&address).await);
         });
         cx.spawn(async move |this, cx| {
             let outcome = rx.await;
             let _updated = this.update(cx, |ws, cx| {
                 match outcome {
-                    Ok(Ok(net::Paired { id, name })) => {
-                        ws.pairing = None;
-                        ws.show_notice(format!("paired with {name}"), cx);
+                    Ok(Ok(net::Added { id, name })) => {
+                        ws.adding = None;
+                        ws.show_notice(format!("added {name}"), cx);
                         ws.add_host(id, name, cx);
                         ws.active = Some(id);
                     }
                     Ok(Err(e)) => {
-                        if let Some(p) = &mut ws.pairing {
+                        if let Some(p) = &mut ws.adding {
                             p.busy = false;
                             p.error = Some(format!("{e:#}"));
                         }
                     }
                     Err(_dropped) => {
-                        if let Some(p) = &mut ws.pairing {
+                        if let Some(p) = &mut ws.adding {
                             p.busy = false;
-                            p.error = Some("pairing task died".to_owned());
+                            p.error = Some("connection task died".to_owned());
                         }
                     }
                 }
@@ -734,7 +728,7 @@ impl Workspace {
         .detach();
     }
 
-    fn pairing_panel(&self, pairing: &Pairing, cx: &Context<Self>) -> impl IntoElement {
+    fn add_host_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (spacing, radii) = (theme.spacing, theme.radii);
@@ -767,49 +761,50 @@ impl Workspace {
             .border_color(hsla(s.border))
             .child(
                 div()
-                    .id("pairing-title")
+                    .id("add-host-title")
                     .role(Role::Heading)
-                    .aria_label("Pair with a host")
+                    .aria_label("Add a host")
                     .text_size(px(theme.typography.title()))
                     .text_color(hsla(s.text))
-                    .child("Pair with a host"),
+                    .child("Add a host"),
             )
             .child(
-                div()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child("On the host Mac run `slopty host ticket`, then paste the ticket here."),
+                div().text_size(px(theme.typography.small())).text_color(hsla(s.text_muted)).child(
+                    "Its Tailscale name, LAN name or IP, with :port unless it listens on \
+                         45550. Slopty does not encrypt: the tailnet or VPN is the boundary.",
+                ),
             )
-            .child(Input::new(&pairing.ticket).aria_label("Pairing ticket"))
+            .child(Input::new(&adding.address).aria_label("Host address"))
             .child(
                 div()
                     .flex()
                     .gap(px(spacing.sm))
                     .items_center()
                     .child(
-                        button("pair", "Pair", true)
-                            .on_click(cx.listener(|this, _ev, _window, cx| this.pair(cx))),
+                        button("add", "Add", true).on_click(
+                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
+                        ),
                     )
-                    .child(button("paste-ticket", "Paste & pair", false).on_click(
-                        cx.listener(|this, _ev, window, cx| this.paste_ticket(window, cx)),
+                    .child(button("paste-address", "Paste & add", false).on_click(
+                        cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
                     ))
                     .when(!self.hosts.is_empty(), |row| {
-                        row.child(button("cancel-pairing", "Cancel", false).on_click(
-                            cx.listener(|this, _ev, window, cx| this.cancel_pairing(window, cx)),
+                        row.child(button("cancel-add", "Cancel", false).on_click(
+                            cx.listener(|this, _ev, window, cx| this.cancel_add_host(window, cx)),
                         ))
                     })
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_size(px(theme.typography.small()))
-                            .text_color(hsla(if pairing.error.is_some() {
+                            .text_color(hsla(if adding.error.is_some() {
                                 s.error
                             } else {
                                 s.text_muted
                             }))
-                            .child(SharedString::from(match (&pairing.error, pairing.busy) {
+                            .child(SharedString::from(match (&adding.error, adding.busy) {
                                 (Some(e), _) => e.clone(),
-                                (None, true) => "pairing…".to_owned(),
+                                (None, true) => "connecting…".to_owned(),
                                 (None, false) => String::new(),
                             })),
                     ),
@@ -1024,8 +1019,7 @@ impl Workspace {
         let zoom = active.map_or(1.0, |h| h.zoom);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0–400")]
         let zoom_pct = (zoom * 100.0).round().max(0.0) as u32;
-        let (rtt, relayed, silent) =
-            active.map_or((None, None, None), |h| (h.rtt, h.relayed, h.silent));
+        let (rtt, silent) = active.map_or((None, None), |h| (h.rtt, h.silent));
         let label = move |text: String| {
             div()
                 .flex_none()
@@ -1199,16 +1193,13 @@ impl Workspace {
                 None => label(self.status_text()),
             })
             .child(div().flex_1())
-            .child(match (silent, rtt, relayed) {
-                (Some(gap), _, _) => {
+            .child(match (silent, rtt) {
+                (Some(gap), _) => {
                     label(format!("host silent {}s", gap.as_secs())).text_color(hsla(s.warn))
                 }
-                (None, _, _) if narrow => label(String::new()),
-                (None, Some(d), Some(true)) => {
-                    label(format!("{:.1} ms via relay", d.as_secs_f64() * 1e3))
-                }
-                (None, Some(d), _) => label(format!("{:.1} ms", d.as_secs_f64() * 1e3)),
-                (None, None, _) => label(String::new()),
+                (None, _) if narrow => label(String::new()),
+                (None, Some(d)) => label(format!("{:.1} ms", d.as_secs_f64() * 1e3)),
+                (None, None) => label(String::new()),
             })
             .when_some(needs_you, gpui::ParentElement::child)
             .when(!narrow, |bar| bar.child(label(format!("{zoom_pct}%"))))
@@ -1328,7 +1319,7 @@ impl Workspace {
         panel = panel.child(div().h(px(1.0)).my(px(spacing.xs)).bg(hsla(s.border))).child(
             tab_stop(add_host, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
                 this.switcher = false;
-                this.show_pairing(window, cx);
+                this.show_add_host(window, cx);
             })),
         );
         div()
@@ -1359,7 +1350,6 @@ const fn status_color(theme: &Theme, status: &HostStatus) -> slopty_theme::Rgb {
     match status {
         HostStatus::Connected => theme.surfaces.success,
         HostStatus::Connecting | HostStatus::Reconnecting(_) => theme.surfaces.warn,
-        HostStatus::NeedsPairing => theme.surfaces.error,
     }
 }
 
@@ -1373,15 +1363,15 @@ impl Render for Workspace {
         // A phone in portrait; the bar drops its readouts so every button stays reachable.
         let narrow = window.viewport_size().width < px(NARROW_BAR);
         let canvas = self.active_canvas();
-        let body = match (canvas, &self.pairing) {
-            (_, Some(pairing)) => div()
+        let body = match (canvas, &self.adding) {
+            (_, Some(adding)) => div()
                 .flex_1()
                 .w_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .p(px(self.theme.spacing.lg))
-                .child(self.pairing_panel(pairing, cx)),
+                .child(self.add_host_panel(adding, cx)),
             (Some(canvas), None) => div().flex_1().w_full().child(canvas),
             (None, None) => div()
                 .flex_1()
@@ -1411,7 +1401,7 @@ impl Render for Workspace {
             .bg(hsla(surfaces.canvas))
             .on_action(cx.listener(|this, _: &NextHost, window, cx| this.step_host(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevHost, window, cx| this.step_host(-1, window, cx)))
-            .on_action(cx.listener(|this, _: &AddHost, window, cx| this.show_pairing(window, cx)))
+            .on_action(cx.listener(|this, _: &AddHost, window, cx| this.show_add_host(window, cx)))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
@@ -1443,7 +1433,7 @@ impl Render for Workspace {
 fn apply_link_event(
     this: &WeakEntity<Workspace>,
     canvas: &Entity<CanvasView>,
-    id: EndpointId,
+    id: WorkerId,
     first_snapshot: &mut bool,
     event: LinkEvent,
     cx: &mut App,
@@ -1596,7 +1586,7 @@ pub fn open_workspace(
         notice: None,
         notice_seq: 0,
         subscriptions: Vec::new(),
-        pairing: None,
+        adding: None,
         runtime: handle,
         window: None,
         settings_path: settings_path.clone(),
@@ -1632,22 +1622,22 @@ pub fn open_workspace(
             });
         });
     });
-    // Every paired host gets a link now; with none, the pairing panel.
-    let known = match net::known_hosts() {
+    // Every known host gets a link now; with none, the add-host panel.
+    let known = match net::known_workers() {
         Ok(known) => known,
         Err(e) => {
-            tracing::error!(error = %e, "pairing store");
+            tracing::error!(error = %e, "known workers");
             Vec::new()
         }
     };
     window.update(cx, |_root, window, cx| {
         workspace.update(cx, |ws, cx| {
             ws.window = Some(window.window_handle());
-            for (id, host) in known {
-                ws.add_host(id, host.name, cx);
+            for worker in known {
+                ws.add_host(worker.worker_id, worker.name, cx);
             }
             if ws.hosts.is_empty() {
-                ws.show_pairing(window, cx);
+                ws.show_add_host(window, cx);
             }
         });
     })?;

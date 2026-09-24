@@ -38,7 +38,7 @@ mod tests {
         Some(Simulator { udid, bundle_id })
     }
 
-    /// The app paired and its first shell at a prompt.
+    /// The app connected to its host and its first shell at a prompt.
     async fn shell(stack: &mut Stack) -> Dump {
         stack
             .driver

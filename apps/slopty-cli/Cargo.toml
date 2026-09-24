@@ -26,9 +26,9 @@ slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 slopty-host.workspace = true
-slopty-net = { workspace = true, features = [ "mdns" ] }
+slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = [ "io-std" ] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

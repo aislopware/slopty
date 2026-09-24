@@ -1,17 +1,17 @@
-//! ptyd + hostd + a client, all on this machine: pair, open a shell, see its output, close it.
+//! ptyd + hostd + a client, all on this machine: connect, open a shell, see its output, close it.
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::process::Stdio;
     use std::time::Duration;
 
     use slopty_client::LinkEvent;
     use slopty_core::{ClientId, WindowId};
-    use slopty_net::client::{HostConn, bind_client, bind_pinned_client, connect_with_ticket};
+    use slopty_net::client::{HostConn, bind_client, connect_addr};
     use slopty_net::framed::FramedRecv;
-    use slopty_net::pairing::PairTicket;
-    use slopty_net::{ClientMsg, HostMsg, Reach, SecretKey};
+    use slopty_net::{ClientMsg, HostMsg};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
@@ -42,8 +42,7 @@ mod tests {
         path
     }
 
-    /// Keeps the daemons and the client endpoint alive for the test (dropping an iroh
-    /// endpoint closes every connection on it).
+    /// Keeps the daemons and the client endpoint alive for the test.
     struct Guard(Vec<Child>, Option<slopty_net::Endpoint>);
 
     impl Drop for Guard {
@@ -57,10 +56,10 @@ mod tests {
         }
     }
 
-    /// Start ptyd and hostd in `dir`, pair a client, return the daemons and the connection.
+    /// Start ptyd and hostd in `dir`, connect a client, return the daemons and the connection.
     async fn connect(dir: &std::path::Path) -> (Guard, HostConn) {
-        let (mut guard, ticket) = daemons(dir, Reach::Anywhere).await;
-        let (endpoint, host) = dial(&ticket, Reach::Anywhere).await;
+        let (mut guard, addr) = daemons(dir).await;
+        let (endpoint, host) = dial(addr).await;
         guard.1 = Some(endpoint);
         (guard, host)
     }
@@ -92,18 +91,8 @@ mod tests {
         }
     }
 
-    /// Start ptyd and hostd in `dir` and read the pairing ticket hostd prints.
-    async fn daemons(dir: &std::path::Path, reach: Reach) -> (Guard, PairTicket) {
-        daemons_at(dir, reach, None).await
-    }
-
-    /// [`daemons`] with hostd bound to one IP, which is what a shaped run needs: see
-    /// [`lan_ip`] and `slopty_net::endpoint::Local::Pinned`.
-    async fn daemons_at(
-        dir: &std::path::Path,
-        reach: Reach,
-        bind: Option<std::net::IpAddr>,
-    ) -> (Guard, PairTicket) {
+    /// Start ptyd and hostd in `dir`; the address a loopback client dials.
+    async fn daemons(dir: &std::path::Path) -> (Guard, SocketAddr) {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = Command::new(bin("slopty-ptyd"))
             .arg("--socket")
@@ -114,34 +103,23 @@ mod tests {
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
         wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
-        let (hostd, ticket) = spawn_hostd(dir, reach, bind).await;
+        let (hostd, addr) = spawn_hostd(dir).await;
         let guard = Guard(vec![ptyd, hostd], None);
-        (guard, ticket)
+        (guard, addr)
     }
 
-    /// Start hostd on `dir`'s ptyd socket and data dir and read its ticket.
-    async fn spawn_hostd(
-        dir: &std::path::Path,
-        reach: Reach,
-        bind: Option<std::net::IpAddr>,
-    ) -> (Child, PairTicket) {
+    /// Start hostd on `dir`'s ptyd socket and data dir and read the address it prints.
+    async fn spawn_hostd(dir: &std::path::Path) -> (Child, SocketAddr) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("hostd.sock");
-        let mut hostd = Command::new(bin("slopty-hostd"));
-        if reach.is_direct_only() {
-            hostd.arg("--direct-only");
-        }
-        if let Some(ip) = bind {
-            hostd.arg("--bind").arg(ip.to_string());
-        }
-        let mut hostd = hostd
+        let mut hostd = Command::new(bin("slopty-hostd"))
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
             .arg(&ctl_sock)
             .arg("--data-dir")
             .arg(dir.join("data"))
-            .arg("--print-ticket")
+            .arg("--print-addr")
             // Any free port: the developer's own hostd may hold the default one.
             .arg("--port")
             .arg("0")
@@ -158,39 +136,41 @@ mod tests {
             Ok(Err(err)) => {
                 let status = hostd.try_wait().ok().flatten();
                 panic!(
-                    "failed to read hostd ticket line after waiting {STEP:?}: hostd exit status: {status:?}, io error: {err}"
+                    "failed to read hostd's address after waiting {STEP:?}: hostd exit status: {status:?}, io error: {err}"
                 );
             }
             Err(_elapsed) => {
                 let status = hostd.try_wait().ok().flatten();
                 panic!(
-                    "hostd did not print a ticket after waiting {STEP:?}: hostd exit status: {status:?}"
+                    "hostd did not print its address after waiting {STEP:?}: hostd exit status: {status:?}"
                 );
             }
         }
-        let ticket: PairTicket = match line.trim().parse() {
-            Ok(ticket) => ticket,
+        let bound: SocketAddr = match line.trim().parse() {
+            Ok(addr) => addr,
             Err(err) => {
                 let status = hostd.try_wait().ok().flatten();
                 panic!(
-                    "failed to parse hostd ticket line after waiting {STEP:?}: {line:?}, hostd exit status: {status:?}, parse error: {err}"
+                    "hostd printed {line:?}, not an address; hostd exit status: {status:?}, parse error: {err}"
                 );
             }
         };
-        (hostd, ticket)
+        (hostd, dialable(bound))
     }
 
-    /// A fresh endpoint (new key, new client id) dialing `ticket`: a cold QUIC connection.
-    async fn dial(ticket: &PairTicket, reach: Reach) -> (slopty_net::Endpoint, HostConn) {
-        dial_from(bind_client(SecretKey::generate(), reach).await.unwrap(), ticket, reach).await
+    /// Where a client on this machine reaches a host bound at `bound`: loopback when it took
+    /// every interface.
+    fn dialable(bound: SocketAddr) -> SocketAddr {
+        if bound.ip().is_unspecified() {
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bound.port()))
+        } else {
+            bound
+        }
     }
 
-    /// [`dial`] on an endpoint the caller bound, for a client that must stay on one address.
-    async fn dial_from(
-        endpoint: slopty_net::Endpoint,
-        ticket: &PairTicket,
-        reach: Reach,
-    ) -> (slopty_net::Endpoint, HostConn) {
+    /// A fresh endpoint (new client id) dialing `addr`: a cold QUIC connection.
+    async fn dial(addr: SocketAddr) -> (slopty_net::Endpoint, HostConn) {
+        let endpoint = bind_client().unwrap();
         let hello = Hello {
             protocol: PROTOCOL_VERSION,
             client: ClientId::new(),
@@ -198,77 +178,50 @@ mod tests {
             name: "e2e".to_owned(),
             app_version: "0".to_owned(),
             caps: Caps::empty(),
-            pair_token: None,
         };
-        let host = tokio::time::timeout(STEP, connect_with_ticket(&endpoint, reach, ticket, hello))
+        let host = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
             .await
             .unwrap()
             .unwrap();
         (endpoint, host)
     }
 
-    /// What a shaper binds: any interface, any free port. It has to answer the client on
-    /// loopback and reach the host on a real one, and a socket on `127.0.0.1` cannot do both.
-    fn wildcard() -> std::net::SocketAddr {
-        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+    /// Close a test's endpoint, giving its connection a moment to tell the host.
+    async fn close_endpoint(endpoint: &slopty_net::Endpoint) {
+        endpoint.close(0_u32.into(), b"done");
+        let _drained = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
     }
 
-    /// This machine's address on the LAN, which is where a shaped run binds hostd. Asking the
-    /// routing table beats reading interfaces: nothing is sent, the socket only reports which
-    /// source it would use.
-    fn lan_ip() -> std::net::IpAddr {
-        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-        probe.connect("192.0.2.1:9").expect("a route off this machine");
-        probe.local_addr().unwrap().ip()
+    /// What a shaper binds: any interface, any free port.
+    fn wildcard() -> SocketAddr {
+        SocketAddr::from(([0, 0, 0, 0], 0))
     }
 
-    /// The address hostd's endpoint is bound to, which under `--bind` is the only one it has.
-    fn hostd_addr(ticket: &PairTicket) -> std::net::SocketAddr {
-        // v4 only: iroh binds v6 on a socket of its own, which is a different port.
-        *ticket.addr.ip_addrs().find(|addr| addr.is_ipv4()).expect("hostd has a direct v4 address")
-    }
-
-    /// A ticket that reaches the host through `relay` rather than straight at it.
-    ///
-    /// The relay is only the measured path while it is the *sole* path. Turning relays off does
-    /// not do that, and neither does skipping mDNS: iroh holepunches regardless, clamping
-    /// `max_concurrent_multipath_paths` to 13 and ignoring anything smaller, so it finds the
-    /// host's real address within a second. What holds the flow here is that the two ends are
-    /// bound where the other's address does not route — hostd on the LAN with `--bind`, the
-    /// client on loopback with [`bind_pinned_client`] — and iroh drops a datagram it has no
-    /// socket for. `a_shaped_link_keeps_the_client_on_the_shaper` is the test of that.
-    fn reroute(ticket: &PairTicket, relay: std::net::SocketAddr) -> PairTicket {
-        PairTicket {
-            addr: slopty_net::EndpointAddr::new(ticket.addr.id).with_ip_addr(relay),
-            token: ticket.token,
-        }
-    }
-
-    /// Mint a fresh pairing ticket over hostd's control socket (tokens are single-use).
-    async fn mint(ctl_sock: &std::path::Path) -> PairTicket {
+    /// The address of a host we did not start, read from its control socket (`doctor` reports
+    /// where it listens).
+    async fn listening(ctl_sock: &std::path::Path) -> SocketAddr {
         use tokio::io::AsyncWriteExt as _;
         let stream = tokio::net::UnixStream::connect(ctl_sock).await.unwrap();
         let (rd, mut wr) = stream.into_split();
-        let mut line = serde_json::to_vec(&slopty_host::ctl::CtlRequest::Ticket).unwrap();
+        let mut line = serde_json::to_vec(&slopty_host::ctl::CtlRequest::Doctor).unwrap();
         line.push(b'\n');
         wr.write_all(&line).await.unwrap();
         // hostd answers a control request and closes without waiting to be half-closed, so this
         // shutdown races its close and macOS reports ENOTCONN when it loses. The reply is already
-        // buffered by then; let `read_line` below be the judge of whether one arrived. Unwrapping
-        // here failed two ladder runs in three at the fifth rung.
+        // buffered by then; let `read_line` below be the judge of whether one arrived.
         if let Err(e) = wr.shutdown().await {
             assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "control socket shutdown: {e}");
         }
         let mut reply = String::new();
         BufReader::new(rd).read_line(&mut reply).await.unwrap();
         match serde_json::from_str(reply.trim()).unwrap() {
-            slopty_host::ctl::CtlReply::Ticket { ticket } => ticket.parse().unwrap(),
+            slopty_host::ctl::CtlReply::Doctor(health) => dialable(health.listen.parse().unwrap()),
             other => panic!("unexpected ctl reply: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn shell_round_trip_over_iroh() {
+    async fn shell_round_trip_over_quic() {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut host) = connect(dir.path()).await;
         assert_eq!(host.ack.protocol, PROTOCOL_VERSION);
@@ -415,8 +368,8 @@ mod tests {
         use slopty_proto::canvas::{CanvasSync, Rect};
 
         let dir = tempfile::tempdir().unwrap();
-        let (mut guard, ticket) = daemons(dir.path(), Reach::Anywhere).await;
-        let (endpoint_a, mut a) = dial(&ticket, Reach::Anywhere).await;
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint_a, mut a) = dial(addr).await;
         guard.1 = Some(endpoint_a);
         let view = Rect { x: 10.0, y: 20.0, w: 1200.0, h: 800.0 };
         a.tx.send(&ClientMsg::Look { view: Some(view) }).await.unwrap();
@@ -428,8 +381,7 @@ mod tests {
         );
 
         // B connects afterwards and is told where A looks before anything else happens.
-        let ctl_sock = dir.path().join("hostd.sock");
-        let (endpoint_b, mut b) = dial(&mint(&ctl_sock).await, Reach::Anywhere).await;
+        let (endpoint_b, mut b) = dial(addr).await;
         let heard = next_presence(&mut b).await;
         let CanvasSync::Presence { client: a_client, name, view: Some(seen), .. } = heard else {
             panic!("{heard:?}");
@@ -539,9 +491,9 @@ mod tests {
         drop(events);
         drop(host);
 
-        let (hostd, ticket) = spawn_hostd(dir.path(), Reach::Anywhere, None).await;
+        let (hostd, addr) = spawn_hostd(dir.path()).await;
         guard.0.push(hostd);
-        let (endpoint, mut host) = dial(&ticket, Reach::Anywhere).await;
+        let (endpoint, mut host) = dial(addr).await;
         guard.1 = Some(endpoint);
         assert_eq!(host.ack.sessions.iter().map(|s| s.id).collect::<Vec<_>>(), [session]);
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
@@ -581,7 +533,7 @@ mod tests {
     /// would run them. Needs Screen Recording permission for the test process, so it only runs
     /// when `SLOPTY_SCREEN_E2E=1`.
     #[tokio::test]
-    async fn screen_stream_over_iroh() {
+    async fn screen_stream_over_quic() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
             eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
             return;
@@ -685,10 +637,9 @@ mod tests {
         /// runs, fed the same `frames` channel and paced by a 60 Hz timer standing in for the
         /// display link.
         pacing: slopty_client::PacingStats,
-        /// The address the selected path was sending to when the sample ended. On a shaped run
-        /// this must still be the shaper's; anything else means iroh migrated and the rest of
-        /// the row describes a link nobody degraded.
-        selected: Option<std::net::SocketAddr>,
+        /// Where the connection was sending when the sample ended: the shaper's address on a
+        /// shaped run.
+        selected: Option<SocketAddr>,
     }
 
     /// `min / p50 / p90 / max` of `samples`, in milliseconds.
@@ -714,20 +665,9 @@ mod tests {
 
     /// Stream the first display on a cold connection for `seconds` and measure the start.
     ///
-    /// `through` sends the connection past a shaper instead of straight at the host.
-    async fn start_up_sample(
-        ctl_sock: &std::path::Path,
-        seconds: u64,
-        through: Option<std::net::SocketAddr>,
-    ) -> StartUp {
-        let ticket = mint(ctl_sock).await;
-        let (endpoint, host) = match through {
-            Some(relay) => {
-                let pinned = bind_pinned_client(SecretKey::generate()).await.unwrap();
-                dial_from(pinned, &reroute(&ticket, relay), Reach::DirectOnly).await
-            }
-            None => dial(&ticket, Reach::DirectOnly).await,
-        };
+    /// `addr` is the host's own address, or a shaper's in front of it.
+    async fn start_up_sample(addr: SocketAddr, seconds: u64) -> StartUp {
+        let (endpoint, host) = dial(addr).await;
         let conn = host.conn.clone();
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
@@ -823,8 +763,8 @@ mod tests {
         sample.lost = stats.frames_lost;
         sample.rate = rate.join(" ");
         sample.pacing = pacer.stats();
-        // Read before the connection closes: a closed connection has no selected path.
-        sample.selected = slopty_net::endpoint::selected_addr(&conn);
+        // Read before the connection closes: a closed connection has no path.
+        sample.selected = slopty_net::endpoint::remote(&conn);
         assert_eq!(stats.decode_errors, 0, "{stats:?}");
         drop(screen);
         link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
@@ -839,7 +779,7 @@ mod tests {
             }
         }
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
         sample
     }
 
@@ -887,9 +827,8 @@ mod tests {
 
     /// Stream the first display for `seconds` with `drop_permille` of the client's datagrams
     /// thrown away before the router sees them, and report what got through.
-    async fn loss_sample(ctl_sock: &std::path::Path, seconds: u64, drop_permille: u32) -> LossRow {
-        let ticket = mint(ctl_sock).await;
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+    async fn loss_sample(addr: SocketAddr, seconds: u64, drop_permille: u32) -> LossRow {
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         // Deterministic: the same rate always drops the same datagrams of the sequence.
         link.screens().set_loss(drop_permille);
@@ -975,7 +914,7 @@ mod tests {
         drop(screen);
         link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
         row
     }
 
@@ -998,16 +937,15 @@ mod tests {
             .with_writer(std::io::stderr)
             .try_init();
         slopty_client::warm_up_decoder();
-        let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
         // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
         // observable state for it.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let ctl_sock = dir.path().join("hostd.sock");
         let mut rows = Vec::new();
         // 0/20/50 ‰ are the rates the ruling is about; 100 ‰ is the stress row that shows
         // what happens once parity alone cannot cover the loss.
         for permille in [0_u32, 20, 50, 100] {
-            rows.push(loss_sample(&ctl_sock, seconds, permille).await);
+            rows.push(loss_sample(addr, seconds, permille).await);
         }
         eprintln!(
             "| drop | frames | by parity | by nack | lost | nack / refresh | datagrams (lost) | kB (B/frame) | fragments/frame | parity seen (one-per-frame would be) | stalls | gap p50 / p90 / max |"
@@ -1091,7 +1029,7 @@ mod tests {
     /// hostd, native scale at the default quality (what the app opens). Prints a table; the
     /// numbers go to `docs/MEASUREMENTS.md`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn screen_start_up_over_iroh() {
+    async fn screen_start_up_over_quic() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
             eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
             return;
@@ -1107,16 +1045,15 @@ mod tests {
             .try_init();
         // The app warms the decoder up at launch, long before it dials a host.
         slopty_client::warm_up_decoder();
-        let (_guard, _ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
         // The daemon warms ScreenCaptureKit up right after it is online; by the time a user
         // opens a window that has long finished, so let it finish here too.
         // Waits for hostd's background ScreenCaptureKit warm-up to finish; hostd exposes no
         // observable state for it.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let ctl_sock = dir.path().join("hostd.sock");
         let mut rows = Vec::new();
         for i in 0..samples {
-            let s = start_up_sample(&ctl_sock, seconds, None).await;
+            let s = start_up_sample(addr, seconds).await;
             eprintln!(
                 "| {i} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} | {:.1} / {:.1} / {:.1} | {} ({} ms) | {} / {} / {} | {} |",
                 s.opened_ms,
@@ -1195,24 +1132,17 @@ mod tests {
 
     /// A shell through the shaper, with the client still on the shaper at the end of it.
     ///
-    /// The ladder below is only worth reading while the shaper is the path, and no iroh setting
-    /// guarantees that: holepunching cannot be turned off, so it moves to the direct path within
-    /// a second of finding it. Only the two binds keep it here. That contract gets a test at the
-    /// cheapest layer that can see it — a link delayed enough that the direct path would win the
-    /// swap, a real session carried over it, and the selected address read after the traffic
-    /// rather than at the handshake, when only one path has ever existed.
+    /// The ladder below is only worth reading while the shaper is the path. Plain QUIC dials one
+    /// address and never looks for another, so this checks that it stays that way: a delayed
+    /// link, a real session carried over it, and the address read after the traffic.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_shaped_link_keeps_the_client_on_the_shaper() {
         let dir = tempfile::tempdir().unwrap();
-        let (_guard, ticket) = daemons_at(dir.path(), Reach::DirectOnly, Some(lan_ip())).await;
-        // 30 ms each way against loopback's microseconds: if iroh can find the direct path at
-        // all, this is the gradient that makes it take it.
+        let (_guard, host_addr) = daemons(dir.path()).await;
         let link =
             slopty_shape::Link { delay: Duration::from_millis(30), ..slopty_shape::Link::CLEAR };
         let relay = std::sync::Arc::new(
-            slopty_shape::relay::Relay::bind(wildcard(), hostd_addr(&ticket), link, 1)
-                .await
-                .unwrap(),
+            slopty_shape::relay::Relay::bind(wildcard(), host_addr, link, 1).await.unwrap(),
         );
         let addr = relay.addr().unwrap();
         tokio::spawn({
@@ -1220,9 +1150,7 @@ mod tests {
             async move { relay.run().await }
         });
 
-        let pinned = bind_pinned_client(SecretKey::generate()).await.unwrap();
-        let (_endpoint, mut host) =
-            dial_from(pinned, &reroute(&ticket, addr), Reach::DirectOnly).await;
+        let (_endpoint, mut host) = dial(addr).await;
         host.tx
             .send(&ClientMsg::OpenSession(OpenSession {
                 size: TermSize { cols: 40, rows: 6, ..TermSize::default() },
@@ -1253,11 +1181,11 @@ mod tests {
         wait_for_text(&mut events, "marker-42").await;
 
         assert_eq!(
-            slopty_net::endpoint::selected_addr(&host.conn),
+            slopty_net::endpoint::remote(&host.conn),
             Some(addr),
             "the connection left the shaper; a shaped measurement would read an unshaped link. \
-             paths: {}",
-            slopty_net::endpoint::describe_paths(&host.conn)
+             path: {}",
+            slopty_net::endpoint::describe_path(&host.conn)
         );
         let carried = relay.carried().await;
         assert!(
@@ -1274,7 +1202,7 @@ mod tests {
         /// `None` on the direct rung, which has no shaper between the ends.
         link: Option<slopty_shape::Link>,
         /// Where the shaper listened: the one address the client was given. `None` when direct.
-        relay: Option<std::net::SocketAddr>,
+        relay: Option<SocketAddr>,
         sample: StartUp,
         carried: slopty_shape::relay::Carried,
     }
@@ -1332,20 +1260,19 @@ mod tests {
     /// It runs against the *installed* host rather than daemons of its own, which is not a
     /// preference: TCC attributes a shell-spawned daemon to whatever launched it, so it is refused
     /// capture with -3801 however the binary is signed, and only the launchd host records a grant.
-    /// That host must be installed with `--bind <lan-ip>`, or the flow leaves the shaper and the
-    /// numbers describe an unimpaired link. `SLOPTY_E2E_HOSTD_SOCKET` points at its control
-    /// socket, under `<data dir>/run/`.
+    /// `SLOPTY_E2E_HOSTD_SOCKET` points at its control socket, under `<data dir>/run/`; the host's
+    /// address is read from it.
     #[tokio::test(flavor = "multi_thread")]
     async fn screen_over_a_shaped_link() {
         let Some(ctl_sock) = std::env::var_os("SLOPTY_E2E_HOSTD_SOCKET") else {
             eprintln!(
                 "SLOPTY_E2E_HOSTD_SOCKET unset; skipping. Install the host under launchd with \
-                 `slopty host install --direct-only --bind <lan-ip>` and point this at its \
-                 hostd.sock; a spawned host cannot get Screen Recording."
+                 `slopty host install` and point this at its hostd.sock; a spawned host cannot \
+                 get Screen Recording."
             );
             return;
         };
-        let ctl_sock = PathBuf::from(ctl_sock);
+        let host_addr = listening(&PathBuf::from(ctl_sock)).await;
         let seconds: u64 =
             std::env::var("SLOPTY_E2E_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
         let _logs = tracing_subscriber::fmt()
@@ -1363,23 +1290,13 @@ mod tests {
         // decodes nothing however it is carried — proven by running the relay-less rung first
         // and then second: it read 0 frames, then 184. A warmed decoder is not enough on its
         // own, so the first rung would otherwise always be a blank row.
-        let discarded = start_up_sample(&ctl_sock, 2, None).await;
+        let discarded = start_up_sample(host_addr, 2).await;
         eprintln!("discarded the first stream: decoded {}", discarded.decoded);
-        // Checked before eight seconds of streaming rather than after: the per-rung assertion
-        // catches an unpinned host too, but only once its numbers are already worthless.
-        let probe = mint(&ctl_sock).await;
-        let addrs: Vec<_> = probe.addr.ip_addrs().copied().collect();
-        assert!(
-            matches!(addrs.as_slice(), [one] if !one.ip().is_loopback()),
-            "the installed host must be pinned to its LAN address (`slopty host install --bind \
-             <lan-ip>`) or the run leaves the shaper; it has {addrs:?}"
-        );
-        let host_addr = hostd_addr(&probe);
 
         let mut rungs = Vec::new();
         for &(name, link) in LADDER {
             let Some(link) = link else {
-                let sample = start_up_sample(&ctl_sock, seconds, None).await;
+                let sample = start_up_sample(host_addr, seconds).await;
                 eprintln!("{name}: selected {:?}, no shaper", sample.selected);
                 rungs.push(Rung {
                     name,
@@ -1400,7 +1317,7 @@ mod tests {
                 let relay = std::sync::Arc::clone(&relay);
                 async move { relay.run().await }
             });
-            let sample = start_up_sample(&ctl_sock, seconds, Some(addr)).await;
+            let sample = start_up_sample(addr, seconds).await;
             let carried = relay.carried().await;
             carrying.abort();
             eprintln!("{name}: selected {:?}, shaper {carried:?}", sample.selected);
@@ -1439,8 +1356,7 @@ mod tests {
         for r in &rungs {
             assert!(r.sample.decoded >= 1, "{}: decoded nothing: {r:?}", r.name);
             let Some(relay) = r.relay else { continue };
-            // A relayed rung is only readable while the relay is the path. If iroh found the
-            // host's own address and migrated, every number in that row is of an unshaped link.
+            // A relayed rung is only readable while the relay is the path.
             assert_eq!(
                 r.sample.selected,
                 Some(relay),
@@ -1468,524 +1384,6 @@ mod tests {
         }
     }
 
-    // ---- the path-flap harness ------------------------------------------------------------
-    //
-    // DECISIONS "Path flap under investigation": a connection went direct → relay-only for 43 s
-    // → direct while the machine was compiling, which is a 50× latency cliff. iroh always
-    // prefers a live direct path, so the direct path must have been *closed*. This drives the
-    // load a `cargo build` applies — all-core CPU, the same at a raised thread QoS, and memory
-    // plus I/O — at a real connection that holds both a direct and a relay path, and reads back
-    // what the transport did.
-
-    /// A load shape applied while the harness watches the connection.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Shape {
-        /// Every core spinning at the default quality of service.
-        Cpu,
-        /// The same, at `USER_INITIATED`: threads that outrank a default-QoS worker.
-        CpuUserInitiated,
-        /// Gigabytes written and read back, plus many small files: what a linker does.
-        MemoryIo,
-        /// Every core spinning, but in other processes: the same machine load without the
-        /// receiver's own runtime competing with it inside one address space.
-        CpuExternal,
-        /// Nothing at all: the baseline the other rows are read against.
-        None,
-    }
-
-    impl Shape {
-        const fn name(self) -> &'static str {
-            match self {
-                Self::Cpu => "cpu",
-                Self::CpuUserInitiated => "cpu-user-initiated",
-                Self::MemoryIo => "memory-io",
-                Self::CpuExternal => "cpu-external",
-                Self::None => "none",
-            }
-        }
-    }
-
-    /// Threads applying a [`Shape`]; they stop when this is dropped.
-    struct Load {
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        threads: Vec<std::thread::JoinHandle<()>>,
-        /// Load applied from outside this process.
-        others: Vec<std::process::Child>,
-    }
-
-    impl Load {
-        fn start(shape: Shape, scratch: &std::path::Path) -> Self {
-            use std::sync::atomic::AtomicBool;
-
-            let stop = std::sync::Arc::new(AtomicBool::new(false));
-            let cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
-            let mut threads = Vec::new();
-            let mut others = Vec::new();
-            if shape == Shape::CpuExternal {
-                // `yes` is the cheapest all-core burn there is, and it burns somewhere else.
-                for _core in 0..cores {
-                    if let Ok(child) = std::process::Command::new("/usr/bin/yes")
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                    {
-                        others.push(child);
-                    }
-                }
-                return Self { stop, threads, others };
-            }
-            if shape == Shape::None {
-                return Self { stop, threads, others };
-            }
-            for worker in 0..cores {
-                let stop = std::sync::Arc::clone(&stop);
-                let scratch = scratch.to_path_buf();
-                threads.push(std::thread::spawn(move || match shape {
-                    Shape::CpuUserInitiated => burn(&stop, true),
-                    Shape::MemoryIo => churn(&stop, &scratch, worker),
-                    // `CpuExternal` and `None` returned above.
-                    Shape::Cpu | Shape::CpuExternal | Shape::None => burn(&stop, false),
-                }));
-            }
-            Self { stop, threads, others }
-        }
-    }
-
-    impl Drop for Load {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            for t in self.threads.drain(..) {
-                let _joined = t.join();
-            }
-            for mut child in self.others.drain(..) {
-                let _killed = child.kill();
-                let _reaped = child.wait();
-            }
-        }
-    }
-
-    /// Spin until told to stop, optionally after asking the scheduler to treat this thread as
-    /// user-initiated work — the class Xcode's and cargo's build threads run at.
-    fn burn(stop: &std::sync::atomic::AtomicBool, user_initiated: bool) {
-        if user_initiated {
-            // SAFETY: `pthread_set_qos_class_self_np` takes a QoS class and a relative priority
-            // and only ever affects the calling thread (Apple's Energy Efficiency Guide, "Set
-            // Quality of Service"); it borrows nothing.
-            let set = unsafe {
-                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
-            };
-            assert_eq!(set, 0, "pthread_set_qos_class_self_np");
-        }
-        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-            for _ in 0..4_096 {
-                x = x
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                std::hint::black_box(x);
-            }
-        }
-    }
-
-    /// Write and read back gigabytes, and churn many small files, until told to stop.
-    fn churn(stop: &std::sync::atomic::AtomicBool, scratch: &std::path::Path, worker: usize) {
-        use std::io::{Read as _, Write as _};
-
-        let dir = scratch.join(format!("churn-{worker}"));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let block = vec![0x5a_u8; 8 << 20];
-        let mut round = 0_u64;
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-            let big = dir.join(format!("big-{round}"));
-            if let Ok(mut f) = std::fs::File::create(&big) {
-                // 512 MB a round, so a 90 s run moves several gigabytes per thread.
-                for _ in 0..64 {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    let _written = f.write_all(&block);
-                }
-                let _flushed = f.sync_all();
-            }
-            if let Ok(mut f) = std::fs::File::open(&big) {
-                let mut sink = vec![0_u8; 8 << 20];
-                while let Ok(n) = f.read(&mut sink) {
-                    if n == 0 || stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                }
-            }
-            let _removed = std::fs::remove_file(&big);
-            // The many-small-files half: metadata pressure, not throughput.
-            for i in 0..2_000 {
-                if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                let small = dir.join(format!("small-{i}"));
-                let _written = std::fs::write(&small, b"slopty");
-                let _removed = std::fs::remove_file(&small);
-            }
-            // A few hundred megabytes touched and dropped: memory pressure on top of the I/O.
-            let mut hot = vec![0_u8; 256 << 20];
-            for page in hot.chunks_mut(4_096) {
-                if let Some(first) = page.first_mut() {
-                    *first = 1;
-                }
-            }
-            std::hint::black_box(&hot);
-            drop(hot);
-            round = round.wrapping_add(1);
-        }
-        let _cleaned = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Tees the test's own log to stderr and to a buffer, so the harness can read back what
-    /// noq said about a path it abandoned (`iroh::_events::path`, which carries the reason).
-    #[derive(Clone)]
-    struct Tee(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Tee {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            std::io::stderr().write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            std::io::stderr().flush()
-        }
-    }
-
-    impl tracing_subscriber::fmt::MakeWriter<'_> for Tee {
-        type Writer = Self;
-
-        fn make_writer(&self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// What one load shape did to the connection.
-    #[derive(Debug)]
-    struct FlapRow {
-        shape: &'static str,
-        /// Times the selected path went from direct to relayed.
-        to_relay: u32,
-        /// Longest unbroken stretch on a relayed path, seconds.
-        relay_max_s: f64,
-        /// Seconds on a relayed path in total.
-        relay_total_s: f64,
-        /// Worst round trip seen on the selected path.
-        rtt_max_ms: f64,
-        /// Round trip at the end, for scale.
-        rtt_last_ms: f64,
-        /// Lines the transport logged about a closed path (the abandon reason lives here).
-        closed: Vec<String>,
-        /// Receiver stalls on the display stream over the run.
-        stalls: u64,
-        /// Frames the display stream delivered.
-        frames: u64,
-        samples: u32,
-        /// Milliseconds the receiver charged to the link (the stalls above, in time).
-        stalled_ms: u64,
-        /// Wait from a frame's first fragment to its completion, milliseconds.
-        hold_p50_ms: u64,
-        hold_p95_ms: u64,
-        hold_max_ms: u64,
-        /// Interarrival jitter on the host's capture clock, milliseconds.
-        jitter_ms: u64,
-        /// The host's own side of the same run: how long capture and encode took, and what it
-        /// had to throw away. This is what says whether a gap the client saw was made here.
-        host_capture_p95_us: u64,
-        host_capture_max_us: u64,
-        host_encode_p95_us: u64,
-        host_encode_max_us: u64,
-        host_dropped: u64,
-        host_queue_full: u64,
-        host_encoded: u64,
-    }
-
-    /// Drive a real connection that holds both a direct and a relay path under the load a build
-    /// applies, and read back whether the direct path is ever closed.
-    ///
-    /// Gated on `SLOPTY_FLAP_E2E`, `SLOPTY_FLAP_SECONDS` for the length of the load (default 90).
-    /// Needs the default relay map: with no relay path there is nothing to flap onto, and the
-    /// case says so and skips. One case per load shape, and nextest is told to give each of them
-    /// every thread — a shape saturates the machine, so two at once would measure each other.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_flap_under_cpu_load() {
-        flap_case(Shape::Cpu).await;
-    }
-
-    /// The same saturation from threads that asked the scheduler to be treated as interactive,
-    /// which is what a build's own workers do.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_flap_under_user_initiated_cpu_load() {
-        flap_case(Shape::CpuUserInitiated).await;
-    }
-
-    /// Memory and I/O rather than CPU: the other half of what a build does to a machine.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_flap_under_memory_io_load() {
-        flap_case(Shape::MemoryIo).await;
-    }
-
-    /// Run one shape end to end and print its verdict line.
-    async fn flap_case(shape: Shape) {
-        if std::env::var_os("SLOPTY_FLAP_E2E").is_none() {
-            eprintln!("SLOPTY_FLAP_E2E unset; skipping");
-            return;
-        }
-        let seconds: u64 =
-            std::env::var("SLOPTY_FLAP_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(90);
-        let log = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let _logs = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-                |_unset| {
-                    // noq's own path events carry the abandon reason.
-                    tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
-                },
-            ))
-            .with_writer(Tee(std::sync::Arc::clone(&log)))
-            .try_init();
-        let dir = tempfile::tempdir().unwrap();
-        // Relays on: both ends must hold a relay path as well as the loopback direct one.
-        let (_guard, ticket) = daemons(dir.path(), Reach::Anywhere).await;
-        let started = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let Some(r) = flap_sample(&ticket, dir.path(), shape, seconds, &log).await else {
-            eprintln!("{}: no relay path (relay unreachable?); skipping", shape.name());
-            return;
-        };
-        eprintln!(
-            "flap {} ran {started} .. {}",
-            shape.name(),
-            chrono::Local::now().format("%H:%M:%S")
-        );
-        eprintln!(
-            "| {} | {} to relay | relay {:.1} s longest, {:.1} s total | rtt {:.1} ms worst, {:.1} ms last | {} closed | {} stalls | {} frames | {} samples |",
-            r.shape,
-            if r.to_relay == 0 { "none".to_owned() } else { r.to_relay.to_string() },
-            r.relay_max_s,
-            r.relay_total_s,
-            r.rtt_max_ms,
-            r.rtt_last_ms,
-            if r.closed.is_empty() { "none".to_owned() } else { r.closed.len().to_string() },
-            r.stalls,
-            r.frames,
-            r.samples,
-        );
-        for line in &r.closed {
-            eprintln!("    {line}");
-        }
-        eprintln!(
-            "| {} | client: {} stalls, {} ms stalled, hold {}/{}/{} ms p50/p95/max, jitter {} ms \
-             | host: {} encoded, {} dropped, {} queue-full, capture p95 {} µs max {} µs, \
-             encode p95 {} µs max {} µs |",
-            r.shape,
-            r.stalls,
-            r.stalled_ms,
-            r.hold_p50_ms,
-            r.hold_p95_ms,
-            r.hold_max_ms,
-            r.jitter_ms,
-            r.host_encoded,
-            r.host_dropped,
-            r.host_queue_full,
-            r.host_capture_p95_us,
-            r.host_capture_max_us,
-            r.host_encode_p95_us,
-            r.host_encode_max_us,
-        );
-        assert!(r.samples > 0, "{} sampled nothing: {r:?}", r.shape);
-        assert!(r.frames > 0, "{} streamed nothing: {r:?}", r.shape);
-        // The verdict this harness exists for. A direct path that closes under load is the flap;
-        // the reason lines above say why, and the ruling follows them.
-        assert_eq!(r.to_relay, 0, "{} pushed the connection onto a relay: {r:?}", r.shape);
-    }
-
-    /// One shape: a fresh connection, a terminal and a display stream, the load, and a sample
-    /// of the selected path every 250 ms. `None` when the connection never held a relay path,
-    /// which means there was nothing to flap onto.
-    async fn flap_sample(
-        ticket: &PairTicket,
-        scratch: &std::path::Path,
-        shape: Shape,
-        seconds: u64,
-        log: &std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
-    ) -> Option<FlapRow> {
-        let (endpoint, host) = dial(ticket, Reach::Anywhere).await;
-        let mut link = slopty_client::HostLink::start(host);
-        let mut events = link.events().unwrap();
-        // A terminal, so the control and session streams carry traffic too.
-        link.send(ClientMsg::OpenSession(OpenSession {
-            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
-            cwd: None,
-            command: vec!["/bin/sh".to_owned()],
-            env: vec![("PS1".to_owned(), "$ ".to_owned())],
-            title: None,
-            attach: true,
-        }))
-        .await
-        .unwrap();
-        // A display stream, so datagrams flow the whole time.
-        link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
-        let display = loop {
-            // A refused listing has no reply to catch — hostd logs it and answers nothing — so a
-            // missing TCC grant arrives here as a timeout, which says nothing on its own.
-            let Ok(event) = tokio::time::timeout(STEP, events.recv()).await else {
-                panic!(
-                    "no screen listing after {STEP:?}. hostd logs -3801 when it is refused Screen \
-                     Recording, which is every host but the installed one: TCC attributes a \
-                     shell-spawned daemon to whatever launched it, so signing does not help. Run \
-                     against `slopty host install`'s host."
-                );
-            };
-            match event.unwrap() {
-                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing { displays, .. })) => {
-                    break displays.first().expect("a display").id;
-                }
-                _other => {}
-            }
-        };
-        link.send(ClientMsg::Screen(ScreenRequest::Open {
-            target: CaptureTarget::Display(display),
-            quality: Quality::default(),
-        }))
-        .await
-        .unwrap();
-        let (stream, codec) = loop {
-            match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
-                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
-                    stream, codec, ..
-                })) => break (stream, codec),
-                LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. })) => {
-                    panic!("open failed: {reason}")
-                }
-                _other => {}
-            }
-        };
-        let screen = link.screen(stream, codec);
-        // Wait for relay path to establish before load starts (hole punching + relay handshake).
-        let relay_deadline =
-            tokio::time::Instant::now().checked_add(Duration::from_secs(15)).expect("deadline");
-        while tokio::time::Instant::now() < relay_deadline {
-            if link.paths().contains("relay") {
-                break;
-            }
-            // Poll interval: checks if connection paths include relay every 50 ms.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        if !link.paths().contains("relay") {
-            drop(screen);
-            link.close();
-            endpoint.close().await;
-            return None;
-        }
-        eprintln!("flap {}: paths before load: {}", shape.name(), link.paths());
-        let mark = log.lock().len();
-        let load = Load::start(shape, scratch);
-
-        let step = Duration::from_millis(250);
-        let mut ticks = tokio::time::interval(step);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let deadline = tokio::time::Instant::now()
-            .checked_add(Duration::from_secs(seconds))
-            .expect("a deadline inside the clock");
-        let mut row = FlapRow {
-            shape: shape.name(),
-            to_relay: 0,
-            relay_max_s: 0.0,
-            relay_total_s: 0.0,
-            rtt_max_ms: 0.0,
-            rtt_last_ms: 0.0,
-            closed: Vec::new(),
-            stalls: 0,
-            frames: 0,
-            samples: 0,
-            stalled_ms: 0,
-            hold_p50_ms: 0,
-            hold_p95_ms: 0,
-            hold_max_ms: 0,
-            jitter_ms: 0,
-            host_capture_p95_us: 0,
-            host_capture_max_us: 0,
-            host_encode_p95_us: 0,
-            host_encode_max_us: 0,
-            host_dropped: 0,
-            host_queue_full: 0,
-            host_encoded: 0,
-        };
-        let mut on_relay = false;
-        let mut stretch = 0.0_f64;
-        // Wall clock between samples, not the nominal step: under the saturation this harness
-        // applies the ticks slip, and charging a fixed step per sample would under-report the
-        // very stretches it is here to measure.
-        let mut sampled_at = std::time::Instant::now();
-        while tokio::time::Instant::now() < deadline {
-            ticks.tick().await;
-            let now = std::time::Instant::now();
-            let since = now.saturating_duration_since(sampled_at).as_secs_f64();
-            sampled_at = now;
-            row.samples = row.samples.saturating_add(1);
-            if let Some(rtt) = link.rtt() {
-                let ms = rtt.as_secs_f64() * 1e3;
-                row.rtt_last_ms = ms;
-                row.rtt_max_ms = row.rtt_max_ms.max(ms);
-            }
-            match link.relayed() {
-                Some(true) => {
-                    if !on_relay {
-                        on_relay = true;
-                        stretch = 0.0;
-                        row.to_relay = row.to_relay.saturating_add(1);
-                        eprintln!("flap {}: on a relay; paths: {}", shape.name(), link.paths());
-                    }
-                    stretch += since;
-                    row.relay_total_s += since;
-                    row.relay_max_s = row.relay_max_s.max(stretch);
-                }
-                Some(false) if on_relay => {
-                    on_relay = false;
-                    eprintln!("flap {}: back on a direct path after {stretch:.1} s", shape.name());
-                }
-                // Direct all along, or no path reported yet.
-                Some(false) | None => {}
-            }
-        }
-        drop(load);
-        let stats = screen.stats();
-        row.stalls = stats.stalls;
-        row.frames = stats.frames;
-        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        row.stalled_ms = stats.stalled_ms;
-        row.hold_p50_ms = ms(stats.hold_p50);
-        row.hold_p95_ms = ms(stats.hold_p95);
-        row.hold_max_ms = ms(stats.hold_max);
-        row.jitter_ms = ms(stats.jitter);
-        // The host's account of the same 90 seconds, before the daemons go.
-        if let Some(host) = screens(&scratch.join("hostd.sock")).await.first() {
-            row.host_capture_p95_us = host.stats.capture.p95_us;
-            row.host_capture_max_us = host.stats.capture.max_us;
-            row.host_encode_p95_us = host.stats.encode.p95_us;
-            row.host_encode_max_us = host.stats.encode.max_us;
-            row.host_dropped = host.stats.dropped;
-            row.host_queue_full = host.stats.queue_full;
-            row.host_encoded = host.stats.encoded;
-        }
-        // What the transport said while the load ran: the closed-path lines carry noq's reason.
-        let text = String::from_utf8_lossy(log.lock().get(mark..).unwrap_or_default()).into_owned();
-        row.closed = text
-            .lines()
-            .filter(|line| line.contains("path closed") || line.contains("abandon"))
-            .map(str::trim)
-            .map(str::to_owned)
-            .collect();
-        eprintln!("flap {}: paths after load: {}", shape.name(), link.paths());
-        drop(screen);
-        link.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await.unwrap();
-        link.close();
-        endpoint.close().await;
-        Some(row)
-    }
-
     /// A capture target that produces no frame at all: the host says so, and the receiver stops
     /// asking for refreshes no refresh can answer.
     ///
@@ -2011,8 +1409,8 @@ mod tests {
         let ready = markers.join("ready");
         wait_for_marker(&ready, "the idle window").await;
 
-        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -2168,7 +1566,7 @@ mod tests {
         let _stopped = helper.wait().await;
         drop(screen);
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
     }
 
     /// [`bin`] for a binary whose package is not named after it, built every time rather than
@@ -2506,9 +1904,9 @@ mod tests {
             .expect("spawn the idle window");
         wait_for_marker(&markers.join("ready"), "the idle window").await;
 
-        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
         let ctl = dir.path().join("hostd.sock");
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -2664,7 +2062,7 @@ mod tests {
         }
         drop(screen);
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
 
         let run = HideRun {
             order_ms,
@@ -2756,9 +2154,9 @@ mod tests {
             .expect("spawn the idle window");
         wait_for_marker(&markers.join("ready"), "the idle window").await;
 
-        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
         let ctl = dir.path().join("hostd.sock");
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -2835,7 +2233,7 @@ mod tests {
         let _stopped = helper.wait().await;
         drop(screen);
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
     }
 
     /// How late each way of noticing a hide is, measured against the same order-out.
@@ -2868,8 +2266,8 @@ mod tests {
         let pid = i32::try_from(helper.id().expect("the helper's pid")).expect("a pid");
 
         // The window as the host would find it, so both signals are asked about the same one.
-        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -2928,7 +2326,7 @@ mod tests {
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
     }
 
     /// Whether a pop-up of the application counts. Autocomplete lists, tooltips and menus are
@@ -2983,9 +2381,9 @@ mod tests {
             .expect("spawn the idle window");
         wait_for_marker(&markers.join("ready"), "the idle window").await;
 
-        let (_guard, ticket) = daemons(dir.path(), Reach::DirectOnly).await;
+        let (_guard, addr) = daemons(dir.path()).await;
         let ctl = dir.path().join("hostd.sock");
-        let (endpoint, host) = dial(&ticket, Reach::DirectOnly).await;
+        let (endpoint, host) = dial(addr).await;
         let mut link = slopty_client::HostLink::start(host);
         let mut events = link.events().unwrap();
         link.send(ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
@@ -3060,7 +2458,7 @@ mod tests {
         std::fs::write(markers.join("quit"), b"").unwrap();
         let _stopped = helper.wait().await;
         link.close();
-        endpoint.close().await;
+        close_endpoint(&endpoint).await;
 
         eprintln!(
             "{close}: ten more frames {flowing_ms} ms after the order-out, siblings {}, \
@@ -3270,18 +2668,5 @@ mod tests {
             }
         }
         false
-    }
-
-    /// The same machine load from other processes, so the receiver's own runtime is not sharing
-    /// an address space with it: the row that says whether a stall is the machine or the harness.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_flap_under_external_cpu_load() {
-        flap_case(Shape::CpuExternal).await;
-    }
-
-    /// No load at all: the baseline every other row is read against.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_flap_with_no_load() {
-        flap_case(Shape::None).await;
     }
 }

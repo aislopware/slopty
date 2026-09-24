@@ -15,7 +15,7 @@ use crate::{
 /// How often [`Driver::wait_for`] polls.
 const POLL: Duration = Duration::from_millis(100);
 
-/// How long one command may take to be answered (a frame, or a pairing round trip).
+/// How long one command may take to be answered (a frame, or a connect round trip).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a described finger rests before it lifts: longer than the 40 ms of silence after
 /// which gpui's touch recognizer takes a finger for stopped.

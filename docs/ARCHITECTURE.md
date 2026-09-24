@@ -19,7 +19,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      │  └────────────┘         │ input: CGEvent injection               │    │
                      │                         └──────────────┬────────────────────────┘    │
                      └────────────────────────────────────────┼─────────────────────────────┘
-                                                              │ iroh (QUIC): streams = control/terminal
+                                                              │ QUIC, plaintext: streams = control/terminal
                                                               │              datagrams = video/audio/cursor
                      ┌────────────────────────────────────────┼─────────────────────────────┐
                      │ client (macOS app · iOS app)           ▼                              │
@@ -29,11 +29,18 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Three kinds of traffic, one QUIC connection per (client, host):
+Three kinds of traffic, one QUIC connection per (client, host). The connection is QUIC over
+plain UDP (n0's `noq`, standalone) with a null crypto provider: every host is reached over
+Tailscale, WireGuard or a VPN, which encrypts and authenticates already, so Slopty adds no
+TLS, no endpoint keys, no relays and no pairing. A host is named by `host[:port]` (a
+`MagicDNS` name, a LAN name or an IP; port 45550 by default) and identified by the `WorkerId`
+in its `HelloAck`; it admits a connection by source address alone — loopback, the tailnet
+(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), private LANs, or the `[host] allow` ranges of its
+`settings.toml` — once per connection, before any handshake state exists.
 
 | Path | QUIC primitive | Payload |
 |---|---|---|
-| Control | one bidirectional stream, length-prefixed `postcard` messages | hello, auth, open/close, resize, canvas doc sync, agent events |
+| Control | one bidirectional stream, length-prefixed `postcard` messages | hello, open/close, resize, canvas doc sync, agent events |
 | Terminal | one unidirectional stream per session, host→client; input on the control stream | grid **row diffs** from the host-side VT engine, scrollback line pages on demand |
 | Media | unreliable datagrams (RFC 9221) | HEVC fragments + Reed–Solomon parity, Opus audio, cursor position/shape; client → host: `Feedback` (NACK, refresh), each datagram standing alone so a lost one never holds the next back |
 
@@ -231,11 +238,12 @@ redirects the database for tests.
 **Deployment.** `slopty host install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
 `dev.aislopware.slopty.hostd`; `KeepAlive`, `RunAtLoad`, `ProcessType Interactive`) with the
 sockets under `<data dir>/run/` and logs in `~/Library/Logs/Slopty`, bootstraps them, and
-prints a pairing ticket; `uninstall` and `service` undo and report. The CLI finds the
-installed socket by itself, so `slopty host ticket` works without launchd's environment.
+waits for the daemon to answer; `uninstall` and `service` undo and report. The CLI finds the
+installed socket by itself, so `slopty host status` works without launchd's environment.
 `slopty host doctor` asks the running daemon about itself (`CtlRequest::Doctor` →
 `Health`): Screen Recording and Accessibility as *that binary* sees them (TCC grants are per
-executable, so the report names the path to add), reach, port, connected clients, sessions;
+executable, so the report names the path to add), listen address, admitted ranges, connected
+clients, sessions;
 exit status 1 while a permission is missing, so it can gate a setup script. For an ad-hoc
 (`cargo build`) binary "per executable" means per build: the cdhash changes and the grant is gone,
 silently. `cargo xtask sign` (and `xtask run host`, which calls it) signs both daemons under
@@ -254,7 +262,7 @@ SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInt
                          AllowFrameReordering=false, AllowOpenGOP=false, MaxFrameDelayCount=0,
                          EnableLTR, MaxKeyFrameInterval=∞, AverageBitRate + DataRateLimits)
   → packetize (≤1200 B datagrams, 16 B header) → reed-solomon-simd parity per frame
-  → iroh datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
+  → QUIC datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
 client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffer (IOSurface)
   → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (vsync off)
 ```
@@ -877,25 +885,27 @@ terminal element re-measures its cell grid from the new size on the next frame a
 resizes the session. iOS reads the same path (in its sandbox); the in-app editor is its
 only way to change it.
 
-**Hosts.** The app holds every paired host at once: one `HostLink` (own iroh endpoint,
-own reconnect loop, own silence check) and one `CanvasView` per host (`slopty_app::hosts`),
+**Hosts.** The app holds every added host at once: one `HostLink` (on the process's one
+client endpoint, with its own reconnect loop and silence check) and one `CanvasView` per host (`slopty_app::hosts`),
 because each host owns its canvas document. A dropped link drops the canvas and the next
 connection makes a new one, told where the old one was (`HostSlot::resume` →
 `CanvasView::resume_at`: the camera at once, the active card once the snapshot brings it).
 One canvas is on show; the host name in the top
-bar is the switcher (status dot: green connected, amber connecting / reconnecting, red needs
-pairing; rows list every host with "forget", then "Add host…"), ⌘⌥→ / ⌘⌥← and the Host menu
+bar is the switcher (status dot: green connected, amber connecting / reconnecting; rows list
+every host with "forget", then "Add host…"), ⌘⌥→ / ⌘⌥← and the Host menu
 step through them, and on a phone the same tap on the name opens it. The "N need you" pill
 and the Dock badge count agents across all hosts; a tap jumps to the next one, switching host
 when the one on show has none. A banner names only a session, so its response finds the host
-whose canvas holds it, switches, then answers or reveals. The pairing store is the map in
-`client.json` (`slopty_net::identity`); the panel appears with no host paired, or on "Add
-host…" (with a Cancel), and a fresh pairing joins the switcher without touching the others.
+whose canvas holds it, switches, then answers or reveals. The known hosts are
+`workers.json` in the client's data dir (`slopty_net::known`): a list of `{ address, name,
+worker_id }` keyed by the id, so a host that moves keeps its row and canvas; a dial that
+reaches another id at a stored address says so instead of mixing canvases.
 
-**Pairing.** Unpaired installations show a pairing panel instead of the canvas: paste the
-ticket `slopty host ticket` printed on the host (a "Paste & pair" button reads the clipboard,
-which is the only practical path on a phone). `slopty_app::net::pair_host` redeems it the same
-way the CLI does and the host's connect loop starts.
+**Adding a host.** An installation with no host shows the add-host panel instead of the
+canvas, as does "Add host…" (with a Cancel): type or paste an address (`mac-studio`,
+`100.64.0.3`, `host:45551`; "Paste & add" reads the clipboard, the practical path on a phone).
+`slopty_app::net::add_worker` connects, says `Hello`, and stores the host under the id its
+`HelloAck` carries, the same as `slopty add` on the CLI.
 
 ## 7. Crate map
 
@@ -907,7 +917,7 @@ way the CLI does and the host's connect loop starts.
 | `slopty-engine` | libghostty-vt engine: frames, scrollback, input encoders | host |
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | host |
 | `slopty-predict` | speculative local echo | client |
-| `slopty-net` | iroh endpoint (`Reach::Anywhere` relays+pkarr, or `DirectOnly`), pairing/auth, channels | all |
+| `slopty-net` | plaintext QUIC endpoint (noq + null crypto provider), `host[:port]` addresses, admission by source address, known workers, framed channels | all |
 | `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
 | `slopty-capture` | ScreenCaptureKit | host |
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |
@@ -919,14 +929,14 @@ way the CLI does and the host's connect loop starts.
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
 | `slopty-platform` | process-level platform helpers: keep the process out of App Nap and timer coalescing while a session is live, and raise the user's attention | all |
-| `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, pairing panel, one link loop per host, settings | client |
+| `slopty-app` | the app shell shared by macOS and iOS: workspace window, host switcher, add-host panel, one link loop per host, settings | client |
 | `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff, frame-time scenarios (`cargo xtask e2e app\|ios\|smooth\|smooth-ios`), and `slopty-idle-window`, a window the harness owns so a capture target that never draws can be tested without touching anything else on the desktop | dev |
 | `slopty-shape` | a UDP relay the client and host speak QUIC through, with a delay/jitter/loss/rate model below the congestion controller; the degraded link the congestion rulings are measured on | dev |
 | `apps/slopty-ptyd` | PTY custodian daemon (LaunchAgent) | host |
 | `apps/slopty-hostd` | host daemon | host |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
 | `apps/slopty-ios` | iOS static library (`slopty_ios_run` called from a UIKit shim); `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
-| `apps/slopty-cli` | `slopty` CLI: host ctl, pairing, raw-mode reference client (`open`/`attach`), hook relay | host |
+| `apps/slopty-cli` | `slopty` CLI: host ctl, `add`/`workers`/`forget`, raw-mode reference client (`open`/`attach`), hook relay | host |
 | `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|ios|host|screen|input|all` for the self-test and the gated live tests) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-host`.

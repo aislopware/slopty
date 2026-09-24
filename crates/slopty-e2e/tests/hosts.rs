@@ -1,9 +1,11 @@
 //! One client, two hosts on two machines: cross-host attention against a real second host.
 //!
-//! Runs only with `SLOPTY_HOST2_E2E=1` and `SLOPTY_HOST2=<ssh name>` (`cargo xtask e2e hosts`).
+//! Runs only with `SLOPTY_HOST2_E2E=1` and `SLOPTY_HOST2=<ssh name>` (`cargo xtask e2e hosts`);
+//! `SLOPTY_HOST2_ADDR` names the address the app adds host B by when the ssh destination is an
+//! alias no resolver knows (its host part is used otherwise).
 //! Stack A is ptyd + hostd + the app on this Mac, as `e2e app` builds it; host B is ptyd +
 //! hostd started over ssh on the second machine under one temp root, with a private HOME so its
-//! real `~/.claude` is never touched and `slopty hook install` is never run. The app pairs with
+//! real `~/.claude` is never touched and `slopty hook install` is never run. The app adds
 //! both and drives, in one serial test so host B is set up once:
 //!
 //! 1. the dump shows two connected hosts;
@@ -100,14 +102,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Host B on the second machine, over ssh. Pair the app with it too.
+        // Host B on the second machine, over ssh. The app adds it by address too.
         let launch_b = Instant::now();
-        let (mut host_b, ticket_b) = RemoteHost::launch(&ssh).await.unwrap();
+        let (mut host_b, address_b) = RemoteHost::launch(&ssh).await.unwrap();
         println!(
             "MEASURE hosts: brought host B up on {ssh} in {:.1} s",
             launch_b.elapsed().as_secs_f64()
         );
-        stack.driver.ok(&Command::Pair { ticket: ticket_b }).await.unwrap();
+        stack.driver.ok(&Command::AddHost { address: address_b }).await.unwrap();
 
         // (1) Two connected hosts.
         stack
@@ -118,7 +120,7 @@ mod tests {
             })
             .await
             .unwrap();
-        // Pairing left host B on show. Read its link RTT once it is sampled (once a second).
+        // Adding left host B on show. Read its link RTT once it is sampled (once a second).
         let d = stack
             .driver
             .wait_for("host B's RTT sampled", STEP, |d| {
@@ -128,11 +130,10 @@ mod tests {
             .unwrap();
         let b = d.hosts.iter().find(|h| h.name == "macbook").unwrap();
         println!(
-            "MEASURE hosts: mesh RTT to host B {:.1} ms ({})",
+            "MEASURE hosts: mesh RTT to host B {:.1} ms",
             Duration::from_micros(b.rtt_us.unwrap()).as_secs_f64() * 1e3,
-            if b.relayed == Some(true) { "via relay" } else { "direct" }
         );
-        assert!(active_name(&d) == Some("macbook"), "pairing shows the new host: {d:#?}");
+        assert!(active_name(&d) == Some("macbook"), "adding shows the new host: {d:#?}");
 
         // (2) Open a shell on host B (⌘N) and round-trip a command over the mesh.
         stack.driver.keys("cmd-n").await.unwrap();

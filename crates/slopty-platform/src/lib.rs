@@ -2,13 +2,11 @@
 //! a session is live, and raise the user's attention.
 //!
 //! macOS throttles timers and network work of applications whose windows are occluded or
-//! hidden (App Nap) and coalesces timers of background processes. iroh's per-path heartbeat is
-//! 5 s against a 15 s idle timeout, so a throttled peer can stop answering on its direct path
-//! long enough for the other side to abandon it and fall back to the relay. An [`Activity`]
-//! with `LatencyCritical` tells the system this process must keep its timers sharp; the app
-//! and the host daemon hold one for their whole run. (A 43 s direct → relay flap was seen on
-//! 2026-09-04; covering the window for 70 s did *not* reproduce it, so this is a precaution,
-//! not the confirmed cause. Path events are logged on both ends to catch the next one.)
+//! hidden (App Nap) and coalesces timers of background processes. The QUIC keep-alive is 5 s
+//! and the app gives a silent host up after 15 s, so a throttled peer can go quiet long enough
+//! for the other side to drop the link. An [`Activity`] with `LatencyCritical` tells the system
+//! this process must keep its timers sharp; the app and the host daemon hold one for their
+//! whole run.
 
 #![cfg(any(target_os = "macos", target_os = "ios"))]
 

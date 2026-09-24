@@ -17,11 +17,12 @@ use crate::tools::step;
 /// Which live tests to run.
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Case {
-    /// ptyd + hostd + the real app, driven through its test socket: pair, open a shell, type,
+    /// ptyd + hostd + the real app, driven through its test socket: add the host, open a
+    /// shell, type,
     /// read the rows back, render frames with the app's own renderer and compare them with
     /// the goldens. No permissions needed.
     App,
-    /// ptyd + hostd + a paired client over loopback iroh: open a shell, read its output. No
+    /// ptyd + hostd + a client over loopback QUIC: open a shell, read its output. No
     /// permissions needed.
     Host,
     /// Window geometry, a display stream and the stream through hostd. Needs Screen Recording
@@ -37,8 +38,8 @@ pub enum Case {
     /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
     /// indicative only, the simulator has no GPU-backed display link.
     SmoothIos,
-    /// Two clients on one host: two app processes on this Mac, each on its own socket, paired
-    /// with the same daemons; a terminal opened on one appears on the other, typing on both is
+    /// Two clients on one host: two app processes on this Mac, each on its own socket, both
+    /// added to the same daemons; a terminal opened on one appears on the other, typing on both is
     /// serialised, attention badges both, a client dying leaves the other streaming, closing
     /// and notes propagate. No permissions needed (the display scenario also needs
     /// `SLOPTY_SCREEN_E2E`).
@@ -47,8 +48,9 @@ pub enum Case {
     /// the phone on one host.
     PairIos,
     /// One client, two hosts on two machines: ptyd + hostd + the app here, ptyd + hostd on a
-    /// second machine over ssh (`SLOPTY_HOST2=<ssh name>`), under a temp root there with a
-    /// private HOME. Proves cross-host attention against a real remote daemon: two hosts pair,
+    /// second machine over ssh (`SLOPTY_HOST2=<ssh name>`, `SLOPTY_HOST2_ADDR` when the app
+    /// must add it by another address), under a temp root there with a private HOME. Proves
+    /// cross-host attention against a real remote daemon: the app adds two hosts,
     /// a shell on the second round-trips over the mesh, a permission hook played to it through
     /// `slopty hook` badges the cross-host pill and routes a banner back to it, and killing it
     /// mid-stream turns its row amber then green on restart. No permissions needed.
@@ -57,7 +59,7 @@ pub enum Case {
     /// machine).
     All,
     /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
-    /// through its test socket: pair, open a shell, type, read the rows back, render frames
+    /// through its test socket: add the host, open a shell, type, read the rows back, render frames
     /// against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
     Ios,
 }

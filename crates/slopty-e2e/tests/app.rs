@@ -1,4 +1,4 @@
-//! The real app, driven from inside: pair with a host, open a shell, type, read the rows back,
+//! The real app, driven from inside: add a host, open a shell, type, read the rows back,
 //! render frames with the app's own renderer and compare them with the goldens.
 //!
 //! Runs only with `SLOPTY_APP_E2E=1` (`cargo xtask e2e app`), since it launches the app. Every

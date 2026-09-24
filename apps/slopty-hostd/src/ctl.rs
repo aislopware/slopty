@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use slopty_agent::Hook;
-use slopty_host::ctl::{CtlReply, CtlRequest, Health, PairedSummary};
+use slopty_host::ctl::{CtlReply, CtlRequest, Health};
 use slopty_proto::HostMsg;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -53,11 +53,8 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
 
 async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
     match req {
-        CtlRequest::Ticket => {
-            CtlReply::Ticket { ticket: daemon.listener.pair_ticket().await.to_string() }
-        }
         CtlRequest::Status => CtlReply::Status {
-            id: daemon.listener.addr().id.to_string(),
+            id: daemon.id,
             name: daemon.name.clone(),
             sessions: daemon.host.summaries().await,
         },
@@ -67,8 +64,8 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
                 .map_or_else(|_| "?".to_owned(), |p| p.display().to_string()),
             screen_recording: slopty_capture::can_capture(),
             post_events: slopty_input::can_post(),
-            reach: format!("{:?}", daemon.listener.reach()),
-            port: daemon.port,
+            listen: daemon.listen.to_string(),
+            allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
             // Every connection subscribes to the event broadcast, plus the daemon's own keep.
             clients: daemon.events.receiver_count().saturating_sub(1),
             sessions: daemon.host.summaries().await.len(),
@@ -78,33 +75,6 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             let (live, closed) = daemon.screens.summaries();
             CtlReply::Screens { live, closed }
         }
-        CtlRequest::Paired => {
-            let store = daemon.listener.store();
-            let paired = store
-                .lock()
-                .await
-                .paired()
-                .into_iter()
-                .map(|(id, p)| PairedSummary {
-                    endpoint: id.to_string(),
-                    client: p.client,
-                    name: p.name,
-                    paired_at: p.paired_at,
-                })
-                .collect();
-            CtlReply::Paired { paired }
-        }
-        CtlRequest::Revoke { endpoint } => match endpoint.parse() {
-            Ok(id) => {
-                let store = daemon.listener.store();
-                let revoked = store.lock().await.revoke(&id);
-                match revoked {
-                    Ok(removed) => CtlReply::Ok { changed: removed },
-                    Err(e) => CtlReply::Error { message: e.to_string() },
-                }
-            }
-            Err(e) => CtlReply::Error { message: format!("bad endpoint id: {e}") },
-        },
         CtlRequest::Hook { session, payload } => match Hook::parse(&payload) {
             Ok(hook) => {
                 if daemon.host.get(session).is_err() {

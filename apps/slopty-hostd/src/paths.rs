@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use slopty_core::HostId;
+use slopty_core::WorkerId;
 
 /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`.
 pub fn data_dir() -> PathBuf {
@@ -22,14 +22,14 @@ pub fn ctl_socket() -> PathBuf {
     std::env::temp_dir().join("slopty").join("hostd.sock")
 }
 
-/// The stable host id, created on first run.
-pub fn host_id(data_dir: &std::path::Path) -> Result<HostId> {
-    let path = data_dir.join("host-id");
+/// The stable worker id, created on first run.
+pub fn worker_id(data_dir: &std::path::Path) -> Result<WorkerId> {
+    let path = data_dir.join("worker-id");
     if let Ok(text) = std::fs::read_to_string(&path) {
         let uuid = text.trim().parse().with_context(|| format!("parse {}", path.display()))?;
-        return Ok(HostId::from_uuid(uuid));
+        return Ok(WorkerId::from_uuid(uuid));
     }
-    let id = HostId::new();
+    let id = WorkerId::new();
     std::fs::write(&path, id.as_uuid().to_string())
         .with_context(|| format!("write {}", path.display()))?;
     Ok(id)

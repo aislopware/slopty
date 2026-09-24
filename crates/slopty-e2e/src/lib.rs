@@ -50,10 +50,10 @@ pub enum Button {
 pub enum Command {
     /// Liveness.
     Ping,
-    /// Redeem a pairing ticket and connect, as the pairing panel would.
-    Pair {
-        /// `sloptypair…` from `slopty host ticket` or `slopty-hostd --print-ticket`.
-        ticket: String,
+    /// Add a host by address and connect, as the add-host panel would.
+    AddHost {
+        /// `host[:port]`.
+        address: String,
     },
     /// Dispatch keystrokes in GPUI's binding syntax, space separated (`cmd-n`, `enter`,
     /// `ctrl-c`, `a`).
@@ -379,10 +379,10 @@ pub enum Reply {
 pub struct Dump {
     /// The window.
     pub window: WindowInfo,
-    /// Every paired host, in switcher order.
+    /// Every added host, in switcher order.
     pub hosts: Vec<HostInfo>,
-    /// The pairing panel is showing.
-    pub pairing: bool,
+    /// The add-host panel is showing.
+    pub adding: bool,
     /// The status text in the top bar.
     pub status: String,
     /// The transient notice in the top bar, if any.
@@ -499,7 +499,7 @@ pub struct WindowInfo {
     pub active: bool,
 }
 
-/// One paired host.
+/// One added host.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct HostInfo {
     /// Display name.
@@ -516,10 +516,6 @@ pub struct HostInfo {
     /// readout); `None` before the first sample.
     #[serde(default)]
     pub rtt_us: Option<u64>,
-    /// Whether this link's path goes through a relay rather than direct; `None` before the
-    /// first sample.
-    #[serde(default)]
-    pub relayed: Option<bool>,
 }
 
 /// One canvas item.

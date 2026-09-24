@@ -92,12 +92,10 @@ fn menus() -> Vec<Menu> {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-            |_| {
-                // iroh's path events carry the abandon reason; always keep them.
-                tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
-            },
-        ))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

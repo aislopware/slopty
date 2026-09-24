@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty host daemon: serves terminal sessions and remote windows to paired clients over iroh"
+description = "Slopty host daemon: serves terminal sessions and remote windows to clients over QUIC"
 
 [lints]
 workspace = true
@@ -24,15 +24,15 @@ slopty-capture.workspace = true
 slopty-core.workspace = true
 slopty-host.workspace = true
 slopty-input.workspace = true
-slopty-net = { workspace = true, features = [ "mdns" ] }
+slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
+slopty-settings.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 objc2-application-services.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
@@ -41,6 +41,5 @@ serde_json.workspace = true
 slopty-host.workspace = true
 slopty-media.workspace = true
 slopty-shape.workspace = true
-libc.workspace = true
 slopty-client.workspace = true
 tempfile.workspace = true

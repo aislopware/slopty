@@ -3271,3 +3271,44 @@ top of both rows alike.
 location 13.8 µs, which the cursor loop paid through a `spawn_blocking` hop 120 times a second
 per open window; the four move/drag counters (`CGEventSourceCounterForEventType`) 43 ns, read
 inline. The pointer itself is now asked for only when the counters moved.
+
+## 2026-09-24 — plaintext QUIC on noq against iroh: connect time and control-stream round trip
+
+Setup: mac-studio, debug builds, `slopty-ptyd` + `slopty-hostd` on port 45597 with private
+sockets and data dirs, `slopty ping --count 20` five times per row. The machine was busy (load
+average ~20: other sessions compiling) for both builds alike, so the tails are noisy; the
+medians are the claim. "Connected in" is new in `slopty ping`: from before the client endpoint
+is bound to the host's `HelloAck`, so it includes the bind. The iroh rows dialled the ticket's
+addresses, which iroh resolved to the LAN address (`192.168.100.240`); the noq rows dial the
+address given.
+
+| build, path                              | connected in (5 runs)            | app rtt median (5 runs)        | QUIC rtt   |
+| ---------------------------------------- | -------------------------------- | ------------------------------ | ---------- |
+| iroh 1.2.0, `Anywhere` (relays on)       | 44 208 (cold), 29, 33, 34, 33 ms | 1.49, 1.04, 0.87, 1.16, 0.93 ms | 2.2–2.9 ms |
+| iroh 1.2.0, `DirectOnly`                 | 22, 31, 28, 32, 27 ms            | 1.15, 1.23, 1.29, 1.27, 1.16 ms | 1.7–2.5 ms |
+| noq, plaintext, `127.0.0.1`              | 42, 44, 6.9, 6.6, 8.6 ms         | 0.50, 0.48, 0.34, 0.35, 0.47 ms | 1.1–2.5 ms |
+| noq, plaintext, `192.168.100.240` (LAN)  | 12, 13, 14, 10, 11 ms            | 0.60, 0.53, 0.46, 0.50, 0.63 ms | 1.0–2.4 ms |
+| noq, plaintext, `100.64.0.3` (tailnet IP) | 14, 15, 7.2, 7.1, 7.8 ms         | 1.13, 0.68, 0.63, 0.66, 0.67 ms | 1.7–4.3 ms |
+
+Reading: on the same LAN address the median round trip halves (≈1.2 ms → ≈0.55 ms) and a
+connection is up in a third of the time (≈30 ms → ≈11 ms); on loopback the steady connect is
+7–9 ms. The first iroh `Anywhere` connect took 44 s (the relay and discovery warming while the
+ticket's direct address waited); nothing in the noq path can wait on a third party. The two
+40 ms loopback connects are the first two runs after hostd started, not a steady cost.
+
+```sh
+# common: R=/tmp/slopty-meas; SLOPTY_PTYD_SOCKET=$R/ptyd.sock SLOPTY_HOSTD_SOCKET=$R/hostd.sock
+#         SLOPTY_PORT=45597 SLOPTY_NO_SHELL_INTEGRATION=1; slopty-ptyd running
+# before (main a88e2e3 plus the "connected in" line; add SLOPTY_DIRECT_ONLY=1 for that row):
+SLOPTY_DATA_DIR=$R/host slopty-hostd --print-ticket > $R/ticket &
+SLOPTY_DATA_DIR=$R/client slopty pair "$(head -1 $R/ticket)"
+SLOPTY_DATA_DIR=$R/client slopty ping --count 20          # ×5
+# after (this branch):
+SLOPTY_DATA_DIR=$R/host slopty-hostd --print-addr &
+SLOPTY_DATA_DIR=$R/client slopty ping --host 127.0.0.1:45597 --count 20   # ×5, then the LAN and tailnet IPs
+```
+
+Not measured: the shaped screen ladder (`screen_over_a_shaped_link`). It runs only against a
+launchd-installed host (TCC grants capture to nothing else), and installing this branch's
+daemons would have replaced the host the user runs. BBR3 against Cubic, and a 2 MB Cubic
+initial window, stay unmeasured on this transport; the tuning carried over unchanged.

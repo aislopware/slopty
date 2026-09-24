@@ -1,10 +1,10 @@
-//! Several hosts in one app: one link and one canvas per paired host, one shown at a time.
+//! Several workers in one app: one link and one canvas per added worker, one shown at a time.
 
 use std::time::Duration;
 
 use gpui::Entity;
 use slopty_client::HostLink;
-use slopty_net::EndpointId;
+use slopty_core::WorkerId;
 use slopty_ui::canvas::CanvasView;
 
 /// GPUI actions for the host switcher.
@@ -22,7 +22,7 @@ pub mod actions {
             NextHost,
             /// Show the previous host's canvas.
             PrevHost,
-            /// Open the pairing panel to add a host.
+            /// Open the panel that adds a worker by address.
             AddHost,
             /// Forget the host being shown.
             ForgetHost,
@@ -39,8 +39,6 @@ pub enum HostStatus {
     Connected,
     /// Link lost or the attempt failed; retrying with the reason.
     Reconnecting(String),
-    /// The host no longer knows this client: pair again with a fresh ticket.
-    NeedsPairing,
 }
 
 impl HostStatus {
@@ -51,16 +49,15 @@ impl HostStatus {
             Self::Connecting => "connecting…".to_owned(),
             Self::Connected => "connected".to_owned(),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
-            Self::NeedsPairing => "needs pairing".to_owned(),
         }
     }
 }
 
-/// One paired host as the workspace sees it.
+/// One added worker as the workspace sees it.
 pub struct HostSlot {
-    /// Transport identity (the pairing store's key).
-    pub id: EndpointId,
-    /// Display name (from the pairing, refreshed by each `HelloAck`).
+    /// Its identity (the known-workers store's key).
+    pub id: WorkerId,
+    /// Display name (from the store, refreshed by each `HelloAck`).
     pub name: String,
     /// Link state.
     pub status: HostStatus,
@@ -70,10 +67,8 @@ pub struct HostSlot {
     pub zoom: f32,
     /// Agents on this host waiting on the human.
     pub needs_you: usize,
-    /// Link RTT, relay use and silence, sampled once a second while connected.
+    /// Link RTT and silence, sampled once a second while connected.
     pub rtt: Option<Duration>,
-    /// Whether the path goes through a relay.
-    pub relayed: Option<bool>,
     /// How long the host has sent nothing, once past the warning bar.
     pub silent: Option<Duration>,
     /// The live link, to abandon it when the host is forgotten.
@@ -96,9 +91,9 @@ impl std::fmt::Debug for HostSlot {
 }
 
 impl HostSlot {
-    /// A slot for a paired host, before its first connection attempt.
+    /// A slot for an added worker, before its first connection attempt.
     #[must_use]
-    pub const fn new(id: EndpointId, name: String) -> Self {
+    pub const fn new(id: WorkerId, name: String) -> Self {
         Self {
             id,
             name,
@@ -107,7 +102,6 @@ impl HostSlot {
             zoom: 1.0,
             needs_you: 0,
             rtt: None,
-            relayed: None,
             silent: None,
             link: None,
             subscriptions: Vec::new(),
@@ -130,7 +124,6 @@ impl HostSlot {
         self.link = None;
         self.needs_you = 0;
         self.rtt = None;
-        self.relayed = None;
         self.silent = None;
         self.status = status;
     }

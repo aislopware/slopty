@@ -197,9 +197,12 @@ pub async fn install(opts: &InstallOpts) -> Result<()> {
     let socket = layout.hostd_socket();
     let started = Instant::now();
     loop {
-        match hostctl::call_at(&socket, CtlRequest::Ticket).await {
-            Ok(CtlReply::Ticket { ticket }) => {
-                println!("\npair a client with:\n{ticket}");
+        match hostctl::call_at(&socket, CtlRequest::Status).await {
+            Ok(CtlReply::Status { name, .. }) => {
+                println!(
+                    "\n{name} is up; add it from a client with `slopty add <this Mac's tailnet \
+                     name or IP>` or the app's \"Add host…\""
+                );
                 return Ok(());
             }
             Ok(other) => bail!("unexpected reply {other:?}"),

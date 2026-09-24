@@ -1,7 +1,7 @@
 //! Two clients on one host, each driven through its own test socket.
 //!
 //! Runs only with `SLOPTY_PAIR_E2E=1` (`cargo xtask e2e pair`): ptyd, hostd and two app
-//! processes on this Mac, the second paired with a ticket of its own. With
+//! processes on this Mac, the second adding the same host address. With
 //! `SLOPTY_PAIR_IOS_E2E=1` (`cargo xtask e2e pair-ios [--sim iphone|ipad]`) the second client
 //! is the app in the simulator, running the subset the phone supports.
 //!
@@ -600,7 +600,7 @@ mod tests {
         );
         assert!(stall <= STALL_LIMIT, "B stalled for {stall:?} when A died");
 
-        // A comes back on the same identity: no ticket, the same two items, current rows.
+        // A comes back on the same identity: nothing to add, the same two items, current rows.
         pair.stack.relaunch_app().await.unwrap();
         let a = &mut pair.stack.driver;
         let da = a

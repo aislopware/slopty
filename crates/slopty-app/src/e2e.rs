@@ -57,15 +57,15 @@ pub fn serve(
     cx.spawn(async move |cx| {
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
-                Command::Pair { ticket } => {
+                Command::AddHost { address } => {
                     let (done_tx, done_rx) = oneshot::channel();
                     handle.spawn(async move {
-                        let _sent = done_tx.send(net::pair_host(&ticket).await);
+                        let _sent = done_tx.send(net::add_worker(&address).await);
                     });
                     match done_rx.await {
-                        Ok(Ok(net::Paired { id, name })) => {
+                        Ok(Ok(net::Added { id, name })) => {
                             workspace.update(cx, |ws, cx| {
-                                ws.pairing = None;
+                                ws.adding = None;
                                 ws.add_host(id, name, cx);
                                 ws.active = Some(id);
                                 cx.notify();
@@ -73,7 +73,7 @@ pub fn serve(
                             Reply::Ok
                         }
                         Ok(Err(e)) => error(&e),
-                        Err(_dropped) => Reply::Error { message: "pairing task died".into() },
+                        Err(_dropped) => Reply::Error { message: "add task died".into() },
                     }
                 }
                 Command::Render { path } => {
@@ -526,7 +526,7 @@ fn apply(
             Reply::Ok
         }
         Command::Dump
-        | Command::Pair { .. }
+        | Command::AddHost { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }
@@ -697,7 +697,6 @@ impl Workspace {
                 active: self.active == Some(h.id),
                 needs_you: h.needs_you,
                 rtt_us: h.rtt.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
-                relayed: h.relayed,
             })
             .collect();
         let mut dump = Dump {
@@ -709,7 +708,7 @@ impl Workspace {
                 active: window.is_window_active(),
             },
             hosts,
-            pairing: self.pairing.is_some(),
+            adding: self.adding.is_some(),
             status: self.status_text(),
             notice: self.notice.as_ref().map(|(_seq, text)| text.clone()),
             frames: frame_info(slopty_ui::frames::stats(cx)),

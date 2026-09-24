@@ -1,22 +1,25 @@
 //! Client side: connect, say hello, get the control stream.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use noq::{Connection, Endpoint};
 use slopty_proto::handshake::{Hello, HelloAck, Rejection};
 use slopty_proto::terminal::TermEvent;
 use slopty_proto::{ClientMsg, HostMsg, StreamHeader};
 
-use crate::endpoint::{Reach, Role, bind};
+use crate::NetError;
+use crate::addr::HostAddr;
 use crate::framed::{FramedRecv, FramedSend};
-use crate::pairing::PairTicket;
-use crate::{ALPN, NetError};
 
+/// How long the QUIC handshake may take before the address counts as unreachable. A path that
+/// answers at all answers in one round trip; without this a dead address waits out the 45 s idle
+/// timeout.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to wait for the host's answer to `Hello`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Errors from the handshake, distinguished so the UI can react (re-pair vs. update).
+/// Errors from the handshake, distinguished so the UI can react (retry vs. update).
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
     /// The host refused.
@@ -32,8 +35,8 @@ pub enum HandshakeError {
 pub struct HostConn {
     /// The QUIC connection.
     pub conn: Connection,
-    /// Host identity.
-    pub remote: EndpointId,
+    /// The address that answered.
+    pub remote: SocketAddr,
     /// What the host told us.
     pub ack: HelloAck,
     /// Control stream, client → host.
@@ -42,52 +45,60 @@ pub struct HostConn {
     pub rx: FramedRecv<HostMsg>,
 }
 
-/// Bind a client endpoint.
-pub async fn bind_client(secret: SecretKey, reach: Reach) -> Result<Endpoint, NetError> {
-    bind(secret, Role::Client, reach).await
+/// Bind a client endpoint on every interface, both families, any free port. One per process is
+/// enough: connections come and go on it independently.
+pub fn bind_client() -> Result<Endpoint, NetError> {
+    crate::endpoint::bind(crate::endpoint::any(0), false)
 }
 
-/// Bind a client on loopback that can reach nothing else.
-///
-/// No relays, no DNS, no LAN lookup, and no route off `127.0.0.1`. A shaped measurement dials a
-/// relay it controls there, and the run means nothing once the connection has found the host by
-/// another route; see [`Local::Pinned`](crate::endpoint::Local::Pinned).
-pub async fn bind_pinned_client(secret: SecretKey) -> Result<Endpoint, NetError> {
-    let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
-    crate::endpoint::bind_at(
-        secret,
-        Role::Client,
-        Reach::DirectOnly,
-        crate::endpoint::Local::Pinned(loopback),
-    )
-    .await
-}
-
-/// Connect using a pairing ticket: the token goes into `hello.pair_token`. `reach` must be
-/// what `endpoint` was bound with.
-pub async fn connect_with_ticket(
-    endpoint: &Endpoint,
-    reach: Reach,
-    ticket: &PairTicket,
-    mut hello: Hello,
-) -> Result<HostConn, HandshakeError> {
-    hello.pair_token = Some(ticket.token);
-    connect(endpoint, reach, ticket.addr.clone(), hello).await
-}
-
-/// Connect to a host we are already paired with (or with `hello.pair_token` set by the caller).
-/// `reach` must be what `endpoint` was bound with.
+/// Connect to `addr` by name: each address it resolves to in turn, IPv4 first (a tailnet's
+/// IPv4 address is the one every peer has), until one completes the handshake.
 pub async fn connect(
     endpoint: &Endpoint,
-    reach: Reach,
-    addr: EndpointAddr,
+    addr: &HostAddr,
     hello: Hello,
 ) -> Result<HostConn, HandshakeError> {
-    // A direct-only endpoint has no relays; an address stored by an earlier pairing may still
-    // carry one. Drop it so the dial cannot wait on a relay we will never use.
-    let addr = if reach.is_direct_only() { direct_only(addr) } else { addr };
-    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| NetError::Connect(e.to_string()))?;
-    let remote = conn.remote_id();
+    let mut candidates = addr.resolve().await?;
+    candidates.sort_by_key(SocketAddr::is_ipv6);
+    let mut last = NetError::Connect(format!("{addr}: no address"));
+    for candidate in candidates {
+        match dial(endpoint, candidate, addr.host()).await {
+            Ok(conn) => return greet(conn, candidate, hello).await,
+            Err(e) => {
+                tracing::debug!(%addr, %candidate, error = %e, "address did not answer");
+                last = e;
+            }
+        }
+    }
+    Err(last.into())
+}
+
+/// Connect to one socket address.
+pub async fn connect_addr(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    hello: Hello,
+) -> Result<HostConn, HandshakeError> {
+    let conn = dial(endpoint, addr, &addr.ip().to_string()).await?;
+    greet(conn, addr, hello).await
+}
+
+/// The QUIC handshake alone.
+async fn dial(endpoint: &Endpoint, addr: SocketAddr, name: &str) -> Result<Connection, NetError> {
+    let connecting =
+        endpoint.connect(addr, name).map_err(|e| NetError::Connect(format!("{addr}: {e}")))?;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)
+        .await
+        .map_err(|_elapsed| NetError::Connect(format!("{addr}: no answer")))?
+        .map_err(|e| NetError::Connect(format!("{addr}: {e}")))
+}
+
+/// `Hello` on a fresh control stream, and the host's answer.
+async fn greet(
+    conn: Connection,
+    remote: SocketAddr,
+    hello: Hello,
+) -> Result<HostConn, HandshakeError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ClientMsg>::new(send);
     let mut rx = FramedRecv::<HostMsg>::new(recv);
@@ -116,15 +127,14 @@ impl HostConn {
         Ok((hdr, header.retype()))
     }
 
-    /// Current RTT on the selected path.
+    /// Current RTT.
     #[must_use]
     pub fn rtt(&self) -> Option<Duration> {
         crate::endpoint::rtt(&self.conn)
     }
-}
 
-/// The same address without its relay entries.
-fn direct_only(addr: EndpointAddr) -> EndpointAddr {
-    let id = addr.id;
-    EndpointAddr::from_parts(id, addr.addrs.into_iter().filter(|a| !a.is_relay()))
+    /// Close the connection.
+    pub fn close(&self) {
+        self.conn.close(0_u32.into(), b"bye");
+    }
 }

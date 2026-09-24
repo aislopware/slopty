@@ -12,22 +12,14 @@ use crate::service;
 
 #[derive(Subcommand, Debug)]
 pub enum HostCmd {
-    /// Print a pairing ticket (valid 10 minutes, single use).
-    Ticket,
     /// Identity and sessions.
     Status,
-    /// Paired clients.
-    Paired,
-    /// Check the daemon's permissions (Screen Recording, Accessibility), reach, port and links.
+    /// Check the daemon's permissions (Screen Recording, Accessibility), listen address,
+    /// admitted ranges and links.
     Doctor,
     /// Screen streams open right now (and the last few closed) with the host-side counters:
     /// capture and encode latency, capture path, drops.
     Screens,
-    /// Revoke a paired client.
-    Revoke {
-        /// Endpoint id (hex).
-        endpoint: String,
-    },
     /// Run `slopty-ptyd` and `slopty-hostd` as `LaunchAgents` (starts now and at every login).
     Install(service::InstallOpts),
     /// Stop the `LaunchAgents` and remove them (open sessions die with ptyd).
@@ -59,12 +51,9 @@ fn socket() -> PathBuf {
 
 pub async fn run(cmd: HostCmd) -> Result<()> {
     let req = match cmd {
-        HostCmd::Ticket => CtlRequest::Ticket,
         HostCmd::Status => CtlRequest::Status,
-        HostCmd::Paired => CtlRequest::Paired,
         HostCmd::Doctor => CtlRequest::Doctor,
         HostCmd::Screens => CtlRequest::Screens,
-        HostCmd::Revoke { endpoint } => CtlRequest::Revoke { endpoint },
         HostCmd::Install(opts) => return service::install(&opts).await,
         HostCmd::Uninstall { data_dir } => return service::uninstall(data_dir.as_deref()),
         HostCmd::Service { data_dir } => {
@@ -73,7 +62,6 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
         }
     };
     match call(req).await? {
-        CtlReply::Ticket { ticket } => println!("{ticket}"),
         CtlReply::Status { id, name, sessions } => {
             println!("{name}  {id}");
             for s in sessions {
@@ -81,11 +69,6 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
                     "  {}  {}x{}  {:?}  {} viewer(s)  {}",
                     s.id, s.cols, s.rows, s.state, s.viewers, s.title
                 );
-            }
-        }
-        CtlReply::Paired { paired } => {
-            for p in paired {
-                println!("{}  {}  {}", p.endpoint, p.name, p.client);
             }
         }
         CtlReply::Doctor(health) => {
@@ -158,7 +141,8 @@ fn doctor_report(h: &slopty_host::ctl::Health) -> String {
     };
     let lines = [
         format!("slopty-hostd {}  ({})", h.version, h.exe),
-        format!("up {} s · reach {} · udp {}", h.uptime_secs, h.reach, h.port),
+        format!("up {} s · listening on {}", h.uptime_secs, h.listen),
+        format!("admits loopback, {}", h.allow.join(", ")),
         format!("{} Screen Recording{screen}", mark(h.screen_recording)),
         format!("{} Accessibility (remote-window input){post}", mark(h.post_events)),
         format!("{} clients connected, {} sessions", h.clients, h.sessions),
@@ -179,8 +163,8 @@ mod tests {
             exe: "/opt/slopty/bin/slopty-hostd".to_owned(),
             screen_recording: true,
             post_events: false,
-            reach: "DirectOnly".to_owned(),
-            port: 45550,
+            listen: "[::]:45550".to_owned(),
+            allow: vec!["100.64.0.0/10".to_owned(), "10.0.0.0/8".to_owned()],
             clients: 2,
             sessions: 3,
             uptime_secs: 61,
@@ -190,5 +174,7 @@ mod tests {
         assert!(report.contains("✔ Screen Recording"));
         assert!(report.contains("✘ Accessibility"));
         assert!(report.contains("2 clients connected, 3 sessions"));
+        assert!(report.contains("listening on [::]:45550"), "{report}");
+        assert!(report.contains("admits loopback, 100.64.0.0/10, 10.0.0.0/8"), "{report}");
     }
 }

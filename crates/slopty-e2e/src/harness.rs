@@ -46,8 +46,8 @@ pub const TRANSCRIPT_DONE: &str = concat!(
 pub struct Stack {
     /// The temporary directory (sockets, data dirs, artifacts).
     pub dir: tempfile::TempDir,
-    /// The host's pairing ticket.
-    pub ticket: String,
+    /// Where the app reaches hostd: `127.0.0.1:<port>`, the port hostd picked.
+    pub address: String,
     /// Connected to the app's test socket.
     pub driver: Driver,
     /// ptyd, hostd, app, and any helper windows; killed on drop.
@@ -65,7 +65,7 @@ pub struct Stack {
 }
 
 /// A second client of the same host: another app process (or the app in a simulator) with
-/// its own data directory, identity and test socket, paired with a ticket of its own.
+/// its own data directory, identity and test socket, that added the same host address.
 #[derive(Debug)]
 pub struct SecondApp {
     /// Connected to its test socket.
@@ -245,7 +245,7 @@ async fn daemons(
         .arg(&ctl_sock)
         .arg("--data-dir")
         .arg(root.join("host"))
-        .arg("--print-ticket")
+        .arg("--print-addr")
         .arg("--port")
         .arg("0")
         .envs(env.iter().copied())
@@ -260,13 +260,19 @@ async fn daemons(
         .spawn()
         .context("spawn slopty-hostd")?;
     let stdout = hostd.stdout.take().context("hostd stdout")?;
-    let mut ticket = String::new();
-    tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut ticket))
+    let mut listen = String::new();
+    tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut listen))
         .await
-        .context("hostd did not print a ticket in time")??;
-    let ticket = ticket.trim().to_owned();
-    anyhow::ensure!(!ticket.is_empty(), "hostd printed an empty ticket");
-    Ok((vec![ptyd, hostd], ticket))
+        .context("hostd did not print its address in time")??;
+    Ok((vec![ptyd, hostd], loopback_address(&listen)?))
+}
+
+/// The loopback address a client dials for a hostd that printed `listen` (`[::]:53211`, or a
+/// specific IP when it was bound to one): the port is what matters.
+fn loopback_address(listen: &str) -> Result<String> {
+    let listen: std::net::SocketAddr =
+        listen.trim().parse().with_context(|| format!("hostd printed {listen:?}"))?;
+    Ok(format!("127.0.0.1:{}", listen.port()))
 }
 
 /// A stand-in for the `claude` binary, written into a run's own directory and put first on
@@ -394,10 +400,10 @@ async fn spawn_simulator_app(
     }
 }
 
-/// Ping, redeem `ticket` and wait for the host to connect.
-async fn pair_driver(driver: &mut Driver, ticket: &str) -> Result<()> {
+/// Ping, add the host at `address` and wait for it to connect.
+async fn add_host(driver: &mut Driver, address: &str) -> Result<()> {
     driver.ok(&crate::Command::Ping).await?;
-    driver.ok(&crate::Command::Pair { ticket: ticket.to_owned() }).await?;
+    driver.ok(&crate::Command::AddHost { address: address.to_owned() }).await?;
     driver
         .wait_for("the host to connect", STARTUP, |d| {
             d.hosts.iter().any(|h| h.active && h.status == "connected")
@@ -406,19 +412,8 @@ async fn pair_driver(driver: &mut Driver, ticket: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mint a fresh pairing ticket over hostd's control socket: tokens are single-use, so every
-/// client after the first needs one of its own.
-async fn mint_ticket(ctl_sock: &Path) -> Result<String> {
-    let reply = ctl(ctl_sock, &json!({ "cmd": "ticket" })).await?;
-    reply
-        .get("ticket")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .with_context(|| format!("hostd did not mint a ticket: {reply}"))
-}
-
 impl Stack {
-    /// Start ptyd, hostd (named `host_name`) and the app; pair the app with the host and wait
+    /// Start ptyd, hostd (named `host_name`) and the app; add the host in the app and wait
     /// until its canvas is up.
     ///
     /// # Errors
@@ -492,12 +487,12 @@ impl Stack {
     ) -> Result<Self> {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (mut children, ticket) = daemons(root, host_name, &log, env).await?;
+        let (mut children, address) = daemons(root, host_name, &log, env).await?;
         let (app, driver) = spawn_app(root, "app", &log, env).await?;
         let app_ix = Some(children.len());
         children.push(app);
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::pair(Self { dir, ticket, driver, children, app_ix, simulator: None, log, app_env })
+        Self::add(Self { dir, address, driver, children, app_ix, simulator: None, log, app_env })
             .await
     }
 
@@ -517,7 +512,7 @@ impl Stack {
     }
 
     /// Start the app again on the same data directory (same identity, same socket path): it
-    /// knows the host and connects by itself, no ticket. Waits for the link to be up.
+    /// knows the host and connects by itself. Waits for the link to be up.
     ///
     /// # Errors
     ///
@@ -542,7 +537,7 @@ impl Stack {
     }
 
     /// [`Self::launch`] plus a second app on the same host: `b` gets its own data directory,
-    /// identity and socket, and pairs with a ticket minted over hostd's control socket. The
+    /// identity and socket, and adds the same host address. The
     /// first app is left to open its first shell before the second comes up, so the two do not
     /// both find an empty canvas and open one each.
     ///
@@ -552,9 +547,8 @@ impl Stack {
     pub async fn launch_pair(host_name: &str) -> Result<Pair> {
         let mut stack = Self::launch(host_name).await?;
         stack.wait_first_shell().await?;
-        let ticket = mint_ticket(&stack.path("hostd.sock")).await?;
         let (child, mut driver) = spawn_app(stack.dir.path(), "b", &stack.log, &[]).await?;
-        pair_driver(&mut driver, &ticket).await?;
+        add_host(&mut driver, &stack.address).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: Some(child), simulator: None } })
     }
 
@@ -567,10 +561,9 @@ impl Stack {
     pub async fn launch_pair_with_simulator(host_name: &str, simulator: Simulator) -> Result<Pair> {
         let mut stack = Self::launch(host_name).await?;
         stack.wait_first_shell().await?;
-        let ticket = mint_ticket(&stack.path("hostd.sock")).await?;
         let mut driver =
             spawn_simulator_app(stack.dir.path(), "b", &stack.log, &simulator, &[]).await?;
-        pair_driver(&mut driver, &ticket).await?;
+        add_host(&mut driver, &stack.address).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
     }
 
@@ -588,7 +581,7 @@ impl Stack {
 
     /// Start ptyd and hostd here and the app in a booted simulator (`simctl launch` with the
     /// socket and data dir in its environment; the simulator shares this file system), then
-    /// pair and wait as [`Self::launch`] does.
+    /// add the host and wait as [`Self::launch`] does.
     ///
     /// # Errors
     ///
@@ -611,12 +604,12 @@ impl Stack {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (children, ticket) = daemons(root, host_name, &log, &[]).await?;
+        let (children, address) = daemons(root, host_name, &log, &[]).await?;
         let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::pair(Self {
+        Self::add(Self {
             dir,
-            ticket,
+            address,
             driver,
             children,
             app_ix: None,
@@ -627,10 +620,10 @@ impl Stack {
         .await
     }
 
-    /// Ping, pair with the host and wait for the connection.
-    async fn pair(mut stack: Self) -> Result<Self> {
-        let ticket = stack.ticket.clone();
-        pair_driver(&mut stack.driver, &ticket).await?;
+    /// Ping, add the host and wait for the connection.
+    async fn add(mut stack: Self) -> Result<Self> {
+        let address = stack.address.clone();
+        add_host(&mut stack.driver, &address).await?;
         Ok(stack)
     }
 
@@ -790,7 +783,7 @@ impl Drop for Stack {
 
 /// A second host on another machine, reached over ssh.
 ///
-/// `slopty-ptyd` and `slopty-hostd` run under one temporary root there, so the app can pair with
+/// `slopty-ptyd` and `slopty-hostd` run under one temporary root there, so the app can add
 /// two hosts at once and the cross-host attention path can be driven against a real remote daemon.
 ///
 /// Everything it creates on the remote lives under `Self::root` and is torn down on
@@ -968,14 +961,34 @@ pub fn host2_gate(gate: Option<&str>, host2: Option<&str>) -> Result<Option<Stri
     }
 }
 
+/// The address the app adds the second host by: `explicit` (`SLOPTY_HOST2_ADDR`) when set,
+/// else the host part of the ssh destination `ssh` (`user@host` or `host`), with `port` unless
+/// the address names its own.
+fn remote_address(explicit: Option<&str>, ssh: &str, port: u16) -> String {
+    let host = explicit
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| ssh.rsplit_once('@').map_or(ssh, |(_user, host)| host));
+    if host.parse::<std::net::SocketAddr>().is_ok()
+        || host.rsplit_once(':').is_some_and(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok())
+    {
+        host.to_owned()
+    } else if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 impl RemoteHost {
     /// Copy the daemons and the `slopty` CLI to `ssh`, start ptyd and hostd there under a fresh
-    /// temp root with a private `HOME`, and return the host with its pairing ticket ready.
+    /// temp root with a private `HOME`, and return the host with the address the app adds it
+    /// by: `SLOPTY_HOST2_ADDR` when set (a tailnet or LAN IP, when the ssh destination is an
+    /// alias no resolver knows), else the host part of the ssh destination, on the fixed port.
     ///
     /// # Errors
     ///
-    /// When ssh is unreachable, a binary is missing, a daemon does not come up, or the ticket
-    /// cannot be minted.
+    /// When ssh is unreachable, a binary is missing, or a daemon does not come up.
     pub async fn launch(ssh: &str) -> Result<(Self, String)> {
         let root = format!("/tmp/slopty-e2e/host2-{}", std::process::id());
         let bin = format!("{root}/bin");
@@ -986,7 +999,7 @@ impl RemoteHost {
         // under our own temp root before anything runs there.
         ensure!(home.starts_with(&root), "private HOME {home} is not under the temp root {root}");
         // A fixed port so a restart (the mid-stream-kill scenario) is reachable at the same
-        // address the app stored at pairing.
+        // address the app stored when it added the host.
         let port = 45_560;
         let name = "macbook".to_owned();
 
@@ -1022,8 +1035,10 @@ impl RemoteHost {
 
         host.ptyd_pid = host.start_ptyd().await?;
         host.hostd_pid = host.start_hostd().await?;
-        let ticket = host.mint_ticket().await?;
-        Ok((host, ticket))
+        host.wait_answering().await?;
+        let address =
+            remote_address(std::env::var("SLOPTY_HOST2_ADDR").ok().as_deref(), ssh, host.port);
+        Ok((host, address))
     }
 
     /// The common environment for a remote daemon: a private HOME and a terminfo dir of its own.
@@ -1053,8 +1068,8 @@ impl RemoteHost {
     }
 
     /// Start hostd on the remote (backgrounded, on a fixed port so a restart keeps the same
-    /// address), returning its pid. The link uses iroh's default reach (direct over the mesh
-    /// when it can, relay otherwise); the app's dump reports which path won.
+    /// address), returning its pid. It listens on every interface, so the app reaches it over
+    /// the mesh or the LAN, whichever the address names.
     async fn start_hostd(&self) -> Result<u32> {
         let env = self.daemon_env();
         let (root, bin, port, name) = (&self.root, &self.bin, self.port, &self.name);
@@ -1110,22 +1125,22 @@ impl RemoteHost {
         }
     }
 
-    /// Mint a fresh pairing ticket over the remote hostd's control socket. The socket file
-    /// appears before the daemon answers on it (over a fast link the first call can land in
-    /// that gap), so a refused call is retried within [`STARTUP`]; the last error carries the
-    /// remote hostd's log tail, which the guard's teardown would otherwise take with it.
-    async fn mint_ticket(&self) -> Result<String> {
+    /// Wait until the remote hostd answers on its control socket. The socket file appears
+    /// before the daemon answers on it (over a fast link the first call can land in that gap),
+    /// so a refused call is retried within [`STARTUP`]; the last error carries the remote
+    /// hostd's log tail, which the guard's teardown would otherwise take with it.
+    async fn wait_answering(&self) -> Result<()> {
         let script =
-            format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host ticket", self.ctl_sock, self.bin);
+            format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host status", self.ctl_sock, self.bin);
         let deadline = tokio::time::Instant::now().checked_add(STARTUP);
         loop {
             match ssh_out(&self.ssh, &script).await {
-                Ok(ticket) => {
+                Ok(status) => {
                     ensure!(
-                        ticket.starts_with("sloptypair"),
-                        "remote hostd did not mint a ticket: {ticket:?}"
+                        status.contains(&self.name),
+                        "remote hostd answered as someone else: {status:?}"
                     );
-                    return Ok(ticket);
+                    return Ok(());
                 }
                 Err(e) if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) => {
                     let log =
@@ -1234,7 +1249,7 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host2_gate, self_excluding, teardown_script};
+    use super::{host2_gate, loopback_address, remote_address, self_excluding, teardown_script};
 
     /// The kill pattern must match the daemons under the root but not the script that holds
     /// the pattern (the remote shell's own command line).
@@ -1247,6 +1262,23 @@ mod tests {
         assert!(re.is_match("/tmp/slopty-e2e/host2-1/bin/slopty hook"));
         assert!(!re.is_match(&teardown_script(&[7], "/tmp/slopty-e2e/host2-1", true)));
         assert!(!re.is_match(&format!("pgrep -lf {pattern} || true")));
+    }
+
+    #[test]
+    fn the_app_dials_loopback_on_the_port_hostd_printed() {
+        assert_eq!(loopback_address("[::]:53211\n").unwrap(), "127.0.0.1:53211");
+        assert_eq!(loopback_address("0.0.0.0:7").unwrap(), "127.0.0.1:7");
+        loopback_address("not an address").unwrap_err();
+    }
+
+    #[test]
+    fn the_second_host_is_added_by_its_ssh_host_unless_an_address_is_given() {
+        assert_eq!(remote_address(None, "macbook-pro", 45_560), "macbook-pro:45560");
+        assert_eq!(remote_address(None, "me@100.64.0.5", 45_560), "100.64.0.5:45560");
+        assert_eq!(remote_address(Some("192.168.1.7"), "macbook-pro", 45_560), "192.168.1.7:45560");
+        assert_eq!(remote_address(Some("10.0.0.2:9"), "x", 45_560), "10.0.0.2:9");
+        assert_eq!(remote_address(Some("fd7a:115c:a1e0::5"), "x", 1), "[fd7a:115c:a1e0::5]:1");
+        assert_eq!(remote_address(Some(" "), "host", 1), "host:1", "blank is unset");
     }
 
     #[test]

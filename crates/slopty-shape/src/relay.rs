@@ -83,7 +83,7 @@ impl Relay {
         })
     }
 
-    /// Where the client's ticket should point: loopback when the relay took the wildcard, since
+    /// Where the client should dial: loopback when the relay took the wildcard, since
     /// nothing can be dialed at `0.0.0.0`.
     ///
     /// # Errors

@@ -2,7 +2,7 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
-- ✅ **iroh 1.2.0** (1.1.0 verified from source in the cargo registry 2026-09-04; 1.2.0 adopted
+- ✅ **iroh 1.2.0** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed** (end of file). (1.1.0 verified from source in the cargo registry 2026-09-04; 1.2.0 adopted
   2026-09-12 the day after its release: `n0-dns-resolver` replaces hickory, nothing in our API
   surface moved, gate + app/iOS e2e green). QUIC via n0's own `noq` 1.3.0 underneath (a quinn fork; **not** the `quinn` crate, so quinn docs/types do not
   apply): streams for control/terminal, unreliable datagrams for media, connection migration for
@@ -10,18 +10,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Rejected: slop-desk's raw UDP + "the WireGuard mesh is the security boundary" (phone-anywhere
   needs app-level auth); WebRTC (ICE/SDP dead weight); MoQ (relay/pub-sub shape).
 
-- ✅ **Default features off; `fast-apple-datapath` is banned.** `default-features = false,
+- ✅ **Default features off; `fast-apple-datapath` is banned.** (2026-09-24: iroh is gone; the ban
+  carries over to `noq`, whose feature of the same name is off in the workspace.) `default-features = false,
   features = ["tls-ring"]`. iroh's default set includes `fast-apple-datapath` (dlsym of private
   `sendmsg_x`/`recvmsg_x`, batched UDP). Measured 2026-09-04 on loopback (`slopty ping`, see
   MEASUREMENTS.md): with it on both ends the app round trip is **53 ms** and QUIC's own RTT
   estimate 48 ms; with it off, **0.8 ms**. The batching path waits to fill batches, which is
   exactly wrong for keystrokes. The feature no longer exists in `slopty-net`; do not re-add it.
 
-- ✅ **LAN discovery** is a separate crate, `iroh-mdns-address-lookup` 0.5.0 (there is no
+- ✅ **LAN discovery** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed**: no mDNS; hosts are added by address.
+  Was: a separate crate, `iroh-mdns-address-lookup` 0.5.0 (there is no
   `discovery-local-network` feature in iroh 1.x). Behind `slopty-net/mdns`; hosts advertise,
   clients only look up. Wide-area lookup is iroh's `presets::N0` (DNS + pkarr on n0's infra).
 
-- ✅ **Pairing**: `PairTicket { addr, token }` (`iroh-tickets` 1.0.0, base32 string, kind
+- ✅ **Pairing** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed** and hosts.md **Admission by source
+  address**: no tickets, tokens or trust store. Was: `PairTicket { addr, token }` (`iroh-tickets` 1.0.0, base32 string, kind
   `sloptypair`), token single-use with a 10-minute TTL. On redeem the host trusts the client's
   endpoint key in `trust.json` (mode 0600); afterwards the QUIC handshake is the whole
   authentication and `Hello.pair_token` stays `None`. Rejections are sent then linger up to 2 s
@@ -56,7 +59,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the start-up cost of the default is 1–2 extra round trips per stream on a 10 ms path
   (numbers in "start-up over the mesh", MEASUREMENTS.md). Invisible on loopback.
 
-- ✅ **QUIC datagrams, not raw UDP over a WireGuard mesh** (re-examined 2026-09-04 when the
+- ✅ **QUIC datagrams, not raw UDP over a WireGuard mesh** (2026-09-24: still QUIC, but the
+  "app-level auth" half is superseded by **Plaintext QUIC on noq, standalone; iroh removed**: the mesh is the boundary after all, and the
+  per-packet AEAD is gone.) (re-examined 2026-09-04 when the
   status bar showed ~100 ms). A QUIC datagram is one UDP packet plus ~30 bytes of header and one
   AEAD (hardware AES-GCM); WireGuard spends the same per packet on ChaCha20, so "UDP + WG" moves
   the crypto, it does not remove it. Measured: app RTT 0.8 ms on loopback, 0.9–2 ms on the LAN
@@ -66,7 +71,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   unreliable datagrams on one connection, migration, NAT traversal and relay fallback for a
   phone off the mesh, and app-level auth instead of "the mesh is the boundary".
 
-- ✅ **Direct-only mode** (`slopty_net::Reach::DirectOnly`; hostd `--direct-only`, every binary
+- ✅ **Direct-only mode** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed**: there is no relay to be direct
+  about; every connection is one UDP path. Was: (`slopty_net::Reach::DirectOnly`; hostd `--direct-only`, every binary
   honours `SLOPTY_DIRECT_ONLY=1`) for hosts and clients on a private mesh (NetBird/Tailscale)
   or one LAN: `RelayMode::Disabled` + `clear_address_lookup()`, mDNS kept. The ticket then
   carries only IP addresses (the mesh address among them) and a relay can never be selected: a
@@ -100,7 +106,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   up on hostd as "connection lost: timed out" 45 s later; that is the stale one, not the new.
   Driving note: cliclick `kp:return` never reaches the app (osascript `keystroke return` does).
 
-- ❌ **Machine load alone does not flap the path** (2026-09-06), closing the 2026-09-04
+- ❌ **Machine load alone does not flap the path** (2026-09-06; the harness was deleted
+  2026-09-24 with iroh: a single-path connection has no relay to flap to), closing the 2026-09-04
   investigation of one connection that went direct → relay-only for 43 s → direct while the
   machine was compiling. iroh's `BiasedRttPathSelector` always prefers a live direct path, so
   the direct path had to have been *closed* (noq abandon reasons `TimedOut` = 15 s path idle
@@ -227,13 +234,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   silenced by the host source hint ("The host says when its capture target is idle; the
   receiver stops asking, protocol 13").
 
-- ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** It uses `tokio::time::timeout`,
+- ⚠️ **Never await iroh's `Endpoint::close` on GPUI's executor.** (iroh removed 2026-09-24; the
+  rule — tokio-timed work runs on the runtime — still holds for noq's `wait_idle`.) It uses `tokio::time::timeout`,
   which panics (`Handle::current`) outside a tokio runtime context; the app aborted on every
   disconnect until the close was spawned onto the runtime and joined (crash report
   2026-09-04). Rule: anything from iroh/tokio-time runs via `runtime.spawn`, GPUI tasks only
   await join handles and channels.
 
-- ⚠️ **One iroh endpoint per process** (found by the app self-test 2026-09-05). The app used to
+- ⚠️ **One iroh endpoint per process** (found by the app self-test 2026-09-05; iroh removed
+  2026-09-24, the app still binds one client endpoint per process, now a `OnceLock`). The app used to
   bind an endpoint to pair, close it, and bind a second one with the same secret key to
   connect; the second dial hung until the step timeout (the host never saw its packets;
   iroh's discovery/relay state for that key was still the old endpoint's). `slopty-app::net`
@@ -729,7 +738,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   whether the token rate can be influenced at all — `EnableLTR` is a plain bool and the encoder
   chooses its own LTR frames, so that may not be ours to set.
 
-- ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`). Three
+- ✅ **The bad link is a UDP relay the two ends speak through** (2026-09-15, `slopty-shape`;
+  2026-09-24: the pinning below is gone with iroh — plain QUIC dials the shaper's address and
+  stays on it). Three
   rulings wait on a link that collapses on demand: the cadence ladder's 8/12 kB rungs, the keyframe
   rule above, and the audio jitter estimator. The kernel's shapers (`dnctl`, `pfctl`) want a
   password this process does not have, and a measurement that cannot run unattended does not run.
@@ -818,3 +829,58 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Three runs and not one because this rung is noisy: its own baseline records it moving 52 to 70
   decoded with no code change. `first decoded` and `gap max` stay noisy here and no claim rests
   on them.
+
+- ✅ **Plaintext QUIC on noq, standalone; iroh removed** (2026-09-24). Every host is now reached
+  over Tailscale, WireGuard or a VPN, which already encrypt and authenticate the path, so the
+  transport drops what iroh brought for the open Internet: TLS, endpoint keys, relays,
+  holepunching, multipath (whose clamps `Local::Pinned` fought), pkarr/DNS discovery and pairing
+  tickets. What stays is QUIC itself: reliable streams, unreliable datagrams, congestion control
+  and migration on one UDP flow.
+
+  *Which QUIC.* noq 1.3.0 (n0's quinn fork, already compiled in under iroh) used standalone,
+  over upstream quinn 0.11. Read from source in the registry: noq-proto's `crypto` traits have
+  quinn's shape (plus a `PathId` argument) and take a provider that does nothing, and
+  `EndpointConfig::new(reset_key)` / `ServerConfig::new(crypto, token_key)` avoid the ring
+  feature. The decider is congestion control: BBR3 is noq's, it has been the default since
+  2026-09-05 on measurements (the entries above), and quinn 0.11 ships only an experimental BBR,
+  so moving would have changed the controller every video ruling was measured under. Multipath
+  and NAT traversal are off in a standalone noq by default; nothing had to be turned off.
+
+  *The provider* (`slopty_net::crypto`). Its own QUIC version, `SLP1`, so a standard QUIC stack
+  gets a version negotiation rather than plaintext it would read as garbage. The handshake is
+  one round trip: each side's `HELLO` (a magic, a length, the transport parameters as QUIC
+  encodes them) in Initial, then a one-byte `FINISHED` in Handshake each way. The FINISHED
+  messages are not decoration: noq moves to the next packet space only when `write_handshake`
+  hands out keys, and marks a connection established when a Handshake packet arrives after the
+  session stops handshaking, so each side must put bytes in Handshake. Packet keys copy (tag 0,
+  limits `u64::MAX`, `next_1rtt_keys` always `Some`), header keys leave the header (sample 0),
+  the retry tag is 16 zero bytes that `is_valid_retry` accepts (the server never retries and
+  sends no address-validation tokens), `export_keying_material` is an error. `read_handshake`
+  returns a transport error for anything that is not ours — a TLS ClientHello, a bad parameter
+  block, an over-long block, trailing bytes — and never panics (unit tests, one per case). The
+  reset and token keys are a keyed SipHash with one constant key for every Slopty process: a
+  restarted host answers the old connection's packets with a stateless reset the client
+  recognises, instead of leaving it to the 15 s silence bar.
+
+  *Tuning carried over, and what is new.* `MAX_ACK_DELAY` 2 ms through ack frequency, the
+  32-packet initial window, BBR3 by default with `SLOPTY_CC` / `SLOPTY_QUIC_IW` overrides,
+  keep-alive 5 s, idle 45 s, migration on (the server default), `fast-apple-datapath` off. New:
+  `initial_rtt` 5 ms (RFC 9002's 333 ms is for an unknown path and set the first handshake
+  retransmission), and an MTU discovery ceiling of 1252 (Tailscale's TUN MTU of 1280 less 28
+  bytes of IPv4 and UDP). One ask was not taken: a datagram send buffer of about one frame. noq
+  drops the *oldest* datagram when that buffer is full and a frame is pushed in one burst, so a
+  buffer smaller than a keyframe would cut the head off every keyframe; the standing queue is
+  already held to two frames by the capture guard (`DatagramBudget`), which drops whole frames.
+  The buffer stays 4 MiB, a ceiling for a burst rather than a queue.
+
+  A host binds one dual-stack socket on `[::]` (IPv4 peers arrive as `::ffff:a.b.c.d` and are
+  canonicalised before admission) or the address `--bind` names. The endpoint and provider know
+  nothing of roles, so the worker ↔ server link can reuse them. Measured (MEASUREMENTS.md
+  2026-09-24): on the same LAN address the control-stream round trip median goes ≈1.2 ms →
+  ≈0.55 ms and connect-to-`HelloAck` ≈30 ms → ≈11 ms; loopback connects in 7–9 ms.
+  `PROTOCOL_VERSION` 50 (`Hello.pair_token` and `Rejection::NotPaired` gone, `HelloAck.worker`).
+
+  🔬 Still owed on this transport: BBR3 against Cubic, and a ~2 MB Cubic initial window that
+  would leave a per-frame HEVC burst unpaced under the 256-MTU pacer cap. The shaped ladder is the
+  instrument and it runs only against a launchd-installed host; installing this branch would have
+  replaced the host in use, so it was not run.

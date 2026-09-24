@@ -100,11 +100,11 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
     let rtt = link.rtt().map_or_else(|| "?".to_owned(), |d| format!("{d:.1?}"));
     println!("keystroke → first frame ({count} bytes to /bin/cat):");
     println!("  {}", quantiles(&mut samples));
-    println!("  timeouts {timeouts}  quic rtt {rtt}  paths: {}", link.paths());
+    println!("  timeouts {timeouts}  quic rtt {rtt}  path: {}", link.path());
     let _closed = link.send(ClientMsg::Term { session: id, req: TermRequest::Close }).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     link.close();
-    endpoint.close().await;
+    crate::client::close_endpoint(&endpoint).await;
     Ok(())
 }
 
@@ -154,7 +154,7 @@ pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
         }
     }
     drop(link);
-    endpoint.close().await;
+    crate::client::close_endpoint(&endpoint).await;
     Ok(())
 }
 
@@ -353,7 +353,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     );
     println!("  host target over time (Mbit/s): {}", rate_trajectory(&rate));
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
-    println!("  quic paths: {}", link.paths());
+    println!("  quic path: {}", link.path());
     // The client's own window, not the media one. This connection carries receiver reports and
     // NACKs and nothing else, so BBR never measures a delivery rate on it and parks the window
     // at its four-packet floor for the whole run. Reading that number as the stream's send
@@ -366,7 +366,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     drop(handle);
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(link);
-    endpoint.close().await;
+    crate::client::close_endpoint(&endpoint).await;
     // The self-check: on a quiet loopback stream nothing can hold a datagram, so the answer is
     // zero, and the attribution above says which reading produced anything else.
     if let Some(max) = bench.max_stalls {

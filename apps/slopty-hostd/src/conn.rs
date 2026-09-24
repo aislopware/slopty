@@ -1,4 +1,4 @@
-//! One authenticated client connection.
+//! One client connection.
 
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ use slopty_host::screen::{
     DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, StreamEvent, listing,
 };
 use slopty_host::session::{ClientSink, Outbound};
-use slopty_net::host::{AuthenticatedClient, open_session_stream};
+use slopty_net::host::{AcceptedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::canvas::CanvasSync;
@@ -37,7 +37,7 @@ const CONTROL_DEPTH: usize = 1024;
 /// Loss feedback datagrams buffered between the reader and the peer loop.
 const FEEDBACK_DEPTH: usize = 256;
 
-pub async fn serve(daemon: Daemon, client: AuthenticatedClient) {
+pub async fn serve(daemon: Daemon, client: AcceptedClient) {
     let remote = client.remote;
     let id = client.hello.client;
     tracing::info!(%remote, client = %id, name = %client.hello.name, "client connected");
@@ -48,8 +48,8 @@ pub async fn serve(daemon: Daemon, client: AuthenticatedClient) {
 }
 
 /// Serve one connection until it ends; `Ok` carries why it ended.
-async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static str, NetError> {
-    let AuthenticatedClient { conn, hello, mut tx, mut rx, .. } = client;
+async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, NetError> {
+    let AcceptedClient { conn, hello, mut tx, mut rx, .. } = client;
 
     let (out, mut out_rx) = mpsc::channel::<HostMsg>(CONTROL_DEPTH);
     let writer: JoinHandle<Result<(), NetError>> = tokio::spawn(async move {
@@ -61,7 +61,7 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
 
     let ack = HelloAck {
         protocol: PROTOCOL_VERSION,
-        host: daemon.id,
+        worker: daemon.id,
         name: daemon.name.clone(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         caps: Caps::empty(),
@@ -84,7 +84,6 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
     let (datagrams, datagram_rx) = mpsc::channel::<Queued>(DATAGRAM_QUEUE);
     let budget = DatagramBudget::new();
     let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
-    let paths = tokio::spawn(slopty_net::endpoint::log_path_events(conn.clone(), "host"));
     let health = tokio::spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "host"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
     let feedback = tokio::spawn(read_feedback(conn.clone(), feedback_tx));
@@ -101,7 +100,6 @@ async fn run(daemon: &Daemon, client: AuthenticatedClient) -> Result<&'static st
         datagrams,
         budget,
         pump,
-        paths,
         health,
         feedback,
         watched: HashMap::new(),
@@ -371,7 +369,7 @@ async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Queued>, budget
         let deepening = hold.as_ref().is_some_and(|h: &Hold| held > h.max_bytes);
         let sample = held > 0 && (hold.is_none() || deepening || datagram.is_none());
         let cwnd = if sample {
-            let (_rtt, cwnd) = slopty_net::endpoint::selected_path(&conn).unwrap_or_default();
+            let (_rtt, cwnd) = slopty_net::endpoint::path_rtt_cwnd(&conn).unwrap_or_default();
             budget.set_cwnd(cwnd);
             cwnd
         } else {
@@ -452,7 +450,6 @@ struct Peer<'d> {
     datagrams: mpsc::Sender<Queued>,
     budget: DatagramBudget,
     pump: JoinHandle<()>,
-    paths: JoinHandle<()>,
     /// The periodic congestion-window sample; a no-op task unless the trace is on.
     health: JoinHandle<()>,
     feedback: JoinHandle<()>,
@@ -471,7 +468,6 @@ impl Drop for Peer<'_> {
             }
         }
         self.pump.abort();
-        self.paths.abort();
         self.health.abort();
         self.feedback.abort();
         self.daemon.wake.lock().client_left();
@@ -706,7 +702,7 @@ impl Peer<'_> {
             ScreenRequest::Report { stream, report } => {
                 if let Some(s) = self.screens.get(&stream) {
                     let path =
-                        slopty_net::endpoint::selected_path(&self.conn).map(|(rtt, cwnd)| {
+                        slopty_net::endpoint::path_rtt_cwnd(&self.conn).map(|(rtt, cwnd)| {
                             slopty_host::screen::PathSample {
                                 rtt: slopty_core::Duration::from_micros(
                                     u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX),

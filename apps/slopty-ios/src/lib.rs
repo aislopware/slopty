@@ -48,7 +48,7 @@ fn init_logging() {
     use tracing_subscriber::fmt::writer::MakeWriterExt as _;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let mirror = std::env::var_os(slopty_e2e::SOCKET_ENV)
         .and_then(|_| std::env::var_os("SLOPTY_DATA_DIR"))
         .map(|dir| std::path::PathBuf::from(dir).join("app.log"))

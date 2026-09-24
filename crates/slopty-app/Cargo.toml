@@ -36,13 +36,12 @@ serde_json.workspace = true
 slopty-e2e.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
-slopty-net = { workspace = true, features = [ "mdns" ] }
+slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true
 slopty-theme.workspace = true
 slopty-ui.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

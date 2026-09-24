@@ -2,8 +2,8 @@
 //!
 //! * `slopty host …` talks to the local `slopty-hostd` over its control socket.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
-//! * `slopty pair <ticket>` pairs this machine with a host.
-//! * `slopty sessions|open|attach` are a real client over iroh: a raw-mode terminal that renders
+//! * `slopty add <host[:port]>` remembers a worker (today's `slopty-hostd`) by its address.
+//! * `slopty sessions|open|attach` are a real client over QUIC: a raw-mode terminal that renders
 //!   frames locally. It is the reference client for latency measurements and works before (and
 //!   without) the GPUI apps.
 
@@ -50,27 +50,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SettingsCmd,
     },
-    /// Pair with a host using the ticket it printed.
-    Pair {
-        /// The ticket (`sloptypair…`).
-        ticket: String,
+    /// Add a worker by its address: a Tailscale `MagicDNS` name, a LAN name or an IP, with an
+    /// optional `:port`.
+    Add {
+        /// `host[:port]`.
+        address: String,
     },
-    /// Paired hosts.
-    Hosts,
-    /// Forget a paired host.
+    /// Workers this machine has added.
+    Workers,
+    /// Forget a worker.
     Forget {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix.
         host: String,
     },
     /// List sessions on a host.
     Sessions {
-        /// Host name or endpoint id prefix (the only paired host when omitted).
+        /// Worker name, address or id prefix, or any `host[:port]` (the only worker when
+        /// omitted).
         #[arg(long)]
         host: Option<String>,
     },
     /// Open a session and attach to it.
     Open {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Working directory on the host.
@@ -82,7 +84,7 @@ enum Cmd {
     },
     /// Measure application round-trip time to a host (control-stream ping).
     Ping {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Number of probes.
@@ -96,7 +98,7 @@ enum Cmd {
     },
     /// Attach to an existing session.
     Attach {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Session id prefix.
@@ -117,7 +119,7 @@ enum SettingsCmd {
 enum BenchCmd {
     /// Keystroke round trip: a byte to a `cat` session on the host, timed to the first frame back.
     Echo {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Samples.
@@ -126,7 +128,7 @@ enum BenchCmd {
     },
     /// Stream a window or display and report what arrived.
     Screen {
-        /// Host name or endpoint id prefix.
+        /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Print the host's windows and displays instead of streaming.
@@ -189,8 +191,8 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Pair { ticket } => client::pair(&data_dir, &ticket).await,
-        Cmd::Hosts => client::hosts(&data_dir),
+        Cmd::Add { address } => client::add(&data_dir, &address).await,
+        Cmd::Workers => client::workers(&data_dir),
         Cmd::Forget { host } => client::forget(&data_dir, &host),
         Cmd::Sessions { host } => client::sessions(&data_dir, host.as_deref()).await,
         Cmd::Open { host, cwd, command } => {

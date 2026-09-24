@@ -16,7 +16,7 @@ use crate::tools::step;
 /// What to run.
 #[derive(Subcommand, Debug)]
 pub enum RunCmd {
-    /// The host side: `slopty-ptyd` + `slopty-hostd` (prints a pairing ticket).
+    /// The host side: `slopty-ptyd` + `slopty-hostd` (prints the address it listens on).
     Host(RunOpts),
     /// The macOS app.
     App(RunOpts),
@@ -108,7 +108,11 @@ fn host(sh: &Shell, opts: &RunOpts) -> Result<()> {
     crate::sign::sign_if_possible(sh, opts.release);
     let mut ptyd = spawn(sh, "slopty-ptyd", &[], opts)?;
     wait_for_socket(&ptyd_socket(opts), &mut ptyd)?;
-    let mut hostd = spawn(sh, "slopty-hostd", &["--print-ticket"], opts)?;
+    println!(
+        "▶ add this host from a client with `slopty add <this Mac's tailnet name or IP>[:port]` \
+         or the app's \"Add host…\"; it listens on:"
+    );
+    let mut hostd = spawn(sh, "slopty-hostd", &["--print-addr"], opts)?;
     let status = hostd.wait().context("wait for slopty-hostd")?;
     let _killed = ptyd.kill();
     let _reaped = ptyd.wait();

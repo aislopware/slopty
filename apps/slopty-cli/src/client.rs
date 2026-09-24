@@ -1,23 +1,26 @@
-//! Identity, pairing, and connecting as a client.
+//! Known workers, adding one by address, and connecting as a client.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use slopty_core::ClientId;
-use slopty_net::client::{HostConn, bind_client, connect, connect_with_ticket};
-use slopty_net::identity::{Identity, KnownHost};
-use slopty_net::pairing::PairTicket;
-use slopty_net::{EndpointAddr, EndpointId, Reach};
+use slopty_net::client::{HostConn, bind_client, connect};
+use slopty_net::known::{KnownWorker, KnownWorkers};
+use slopty_net::{Endpoint, HostAddr};
 use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, ClientKind, Hello};
+
+/// How long a closing endpoint may take to tell its peers.
+const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`.
 pub fn data_dir() -> PathBuf {
     slopty_settings::data_dir()
 }
 
-fn identity(data_dir: &Path) -> Result<Identity> {
-    Ok(Identity::open(&data_dir.join("client.json"))?)
+fn known(data_dir: &Path) -> Result<KnownWorkers> {
+    Ok(KnownWorkers::open_in(data_dir)?)
 }
 
 fn hello(client: ClientId) -> Hello {
@@ -28,7 +31,6 @@ fn hello(client: ClientId) -> Hello {
         name: format!("slopty cli @ {}", host_name()),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         caps: Caps::empty(),
-        pair_token: None,
     }
 }
 
@@ -44,95 +46,103 @@ fn host_name() -> String {
         .unwrap_or_else(|| "mac".to_owned())
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+/// Close `endpoint`, giving its connections a moment to tell their peers.
+pub async fn close_endpoint(endpoint: &Endpoint) {
+    endpoint.close(0_u32.into(), b"bye");
+    let _drained = tokio::time::timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
 }
 
-pub async fn pair(data_dir: &Path, ticket: &str) -> Result<()> {
-    let ticket: PairTicket = ticket.trim().parse().context("parse ticket")?;
-    let mut me = identity(data_dir)?;
-    let reach = Reach::from_env();
-    let endpoint = bind_client(me.secret().clone(), reach).await?;
-    eprintln!("connecting to {}…", ticket.addr.id);
-    let conn = connect_with_ticket(&endpoint, reach, &ticket, hello(me.client())).await?;
-    me.remember(KnownHost {
-        host: conn.ack.host,
+/// Connect to the worker at `address` and remember it under the id it answers with.
+pub async fn add(data_dir: &Path, address: &str) -> Result<()> {
+    let address: HostAddr = address.parse()?;
+    let mut me = known(data_dir)?;
+    let endpoint = bind_client()?;
+    eprintln!("connecting to {address}…");
+    let conn = connect(&endpoint, &address, hello(me.client())).await?;
+    me.remember(KnownWorker {
+        address: address.clone(),
         name: conn.ack.name.clone(),
-        addr: ticket.addr.clone(),
-        paired_at: unix_now(),
+        worker_id: conn.ack.worker,
     })?;
-    println!("paired with {} ({})", conn.ack.name, ticket.addr.id);
-    conn.conn.close(0_u32.into(), b"paired");
-    endpoint.close().await;
+    println!("added {} at {address} ({})", conn.ack.name, conn.ack.worker);
+    conn.close();
+    close_endpoint(&endpoint).await;
     Ok(())
 }
 
-pub fn hosts(data_dir: &Path) -> Result<()> {
-    let me = identity(data_dir)?;
-    println!("client {}  endpoint {}", me.client(), me.secret().public());
-    for (id, h) in me.hosts() {
-        println!("{id}  {}  ({})", h.name, h.host);
+pub fn workers(data_dir: &Path) -> Result<()> {
+    let me = known(data_dir)?;
+    println!("client {}", me.client());
+    for w in me.workers() {
+        println!("{}  {}  {}", w.worker_id, w.address, w.name);
     }
     Ok(())
 }
 
 pub fn forget(data_dir: &Path, needle: &str) -> Result<()> {
-    let mut me = identity(data_dir)?;
-    let (id, host) = me.find(needle).context("no unique host matches")?;
-    me.forget(&id)?;
-    println!("forgot {} ({id})", host.name);
+    let mut me = known(data_dir)?;
+    let worker = me.find(needle).context("no unique worker matches")?.clone();
+    me.forget(worker.worker_id)?;
+    println!("forgot {} ({})", worker.name, worker.address);
     Ok(())
 }
 
-/// Pick a host: by prefix, or the only one.
-fn pick(me: &Identity, needle: Option<&str>) -> Result<(EndpointId, KnownHost)> {
+/// Where to connect: a known worker by name, address or id prefix; else `needle` itself as an
+/// address; else the only known worker.
+fn pick(me: &KnownWorkers, needle: Option<&str>) -> Result<HostAddr> {
     if let Some(n) = needle {
-        return me.find(n).context("no unique host matches");
+        if let Some(known) = me.find(n) {
+            return Ok(known.address.clone());
+        }
+        return n
+            .parse()
+            .with_context(|| format!("{n:?} is neither a known worker nor an address"));
     }
-    let hosts = me.hosts();
-    match hosts.as_slice() {
-        [one] => Ok(one.clone()),
-        [] => bail!("no paired hosts; run `slopty pair <ticket>`"),
-        _many => bail!("several hosts; pass --host"),
+    match me.workers() {
+        [one] => Ok(one.address.clone()),
+        [] => bail!("no workers; run `slopty add <host[:port]>`"),
+        _many => bail!("several workers; pass --host"),
     }
 }
 
-/// A live connection to a paired host.
+/// A live connection to a worker.
 pub struct Session {
     /// The connection.
     pub conn: HostConn,
-    /// Who we are to the host (the key of its per-client registries).
+    /// Who we are to the worker (the key of its per-client registries).
     pub client: ClientId,
     /// Our endpoint (closed with the session).
-    pub endpoint: slopty_net::Endpoint,
+    pub endpoint: Endpoint,
+    /// From before the endpoint was bound to the worker's `HelloAck`.
+    pub connect_time: Duration,
 }
 
 impl Session {
     /// Close cleanly.
     pub async fn close(self) {
-        self.conn.conn.close(0_u32.into(), b"bye");
-        self.endpoint.close().await;
+        self.conn.close();
+        close_endpoint(&self.endpoint).await;
     }
 }
 
 pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
     slopty_client::warm_up_decoder();
-    let me = identity(data_dir)?;
-    let (_id, known) = pick(&me, needle)?;
-    let reach = Reach::from_env();
-    let endpoint = bind_client(me.secret().clone(), reach).await?;
-    let addr: EndpointAddr = known.addr;
+    let me = known(data_dir)?;
+    let address = pick(&me, needle)?;
     let client = me.client();
-    let conn = connect(&endpoint, reach, addr, hello(client)).await?;
-    Ok(Session { conn, client, endpoint })
+    let started = Instant::now();
+    let endpoint = bind_client()?;
+    let conn = connect(&endpoint, &address, hello(client)).await?;
+    Ok(Session { conn, client, endpoint, connect_time: started.elapsed() })
 }
 
 pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
     let session = connect_to(data_dir, needle).await?;
-    println!("{}", session.conn.ack.name);
-    println!("  paths: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    println!("  paths after 1.5 s: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
+    println!(
+        "{}  {}",
+        session.conn.ack.name,
+        slopty_net::endpoint::describe_path(&session.conn.conn)
+    );
     for s in &session.conn.ack.sessions {
         println!(
             "  {}  {}x{}  {:?}  {} viewer(s)  {}",
@@ -143,14 +153,19 @@ pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Application-level round trips: `Ping` on the control stream, `Pong` back. Prints per-probe
-/// and summary numbers plus the QUIC path view, so transport and app latency can be compared.
+/// Application-level round trips: `Ping` on the control stream, `Pong` back. Prints the time to
+/// the first `HelloAck`, per-probe and summary numbers, and QUIC's own view of the path, so
+/// transport and app latency can be compared.
 pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
     use slopty_core::MonoTime;
     use slopty_proto::{ClientMsg, HostMsg};
 
     let mut session = connect_to(data_dir, needle).await?;
-    println!("{}", session.conn.ack.name);
+    println!(
+        "{}  connected in {:.1} ms",
+        session.conn.ack.name,
+        session.connect_time.as_secs_f64() * 1e3
+    );
     let mut samples = Vec::with_capacity(count as usize);
     for i in 0..count {
         let sent = MonoTime::now();
@@ -158,18 +173,18 @@ pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
         let rtt = loop {
             match session.conn.rx.recv().await? {
                 HostMsg::Pong { sent_at } if sent_at == sent => {
-                    break std::time::Duration::from_nanos(MonoTime::now().since(sent).as_nanos());
+                    break Duration::from_nanos(MonoTime::now().since(sent).as_nanos());
                 }
                 _other => {}
             }
         };
         println!("  #{i:<3} app rtt {:>8.3} ms", rtt.as_secs_f64() * 1e3);
         samples.push(rtt);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     samples.sort();
     if let (Some(min), Some(max)) = (samples.first(), samples.last()) {
-        let total: std::time::Duration = samples.iter().sum();
+        let total: Duration = samples.iter().sum();
         let avg = total.checked_div(u32::try_from(samples.len()).unwrap_or(1)).unwrap_or_default();
         let median = samples.get(samples.len() / 2).copied().unwrap_or_default();
         println!(
@@ -180,7 +195,7 @@ pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
             max.as_secs_f64() * 1e3,
         );
     }
-    println!("  quic paths: {}", slopty_net::endpoint::describe_paths(&session.conn.conn));
+    println!("  quic path: {}", slopty_net::endpoint::describe_path(&session.conn.conn));
     session.close().await;
     Ok(())
 }

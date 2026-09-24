@@ -5,12 +5,8 @@
 //! would to a real bottleneck. Nothing here needs a password, which is the whole point: the
 //! kernel's shapers do, and the rulings that wait on a collapsed link have waited long enough.
 //!
-//! Point it at the host's UDP address and hand the client a pair ticket carrying the host's id
-//! and *this* address. Turning relays off is nowhere near enough to keep the flow here: iroh
-//! holepunches whatever it can, refuses to be told not to, and finds the host's real address
-//! within a second. Both ends have to be bound where the other's real address does not route --
-//! `slopty-hostd --bind <lan-ip>` and `slopty_net::client::bind_pinned_client`, which binds
-//! loopback. Then the relay is the only way across.
+//! Point it at the host's UDP address and connect the client to *this* address. Plain QUIC
+//! never looks for another path, so the relay stays the only way across for the whole run.
 //!
 //! ```text
 //! slopty-shape --to 192.168.1.10:45560 --delay 60ms --jitter 10ms --rate 600kB --loss 1%
@@ -31,9 +27,9 @@ const REPORT: Duration = Duration::from_secs(5);
 #[derive(Parser, Debug)]
 #[command(about = "Relay UDP between a Slopty client and host over a link you can degrade")]
 struct Opts {
-    /// UDP address to listen on. The client's ticket carries this, with `0.0.0.0` read as
-    /// loopback: the relay must be able to answer a client there and reach the host on a real
-    /// interface, and one socket bound to `127.0.0.1` cannot do both.
+    /// UDP address to listen on. The client dials this, with `0.0.0.0` read as loopback: the
+    /// relay must be able to answer a client there and reach the host on a real interface, and
+    /// one socket bound to `127.0.0.1` cannot do both.
     #[arg(long, default_value = "0.0.0.0:45570")]
     at: SocketAddr,
     /// The host's UDP address, where packets from the client go.

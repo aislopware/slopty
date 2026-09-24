@@ -195,7 +195,7 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
     println!("[{why}; {} frames; rtt {rtt}]", state.frames());
     let _detached = link.send(ClientMsg::Term { session: id, req: TermRequest::Detach }).await;
     link.close();
-    endpoint.close().await;
+    crate::client::close_endpoint(&endpoint).await;
     Ok(())
 }
 

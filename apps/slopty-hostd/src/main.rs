@@ -1,9 +1,10 @@
 //! `slopty-hostd` — the host daemon.
 //!
-//! Owns the iroh endpoint, authenticates clients against the trust store, and bridges control
-//! and session streams to [`slopty_host::Host`]. PTY masters live in `slopty-ptyd`, so this
-//! process can restart without killing shells. A local control socket lets `slopty` (the CLI)
-//! mint pairing tickets and inspect state.
+//! Owns the QUIC endpoint, admits clients by source address (loopback, the tailnet, private
+//! LANs, or the `[host] allow` ranges in `settings.toml`), and bridges control and session
+//! streams to [`slopty_host::Host`]. PTY masters live in `slopty-ptyd`, so this process can
+//! restart without killing shells. A local control socket lets `slopty` (the CLI) inspect state
+//! and relay agent hooks.
 
 #![forbid(unsafe_code)]
 
@@ -18,11 +19,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_agent::AgentTable;
-use slopty_core::HostId;
+use slopty_core::WorkerId;
 use slopty_host::{CanvasStore, Host};
-use slopty_net::Reach;
+use slopty_net::admission::{Admission, Cidr};
 use slopty_net::host::HostListener;
-use slopty_net::pairing::TrustStore;
 use tokio::sync::broadcast;
 
 /// Command line.
@@ -32,38 +32,49 @@ struct Args {
     /// ptyd socket (default: `$TMPDIR/slopty/ptyd.sock`, or `$SLOPTY_PTYD_SOCKET`).
     #[arg(long)]
     ptyd_socket: Option<PathBuf>,
-    /// Data directory holding `trust.json` (default: `$SLOPTY_DATA_DIR` or
-    /// `~/Library/Application Support/Slopty`).
+    /// Data directory holding `worker-id`, `canvas.json` and `settings.toml` (default:
+    /// `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// Control socket (default: `$TMPDIR/slopty/hostd.sock`, or `$SLOPTY_HOSTD_SOCKET`).
     #[arg(long)]
     ctl_socket: Option<PathBuf>,
-    /// Print a pairing ticket on stdout once the endpoint is online.
+    /// Print the address it listens on, on stdout, once it does (a harness reads the port
+    /// `--port 0` picked from it).
     #[arg(long)]
-    print_ticket: bool,
-    /// No relay, no wide-area lookup: clients must reach this host directly (LAN or a private
-    /// mesh such as `NetBird`). Also `SLOPTY_DIRECT_ONLY=1` (`1`/`true`/`yes`/`on`, as the
-    /// client reads it).
-    #[arg(
-        long,
-        env = Reach::ENV,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        num_args = 0..=1,
-        default_missing_value = "true",
-        default_value = "false",
-        action = clap::ArgAction::Set
-    )]
-    direct_only: bool,
-    /// UDP port to listen on; 0 picks a random free port (clients that cannot hear mDNS
+    print_addr: bool,
+    /// UDP port to listen on; 0 picks a random free port (clients that stored the address
     /// then lose the host after a restart). Also `SLOPTY_PORT`.
     #[arg(long, env = "SLOPTY_PORT", default_value_t = slopty_net::endpoint::HOST_PORT)]
     port: u16,
-    /// Listen on this one IP and reach nothing off it, instead of every interface. A shaped
-    /// measurement binds its two ends this way so they stay on the relay between them; see
-    /// `Local::Pinned`. Also `SLOPTY_BIND`.
+    /// Listen on this one IP instead of every interface of both families (`::`). Also
+    /// `SLOPTY_BIND`.
     #[arg(long = "bind", env = "SLOPTY_BIND")]
     bind: Option<std::net::IpAddr>,
+}
+
+/// Who may connect: the `[host] allow` ranges of `settings.toml` in `data_dir`, else the
+/// defaults. A range that does not parse is logged and skipped; a list with none left falls
+/// back to the defaults, which are private networks only.
+fn admission(data_dir: &std::path::Path) -> Admission {
+    let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir));
+    if let Some(e) = &loaded.error {
+        tracing::warn!(error = %e, "settings.toml ignored; admitting the default ranges");
+    }
+    let allow = loaded
+        .settings
+        .host
+        .allow
+        .iter()
+        .filter_map(|range| match range.parse::<Cidr>() {
+            Ok(cidr) => Some(cidr),
+            Err(e) => {
+                tracing::warn!(%range, error = %e, "[host] allow: skipped");
+                None
+            }
+        })
+        .collect();
+    Admission::new(allow)
 }
 
 /// Shared daemon state.
@@ -71,10 +82,10 @@ struct Args {
 pub struct Daemon {
     /// Session table.
     pub host: Host,
-    /// Listening endpoint + trust store.
+    /// Listening endpoint and who it admits.
     pub listener: HostListener,
-    /// Stable identity of this host installation.
-    pub id: HostId,
+    /// Stable identity of this worker installation.
+    pub id: WorkerId,
     /// Human name (hostname).
     pub name: String,
     /// Events every connected client should hear (session opened/closed, canvas deltas).
@@ -90,8 +101,8 @@ pub struct Daemon {
     pub presence: Arc<parking_lot::Mutex<slopty_host::presence::Presence>>,
     /// When the daemon came up (for `doctor`).
     pub started_at: std::time::Instant,
-    /// The UDP port it listens on.
-    pub port: u16,
+    /// Where it listens.
+    pub listen: std::net::SocketAddr,
     /// Screen streams across every connection, for the control socket.
     pub screens: slopty_host::screen::Registry,
     /// Sleep policy: awake while a client is attached, display on while a stream is live.
@@ -140,12 +151,10 @@ async fn watch_pasteboard(daemon: Daemon) -> ! {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-            |_| {
-                // iroh's path events carry the abandon reason; always keep them.
-                tracing_subscriber::EnvFilter::new("info,iroh::_events::path=debug")
-            },
-        ))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
@@ -156,15 +165,14 @@ async fn main() -> Result<()> {
     let data_dir = args.data_dir.unwrap_or_else(paths::data_dir);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
-    let store = TrustStore::open(&data_dir.join("trust.json"))?;
-    let id = paths::host_id(&data_dir)?;
-    let reach = if args.direct_only { Reach::DirectOnly } else { Reach::Anywhere };
-    let local = args.bind.map_or(slopty_net::endpoint::Local::Anywhere(args.port), |ip| {
-        slopty_net::endpoint::Local::Pinned(std::net::SocketAddr::new(ip, args.port))
-    });
-    let listener = HostListener::bind_at(store, reach, local)
-        .await
-        .with_context(|| format!("bind {local:?} (is another hostd running?)"))?;
+    let id = paths::worker_id(&data_dir)?;
+    let local = args.bind.map_or_else(
+        || slopty_net::endpoint::any(args.port),
+        |ip| std::net::SocketAddr::new(ip, args.port),
+    );
+    let listener = HostListener::bind(local, admission(&data_dir))
+        .with_context(|| format!("bind {local} (is another hostd running?)"))?;
+    let listen = listener.local_addr()?;
     let host = Host::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let canvas = CanvasStore::open(&data_dir.join("canvas.json"))?;
@@ -186,7 +194,7 @@ async fn main() -> Result<()> {
         pasteboard: Arc::new(slopty_input::Pasteboard::new()),
         presence: Arc::default(),
         started_at: std::time::Instant::now(),
-        port: args.port,
+        listen,
         screens,
         wake,
     };
@@ -212,13 +220,9 @@ async fn main() -> Result<()> {
     )]);
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
-    daemon.listener.online().await;
-    tracing::info!(
-        id = %daemon.listener.addr().id,
-        name = %daemon.name,
-        reach = ?daemon.listener.reach(),
-        "online"
-    );
+    let allow: Vec<String> =
+        daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();
+    tracing::info!(%id, name = %daemon.name, %listen, ?allow, "listening");
     // ScreenCaptureKit's first start in a process is slow; pay it now, not on the first window.
     tokio::spawn(async {
         match slopty_host::screen::warm_up().await {
@@ -248,10 +252,10 @@ async fn main() -> Result<()> {
         );
         let _granted = slopty_capture::request_capture();
     }
-    if args.print_ticket {
-        #[expect(clippy::print_stdout, reason = "the ticket is the program's output")]
+    if args.print_addr {
+        #[expect(clippy::print_stdout, reason = "the address is what a harness waits for")]
         {
-            println!("{}", daemon.listener.pair_ticket().await);
+            println!("{listen}");
         }
     }
 
@@ -270,30 +274,35 @@ async fn main() -> Result<()> {
     let _sent = daemon
         .events
         .send(slopty_proto::HostMsg::Rejected(slopty_proto::handshake::Rejection::Busy));
-    daemon.listener.endpoint().close().await;
+    daemon.listener.endpoint().close(0_u32.into(), b"host shutting down");
+    let _drained = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        daemon.listener.endpoint().wait_idle(),
+    )
+    .await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
+    use super::admission;
 
-    use super::Args;
-
-    /// The flag, `--direct-only=<boolish>` and the env value all go through one boolish parser,
-    /// so `SLOPTY_DIRECT_ONLY=1` (the client's spelling) is accepted rather than rejected.
     #[test]
-    fn direct_only_takes_the_clients_spellings() {
-        assert!(!Args::try_parse_from(["hostd"]).unwrap().direct_only);
-        assert!(Args::try_parse_from(["hostd", "--direct-only"]).unwrap().direct_only);
-        for yes in ["1", "true", "yes", "on"] {
-            let arg = format!("--direct-only={yes}");
-            assert!(Args::try_parse_from(["hostd", &arg]).unwrap().direct_only, "{yes}");
-        }
-        for no in ["0", "false", "no", "off"] {
-            let arg = format!("--direct-only={no}");
-            assert!(!Args::try_parse_from(["hostd", &arg]).unwrap().direct_only, "{no}");
-        }
-        Args::try_parse_from(["hostd", "--direct-only=maybe"]).unwrap_err();
+    fn the_allow_list_comes_from_settings_and_a_bad_range_is_skipped() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let none = admission(dir.path());
+        assert!(none.admits(ip("192.168.1.9")) && none.admits(ip("100.64.0.1")), "defaults");
+        assert!(!none.admits(ip("8.8.8.8")));
+
+        let settings = "[host]\nallow = [\"10.0.0.0/8\", \"bogus\"]\n";
+        std::fs::write(dir.path().join("settings.toml"), settings).unwrap();
+        let listed = admission(dir.path());
+        assert!(listed.admits(ip("10.1.2.3")));
+        assert!(!listed.admits(ip("192.168.1.9")), "the list replaces the defaults");
+        assert!(listed.admits(ip("::1")), "loopback always");
+
+        std::fs::write(dir.path().join("settings.toml"), "[host]\nallow = [\"bogus\"]\n").unwrap();
+        assert_eq!(admission(dir.path()), none, "nothing usable left: the defaults, not everyone");
     }
 }

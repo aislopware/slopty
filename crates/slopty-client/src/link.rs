@@ -139,8 +139,6 @@ impl HostLink {
             }
         });
 
-        let paths_conn = quic.clone();
-        tasks.spawn(slopty_net::endpoint::log_path_events(paths_conn, "client"));
         let runtime = tokio::runtime::Handle::current();
         Self { ack, out: out_tx, events: Some(events_rx), conn: quic, router, runtime, tasks }
     }
@@ -195,7 +193,7 @@ impl HostLink {
         self.out.send(msg).await.map_err(|_gone| NetError::Closed)
     }
 
-    /// RTT on the selected path.
+    /// RTT of the path.
     #[must_use]
     pub fn rtt(&self) -> Option<std::time::Duration> {
         slopty_net::endpoint::rtt(&self.conn)
@@ -207,19 +205,13 @@ impl HostLink {
         slopty_net::endpoint::received_datagrams(&self.conn)
     }
 
-    /// Whether the selected path goes through a relay (`None` while no path is selected).
+    /// Where the host is and the round trip to it, for diagnostics.
     #[must_use]
-    pub fn relayed(&self) -> Option<bool> {
-        slopty_net::endpoint::relayed(&self.conn)
+    pub fn path(&self) -> String {
+        slopty_net::endpoint::describe_path(&self.conn)
     }
 
-    /// Every path, for diagnostics.
-    #[must_use]
-    pub fn paths(&self) -> String {
-        slopty_net::endpoint::describe_paths(&self.conn)
-    }
-
-    /// The selected path's congestion picture (this side's sending), for diagnostics.
+    /// The path's congestion picture (this side's sending), for diagnostics.
     #[must_use]
     pub fn health(&self) -> String {
         slopty_net::endpoint::describe_health(&self.conn)

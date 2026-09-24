@@ -2,25 +2,17 @@
 //! over a Unix socket, one request and one reply per connection.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId};
+use slopty_core::{SessionId, WorkerId};
 use slopty_proto::terminal::SessionSummary;
 
 /// CLI → daemon.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum CtlRequest {
-    /// Mint a pairing ticket.
-    Ticket,
     /// Identity and sessions.
     Status,
-    /// Paired clients.
-    Paired,
-    /// Forget a client.
-    Revoke {
-        /// Endpoint id (hex).
-        endpoint: String,
-    },
-    /// Health: permissions, reach, port, connected clients (`slopty host doctor`).
+    /// Health: permissions, listen address, admitted ranges, connected clients
+    /// (`slopty host doctor`).
     Doctor,
     /// Live screen streams and their host-side counters (`slopty bench screen` reads the
     /// capture and encode latency through this on loopback).
@@ -45,10 +37,10 @@ pub struct Health {
     pub screen_recording: bool,
     /// Accessibility / post-event access granted (remote-window input is delivered).
     pub post_events: bool,
-    /// `Anywhere` or `DirectOnly`.
-    pub reach: String,
-    /// Bound UDP port.
-    pub port: u16,
+    /// Where it listens (`[::]:45550` is every interface, both families).
+    pub listen: String,
+    /// Address ranges whose peers it admits, besides loopback.
+    pub allow: Vec<String>,
     /// Clients connected right now.
     pub clients: usize,
     /// Sessions ptyd holds.
@@ -57,41 +49,18 @@ pub struct Health {
     pub uptime_secs: u64,
 }
 
-/// One paired client, as listed.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PairedSummary {
-    /// Endpoint id (hex).
-    pub endpoint: String,
-    /// App identity.
-    pub client: ClientId,
-    /// Name from its `Hello`.
-    pub name: String,
-    /// Unix seconds.
-    pub paired_at: u64,
-}
-
 /// Daemon → CLI.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum CtlReply {
-    /// A ticket string.
-    Ticket {
-        /// Base32 ticket.
-        ticket: String,
-    },
     /// Status.
     Status {
-        /// Endpoint id (hex).
-        id: String,
+        /// Host id: the UUID clients key this host by.
+        id: WorkerId,
         /// Host name.
         name: String,
         /// Sessions.
         sessions: Vec<SessionSummary>,
-    },
-    /// Paired clients.
-    Paired {
-        /// The list.
-        paired: Vec<PairedSummary>,
     },
     /// Health report.
     Doctor(Health),

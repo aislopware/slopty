@@ -2,7 +2,7 @@
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, HostId};
+use slopty_core::{ClientId, WorkerId};
 
 use crate::terminal::SessionSummary;
 
@@ -54,9 +54,6 @@ pub struct Hello {
     pub app_version: String,
     /// Features.
     pub caps: Caps,
-    /// One-time pairing token from the host's pairing ticket. Present on the first connection
-    /// only; afterwards the transport identity (the client's endpoint key) is the credential.
-    pub pair_token: Option<[u8; 32]>,
 }
 
 /// Host's acceptance.
@@ -64,8 +61,9 @@ pub struct Hello {
 pub struct HelloAck {
     /// Host protocol version (equals the client's, or `Rejected` was sent instead).
     pub protocol: u16,
-    /// Host identity.
-    pub host: HostId,
+    /// Worker identity: a UUID the worker keeps in its data directory, so a client keys
+    /// everything by it and not by the address it happened to dial.
+    pub worker: WorkerId,
     /// Host name ("mac-studio").
     pub name: String,
     /// Host app version.
@@ -84,8 +82,6 @@ pub enum Rejection {
         /// What the host speaks.
         host: u16,
     },
-    /// The client is not paired with this host.
-    NotPaired,
     /// Too many clients.
     Busy,
 }

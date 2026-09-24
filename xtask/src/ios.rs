@@ -65,11 +65,8 @@ pub struct IosOpts {
     #[arg(long)]
     release: bool,
     /// `RUST_LOG` filter for the app.
-    #[arg(long, default_value = "info,iroh::_events::path=debug")]
+    #[arg(long, default_value = "info")]
     log: String,
-    /// Direct-only reach (no relay), for hosts on the same LAN or mesh.
-    #[arg(long)]
-    direct_only: bool,
     /// Only build; do not install or launch.
     #[arg(long)]
     no_run: bool,
@@ -88,15 +85,7 @@ impl IosOpts {
     /// Options for the simulator self-test: debug build with the `e2e` feature.
     #[must_use]
     pub fn for_e2e(sim: SimKind, log: &str) -> Self {
-        Self {
-            release: false,
-            log: log.to_owned(),
-            direct_only: false,
-            no_run: false,
-            device: None,
-            sim,
-            e2e: true,
-        }
+        Self { release: false, log: log.to_owned(), no_run: false, device: None, sim, e2e: true }
     }
 }
 
@@ -348,8 +337,6 @@ fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String>
 fn run_simulator(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
     let udid = boot_and_install(sh, app, opts.sim)?;
     let _log = sh.push_env("SIMCTL_CHILD_RUST_LOG", &opts.log);
-    let _direct =
-        sh.push_env("SIMCTL_CHILD_SLOPTY_DIRECT_ONLY", u8::from(opts.direct_only).to_string());
     step(
         "simctl launch (Ctrl-C to detach; the app keeps running)",
         &cmd!(sh, "xcrun simctl launch --console-pty {udid} {BUNDLE_ID}"),
@@ -393,11 +380,7 @@ fn run_device(sh: &Shell, app: &Utf8Path, opts: &IosOpts) -> Result<()> {
         "devicectl install",
         &cmd!(sh, "xcrun devicectl device install app --device {device} {app}"),
     )?;
-    let env_json = format!(
-        "{{\"RUST_LOG\":\"{}\",\"SLOPTY_DIRECT_ONLY\":\"{}\"}}",
-        opts.log,
-        u8::from(opts.direct_only)
-    );
+    let env_json = format!("{{\"RUST_LOG\":\"{}\"}}", opts.log);
     step(
         "devicectl launch",
         &cmd!(

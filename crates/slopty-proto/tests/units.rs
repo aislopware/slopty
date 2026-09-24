@@ -82,6 +82,6 @@ mod units {
             item: ItemId::new(),
         };
         assert_eq!(HostMsg::Canvas(pointed).kind(), "Canvas");
-        assert_eq!(HostMsg::Rejected(Rejection::NotPaired).kind(), "Rejected");
+        assert_eq!(HostMsg::Rejected(Rejection::Busy).kind(), "Rejected");
     }
 }

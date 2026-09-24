@@ -2,7 +2,8 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
-- ✅ **The pairing store was already a list** (2026-09-05): `slopty_net::identity::Identity`
+- ✅ **The pairing store was already a list** (2026-09-05; superseded 2026-09-24 by **Hosts are
+  added by address and keyed by their `WorkerId`**): `slopty_net::identity::Identity`
   keeps `hosts: BTreeMap<EndpointId, KnownHost>` in `client.json`; only the app's
   `connect_host` picked the first entry. So there is no second file and no migration:
   `net::known_hosts` reads the map (sorted by name), `net::forget_host` removes one, and a
@@ -16,7 +17,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   when its slot is gone (forget). Each host owns its `canvas.json`, so one `CanvasView` per
   host and the workspace shows `active`'s; switching is a field change plus a focus, nothing
   is torn down. `Rejection::NotPaired` maps to `HostStatus::NeedsPairing` (red dot) and keeps
-  retrying at the capped backoff so a fresh pairing of the same host resumes by itself.
+  retrying at the capped backoff so a fresh pairing of the same host resumes by itself (both gone
+  2026-09-24 with pairing).
   Verified with two daemons on this Mac (`SLOPTY_PORT` 45570/45571, `SLOPTY_HOST_NAME`
   "Studio One" / "Studio Two", the new env override in `slopty-hostd::paths`): "Add host…"
   paired the second while the first stayed connected; each host had its own shell (`echo
@@ -86,7 +88,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   it in 0.2 s and brought host B up in 2.8 s). The measurement records the address used
   (MEASUREMENTS "cross-host attention, second run").
 
-- ✅ **`slopty-hostd --direct-only` reads the same env spellings as the client** (2026-09-06).
+- ✅ **`slopty-hostd --direct-only` reads the same env spellings as the client** (2026-09-06;
+  the flag is gone 2026-09-24 with iroh's relays).
   The flag was a plain clap bool with `env = SLOPTY_DIRECT_ONLY`, which rejects `1` (clap only
   accepts the flag's presence, and an env value must parse as the value type), so
   `SLOPTY_DIRECT_ONLY=1 slopty-hostd` failed to start while the same variable is how the client
@@ -186,3 +189,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   panel) and lets go when every agent is idle, blocked on the human, or gone
   (`a_working_agent_keeps_the_device_awake`). Not done, ⏸ until asked: a host setting to opt
   out (`pmset` still wins over an activity for a forced sleep).
+
+- ✅ **Hosts are added by address and keyed by their `WorkerId`** (2026-09-24, with the transport
+  ruling **Plaintext QUIC on noq, standalone; iroh removed**). A host is typed as `host[:port]` —
+  a Tailscale `MagicDNS` name, a LAN name or an IP, port 45550 unless given — in the app's
+  add-host panel (it replaces the pairing panel; "Paste & add" for the phone) or `slopty add`.
+  The client connects, says `Hello`, and stores `{ address, name, worker_id }` in `workers.json`
+  in its data dir (`slopty_net::known`). The id is a UUID the host keeps in `<data dir>/worker-id`
+  and sends in every `HelloAck`; slots, canvases and the store are keyed by it, the address is
+  only where it was last reached. Two consequences are handled: an address that answers with
+  another id (a reinstalled host) replaces the old entry when added, and a reconnect that meets
+  another id refuses to mix canvases and says to add it again. The id is `WorkerId`, not
+  `HostId`: today's host becomes a *worker* under a coming control-plane server, which will also
+  be what tells a client about workers. For that reason tailnet discovery (probing the peers of
+  `tailscale status --json`) was written and then dropped before landing, and mDNS went with
+  iroh; manual entry is the one way in until the server exists. `HostStatus::NeedsPairing`, the
+  pairing CLI (`slopty pair`, `slopty host ticket|paired|revoke`) and `trust.json` are deleted.
+
+- ✅ **Admission by source address, once per connection** (2026-09-24). With no keys, the network
+  is the boundary, so hostd lets in loopback always, and otherwise only the tailnet
+  (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), RFC 1918 LANs, unique-local IPv6 (`fc00::/7`) and
+  link-local (`slopty_net::admission`). The `[host] allow` list in the host's `settings.toml`
+  *replaces* those defaults (so it can narrow as well as widen; loopback stays), read when hostd
+  starts; a range that does not parse is logged and skipped, and a list with nothing usable left
+  falls back to the defaults rather than to everyone. The check runs in the accept loop on
+  `Incoming::remote_address()` before any connection state exists; a refused peer gets QUIC's
+  `CONNECTION_REFUSED` at once (so a misconfigured client hears why in milliseconds, not a
+  timeout) and packets of an admitted connection are never looked at again. Each admitted
+  connection's handshake and `Hello` now run on a task of their own, so a peer that connects and
+  says nothing holds up nobody behind it. Tests: `slopty_net::admission` (ranges, mapped IPv4,
+  the replacing list), hostd's `the_allow_list_comes_from_settings_and_a_bad_range_is_skipped`,
+  and `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake`, which dials the host
+  from `fe80::1%lo0` (this Mac's own link-local address, not loopback) against a host admitting
+  only 10/8 and reads the refusal in under a second.
