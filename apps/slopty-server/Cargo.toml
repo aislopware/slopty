@@ -1,0 +1,27 @@
+[package]
+name = "slopty-serverd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty server daemon: the control plane workers register with and clients and agents drive them through"
+
+[lints]
+workspace = true
+
+# The package takes another name than the library's; the binary keeps the one people type.
+# `doc = false`: its docs would land where the library's do.
+[[bin]]
+name = "slopty-server"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+slopty-net.workspace = true
+slopty-server.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

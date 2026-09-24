@@ -71,10 +71,10 @@ impl fmt::Display for HostAddr {
     }
 }
 
-impl std::str::FromStr for HostAddr {
-    type Err = NetError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl HostAddr {
+    /// Parse `host[:port]` with `default_port` when it names none ([`HOST_PORT`] is what
+    /// [`str::parse`] assumes; a server address wants [`crate::endpoint::SERVER_PORT`]).
+    pub fn parse_with_port(s: &str, default_port: u16) -> Result<Self, NetError> {
         let s = s.trim();
         let bad = |why: &str| NetError::Address(format!("{s:?}: {why}"));
         let port =
@@ -82,15 +82,15 @@ impl std::str::FromStr for HostAddr {
         let (host, port) = if let Some(rest) = s.strip_prefix('[') {
             let (host, after) = rest.split_once(']').ok_or_else(|| bad("no closing ]"))?;
             match after {
-                "" => (host, HOST_PORT),
+                "" => (host, default_port),
                 _ => (host, port(after.strip_prefix(':').ok_or_else(|| bad("junk after ]"))?)?),
             }
         } else if s.parse::<std::net::Ipv6Addr>().is_ok() {
-            (s, HOST_PORT)
+            (s, default_port)
         } else {
             match s.rsplit_once(':') {
                 Some((host, p)) => (host, port(p)?),
-                None => (s, HOST_PORT),
+                None => (s, default_port),
             }
         };
         if host.is_empty() {
@@ -103,6 +103,14 @@ impl std::str::FromStr for HostAddr {
             return Err(bad("not a host name"));
         }
         Ok(Self::new(host, port))
+    }
+}
+
+impl std::str::FromStr for HostAddr {
+    type Err = NetError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_with_port(s, HOST_PORT)
     }
 }
 
@@ -142,6 +150,18 @@ mod tests {
             assert_eq!(addr.to_string().parse::<HostAddr>().unwrap(), addr, "{text:?} round trips");
         }
         assert_eq!("[::1]:9".parse::<HostAddr>().unwrap().to_string(), "[::1]:9");
+    }
+
+    #[test]
+    fn a_server_address_defaults_to_the_server_port() {
+        use crate::endpoint::SERVER_PORT;
+        let named = HostAddr::parse_with_port("studio", SERVER_PORT).unwrap();
+        assert_eq!((named.host(), named.port()), ("studio", SERVER_PORT));
+        let v6 = HostAddr::parse_with_port("[::1]", SERVER_PORT).unwrap();
+        assert_eq!(v6.port(), SERVER_PORT);
+        let explicit = HostAddr::parse_with_port("studio:7", SERVER_PORT).unwrap();
+        assert_eq!(explicit.port(), 7, "an explicit port wins");
+        HostAddr::parse_with_port("a b", SERVER_PORT).unwrap_err();
     }
 
     #[test]

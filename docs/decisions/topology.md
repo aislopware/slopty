@@ -107,3 +107,62 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   These traits are cut when the worker is renamed, not before. Today's macOS code is the only
   implementation, and a trait is not written ahead of its second implementation beyond these
   four seams.
+
+- ✅ **The CLI and `slopty mcp` name a terminal `worker/session` and resolve names on the
+  client** (2026-09-25).
+  - **Handles.** A terminal prints as `worker/session` with both UUIDs in full (the `term`
+    field in JSON), and every verb takes it back. The worker part may also be a name and the
+    session part a unique id prefix; full ids cost no round trip, anything else one
+    `ListWorkers` or `ListTerminals`. Text output shortens the handle to `name/prefix`, where the
+    prefix is the shortest one no other listed session shares, at least 8 characters: `UUIDv7`s
+    open with their creation time, so ids minted a minute apart share their first 8.
+  - **One JSON shape per answer.** `slopty … --json` and the `slopty mcp` tools print the same
+    views (`apps/slopty-cli/src/view.rs`) with snake_case keys, not the wire enums' serde form.
+    `slopty workers` adds each worker's terminal count and the agents waiting on a human, from
+    `ListTerminals` plus one `AgentStatus` per terminal on an online worker, all in flight at
+    once on the one stream.
+  - **`slopty mcp`** holds one `Role::Agent` link for its lifetime and redials when it drops
+    (250 ms doubling to 5 s; a call made while it is down dials at once and fails with the
+    reason). It speaks revision 2026-07-28, and still negotiates older revisions for a client
+    that sends `initialize`. An agent that comes to need a human goes out as a
+    `notifications/message`, once per episode. Logging is deprecated by SEP-2577, but it is
+    the one message a stdio client receives without a `subscriptions/listen` stream, and that
+    stream's filters carry no such category. Claude Code channels are not used: they are a
+    research preview on an older revision. `wait_for` sends progress every 10 s when the call
+    carries a progress token.
+  - The CLI's direct-to-worker `slopty open` (open and attach a raw terminal) became
+    `slopty attach` without a session: `open` is now the verb. The local `slopty workers`
+    listing of added workers is gone; the server's directory replaces it.
+
+- ✅ **The server's lease timings, state file and MCP endpoint** (2026-09-25).
+  - **Lease.** Every server link runs a 1 s QUIC keep-alive and a 5 s idle timeout
+    (`LEASE_KEEP_ALIVE` and `LEASE_IDLE_TIMEOUT` in `slopty-net`). QUIC negotiates the idle
+    timeout down to the smaller side's, so client and agent links get it too. That costs
+    nothing, because the server is off the data path and a dropped client just redials.
+    - A worker whose link ends turns *unreachable*. A clean close does it at once, a silent
+      path after 5 s. Requests pending on the link fail with `WorkerUnreachable` right away.
+    - 20 s later with no reconnect it turns *gone*.
+    - A reconnect under the same id brings it back *online* in the same entry.
+    - The server refuses a second live link that claims the id (`DuplicateWorker`) instead of
+      letting it take over. Two machines sharing a copied data directory would otherwise steal
+      the lease back and forth forever. A worker restarted before its old link timed out gets
+      in on a retry within 5 s.
+  - **State.** The server keeps one file, `workers.json`, in `$SLOPTY_DATA_DIR/server`, else in
+    `~/Library/Application Support/Slopty/server`; `--data-dir` overrides both. It holds the
+    last-known `WorkerInfo` of every worker. The server writes it to a temporary file, fsyncs
+    and renames it over the old one, and only when the registry changes shape. A shape change
+    is a new worker, a new name or address, capabilities that changed in more than their load,
+    or a lease that ended. A restarted server lists every known worker as *gone* until it
+    registers again.
+  - **MCP.** Streamable HTTP on TCP 45561 (`MCP_PORT`, next to `SERVER_PORT`), path `/mcp`,
+    stateless, with JSON responses.
+    - The listener binds `[::]` dual-stack and admits each TCP peer with the QUIC listener's
+      check (loopback, the tailnet, private LANs). It answers the same peers that binding
+      127.0.0.1 plus the tailnet and LAN addresses would, and it also reaches interfaces that
+      come up after the server does, such as Tailscale starting late at boot.
+    - It does not check `Host`, since tailnet names and IP literals are as legitimate as
+      `localhost`. It refuses any request that carries `Origin` with a 403 instead. A browser
+      always sends that header, and a DNS-rebinding page cannot leave it out.
+  - **Timeout cap.** The server caps `wait_for` at 240 s, under Claude Code's five-minute idle
+    abort of an MCP call. It gives a forwarded wait its own timeout plus 15 s before it stops
+    waiting on the worker, and every other forwarded verb 60 s.

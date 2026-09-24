@@ -15,6 +15,20 @@ use crate::NetError;
 /// dials when an address names none.
 pub const HOST_PORT: u16 = 45550;
 
+/// UDP port the server binds unless told otherwise, and the port a worker or client dials when a
+/// server address names none.
+pub const SERVER_PORT: u16 = 45560;
+
+/// TCP port the server's MCP endpoint (Streamable HTTP) listens on unless told otherwise.
+pub const MCP_PORT: u16 = 45561;
+
+/// Keep-alive on a server link (worker, client or agent ↔ server): the server's pings keep a
+/// healthy link busy both ways, so [`LEASE_IDLE_TIMEOUT`] only fires on a dead path.
+pub const LEASE_KEEP_ALIVE: Duration = Duration::from_secs(1);
+/// Silence after which a server link is dead; for a worker this ends its lease and the
+/// directory marks it unreachable (`docs/decisions/topology.md`).
+pub const LEASE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Idle timeout before a silent connection is dropped. Generous: a phone in a pocket keeps its
 /// session across brief radio gaps; QUIC migration handles the address change.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -84,6 +98,28 @@ pub fn transport_config() -> TransportConfig {
     config
 }
 
+/// Transport config for server links: [`transport_config`] with the lease's timings.
+///
+/// The idle timeout is negotiated down to the smaller side's, so a server endpoint on this
+/// config holds every link to it to [`LEASE_IDLE_TIMEOUT`].
+#[must_use]
+pub fn lease_transport_config() -> TransportConfig {
+    let mut config = transport_config();
+    config
+        .max_idle_timeout(IdleTimeout::try_from(LEASE_IDLE_TIMEOUT).ok())
+        .keep_alive_interval(Some(LEASE_KEEP_ALIVE));
+    config
+}
+
+/// A client config that dials a server on [`lease_transport_config`], for an endpoint whose
+/// default config is the host's.
+#[must_use]
+pub fn lease_client_config() -> noq::ClientConfig {
+    let mut config = crate::crypto::client_config();
+    config.transport_config(Arc::new(lease_transport_config()));
+    config
+}
+
 /// The initial congestion window in bytes: [`INITIAL_WINDOW_ENV`] packets if set, else
 /// [`INITIAL_WINDOW_PACKETS`].
 fn initial_window() -> u64 {
@@ -135,6 +171,19 @@ fn congestion_controller() -> Arc<dyn noq::congestion::ControllerFactory + Send 
 /// error: falling back to a random port would strand every client that knows the host by its
 /// port.
 pub fn bind(local: SocketAddr, server: bool) -> Result<Endpoint, NetError> {
+    bind_with(local, server, transport_config())
+}
+
+/// [`bind`] for the server's endpoint: accepting, every link on [`lease_transport_config`].
+pub fn bind_lease(local: SocketAddr) -> Result<Endpoint, NetError> {
+    bind_with(local, true, lease_transport_config())
+}
+
+fn bind_with(
+    local: SocketAddr,
+    server: bool,
+    transport: TransportConfig,
+) -> Result<Endpoint, NetError> {
     let bind_err = |e: std::io::Error| NetError::Bind(format!("{local}: {e}"));
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(local),
@@ -146,7 +195,7 @@ pub fn bind(local: SocketAddr, server: bool) -> Result<Endpoint, NetError> {
         socket.set_only_v6(false).map_err(bind_err)?;
     }
     socket.bind(&local.into()).map_err(bind_err)?;
-    let transport = Arc::new(transport_config());
+    let transport = Arc::new(transport);
     let server_config = server.then(|| {
         let mut config = crate::crypto::server_config();
         config.transport_config(Arc::clone(&transport));

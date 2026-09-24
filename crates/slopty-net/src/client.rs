@@ -62,7 +62,7 @@ pub async fn connect(
     candidates.sort_by_key(SocketAddr::is_ipv6);
     let mut last = NetError::Connect(format!("{addr}: no address"));
     for candidate in candidates {
-        match dial(endpoint, candidate, addr.host()).await {
+        match dial(endpoint, candidate, addr.host(), None).await {
             Ok(conn) => return greet(conn, candidate, hello).await,
             Err(e) => {
                 tracing::debug!(%addr, %candidate, error = %e, "address did not answer");
@@ -79,14 +79,22 @@ pub async fn connect_addr(
     addr: SocketAddr,
     hello: Hello,
 ) -> Result<HostConn, HandshakeError> {
-    let conn = dial(endpoint, addr, &addr.ip().to_string()).await?;
+    let conn = dial(endpoint, addr, &addr.ip().to_string(), None).await?;
     greet(conn, addr, hello).await
 }
 
-/// The QUIC handshake alone.
-async fn dial(endpoint: &Endpoint, addr: SocketAddr, name: &str) -> Result<Connection, NetError> {
-    let connecting =
-        endpoint.connect(addr, name).map_err(|e| NetError::Connect(format!("{addr}: {e}")))?;
+/// The QUIC handshake alone, on `config` or the endpoint's default client config.
+pub(crate) async fn dial(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    name: &str,
+    config: Option<noq::ClientConfig>,
+) -> Result<Connection, NetError> {
+    let connecting = match config {
+        Some(config) => endpoint.connect_with(config, addr, name),
+        None => endpoint.connect(addr, name),
+    }
+    .map_err(|e| NetError::Connect(format!("{addr}: {e}")))?;
     tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)
         .await
         .map_err(|_elapsed| NetError::Connect(format!("{addr}: no answer")))?

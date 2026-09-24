@@ -10,10 +10,11 @@
 //! * [`framed`] — typed, length-prefixed messages over QUIC streams.
 //! * [`host`] — accept loop yielding clients that said `Hello`.
 //! * [`client`] — connect to a host by address.
+//! * [`server`] — links to the server: its accept loop, and the dial to it.
 //! * [`known`] — the client's id and the workers it has added.
 //!
 //! The endpoint and the crypto provider know nothing of the roles: the same plaintext QUIC
-//! serves client ↔ worker and, later, worker ↔ server links.
+//! serves client ↔ worker and worker, client or agent ↔ server links.
 //!
 //! One QUIC connection carries: the control stream (bidirectional, opened by the client), one
 //! unidirectional session stream per attached terminal (opened by the host), and unreliable
@@ -29,6 +30,7 @@ pub mod endpoint;
 pub mod framed;
 pub mod host;
 pub mod known;
+pub mod server;
 
 pub use addr::HostAddr;
 pub use noq::{Connection, Endpoint};

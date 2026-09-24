@@ -1,8 +1,9 @@
 //! `xtask run`: launch the host daemons or the app from the dev tree.
 //!
 //! `run host` builds and starts `slopty-ptyd` then `slopty-hostd` in the foreground (Ctrl-C
-//! stops both: they share this process group). `run app` builds and starts the macOS app.
-//! Both honour `--data-dir` so several isolated setups can coexist on one machine.
+//! stops both: they share this process group). `run server` builds and starts `slopty-server`.
+//! `run app` builds and starts the macOS app. All honour `--data-dir` so several isolated setups
+//! can coexist on one machine.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -18,6 +19,8 @@ use crate::tools::step;
 pub enum RunCmd {
     /// The host side: `slopty-ptyd` + `slopty-hostd` (prints the address it listens on).
     Host(RunOpts),
+    /// The control plane: `slopty-server` (QUIC on 45560, MCP on 45561).
+    Server(RunOpts),
     /// The macOS app.
     App(RunOpts),
 }
@@ -60,6 +63,7 @@ impl RunOpts {
 pub fn run(sh: &Shell, what: &RunCmd) -> Result<()> {
     match what {
         RunCmd::Host(opts) => host(sh, opts),
+        RunCmd::Server(opts) => server(sh, opts),
         RunCmd::App(opts) => app(sh, opts),
     }
 }
@@ -118,6 +122,16 @@ fn host(sh: &Shell, opts: &RunOpts) -> Result<()> {
     let _reaped = ptyd.wait();
     if !status.success() {
         bail!("slopty-hostd exited with {status}");
+    }
+    Ok(())
+}
+
+fn server(sh: &Shell, opts: &RunOpts) -> Result<()> {
+    let flags = opts.cargo_flags();
+    step("build server", &cmd!(sh, "cargo build {flags...} -p slopty-serverd"))?;
+    let status = spawn(sh, "slopty-server", &[], opts)?.wait().context("wait for slopty-server")?;
+    if !status.success() {
+        bail!("slopty-server exited with {status}");
     }
     Ok(())
 }
