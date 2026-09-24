@@ -1,6 +1,6 @@
 //! Identifiers, clocks and small shared types.
 //!
-//! This crate has no platform code and no I/O. Everything above it (protocol, grid, host, client)
+//! This crate has no platform code and no I/O. Everything above it (protocol, grid, worker, client)
 //! agrees on these types, so they are deliberately few and boring.
 
 #![forbid(unsafe_code)]

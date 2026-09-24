@@ -20,7 +20,7 @@ use crate::NetError;
 use crate::addr::HostAddr;
 use crate::admission::Admission;
 use crate::framed::{FramedRecv, FramedSend};
-use crate::host::close_code;
+use crate::worker::close_code;
 
 /// How long a dialer has to open its stream and say `Hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);

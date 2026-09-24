@@ -1,10 +1,10 @@
-//! Files both ways: an upload of dropped files, a download of a host file dragged out, and the
+//! Files both ways: an upload of dropped files, a download of a worker file dragged out, and the
 //! pure pieces around them (which files a drop is, how a path is typed into a shell).
 //!
 //! An upload announces itself with [`XferMsg::Begin`], then sends one bulk stream per file,
-//! one after another, at bulk priority. A stream cut short is resumed: the sender asks the host
+//! one after another, at bulk priority. A stream cut short is resumed: the sender asks the worker
 //! how much of the file is durable ([`XferMsg::Resume`] → [`XferMsg::Offset`]) and sends the rest.
-//! A download is the host's bulk streams landing in a directory as `name.partial`, renamed when
+//! A download is the worker's bulk streams landing in a directory as `name.partial`, renamed when
 //! whole.
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ const CHUNK: usize = 256 * 1024;
 /// Attempts at one file before the upload gives up on it: the first and two resumes.
 const ATTEMPTS: u32 = 3;
 
-/// How long the host has to answer a [`XferMsg::Resume`].
+/// How long the worker has to answer a [`XferMsg::Resume`].
 const OFFSET_WAIT: Duration = Duration::from_secs(10);
 
 /// One file of a transfer, as the sender found it on disk.
@@ -142,7 +142,7 @@ pub struct Table {
 
 #[derive(Debug, Default)]
 struct Tables {
-    /// Uploads waiting for the host's [`XferMsg::Offset`], by transfer and file.
+    /// Uploads waiting for the worker's [`XferMsg::Offset`], by transfer and file.
     offsets: HashMap<(XferId, String), oneshot::Sender<u64>>,
     /// Uploads that were cancelled; their tasks stop at the next chunk.
     cancelled: std::collections::HashSet<XferId>,
@@ -153,14 +153,14 @@ struct Tables {
 #[derive(Debug)]
 struct Download {
     into: PathBuf,
-    /// Files the host said it sends ([`XferMsg::Begin`]), once it has said.
+    /// Files the worker said it sends ([`XferMsg::Begin`]), once it has said.
     expected: Option<u32>,
     landed: Vec<PathBuf>,
     done: Option<oneshot::Sender<Result<Vec<PathBuf>, String>>>,
 }
 
 impl Table {
-    /// The host answered a resume.
+    /// The worker answered a resume.
     fn offset(&self, xfer: XferId, name: String, durable: u64) {
         let waiting = self.inner.lock().offsets.remove(&(xfer, name));
         if let Some(tx) = waiting {
@@ -272,9 +272,9 @@ pub struct Uplink {
 
 /// Send `files` up as transfer `xfer`, to `dest`.
 ///
-/// Every file is sent before this returns; the host's `Done`, `Progress` and `Finished` arrive
+/// Every file is sent before this returns; the worker's `Done`, `Progress` and `Finished` arrive
 /// on the control stream. An error is the reason the transfer stopped, already reported to the
-/// host as [`XferMsg::Failed`].
+/// worker as [`XferMsg::Failed`].
 pub async fn upload(
     up: &Uplink,
     xfer: XferId,
@@ -312,7 +312,7 @@ async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &str) {
     let _closed = send(up, XferMsg::Failed { xfer, name, error: error.to_owned() }).await;
 }
 
-/// One file, resumed from what the host holds after a cut stream.
+/// One file, resumed from what the worker holds after a cut stream.
 async fn send_with_resume(up: &Uplink, xfer: XferId, entry: &Entry) -> Result<(), String> {
     let mut offset = 0_u64;
     let mut attempt = 0_u32;
@@ -328,7 +328,7 @@ async fn send_with_resume(up: &Uplink, xfer: XferId, entry: &Entry) -> Result<()
                 send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
                 offset = tokio::time::timeout(OFFSET_WAIT, answer)
                     .await
-                    .map_err(|_elapsed| "the host did not say how much it holds".to_owned())?
+                    .map_err(|_elapsed| "the worker did not say how much it holds".to_owned())?
                     .map_err(|_dropped| "link closed".to_owned())?
                     .min(entry.size);
             }
@@ -362,15 +362,15 @@ async fn send_file(up: &Uplink, xfer: XferId, entry: &Entry, offset: u64) -> Res
         stream.write_all(chunk).await.map_err(|e| e.to_string())?;
     }
     stream.finish().map_err(|e| e.to_string())?;
-    // A stream the host stopped after the last write surfaces here rather than in a write.
+    // A stream the worker stopped after the last write surfaces here rather than in a write.
     match stream.stopped().await {
         Ok(None) => Ok(()),
-        Ok(Some(code)) => Err(format!("the host stopped the stream ({code})")),
+        Ok(Some(code)) => Err(format!("the worker stopped the stream ({code})")),
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// Ask the host for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
+/// Ask the worker for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
 /// wait until every file of it has landed in `into`. Returns the top-level paths landed.
 pub async fn download(
     up: &Uplink,
@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn a_download_is_whole_when_the_files_the_host_promised_have_landed_in_any_order() {
+    fn a_download_is_whole_when_the_files_the_worker_promised_have_landed_in_any_order() {
         let table = Table::default();
         let xfer = XferId::new();
         let mut done = table.expect_download(xfer, PathBuf::from("/tmp"));

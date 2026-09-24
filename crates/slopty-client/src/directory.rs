@@ -15,7 +15,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
-use slopty_net::endpoint::HOST_PORT;
+use slopty_net::endpoint::WORKER_PORT;
 use slopty_proto::server::{Event, FromServer, Liveness, WorkerInfo};
 
 /// File name of the cached directory inside the client's data directory.
@@ -187,7 +187,7 @@ impl Directory {
         if self.linked() && info.liveness != Liveness::Online {
             return Dial::Hold(info.liveness);
         }
-        match HostAddr::parse_with_port(&info.address, HOST_PORT) {
+        match HostAddr::parse_with_port(&info.address, WORKER_PORT) {
             Ok(addr) => Dial::At(addr),
             Err(e) => {
                 tracing::warn!(%worker, address = %info.address, error = %e, "directory address");

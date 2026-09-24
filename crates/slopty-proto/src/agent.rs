@@ -1,4 +1,4 @@
-//! Coding-agent status as the host observes it.
+//! Coding-agent status as the worker observes it.
 //!
 //! Which agent a shell runs and whether it works, waits on the human or is done. The agent
 //! itself is used through its own TUI in the terminal; nothing here drives it.
@@ -49,9 +49,9 @@ pub enum AgentStatus {
     Done,
 }
 
-/// Which signal the host read the status from, weakest first.
+/// Which signal the worker read the status from, weakest first.
 ///
-/// The host watches four signals and keeps the strongest one that has spoken for a session:
+/// The worker watches four signals and keeps the strongest one that has spoken for a session:
 /// the foreground process only says an agent is there, the terminal title tells working from
 /// idle, the JSONL transcript names the turn and the tool, and the hooks say everything
 /// including what the agent is blocked on. A client shows the same pill for all four; the
@@ -68,7 +68,7 @@ pub enum AgentSource {
     Hook,
 }
 
-/// Host → client.
+/// Worker → client.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
     /// Session.

@@ -4,8 +4,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Three roles; the server is never on the data path** (2026-09-24, at the user's request
   for one app that reaches many machines and lets people and AI agents orchestrate them).
-  - **Worker.** A machine that runs things: today's host (`slopty-hostd` + `slopty-ptyd`),
-    which will be renamed `slopty-worker`. It owns PTYs, scrollback, windows, displays and agent
+  - **Worker.** A machine that runs things: `slopty-worker` + `slopty-ptyd`, the host daemon
+    of the time under its new name. It owns PTYs, scrollback, windows, displays and agent
     status.
   - **Server.** The control plane (`slopty-server`). It holds the worker registry with
     capabilities, cross-worker state (notes, orchestration history, per-device layouts kept for
@@ -168,7 +168,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     waiting on the worker, and every other forwarded verb 60 s.
 
 - ✅ **The worker's side of the link: registration, redial, and what the verbs mean** (2026-09-25).
-  - **Joining.** `slopty-hostd` registers with the server named by `--server`, else
+  - **Joining.** `slopty-worker` registers with the server named by `--server`, else
     `SLOPTY_SERVER`, else `[worker] server` in `settings.toml` (port 45560 when none is given).
     With none it runs on its own as before. The link is one task beside the rest of the
     daemon. It hears the daemon's events on its own broadcast subscription and forwards
@@ -242,7 +242,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A test sends the same calls to the server's endpoint and to `slopty mcp` dialled to that
     server, over one fake worker, and requires identical results.
 
-- ✅ **A terminal ends with its program** (2026-09-25). When a session's program exits, hostd
+- ✅ **A terminal ends with its program** (2026-09-25). When a session's program exits, the worker
   shows the viewers the exit status, then closes the session and announces
   `SessionClosed { reason: Exited }` to its clients and the server. Before, only a verb or a
   client's close announced an end, so a shell that ran `exit` stayed listed on the server
@@ -252,7 +252,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     table, and only the call that removes it announces it. A client's `Close` for a session
     already gone is no longer an error, because that is the usual race: its program exited
     and the client closed the tile on seeing it.
-  - Sessions that ended while hostd was down (ptyd reports them exited on adoption) are
+  - Sessions that ended while the worker was down (ptyd reports them exited on adoption) are
     closed the same way at start, before the server hears of them.
   - An orchestrator that wants a program's last output reads it before the program exits: run
     it in a shell and wait with `command_done`, not `exit`. `WaitFor { Exit }` still resolves
@@ -296,3 +296,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The palette gained "Connect to a server", "Disconnect from the server" and "List
     workers". The list shows each worker with its state, and ↩ goes to its first tile or
     opens a shell on it.
+
+- ✅ **The worker is called a worker everywhere** (2026-09-25). The code said "host" for the
+  worker role long after the three roles were named, so the names now follow the roles, with
+  no aliases.
+  - **Crates and binaries** mirror the server's: the library `slopty-worker`, and the package
+    `slopty-workerd` that builds the binary `slopty-worker`. `slopty-ptyd` keeps its name.
+  - **Wire.** `WorkerMsg`, `slopty_net::worker::WorkerListener`, `WorkerConn`, `WORKER_PORT`,
+    `CloseReason::WorkerShutdown`, `Rejection::ProtocolVersion { worker }`. Postcard encodes
+    no names, so the proto goldens are byte for byte what they were and `PROTOCOL_VERSION`
+    stays. `HostAddr` keeps its name: it is a network host, and it names the server too.
+  - **Around the daemon.** `slopty worker install|uninstall|status|doctor|screens`, the
+    `--worker` flag on `sessions`, `ping`, `attach` and `bench`, the launchd label
+    `dev.aislopware.slopty.worker`, `worker.sock`, `slopty-worker.log` and the
+    `SLOPTY_WORKER_*` variables. `settings.toml` has one `[worker]` table: `allow` moved into
+    it from `[host]`.
+  - **Moving an installed worker.** Nothing reads the old label. Boot out
+    `dev.aislopware.slopty.hostd` and delete its plist, then run `slopty worker install` from
+    the new build; the new signing identifier needs its permissions granted again.

@@ -9,7 +9,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Window streams post with `CGEventPostToPid` to the owner; display streams post to the HID tap.
   Keys carry the client's text via `CGEventKeyboardSetUnicodeString`, so host and client
   layouts need not agree; bare modifier keys post as `FlagsChanged`. Needs post-event
-  (Accessibility) access: `slopty-hostd` preflights at start-up, warns, and asks once.
+  (Accessibility) access: `slopty-worker` preflights at start-up, warns, and asks once.
 
 - ✅ **The injector decides, a `Backend` posts** (2026-09-05). `Injector<B: Backend>` maps
   pixels to points, tracks held buttons and flags, picks the route (`Pid` vs `Hid`; right
@@ -86,8 +86,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   guard's confirming mesh run a whole session (MEASUREMENTS.md). Signing with a Developer ID
   certificate under a fixed identifier makes the designated requirement the identifier plus the
   certificate instead of the hash, so one approval covers every later build. Ruling: the daemons
-  are signed as `dev.aislopware.slopty.hostd` and `….ptyd`, the same strings the LaunchAgents are
-  labelled with, by `cargo xtask sign`; `xtask run host` calls it after the build so nobody has to
+  are signed as `dev.aislopware.slopty.worker` and `….ptyd`, the same strings the LaunchAgents are
+  labelled with, by `cargo xtask sign`; `xtask run worker` calls it after the build so nobody has to
   remember, and reports rather than fails when there is no certificate, because an unsigned daemon
   still runs. Only a Developer ID certificate is accepted: an Apple Development one expires within
   the year and takes the approval with it. Tests `xtask::sign::tests`.
@@ -99,7 +99,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stream keeps failing with `-3801`. The Accessibility path had asked (`CGRequestPostEventAccess`)
   since the first cut; this is the same three lines for the other permission
   (`slopty_capture::request_capture`), logged at `warn` beside it. Costs one prompt, once, per
-  signed identity — which is exactly one now that the identity is stable. `slopty host doctor`
+  signed identity — which is exactly one now that the identity is stable. `slopty worker doctor`
   still reports both, so a headless install can gate on it.
 
 - 🔬 Whether macOS 26 drops modifier combos from unsigned processes — slop-desk claims it, we have
@@ -118,7 +118,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Not done: releasing modifiers when the view loses focus while one is down (⌘-tab away with
   ⌘ held) — the release does arrive from GPUI when the key goes up in this window, and a
   focus-loss sweep belongs with a sweep of `held` too. Test: headless
-  `modifier_keys_go_to_the_host_as_they_move`.
+  `modifier_keys_go_to_the_worker_as_they_move`.
 
 - ✅ **A window card's grip resizes the host window** (2026-09-13). Dragging a card's grip only
   changed the card, and the next `Geometry` event snapped it back to the window's aspect;
@@ -146,7 +146,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the modifier releases through the same diff the modifier keys use, so the host sees the
   keyboard as the client does: nothing down. A view with nothing held sends nothing. The
   earlier "Modifier keys reach the host on their own" entry's open item is closed by this.
-  Test: headless `losing_focus_releases_what_is_held_on_the_host`.
+  Test: headless `losing_focus_releases_what_is_held_on_the_worker`.
 
 - ✅ **A fling reaches the host as a gesture and then as momentum** (2026-09-15). The wire type
   and the host have carried both phases from the start: `ScreenInput::Scroll` has `phase` and
@@ -202,5 +202,5 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   had the same arm and got the same fix; the canvas's pinch handler ignores phase, so nothing
   there changes.
 
-  Test: `a_fling_over_the_picture_reaches_the_host_as_a_gesture_and_then_as_momentum` drives the
+  Test: `a_fling_over_the_picture_reaches_the_worker_as_a_gesture_and_then_as_momentum` drives the
   whole shape, both ways it can finish, and the doubled open.

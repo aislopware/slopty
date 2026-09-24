@@ -113,7 +113,7 @@ impl Server {
     pub async fn shutdown(self) {
         self.listener
             .endpoint()
-            .close(slopty_net::host::close_code::NORMAL.into(), b"server stopping");
+            .close(slopty_net::worker::close_code::NORMAL.into(), b"server stopping");
         for task in &self.tasks {
             task.abort();
         }

@@ -59,10 +59,10 @@ jobs:
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm git-cliff@2.14.1
       - run: brew install zig
-      - run: cargo build --profile dist -p slopty-hostd -p slopty-ptyd
+      - run: cargo build --profile dist -p slopty-workerd -p slopty-ptyd
       - run: |
           mkdir -p dist
-          tar -C target/dist -czf dist/slopty-host-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-hostd slopty-ptyd
+          tar -C target/dist -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-worker slopty-ptyd
           git cliff --latest --strip all > dist/notes.md
       - uses: softprops/action-gh-release@v2
         with:

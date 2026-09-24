@@ -4,7 +4,7 @@
 //! frame it drew as that frame reaches the display ([`KeyLatency::painted`], from the next
 //! frame callback: the display tick that presents it, not the paint, which runs up to a refresh
 //! more earlier) with two facts: which keys the local-echo overlay is showing
-//! (the predictor stamps each guess with the key's sequence number) and which key the host had
+//! (the predictor stamps each guess with the key's sequence number) and which key the worker had
 //! applied in the frame on screen (`Frame::input_ack`). The first paint that shows a key's
 //! guess is that key's *predicted* time; the first paint whose frame acknowledges it is its
 //! *echoed* time. A key the predictor drew nothing for (an arrow, a control key) gets no
@@ -22,15 +22,15 @@ pub const STALE: Duration = Duration::from_secs(5);
 /// Percentiles and counts over the last [`RING`] keys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LatencyStats {
-    /// Keys whose echo from the host has been painted.
+    /// Keys whose echo from the worker has been painted.
     pub echoed: u64,
-    /// Key → paint of the host's echo, median.
+    /// Key → paint of the worker's echo, median.
     pub echo_p50: Duration,
     /// Same, 95th percentile.
     pub echo_p95: Duration,
     /// Same, worst in the ring.
     pub echo_max: Duration,
-    /// Keys the local-echo overlay showed before the host answered.
+    /// Keys the local-echo overlay showed before the worker answered.
     pub predicted: u64,
     /// Key → paint of the prediction, median.
     pub predicted_p50: Duration,
@@ -58,7 +58,7 @@ pub struct KeyLatency {
 }
 
 impl KeyLatency {
-    /// A key with sequence number `seq` left for the host at `now`.
+    /// A key with sequence number `seq` left for the worker at `now`.
     pub fn pressed(&mut self, seq: u64, now: Instant) {
         self.pending.push_back(Pending { seq, at: now, predicted: false });
         while self.pending.len() > RING {
@@ -73,7 +73,7 @@ impl KeyLatency {
     }
 
     /// A frame was presented at `now`: the local-echo overlay showed guesses for the keys in
-    /// `shown` and the picture on screen carries the host's state after key `input_ack`.
+    /// `shown` and the picture on screen carries the worker's state after key `input_ack`.
     pub fn painted(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
         let mut keep = VecDeque::with_capacity(self.pending.len());
         for mut key in self.pending.drain(..) {
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_the_host_never_answers_go_stale_and_percentiles_span_the_ring() {
+    fn keys_the_worker_never_answers_go_stale_and_percentiles_span_the_ring() {
         let mut m = KeyLatency::default();
         let t0 = Instant::now();
         m.pressed(1, t0);

@@ -1,8 +1,8 @@
 //! `xtask bundle`: the macOS app bundle.
 //!
-//! `Slopty.app` carries the app and, beside it, the host daemons and the CLI, so one bundle
-//! serves both roles: launch it for the workspace, or run `Contents/MacOS/slopty host install`
-//! to turn the machine into a host. `Info.plist` is generated from the workspace version;
+//! `Slopty.app` carries the app and, beside it, the worker daemons and the CLI, so one bundle
+//! serves both roles: launch it for the workspace, or run `Contents/MacOS/slopty worker install`
+//! to turn the machine into a worker. `Info.plist` is generated from the workspace version;
 //! signing is ad hoc unless `--sign` names a Developer ID identity.
 
 use anyhow::{Result, bail};
@@ -19,7 +19,7 @@ const PRODUCT: &str = "Slopty";
 /// Floor, as `LSMinimumSystemVersion`.
 const MACOS_VERSION: &str = "26.5";
 /// Binaries copied into `Contents/MacOS`, the app first.
-const BINARIES: [&str; 4] = ["slopty-app", "slopty-hostd", "slopty-ptyd", "slopty"];
+const BINARIES: [&str; 4] = ["slopty-app", "slopty-worker", "slopty-ptyd", "slopty"];
 
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone)]
@@ -41,7 +41,10 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
     let flags: &[&str] = if opts.debug { &[] } else { &["--release"] };
     step(
         &format!("cargo build ({profile})"),
-        &cmd!(sh, "cargo build {flags...} -p slopty -p slopty-hostd -p slopty-ptyd -p slopty-cli"),
+        &cmd!(
+            sh,
+            "cargo build {flags...} -p slopty -p slopty-workerd -p slopty-ptyd -p slopty-cli"
+        ),
     )?;
     let built = root.join("target").join(profile);
     let out = opts.out.clone().unwrap_or_else(|| root.join("target").join("bundle"));
@@ -124,7 +127,7 @@ fn info_plist(version: &str) -> String {
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Slopty finds your host on the local network.</string>
+	<string>Slopty finds your worker on the local network.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_slopty._udp</string>

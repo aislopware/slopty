@@ -144,7 +144,7 @@ const WARM_UP_HEVC: [&[u8]; 3] = [
 /// `VTDecompressionSessionCreate` in a process takes ~150 ms, every later one ~3 ms, and the
 /// stream worker that creates it holds every datagram behind it for that long — which the
 /// reassembler then counted as a 150 ms link stall. Call this once, off the stream's path,
-/// when a host link comes up.
+/// when a worker link comes up.
 pub fn warm_up() -> Result<std::time::Duration, CodecError> {
     let started = std::time::Instant::now();
     let mut decoder = Decoder::new(VideoCodec::Hevc, |_frame| {});
@@ -238,7 +238,7 @@ impl Decoder {
             unsafe { session.invalidate() }
             self.session = None;
         }
-        // Full-range bi-planar 4:2:0, the format the host captures and encodes, so the decoder
+        // Full-range bi-planar 4:2:0, the format the worker captures and encodes, so the decoder
         // writes its output directly and runs no conversion pass; GPUI's surface path samples
         // the two planes through `CVMetalTextureCache`.
         let format_type = CFNumber::new_i32(i32::from_ne_bytes(

@@ -1,9 +1,9 @@
-//! The host's clipboard as this client sees it: the representations of the host's latest offer
+//! The worker's clipboard as this client sees it: the representations of the worker's latest offer
 //! that were fetched, or are on their way.
 //!
-//! The UI puts promises on the local pasteboard for what the host announced. When something
+//! The UI puts promises on the local pasteboard for what the worker announced. When something
 //! pastes, the pasteboard asks for the bytes on the main thread and must have them before it
-//! returns; [`ClipCache::wait`] gives them from here, asking the host once and waiting a bounded
+//! returns; [`ClipCache::wait`] gives them from here, asking the worker once and waiting a bounded
 //! time for the answer, which the link's tasks put here ([`ClipCache::fill`]) from a `Data`
 //! message or a bulk stream.
 
@@ -15,7 +15,7 @@ use slopty_net::ClientMsg;
 use slopty_proto::transfer::{ClipMsg, INLINE_CLIP_BYTES, Offer};
 use tokio::sync::mpsc;
 
-/// Representations up to this size are fetched as soon as the host announces them, so a paste
+/// Representations up to this size are fetched as soon as the worker announces them, so a paste
 /// finds them here; bigger ones are fetched when something pastes them.
 pub const PREFETCH_BYTES: u64 = 1 << 20;
 
@@ -32,12 +32,12 @@ enum Slot {
 
 #[derive(Debug, Default)]
 struct State {
-    /// The host's latest offer.
+    /// The worker's latest offer.
     generation: Option<u64>,
     slots: HashMap<(u64, String), Slot>,
 }
 
-/// The fetched representations of the host's latest offer.
+/// The fetched representations of the worker's latest offer.
 #[derive(Debug)]
 pub struct ClipCache {
     state: Mutex<State>,
@@ -46,13 +46,13 @@ pub struct ClipCache {
 }
 
 impl ClipCache {
-    /// A cache that asks the host on `out`.
+    /// A cache that asks the worker on `out`.
     #[must_use]
     pub fn new(out: mpsc::Sender<ClientMsg>) -> Self {
         Self { state: Mutex::default(), changed: Condvar::new(), out }
     }
 
-    /// The host announced `offer`: the older offers' bytes go, the inline ones are here at
+    /// The worker announced `offer`: the older offers' bytes go, the inline ones are here at
     /// once, and the small ones are asked for now.
     pub fn offer(&self, offer: &Offer) {
         let mut state = self.state.lock();
@@ -89,7 +89,7 @@ impl ClipCache {
         self.changed.notify_all();
     }
 
-    /// Offer `generation` is gone on the host: anyone waiting on it stops.
+    /// Offer `generation` is gone on the worker: anyone waiting on it stops.
     pub fn gone(&self, generation: u64) {
         let mut state = self.state.lock();
         for ((g, _), slot) in &mut state.slots {
@@ -122,7 +122,7 @@ impl ClipCache {
     }
 
     /// The bytes of `uti` in offer `generation`: from the cache, else asked for and waited on
-    /// for at most `wait`. `None` when the offer is gone or the host did not answer in time.
+    /// for at most `wait`. `None` when the offer is gone or the worker did not answer in time.
     /// Blocks the calling thread; the answer arrives on the link's tasks, never this thread.
     #[must_use]
     pub fn wait(&self, generation: u64, uti: &str, wait: Duration) -> Option<Vec<u8>> {
@@ -148,7 +148,7 @@ impl ClipCache {
     }
 }
 
-/// How an answer to a host's fetch travels: inline on the control stream when it fits.
+/// How an answer to a worker's fetch travels: inline on the control stream when it fits.
 #[must_use]
 pub const fn fits_inline(len: usize) -> bool {
     len <= INLINE_CLIP_BYTES

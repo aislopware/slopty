@@ -23,7 +23,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `discovery-local-network` feature in iroh 1.x). Behind `slopty-net/mdns`; hosts advertise,
   clients only look up. Wide-area lookup is iroh's `presets::N0` (DNS + pkarr on n0's infra).
 
-- ✅ **Pairing** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed** and hosts.md **Admission by source
+- ✅ **Pairing** — superseded 2026-09-24 by **Plaintext QUIC on noq, standalone; iroh removed** and workers.md **Admission by source
   address**: no tickets, tokens or trust store. Was: `PairTicket { addr, token }` (`iroh-tickets` 1.0.0, base32 string, kind
   `sloptypair`), token single-use with a 10-minute TTL. On redeem the host trusts the client's
   endpoint key in `trust.json` (mode 0600); afterwards the QUIC handshake is the whole
@@ -95,11 +95,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   one occurrence, and a retry policy would only hide the rate. If it recurs, the number to
   read first is whether the host's accept loop ever saw the stranger. ✅ Liveness now comes from
   QUIC itself, no protocol message: the app samples `ConnectionStats.udp_rx.datagrams` once a
-  second (`HostLink::received_datagrams`); keep-alive pings make a live host send something
+  second (`WorkerLink::received_datagrams`); keep-alive pings make a live host send something
   every 5 s, so a counter that stands still for `SILENCE_WARN` = 8 s turns the RTT readout into
   a yellow "host silent Ns". Verified 2026-09-05 by `SIGSTOP`ping hostd. Since the same day the
   app also *gives up* at `SILENCE_DROP` = 15 s (three missed keep-alives, noq's own path bar):
-  `HostLink::abandon` closes the QUIC connection, the control reader reports `Disconnected`,
+  `WorkerLink::abandon` closes the QUIC connection, the control reader reports `Disconnected`,
   and the normal reconnect loop runs, so a restarted host is back ~2 s after it answers instead
   of after the 45 s idle timeout. Measured with a frozen hostd: dropped at 15.2 s, reconnected
   2 s after `SIGCONT`. Reading the logs afterwards: a killed app's *old* connection still shows
@@ -114,7 +114,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   with 5 s heartbeats, `UnusableAfterNetworkChange`, `RemoteAbandoned`), and the standing
   hypothesis was that a busy machine starves the QUIC driver task until the heartbeats miss.
   A harness now says otherwise: `path_flap_under_{cpu,user_initiated_cpu,memory_io}_load`
-  (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_FLAP_E2E`) runs hostd and a client over iroh
+  (`apps/slopty-worker/tests/e2e.rs`, gate `SLOPTY_FLAP_E2E`) runs hostd and a client over iroh
   with relays enabled — both ends hold a relay path *and* a direct path, so there is somewhere
   to flap to — attaches a shell and a display stream, and hammers the machine for 90 s while
   sampling the selected path four times a second and keeping noq's own path log. Three shapes,
@@ -139,7 +139,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Host::client_gone(client)`, which detached *every* viewer with that id, i.e. the new
   connection's. Rule: viewer eviction is scoped to the connection that attached it:
   `SessionHandle::detach_sink(client, &sink)` removes a viewer only if `Sender::same_channel`
-  matches, and `Peer::drop` in hostd uses it; `client_gone` is gone. Regression test
+  matches, and `Peer::drop` in `slopty-worker` uses it; `client_gone` is gone. Regression test
   `stale_connection_detach_keeps_the_reconnected_viewer`.
 
 - ✅ **Terminal search runs on the host** (2026-09-05). The client caches at most 20k lines and
@@ -211,8 +211,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_stall_longer_than_max_hold_gives_up`. Cost: on a *still* screen a genuinely dropped tail
   waits the full 500 ms before the refresh (nothing newer arrives to prove the drop).
 
-- ✅ **hostd binds a fixed UDP port** (2026-09-05): `slopty-hostd --port` / `SLOPTY_PORT`,
-  default `slopty_net::endpoint::HOST_PORT` (45550), IPv4 required, IPv6 best effort. Found
+- ✅ **hostd binds a fixed UDP port** (2026-09-05): `slopty-worker --port` / `SLOPTY_PORT`,
+  default `slopty_net::endpoint::WORKER_PORT` (45550), IPv4 required, IPv6 best effort. Found
   when a hostd restart stranded the paired MacBook: with `--direct-only` a client on another
   subnet knows the host only by the ticket's `ip:port` and cannot hear mDNS, so a random port
   per launch meant re-pairing after every restart. A port in use is a hard error (a silent
@@ -249,9 +249,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keeps a process-wide `OnceCell<Endpoint>` used by both `pair_host` and `connect_to`, and
   never closes it.
 
-- ✅ Deployment is two LaunchAgents written by `slopty host install` (`plist` crate, XML):
+- ✅ Deployment is two LaunchAgents written by `slopty worker install` (`plist` crate, XML):
   `KeepAlive` + `RunAtLoad` + `ThrottleInterval 2` so a crash comes back in 2 s and login
-  starts both; `ProcessType Interactive` and `LimitLoadToSessionType Aqua` because hostd
+  starts both; `ProcessType Interactive` and `LimitLoadToSessionType Aqua` because the worker
   needs the window server and ScreenCaptureKit and must not be App-Napped; sockets under
   `<data dir>/run/` (not `$TMPDIR`, which launchd children may not share) and the CLI's
   socket lookup falls back to that path when it exists. `install` re-bootstraps (bootout
@@ -259,14 +259,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **"install hooks" is a pill on the title bar of the first unhooked agent, and hostd
   writes the settings** (2026-09-05). The human whose agent is being guessed at may be on a
-  phone, so `ClientMsg::InstallHooks` asks the host to do it and `HostMsg::HooksInstalled`
+  phone, so `ClientMsg::InstallHooks` asks the host to do it and `WorkerMsg::HooksInstalled`
   comes back as a notice. The installer moved from `slopty-cli` into `slopty_agent::hooks` so
   the CLI and the daemon run the same code; hostd registers the `slopty` binary beside itself
   (`Contents/MacOS` in a bundle, `target/<profile>` in a build tree). The offer shows once per
   run and comes back only if the host reports it failed. Wire, with the `AgentSource` of the
   attribution ruling above: `AgentEvent.source`, `ClientMsg::InstallHooks` and
-  `HostMsg::HooksInstalled`, goldens `host_agent_process`, `host_agent_hook`,
-  `client_install_hooks` and `host_hooks_installed` (all new) with `client_hello` re-accepted,
+  `WorkerMsg::HooksInstalled`, goldens `worker_agent_process`, `worker_agent_hook`,
+  `client_install_hooks` and `worker_hooks_installed` (all new) with `client_hello` re-accepted,
   PROTOCOL_VERSION 11 → 12.
 
 - ✅ **A stall is the link's silence, not the source's** (2026-09-06, measured). The receiver
@@ -277,7 +277,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   says "the link is up, the source is quiet" — but a beat that is itself late leaves the same
   hole. The answer was already on the wire: every datagram carries `send_ms_lo`, the low byte of
   the host's millisecond clock, so the difference between two stamps is how long the host waited
-  between sending them. `link_gap = arrival_gap − host_gap` is the link's share, and only that is
+  between sending them. `link_gap = arrival_gap − worker_gap` is the link's share, and only that is
   compared with the stall threshold and charged to `stalled_ms` — RFC 3550's interarrival
   arithmetic, used for attribution rather than jitter. Three cases keep the old pessimistic
   reading, because they are cases where the receiver genuinely cannot tell: a gap past the
@@ -286,7 +286,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   which is the in-progress half — a gap that has not ended yet has no stamp to settle it. Result:
   0 stalls at every rate, and the gated test asserts its verdicts again. Tests:
   `a_quiet_source_whose_heartbeat_was_late_is_not_a_stall` and
-  `only_the_hosts_share_of_a_gap_is_forgiven` (`crates/slopty-media/tests/pipeline.rs`), with the
+  `only_the_workers_share_of_a_gap_is_forgiven` (`crates/slopty-media/tests/pipeline.rs`), with the
   existing stall tests rewritten to produce their frames *before* the silence they are released
   after, which is what a held link actually looks like.
 
@@ -329,7 +329,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     whole silence to the link. The difference is congruent to the host's real interval modulo
     the byte's 256 ms range, so it is now read as a **signed offset from the arrival gap**: below
     the midpoint the host covers the silence, above it the datagram overtook its predecessor and
-    is refused exactly as before (`STAMP_SLACK`, `Stamp::{Host, Covered, Backwards}`). Past
+    is refused exactly as before (`STAMP_SLACK`, `Stamp::{Worker, Covered, Backwards}`). Past
     256 ms the ambiguity is real and the pessimistic reading stands (`Stamp::Wrapped`).
   * **A receiver that was not scheduled charged its own load to the link.** Nothing distinguishes
     a held link from an unread socket from inside a task that never ran, and the same runs had
@@ -350,7 +350,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   **a fragment of the frame still pending**, on the host's send side (`cwnd 5808`, QUIC's floor,
   against a 30 Mbit/s target on a 2.9 ms path). Freezing growth on those is right. The self-check
   is `slopty bench screen --max-stalls 0`. Tests (`crates/slopty-media/tests/pipeline.rs`):
-  `a_stamp_reading_just_past_the_silence_still_belongs_to_the_host`,
+  `a_stamp_reading_just_past_the_silence_still_belongs_to_the_worker`,
   `heartbeats_late_by_three_beats_are_charged_to_the_sender`,
   `two_hundred_milliseconds_in_flight_is_one_stall` (which must still be one stall of 200 ms, and
   still freeze the bitrate controller) and `a_silence_the_receiver_slept_through_is_not_a_stall`;
@@ -388,8 +388,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   async, which is not a change to make while chasing a tail. The e2e asserts the p95 against
   `STALL_GAP` and 0 stalls, and deliberately does not assert the worst gap.
   Tests: `a_slow_geometry_call_does_not_make_the_beat_late` (unit: 300 ms of blocking work beside
-  the beat, cadence kept) and `the_heartbeat_keeps_its_cadence_on_a_quiet_stream` (hostd e2e,
-  `SLOPTY_SCREEN_E2E`, a minute on a stream whose target draws nothing).
+  the beat, cadence kept) and `the_heartbeat_keeps_its_cadence_on_a_quiet_stream` (`slopty-worker`
+  e2e, `SLOPTY_SCREEN_E2E`, a minute on a stream whose target draws nothing).
 
 - ❌ **Raising BBR3's minimum congestion window, or softening `ProbeRTT`** (2026-09-06). The long
   holds on a quiet loopback stream are `ProbeRTT`: every 5 s without a lower RTT sample BBR3
@@ -443,7 +443,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the same logs. Unit test: `a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain`.
   Amended 2026-09-06: the turn accounting still could not see a datagram that arrived in an
   empty queue and then waited out a deschedule alone — `queued_before` was zero, so no turn was
-  owed. Every datagram now carries its enqueue time (`slopty_host::screen::Queued`, stamped in
+  owed. Every datagram now carries its enqueue time (`slopty_worker::screen::Queued`, stamped in
   `Shared::push` with `host_now_us()`) and the pump reads the wait on the way out: the caught-up
   line reports `waited` p50/p95/max over the last 1024 datagrams and the worst since the last
   line, and a lone wait past 20 ms with no backlog to charge it to is logged on its own, at most
@@ -451,20 +451,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_wait_ring_reports_the_last_window_and_the_worst_once`; numbers in MEASUREMENTS.md
   "what a datagram waits in the pump's channel". The bench's `quic path (client side)` line — the feedback connection, permanently at
   `min_pipe_cwnd` because nothing measurable flows on it — is relabelled
-  `quic path (client→host, feedback only)`; reading it as the media window is the mistake this
+  `quic path (client→worker, feedback only)`; reading it as the media window is the mistake this
   entry exists to stop.
 
 - ✅ **With no audio, the heartbeat is what keeps the cadence — and that is all a keep-cadence
   datagram can do** (2026-09-06). ❌ **Beating at the inter-frame gap instead of
   `HEARTBEAT_AFTER`.** The question was whether a stream carrying no audio loses its datagram
   cadence and lets the congestion window fall to the floor. Measured both ways on the same host
-  (MEASUREMENTS.md, "Audio on"): with sound playing, `host_quiet` silences go to 0 — the sender is
+  (MEASUREMENTS.md, "Audio on"): with sound playing, `worker_quiet` silences go to 0 — the sender is
   never quiet — and the window is at 5 808 B for **23 % of samples against 1.4–8 % on the quiet
   runs**, with 27 of its 28 long holds there and 14 stalls. Traffic does not lift the window; the
   window is low because the flow is application-limited and BBR sizes it from `bw × min_rtt`, which
   on a still desktop (~1 Mbit/s over 1.5 ms) is under a packet. More datagrams are more bursts into
   a four-packet window. The heartbeat's job is the receiver's stall clock, not the congestion
-  controller's estimate, and at half the stall gap it already does that job: `host_quiet` silences
+  controller's estimate, and at half the stall gap it already does that job: `worker_quiet` silences
   run 0–4 per 90 s with `stamp_absent` zero throughout. Raising its rate would buy nothing and cost
   a datagram every 16.7 ms per stream. The only filler that would move the estimate is filler at
   the target rate, which is 30 Mbit/s of nothing on a link carrying 1 Mbit/s of content.
@@ -501,7 +501,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   read as 25 ms of link time instead of 100 and the stall was missed. Only sleep past the end of
   the host's silence is credited now, which needs the doze's start as well as its length. Tests:
   `a_sleep_is_forgiven_once_and_a_stall_that_stays_on_keeps_reporting`,
-  `sleep_inside_the_hosts_own_silence_is_not_forgiven_twice`; both were checked against a mutation
+  `sleep_inside_the_workers_own_silence_is_not_forgiven_twice`; both were checked against a mutation
   of the fix they cover.
 
 - ✅ **BBR3 stays the default congestion controller; the choice is decided by the busy case, and
@@ -786,7 +786,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
   The ladder runs against the *installed* host, which is not a preference: TCC attributes a
   shell-spawned daemon to whatever launched it, so a test that spawns its own is refused capture
-  with -3801 however the binary is signed. `SLOPTY_E2E_HOSTD_SOCKET` points it at the launchd
+  with -3801 however the binary is signed. `SLOPTY_E2E_WORKER_SOCKET` points it at the launchd
   host's control socket, and it checks that host is pinned before streaming rather than after.
   Every other `SLOPTY_SCREEN_E2E` test still spawns its own daemons and so cannot capture either;
   that is older than this change and not fixed here.
@@ -890,10 +890,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   replaced the host in use, so it was not run.
 
 - ✅ **Media datagrams go to QUIC from the thread that made them** (2026-09-25). A stream hands
-  its datagrams to a `DatagramSink` (hostd's `QuicSink` over the connection) from wherever they
-  were produced: a frame's worth in one `send_many_datagrams` call from VideoToolbox's callback,
-  audio from the capture queue, heartbeats and cursor samples from their tasks. The pump it
-  replaces put every datagram through a 4096-slot channel into a task that read the send buffer
+  its datagrams to a `DatagramSink` (`slopty-worker`'s `QuicSink` over the connection) from wherever
+  they were produced: a frame's worth in one `send_many_datagrams` call from VideoToolbox's
+  callback, audio from the capture queue, heartbeats and cursor samples from their tasks. The pump
+  it replaces put every datagram through a 4096-slot channel into a task that read the send buffer
   and the datagram size beside each `send_datagram`, three connection locks per datagram, and
   polled at 1 kHz while QUIC held bytes. The capture guard now reads the held bytes from the sink
   on each captured frame and the window only while something is held, so there is no second
@@ -919,8 +919,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   reads, hook installs and transfer resumes are spawned and report back; the watched files have
   their own task. A paste chord holds input only for the windows it went to, in order, while the
   clipboard is asked, fetched and written off the runtime; other windows and every terminal carry
-  on. `echo_is_not_held_behind_slow_requests` (hostd e2e) keeps it so: keystroke echo under a
-  stream of quick opens and window opens on the same connection, p99 against half a quick open.
-  Measured (MEASUREMENTS.md, "echo behind slow requests"): echo p99 33.3 → 4.8–5.3 ms under that
-  load, p50 28.7 → 2.8 ms. `slopty_host::file::read` also refuses what is not a regular file
+  on. `echo_is_not_held_behind_slow_requests` (`slopty-worker` e2e) keeps it so: keystroke echo
+  under a stream of quick opens and window opens on the same connection, p99 against half a quick
+  open. Measured (MEASUREMENTS.md, "echo behind slow requests"): echo p99 33.3 → 4.8–5.3 ms under
+  that load, p50 28.7 → 2.8 ms. `slopty_worker::file::read` also refuses what is not a regular file
   before opening it: a named pipe would wait for a writer on a blocking thread for good.

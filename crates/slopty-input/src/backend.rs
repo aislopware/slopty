@@ -100,7 +100,7 @@ pub struct Post {
     pub event: Event,
 }
 
-/// The host-side services an injector needs: window geometry, app activation, posting.
+/// The worker-side services an injector needs: window geometry, app activation, posting.
 pub trait Backend {
     /// The pid owning a window target; `None` for displays or unknown windows.
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32>;

@@ -21,7 +21,7 @@ pub const BULK_PRIORITY: i32 = -1;
 /// A unidirectional stream the peer opened.
 #[derive(Debug)]
 pub enum Uni {
-    /// A session's terminal events (host → client).
+    /// A session's terminal events (worker → client).
     Session {
         /// The session.
         session: SessionId,
@@ -96,7 +96,7 @@ pub async fn accept_uni(conn: &Connection) -> Result<Uni, NetError> {
     })
 }
 
-/// Client: open a tunnel to `port` on the host.
+/// Client: open a tunnel to `port` on the worker.
 pub async fn open_tunnel(conn: &Connection, port: u16) -> Result<(SendStream, RawRecv), NetError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut head = FramedSend::<TunnelOpen>::new(send);
@@ -104,7 +104,7 @@ pub async fn open_tunnel(conn: &Connection, port: u16) -> Result<(SendStream, Ra
     Ok((head.into_inner(), RawRecv::new(BytesMut::new(), recv)))
 }
 
-/// Host: accept the next tunnel a client opens (every bidirectional stream after the control
+/// Worker: accept the next tunnel a client opens (every bidirectional stream after the control
 /// stream is one).
 pub async fn accept_tunnel(
     conn: &Connection,

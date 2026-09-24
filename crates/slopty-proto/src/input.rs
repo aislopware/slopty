@@ -1,6 +1,6 @@
 //! Keyboard and pointer events as the client observed them.
 //!
-//! The client sends *what happened* (physical key, modifiers, the text the OS produced); the host
+//! The client sends *what happened* (physical key, modifiers, the text the OS produced); the worker
 //! turns it into bytes with the engine's key encoder, which knows every terminal mode. Names follow
 //! the W3C UI Events `code` values so the mapping to the engine is one-to-one.
 
@@ -101,7 +101,7 @@ pub enum KeyAction {
 /// One key event, shaped exactly like ghostty's own view constructs it.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct KeyEvent {
-    /// Client-assigned sequence number; the host echoes the highest applied one in each frame so
+    /// Client-assigned sequence number; the worker echoes the highest applied one in each frame so
     /// the prediction engine can retire its speculation.
     pub seq: u64,
     /// Press / repeat / release.
@@ -120,8 +120,8 @@ pub struct KeyEvent {
     /// Inside an IME composition; the engine must not encode it.
     pub composing: bool,
     /// The ⌥ held is Alt for this press (the client's `option_as_alt` setting, resolved for
-    /// the side): `text` is then the key without ⌥ and the host prefixes an escape instead of
-    /// typing the layout's symbol. Per key, since the encoder is the host's and a session's
+    /// the side): `text` is then the key without ⌥ and the worker prefixes an escape instead of
+    /// typing the layout's symbol. Per key, since the encoder is the worker's and a session's
     /// clients may differ.
     pub option_as_alt: bool,
 }
@@ -178,7 +178,7 @@ pub struct MouseEvent {
     pub py: u32,
 }
 
-/// Client cell geometry, so the host can encode pixel-mode mouse reports and `TIOCSWINSZ` pixel
+/// Client cell geometry, so the worker can encode pixel-mode mouse reports and `TIOCSWINSZ` pixel
 /// fields identically to a local terminal.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
 pub struct CellMetrics {

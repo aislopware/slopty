@@ -9,7 +9,7 @@
 //! machine that has granted no permission at all.
 //!
 //! The `harness` feature adds the [`Driver`] (the client side of the socket), the
-//! [`harness`] (ptyd + hostd + app in a temporary directory) and [`snapshot`] (compare a
+//! [`harness`] (ptyd + worker + app in a temporary directory) and [`snapshot`] (compare a
 //! rendered frame with a golden PNG and write the diff for a failed one).
 
 #![forbid(unsafe_code)]
@@ -50,8 +50,8 @@ pub enum Button {
 pub enum Command {
     /// Liveness.
     Ping,
-    /// Add a host by address and connect, as the add-host panel would.
-    AddHost {
+    /// Add a worker by address and connect, as the add-worker panel would.
+    AddWorker {
         /// `host[:port]`.
         address: String,
     },
@@ -132,7 +132,7 @@ pub enum Command {
         zoom: bool,
     },
     /// Open `count` sessions running `command` (the login shell when empty) on the active
-    /// canvas, as ⌘N does; the host places them. Load for the frame-time scenarios without
+    /// canvas, as ⌘N does; the worker places them. Load for the frame-time scenarios without
     /// typing anything into a shell.
     Open {
         /// Program and arguments.
@@ -142,10 +142,10 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
-    /// Open a file card for `path` on the host, as "view" on a tool call does, landing on
+    /// Open a file card for `path` on the worker, as "view" on a tool call does, landing on
     /// `line` when given.
     OpenFile {
-        /// Absolute path on the host.
+        /// Absolute path on the worker.
         path: String,
         /// 1-based line to land on.
         #[serde(default)]
@@ -160,7 +160,7 @@ pub enum Command {
         /// The session id (`terminal:<id>` without the prefix), as the dump reports it.
         session: String,
     },
-    /// Add the host's first display to the active canvas, as picking it would (the host
+    /// Add the worker's first display to the active canvas, as picking it would (the worker
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
     /// Put a window of the worker in the strip, as picking it in the ⌘O picker does. The id
@@ -174,7 +174,7 @@ pub enum Command {
     },
     /// Drive the app's system-notification response path with `tag` (a session UUID),
     /// exactly as `cx.on_system_notification_response` would when the user activates an
-    /// agent banner: find the host whose canvas holds the session, switch to it, then reveal
+    /// agent banner: find the worker whose canvas holds the session, switch to it, then reveal
     /// the session. System notifications are disabled outside a bundle, so this is the only
     /// way to test the path.
     NotificationResponse {
@@ -437,7 +437,7 @@ pub struct Dump {
     pub hooks_offered: bool,
     /// The UI's frame times since the last [`Command::FramesReset`].
     pub frames: FrameInfo,
-    /// This app's client id on the wire (what the host's `screens` listing names).
+    /// This app's client id on the wire (what the worker's `screens` listing names).
     #[serde(default)]
     pub client: String,
 }
@@ -578,7 +578,7 @@ pub struct ItemInfo {
 /// A file card.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct FileItemInfo {
-    /// Absolute path on the host.
+    /// Absolute path on the worker.
     pub path: String,
     /// The card's one-line summary ("12 lines", "missing: …", "reading…").
     pub summary: String,
@@ -607,15 +607,15 @@ pub struct TerminalInfo {
     /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
     /// starts a new one); `None` before the first frame.
     pub epoch: Option<u32>,
-    /// The coding agent's state as the host reports it: `idle`, `working`, `tool:<name>`,
+    /// The coding agent's state as the worker reports it: `idle`, `working`, `tool:<name>`,
     /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
     /// `blocked:idle`, `done`; `None` without an agent.
     pub agent: Option<String>,
-    /// What the host says the agent is doing ("thinking…", "calling Write…", a prompt's
+    /// What the worker says the agent is doing ("thinking…", "calling Write…", a prompt's
     /// first line, a permission's summary); `None` without one.
     #[serde(default)]
     pub agent_detail: Option<String>,
-    /// Which signal the host read the agent's state from: `process`, `title`, `transcript`
+    /// Which signal the worker read the agent's state from: `process`, `title`, `transcript`
     /// or `hook`; `None` without an agent.
     pub agent_source: Option<String>,
     /// Keystroke → paint, for keys typed into this terminal.
@@ -639,7 +639,7 @@ pub struct TerminalInfo {
 
 /// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
 ///
-/// `echo_*` runs from the key to the paint of the first frame the host produced after applying
+/// `echo_*` runs from the key to the paint of the first frame the worker produced after applying
 /// it; `predicted_*` from the key to the paint that showed the local-echo guess, counted only
 /// while the predictor was drawing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -740,7 +740,7 @@ pub struct ScreenInfo {
     pub interval_jitter_us: u64,
     /// Frames the pacer's ring holds.
     pub window: usize,
-    /// What the host last said about the capture target: `live` (it is drawing, or has drawn)
+    /// What the worker last said about the capture target: `live` (it is drawing, or has drawn)
     /// or `idle` (it has produced no frame at all, so no refresh can help).
     #[serde(default)]
     pub source: String,
@@ -752,7 +752,7 @@ pub struct ScreenInfo {
 /// The client's loss-recovery counters for one stream.
 ///
 /// A subset of `slopty_client`'s `ScreenStats`, so an app self-test can build the injected-loss
-/// table the in-process host test does. All are cumulative over the stream's life.
+/// table the in-process worker test does. All are cumulative over the stream's life.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct RecoveryInfo {
     /// Frames delivered to the decoder.
@@ -765,9 +765,9 @@ pub struct RecoveryInfo {
     pub frames_lost: u64,
     /// Data fragments that never arrived.
     pub datagrams_lost: u64,
-    /// Data fragments the host cut the frames into.
+    /// Data fragments the worker cut the frames into.
     pub data_shards: u64,
-    /// Parity fragments the host added.
+    /// Parity fragments the worker added.
     pub parity_shards: u64,
     /// Parity as observed on the wire, thousandths of the data fragments.
     pub parity_permille: u16,

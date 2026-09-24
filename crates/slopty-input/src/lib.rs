@@ -1,19 +1,19 @@
-//! Remote-window input on the host: turn a client's [`ScreenInput`] into `CGEvent`s.
+//! Remote-window input on the worker: turn a client's [`ScreenInput`] into `CGEvent`s.
 //!
 //! One [`Injector`] per screen stream. It knows the stream's target and its pixels-per-point
 //! scale, maps stream pixels back to global display points, and decides what to post and
 //! where: straight to the owning process (`CGEventPostToPid`, window streams: the window need
-//! not be frontmost, nothing on the host's own desktop moves) or to the HID event tap
+//! not be frontmost, nothing on the worker's own desktop moves) or to the HID event tap
 //! (display streams: the whole screen is the target, so the real pointer follows). Posting
 //! itself is a [`Backend`]: [`System`] for the daemon, [`Recorder`] for tests, so every
 //! decision here is unit-tested without Accessibility access and without a real event.
-//! Posting needs the host process to be granted *Accessibility* (post-event access);
+//! Posting needs the worker process to be granted *Accessibility* (post-event access);
 //! [`can_post`] and [`request_post`] wrap the preflight and prompt.
 //!
 //! macOS only delivers keyboard events to the *active* application: events posted to an
 //! inactive pid queue up until it is activated (observed macOS 26.5). So a window stream
 //! activates its owner before the first click or key press after it lost activation; the
-//! host's own desktop sees that app come to the front, which is the price of typing into it.
+//! worker's own desktop sees that app come to the front, which is the price of typing into it.
 //!
 //! Magnify gestures have no public `CGEvent` constructor and are ignored.
 
@@ -225,7 +225,7 @@ impl<B: Backend> Injector<B> {
         // A context menu is tracked by AppKit against the window server's own event stream:
         // a right click posted to the pid reaches `rightMouseDown` but the menu never opens
         // (observed with Ghostty, macOS 26.5). So right-button events go through the HID tap
-        // even for window streams; the host's pointer does move for those, which is the
+        // even for window streams; the worker's pointer does move for those, which is the
         // price of a menu.
         let route = (button == CGMouseButton::Right).then_some(Route::Hid);
         self.post(route, Event::Mouse { kind, at, button, number, clicks })

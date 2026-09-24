@@ -92,7 +92,7 @@ mod tests {
     async fn a_shell_on_the_simulator_echoes_and_is_sized_for_its_screen() {
         let Some(simulator) = simulator() else { return };
         let mut stack =
-            Stack::launch_first_run_on_simulator("e2e-ios-host", simulator).await.unwrap();
+            Stack::launch_first_run_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dir = stack.dir.path().to_path_buf();
         let render_path = stack.path("terminal.png");
 

@@ -74,7 +74,7 @@ in it until checked here.
 - Checks run as tests, never by hand. That means no synthetic keys into a pid, no screenshots of
   other windows, and no reading images back: that pattern reads as surveillance tooling and has
   been flagged. A *pass or fail* is decided on the diff numbers, never by eye.
-- To test agent status, send hook JSON to hostd's control socket (`CtlRequest::Hook`) or spawn
+- To test agent status, send hook JSON to the worker's control socket (`CtlRequest::Hook`) or spawn
   `slopty hook` as the test's own child. Never type a command into a shell under test.
 - Never read old Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`).
 - One exception, granted 2026-09-15: Slopty's own renders (`crates/slopty-e2e/golden/*.png` and

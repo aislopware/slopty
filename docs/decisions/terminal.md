@@ -127,7 +127,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ascent 1.020, descent −0.300, line gap 0, underline −0.155 / 0.050). Goldens: see
   MEASUREMENTS.md "font truth" for the moved pixels.
 
-- ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to hostd by
+- ✅ **PTY custody in a tiny separate daemon** (`slopty-ptyd`), masters handed to the worker by
   `SCM_RIGHTS` (`nix` `sendmsg`/`recvmsg`; `sendfd` dropped — one fewer dependency, and macOS
   has no `MSG_CMSG_CLOEXEC` so CLOEXEC is set by hand either way). ptyd drains the master into a
   bounded ring (4 MiB default) while detached. Verified 2026-09-04 by an end-to-end test
@@ -202,7 +202,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   right whether ⌘ goes down before or after the pointer arrives). Covered by
   `osc8_links_become_runs_on_screen_and_in_history`, `plain_rows_carry_no_link_runs`,
   `links_are_found_by_column_and_clipped_on_resize`, `osc8_runs_win_over_the_text_scan`,
-  `text_links_come_with_their_columns` and the `host_lines_links` golden. macOS only for now:
+  `text_links_come_with_their_columns` and the `worker_lines_links` golden. macOS only for now:
   the phone key bar arms ⌘ for remote windows but not for terminals, so a tap has nothing to
   read; long-press stays selection. On the phone (2026-09-05) the terminal key bar has a ⌘
   key beside ⌃: it arms one tap (`TerminalView::set_sticky_command`), the next left press
@@ -294,7 +294,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   byte, a prompt row with a status three (MEASUREMENTS.md: an all-prompt 80×24 frame is
   48 bytes larger than a blank one). The brief's `End { exit }` variant was not added: the
   `D` lands on the row the next prompt starts on, so a separate variant would collide with
-  `Prompt` on the same row. `PROTOCOL_VERSION` 6 → 7, golden `host_lines_marks`; the other
+  `Prompt` on the same row. `PROTOCOL_VERSION` 6 → 7, golden `worker_lines_marks`; the other
   goldens are unchanged because `Unknown` is still variant 0 and `client_hello` only moved
   its version byte.
   *Client/UI:* `TermState::prompt_before/after` walk the cached lines (uncached history is
@@ -323,7 +323,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `TermEvent::ClipboardReadRequest` / `TermRequest::ClipboardRead` pair (the client used to
   answer it with its clipboard, unprompted) is removed from the protocol so a future host
   cannot ask. Covered by `osc52_writes_to_the_system_clipboard_only` (standard, primary,
-  selection, `?`) and the `host_term_clipboard_write` golden.
+  selection, `?`) and the `worker_term_clipboard_write` golden.
 
 - ✅ **A command block has a menu: copy the command, copy the output, run it again, select
   it — and the rows know where the command starts, protocol 28** (2026-09-12). Warp's
@@ -348,7 +348,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the command followed by ↩ as a key — the shell sees exactly what the human would have typed
   (bracketed when it asked), so aliases, history and hooks all apply; (5) it is our own small
   menu (the tokens, the a11y roles, the tab ring) rather than gpui-kit's `ContextMenu`, whose
-  element-state machinery adds nothing here. Wire: the two marks; goldens `host_lines_marks`
+  element-state machinery adds nothing here. Wire: the two marks; goldens `worker_lines_marks`
   / `client_hello` re-accepted, PROTOCOL_VERSION 27 → 28. Tests:
   `prompt_rows_carry_the_previous_commands_exit_status` and
   `captured_zsh_bytes_keep_output_rows_and_statuses` (`engine`: the column on the row the
@@ -633,7 +633,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   tagged by the session so a click reveals the card through the existing response path, and
   `CanvasEvent::Attention` for the Dock bounce either way. No sound and no urgency: the bell
   already has its own path. Tests: engine `desktop_notifications_are_events`, client
-  `apply` mapping, `host_term_notification` golden, canvas
+  `apply` mapping, `worker_term_notification` golden, canvas
   `a_programs_banner_has_a_title_even_when_the_protocol_gave_none`.
 
 - ✅ **The bell is seen, and heard only when the human is elsewhere** (2026-09-15). BEL
@@ -714,8 +714,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `rgb_and_png_transmissions_arrive_as_rgba`, `graphics::tests`; client
   `images_are_kept_for_their_placements_and_the_oldest_placed_go_first`; view
   `a_placed_image_has_one_texture_until_its_pixels_are_forgotten`; element
-  `a_placement_is_painted_at_its_cell_in_the_hosts_pixels`; goldens `host_frame`,
-  `host_term_image` (protocol 43).
+  `a_placement_is_painted_at_its_cell_in_the_workers_pixels`; goldens `worker_frame`,
+  `worker_term_image` (protocol 43).
 
 - ✅ **Unicode placeholders are placed by the host** (2026-09-15). A virtual placement
   (`U=1`) is how an image survives a multiplexer or a scrolling pager: the program prints
@@ -916,7 +916,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and `KeyEvent::option_as_alt` set (protocol 47); the host puts that on libghostty's
   encoder after `setopt_from_terminal`, which resets it. Per key rather than per session
   because the session is shared: two clients with different keyboards get each their own.
-  Tests: `option_as_alt_prefixes_escape_on_the_host` (engine),
+  Tests: `option_as_alt_prefixes_escape_on_the_worker` (engine),
   `option_as_alt_rides_on_the_event` (client keys), `terminal_keys` (settings).
 
 - ✅ **The right click works on every row** (2026-09-13). The block menu opened only on a
@@ -1002,7 +1002,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **A `133;C` on its own is a frame** (2026-09-13). App e2e run 343 timed out waiting for
   `sleep 6` to badge its shell: the client saw the command start only when it ended
   (`elapsed` 76 ms for a six-second sleep), so nothing was slow and nothing was badged. The
-  PTY bytes (traced at `slopty_host::session=trace`, run 345) show zsh writing `\r\r\n`
+  PTY bytes (traced at `slopty_worker::session=trace`, run 345) show zsh writing `\r\r\n`
   and then `133;C` as two writes. The linefeed from the input row leaves the new row a
   prompt continuation (libghostty's guess for shells without `k=s`), and the `C` takes it
   out again without touching a cell, so the row was never dirty: the frame after the

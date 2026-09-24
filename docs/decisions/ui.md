@@ -553,7 +553,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **A session sends at most 125 frames a second** (2026-09-05). The host coalesced PTY output
   for 2 ms and then sent a frame, so a flooding shell produced 500 frames/s per session; twenty
   of them overran every client's 256-frame sink and hostd detached the client ("cannot keep
-  up") within seconds. `slopty_host::session::MIN_FRAME_INTERVAL` (8 ms) paces a session's
+  up") within seconds. `slopty_worker::session::MIN_FRAME_INTERVAL` (8 ms) paces a session's
   frames after the first: a flood leaves every 8 ms. No display shows more than 120 Hz; the
   prediction path is unaffected (the client's local echo does not wait for a frame).
   Amended 2026-09-06: the 2 ms `COALESCE` window that a burst after a quiet spell used to wait
@@ -575,7 +575,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the budget.
 
 - ✅ **The keystroke path carries permanent trace stamps** (2026-09-06). `trace!` lines at
-  every stage of one echo — `term input received` and `frame sent` in hostd's connection,
+  every stage of one echo — `term input received` and `frame sent` in `slopty-worker`'s connection,
   `pty input written` (with `queued_us`, `write_us`), `echo read` (`echo_us`) and `frame
   flushed` (`read_to_frame_us`, `input_to_frame_us`) in the session actor, `frame received`
   in the client link and `bench send` / `bench frame` in the bench — with microsecond

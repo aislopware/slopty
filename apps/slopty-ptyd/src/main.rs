@@ -1,7 +1,7 @@
 //! `slopty-ptyd` — the PTY custodian.
 //!
-//! Holds every PTY master so `slopty-hostd` can be restarted (rebuilt, upgraded, crashed)
-//! without killing shells. While no host is attached it drains output into a bounded ring so
+//! Holds every PTY master so `slopty-worker` can be restarted (rebuilt, upgraded, crashed)
+//! without killing shells. While no worker is attached it drains output into a bounded ring so
 //! the child never blocks; on attach it hands the master over `SCM_RIGHTS` with the backlog.
 //! Deliberately tiny: no VT parsing, no networking, nothing that changes often.
 
@@ -22,8 +22,8 @@ struct Args {
     /// Socket path (default: `$TMPDIR/slopty/ptyd.sock`, or `$SLOPTY_PTYD_SOCKET`).
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// Bytes of output retained per session: what came in while no host held it, or what the
-    /// host tapped since its last checkpoint.
+    /// Bytes of output retained per session: what came in while no worker held it, or what the
+    /// worker tapped since its last checkpoint.
     #[arg(long, default_value_t = slopty_pty::protocol::DEFAULT_BACKLOG_BYTES)]
     backlog_bytes: usize,
     /// Where the shell integration scripts are written (default: `$SLOPTY_DATA_DIR/shell`, else

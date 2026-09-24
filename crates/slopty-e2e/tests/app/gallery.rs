@@ -13,7 +13,7 @@ use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::snapshot::assert_matches;
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
-/// How long a host round trip may take.
+/// How long a worker round trip may take.
 const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
@@ -75,7 +75,7 @@ async fn the_first_run_offers_one_way_in() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch_first_run("e2e-host").await.unwrap();
+    let mut stack = Stack::launch_first_run("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -118,7 +118,7 @@ async fn a_workspace_of_columns_in_both_themes() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-host").await.unwrap();
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -191,7 +191,7 @@ async fn the_empty_workspace_says_how_to_begin() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-host").await.unwrap();
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -212,7 +212,7 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-host").await.unwrap();
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let dump = first_shell(&mut stack.driver).await;
@@ -241,7 +241,7 @@ async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-host").await.unwrap();
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let work = stack.path("drop-here");
     std::fs::create_dir_all(&work).unwrap();
@@ -310,7 +310,7 @@ async fn a_remote_window_waits_in_its_chrome() {
     if !gated() {
         return;
     }
-    let mut stack = Stack::launch("e2e-host").await.unwrap();
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();

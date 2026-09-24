@@ -1,4 +1,4 @@
-//! `slopty host install|uninstall` and `slopty server install|uninstall|status`: the host
+//! `slopty worker install|uninstall` and `slopty server install|uninstall|status`: the worker
 //! daemons and the server as `LaunchAgents`.
 //!
 //! The server is one more agent, `slopty-server`, installed the same way: copied to
@@ -6,7 +6,7 @@
 //! answers a hello on loopback.
 //!
 //! Two agents in `~/Library/LaunchAgents`: `slopty-ptyd` (the PTY custodian, keeps shells alive
-//! across daemon restarts) and `slopty-hostd`, both `KeepAlive` so launchd restarts either one
+//! across daemon restarts) and `slopty-worker`, both `KeepAlive` so launchd restarts either one
 //! that dies and both come back at login. Sockets live under `<data dir>/run/` so the CLI can
 //! find them without launchd's environment; the data dir, reach, port and log level are baked
 //! into the plists at install time. The binaries are copied to `<data dir>/bin/` first: a
@@ -22,24 +22,24 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use plist::{Dictionary, Value};
-use slopty_host::ctl::{CtlReply, CtlRequest};
 use slopty_net::HostAddr;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_proto::server::Role;
+use slopty_worker::ctl::{CtlReply, CtlRequest};
 
-use crate::hostctl;
+use crate::workerctl;
 
 /// launchd label of the PTY custodian.
 pub const PTYD_LABEL: &str = "dev.aislopware.slopty.ptyd";
-/// launchd label of the host daemon.
-pub const HOSTD_LABEL: &str = "dev.aislopware.slopty.hostd";
+/// launchd label of the worker daemon.
+pub const WORKER_LABEL: &str = "dev.aislopware.slopty.worker";
 /// How long `install` waits for the daemon's control socket before giving up on the ticket.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `slopty host install` options.
+/// `slopty worker install` options.
 #[derive(Args, Debug, Clone, Default)]
 pub struct InstallOpts {
-    /// Where to copy `slopty-ptyd`, `slopty-hostd` and `slopty` from (default: this binary's
+    /// Where to copy `slopty-ptyd`, `slopty-worker` and `slopty` from (default: this binary's
     /// directory).
     #[arg(long)]
     bin_dir: Option<PathBuf>,
@@ -49,10 +49,10 @@ pub struct InstallOpts {
     /// No relay, no wide-area lookup (LAN or private mesh only).
     #[arg(long)]
     direct_only: bool,
-    /// UDP port for the host (default: the daemon's fixed port).
+    /// UDP port for the worker (default: the daemon's fixed port).
     #[arg(long)]
     port: Option<u16>,
-    /// Listen on this one IP and reach nothing off it. A shaped measurement installs the host
+    /// Listen on this one IP and reach nothing off it. A shaped measurement installs the worker
     /// this way so the run stays on its relay; it is unreachable from anywhere else meanwhile.
     #[arg(long)]
     bind: Option<std::net::IpAddr>,
@@ -90,8 +90,8 @@ impl Layout {
         self.run.join("ptyd.sock")
     }
 
-    fn hostd_socket(&self) -> PathBuf {
-        self.run.join("hostd.sock")
+    fn worker_socket(&self) -> PathBuf {
+        self.run.join("worker.sock")
     }
 
     fn plist(&self, label: &str) -> PathBuf {
@@ -105,7 +105,7 @@ fn home() -> PathBuf {
 
 /// The two agents' property lists for `opts`, in start order.
 ///
-/// `LimitLoadToSessionType Aqua` puts them in the login session, where `slopty-hostd` reaches
+/// `LimitLoadToSessionType Aqua` puts them in the login session, where `slopty-worker` reaches
 /// ScreenCaptureKit and the window server.
 pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(String, Value)> {
     let layout = Layout::new(data_dir);
@@ -113,7 +113,7 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
     let common = |label: &str, program: &str, args: &[String], env: Vec<(&str, String)>| {
         let mut vars = Dictionary::new();
         vars.insert("SLOPTY_PTYD_SOCKET".into(), Value::String(path(&layout.ptyd_socket())));
-        vars.insert("SLOPTY_HOSTD_SOCKET".into(), Value::String(path(&layout.hostd_socket())));
+        vars.insert("SLOPTY_WORKER_SOCKET".into(), Value::String(path(&layout.worker_socket())));
         for (k, v) in env {
             vars.insert(k.into(), Value::String(v));
         }
@@ -122,21 +122,21 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
         d.insert("LimitLoadToSessionType".into(), Value::String("Aqua".into()));
         Value::Dictionary(d)
     };
-    let mut hostd_args = Vec::new();
+    let mut worker_args = Vec::new();
     if opts.direct_only {
-        hostd_args.push("--direct-only".to_owned());
+        worker_args.push("--direct-only".to_owned());
     }
     if let Some(port) = opts.port {
-        hostd_args.push("--port".to_owned());
-        hostd_args.push(port.to_string());
+        worker_args.push("--port".to_owned());
+        worker_args.push(port.to_string());
     }
     if let Some(ip) = opts.bind {
-        hostd_args.push("--bind".to_owned());
-        hostd_args.push(ip.to_string());
+        worker_args.push("--bind".to_owned());
+        worker_args.push(ip.to_string());
     }
     vec![
         (PTYD_LABEL.to_owned(), common(PTYD_LABEL, "slopty-ptyd", &[], Vec::new())),
-        (HOSTD_LABEL.to_owned(), common(HOSTD_LABEL, "slopty-hostd", &hostd_args, Vec::new())),
+        (WORKER_LABEL.to_owned(), common(WORKER_LABEL, "slopty-worker", &worker_args, Vec::new())),
     ]
 }
 
@@ -178,7 +178,7 @@ fn launch_agent(
 }
 
 /// The binaries an installation carries.
-const BINARIES: [&str; 3] = ["slopty-ptyd", "slopty-hostd", "slopty"];
+const BINARIES: [&str; 3] = ["slopty-ptyd", "slopty-worker", "slopty"];
 
 /// Copy the binaries, write the plists, (re)bootstrap both agents, wait for the daemon and
 /// print a ticket.
@@ -199,7 +199,7 @@ pub async fn install(opts: &InstallOpts) -> Result<()> {
     let uid = rustix::process::getuid().as_raw();
     // Stop first: the copy must not land on a running binary, and a stale socket file makes
     // the daemon's bind fail (launchd would then loop on it).
-    for label in [HOSTD_LABEL, PTYD_LABEL] {
+    for label in [WORKER_LABEL, PTYD_LABEL] {
         bootout(uid, label);
     }
     if bin_dir != source {
@@ -216,20 +216,20 @@ pub async fn install(opts: &InstallOpts) -> Result<()> {
             .with_context(|| format!("bootstrap {label}"))?;
         println!("installed {label}  ({})", path.display());
     }
-    let socket = layout.hostd_socket();
+    let socket = layout.worker_socket();
     let started = Instant::now();
     loop {
-        match hostctl::call_at(&socket, CtlRequest::Status).await {
+        match workerctl::call_at(&socket, CtlRequest::Status).await {
             Ok(CtlReply::Status { name, .. }) => {
                 println!(
                     "\n{name} is up; add it from a client with `slopty add <this Mac's tailnet \
-                     name or IP>` or the app's \"Add host…\""
+                     name or IP>` or the app's \"Add worker…\""
                 );
                 return Ok(());
             }
             Ok(other) => bail!("unexpected reply {other:?}"),
             Err(e) if started.elapsed() < START_TIMEOUT => {
-                tracing::debug!(error = %e, "waiting for slopty-hostd");
+                tracing::debug!(error = %e, "waiting for slopty-worker");
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             Err(e) => {
@@ -244,7 +244,7 @@ pub fn uninstall(data_dir: Option<&Path>) -> Result<()> {
     let data_dir = data_dir.map_or_else(crate::client::data_dir, Path::to_path_buf);
     let layout = Layout::new(&data_dir);
     let uid = rustix::process::getuid().as_raw();
-    for label in [HOSTD_LABEL, PTYD_LABEL] {
+    for label in [WORKER_LABEL, PTYD_LABEL] {
         bootout(uid, label);
         let path = layout.plist(label);
         match std::fs::remove_file(&path) {
@@ -261,7 +261,7 @@ pub fn status(data_dir: Option<&Path>) {
     let data_dir = data_dir.map_or_else(crate::client::data_dir, Path::to_path_buf);
     let layout = Layout::new(&data_dir);
     let uid = rustix::process::getuid().as_raw();
-    for label in [PTYD_LABEL, HOSTD_LABEL] {
+    for label in [PTYD_LABEL, WORKER_LABEL] {
         let installed = layout.plist(label).is_file();
         let pid = launchctl(&["print", &format!("gui/{uid}/{label}")])
             .ok()
@@ -500,8 +500,8 @@ mod tests {
         };
         let list = plists(&opts, Path::new("/opt/slopty/bin"), Path::new("/data/slopty"));
         assert_eq!(list.len(), 2);
-        let hostd = list[1].1.as_dictionary().unwrap();
-        let argv: Vec<&str> = hostd["ProgramArguments"]
+        let worker = list[1].1.as_dictionary().unwrap();
+        let argv: Vec<&str> = worker["ProgramArguments"]
             .as_array()
             .unwrap()
             .iter()
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(
             argv,
             [
-                "/opt/slopty/bin/slopty-hostd",
+                "/opt/slopty/bin/slopty-worker",
                 "--direct-only",
                 "--port",
                 "45551",
@@ -518,11 +518,11 @@ mod tests {
                 "192.168.1.10"
             ]
         );
-        let env = hostd["EnvironmentVariables"].as_dictionary().unwrap();
-        assert_eq!(env["SLOPTY_HOSTD_SOCKET"].as_string(), Some("/data/slopty/run/hostd.sock"));
+        let env = worker["EnvironmentVariables"].as_dictionary().unwrap();
+        assert_eq!(env["SLOPTY_WORKER_SOCKET"].as_string(), Some("/data/slopty/run/worker.sock"));
         assert_eq!(env["SLOPTY_DATA_DIR"].as_string(), Some("/data/slopty"));
-        assert_eq!(hostd["KeepAlive"].as_boolean(), Some(true));
-        assert_eq!(hostd["ProcessType"].as_string(), Some("Interactive"));
+        assert_eq!(worker["KeepAlive"].as_boolean(), Some(true));
+        assert_eq!(worker["ProcessType"].as_string(), Some("Interactive"));
         let ptyd = list[0].1.as_dictionary().unwrap();
         assert_eq!(ptyd["Label"].as_string(), Some(PTYD_LABEL));
     }

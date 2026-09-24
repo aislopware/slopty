@@ -1,6 +1,6 @@
 //! Monotonic time for telemetry and pacing.
 //!
-//! Wall clocks differ between host and client; every latency figure on the wire is expressed
+//! Wall clocks differ between worker and client; every latency figure on the wire is expressed
 //! as a delta or an echoed timestamp in the sender's own monotonic domain.
 
 use core::{fmt, ops};

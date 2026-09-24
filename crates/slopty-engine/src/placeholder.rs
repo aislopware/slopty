@@ -4,7 +4,7 @@
 //! image (foreground colour), the placement (underline colour) and the tile (two combining
 //! diacritics: row, column; a third carries the image id's high byte).
 //!
-//! libghostty stores the virtual placement but places nothing; the host walks the rows,
+//! libghostty stores the virtual placement but places nothing; the worker walks the rows,
 //! joins consecutive placeholder cells into runs (ghostty's rules) and turns each run into an
 //! ordinary [`Placement`](slopty_proto::terminal::Placement) with ghostty's geometry, so the
 //! client paints it like any other. The placeholder cells themselves go out blank.

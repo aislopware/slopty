@@ -13,8 +13,8 @@
 //!   could not get through it either and everything usually arrives once it clears. When it clears,
 //!   every pending frame's NACK clock restarts: the NACK sent into the stall only left with the
 //!   release, so its answer is a round trip away from *now*, not from when it was written.
-//! * **Need refresh** (after a loss): the host is asked for a refresh from the last good frame; the
-//!   next IDR or LTR-refresh frame restarts delivery and everything older is dropped.
+//! * **Need refresh** (after a loss): the worker is asked for a refresh from the last good frame;
+//!   the next IDR or LTR-refresh frame restarts delivery and everything older is dropped.
 //!
 //! Frames whose fragments all arrive are delivered without any parity work; parity is only
 //! decoded when data fragments are missing and enough parity arrived.
@@ -32,7 +32,7 @@ use slopty_proto::screen::ReceiverReport;
 
 use crate::cursor::parse_cursor;
 
-/// Shortest silence on a stream that counts as a stall (see [`Config::stall_gap`]); the host
+/// Shortest silence on a stream that counts as a stall (see [`Config::stall_gap`]); the worker
 /// heartbeats at half this while its source is quiet.
 pub const STALL_GAP: Duration = Duration::from_millis(50);
 
@@ -43,12 +43,12 @@ const SEND_STAMP_RANGE: Duration = Duration::from_millis(256);
 /// How far a stamp difference may read *past* the silence it is supposed to explain before it
 /// is better read as a stamp that went backwards.
 ///
-/// The difference is congruent to the host's real interval modulo [`SEND_STAMP_RANGE`], so
+/// The difference is congruent to the worker's real interval modulo [`SEND_STAMP_RANGE`], so
 /// within one range there are two readings: `d` and `d − 256 ms`. The reading nearer the
 /// arrival gap is the one meant, and the midpoint of the range is where they swap. Below it,
-/// the host accounts for the whole silence and a few milliseconds more, which is what the
+/// the worker accounts for the whole silence and a few milliseconds more, which is what the
 /// stamp's millisecond truncation and the wait between building a datagram and sending it look
-/// like. Above it, the datagram overtook its predecessor and the difference is not a host
+/// like. Above it, the datagram overtook its predecessor and the difference is not a worker
 /// interval at all.
 const STAMP_SLACK: Duration = match SEND_STAMP_RANGE.checked_div(2) {
     Some(half) => half,
@@ -65,7 +65,7 @@ const HALF_STALL_GAP: Duration = match STALL_GAP.checked_div(2) {
 /// function of the round trip.
 ///
 /// The delay only has to outlast the spread of one frame's fragments on the wire: they leave the
-/// host back to back, so silence after them means loss rather than pacing. That spread tracks the
+/// worker back to back, so silence after them means loss rather than pacing. That spread tracks the
 /// path's own delay variation, which in turn tracks its round trip, so the delay is a fraction of
 /// the RTT — the same reordering tolerance TCP RACK uses (`min_rtt / 4`). The bounds matter more
 /// than the fraction: without the floor a loopback link (RTT ≈ 0.5 ms) would NACK on scheduling
@@ -114,10 +114,10 @@ pub struct Config {
     /// Longest wait between refresh repeats.
     pub refresh_repeat_max: Duration,
     /// Unanswered refresh repeats before the receiver stops asking altogether, until something
-    /// arrives on the stream again. The host's [`SourceState`](slopty_proto::screen::SourceState)
-    /// hint is the real answer to a target that produces nothing; this is the fallback for a
-    /// host too old or too silent to send one, so it is generous: with the doubling backoff it
-    /// spans about 17 s of asking.
+    /// arrives on the stream again. The worker's
+    /// [`SourceState`](slopty_proto::screen::SourceState) hint is the real answer to a target
+    /// that produces nothing; this is the fallback for a worker too old or too silent to send
+    /// one, so it is generous: with the doubling backoff it spans about 17 s of asking.
     pub refresh_max_repeats: u32,
     /// Longest an incomplete frame is held while nothing at all arrives on the stream (a
     /// stalled link); past this it is lost even though the deadline logic would keep waiting.
@@ -131,7 +131,7 @@ pub struct Config {
     /// datagrams from a socket it did not read, and charging its own load to the link is what
     /// makes a busy machine look like a congested network.
     ///
-    /// Must be shorter than [`Self::stall_gap`], for the same reason the host beats twice per
+    /// Must be shorter than [`Self::stall_gap`], for the same reason the worker beats twice per
     /// gap: a receiver that looks exactly as often as the thing it is looking for is long
     /// cannot resolve it, and a gap it slept through entirely would still read as a full
     /// stall's worth of link silence.
@@ -166,7 +166,7 @@ pub struct FrameInfo {
     pub ltr_token: Option<u64>,
     /// Recovery frame from an acknowledged LTR.
     pub ltr_refresh: bool,
-    /// Host capture timestamp, microseconds (low 32 bits).
+    /// Worker capture timestamp, microseconds (low 32 bits).
     pub capture_ts_us: u32,
     /// Needed parity or a retransmission.
     pub recovered: bool,
@@ -219,13 +219,13 @@ pub enum Ingest {
         /// Position.
         update: CursorUpdate,
     },
-    /// The host had nothing to send: the link moved, the stall clock restarted, nothing else.
+    /// The worker had nothing to send: the link moved, the stall clock restarted, nothing else.
     Heartbeat,
     /// Dropped.
     Ignored(Ignored),
 }
 
-/// Something to tell the host.
+/// Something to tell the worker.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
     /// Retransmit fragments (`fragments` empty: the whole frame).
@@ -242,13 +242,13 @@ pub enum Action {
     },
 }
 
-/// What the host's send stamps made of a silence in arrivals.
+/// What the worker's send stamps made of a silence in arrivals.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stamp {
-    /// The host waited this long between sending the two datagrams; the rest of the silence is
+    /// The worker waited this long between sending the two datagrams; the rest of the silence is
     /// the link's.
-    Host(Duration),
-    /// The host's own interval covers the whole silence (and reads a little longer than it,
+    Worker(Duration),
+    /// The worker's own interval covers the whole silence (and reads a little longer than it,
     /// within [`STAMP_SLACK`]): nothing is left for the link.
     Covered,
     /// Nothing to compare against: the stream just started, or a retransmission (which carries
@@ -264,19 +264,19 @@ enum Stamp {
 
 /// Where every silence past the stall threshold went.
 ///
-/// A stall is meant to mean "the link held datagrams", and the host's send stamps are what
-/// tells that from "the host had nothing to send" — with the receiver's own scheduling as the
+/// A stall is meant to mean "the link held datagrams", and the worker's send stamps are what
+/// tells that from "the worker had nothing to send" — with the receiver's own scheduling as the
 /// third possibility. These counters say which of the three each silence was, so a stall count
 /// can be read rather than guessed at. The first three are forgiven, `in_flight` is the one the
 /// stamps prove was the link's, and the `stamp_*` three are charged to the link only because no
 /// reading was available.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct StallAttribution {
-    /// Silences the stamps explained: the host itself was quiet. Not charged.
-    pub host_quiet: u64,
-    /// Silences the host's interval covered outright, give or take the stamp's own slack (see
+    /// Silences the stamps explained: the worker itself was quiet. Not charged.
+    pub worker_quiet: u64,
+    /// Silences the worker's interval covered outright, give or take the stamp's own slack (see
     /// `STAMP_SLACK`). Not charged.
-    pub host_covered: u64,
+    pub worker_covered: u64,
     /// Silences the receiver slept through, so it never observed the link at all. Not charged.
     pub receiver_dozed: u64,
     /// Silences the stamps prove were spent in flight. Charged.
@@ -314,9 +314,9 @@ pub struct ReassemblerStats {
     pub frames_lost: u64,
     /// Fragments that never arrived (counted when a frame resolves).
     pub datagrams_lost: u64,
-    /// Data fragments the host cut frames into (counted once per frame seen).
+    /// Data fragments the worker cut frames into (counted once per frame seen).
     pub data_shards: u64,
-    /// Parity fragments it added to them: the ratio is the parity the host settled on.
+    /// Parity fragments it added to them: the ratio is the parity the worker settled on.
     pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
@@ -440,7 +440,7 @@ pub struct Reassembler {
     refresh_requested_at: Option<Instant>,
     /// Unanswered refresh repeats in a row (backoff exponent, and the give-up count).
     refresh_repeats: u32,
-    /// What the host last said its capture target is doing. `false` means the target has drawn
+    /// What the worker last said its capture target is doing. `false` means the target has drawn
     /// nothing at all, so no refresh can produce a frame and asking is pure noise.
     source_live: bool,
     stats: ReassemblerStats,
@@ -454,8 +454,8 @@ pub struct Reassembler {
     /// A video datagram of this stream has arrived at least once; before that, silence is the
     /// stream starting up (the cursor arrives before the first frame), not a stall.
     any_arrived: bool,
-    /// The host's send stamp on the last datagram that carried a fresh one, so the silence the
-    /// host made itself can be told from the silence the link made (see `link_gap`).
+    /// The worker's send stamp on the last datagram that carried a fresh one, so the silence the
+    /// worker made itself can be told from the silence the link made (see `link_gap`).
     last_send_ms_lo: Option<u8>,
     /// When the receiver's own loop last ran — a `tick` or an `ingest`, since either is proof
     /// it was scheduled — so a silence it slept through is not charged to the link (see `dozed`).
@@ -466,8 +466,8 @@ pub struct Reassembler {
     /// would find nothing slept through and charge the whole gap to the link. `tick` banks the
     /// stretch here instead, and the arrival that ends the silence spends it.
     dozed_since_arrival: Duration,
-    /// Where the banked sleep begins, so the part of it that could fall inside the host's own
-    /// silence can be told from the part that could not (see `doze_beyond_host`).
+    /// Where the banked sleep begins, so the part of it that could fall inside the worker's own
+    /// silence can be told from the part that could not (see `doze_beyond_worker`).
     dozed_from: Option<Instant>,
     /// How much of the bank has already been forgiven by a charge. A report every 50 ms would
     /// otherwise spend the same sleep again in every window, and a stall that stays on would
@@ -478,7 +478,7 @@ pub struct Reassembler {
     /// [`Config::nack_delay`] evaluated for `last_rtt`, so `stalled` and `resume` (which have no
     /// round trip to hand) use the same number `tick` does.
     nack_delay: Duration,
-    last_host_ts_us: u32,
+    last_worker_ts_us: u32,
     ltr_acks: VecDeque<u64>,
 }
 
@@ -526,7 +526,7 @@ impl Reassembler {
             dozed_spent: Duration::ZERO,
             last_rtt,
             nack_delay: cfg.nack_delay.for_rtt(last_rtt),
-            last_host_ts_us: 0,
+            last_worker_ts_us: 0,
             ltr_acks: VecDeque::new(),
         }
     }
@@ -543,17 +543,17 @@ impl Reassembler {
         !matches!(self.need, Need::Frame(_))
     }
 
-    /// The host said whether its capture target is producing pictures.
+    /// The worker said whether its capture target is producing pictures.
     ///
     /// While it is not, refresh requests stop: a hidden or undrawn window has nothing to refresh
     /// from, and asking every backoff period for as long as the item is open is the storm this
     /// exists to prevent. Going live restarts the backoff, so the first refresh after the window
     /// draws goes out immediately.
     ///
-    /// The statement also outranks arriving video until it is taken back. The host says this
+    /// The statement also outranks arriving video until it is taken back. The worker says this
     /// once per change, on the control stream, while frames travel as datagrams: without that
     /// ordering a fragment sent before the window went away would put the receiver back to live
-    /// behind the host's back, and since every datagram (heartbeats included) restarts the
+    /// behind the worker's back, and since every datagram (heartbeats included) restarts the
     /// refresh cap, one lost frame after that would ask for a refresh forever.
     pub const fn set_source_live(&mut self, live: bool) {
         if self.source_live != live {
@@ -565,7 +565,7 @@ impl Reassembler {
         }
     }
 
-    /// Whether the host's target is producing pictures, as last reported.
+    /// Whether the worker's target is producing pictures, as last reported.
     #[must_use]
     pub const fn source_live(&self) -> bool {
         self.source_live
@@ -600,9 +600,9 @@ impl Reassembler {
         }
         let gap = now.saturating_duration_since(self.arrived_at);
         let stamp = self.read_stamp(header, gap);
-        let host_gap = Self::host_share(stamp, gap);
-        let dozed = self.doze_beyond_host(now, host_gap);
-        let unexplained = gap.saturating_sub(host_gap);
+        let worker_gap = Self::worker_share(stamp, gap);
+        let dozed = self.doze_beyond_worker(now, worker_gap);
+        let unexplained = gap.saturating_sub(worker_gap);
         let link_gap = unexplained.saturating_sub(dozed);
         if self.any_arrived && gap >= self.stall_threshold() {
             self.attribute(gap, stamp, dozed, header.kind());
@@ -617,20 +617,20 @@ impl Reassembler {
             tracing::debug!(
                 stream = %self.stream,
                 ?gap,
-                ?host_gap,
+                ?worker_gap,
                 ?dozed,
                 ?link_gap,
                 ?stamp,
                 ended_by = ?header.kind(),
                 pending = self.frames.len(),
-                "stall released: the link held datagrams the host had already sent"
+                "stall released: the link held datagrams the worker had already sent"
             );
-            self.charge_stall(now, host_gap);
+            self.charge_stall(now, worker_gap);
             self.window.stalls = self.window.stalls.saturating_add(1);
             self.stats.stalls = self.stats.stalls.saturating_add(1);
         }
         // The stamp and `arrived_at` have to name the same datagram, or the next gap subtracts a
-        // host interval that spans a different pair. A retransmission advances the arrival but
+        // worker interval that spans a different pair. A retransmission advances the arrival but
         // carries its original frame's stamp, so it clears the pair instead of updating it: the
         // next datagram is measured against no stamp at all, which is the pessimistic reading.
         self.last_send_ms_lo = (header.flags & flags::RETRANSMIT == 0).then_some(header.send_ms_lo);
@@ -641,7 +641,7 @@ impl Reassembler {
         self.dozed_from = None;
         self.dozed_spent = Duration::ZERO;
         self.last_tick_at = self.last_tick_at.max(now);
-        // Anything on the stream — a heartbeat included — proves the host is still there, so the
+        // Anything on the stream — a heartbeat included — proves the worker is still there, so the
         // refresh cap starts over; only a video fragment proves the *source* is drawing.
         self.refresh_repeats = 0;
         let header = *header;
@@ -660,9 +660,9 @@ impl Reassembler {
     }
 
     fn ingest_video(&mut self, header: &MediaHeader, payload: Bytes, now: Instant) -> Ingest {
-        // A picture never changes what the host said about its source: one that arrives after
+        // A picture never changes what the worker said about its source: one that arrives after
         // the source was called idle was captured before it stopped and proves nothing about
-        // now, and only the host's word makes it live again (`set_source_live`).
+        // now, and only the worker's word makes it live again (`set_source_live`).
         self.any_arrived = true;
         let frame = header.frame.get();
         let data_count = usize::from(header.data_count.get());
@@ -841,11 +841,11 @@ impl Reassembler {
         self.stats.frames_ok = self.stats.frames_ok.saturating_add(1);
         self.window.frames_ok = self.window.frames_ok.saturating_add(1);
         self.window.holds_ns.push(u64::try_from(out.hold.as_nanos()).unwrap_or(u64::MAX));
-        self.last_host_ts_us = out.info.capture_ts_us;
+        self.last_worker_ts_us = out.info.capture_ts_us;
         let arrival_us = u64::try_from(now.saturating_duration_since(self.epoch).as_micros())
             .unwrap_or(u64::MAX);
         if let Some((prev_arrival, prev_ts)) = self.last_arrival {
-            // RFC 3550 interarrival jitter, on the host's capture clock.
+            // RFC 3550 interarrival jitter, on the worker's capture clock.
             let transit =
                 i64::try_from(arrival_us.saturating_sub(prev_arrival)).unwrap_or(i64::MAX);
             let sent = i64::from(out.info.capture_ts_us.wrapping_sub(prev_ts));
@@ -883,12 +883,12 @@ impl Reassembler {
         self.nack_delay
     }
 
-    /// How much of a `gap` in arrivals the host made itself, read off its own send clock.
+    /// How much of a `gap` in arrivals the worker made itself, read off its own send clock.
     ///
-    /// Every datagram carries the low byte of the host's millisecond clock, so the difference
-    /// between two stamps is how long the host waited between sending them. A source with
+    /// Every datagram carries the low byte of the worker's millisecond clock, so the difference
+    /// between two stamps is how long the worker waited between sending them. A source with
     /// nothing to draw waits; a link that holds datagrams and releases them together does not,
-    /// and its stamps come out bunched. Subtracting the host's share is what tells the two
+    /// and its stamps come out bunched. Subtracting the worker's share is what tells the two
     /// apart — the heartbeat is the same statement in datagram form, and this reads it even
     /// when the beat that would have carried it was late.
     ///
@@ -899,9 +899,9 @@ impl Reassembler {
     ///
     /// The last case is what a reordered or delayed datagram looks like: the subtraction is
     /// unsigned and wraps, so a stamp 10 ms behind its predecessor reads as 246 ms ahead and
-    /// would forgive a real stall. There is no bit that says which it is, but a host interval
+    /// would forgive a real stall. There is no bit that says which it is, but a worker interval
     /// longer than the arrival gap it is supposed to explain is not evidence of anything —
-    /// the host cannot have spent longer not sending than the receiver spent not receiving.
+    /// the worker cannot have spent longer not sending than the receiver spent not receiving.
     fn read_stamp(&self, header: &MediaHeader, gap: Duration) -> Stamp {
         if header.flags & flags::RETRANSMIT != 0 {
             return Stamp::Absent;
@@ -910,19 +910,19 @@ impl Reassembler {
         if gap >= SEND_STAMP_RANGE {
             return Stamp::Wrapped;
         }
-        let host_gap = Duration::from_millis(u64::from(header.send_ms_lo.wrapping_sub(previous)));
-        match host_gap.checked_sub(gap).filter(|by| !by.is_zero()) {
-            None => Stamp::Host(host_gap),
+        let worker_gap = Duration::from_millis(u64::from(header.send_ms_lo.wrapping_sub(previous)));
+        match worker_gap.checked_sub(gap).filter(|by| !by.is_zero()) {
+            None => Stamp::Worker(worker_gap),
             Some(by) if by <= STAMP_SLACK => Stamp::Covered,
             Some(by) => Stamp::Backwards(by),
         }
     }
 
-    /// The host's share of a silence, as the stamps read it. Zero when they cannot be read,
+    /// The worker's share of a silence, as the stamps read it. Zero when they cannot be read,
     /// which is the pessimistic reading: the whole silence goes to the link.
-    const fn host_share(stamp: Stamp, gap: Duration) -> Duration {
+    const fn worker_share(stamp: Stamp, gap: Duration) -> Duration {
         match stamp {
-            Stamp::Host(host) => host,
+            Stamp::Worker(worker) => worker,
             Stamp::Covered => gap,
             Stamp::Absent | Stamp::Wrapped | Stamp::Backwards(_) => Duration::ZERO,
         }
@@ -952,19 +952,19 @@ impl Reassembler {
         self.last_tick_at.checked_add(self.cfg.tick_period).unwrap_or(self.last_tick_at)
     }
 
-    /// The sleep that cannot have been the host's, given the host's own share of the silence.
+    /// The sleep that cannot have been the worker's, given the worker's own share of the silence.
     ///
-    /// The two shares are not disjoint: the host's silence runs from the last arrival for
-    /// `host_gap`, and the receiver may have slept through part of exactly that stretch.
-    /// Forgiving their sum would excuse the overlap twice and let a real hold through — a host
+    /// The two shares are not disjoint: the worker's silence runs from the last arrival for
+    /// `worker_gap`, and the receiver may have slept through part of exactly that stretch.
+    /// Forgiving their sum would excuse the overlap twice and let a real hold through — a worker
     /// quiet for 100 ms, then a link holding the next datagram for 100 ms, with 75 ms of sleep
-    /// inside the host's half, would read as 25 ms of link time instead of 100. Only the sleep
-    /// past the end of the host's silence is credited.
-    fn doze_beyond_host(&self, arrival: Instant, host_gap: Duration) -> Duration {
+    /// inside the worker's half, would read as 25 ms of link time instead of 100. Only the sleep
+    /// past the end of the worker's silence is credited.
+    fn doze_beyond_worker(&self, arrival: Instant, worker_gap: Duration) -> Duration {
         let (total, from) = self.doze(arrival);
         let Some(from) = from else { return Duration::ZERO };
-        let host_until = self.arrived_at.checked_add(host_gap).unwrap_or(self.arrived_at);
-        total.saturating_sub(host_until.saturating_duration_since(from))
+        let worker_until = self.arrived_at.checked_add(worker_gap).unwrap_or(self.arrived_at);
+        total.saturating_sub(worker_until.saturating_duration_since(from))
     }
 
     /// The part of [`Self::dozed`] not yet banked by [`Self::tick`]: the stretch since the last
@@ -977,7 +977,7 @@ impl Reassembler {
     /// count can be read back as a cause rather than a number (see [`StallAttribution`]).
     fn attribute(&mut self, gap: Duration, stamp: Stamp, dozed: Duration, kind: Option<Kind>) {
         let threshold = self.stall_threshold();
-        let host = Self::host_share(stamp, gap);
+        let worker = Self::worker_share(stamp, gap);
         let pending = self.frames.values().any(|s| !matches!(s, Slot::Complete { .. }));
         let a = &mut self.stats.silences;
         a.gap_ms_max = a.gap_ms_max.max(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX));
@@ -985,16 +985,16 @@ impl Reassembler {
         if !pending {
             a.while_idle = a.while_idle.saturating_add(1);
         }
-        let counter = if gap.saturating_sub(host) < threshold {
+        let counter = if gap.saturating_sub(worker) < threshold {
             match stamp {
-                Stamp::Covered => &mut a.host_covered,
-                _ => &mut a.host_quiet,
+                Stamp::Covered => &mut a.worker_covered,
+                _ => &mut a.worker_quiet,
             }
-        } else if gap.saturating_sub(host).saturating_sub(dozed) < threshold {
+        } else if gap.saturating_sub(worker).saturating_sub(dozed) < threshold {
             &mut a.receiver_dozed
         } else {
             match stamp {
-                Stamp::Host(_) | Stamp::Covered => &mut a.in_flight,
+                Stamp::Worker(_) | Stamp::Covered => &mut a.in_flight,
                 Stamp::Absent => &mut a.stamp_absent,
                 Stamp::Wrapped => &mut a.stamp_wrapped,
                 Stamp::Backwards(_) => &mut a.stamp_backwards,
@@ -1010,8 +1010,8 @@ impl Reassembler {
     }
 
     /// Whether nothing has arrived for a stall's worth of time as of `now` (never before the
-    /// stream's first video datagram: that wait is the host starting the stream, never while
-    /// the host says its source is idle — silence from a window that is not drawing is the
+    /// stream's first video datagram: that wait is the worker starting the stream, never while
+    /// the worker says its source is idle — silence from a window that is not drawing is the
     /// source's, not the link's — and never for the stretch the receiver itself slept through).
     #[must_use]
     pub fn stalled(&self, now: Instant) -> bool {
@@ -1022,9 +1022,9 @@ impl Reassembler {
     }
 
     /// Charge the silence since the last datagram (the part not yet charged, less the part the
-    /// host spent not sending) to the current report window, so a stall is reported whether it
+    /// worker spent not sending) to the current report window, so a stall is reported whether it
     /// released or is still on.
-    fn charge_stall(&mut self, now: Instant, host_gap: Duration) {
+    fn charge_stall(&mut self, now: Instant, worker_gap: Duration) {
         let from = self.arrived_at.max(self.stall_charged_to);
         let stretch = now.saturating_duration_since(from);
         // Spend the sleep as it is forgiven. The bank belongs to the whole silence, but a
@@ -1032,11 +1032,11 @@ impl Reassembler {
         // time would forgive the same sleep in every report window and a stall that stays on
         // would go quiet after its first one.
         let doze = self
-            .doze_beyond_host(now, host_gap)
+            .doze_beyond_worker(now, worker_gap)
             .saturating_sub(self.dozed_spent)
-            .min(stretch.saturating_sub(host_gap));
+            .min(stretch.saturating_sub(worker_gap));
         self.dozed_spent = self.dozed_spent.saturating_add(doze);
-        let silence = stretch.saturating_sub(host_gap).saturating_sub(doze);
+        let silence = stretch.saturating_sub(worker_gap).saturating_sub(doze);
         self.window.stalled = self.window.stalled.saturating_add(silence);
         self.stats.stalled_ms =
             self.stats.stalled_ms.saturating_add(u64::try_from(silence.as_millis()).unwrap_or(0));
@@ -1189,7 +1189,7 @@ impl Reassembler {
     /// progress to this window.
     pub fn take_report(&mut self, now: Instant, late_frames: u32) -> ReceiverReport {
         if self.stalled(now) {
-            // Still in it: no datagram has arrived to say how much of it was the host's, so all
+            // Still in it: no datagram has arrived to say how much of it was the worker's, so all
             // of it is charged bar the receiver's own sleep, which needs no datagram to settle.
             // The stamp settles the rest of the account when the silence ends.
             self.charge_stall(now, Duration::ZERO);
@@ -1214,7 +1214,7 @@ impl Reassembler {
             frames_fec: window.frames_fec,
             frames_lost: window.frames_lost,
             datagrams_lost: window.datagrams_lost,
-            last_host_send_ts_us: self.last_host_ts_us,
+            last_worker_send_ts_us: self.last_worker_ts_us,
             hold_p50: percentile(50),
             hold_p95: percentile(95),
             owd_jitter: slopty_core::Duration::from_micros(

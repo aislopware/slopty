@@ -50,7 +50,7 @@ pub const MAX_CONCEALED: u32 = 3;
 /// Apple's Opus decoder takes no empty packet for it, so the last decoded packet stands in for
 /// a short gap, replayed with a linear fade to silence across the gap: a lost packet is a dip
 /// instead of a click. The stand-in keeps the ring's timing too: the gap took 20 ms per packet
-/// on the host, and playing that long keeps the next real packet from arriving early.
+/// on the worker, and playing that long keeps the next real packet from arriving early.
 #[derive(Debug, Default)]
 pub struct Conceal {
     last: Vec<f32>,
@@ -631,7 +631,7 @@ mod conceal_tests {
 mod latency_tests {
     use super::*;
 
-    /// What the listener hears behind the host, in milliseconds: the ring plus the device
+    /// What the listener hears behind the worker, in milliseconds: the ring plus the device
     /// buffers queued ahead of it (the callback refills one as soon as it is played, so all
     /// of them are full).
     fn heard_ms(ring: &Ring) -> usize {
@@ -678,7 +678,7 @@ mod latency_tests {
         }
         let settled = settled_sum.checked_div(settled_n).unwrap_or(0);
         eprintln!(
-            "heard behind the host: {after_burst} ms after the burst, {at_2500} ms at 2.5 s, {settled} ms mean over 1.5–3 s"
+            "heard behind the worker: {after_burst} ms after the burst, {at_2500} ms at 2.5 s, {settled} ms mean over 1.5–3 s"
         );
         assert!(
             after_burst <= 70,

@@ -9,7 +9,7 @@
 //! the guarded scenario: its p95 draw must stay under [`PAN_P95_LIMIT`] on the Mac.
 //!
 //! Load is twenty sessions running [`LOAD`] straight from `OpenSession` (nothing is typed into
-//! a shell); the display scenario needs Screen Recording for hostd and runs only when
+//! a shell); the display scenario needs Screen Recording for the worker and runs only when
 //! `SLOPTY_SCREEN_E2E` is set as well.
 
 #[cfg(test)]
@@ -19,7 +19,7 @@ mod tests {
     use slopty_e2e::harness::Simulator;
     use slopty_e2e::{Command, Driver, Dump, FrameInfo, Stack};
 
-    /// How long a host round trip (open twenty shells, first output) may take.
+    /// How long a worker round trip (open twenty shells, first output) may take.
     const STEP: Duration = Duration::from_secs(30);
     /// Each scenario's measured span.
     const RUN: Duration = Duration::from_secs(5);
@@ -47,7 +47,7 @@ mod tests {
     /// building; see MEASUREMENTS "canvas frame time").
     const PAN_P95_LIMIT: Duration = Duration::from_millis(25);
 
-    /// A shell that prints as fast as it can, one varied line at a time: the host frames it
+    /// A shell that prints as fast as it can, one varied line at a time: the worker frames it
     /// at its own rate, every visible row changes on every frame, and nothing is typed.
     const LOAD: &[&str] = &[
         "/bin/sh",

@@ -31,14 +31,14 @@ pub enum PaletteRun {
     /// Go to this worker's tiles, or give it a shell when it has none.
     Worker(slopty_client::layout::WorkerKey),
     /// Open a file card for the path the field holds (relative to the active shell, `~` the
-    /// host's home), landing on `line`.
+    /// worker's home), landing on `line`.
     OpenFile {
         /// As typed, with any `:line` suffix removed.
         path: String,
         /// The `:line` suffix, 1-based.
         line: Option<u32>,
     },
-    /// Open a shell in the directory the field holds (spelled from the host's root or home).
+    /// Open a shell in the directory the field holds (spelled from the worker's root or home).
     OpenShell {
         /// As typed, without its trailing slash.
         cwd: String,
@@ -195,7 +195,7 @@ impl PaletteItem {
         }
     }
 
-    /// `Open <relative>` for a file the host found under `root`, `file` on the right.
+    /// `Open <relative>` for a file the worker found under `root`, `file` on the right.
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
         Self {
@@ -208,7 +208,7 @@ impl PaletteItem {
         }
     }
 
-    /// A directory the host found under `root`: a shell and a conversation in it.
+    /// A directory the worker found under `root`: a shell and a conversation in it.
     #[must_use]
     pub fn found_dir(root: &str, relative: &str) -> [Self; 2] {
         let cwd = format!("{}/{}", root.trim_end_matches('/'), relative.trim_end_matches('/'));
@@ -370,9 +370,9 @@ pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
 
 /// What a path typed into the field offers.
 ///
-/// A directory — a slash at the end, spelled from the host's root or home — offers a shell
+/// A directory — a slash at the end, spelled from the worker's root or home — offers a shell
 /// and a conversation there; anything else with the shape of a path opens as a file card. A
-/// relative directory is a file line: the host resolves a file against the active shell, but
+/// relative directory is a file line: the worker resolves a file against the active shell, but
 /// a shell has to know its directory from the start.
 #[must_use]
 pub fn path_items(query: &str) -> Vec<PaletteItem> {
@@ -387,7 +387,7 @@ pub fn path_items(query: &str) -> Vec<PaletteItem> {
     vec![PaletteItem::open_file(&path, line)]
 }
 
-/// The query worth asking the host's files for: one word of two characters or more that is
+/// The query worth asking the worker's files for: one word of two characters or more that is
 /// not a path already spelled from its root (`/…`, `~…`, `.…`).
 #[must_use]
 pub fn files_query(query: &str) -> Option<&str> {
@@ -413,7 +413,7 @@ pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem>
 /// What the palette decided.
 #[derive(Debug)]
 pub enum PaletteEvent {
-    /// The field changed; the canvas asks the host for the files it names.
+    /// The field changed; the canvas asks the worker for the files it names.
     Changed(String),
     /// Run this, once the palette is gone and the focus is back.
     Run(PaletteRun),
@@ -426,7 +426,7 @@ pub struct CommandPalette {
     items: Vec<PaletteItem>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
     path_items: Vec<PaletteItem>,
-    /// `Open <path>` for the files the host found for the field's text; dropped on a change.
+    /// `Open <path>` for the files the worker found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
     input: Entity<InputState>,
     /// Which match ↑/↓ have selected.
@@ -525,7 +525,7 @@ impl CommandPalette {
         cx.notify();
     }
 
-    /// The host found `paths` under `root` for `query`: they are `Open <path>` lines after
+    /// The worker found `paths` under `root` for `query`: they are `Open <path>` lines after
     /// the commands, while the field still says `query`; a directory (a slash at its end)
     /// is a shell and a conversation in it.
     pub fn set_found(&mut self, root: &str, query: &str, paths: &[String], cx: &mut Context<Self>) {
@@ -547,7 +547,7 @@ impl CommandPalette {
 
     /// The items matching the field, in order: a path typed into it (`Open <path>`, or a
     /// shell and a conversation in a directory) first,
-    /// the commands the text matches, then the files the host found for it.
+    /// the commands the text matches, then the files the worker found for it.
     #[must_use]
     pub fn matches(&self, cx: &App) -> Vec<&PaletteItem> {
         let mut out: Vec<&PaletteItem> = self.path_items.iter().collect();
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
         assert_eq!(PaletteItem::open_file("/w", None).keys, "file");
 
-        // What is asked of the host's files: a word, not a rooted path, not one letter.
+        // What is asked of the worker's files: a word, not a rooted path, not one letter.
         assert_eq!(files_query("main"), Some("main"));
         assert_eq!(files_query(" src/ma "), Some("src/ma"));
         assert_eq!(files_query("m"), None, "one letter matches everything");

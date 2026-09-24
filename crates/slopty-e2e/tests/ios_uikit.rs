@@ -34,7 +34,7 @@ mod tests {
         Some(Simulator { udid, bundle_id })
     }
 
-    /// The app connected to its host and its first shell at a prompt.
+    /// The app connected to its worker and its first shell at a prompt.
     async fn shell(stack: &mut Stack) -> Dump {
         stack
             .driver
@@ -105,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn a_hardware_keyboard_on_the_simulator_arrives_through_presses() {
         let Some(simulator) = simulator() else { return };
-        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let session = dump.terminals[0].session.clone();
 
@@ -201,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn fingers_on_the_simulator_swipe_tap_and_pinch() {
         let Some(simulator) = simulator() else { return };
-        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let first = dump.item("terminal").unwrap().clone();
         let drv = &mut stack.driver;
@@ -275,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn the_soft_keyboard_on_the_simulator_types_through_insert_text() {
         let Some(simulator) = simulator() else { return };
-        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         shell(&mut stack).await;
         start_cat_v(&mut stack).await;
         let drv = &mut stack.driver;
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn the_key_bar_on_the_simulator_is_tapped_at_its_a11y_bounds() {
         let Some(simulator) = simulator() else { return };
-        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         shell(&mut stack).await;
         start_cat_v(&mut stack).await;
         let drv = &mut stack.driver;

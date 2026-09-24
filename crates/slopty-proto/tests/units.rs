@@ -13,7 +13,7 @@ mod units {
     use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
     use slopty_proto::terminal::{MAX_OSC52_BYTES, TermSize};
-    use slopty_proto::{ClientMsg, HostMsg};
+    use slopty_proto::{ClientMsg, WorkerMsg};
     use zerocopy::FromZeros as _;
 
     #[test]
@@ -80,7 +80,7 @@ mod units {
             name: "x".to_owned(),
             item: ItemId::new(),
         };
-        assert_eq!(HostMsg::Items(pointed).kind(), "Items");
-        assert_eq!(HostMsg::Rejected(Rejection::Busy).kind(), "Rejected");
+        assert_eq!(WorkerMsg::Items(pointed).kind(), "Items");
+        assert_eq!(WorkerMsg::Rejected(Rejection::Busy).kind(), "Rejected");
     }
 }

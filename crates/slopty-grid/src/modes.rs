@@ -1,6 +1,6 @@
 //! Terminal modes the client needs to see.
 //!
-//! Input *encoding* stays on the host (the engine knows every mode), but the client needs a few
+//! Input *encoding* stays on the worker (the engine knows every mode), but the client needs a few
 //! bits to decide what a wheel or a keystroke means locally: whether to scroll the viewport or
 //! forward the wheel, and whether local echo prediction is safe.
 

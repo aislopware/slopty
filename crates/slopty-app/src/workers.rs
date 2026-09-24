@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use slopty_client::HostLink;
+use slopty_client::WorkerLink;
 use slopty_client::layout::WorkerKey;
 use slopty_core::WorkerId;
 
@@ -48,7 +48,7 @@ pub struct WorkerSlot {
     /// Display name (from the store, refreshed by each `HelloAck`).
     pub name: String,
     /// The live link, to abandon it when the worker is forgotten.
-    pub link: Option<std::sync::Weak<HostLink>>,
+    pub link: Option<std::sync::Weak<WorkerLink>>,
 }
 
 impl std::fmt::Debug for WorkerSlot {

@@ -30,12 +30,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The iOS app is tested through the same socket, in the simulator** (2026-09-05).
   `cargo xtask e2e ios [--sim iphone|ipad]` builds the app with the `e2e` feature, boots the
   simulator (created on first use), installs the bundle and runs `crates/slopty-e2e/tests/ios.rs`
-  (gate `SLOPTY_IOS_E2E`): ptyd and hostd start on the Mac as for `e2e app`, the app is
+  (gate `SLOPTY_IOS_E2E`): ptyd and the worker start on the Mac as for `e2e app`, the app is
   launched with `simctl launch` and `SIMCTL_CHILD_*` variables for its socket, data dir,
   `SLOPTY_PREDICT` and `SLOPTY_HARDWARE_KEYBOARD`, and binds the socket on the shared file system (a simulator process is a
   Mac process; the sandbox does not stop it). `Stack::launch_on_simulator` shares the daemon
   code with `launch`; shutdown sends `quit` and `simctl terminate`. The test pins the one
-  behaviour that differs by screen: the host places a desktop-sized terminal and the client
+  behaviour that differs by screen: the worker places a desktop-sized terminal and the client
   fits it — a phone shrinks it to the viewport, an iPad keeps 720 pt — then types, reads the
   echo, ⌘N/⌘W. UIKit's own delivery (touches, presses) is still outside the test: the socket
   dispatches keystrokes at GPUI's level, so a fork bug in `pressesBegan` would not show here.
@@ -128,7 +128,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **`cargo xtask e2e` builds with `--bins`, never `--bin slopty-app`** (2026-09-05). A `--bin`
   filter applies to every `-p` on the command line, so the daemons and the CLI were not rebuilt
-  and a stale `slopty-hostd` answered `ProtocolVersion { host: 9 }` to a protocol-11 app: every
+  and a stale `slopty-worker` answered `ProtocolVersion { worker: 9 }` to a protocol-11 app: every
   suite failed at pairing within a second. `--bins` builds each selected package's binaries.
 
 - ✅ **Frame-time scenarios run through the self-test socket, and the harness draws differently
@@ -156,8 +156,8 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   grids return; the headless test `zooming_out_to_cards_hands_the_keyboard_to_the_canvas_and_back`
   pins it.
 
-- ✅ **Playing an agent in the self-tests: hook JSON to hostd's control socket, never typed
-  into the shell** (2026-09-05). hostd already takes `CtlRequest::Hook { session, payload }`
+- ✅ **Playing an agent in the self-tests: hook JSON to the worker's control socket, never typed
+  into the shell** (2026-09-05). The worker already takes `CtlRequest::Hook { session, payload }`
   on its control socket (what `slopty hook` relays), so `Stack::play_hook` writes the fixture
   transcript (`harness::TRANSCRIPT`, never a real `~/.claude/projects` file) under the run's
   temp dir and sends the payload there from the test process, with the session id read from
@@ -166,10 +166,10 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   result back is the surveillance-shaped pattern CLAUDE.md forbids, and it got that session
   flagged. Keys over the test socket drive the app's own UI only (⌘⇧L, the composer, the
   buttons); the one line the composer sends is a shell comment, so the shell echoes it and runs
-  nothing. The same path drives the simulator, since hostd stays on the Mac.
+  nothing. The same path drives the simulator, since the worker stays on the Mac.
 
 - ✅ **The self-test plays the agent with a fake `claude` on ptyd's `PATH`, never by typing**
-  (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and hostd a `HOME` and a `PATH` of
+  (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and the worker a `HOME` and a `PATH` of
   their own and writes a small `claude` script into the run's temp directory; "+ agent"
   (⌘⇧T) starts it. It paints the spinning title, then the sparkle one, and writes the fixture
   JSONL into `$HOME/.claude/projects/<escaped cwd>` where the real one would, stepping from
@@ -181,7 +181,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   closing the gap the ruling above used to name. The pill's position *is* in the dump: it is a
   button with a label, so it carries bounds in `dump.a11y`, which is also how a screen reader
   reaches it — the test clicks the middle of those bounds with `Command::Click` and asserts
-  hostd wrote Claude Code's settings with the relay and all 12 `HOOK_EVENTS`. The file asserted
+  the worker wrote Claude Code's settings with the relay and all 12 `HOOK_EVENTS`. The file asserted
   is `<run temp dir>/home/.claude/settings.json`, and the test asserts that path is **under the
   run's directory before asserting its content**, so a wiring mistake fails the test instead of
   editing the developer's `~/.claude`. The pill retires after one click, so a second *click* is

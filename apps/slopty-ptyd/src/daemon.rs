@@ -268,9 +268,9 @@ impl Connection {
             }
             PtydRequest::Output { id, bytes } => {
                 // No reply by contract. Only the connection holding the master may tap: its
-                // frames and its EOF arrive in one order, so everything a dying host tapped is
+                // frames and its EOF arrive in one order, so everything a dying worker tapped is
                 // in the ring before our reader resumes, and nothing it sends can land after
-                // the next host attaches.
+                // the next worker attaches.
                 if let Some(session) = self.session(id)
                     && *session.attached_by.lock() == Some(self.id)
                 {

@@ -1,4 +1,4 @@
-//! Host side: split an encoded frame into datagrams and add parity.
+//! Worker side: split an encoded frame into datagrams and add parity.
 
 use std::collections::VecDeque;
 
@@ -35,7 +35,7 @@ pub struct EncodedFrame<'a> {
     pub ltr_token: Option<u64>,
     /// Encoded as a recovery frame from an acknowledged LTR.
     pub ltr_refresh: bool,
-    /// Capture time, host monotonic microseconds (low 32 bits).
+    /// Capture time, worker monotonic microseconds (low 32 bits).
     pub capture_ts_us: u32,
 }
 
@@ -170,7 +170,7 @@ impl Packetizer {
         self.datagrams_sent
     }
 
-    /// Cut `frame` into datagrams and add parity. `send_ms_lo` is the low byte of the host's
+    /// Cut `frame` into datagrams and add parity. `send_ms_lo` is the low byte of the worker's
     /// millisecond clock, stamped on every datagram.
     ///
     /// Every datagram, parity included, is written once into one buffer laid out as the wire

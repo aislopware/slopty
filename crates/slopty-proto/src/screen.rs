@@ -5,7 +5,7 @@ use slopty_core::{Duration, StreamId, WindowId};
 
 use crate::input::{KeyAction, KeyCode, Mods, MouseButton};
 
-/// A window on the host that can be streamed.
+/// A window on the worker that can be streamed.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct WindowInfo {
     /// Identity.
@@ -16,7 +16,7 @@ pub struct WindowInfo {
     pub bundle_id: Option<String>,
     /// Window title.
     pub title: String,
-    /// Bounds in host points.
+    /// Bounds in worker points.
     pub x: f32,
     /// Bounds.
     pub y: f32,
@@ -30,7 +30,7 @@ pub struct WindowInfo {
     pub on_screen: bool,
 }
 
-/// A display on the host.
+/// A display on the worker.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DisplayInfo {
     /// CoreGraphics display id.
@@ -109,7 +109,7 @@ pub enum ScreenInput {
         /// Modifiers.
         mods: Mods,
     },
-    /// Scroll with trackpad phases so the host can synthesise momentum-faithful events.
+    /// Scroll with trackpad phases so the worker can synthesise momentum-faithful events.
     Scroll {
         /// Pixel delta x.
         dx: f32,
@@ -136,7 +136,7 @@ pub enum ScreenInput {
         action: KeyAction,
         /// Modifiers.
         mods: Mods,
-        /// Text, for keys the host cannot reproduce from the code alone (IME, dead keys).
+        /// Text, for keys the worker cannot reproduce from the code alone (IME, dead keys).
         text: Option<String>,
     },
     /// Pinch (magnify) gesture.
@@ -170,7 +170,7 @@ pub enum ScrollPhase {
     MayBegin,
 }
 
-/// Client → host.
+/// Client → worker.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ScreenRequest {
     /// Enumerate windows and displays.
@@ -205,10 +205,10 @@ pub enum ScreenRequest {
         /// Report.
         report: ReceiverReport,
     },
-    /// Raise/focus the window on the host.
+    /// Raise/focus the window on the worker.
     Focus(StreamId),
-    /// Give the streamed window this size on the host, in the stream's native pixels (what
-    /// `Opened` / `Geometry` report). A display stream ignores it; the host answers, when the
+    /// Give the streamed window this size on the worker, in the stream's native pixels (what
+    /// `Opened` / `Geometry` report). A display stream ignores it; the worker answers, when the
     /// window did move, with a `Geometry` event from its geometry poll.
     Resize {
         /// Stream.
@@ -220,7 +220,7 @@ pub enum ScreenRequest {
     },
 }
 
-/// Loss feedback, client → host, sent as a QUIC **datagram** rather than on the control stream.
+/// Loss feedback, client → worker, sent as a QUIC **datagram** rather than on the control stream.
 ///
 /// The control stream is ordered: one lost packet carrying a NACK would hold every later NACK
 /// back until QUIC's loss timer retransmits it (a whole PTO, tens of milliseconds on Wi-Fi), by
@@ -240,7 +240,7 @@ pub enum Feedback {
         /// arrived, so the client does not know how many there are).
         fragments: Vec<u16>,
     },
-    /// The client lost a frame it could not recover; the host should refresh from an acked LTR.
+    /// The client lost a frame it could not recover; the worker should refresh from an acked LTR.
     Refresh {
         /// Stream.
         stream: StreamId,
@@ -260,8 +260,8 @@ pub struct ReceiverReport {
     pub frames_lost: u32,
     /// Datagrams lost (by sequence gaps).
     pub datagrams_lost: u32,
-    /// Highest host send timestamp seen (host clock, echoed).
-    pub last_host_send_ts_us: u32,
+    /// Highest worker send timestamp seen (worker clock, echoed).
+    pub last_worker_send_ts_us: u32,
     /// Client-side hold time between arrival and present, p50.
     pub hold_p50: Duration,
     /// Client-side hold time, p95.
@@ -284,7 +284,7 @@ pub struct ReceiverReport {
     pub stalls: u16,
 }
 
-/// What the host's bitrate controller made of its last decision window.
+/// What the worker's bitrate controller made of its last decision window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RateVerdict {
     /// Loss, queueing or hold time: the target was cut.
@@ -303,7 +303,7 @@ pub enum RateVerdict {
 /// frames at all, and there is no way for the client to tell that apart from a stream whose
 /// frames are being lost. Without the distinction the receiver sits in "need refresh" and asks
 /// for one every backoff period for as long as the item is open, which no amount of asking can
-/// answer. The host says which it is.
+/// answer. The worker says which it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SourceState {
     /// Open and capturing, but the target has produced no frame yet. Nothing to refresh from.
@@ -329,7 +329,7 @@ pub struct CursorShape {
     pub scale: u8,
 }
 
-/// Host → client.
+/// Worker → client.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ScreenEvent {
     /// Reply to `List`.

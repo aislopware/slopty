@@ -73,7 +73,7 @@ bitflags! {
     pub struct LineFlags: u8 {
         /// This line is a soft-wrapped continuation of the previous one (no newline between).
         const WRAPPED = 1 << 0;
-        /// The line is "dirty" from the engine's point of view (only meaningful on the host).
+        /// The line is "dirty" from the engine's point of view (only meaningful on the worker).
         const DIRTY = 1 << 1;
     }
 }

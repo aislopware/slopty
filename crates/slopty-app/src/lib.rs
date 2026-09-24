@@ -29,7 +29,7 @@ pub use settings::actions::OpenSettings;
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
-use slopty_proto::HostMsg;
+use slopty_proto::WorkerMsg;
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::Theme;
 use slopty_ui::a11y::{key_name, tab_stop};
@@ -966,7 +966,7 @@ impl Workspace {
         tab_stop(key, accent).on_click(move |_ev, window, cx| on_click(window, cx))
     }
 
-    /// The bar over a remote window: chords and arrows, copy and paste through the host.
+    /// The bar over a remote window: chords and arrows, copy and paste through the worker.
     fn screen_key_bar(&self, screen: &Entity<ScreenView>, cx: &Context<Self>) -> gpui::AnyElement {
         let s = &self.theme.surfaces;
         let view = screen.read(cx);
@@ -1208,31 +1208,31 @@ fn apply_link_event(
         LinkEvent::Term { session, event } => {
             view.update(cx, |v, cx| v.term_event(session, event, cx));
         }
-        LinkEvent::Control(HostMsg::Term { session, event }) => {
+        LinkEvent::Control(WorkerMsg::Term { session, event }) => {
             view.update(cx, |v, cx| v.term_event(session, event, cx));
         }
-        LinkEvent::Control(HostMsg::Items(sync)) => {
+        LinkEvent::Control(WorkerMsg::Items(sync)) => {
             view.update(cx, |v, cx| v.apply_sync(key, sync, cx));
         }
-        LinkEvent::Control(HostMsg::SessionOpened(summary)) => {
+        LinkEvent::Control(WorkerMsg::SessionOpened(summary)) => {
             view.update(cx, |v, cx| v.session_opened(key, summary, cx));
         }
-        LinkEvent::Control(HostMsg::SessionClosed { session, .. }) => {
+        LinkEvent::Control(WorkerMsg::SessionClosed { session, .. }) => {
             view.update(cx, |v, cx| v.session_closed(session, cx));
         }
-        LinkEvent::Control(HostMsg::Screen(event)) => {
+        LinkEvent::Control(WorkerMsg::Screen(event)) => {
             view.update(cx, |v, cx| v.screen_event(key, event, cx));
         }
-        LinkEvent::Control(HostMsg::Agent(event)) => {
+        LinkEvent::Control(WorkerMsg::Agent(event)) => {
             view.update(cx, |v, cx| v.agent_event(event, cx));
         }
-        LinkEvent::Control(HostMsg::File { path, read }) => {
+        LinkEvent::Control(WorkerMsg::File { path, read }) => {
             view.update(cx, |v, cx| v.file_read(key, &path, &read, cx));
         }
-        LinkEvent::Control(HostMsg::FoundFiles { root, query, paths }) => {
+        LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths }) => {
             view.update(cx, |v, cx| v.files_found(&root, &query, &paths, cx));
         }
-        LinkEvent::Control(HostMsg::HooksInstalled { ok, message }) => {
+        LinkEvent::Control(WorkerMsg::HooksInstalled { ok, message }) => {
             view.update(cx, |v, cx| {
                 v.show_notice(message, cx);
                 if !ok {
@@ -1241,10 +1241,10 @@ fn apply_link_event(
                 }
             });
         }
-        LinkEvent::Control(HostMsg::Clip(msg)) => {
+        LinkEvent::Control(WorkerMsg::Clip(msg)) => {
             view.update(cx, |v, _cx| v.clip_message(key, msg));
         }
-        LinkEvent::Control(HostMsg::Xfer(msg)) => {
+        LinkEvent::Control(WorkerMsg::Xfer(msg)) => {
             view.update(cx, |v, cx| v.xfer_message(msg, cx));
         }
         LinkEvent::Ports { session, forwards } => {

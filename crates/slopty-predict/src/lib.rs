@@ -2,7 +2,7 @@
 //!
 //! A printable key pressed at a shell prompt almost always ends up on screen at the cursor. On a
 //! slow link the client draws it immediately as a *prediction*, then reconciles against the next
-//! authoritative frame: `Frame::input_ack` says which keys the host had applied when the frame
+//! authoritative frame: `Frame::input_ack` says which keys the worker had applied when the frame
 //! was captured, so every acknowledged prediction is checked cell-for-cell. Hits raise
 //! confidence; one miss clears the overlay and mutes prediction for a while.
 //!
@@ -130,7 +130,7 @@ impl Predictor {
     /// Whether the overlay should be drawn right now.
     ///
     /// A guess older than [`STALE`] is never drawn, even while no frame has come to count it
-    /// as a miss: a link that went quiet must not leave a guess on screen that the host never
+    /// as a miss: a link that went quiet must not leave a guess on screen that the worker never
     /// confirmed.
     #[must_use]
     pub fn visible(&self, now: Instant) -> bool {
@@ -347,14 +347,14 @@ mod tests {
         let _a = p.on_key(&key(1, "a"), cursor(0, 0), 80, TermModes::CANONICAL, now);
         let _b = p.on_key(&key(2, "b"), cursor(0, 0), 80, TermModes::CANONICAL, now);
         assert!(!p.visible(now), "no hits yet on a merely slow link");
-        // Host applied key 1 only: 'a' landed.
+        // Worker applied key 1 only: 'a' landed.
         let r = p.on_frame(&screen_with(0, "a"), 1, 0, now);
         assert_eq!(r, Reconciled { hits: 1, misses: 0, pending: 1 });
         let _c = p.on_key(&key(3, "c"), cursor(0, 1), 80, TermModes::CANONICAL, now);
         let r = p.on_frame(&screen_with(0, "ab"), 2, 0, now);
         assert_eq!(r.hits, 1);
         assert!(p.visible(now), "two hits: warm");
-        // Host disagrees on key 3 (say the shell rejected it).
+        // Worker disagrees on key 3 (say the shell rejected it).
         let r = p.on_frame(&screen_with(0, "ab"), 3, 0, now);
         assert_eq!((r.hits, r.misses, r.pending), (0, 1, 0));
         assert!(!p.visible(now));

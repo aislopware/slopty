@@ -1,4 +1,4 @@
-//! Host and client in one process over real UDP: connect by address, talk, get refused.
+//! Worker and client in one process over real UDP: connect by address, talk, get refused.
 
 #[cfg(test)]
 mod tests {
@@ -8,9 +8,9 @@ mod tests {
     use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{HandshakeError, bind_client, connect, connect_addr};
-    use slopty_net::host::HostListener;
     use slopty_net::streams::{self, Uni};
-    use slopty_net::{HostAddr, HostMsg, NetError};
+    use slopty_net::worker::WorkerListener;
+    use slopty_net::{HostAddr, NetError, WorkerMsg};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck, Rejection};
     use slopty_proto::terminal::TermEvent;
@@ -31,27 +31,27 @@ mod tests {
         HelloAck {
             protocol: PROTOCOL_VERSION,
             worker,
-            name: "host".to_owned(),
+            name: "worker".to_owned(),
             app_version: "0".to_owned(),
             caps: Caps::empty(),
             sessions: Vec::new(),
         }
     }
 
-    /// A host on every interface, any port, answering each `Hello` with `ack(id)` and holding
+    /// A worker on every interface, any port, answering each `Hello` with `ack(id)` and holding
     /// the connection until the client closes it.
-    fn host(admission: Admission) -> (HostListener, u16, WorkerId) {
-        let listener = HostListener::bind(slopty_net::endpoint::any(0), admission).unwrap();
+    fn worker(admission: Admission) -> (WorkerListener, u16, WorkerId) {
+        let listener = WorkerListener::bind(slopty_net::endpoint::any(0), admission).unwrap();
         let port = listener.local_addr().unwrap().port();
         (listener, port, WorkerId::new())
     }
 
-    fn answer_every_hello(listener: &HostListener, id: WorkerId) {
+    fn answer_every_hello(listener: &WorkerListener, id: WorkerId) {
         let listener = listener.clone();
         tokio::spawn(async move {
             while let Some(mut client) = listener.accept().await {
                 assert!(client.remote.ip().is_loopback(), "{}", client.remote);
-                client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
+                client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
                 tokio::spawn(async move { client.conn.closed().await });
             }
         });
@@ -59,15 +59,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_connects_by_address_and_streams_a_session() {
-        let (listener, port, id) = host(Admission::default());
+        let (listener, port, id) = worker(Admission::default());
         let session = SessionId::new();
-        let host_task = {
+        let worker_task = {
             let listener = listener.clone();
             tokio::spawn(async move {
                 let mut client = listener.accept().await.unwrap();
                 assert_eq!(client.hello.name, "test");
                 assert_eq!(client.remote.ip(), std::net::Ipv4Addr::LOCALHOST, "canonical IPv4");
-                client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
+                client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
                 let mut stream = streams::open_session(&client.conn, session).await.unwrap();
                 stream.send(&TermEvent::Bell).await.unwrap();
                 // A pre-encoded frame (the fan-out path), then a graceful end.
@@ -106,7 +106,7 @@ mod tests {
         let max = conn.conn.max_datagram_size().unwrap();
         assert!(max >= 1150, "no AEAD tag eats into a datagram: {max}");
         conn.close();
-        tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), worker_task).await.unwrap().unwrap();
     }
 
     fn header(size: u64, purpose: Purpose) -> BulkHeader {
@@ -133,14 +133,14 @@ mod tests {
     /// A file up, a file down, and a tunnel echoing, all beside the control stream.
     #[tokio::test]
     async fn bulk_streams_carry_raw_bytes_both_ways_and_a_tunnel_echoes() {
-        let (listener, port, id) = host(Admission::default());
+        let (listener, port, id) = worker(Admission::default());
         let up: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
-        let down = b"the host's file".to_vec();
-        let host_task = {
+        let down = b"the worker's file".to_vec();
+        let worker_task = {
             let (listener, up, down) = (listener.clone(), up.clone(), down.clone());
             tokio::spawn(async move {
                 let mut client = listener.accept().await.unwrap();
-                client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
+                client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
                 let Uni::Bulk { header, mut rx } = streams::accept_uni(&client.conn).await.unwrap()
                 else {
                     panic!("a bulk stream");
@@ -182,13 +182,13 @@ mod tests {
         send.finish().unwrap();
         assert_eq!(drain(&mut rx).await, b"GET / HTTP/1.1\r\n\r\n", "half-close ends the echo");
         conn.close();
-        tokio::time::timeout(Duration::from_secs(10), host_task).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), worker_task).await.unwrap().unwrap();
     }
 
     /// One socket answers both families, and a name resolves.
     #[tokio::test]
-    async fn a_host_on_every_interface_answers_ipv4_ipv6_and_a_name() {
-        let (listener, port, id) = host(Admission::default());
+    async fn a_worker_on_every_interface_answers_ipv4_ipv6_and_a_name() {
+        let (listener, port, id) = worker(Admission::default());
         answer_every_hello(&listener, id);
         let endpoint = bind_client().unwrap();
         for addr in
@@ -207,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_protocol_version_is_rejected_readably() {
-        let (listener, port, _id) = host(Admission::default());
+        let (listener, port, _id) = worker(Admission::default());
         let drained = {
             let listener = listener.clone();
             tokio::spawn(async move { listener.accept().await.is_none() })
@@ -218,7 +218,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, HandshakeError::Rejected(Rejection::ProtocolVersion { host }) if host == PROTOCOL_VERSION),
+            matches!(err, HandshakeError::Rejected(Rejection::ProtocolVersion { worker }) if worker == PROTOCOL_VERSION),
             "{err:?}"
         );
         assert!(!drained.is_finished(), "a rejected client never reaches the caller");
@@ -227,16 +227,16 @@ mod tests {
 
     /// A peer outside the admitted ranges is refused at its first packet: the client hears so
     /// at once rather than waiting out a timeout, and the caller never sees it. The peer here is
-    /// this machine's own link-local address on `lo0`, which is not loopback, against a host
+    /// this machine's own link-local address on `lo0`, which is not loopback, against a worker
     /// that admits only 10/8.
     #[tokio::test]
     async fn a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake() {
-        let (listener, port, id) = host(Admission::new(vec!["10.0.0.0/8".parse().unwrap()]));
+        let (listener, port, id) = worker(Admission::new(vec!["10.0.0.0/8".parse().unwrap()]));
         let seen = {
             let listener = listener.clone();
             tokio::spawn(async move {
                 let mut client = listener.accept().await.unwrap();
-                client.tx.send(&HostMsg::HelloAck(ack(id))).await.unwrap();
+                client.tx.send(&WorkerMsg::HelloAck(ack(id))).await.unwrap();
                 client
             })
         };

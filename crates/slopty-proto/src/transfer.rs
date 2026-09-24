@@ -36,7 +36,7 @@ pub fn parse_origin(bytes: &[u8]) -> Option<(Peer, u64)> {
 /// First message on every unidirectional stream, naming what follows.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum UniHead {
-    /// Host → client: the [`crate::terminal::TermEvent`]s of one session follow.
+    /// Worker → client: the [`crate::terminal::TermEvent`]s of one session follow.
     Session {
         /// The session.
         session: SessionId,
@@ -47,11 +47,11 @@ pub enum UniHead {
 
 /// First message on a tunnel: a client-opened bidirectional stream other than the control one.
 ///
-/// It is a TCP connection the client accepted, to be joined to `127.0.0.1:port` on the host.
+/// It is a TCP connection the client accepted, to be joined to `127.0.0.1:port` on the worker.
 /// Raw bytes follow both ways; a finished stream is a half-closed socket.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TunnelOpen {
-    /// The host port.
+    /// The worker port.
     pub port: u16,
 }
 
@@ -93,8 +93,8 @@ pub struct Offer {
 /// Clipboard sync.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ClipMsg {
-    /// Client → host: whether this client wants the host's clipboard changes now (a remote
-    /// tile has focus, or the app is frontmost). The host watches its pasteboard only while
+    /// Client → worker: whether this client wants the worker's clipboard changes now (a remote
+    /// tile has focus, or the app is frontmost). The worker watches its pasteboard only while
     /// some client wants it.
     Watch(bool),
     /// Either way: the sender's clipboard changed.
@@ -123,7 +123,7 @@ pub enum ClipMsg {
     },
 }
 
-/// Where uploaded files land on the host.
+/// Where uploaded files land on the worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Dest {
     /// The session's working directory (OSC 7), or a fresh `~/.slopty/drop/<xfer>/` when a
@@ -138,9 +138,9 @@ pub enum Dest {
 /// What a bulk stream's bytes are for.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Purpose {
-    /// Client → host: a file of an upload.
+    /// Client → worker: a file of an upload.
     Upload,
-    /// Host → client: a file the client fetched.
+    /// Worker → client: a file the client fetched.
     Download,
     /// Either way: a clipboard representation too big to inline.
     Clip {
@@ -241,7 +241,7 @@ pub enum XferMsg {
         /// The transfer.
         xfer: XferId,
     },
-    /// Client → host: send this file or directory down as transfer `xfer`, from the start (a
+    /// Client → worker: send this file or directory down as transfer `xfer`, from the start (a
     /// download does not resume).
     Fetch {
         /// The transfer the client names.

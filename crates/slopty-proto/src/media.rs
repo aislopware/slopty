@@ -82,7 +82,7 @@ pub struct MediaHeader {
     pub kind: u8,
     /// [`flags`].
     pub flags: u8,
-    /// Host send timestamp, low 8 bits of milliseconds (wraps; combined with the report's
+    /// Worker send timestamp, low 8 bits of milliseconds (wraps; combined with the report's
     /// 32-bit field for OWD trend, never for absolute latency).
     pub send_ms_lo: u8,
 }
@@ -124,8 +124,8 @@ pub const FRAME_PREFIX_BYTES: usize = 16;
 pub struct FramePrefix {
     /// Bitstream bytes that follow; anything after them is padding.
     pub len: U32,
-    /// Host capture timestamp, microseconds on the host's monotonic clock (low 32 bits). Echoed
-    /// in `ReceiverReport::last_host_send_ts_us` and used for one-way-delay *trend*.
+    /// Worker capture timestamp, microseconds on the worker's monotonic clock (low 32 bits).
+    /// Echoed in `ReceiverReport::last_worker_send_ts_us` and used for one-way-delay *trend*.
     pub capture_ts_us: U32,
     /// The long-term-reference token to acknowledge when [`flags::LTR`] is set; zero otherwise.
     pub ltr_token: U64,

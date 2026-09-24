@@ -1,6 +1,6 @@
 //! A QUIC crypto provider that does no cryptography.
 //!
-//! Every host sits behind Tailscale, `WireGuard` or a VPN, which already encrypts and
+//! Every worker sits behind Tailscale, `WireGuard` or a VPN, which already encrypts and
 //! authenticates the path; a second layer here would only cost latency and a pairing ceremony
 //! (docs/decisions/transport.md). So packets go in the clear: the packet keys copy, the header
 //! keys leave the header alone, and the tag is zero bytes long.
@@ -352,7 +352,7 @@ impl crypto::Session for Session {
 ///
 /// Not a MAC an attacker cannot forge: the network is the trust boundary here, as for
 /// everything else in this module. The key is the same in every Slopty process so a restarted
-/// host answers the old connection's packets with a reset the client recognises, rather than
+/// worker answers the old connection's packets with a reset the client recognises, rather than
 /// leaving it to time out.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Keyed;
@@ -454,7 +454,7 @@ mod tests {
     }
 
     fn pair() -> (Box<dyn crypto::Session>, Box<dyn crypto::Session>) {
-        let client = Client.start_session(QUIC_VERSION, "host", &params()).unwrap();
+        let client = Client.start_session(QUIC_VERSION, "worker", &params()).unwrap();
         let server = Server.start_session(QUIC_VERSION, &params());
         (client, server)
     }
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(k.confidentiality_limit(), u64::MAX);
         assert_eq!(k.integrity_limit(), u64::MAX);
         assert!(Server.initial_keys(1, ConnectionId::new(&[1; 8])).is_err(), "QUIC v1 is refused");
-        assert!(Client.start_session(1, "host", &params()).is_err());
+        assert!(Client.start_session(1, "worker", &params()).is_err());
     }
 
     #[test]

@@ -4,12 +4,12 @@
 //! plus the instants that got it here. GPUI's `surface` element samples it through
 //! `CVMetalTextureCache`, so nothing is copied on the client, and a `slopty_client::Pacer`
 //! decides when it goes up (present on arrival, never a queue) and measures how long the
-//! journey took. The host's cursor is drawn here from the cursor channel (one RTT behind the
+//! journey took. The worker's cursor is drawn here from the cursor channel (one RTT behind the
 //! pointer, not one video pipeline). Pointer, scroll and key events inside the view go to the
-//! host as
-//! `ScreenInput` in stream pixels; the host injects them. ⌘ chords the canvas binds (⌘T/⌘O/⌘W,
+//! worker as
+//! `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the canvas binds (⌘T/⌘O/⌘W,
 //! zoom) never reach the view because GPUI runs key bindings before key listeners; every other
-//! chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also asks the host for a
+//! chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also asks the worker for a
 //! smaller stream when it is painted small (canvas zoomed out), quantised so the encoder is
 //! not rebuilt on every wheel tick.
 
@@ -47,7 +47,7 @@ use crate::keys;
 /// the worker has not heard it yet (`crate::clipboard::ClipSync::offer_for`).
 pub type PasteHook = std::rc::Rc<dyn Fn() -> Option<ClientMsg>>;
 
-/// Makes a client-side stream for an `Opened` event (wraps `HostLink::screen`).
+/// Makes a client-side stream for an `Opened` event (wraps `WorkerLink::screen`).
 pub type ScreenFactory = Arc<dyn Fn(StreamId, VideoCodec) -> ScreenHandle + Send + Sync>;
 
 /// Quality change rate limit.
@@ -65,7 +65,7 @@ pub enum ScreenViewEvent {
     Pressed,
 }
 
-/// What the host answered to `Open`, plus what we asked for.
+/// What the worker answered to `Open`, plus what we asked for.
 #[derive(Clone, Copy, Debug)]
 pub struct Opened {
     /// Stream id.
@@ -78,13 +78,13 @@ pub struct Opened {
     pub quality: Quality,
 }
 
-/// What is drawn at the host's pointer position: the client's own arrow until the host has
+/// What is drawn at the worker's pointer position: the client's own arrow until the worker has
 /// said which cursor it shows, then that picture (`ScreenEvent::Cursor`).
 #[derive(Clone)]
 enum Pointer {
-    /// A drawn arrow, the same on every host.
+    /// A drawn arrow, the same on every worker.
     Arrow,
-    /// The host's cursor picture, its size and hotspot in points.
+    /// The worker's cursor picture, its size and hotspot in points.
     Image {
         /// Premultiplied BGRA, as GPUI keeps images.
         image: Arc<RenderImage>,
@@ -96,7 +96,7 @@ enum Pointer {
 }
 
 impl Pointer {
-    /// The host's cursor picture as a pointer, or the arrow when there is none or its bytes
+    /// The worker's cursor picture as a pointer, or the arrow when there is none or its bytes
     /// do not fill its size.
     fn from_shape(shape: Option<CursorShape>) -> Self {
         let Some(shape) = shape else { return Self::Arrow };
@@ -120,7 +120,7 @@ fn pointer_bounds(at: Point<Pixels>, size: Size<Pixels>, hot: Point<Pixels>) -> 
     Bounds { origin: point(at.x - hot.x, at.y - hot.y), size }
 }
 
-/// How long a fling may go quiet before the host is told its momentum ended. Both platforms say
+/// How long a fling may go quiet before the worker is told its momentum ended. Both platforms say
 /// so themselves, so this is the backstop for a lost or dropped close. Momentum events arrive
 /// about a frame apart, which makes this several frames of silence.
 const MOMENTUM_GAP: Duration = Duration::from_millis(120);
@@ -157,14 +157,14 @@ pub struct ScreenView {
     quality: Quality,
     quality_changed: Instant,
     cursor: CursorState,
-    /// The host's cursor as it is drawn at that position.
+    /// The worker's cursor as it is drawn at that position.
     pointer: Pointer,
     out: mpsc::Sender<ClientMsg>,
     theme: Theme,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
     frames: u64,
-    /// Keys whose press went to the host, so a release for a locally-handled chord (its press
+    /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
     /// was eaten by a canvas binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
     /// Asked before a paste chord goes, so the worker pastes what this client copied.
@@ -174,7 +174,7 @@ pub struct ScreenView {
     /// The modifier keys as last reported, so a change forwards the key that moved.
     modifiers: Modifiers,
     /// Focus leaving the view and the window going inactive each release what is held on the
-    /// host (registered at the first render: the constructor has no window).
+    /// worker (registered at the first render: the constructor has no window).
     let_go: Option<[Subscription; 2]>,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
@@ -192,12 +192,12 @@ pub struct ScreenView {
     /// a viewer watching a remote window is not touching the keyboard.
     #[cfg(target_os = "macos")]
     _display: slopty_platform::Activity,
-    /// The host's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
+    /// The worker's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
     rate: Option<(u32, RateVerdict, bool)>,
-    /// What the host says its capture target is doing (`ScreenEvent::Source`). A target that
+    /// What the worker says its capture target is doing (`ScreenEvent::Source`). A target that
     /// has drawn nothing is not a broken stream, and the placeholder should not claim it is.
     source: SourceState,
-    /// Where the scroll gesture over the picture has got to, so the host is sent the phases
+    /// Where the scroll gesture over the picture has got to, so the worker is sent the phases
     /// macOS would have sent rather than the ones gpui reports.
     scrolling: Scrolling,
     /// Fires [`MOMENTUM_GAP`] after the last momentum event to close the fling. Replaced (so
@@ -229,7 +229,7 @@ pub struct HudInput<'a> {
     pub rtt: Option<Duration>,
     /// How long ago the frame on screen was taken from the decoder.
     pub frame_age: Option<Duration>,
-    /// The host's last bitrate decision: target, verdict, cwnd-capped.
+    /// The worker's last bitrate decision: target, verdict, cwnd-capped.
     pub rate: Option<(u32, RateVerdict, bool)>,
     /// The receiver's counters.
     pub stats: &'a ScreenStats,
@@ -245,7 +245,7 @@ pub struct HudInput<'a> {
 /// Line one is the picture: size, rate, throughput, round trip and the age of the frame being
 /// shown. Line two is the path: jitter (RFC 3550 interarrival), how long frames waited for
 /// their last fragment (p50 / p95 of the last report), the in-order queue, recovery counts,
-/// stalls, the host's bitrate verdict and audio. Line three is the presentation: how long a
+/// stalls, the worker's bitrate verdict and audio. Line three is the presentation: how long a
 /// frame takes from the arrival of the datagram that completed it to the paint that shows it
 /// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
 /// of it), the spacing of those paints and its jitter, and the two cadence faults —
@@ -315,7 +315,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
 ///
 /// The two cases look identical to the viewer and are not: a stream still starting up will draw
 /// in a moment, while a window that is hidden, minimised or has never drawn will not draw until
-/// something on the host changes. Saying which is the visible half of the refresh-storm guard.
+/// something on the worker changes. Saying which is the visible half of the refresh-storm guard.
 #[must_use]
 pub const fn waiting_text(source: SourceState) -> &'static str {
     match source {
@@ -374,7 +374,7 @@ pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32) -> Quality
 
 impl ScreenView {
     /// Swap the theme: chrome colours, and the stream settings, which a live stream asks
-    /// the host for at once (the scale it holds stays; that follows the canvas).
+    /// the worker for at once (the scale it holds stays; that follows the canvas).
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
             return;
@@ -543,19 +543,19 @@ impl ScreenView {
         self.rtt = rtt;
     }
 
-    /// The host's latest bitrate decision, shown in the overlay.
+    /// The worker's latest bitrate decision, shown in the overlay.
     pub const fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
         self.rate = Some((target_bps, verdict, capped));
     }
 
-    /// The host said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
+    /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
     /// pointer from now on, or the arrow again for `None`.
     pub fn set_cursor_shape(&mut self, shape: Option<CursorShape>, cx: &mut Context<Self>) {
         self.pointer = Pointer::from_shape(shape);
         cx.notify();
     }
 
-    /// The host cursor picture's size and hotspot in points, when one is drawn.
+    /// The worker cursor picture's size and hotspot in points, when one is drawn.
     #[cfg(test)]
     const fn pointer_picture(&self) -> Option<(Size<Pixels>, Point<Pixels>)> {
         match &self.pointer {
@@ -564,7 +564,7 @@ impl ScreenView {
         }
     }
 
-    /// The host said whether its capture target is drawing. While it is not, the receiver stops
+    /// The worker said whether its capture target is drawing. While it is not, the receiver stops
     /// asking for refreshes (a hidden window has nothing to refresh from) and the placeholder
     /// says so instead of "Waiting for the first frame".
     pub fn set_source_state(&mut self, state: SourceState, cx: &mut Context<Self>) {
@@ -575,13 +575,13 @@ impl ScreenView {
         }
     }
 
-    /// What the host says its capture target is doing.
+    /// What the worker says its capture target is doing.
     #[must_use]
     pub const fn source_state(&self) -> SourceState {
         self.source
     }
 
-    /// The host's latest bitrate decision: target, verdict, whether the cwnd cap holds it.
+    /// The worker's latest bitrate decision: target, verdict, whether the cwnd cap holds it.
     #[must_use]
     pub const fn rate(&self) -> Option<(u32, RateVerdict, bool)> {
         self.rate
@@ -620,7 +620,7 @@ impl ScreenView {
         Some(hud.text.clone())
     }
 
-    /// Whether the host has sent any audio for this stream (the mute control is pointless
+    /// Whether the worker has sent any audio for this stream (the mute control is pointless
     /// before that).
     #[must_use]
     pub fn has_audio(&self) -> bool {
@@ -640,7 +640,7 @@ impl ScreenView {
     }
 
     /// The canvas reports how wide the view is painted (device pixels) so the stream can be
-    /// downscaled at the host when zoomed out. Quantised to quarter steps and rate limited.
+    /// downscaled at the worker when zoomed out. Quantised to quarter steps and rate limited.
     pub fn set_painted_width(&mut self, device_px: f32) {
         let wanted = (device_px / self.native.0).clamp(MIN_SCALE, 1.0);
         let bucket = (wanted * 4.0).ceil() / 4.0;
@@ -657,7 +657,7 @@ impl ScreenView {
         self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
     }
 
-    /// The host resized the target: the stream now has this pixel size at the current quality
+    /// The worker resized the target: the stream now has this pixel size at the current quality
     /// scale, so the native size follows from it.
     pub fn set_geometry(&mut self, width: u32, height: u32) {
         self.size = (width, height);
@@ -798,7 +798,7 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
-    /// The `phase` and `momentum` a host `CGEvent` needs for this wheel event, moving the
+    /// The `phase` and `momentum` a worker `CGEvent` needs for this wheel event, moving the
     /// gesture on as it goes. A mouse wheel notch is part of no gesture and carries neither.
     const fn scroll_phases(
         &mut self,
@@ -820,7 +820,7 @@ impl ScreenView {
             }
             // gpui reads `NSEventPhaseMayBegin` and `NSEventPhaseBegan` as the same `Started`, so
             // fingers that rest before they push open the gesture twice. The second one is the
-            // same gesture; telling the host it began again would restart its rubber-banding.
+            // same gesture; telling the worker it began again would restart its rubber-banding.
             (TouchPhase::Started, Scrolling::Fingers) => (ScrollPhase::Changed, ScrollPhase::None),
             (TouchPhase::Started, _) => {
                 self.scrolling = Scrolling::Fingers;
@@ -903,9 +903,9 @@ impl ScreenView {
         });
     }
 
-    /// Focus left the view or the window went inactive: release on the host every key and
+    /// Focus left the view or the window went inactive: release on the worker every key and
     /// modifier whose press went there, since the release never will (⌘-tab away with ⌘
-    /// held, a click on another card while a key is down) — a key stuck down on the host is
+    /// held, a click on another card while a key is down) — a key stuck down on the worker is
     /// the one thing a remote desktop must never leave behind.
     fn let_go(&mut self, cx: &mut Context<Self>) {
         for code in std::mem::take(&mut self.held) {
@@ -952,7 +952,7 @@ impl ScreenView {
         cx.stop_propagation();
     }
 
-    /// Before a paste reaches the host, make sure it pastes what this client copied: this
+    /// Before a paste reaches the worker, make sure it pastes what this client copied: this
     /// client's clipboard offer goes on the (ordered) control stream ahead of the key, when the
     /// worker has not heard it yet.
     fn push_clipboard(&self) {
@@ -985,7 +985,7 @@ impl ScreenView {
         cx.notify();
     }
 
-    /// Press and release one key on the host: the phone key bar and the soft keyboard, which
+    /// Press and release one key on the worker: the phone key bar and the soft keyboard, which
     /// have no key-up of their own. Armed modifiers apply and clear.
     pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
         let armed = std::mem::take(&mut self.sticky);
@@ -996,7 +996,7 @@ impl ScreenView {
         }
         let code = keys::key_code(&keystroke.key);
         let mods = keys::mods(keystroke.modifiers);
-        // A modified key is a chord, not typing: no text, or the host would insert it too.
+        // A modified key is a chord, not typing: no text, or the worker would insert it too.
         let text = keystroke
             .key_char
             .filter(|t| !t.is_empty() && !mods.intersects(Mods::CTRL | Mods::SUPER));
@@ -1005,7 +1005,7 @@ impl ScreenView {
         cx.notify();
     }
 
-    /// Touch: a long press over the picture is a right click on the host (context menus);
+    /// Touch: a long press over the picture is a right click on the worker (context menus);
     /// a plain drag stays a canvas pan. Returns whether the gesture was claimed.
     fn long_press(&self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
         if ev.phase != TouchPhase::Started || !self.inside(ev.start_position) {
@@ -1026,17 +1026,17 @@ impl ScreenView {
         true
     }
 
-    /// The phone's "paste" key: ⌘V on the host, this client's clipboard pushed first.
+    /// The phone's "paste" key: ⌘V on the worker, this client's clipboard pushed first.
     pub fn paste_key(&mut self, cx: &mut Context<Self>) {
         self.press(chord("v"), cx);
     }
 
-    /// The phone's "copy" key: ⌘C on the host; the host's pasteboard then flows back here.
+    /// The phone's "copy" key: ⌘C on the worker; the worker's pasteboard then flows back here.
     pub fn copy_key(&mut self, cx: &mut Context<Self>) {
         self.press(chord("c"), cx);
     }
 
-    /// The host's pointer in view coordinates: its own cursor picture when the host has sent
+    /// The worker's pointer in view coordinates: its own cursor picture when the worker has sent
     /// one, else a drawn arrow.
     fn cursor_overlay(&self) -> Option<impl IntoElement + use<>> {
         if !self.cursor.visible || self.latest.is_none() {
@@ -1159,7 +1159,7 @@ impl Render for ScreenView {
                 let text = waiting_text(self.source);
                 div()
                     // A status, not a picture: it is the only thing a screen reader can be told
-                    // while the surface is empty, and it changes when the host reports the source.
+                    // while the surface is empty, and it changes when the worker reports the source.
                     .id("screen-waiting")
                     .role(gpui::accesskit::Role::Status)
                     .aria_label(text)
@@ -1222,8 +1222,8 @@ impl Render for ScreenView {
     }
 }
 
-/// The pointer the client shows over the card: none while a frame is up, since the host's
-/// pointer is drawn on it (its picture, or an arrow, or nothing when the host hides it, all
+/// The pointer the client shows over the card: none while a frame is up, since the worker's
+/// pointer is drawn on it (its picture, or an arrow, or nothing when the worker hides it, all
 /// one round trip behind — two pointers that far apart read as a lag), and the arrow before
 /// the first frame, when there is nothing to point at yet.
 const fn local_pointer(showing: bool) -> CursorStyle {
@@ -1273,7 +1273,7 @@ impl EntityInputHandler for ScreenView {
         }
     }
 
-    /// Committed text: one key per character so the host sees ordinary typing (a single
+    /// Committed text: one key per character so the worker sees ordinary typing (a single
     /// event carrying a whole string trips apps that read the key code, not the string).
     fn replace_text_in_range(
         &mut self,
@@ -1314,7 +1314,7 @@ impl EntityInputHandler for ScreenView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // The host's pointer stands in for a caret: candidate windows hang there.
+        // The worker's pointer stands in for a caret: candidate windows hang there.
         let (w, h) = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
         #[expect(clippy::cast_precision_loss, reason = "pixel counts are small")]
         let (sw, sh) = ((self.size.0 as f32).max(1.0), (self.size.1 as f32).max(1.0));
@@ -1348,7 +1348,7 @@ impl EntityInputHandler for ScreenView {
 }
 
 /// The modifier keys that went down or up between `was` and `now`, as presses and releases.
-/// The fn key is left out: the host's own fn setting (emoji picker, dictation) would fire.
+/// The fn key is left out: the worker's own fn setting (emoji picker, dictation) would fire.
 fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
     [
         (was.shift, now.shift, KeyCode::ShiftLeft),
@@ -1362,7 +1362,7 @@ fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
     .collect()
 }
 
-/// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the host read its pasteboard.
+/// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the worker read its pasteboard.
 fn is_paste_chord(keystroke: &Keystroke) -> bool {
     let m = keystroke.modifiers;
     m.platform && !m.control && !m.alt && keystroke.key == "v"
@@ -1378,7 +1378,7 @@ mod tests {
         Keystroke::parse(s).expect("keystroke")
     }
 
-    /// The placeholder distinguishes "the picture has not got here yet" from "the host says its
+    /// The placeholder distinguishes "the picture has not got here yet" from "the worker says its
     /// target has not drawn": the second is not a network problem and no amount of asking fixes
     /// it, so the wait must not read like a stall.
     #[test]
@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     /// A view with nowhere to draw: a detached handle and a channel that collects what it
-    /// would send the host.
+    /// would send the worker.
     fn view(
         cx: &mut gpui::TestAppContext,
     ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>) {
@@ -1515,11 +1515,11 @@ mod tests {
         assert!(!sent(&mut rx).is_empty(), "fps change asked");
     }
 
-    /// The host's cursor picture replaces the drawn arrow at the pointer, its hotspot on
+    /// The worker's cursor picture replaces the drawn arrow at the pointer, its hotspot on
     /// the position and its size in points; bytes that do not fill it, or `None`, put the
     /// arrow back.
     #[gpui::test]
-    fn the_hosts_cursor_picture_is_drawn_at_its_hotspot(cx: &mut gpui::TestAppContext) {
+    fn the_workers_cursor_picture_is_drawn_at_its_hotspot(cx: &mut gpui::TestAppContext) {
         let (view, _rx) = view(cx);
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "the arrow to begin");
         let shape = |bgra: Vec<u8>| CursorShape { w: 4, h: 2, hot_x: 2, hot_y: 1, bgra, scale: 2 };
@@ -1544,7 +1544,7 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
     }
 
-    /// The client's own pointer hides over a card that shows a frame, where the host's is
+    /// The client's own pointer hides over a card that shows a frame, where the worker's is
     /// drawn, and stays the arrow before the first frame.
     #[test]
     fn the_local_pointer_hides_once_a_frame_is_up() {
@@ -1552,11 +1552,11 @@ mod tests {
         assert_eq!(local_pointer(true), CursorStyle::None);
     }
 
-    /// A modifier pressed on its own reaches the host as that key: each one that moves is a
+    /// A modifier pressed on its own reaches the worker as that key: each one that moves is a
     /// press or a release carrying the new state, an unchanged state sends nothing, and the
     /// fn key is never forwarded.
     #[gpui::test]
-    fn modifier_keys_go_to_the_host_as_they_move(cx: &mut gpui::TestAppContext) {
+    fn modifier_keys_go_to_the_worker_as_they_move(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
         let key = |req: &ScreenRequest| match req {
             ScreenRequest::Input {
@@ -1590,10 +1590,10 @@ mod tests {
         );
     }
 
-    /// Losing focus (or the window going inactive) releases on the host every key and
+    /// Losing focus (or the window going inactive) releases on the worker every key and
     /// modifier whose press went there, once; with nothing held it sends nothing.
     #[gpui::test]
-    fn losing_focus_releases_what_is_held_on_the_host(cx: &mut gpui::TestAppContext) {
+    fn losing_focus_releases_what_is_held_on_the_worker(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
         let keys = |reqs: Vec<ScreenRequest>| -> Vec<(KeyCode, KeyAction)> {
             reqs.iter()
@@ -1643,8 +1643,8 @@ mod tests {
         out
     }
 
-    /// Zooming the card out asks the host for a smaller picture, in quarter steps, not more
-    /// than once per cooldown; a resize from the host keeps the native size consistent with
+    /// Zooming the card out asks the worker for a smaller picture, in quarter steps, not more
+    /// than once per cooldown; a resize from the worker keeps the native size consistent with
     /// the scale in force.
     #[gpui::test]
     fn the_painted_width_asks_for_a_scale_in_quarter_steps_once_per_cooldown(
@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     /// The phone's key bar presses and releases a key in one go; an armed modifier rides on
-    /// it once, and a chord carries no text so the host does not type it as well.
+    /// it once, and a chord carries no text so the worker does not type it as well.
     #[gpui::test]
     fn a_pressed_key_is_a_press_and_a_release_with_the_armed_modifier(
         cx: &mut gpui::TestAppContext,
@@ -1790,13 +1790,13 @@ mod tests {
         (view, rx, cx)
     }
 
-    /// A fling reaches the host shaped the way macOS shapes one: the gesture begins, changes and
+    /// A fling reaches the worker shaped the way macOS shapes one: the gesture begins, changes and
     /// ends, and everything after that is momentum, which begins, continues and is closed by a
     /// zero-delta end of its own. gpui reports none of that — it reads `NSEvent.phase` and never
     /// `momentumPhase`, so momentum arrives as plain `Moved` events after `Ended` — and passing
     /// them on unchanged would tell the remote app the scroll ended and then went on changing.
     #[gpui::test]
-    fn a_fling_over_the_picture_reaches_the_host_as_a_gesture_and_then_as_momentum(
+    fn a_fling_over_the_picture_reaches_the_worker_as_a_gesture_and_then_as_momentum(
         cx: &mut gpui::TestAppContext,
     ) {
         use ScrollPhase::{Began, Changed, Ended, None as Off};
@@ -1853,7 +1853,7 @@ mod tests {
         assert!(inputs(&mut rx).is_empty(), "the fling is closed once");
 
         // If that last event is lost, the silence itself still closes the coast, with the
-        // zero-delta end the host needs to let the gesture go.
+        // zero-delta end the worker needs to let the gesture go.
         wheel(cx, -8.0, TouchPhase::Started);
         wheel(cx, -30.0, TouchPhase::Ended);
         wheel(cx, -20.0, TouchPhase::Moved);
@@ -1884,7 +1884,7 @@ mod tests {
         assert!(inputs(&mut rx).is_empty(), "and the backstop has nothing left to close");
 
         // Fingers that rest on the trackpad before they push open the gesture twice, because
-        // gpui reads `MayBegin` and `Began` as the same phase. The host is told once.
+        // gpui reads `MayBegin` and `Began` as the same phase. The worker is told once.
         wheel(cx, 0.0, TouchPhase::Started);
         wheel(cx, 0.0, TouchPhase::Started);
         wheel(cx, -30.0, TouchPhase::Moved);
@@ -1914,13 +1914,13 @@ mod tests {
             .collect()
     }
 
-    /// The pointer reaches the host in the stream's pixels: a point on the painted picture
+    /// The pointer reaches the worker in the stream's pixels: a point on the painted picture
     /// scales by the stream size over the picture's bounds. A press carries its button, click
     /// count and modifiers, a release the same, a move only while over the picture, and a
     /// scroll its deltas with the unit (pixels are precise, lines are not) and the phases a
     /// `CGEvent` needs; ⌘-scroll is the canvas's zoom and sends nothing.
     #[gpui::test]
-    fn pointer_and_scroll_reach_the_host_in_stream_pixels(cx: &mut gpui::TestAppContext) {
+    fn pointer_and_scroll_reach_the_worker_in_stream_pixels(cx: &mut gpui::TestAppContext) {
         let (view, mut rx, cx) = windowed(cx);
         drop(sent(&mut rx));
         let bounds = view.read_with(cx, |v, _| v.bounds);

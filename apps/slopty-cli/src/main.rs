@@ -4,9 +4,9 @@
 //!   (`slopty_proto::orchestration`), as text or `--json`.
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
 //! * `slopty server …` runs `slopty-server` as a `LaunchAgent`.
-//! * `slopty host …` talks to the local `slopty-hostd` over its control socket.
+//! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
-//! * `slopty add <host[:port]>` remembers a worker (today's `slopty-hostd`) by its address.
+//! * `slopty add <host[:port]>` remembers a worker (today's `slopty-worker`) by its address.
 //! * `slopty sessions|attach` are a real client over QUIC straight to a worker: a raw-mode terminal
 //!   that renders frames locally. It is the reference client for latency measurements and works
 //!   before (and without) the GPUI apps.
@@ -18,11 +18,11 @@ mod attach;
 mod bench;
 mod client;
 mod hook;
-mod hostctl;
 mod link;
 mod mcp;
 mod service;
 mod verbs;
+mod workerctl;
 
 use std::path::PathBuf;
 
@@ -59,12 +59,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: service::ServerCmd,
     },
-    /// Control the local host daemon.
-    Host {
+    /// Control the local worker daemon.
+    Worker {
         #[command(subcommand)]
-        cmd: hostctl::HostCmd,
+        cmd: workerctl::WorkerCmd,
     },
-    /// Claude Code hook relay: forwards the hook on stdin to the host daemon (exits 0 always).
+    /// Claude Code hook relay: forwards the hook on stdin to the worker daemon (exits 0 always).
     Hook {
         #[command(subcommand)]
         cmd: Option<hook::HookCmd>,
@@ -83,20 +83,20 @@ enum Cmd {
     /// Forget a worker.
     Forget {
         /// Worker name, address or id prefix.
-        host: String,
+        worker: String,
     },
-    /// List sessions on a host.
+    /// List sessions on a worker.
     Sessions {
         /// Worker name, address or id prefix, or any `host[:port]` (the only worker when
         /// omitted).
         #[arg(long)]
-        host: Option<String>,
+        worker: Option<String>,
     },
-    /// Measure application round-trip time to a host (control-stream ping).
+    /// Measure application round-trip time to a worker (control-stream ping).
     Ping {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
-        host: Option<String>,
+        worker: Option<String>,
         /// Number of probes.
         #[arg(long, default_value_t = 20)]
         count: u32,
@@ -111,7 +111,7 @@ enum Cmd {
     Attach {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
-        host: Option<String>,
+        worker: Option<String>,
         /// Session id prefix.
         session: Option<String>,
         /// Working directory for a new session.
@@ -134,11 +134,12 @@ enum SettingsCmd {
 
 #[derive(Subcommand, Debug)]
 enum BenchCmd {
-    /// Keystroke round trip: a byte to a `cat` session on the host, timed to the first frame back.
+    /// Keystroke round trip: a byte to a `cat` session on the worker, timed to the first frame
+    /// back.
     Echo {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
-        host: Option<String>,
+        worker: Option<String>,
         /// Samples.
         #[arg(long, default_value_t = 30)]
         count: u32,
@@ -147,8 +148,8 @@ enum BenchCmd {
     Screen {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
-        host: Option<String>,
-        /// Print the host's windows and displays instead of streaming.
+        worker: Option<String>,
+        /// Print the worker's windows and displays instead of streaming.
         #[arg(long)]
         list: bool,
         /// Window id (see `--list`).
@@ -188,7 +189,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(client::data_dir);
     match cli.cmd {
-        Cmd::Host { cmd } => hostctl::run(cmd).await,
+        Cmd::Worker { cmd } => workerctl::run(cmd).await,
         Cmd::Hook { cmd: None } => {
             hook::relay().await;
             Ok(())
@@ -212,30 +213,30 @@ async fn main() -> Result<()> {
         Cmd::Mcp => mcp::run(cli.server.as_deref(), &data_dir).await,
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
         Cmd::Add { address } => client::add(&data_dir, &address).await,
-        Cmd::Forget { host } => client::forget(&data_dir, &host),
-        Cmd::Sessions { host } => client::sessions(&data_dir, host.as_deref()).await,
-        Cmd::Attach { host, session: Some(session), .. } => {
-            attach::attach(&data_dir, host.as_deref(), &session).await
+        Cmd::Forget { worker } => client::forget(&data_dir, &worker),
+        Cmd::Sessions { worker } => client::sessions(&data_dir, worker.as_deref()).await,
+        Cmd::Attach { worker, session: Some(session), .. } => {
+            attach::attach(&data_dir, worker.as_deref(), &session).await
         }
-        Cmd::Attach { host, session: None, cwd, command } => {
-            attach::open(&data_dir, host.as_deref(), cwd, command).await
+        Cmd::Attach { worker, session: None, cwd, command } => {
+            attach::open(&data_dir, worker.as_deref(), cwd, command).await
         }
-        Cmd::Ping { host, count } => client::ping(&data_dir, host.as_deref(), count).await,
-        Cmd::Bench { cmd: BenchCmd::Echo { host, count } } => {
-            bench::echo(&data_dir, host.as_deref(), count).await
+        Cmd::Ping { worker, count } => client::ping(&data_dir, worker.as_deref(), count).await,
+        Cmd::Bench { cmd: BenchCmd::Echo { worker, count } } => {
+            bench::echo(&data_dir, worker.as_deref(), count).await
         }
-        Cmd::Bench { cmd: BenchCmd::Screen { host, list, .. } } if list => {
-            bench::list(&data_dir, host.as_deref()).await
+        Cmd::Bench { cmd: BenchCmd::Screen { worker, list, .. } } if list => {
+            bench::list(&data_dir, worker.as_deref()).await
         }
         Cmd::Bench {
             cmd:
                 BenchCmd::Screen {
-                    host, window, display, seconds, scale, fps, mbit, max_stalls, ..
+                    worker, window, display, seconds, scale, fps, mbit, max_stalls, ..
                 },
         } => {
             let spec =
                 bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
-            bench::screen(&data_dir, host.as_deref(), spec).await
+            bench::screen(&data_dir, worker.as_deref(), spec).await
         }
     }
 }

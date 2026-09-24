@@ -60,7 +60,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   anything. Refreshed they are all 0.000 %.
 
 - ✅ **The repository root comes from the host, protocol 14** (2026-09-06). Only the machine a
-  shell runs on can see its `.git`, so `slopty_host::repo::root_of` resolves it there: walk up
+  shell runs on can see its `.git`, so `slopty_worker::repo::root_of` resolves it there: walk up
   from the working directory to the nearest ancestor holding a `.git` **entry**, and stop.
   No `git` subprocess and no libgit — a handful of `stat` calls per `cd`, on the session actor's
   own thread, cached in the actor and recomputed only when OSC 7 says the directory changed.
@@ -71,8 +71,8 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   The path is canonicalised first, so two shells that reached one checkout through different
   symlinks land in the same block; a directory that has since been removed answers `None` rather
   than guessing from the stale string. Wire: `SessionSummary.repo` and `TermEvent::Cwd` becoming
-  `{ path, repo }`, both `Option<String>`; goldens `host_session_opened`, `host_term_cwd` and
-  `host_term_cwd_no_repo` (new) and `client_hello` re-accepted, `PROTOCOL_VERSION` 13 → 14.
+  `{ path, repo }`, both `Option<String>`; goldens `worker_session_opened`, `worker_term_cwd` and
+  `worker_term_cwd_no_repo` (new) and `client_hello` re-accepted, `PROTOCOL_VERSION` 13 → 14.
   `slopty_client::arrange` keys on the root when it is there and keeps the old containment
   heuristic only for the items the host resolved no root for — a directory outside any
   repository, or one that has since been removed — so a mixed canvas (a shell outside any
@@ -81,7 +81,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   client that reads roots never sees session data from a host that does not send them.
   This replaces the deferral in the ruling above: sibling subdirectories with nothing checked
   out at the root are now one block, which the heuristic could never see. Tests:
-  `slopty_host::repo` over a temp tree (checkout, nested subdirectory, worktree `.git` file,
+  `slopty_worker::repo` over a temp tree (checkout, nested subdirectory, worktree `.git` file,
   repository inside a repository, no repository, directory that is gone),
   `sibling_directories_of_one_repository_are_one_block` and
   `a_rootless_shell_does_not_join_a_rooted_block` in `slopty_client::arrange`, and
@@ -89,7 +89,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
 
 - ✅ Kind-aware culling: terminals keep state and stop painting off-screen; video pauses decode.
 
-- ✅ **Host-authoritative document, optimistic client.** `slopty-host::CanvasStore` owns the
+- ✅ **Host-authoritative document, optimistic client.** `slopty-worker::CanvasStore` owns the
   document (JSON at `<data>/canvas.json`, atomic rename, serialised writers), validates every
   `CanvasOp` (finite, clamped geometry; unknown ids rejected), bumps a version and broadcasts a
   `CanvasSync::Delta { by }`. Clients apply their own ops immediately and recognise the echo by
@@ -119,7 +119,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   bar on both platforms (a tap on the phone, where there is no ⌘⇧A). Reading order rather than
   z or arrival time because it is the one order the user can predict from what they see; the
   picker (⌘O) uses the same order within its "needs you / other agents / shells" ranking. No
-  proto change: the count is derived from the `HostMsg::Agent` table the client already has.
+  proto change: the count is derived from the `WorkerMsg::Agent` table the client already has.
 
 - ✅ **"+ agent" is a menu** (2026-09-12): "Terminal agent" / "Conversation" / "Resume
   conversation…" (`agent-terminal`, `agent-conversation`, `agent-resume`, each the action its
@@ -179,13 +179,13 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   `/` in it and no empty segment (`palette::path_query`; `note` stays a command, `a//b` is
   not a path), an optional `:N` split off as the line to land on; ↩ opens the card through
   `Canvas::open_file`, a relative path against the active shell's directory and `~` left for
-  the host, which expands it to its own home (`slopty_host::file::expand_home`) since the
+  the host, which expands it to its own home (`slopty_worker::file::expand_home`) since the
   client cannot know it. Added 2026-09-12: a file the agent never touched had no way onto
   the canvas but a shell command, and the palette already had a field; (10) the field is a
   quick open too (protocol 36, same day): a word of two characters or more that is not a
   rooted path (`palette::files_query`) is asked of the host as `ClientMsg::FindFiles { root,
   query }` — the root the active shell's directory, or `~` when no shell is active, which the
-  host expands — answered with `HostMsg::FoundFiles` from the same `files::matching` walk the
+  host expands — answered with `WorkerMsg::FoundFiles` from the same `files::matching` walk the
   composer's `@` completion uses (best eight, `.gitignore` honoured); the files are `Open
   <relative>` lines after the commands the word matches (a command is still the likelier
   intent), directories left out, and each change of the field drops them until the answer
@@ -193,11 +193,11 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   active item's directory too (`cwd_of`: its parent, when the path is spelled from the root),
   so ⌘N beside a card and a lookup over it start where the file is. Tests:
   `a_path_in_the_field_is_told_from_a_command` (unit, with `files_query` and `found_file`),
-  `a_tilde_is_the_hosts_home` (host unit), `a_path_typed_into_the_palette_opens_a_file_card`
-  (headless: the typed path, the host lookup asked with the shell's root and with `~`, the
-  found lines and ↩ on one); the app self-test's driven scenario types `note.t` into the
-  palette and gets "Open note.txt" from the real host walk, ↩ bringing the card back with
-  its two lines. Earlier tests:
+  `a_tilde_is_the_workers_home` (`slopty-worker` unit),
+  `a_path_typed_into_the_palette_opens_a_file_card` (headless: the typed path, the host lookup asked
+  with the shell's root and with `~`, the found lines and ↩ on one); the app self-test's driven
+  scenario types `note.t` into the palette and gets "Open note.txt" from the real host walk, ↩
+  bringing the card back with its two lines. Earlier tests:
   `keys_read_as_glyphs_and_the_filter_takes_every_word` (unit),
   `the_command_palette_runs_an_action_by_name` (headless: the Dialog and its lines with their
   keys in the a11y tree, the field focused, Esc closing with the canvas focused again and
@@ -212,33 +212,33 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   Rulings: (1) a **file card** is an item (`ItemKind::File { path }`) so every client sees it
   where it was put, but the **text is not document state** — a file is the host's, can be
   large and changes under the agent, so each client asks (`ClientMsg::ReadFile`) and the host
-  answers (`HostMsg::File`, `slopty-host::file::read`) with the first 512 KiB then the first
+  answers (`WorkerMsg::File`, `slopty-worker::file::read`) with the first 512 KiB then the first
   2 000 lines, `Binary` on a NUL or invalid UTF-8, `Missing` with the OS's word; (2) **no path
   restriction** on the host: a paired client already has a shell there, so a read is nothing
   it could not do (logged like the rest) — and (2026-09-13, protocol 40) the host **watches
   the files behind a client's cards**: the client sends the whole set as `ClientMsg::WatchFiles`
   whenever it changes (`canvas::reconcile_files`, sorted, empty when the last card goes), the
   connection looks at each path's size and modification time every second
-  (`slopty_host::file::stamp`, `FILES_PERIOD`, off the runtime on `spawn_blocking`) and answers
-  a moved stamp with a fresh `HostMsg::File` unasked — a removal too, since the card says
+  (`slopty_worker::file::stamp`, `FILES_PERIOD`, off the runtime on `spawn_blocking`) and answers
+  a moved stamp with a fresh `WorkerMsg::File` unasked — a removal too, since the card says
   "missing" until it is back. Polling over FSEvents: cards are few, a second is the eye's
   latency for a file the human is not editing, and no watcher API means no dependency and no
   per-path descriptor to leak; a path new to the set is stamped as it is, the card's own read
-  showing that state. Covered by the hostd e2e `a_watched_file_is_read_again_when_it_changes`,
+  showing that state. Covered by the `slopty-worker` e2e
+  `a_watched_file_is_read_again_when_it_changes`,
   `a_stamp_changes_with_the_file_and_is_none_for_what_is_not_one` and the watch asserts in
-  `a_tool_calls_path_opens_a_file_card`; (3) **one card per path** — "view" on another call
-  for the same file reveals the card and reads it again (`canvas::open_file`), because two
-  copies of one file drift; (4) the card **reads again unasked when an agent's Edit or Write
-  result lands** anywhere on the canvas (a result does not name its file, cards are few, and
-  a stale card is worse than a spare read), and on its "reload" pill for edits made in a
-  shell; (5) the card is read-only — editing is the editor's job (`open`), viewing is the
-  card's; (6) drawn with `uniform_list` (line-numbered rows, the gutter as wide as the last
-  number) so a 2 000-line file lays out only what is on screen; (7) the way in is a **"view"
-  button on every edit, write and read in the agent card**, always shown (a card needs no
-  shell, unlike "open"), a relative path made absolute against the agent's `cwd`
-  (`TerminalView::view_file`) because Claude Code's tools take absolute paths but a fake or a
-  hook need not; (8) a byte-capped read drops its last, possibly partial, line and counts it
-  in `more_lines`, so the card never shows half a character; (9) a read that follows one
+  `a_tool_calls_path_opens_a_file_card`; (3) **one card per path** — "view" on another call for the
+  same file reveals the card and reads it again (`canvas::open_file`), because two copies of one
+  file drift; (4) the card **reads again unasked when an agent's Edit or Write result lands**
+  anywhere on the canvas (a result does not name its file, cards are few, and a stale card is worse
+  than a spare read), and on its "reload" pill for edits made in a shell; (5) the card is read-only
+  — editing is the editor's job (`open`), viewing is the card's; (6) drawn with `uniform_list`
+  (line-numbered rows, the gutter as wide as the last number) so a 2 000-line file lays out only
+  what is on screen; (7) the way in is a **"view" button on every edit, write and read in the agent
+  card**, always shown (a card needs no shell, unlike "open"), a relative path made absolute against
+  the agent's `cwd` (`TerminalView::view_file`) because Claude Code's tools take absolute paths but
+  a fake or a hook need not; (8) a byte-capped read drops its last, possibly partial, line and
+  counts it in `more_lines`, so the card never shows half a character; (9) a read that follows one
   **tints the lines that changed** (success tone, `file::changed_lines`: inserted and
   replaced lines, a deletion pointed at by the line now standing there) and scrolls the first
   into view, the summary saying "12 lines, 3 changed" — the whole point of a card that reads
@@ -251,7 +251,7 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   (a11y "View <path> on the canvas"), `file-<item>` (a11y Document "File <path>" whose value
   is the summary: "212 lines", "12 lines, 40 more", "binary, 1.2 MB", "missing: No such
   file"), `reload-<item>` (a11y "Read the file again"). Goldens `client_read_file`,
-  `host_file`, `host_file_missing`, `host_canvas_file`. Tests: `slopty-host::file` unit
+  `worker_file`, `worker_file_missing`, `host_canvas_file`. Tests: `slopty-worker::file` unit
   (text, binary, latin-1, missing, directory, line clip, byte clip); headless
   `a_tool_calls_path_opens_a_file_card` (one item for the absolute path, the read asked, the
   text drawn and read out, a second read after an Edit result, the same card on a second
@@ -536,11 +536,11 @@ notes, file cards, the palette, names and agents still hold, a "card" now being 
   to know its directory from the start; a directory the host finds for a typed word
   (`FoundFiles` carried them with a slash already; the palette dropped them) is the same
   two lines, rooted where the host looked; (2) `~` goes to the host as typed and both the shell
-  (`Host::open`) and the driven agent (`Driven::open`) expand it with `file::expand_home`,
+  (`Worker::open`) and the driven agent (`Driven::open`) expand it with `file::expand_home`,
   the client never knowing the host's home; (3) a directory that does not exist fails the
   spawn and the host reports it as it does any failed open. Tests: `path_items` (palette),
   headless `a_directory_in_the_palette_opens_a_shell_or_a_conversation_there` (both lines,
-  the `OpenSession` and `OpenAgent` sent), and the hostd e2e's shell round trip, which
+  the `OpenSession` and `OpenAgent` sent), and the `slopty-worker` e2e's shell round trip, which
   opens its shell in `~` and reads `pwd` back as the host's home.
 
 - ✅ **⌘⇧F finds in every card** (2026-09-13). Which of eight shells printed the error was a

@@ -11,7 +11,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   serialised defaults (no hand-kept key list) and reported as warnings; a parse or type error
   yields the defaults plus a one-line error (`Loaded { settings, warnings, error }`), never a
   crash. `slopty settings init` writes a commented file generated from `Settings::default()`
-  and covered by a round-trip test. `terminal.scrollback_lines` is host-side and not here.
+  and covered by a round-trip test. `terminal.scrollback_lines` is worker-side and not here.
 
 - ✅ **Hot reload by a 1 s stamp poll, not `notify`** (2026-09-05): a GPUI foreground task
   sleeps on the background executor's timer and compares `(mtime, len, exists)`. Editors save
@@ -99,7 +99,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `escape_and_cancel_dismiss_and_the_phone_has_no_external_editor` (slopty-ui, headless);
   the app e2e types a section into the editor and reads the file back.
 - ✅ **`[terminal] option_as_alt`** (2026-09-15): ghostty's `macos-option-as-alt`, the one
-  key setting that has to reach the host (the encoder lives there); ruled in
+  key setting that has to reach the worker (the encoder lives there); ruled in
   decisions/terminal.md. It rides on `Theme::behaviour.option_as_alt` like the other
   terminal settings and from there, resolved for the side held, on every key event, not on
   the session, since the session is shared between clients.

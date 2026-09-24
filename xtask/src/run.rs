@@ -1,6 +1,6 @@
-//! `xtask run`: launch the host daemons or the app from the dev tree.
+//! `xtask run`: launch the worker daemons or the app from the dev tree.
 //!
-//! `run host` builds and starts `slopty-ptyd` then `slopty-hostd` in the foreground (Ctrl-C
+//! `run worker` builds and starts `slopty-ptyd` then `slopty-worker` in the foreground (Ctrl-C
 //! stops both: they share this process group). `run server` builds and starts `slopty-server`.
 //! `run app` builds and starts the macOS app. All honour `--data-dir` so several isolated setups
 //! can coexist on one machine.
@@ -17,8 +17,8 @@ use crate::tools::step;
 /// What to run.
 #[derive(Subcommand, Debug)]
 pub enum RunCmd {
-    /// The host side: `slopty-ptyd` + `slopty-hostd` (prints the address it listens on).
-    Host(RunOpts),
+    /// The worker side: `slopty-ptyd` + `slopty-worker` (prints the address it listens on).
+    Worker(RunOpts),
     /// The control plane: `slopty-server` (QUIC on 45560, MCP on 45561).
     Server(RunOpts),
     /// The macOS app.
@@ -54,7 +54,7 @@ impl RunOpts {
         if let Some(dir) = &self.data_dir {
             out.push(("SLOPTY_DATA_DIR", dir.clone()));
             out.push(("SLOPTY_PTYD_SOCKET", format!("{dir}/run/ptyd.sock")));
-            out.push(("SLOPTY_HOSTD_SOCKET", format!("{dir}/run/hostd.sock")));
+            out.push(("SLOPTY_WORKER_SOCKET", format!("{dir}/run/worker.sock")));
         }
         out
     }
@@ -62,7 +62,7 @@ impl RunOpts {
 
 pub fn run(sh: &Shell, what: &RunCmd) -> Result<()> {
     match what {
-        RunCmd::Host(opts) => host(sh, opts),
+        RunCmd::Worker(opts) => worker(sh, opts),
         RunCmd::Server(opts) => server(sh, opts),
         RunCmd::App(opts) => app(sh, opts),
     }
@@ -101,11 +101,11 @@ fn wait_for_socket(path: &std::path::Path, child: &mut Child) -> Result<()> {
     Ok(())
 }
 
-fn host(sh: &Shell, opts: &RunOpts) -> Result<()> {
+fn worker(sh: &Shell, opts: &RunOpts) -> Result<()> {
     let flags = opts.cargo_flags();
     step(
-        "build host daemons",
-        &cmd!(sh, "cargo build {flags...} -p slopty-ptyd -p slopty-hostd -p slopty-cli"),
+        "build worker daemons",
+        &cmd!(sh, "cargo build {flags...} -p slopty-ptyd -p slopty-workerd -p slopty-cli"),
     )?;
     // The build just ad-hoc signed both daemons, which throws away yesterday's Screen Recording
     // and Accessibility approvals; re-sign them under their stable identifiers before they start.
@@ -113,15 +113,15 @@ fn host(sh: &Shell, opts: &RunOpts) -> Result<()> {
     let mut ptyd = spawn(sh, "slopty-ptyd", &[], opts)?;
     wait_for_socket(&ptyd_socket(opts), &mut ptyd)?;
     println!(
-        "▶ add this host from a client with `slopty add <this Mac's tailnet name or IP>[:port]` \
-         or the app's \"Add host…\"; it listens on:"
+        "▶ add this worker from a client with `slopty add <this Mac's tailnet name or IP>[:port]` \
+         or the app's \"Add worker…\"; it listens on:"
     );
-    let mut hostd = spawn(sh, "slopty-hostd", &["--print-addr"], opts)?;
-    let status = hostd.wait().context("wait for slopty-hostd")?;
+    let mut worker = spawn(sh, "slopty-worker", &["--print-addr"], opts)?;
+    let status = worker.wait().context("wait for slopty-worker")?;
     let _killed = ptyd.kill();
     let _reaped = ptyd.wait();
     if !status.success() {
-        bail!("slopty-hostd exited with {status}");
+        bail!("slopty-worker exited with {status}");
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 //! Links in terminal text: the link under a cell, found on the client from the line cache.
 //!
-//! An OSC 8 run the program marked wins (`Line::links`, filled by the host engine). Most
+//! An OSC 8 run the program marked wins (`Line::links`, filled by the worker engine). Most
 //! programs do not emit OSC 8, so otherwise the row is joined column by column (a wide cluster
 //! fills its first column, the spacer contributes nothing) so a cell column maps to a byte
 //! offset, then the longest run around that offset that starts with a known scheme and ends

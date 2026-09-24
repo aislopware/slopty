@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [ "crates/*", "apps/*", "xtask" ]
-# default-members: every member builds on the host; iOS-only crates are cfg-gated internally
+# default-members: every member builds on the worker; iOS-only crates are cfg-gated internally
 exclude = [ "vendor", ".research" ]
 
 [workspace.package]
@@ -23,7 +23,7 @@ slopty-proto = { path = "crates/slopty-proto" }
 slopty-grid = { path = "crates/slopty-grid" }
 slopty-engine = { path = "crates/slopty-engine" }
 slopty-pty = { path = "crates/slopty-pty" }
-slopty-host = { path = "crates/slopty-host" }
+slopty-worker = { path = "crates/slopty-worker" }
 slopty-net = { path = "crates/slopty-net" }
 slopty-client = { path = "crates/slopty-client" }
 slopty-predict = { path = "crates/slopty-predict" }

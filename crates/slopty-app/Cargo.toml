@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty app shell shared by the macOS and iOS apps: workspace window, host link loop"
+description = "Slopty app shell shared by the macOS and iOS apps: workspace window, worker link loop"
 
 [lints]
 workspace = true

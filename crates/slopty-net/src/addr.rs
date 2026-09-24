@@ -6,9 +6,9 @@ use std::net::{IpAddr, SocketAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::NetError;
-use crate::endpoint::HOST_PORT;
+use crate::endpoint::WORKER_PORT;
 
-/// A host as a person types it, with an optional port ([`HOST_PORT`] when absent).
+/// A host as a person types it, with an optional port ([`WORKER_PORT`] when absent).
 ///
 /// The host is a Tailscale `MagicDNS` name, a LAN name or an IP address. IPv6 literals take
 /// brackets when they carry a port (`[fd7a:115c:a1e0::1]:45550`) and may go without when they
@@ -72,7 +72,7 @@ impl fmt::Display for HostAddr {
 }
 
 impl HostAddr {
-    /// Parse `host[:port]` with `default_port` when it names none ([`HOST_PORT`] is what
+    /// Parse `host[:port]` with `default_port` when it names none ([`WORKER_PORT`] is what
     /// [`str::parse`] assumes; a server address wants [`crate::endpoint::SERVER_PORT`]).
     pub fn parse_with_port(s: &str, default_port: u16) -> Result<Self, NetError> {
         let s = s.trim();
@@ -110,7 +110,7 @@ impl std::str::FromStr for HostAddr {
     type Err = NetError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse_with_port(s, HOST_PORT)
+        Self::parse_with_port(s, WORKER_PORT)
     }
 }
 
@@ -135,12 +135,12 @@ mod tests {
     #[test]
     fn a_host_reads_with_and_without_its_port() {
         let cases = [
-            ("mac-studio", "mac-studio", HOST_PORT),
+            ("mac-studio", "mac-studio", WORKER_PORT),
             ("mac-studio.tail1234.ts.net:4000", "mac-studio.tail1234.ts.net", 4000),
-            (" 100.64.0.3 ", "100.64.0.3", HOST_PORT),
+            (" 100.64.0.3 ", "100.64.0.3", WORKER_PORT),
             ("100.64.0.3:45551", "100.64.0.3", 45551),
-            ("fd7a:115c:a1e0::1", "fd7a:115c:a1e0::1", HOST_PORT),
-            ("[fd7a:115c:a1e0::1]", "fd7a:115c:a1e0::1", HOST_PORT),
+            ("fd7a:115c:a1e0::1", "fd7a:115c:a1e0::1", WORKER_PORT),
+            ("[fd7a:115c:a1e0::1]", "fd7a:115c:a1e0::1", WORKER_PORT),
             ("[fd7a:115c:a1e0::1]:45552", "fd7a:115c:a1e0::1", 45552),
             ("[::1]:9", "::1", 9),
         ];

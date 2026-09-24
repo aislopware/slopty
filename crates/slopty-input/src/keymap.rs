@@ -1,7 +1,7 @@
 //! W3C key codes → macOS virtual key codes (`kVK_*`, ANSI layout positions).
 //!
-//! Virtual key codes name *positions*, so a `KeyCode::A` press lands as whatever the host's
-//! keyboard layout puts there; the client also sends the text it produced, which the host
+//! Virtual key codes name *positions*, so a `KeyCode::A` press lands as whatever the worker's
+//! keyboard layout puts there; the client also sends the text it produced, which the worker
 //! attaches with `CGEventKeyboardSetUnicodeString` so layouts do not have to agree.
 
 use objc2_core_graphics::CGKeyCode;

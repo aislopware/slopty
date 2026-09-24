@@ -16,7 +16,7 @@ pub use slopty_net::HostAddr;
 pub const FILE_NAME: &str = "settings.toml";
 
 /// `$SLOPTY_DATA_DIR`, else `~/Library/Application Support/Slopty`. The same directory the
-/// client identity and the host daemon use.
+/// client identity and the worker daemon use.
 #[must_use]
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("SLOPTY_DATA_DIR") {
@@ -253,13 +253,13 @@ impl Default for TerminalSettings {
     }
 }
 
-/// `[remote]`: what a remote window or display stream asks the host for.
+/// `[remote]`: what a remote window or display stream asks the worker for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteSettings {
-    /// Frames per second the host captures and encodes at (15–120).
+    /// Frames per second the worker captures and encodes at (15–120).
     pub fps: u16,
-    /// The most the host may send per stream, in megabits per second (1–200): the ceiling
+    /// The most the worker may send per stream, in megabits per second (1–200): the ceiling
     /// its bitrate controller grows towards, never the rate it starts at.
     pub max_bitrate_mbps: u16,
     /// Encode 10-bit HEVC (Main 10) so an HDR source keeps its range; off, everything is
@@ -275,19 +275,13 @@ impl Default for RemoteSettings {
     }
 }
 
-/// `[host]`: what `slopty-hostd` reads from the same file when it starts.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HostSettings {
-    /// Address ranges (`100.64.0.0/10`, `fd00::/8`, a bare address) whose peers may connect,
-    /// replacing the default of the tailnet and private LANs. Loopback is always admitted.
-    pub allow: Vec<String>,
-}
-
-/// `[worker]`: how `slopty-hostd` joins a server.
+/// `[worker]`: what `slopty-worker` reads from the same file when it starts.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkerSettings {
+    /// Address ranges (`100.64.0.0/10`, `fd00::/8`, a bare address) whose peers may connect,
+    /// replacing the default of the tailnet and private LANs. Loopback is always admitted.
+    pub allow: Vec<String>,
     /// The server to register with, `host[:port]` (port 45560 when absent); empty runs the
     /// worker on its own. `--server` and `SLOPTY_SERVER` take precedence.
     pub server: String,
@@ -339,9 +333,7 @@ pub struct Settings {
     pub remote: RemoteSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
-    /// The host daemon.
-    pub host: HostSettings,
-    /// The host daemon as a worker of a server.
+    /// The worker daemon: who may connect, and the server it registers with.
     pub worker: WorkerSettings,
     /// The app and the CLI as clients of a server.
     pub client: ClientSettings,
@@ -483,7 +475,7 @@ natural_editing = {natural_editing}
 [remote]
 # Frames per second a remote window or display is captured at (15 to 120).
 fps = {fps}
-# Ceiling for one stream in megabits per second (1 to 200); the host grows
+# Ceiling for one stream in megabits per second (1 to 200); the worker grows
 # towards it as the link allows.
 max_bitrate_mbps = {max_bitrate_mbps}
 # 10-bit HEVC, for an HDR source.
@@ -504,19 +496,19 @@ selection = \"\"
 # then their bright forms. Fewer than 16 keep the rest.
 ansi = []
 
-[host]
-# Who may connect to the host daemon on this Mac, as address ranges
+[worker]
+# Read when slopty-worker starts.
+#
+# Who may connect to the worker daemon on this Mac, as address ranges
 # (\"100.64.0.0/10\", \"fd00::/8\", \"192.168.1.20\"). Empty admits the tailnet
 # (100.64.0.0/10, fd7a:115c:a1e0::/48) and private LANs (10/8, 172.16/12,
 # 192.168/16, fc00::/7, link-local); a list replaces those. Loopback always
 # connects. Traffic is not encrypted by Slopty: the VPN or tailnet is the
-# boundary. Read when slopty-hostd starts.
+# boundary.
 allow = []
-
-[worker]
 # The server this Mac registers with as a worker, \"host\" or \"host:port\"
-# (port 45560 when absent). Empty runs it on its own. Read when slopty-hostd
-# starts; --server and SLOPTY_SERVER override it.
+# (port 45560 when absent). Empty runs it on its own. --server and
+# SLOPTY_SERVER override it.
 server = \"\"
 
 [client]
@@ -738,7 +730,7 @@ mod tests {
             loaded.settings.remote,
             RemoteSettings { fps: 30, max_bitrate_mbps: 8, hdr: true, muted: true }
         );
-        assert!(!Settings::default().remote.muted, "sound on, as the host plays it");
+        assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
     }
 
     #[test]
@@ -948,18 +940,14 @@ mod tests {
 
     #[test]
     fn worker_keys() {
-        let loaded = Settings::parse("[worker]\nserver = \"studio.tail1234.ts.net\"\n");
+        let loaded = Settings::parse(
+            "[worker]\nallow = [\"100.64.0.3\", \"fd00::/8\"]\nserver = \"studio.tail1234.ts.net\"\n",
+        );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        assert_eq!(loaded.settings.worker.allow, ["100.64.0.3", "fd00::/8"]);
         assert_eq!(loaded.settings.worker.server, "studio.tail1234.ts.net");
+        assert!(Settings::default().worker.allow.is_empty(), "the private ranges by default");
         assert!(Settings::default().worker.server.is_empty(), "on its own by default");
-    }
-
-    #[test]
-    fn host_keys() {
-        let loaded = Settings::parse("[host]\nallow = [\"100.64.0.3\", \"fd00::/8\"]\n");
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        assert_eq!(loaded.settings.host.allow, ["100.64.0.3", "fd00::/8"]);
-        assert!(Settings::default().host.allow.is_empty(), "the private ranges by default");
     }
 
     #[test]

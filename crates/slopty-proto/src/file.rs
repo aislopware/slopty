@@ -1,13 +1,13 @@
-//! A file read for a file card: the host reads it, clips it and says what it found.
+//! A file read for a file card: the worker reads it, clips it and says what it found.
 
 use serde::{Deserialize, Serialize};
 
 /// Lines a file card carries at most; the rest is counted.
 pub const FILE_LINES: u32 = 2000;
-/// Bytes the host reads of a file at most, before the line clip.
+/// Bytes the worker reads of a file at most, before the line clip.
 pub const FILE_BYTES: u64 = 512 * 1024;
 
-/// What the host found at a path.
+/// What the worker found at a path.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FileRead {
     /// A text file, the first [`FILE_LINES`] lines of it.

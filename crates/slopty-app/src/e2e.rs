@@ -57,7 +57,7 @@ pub fn serve(
     cx.spawn(async move |cx| {
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
-                Command::AddHost { address } => {
+                Command::AddWorker { address } => {
                     let (done_tx, done_rx) = oneshot::channel();
                     handle.spawn(async move {
                         let _sent = done_tx.send(net::add_worker(&address).await);
@@ -576,7 +576,7 @@ fn apply(
             Reply::Ok
         }
         Command::Dump
-        | Command::AddHost { .. }
+        | Command::AddWorker { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }

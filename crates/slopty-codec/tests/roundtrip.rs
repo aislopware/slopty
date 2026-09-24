@@ -151,7 +151,7 @@ mod tests {
 
     /// What a forced LTR refresh actually costs once its reference is acknowledged.
     ///
-    /// The host's congestion guard asks for a refresh on every frame it drops, so on a collapsed
+    /// The worker's congestion guard asks for a refresh on every frame it drops, so on a collapsed
     /// link that is most of them (`docs/decisions/transport.md`). Whether that is cheap or ruinous
     /// turns on one thing: if VideoToolbox answers with a delta off an acknowledged long-term
     /// reference it is a small frame, and if it falls back to an IDR the guard is demanding a full
@@ -218,7 +218,7 @@ mod tests {
         assert!(
             !refresh.keyframe,
             "a refresh off {} acknowledged LTR tokens still came back as an IDR of {} B \
-             (the plain IDR was {idr} B): the host's guard is asking a collapsed link for a full \
+             (the plain IDR was {idr} B): the worker's guard is asking a collapsed link for a full \
              keyframe on every dropped frame",
             tokens.len(),
             refresh.data.len()

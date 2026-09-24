@@ -17,13 +17,13 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
   is the one for the server, its worker link, the CLI and MCP, and takes seconds.
-- `cargo xtask run host|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
+- `cargo xtask run worker|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI) under `target/bundle`
   with the icon rendered from `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
 - `cargo xtask sign` gives the dev daemons a Developer ID signature under their LaunchAgent
   identifiers, so one approval of Screen Recording and Accessibility survives every later build
-  (`run host` does it for you). Without it a rebuilt daemon is a new executable to TCC and
+  (`run worker` does it for you). Without it a rebuilt daemon is a new executable to TCC and
   loses both, which surfaces as ScreenCaptureKit `-3801` and no prompt (`docs/decisions/input.md`).
 - `cargo xtask upstream check` shows how far the GPUI, gpui-kit and libghostty forks are behind upstream
   (bases in `xtask/upstream.toml`; the gate warns past 7 days); `cargo xtask upstream sync`

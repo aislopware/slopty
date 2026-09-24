@@ -114,12 +114,12 @@ enum Cmd {
     },
     /// Print the changelog for unreleased commits.
     Changelog,
-    /// Launch the host daemons or the app from the dev tree.
+    /// Launch the worker daemons or the app from the dev tree.
     Run {
         #[command(subcommand)]
         cmd: run::RunCmd,
     },
-    /// macOS: build `Slopty.app` (app + host daemons + CLI inside) and sign it.
+    /// macOS: build `Slopty.app` (app + worker daemons + CLI inside) and sign it.
     Bundle(bundle::BundleOpts),
     /// macOS: codesign the dev daemons so their TCC grants survive the next `cargo build`.
     Sign(sign::SignOpts),

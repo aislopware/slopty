@@ -1,6 +1,6 @@
 //! Recognising a Claude Code process from its name and arguments.
 //!
-//! The host reads the foreground process of every session's tty (see
+//! The worker reads the foreground process of every session's tty (see
 //! `slopty_pty::process::foreground`); this module decides, from the name and `argv` alone,
 //! whether that process is a coding agent. It is deliberately a pure function over strings so
 //! the rules can be tested without a process table, and so the platform lookup stays the only

@@ -11,19 +11,19 @@ use slopty_proto::terminal::{
     TermSize,
 };
 
-/// Lines kept client-side. Newest-first eviction; the host retains 50k.
+/// Lines kept client-side. Newest-first eviction; the worker retains 50k.
 pub const CACHE_LINES: usize = 20_000;
 
 /// What the UI or connection should do after an event was applied.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Effect {
-    /// Send this to the host.
+    /// Send this to the worker.
     Request(TermRequest),
     /// Ring the bell.
     Bell,
     /// The title changed.
     Title(String),
-    /// The cwd changed, with the repository the host resolved it to.
+    /// The cwd changed, with the repository the worker resolved it to.
     Cwd {
         /// The new directory.
         path: String,
@@ -41,7 +41,7 @@ pub enum Effect {
     },
     /// The child exited.
     Exited(i32),
-    /// The host reported an error for a request.
+    /// The worker reported an error for a request.
     Error(String),
     /// Search hits for `needle`.
     Matches {
@@ -105,7 +105,7 @@ pub struct TermState {
     latest_prompt: Option<LineIndex>,
     /// The command running since the cursor left its prompt, with the prompt it was typed at.
     running: Option<(LineIndex, String)>,
-    /// Images the host sent, by id, for the placements of the frames.
+    /// Images the worker sent, by id, for the placements of the frames.
     images: BTreeMap<u32, TermImage>,
     /// Bytes of pixels in `images`.
     image_bytes: usize,
@@ -115,7 +115,7 @@ pub struct TermState {
     colors: ColorOverrides,
 }
 
-/// The pixels of one image the host sent (kitty graphics).
+/// The pixels of one image the worker sent (kitty graphics).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TermImage {
     /// Its generation: a placement names the one it was laid out for.
@@ -202,7 +202,7 @@ impl TermState {
         &self.colors
     }
 
-    /// The pixels a placement names, once the host sent that generation.
+    /// The pixels a placement names, once the worker sent that generation.
     #[must_use]
     pub fn image(&self, placement: &Placement) -> Option<&TermImage> {
         self.images.get(&placement.image).filter(|i| i.generation == placement.generation)
@@ -214,9 +214,9 @@ impl TermState {
         self.images.get(&id).is_some_and(|i| i.generation == generation)
     }
 
-    /// Keep an image the host sent.
+    /// Keep an image the worker sent.
     ///
-    /// Drops the least recently placed ones over the budget the host assumes
+    /// Drops the least recently placed ones over the budget the worker assumes
     /// (`IMAGE_CACHE_BYTES`), so both sides forget the same images.
     fn keep_image(&mut self, id: u32, image: TermImage) {
         if let Some(old) = self.images.insert(id, image) {
@@ -243,7 +243,7 @@ impl TermState {
         self.size
     }
 
-    /// The scrollback cache: what is held, and how much of it the host still has.
+    /// The scrollback cache: what is held, and how much of it the worker still has.
     #[must_use]
     pub const fn scrollback(&self) -> &Scrollback {
         &self.scrollback
@@ -279,7 +279,7 @@ impl TermState {
         self.cwd.as_deref()
     }
 
-    /// The repository the cwd is in, as the host resolved it.
+    /// The repository the cwd is in, as the worker resolved it.
     #[must_use]
     pub fn repo(&self) -> Option<&str> {
         self.repo.as_deref()
@@ -303,7 +303,7 @@ impl TermState {
         self.epoch
     }
 
-    /// Highest key `seq` the host has applied.
+    /// Highest key `seq` the worker has applied.
     #[must_use]
     pub const fn input_ack(&self) -> u64 {
         self.input_ack
@@ -849,7 +849,7 @@ impl TermState {
             .collect()
     }
 
-    /// The client's size changed: resize locally for immediate feedback and ask the host.
+    /// The client's size changed: resize locally for immediate feedback and ask the worker.
     pub fn resize(&mut self, size: TermSize) -> Vec<Effect> {
         self.size = size;
         self.screen.resize(size.cols, size.rows);
@@ -1076,7 +1076,7 @@ mod tests {
         assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
     }
 
-    /// The numbering changes under a running command (the window was resized, so the host
+    /// The numbering changes under a running command (the window was resized, so the worker
     /// reflowed): while its block is still the newest it runs on under the new numbers, and
     /// once a newer prompt exists it finished, with that prompt's status and its own new row
     /// when it is held here.
@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn the_state_counts_its_frames_and_reads_back_the_epoch_and_the_ack() {
         let mut s = TermState::new(size());
-        assert!(!s.driving(), "a client drives only when the host says so");
+        assert!(!s.driving(), "a client drives only when the worker says so");
         assert_eq!((s.epoch(), s.input_ack(), s.frames()), (None, 0, 0));
         s.apply(TermEvent::Frame(frame(7, true, 3, 0, 1, &[(0, "a")])));
         assert_eq!((s.epoch(), s.input_ack(), s.frames()), (Some(3), 7, 1));
@@ -1324,7 +1324,7 @@ mod tests {
     #[test]
     fn missing_history_is_fetched_and_filled() {
         let mut s = TermState::new(size());
-        // Attach mid-way: first visible is 100, history 0..100 exists on the host.
+        // Attach mid-way: first visible is 100, history 0..100 exists on the worker.
         s.apply(TermEvent::Frame(frame(1, true, 0, 100, 103, &[(0, "x"), (1, "y"), (2, "z")])));
         let effects = s.scroll(3);
         assert_eq!(

@@ -11,12 +11,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Pre/PostToolUse`, `PostToolUseFailure`, `PermissionRequest/Denied`, `Notification`,
   `Elicitation/Result`, `Stop`) in `~/.claude/settings.json` (or `--settings`). Exec form
   (no shell) and `async` so the agent never waits on us. The relay reads `SLOPTY_SESSION` and
-  `SLOPTY_HOSTD_SOCKET`, both injected by the host into every session's environment, posts
+  `SLOPTY_WORKER_SOCKET`, both injected by the host into every session's environment, posts
   `CtlRequest::Hook` and exits 0 whatever happens. `slopty-agent::Tracker` maps hooks to
   `AgentStatus`; `AgentEvent.attention` is true only on entering a blocked state or `Done`,
   so the permission `Notification` that follows a `PermissionRequest` does not alert twice.
-  Joining clients get the current table after the canvas snapshot (no proto change: `HostMsg::Agent`
-  already existed). Observed cycle: Idle → Working → Tool{Bash} → Working → Done → None.
+  Joining clients get the current table after the canvas snapshot (no proto change:
+  `WorkerMsg::Agent` already existed). Observed cycle: Idle → Working → Tool{Bash} → Working →
+  Done → None.
 
 - ✅ Answering a permission prompt from the badge (verified 2026-09-05 against Claude Code
   2.1.261 driven under a pty in `default` permission mode): the prompt is a numbered menu with
@@ -26,7 +27,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   with "Interrupted · What should Claude do instead?" and nothing ran. So "allow" = Enter and
   "deny" = Esc, sent through `TerminalView::press` like the phone's key bar, with a sticky
   Control disarmed first. Neither key is sent twice: the canvas remembers the answer per session
-  until the next `HostMsg::Agent` for it. Two things learned on the way: text and `\r` written
+  until the next `WorkerMsg::Agent` for it. Two things learned on the way: text and `\r` written
   in one burst are taken as a paste (the newline does not submit), and Esc while the model is
   still thinking interrupts the turn instead of answering — the badge only offers the buttons
   while the status is `Blocked(Permission)`, which the `PermissionRequest` hook raises after
@@ -172,7 +173,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `slopty hook install` — now gets the same pill, badges, attention and conversation view as a
   hooked one. `AgentSource` (on the wire, `Process < Title < Transcript < Hook`) says which
   signal the status came from, and `Tracker::observe` / `observe_progress` refuse to let a
-  weaker one overwrite a stronger one's state. hostd's `agents::watch` reads every session
+  weaker one overwrite a stronger one's state. `slopty-worker`'s `agents::watch` reads every session
   every 750 ms:
   - **Foreground process.** `tcgetpgrp` on the PTY master names the tty's foreground group;
     `slopty_pty::process` describes its leader (`proc_pidinfo PROC_PIDTBSDINFO` for the name
@@ -413,7 +414,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   named after — rather than the client guessing by order, which breaks with two subagents;
   (4) the line under the call says kind, state, tool uses, seconds and last tool and the
   label says the same, because on the phone the subagent's minutes are the only sign the
-  turn is alive. Wire: `TranscriptBody::ToolUse.call`, `AgentTask`, `HostMsg::AgentTask`,
+  turn is alive. Wire: `TranscriptBody::ToolUse.call`, `AgentTask`, `WorkerMsg::AgentTask`,
   goldens `host_transcript` / `host_transcript_tools` / `host_agent_sessions` /
   `client_hello` re-accepted, `host_agent_task` added, PROTOCOL_VERSION 19 → 20. Tests:
   `a_subagents_own_records_are_not_entries` (`transcript`),
@@ -776,7 +777,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and opens only the newest candidates (mtime sort first, prompt read second), so a home with
   a thousand transcripts costs thirty reads; a transcript whose records never name a
   directory is listed under the escaped project directory name, which is what Claude Code
-  itself knows. Wire: `HostMsg::AgentSessions.cwd` optional; goldens `host_agent_sessions` /
+  itself knows. Wire: `WorkerMsg::AgentSessions.cwd` optional; goldens `host_agent_sessions` /
   `client_hello` re-accepted, PROTOCOL_VERSION 21 → 22. Tests:
   `the_conversations_on_disk_are_listed_newest_first_by_their_first_prompt` (`discover`: a
   second project joins in mtime order, the fallback name, the cap spans directories),
@@ -921,7 +922,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   signals, the tracker, the pill, the attention outline, ⌘⇧A / "N need you", the Dock badge
   and the banner — and drops everything that spoke for the human or drew for the agent: the
   driven card and its stream-json pump (`hostd::driven`, `slopty_agent::stream`,
-  `ClientMsg::OpenAgent/AgentSay/AgentAnswer/AgentInterrupt/AgentSet`, `HostMsg::AgentPartial/
+  `ClientMsg::OpenAgent/AgentSay/AgentAnswer/AgentInterrupt/AgentSet`, `WorkerMsg::AgentPartial/
   AgentPermission/AgentInfo/AgentTask/AgentSessions/Transcript/Files`, `SessionKind::Agent`,
   `CloseReason::Failed`), the conversation view (⌘⇧L, `terminal::conversation`), the composer
   with its attachments, window snapshots, `@` file and slash completions, the resume picker
@@ -939,6 +940,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_driven_agent_talks_over_stream_json` with the `slopty-fake-claude` binary and the
   conversation goldens, the simulator's conversation and driven tests. Kept and retuned: the
   status pipeline's unit tests, `an_agent_seen_without_hooks_gets_the_pill_and_offers_the_hooks`,
-  `an_agent_started_without_hooks_is_attributed_from_what_the_host_can_see` (shell-script fake
+  `an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see` (shell-script fake
   `claude`), the title-bar a11y order (`Heading < Status < Button "go" < Terminal`) and the
   find-everywhere and palette-directory tests without their agent lines.

@@ -251,12 +251,12 @@ impl Driver {
         self.ok(&Command::Open { command, count }).await
     }
 
-    /// Open a file card for `path` on the host.
+    /// Open a file card for `path` on the worker.
     pub async fn open_file(&mut self, path: &str, line: Option<u32>) -> Result<()> {
         self.ok(&Command::OpenFile { path: path.to_owned(), line }).await
     }
 
-    /// Add the host's first display to the canvas.
+    /// Add the worker's first display to the canvas.
     ///
     /// # Errors
     ///

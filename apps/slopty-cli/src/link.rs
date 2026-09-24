@@ -279,6 +279,6 @@ mod tests {
         assert_eq!(explicit.port(), 7, "an explicit port wins");
         let v6 = locate(Some("fd7a:115c:a1e0::1"), &dir).unwrap();
         assert_eq!(v6.port(), SERVER_PORT);
-        locate(Some("not a host"), &dir).unwrap_err();
+        locate(Some("not a worker"), &dir).unwrap_err();
     }
 }

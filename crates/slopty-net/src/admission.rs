@@ -1,6 +1,6 @@
-//! Which peers a host lets in: decided once per incoming connection, by source address.
+//! Which peers a worker lets in: decided once per incoming connection, by source address.
 //!
-//! With no encryption and no pairing, the network is the boundary: a host answers loopback,
+//! With no encryption and no pairing, the network is the boundary: a worker answers loopback,
 //! its tailnet and the private LAN it sits on, and nothing else. A peer outside those ranges
 //! is refused before the handshake, so it costs one packet and no state.
 
@@ -21,7 +21,7 @@ pub struct Cidr {
 }
 
 impl Cidr {
-    /// `net/prefix`, with the host bits of `net` cleared.
+    /// `net/prefix`, with the worker bits of `net` cleared.
     pub fn new(net: IpAddr, prefix: u8) -> Result<Self, NetError> {
         let bits = if net.is_ipv4() { 32 } else { 128 };
         if prefix > bits {
@@ -94,7 +94,7 @@ impl From<Cidr> for String {
     }
 }
 
-/// The ranges admitted when the host settings name none: private networks only.
+/// The ranges admitted when the worker settings name none: private networks only.
 pub const DEFAULT_ALLOW: &[&str] = &[
     // Tailscale: its CGNAT block and its IPv6 ULA prefix.
     "100.64.0.0/10",
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn ranges_parse_normalise_and_refuse_nonsense() {
         let c: Cidr = "10.1.2.3/8".parse().unwrap();
-        assert_eq!(c.to_string(), "10.0.0.0/8", "host bits cleared");
+        assert_eq!(c.to_string(), "10.0.0.0/8", "worker bits cleared");
         assert_eq!(
             "fd7a:115c:a1e0::5/48".parse::<Cidr>().unwrap().to_string(),
             "fd7a:115c:a1e0::/48"
@@ -214,7 +214,7 @@ mod tests {
         let everything: Cidr = "0.0.0.0/0".parse().unwrap();
         assert!(everything.contains(ip("8.8.8.8")) && !everything.contains(ip("::1")));
         assert!("::/0".parse::<Cidr>().unwrap().contains(ip("2001::1")));
-        for bad in ["", "10.0.0.0/33", "::/129", "10.0.0/8", "host", "10.0.0.0/x", "/8"] {
+        for bad in ["", "10.0.0.0/33", "::/129", "10.0.0/8", "worker", "10.0.0.0/x", "/8"] {
             assert!(bad.parse::<Cidr>().is_err(), "{bad:?}");
         }
         let json = serde_json::to_string(&c).unwrap();

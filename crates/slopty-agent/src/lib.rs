@@ -1,9 +1,9 @@
-//! Coding-agent tracking on the host.
+//! Coding-agent tracking on the worker.
 //!
 //! Claude Code reports what it is doing through hooks: for every registered event it runs a
 //! command with a JSON description on stdin. Slopty registers `slopty hook` for the events it
 //! cares about; the CLI forwards the JSON, together with the `SLOPTY_SESSION` the terminal was
-//! spawned with, to `slopty-hostd`, which feeds it to an [`AgentTable`]. The table keeps one
+//! spawned with, to `slopty-worker`, which feeds it to an [`AgentTable`]. The table keeps one
 //! [`Tracker`] per terminal session and turns the raw hook stream into
 //! [`AgentStatus`] transitions that the daemon broadcasts as [`AgentEvent`]s.
 //!
@@ -17,7 +17,7 @@
 //!
 //! Hooks are only the strongest of four signals. A `claude` the human started by hand in any
 //! Slopty terminal — or one running before `slopty hook install` — is attributed from what the
-//! host can see anyway: its [`detect`]ed foreground process, the [`title`] it paints, and the
+//! worker can see anyway: its [`detect`]ed foreground process, the [`title`] it paints, and the
 //! JSONL transcript [`discover`]ed from its working directory. [`Tracker::observe`] merges
 //! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
 //! said and hooks stay authoritative once they speak.
@@ -191,10 +191,10 @@ fn tool_from_message(message: Option<&str>) -> Option<String> {
     (!tool.is_empty()).then(|| tool.to_owned())
 }
 
-/// What the host can see of a session without any help from the agent: the program in the
+/// What the worker can see of a session without any help from the agent: the program in the
 /// foreground of its tty, the title that program paints, and the directory it runs in.
 ///
-/// Everything here is a fact about the terminal, gathered by the host on a timer; nothing in
+/// Everything here is a fact about the terminal, gathered by the worker on a timer; nothing in
 /// it requires the agent to cooperate. A `program` of `None` means the platform would not say
 /// (the lookup failed), which is not the same as "no agent runs here" and never clears one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -348,10 +348,10 @@ impl Tracker {
         Some(AgentEvent { attention, ..self.event(session) })
     }
 
-    /// Fold in what the host can see of the session (see [`Observation`]).
+    /// Fold in what the worker can see of the session (see [`Observation`]).
     ///
     /// A foreground process that is not an agent clears the session. When a hook has spoken,
-    /// the hooks decide when it ends and this only steps in for an agent the host actually saw
+    /// the hooks decide when it ends and this only steps in for an agent the worker actually saw
     /// running that has now been gone for `ABSENT_BEFORE_GONE` probes — a `claude` killed
     /// without a `SessionEnd` would otherwise keep its pill until the terminal exits.
     /// Otherwise the title decides working from idle, and the mere presence of the process
@@ -608,7 +608,7 @@ impl AgentTable {
         event
     }
 
-    /// Feed one round of what the host can see of a session ([`Tracker::observe`]).
+    /// Feed one round of what the worker can see of a session ([`Tracker::observe`]).
     pub fn observe(&mut self, session: SessionId, obs: &Observation) -> Option<AgentEvent> {
         // A session with nothing agent-like in it must not grow an entry on every tick.
         if !self.sessions.contains_key(&session)
@@ -641,7 +641,7 @@ impl AgentTable {
         self.sessions.iter().filter_map(|(id, t)| t.discovery(*id)).collect()
     }
 
-    /// Drop every agent whose session the host no longer runs, and say so: a session that
+    /// Drop every agent whose session the worker no longer runs, and say so: a session that
     /// went away takes its agent with it whatever its last signal said.
     pub fn retain(&mut self, live: &[SessionId]) -> Vec<AgentEvent> {
         let mut gone = Vec::new();
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Permission { tool: String::new() }));
     }
 
-    /// What the host sees of a terminal running `program` with `title`, always the same
+    /// What the worker sees of a terminal running `program` with `title`, always the same
     /// process ([`process`] for another one).
     fn seen(program: &str, title: Option<&str>) -> Observation {
         process(program, title, 4321)
@@ -1381,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_the_host_no_longer_runs_takes_its_agent_with_it() {
+    fn a_session_the_worker_no_longer_runs_takes_its_agent_with_it() {
         let a = SessionId::new();
         let b = SessionId::new();
         let mut table = AgentTable::default();

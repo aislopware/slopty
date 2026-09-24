@@ -1,8 +1,8 @@
 //! `slopty hook`: the Claude Code hook relay and its installer.
 //!
 //! Claude Code runs `slopty hook` for every registered event with a JSON payload on stdin. The
-//! relay reads `SLOPTY_SESSION` (set by the host for every session it spawns), forwards the
-//! payload to `slopty-hostd` over the control socket and exits 0 whatever happens: it must never
+//! relay reads `SLOPTY_SESSION` (set by the worker for every session it spawns), forwards the
+//! payload to `slopty-worker` over the control socket and exits 0 whatever happens: it must never
 //! slow down or block the agent. `slopty hook install` registers it in `~/.claude/settings.json`
 //! as an asynchronous exec-form command hook; `uninstall` removes exactly those entries.
 //! `slopty hook report <status> [message]` is the same relay for any program: a wrapper around
@@ -16,10 +16,10 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use slopty_agent::HOOK_EVENTS;
 use slopty_agent::hooks::{self, Outcome};
-use slopty_host::ctl::{CtlReply, CtlRequest};
-use slopty_host::manager::SESSION_ENV;
+use slopty_worker::ctl::{CtlReply, CtlRequest};
+use slopty_worker::manager::SESSION_ENV;
 
-use crate::hostctl;
+use crate::workerctl;
 
 /// Longest payload the relay forwards; a hook's stdin is a few KB at most.
 const PAYLOAD_MAX: u64 = 1 << 20;
@@ -113,7 +113,7 @@ async fn relay_payload(payload: String) -> Result<()> {
     let session =
         session.to_string_lossy().parse().context("SLOPTY_SESSION is not a session id")?;
     let reply =
-        tokio::time::timeout(RELAY_TIMEOUT, hostctl::call(CtlRequest::Hook { session, payload }))
+        tokio::time::timeout(RELAY_TIMEOUT, workerctl::call(CtlRequest::Hook { session, payload }))
             .await
             .context("daemon did not answer")??;
     if let CtlReply::Error { message } = reply {

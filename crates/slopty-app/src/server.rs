@@ -256,7 +256,7 @@ impl Workspace {
     /// The directory's address for `id`, whatever its liveness.
     fn directory_address(&self, id: WorkerId) -> Option<HostAddr> {
         let info = self.directory.get(id)?;
-        HostAddr::parse_with_port(&info.address, slopty_net::endpoint::HOST_PORT).ok()
+        HostAddr::parse_with_port(&info.address, slopty_net::endpoint::WORKER_PORT).ok()
     }
 
     /// How a failed dial shows: the server's word when it has one, else the reason.

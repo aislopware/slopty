@@ -55,7 +55,7 @@ const SOCKET_BUFFER: usize = 1 << 20;
 /// Most bytes one `recvmsg` takes.
 const READ_CHUNK: usize = 256 << 10;
 
-/// Raise both socket buffers of a hostd↔ptyd connection to `SOCKET_BUFFER`. A connection
+/// Raise both socket buffers of a worker↔ptyd connection to `SOCKET_BUFFER`. A connection
 /// whose peer already hung up refuses (`EINVAL`), and it has nothing left to carry anyway.
 pub fn widen_buffers(stream: &UnixStream) {
     let widened = rustix::net::sockopt::set_socket_send_buffer_size(stream, SOCKET_BUFFER)

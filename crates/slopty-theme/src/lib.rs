@@ -168,7 +168,7 @@ impl TerminalPalette {
         bold_is_bright: false,
     };
 
-    /// The palette as the host hears it: what colour queries answer while this client drives.
+    /// The palette as the worker hears it: what colour queries answer while this client drives.
     #[must_use]
     pub fn wire(&self) -> TermColors {
         let rgb = |c: Rgb| [c.r, c.g, c.b];
@@ -531,13 +531,13 @@ pub struct Behaviour {
     pub hide_pointer_while_typing: bool,
     /// What a wheel or trackpad line is worth in grid lines, in hundredths (`100` = one).
     pub scroll_multiplier: u16,
-    /// ⌥ as Alt: sent with every key, since the encoder is the host's.
+    /// ⌥ as Alt: sent with every key, since the encoder is the worker's.
     pub option_as_alt: OptionAsAlt,
     /// Closing a terminal whose command is still running asks first.
     pub confirm_close: bool,
     /// ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ edit the shell's line as the Mac's text fields do.
     pub natural_editing: bool,
-    /// What a remote window or display stream asks the host for.
+    /// What a remote window or display stream asks the worker for.
     pub stream: StreamPrefs,
 }
 

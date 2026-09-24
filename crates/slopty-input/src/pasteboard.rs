@@ -1,4 +1,4 @@
-//! The host's pasteboard, for clipboard sync with clients.
+//! The worker's pasteboard, for clipboard sync with clients.
 //!
 //! [`Board`] is the little clipboard sync needs from a pasteboard: its `changeCount` (macOS has
 //! no change notification, so it is polled), the types and bytes of what it holds, and a way to

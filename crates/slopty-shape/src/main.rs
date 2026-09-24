@@ -1,11 +1,11 @@
-//! `slopty-shape` — a UDP relay that degrades the link between a Slopty client and a host.
+//! `slopty-shape` — a UDP relay that degrades the link between a Slopty client and a worker.
 //!
 //! The two ends speak QUIC to each other through this process, so the impairment lands below
 //! the congestion controller and it reacts to the queue, the loss and the delay the way it
 //! would to a real bottleneck. Nothing here needs a password, which is the whole point: the
 //! kernel's shapers do, and the rulings that wait on a collapsed link have waited long enough.
 //!
-//! Point it at the host's UDP address and connect the client to *this* address. Plain QUIC
+//! Point it at the worker's UDP address and connect the client to *this* address. Plain QUIC
 //! never looks for another path, so the relay stays the only way across for the whole run.
 //!
 //! ```text
@@ -25,14 +25,14 @@ use slopty_shape::{Link, Tally};
 const REPORT: Duration = Duration::from_secs(5);
 
 #[derive(Parser, Debug)]
-#[command(about = "Relay UDP between a Slopty client and host over a link you can degrade")]
+#[command(about = "Relay UDP between a Slopty client and worker over a link you can degrade")]
 struct Opts {
     /// UDP address to listen on. The client dials this, with `0.0.0.0` read as loopback: the
-    /// relay must be able to answer a client there and reach the host on a real interface, and
+    /// relay must be able to answer a client there and reach the worker on a real interface, and
     /// one socket bound to `127.0.0.1` cannot do both.
     #[arg(long, default_value = "0.0.0.0:45570")]
     at: SocketAddr,
-    /// The host's UDP address, where packets from the client go.
+    /// The worker's UDP address, where packets from the client go.
     #[arg(long)]
     to: SocketAddr,
     /// One-way delay each direction, e.g. `60ms`.
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("bind {}", opts.at))?,
     );
-    tracing::info!(addr = %relay.addr()?, host = %opts.to, ?link, "shaping");
+    tracing::info!(addr = %relay.addr()?, worker = %opts.to, ?link, "shaping");
     tokio::spawn(report(Arc::clone(&relay)));
     relay.run().await.context("relay")
 }

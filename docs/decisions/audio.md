@@ -46,7 +46,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   clipboard (the connection filters the broadcast) and the client never writes text it
   already holds, which is what stops the loopback echo when app and host share a Mac.
   Text only; files and images stay local. `cargo xtask bundle` builds `Slopty.app` with the
-  daemons and CLI beside the app (`Contents/MacOS/slopty host install` works unchanged since
+  daemons and CLI beside the app (`Contents/MacOS/slopty worker install` works unchanged since
   the installer copies from its own directory), ad-hoc signed unless `--sign` names an
   identity.
 
@@ -106,11 +106,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The host announces its clipboard only while watched, and writes a client's on that
   client's paste chord** (2026-09-25, protocol 52; replaces the two push-ahead-of-⌘V entries
-  above on the host side).
-  - hostd reads `changeCount` every 200 ms only while some client has sent
+  above on the worker side).
+  - The worker reads `changeCount` every 200 ms only while some client has sent
     `ClipMsg::Watch(true)`; otherwise the poller sleeps on a watch channel and reads nothing.
     Watching starts from the pasteboard as it is: a change made while nobody watched was made
-    on the host, and announcing it on focus would overwrite the client's clipboard.
+    on the worker, and announcing it on focus would overwrite the client's clipboard.
   - A change becomes an `Offer`, richest first. Text of at most 64 KiB rides inline. PNG,
     TIFF, RTF, HTML and file URLs are listed with size and BLAKE3 digest and kept for `Fetch`
     until the next change; an answer over 64 KiB goes on a bulk stream. The file URLs of every
@@ -121,12 +121,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     postcard `(Peer, u64)`, the origin and generation. Contents whose digest matches what was
     last announced or written are not announced again, which covers Universal Clipboard.
   - A client's offer is recorded, not written. ⌘V on one of its window streams writes it:
-    inline text at once, otherwise hostd fetches the missing representations and holds that
+    inline text at once, otherwise the worker fetches the missing representations and holds that
     client's window input, in order, until they arrive. After 3 s the chord goes on
     unwritten, and the next ⌘V writes what arrived meanwhile. A client's file URLs are never
     written: they name files on the client, which travel as a transfer.
   - Tests use a named pasteboard (`--pasteboard`, `SLOPTY_PASTEBOARD`), never the general one:
-    the `slopty_host::clip` unit tests and hostd's
+    the `slopty_worker::clip` unit tests and `slopty-worker`'s
     `the_clipboard_is_announced_fetched_and_pasted_both_ways`.
 
 - ✅ **Uploads are written as `.partial` beside their name, placed per top-level entry, and
@@ -150,15 +150,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Ports are scanned on a hint or while the shell is busy, never when idle** (2026-09-25,
   protocol 52).
   - The session actor checks each PTY read for a local server's address or an OSC 8 web link
-    and hints hostd. After a hit it skips the check for a second. A keystroke's echo pays
+    and hints the worker. After a hit it skips the check for a second. A keystroke's echo pays
     nothing measurable and a full 64 KiB read 7 to 11 µs (`docs/MEASUREMENTS.md`,
     2026-09-25).
-  - hostd scans a hinted session 250 ms later, so a server that prints its address as it binds
+  - The worker scans a hinted session 250 ms later, so a server that prints its address as it binds
     is found listening. Every 2 s it looks at each session and scans one whose tty's foreground
     process is not the one ptyd spawned. It also scans one that still has listeners (a
     background job) and one whose foreground program just ended. `Ports` goes to every client
     when a set changes, and the known sets go to a client when it connects.
-  - Every bidirectional stream a client opens after the control stream is a tunnel. hostd
+  - Every bidirectional stream a client opens after the control stream is a tunnel. The worker
     dials `127.0.0.1` and then `::1`, because a dev server bound to `localhost` on macOS often
     listens on `::1` only. It splices both ways with a half-close each way, and a refused dial
     resets the stream.

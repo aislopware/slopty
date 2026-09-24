@@ -50,7 +50,7 @@ async fn worker(hub: Hub, link: AcceptedLink, registration: slopty_proto::server
     let writer = tokio::spawn(write(tx, queue));
     read_worker(&lease, &mut rx).await;
     writer.abort();
-    conn.close(slopty_net::host::close_code::NORMAL.into(), b"lease ended");
+    conn.close(slopty_net::worker::close_code::NORMAL.into(), b"lease ended");
     drop(lease);
 }
 
@@ -126,5 +126,5 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
             break;
         }
     }
-    conn.close(slopty_net::host::close_code::NORMAL.into(), b"bye");
+    conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
 }

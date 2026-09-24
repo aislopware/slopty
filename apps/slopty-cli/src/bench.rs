@@ -1,10 +1,10 @@
-//! `slopty bench echo`: keystroke → first frame back on a `cat` session (transport + host
+//! `slopty bench echo`: keystroke → first frame back on a `cat` session (transport + worker
 //! engine + frame coalescing, no terminal emulation on this side).
 //!
 //! `slopty bench screen`: open a screen stream and report what arrives.
 //!
 //! Frame latency is capture timestamp → decoded frame available, on the host time clock, so it
-//! is only meaningful when client and host share a clock (loopback). Everything else (fps,
+//! is only meaningful when client and worker share a clock (loopback). Everything else (fps,
 //! arrival jitter, loss, FEC, NACKs) holds over any path. `SLOPTY_E2E_DROP_PERMILLE` on this
 //! process (or the older `SLOPTY_DROP_PERMILLE`) drops incoming media datagrams from a fixed
 //! seed to simulate a lossy path: the same rate always drops the same datagrams of the
@@ -14,11 +14,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use slopty_client::{HostLink, LinkEvent};
+use slopty_client::{LinkEvent, WorkerLink};
 use slopty_core::WindowId;
 use slopty_proto::screen::{CaptureTarget, Quality, RateVerdict, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
-use slopty_proto::{ClientMsg, HostMsg};
+use slopty_proto::{ClientMsg, WorkerMsg};
 
 use crate::client::{Session, connect_to};
 
@@ -34,7 +34,7 @@ async fn drain(events: &mut tokio::sync::mpsc::Receiver<LinkEvent>, quiet: Durat
 }
 
 /// Send `count` single bytes to a fresh `cat` session and time each one to the first frame
-/// that comes back. Includes the host's frame coalescing window and one round trip.
+/// that comes back. Includes the worker's frame coalescing window and one round trip.
 pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
     let mut session = connect_to(data_dir, needle).await?;
     let size = TermSize { cols: 60, rows: 12, ..TermSize::default() };
@@ -52,13 +52,13 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
         .await?;
     let id = loop {
         match session.conn.rx.recv().await? {
-            HostMsg::SessionOpened(s) => break s.id,
-            HostMsg::Term { event: TermEvent::Error(e), .. } => bail!("host: {e}"),
+            WorkerMsg::SessionOpened(s) => break s.id,
+            WorkerMsg::Term { event: TermEvent::Error(e), .. } => bail!("worker: {e}"),
             _other => {}
         }
     };
     let Session { conn, endpoint, .. } = session;
-    let mut link = HostLink::start(conn);
+    let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;
 
     // Let the attach frames settle before timing anything.
@@ -111,9 +111,9 @@ pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
 /// What to stream and for how long.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenBench {
-    /// Window id on the host (`slopty bench screen --list` prints them).
+    /// Window id on the worker (`slopty bench screen --list` prints them).
     pub window: Option<u32>,
-    /// Display id on the host; the main display when neither is given.
+    /// Display id on the worker; the main display when neither is given.
     pub display: Option<u32>,
     /// Run length.
     pub seconds: u64,
@@ -127,16 +127,16 @@ pub struct ScreenBench {
     pub max_stalls: Option<u64>,
 }
 
-/// Print the host's windows and displays.
+/// Print the worker's windows and displays.
 pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
     let session = connect_to(data_dir, needle).await?;
     let Session { conn, endpoint, .. } = session;
-    let mut link = HostLink::start(conn);
+    let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;
     link.sender().send(ClientMsg::Screen(ScreenRequest::List)).await?;
     loop {
         match events.recv().await {
-            Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing {
+            Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Listing {
                 windows,
                 displays,
             }))) => {
@@ -162,7 +162,7 @@ pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
 pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -> Result<()> {
     let session = connect_to(data_dir, needle).await?;
     let Session { conn, endpoint, .. } = session;
-    let mut link = HostLink::start(conn);
+    let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;
     let out = link.sender();
 
@@ -173,11 +173,11 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
             out.send(ClientMsg::Screen(ScreenRequest::List)).await?;
             loop {
                 match events.recv().await {
-                    Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Listing {
+                    Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Listing {
                         displays,
                         ..
                     }))) => {
-                        let main = displays.first().context("host has no display")?;
+                        let main = displays.first().context("worker has no display")?;
                         break CaptureTarget::Display(main.id);
                     }
                     Some(LinkEvent::Disconnected(why)) => bail!("disconnected: {why}"),
@@ -197,15 +197,15 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     let opened_at = Instant::now();
     let (stream, codec, width, height) = loop {
         match events.recv().await {
-            Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Opened {
+            Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Opened {
                 stream,
                 codec,
                 width,
                 height,
                 ..
             }))) => break (stream, codec, width, height),
-            Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. }))) => {
-                bail!("host closed the stream: {reason}")
+            Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Closed { reason, .. }))) => {
+                bail!("worker closed the stream: {reason}")
             }
             Some(LinkEvent::Disconnected(why)) => bail!("disconnected: {why}"),
             Some(_other) => {}
@@ -229,7 +229,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     let mut gaps_us: Vec<u64> = Vec::new();
     let mut first_frame: Option<Instant> = None;
     let mut last_arrival: Option<Instant> = None;
-    // The host's bitrate decisions as they arrive: (seconds into the run, target, verdict).
+    // The worker's bitrate decisions as they arrive: (seconds into the run, target, verdict).
     let mut rate: Vec<(f64, u32, RateVerdict, bool)> = Vec::new();
     loop {
         tokio::select! {
@@ -241,7 +241,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
                 let Some(frame) = frame else { continue };
                 let now = Instant::now();
                 first_frame.get_or_insert(now);
-                // The wire carries the low 32 bits of the host clock in microseconds.
+                // The wire carries the low 32 bits of the worker clock in microseconds.
                 #[expect(clippy::cast_possible_truncation, reason = "low 32 bits by design")]
                 let (now_lo, pts_lo) =
                     (slopty_capture::host_now_us() as u32, frame.stamp.pts_us as u32);
@@ -258,15 +258,15 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
             () = tokio::time::sleep_until(deadline) => break,
             ev = events.recv() => {
                 match ev {
-                    Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Closed { reason, .. }))) => {
-                        eprintln!("host closed the stream: {reason}");
+                    Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Closed { reason, .. }))) => {
+                        eprintln!("worker closed the stream: {reason}");
                         break;
                     }
                     Some(LinkEvent::Disconnected(why)) => {
                         eprintln!("disconnected: {why}");
                         break;
                     }
-                    Some(LinkEvent::Control(HostMsg::Screen(ScreenEvent::Rate {
+                    Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Rate {
                         stream: s,
                         target_bps,
                         verdict,
@@ -304,7 +304,7 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         since(stats.first_decoded_at),
         stats.hold_max.as_secs_f64() * 1e3
     );
-    println!("  capture→decoded (host clock; loopback only): {}", quantiles(&mut latency_us));
+    println!("  capture→decoded (worker clock; loopback only): {}", quantiles(&mut latency_us));
     println!("  arrival gap: {}", quantiles(&mut gaps_us));
     println!(
         "  last report: hold p50 {:.1} ms p95 {:.1} ms  jitter {:.1} ms  queue {}",
@@ -330,10 +330,10 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     );
     let s = stats.silences;
     println!(
-        "  silences past the gap: host-quiet {} / covered {}  receiver-dozed {}  in-flight {}  \
+        "  silences past the gap: worker-quiet {} / covered {}  receiver-dozed {}  in-flight {}  \
          stamp wrapped {} / backwards {} / absent {}  idle {}  worst gap {} ms, worst doze {} ms",
-        s.host_quiet,
-        s.host_covered,
+        s.worker_quiet,
+        s.worker_covered,
         s.receiver_dozed,
         s.in_flight,
         s.stamp_wrapped,
@@ -351,16 +351,16 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         stats.reader_lag_max.as_secs_f64() * 1e3,
         stats.reader_lag_over_gap
     );
-    println!("  host target over time (Mbit/s): {}", rate_trajectory(&rate));
+    println!("  worker target over time (Mbit/s): {}", rate_trajectory(&rate));
     println!("  audio packets {}  lost {}", stats.audio_packets, stats.audio_lost);
     println!("  quic path: {}", link.path());
     // The client's own window, not the media one. This connection carries receiver reports and
     // NACKs and nothing else, so BBR never measures a delivery rate on it and parks the window
     // at its four-packet floor for the whole run. Reading that number as the stream's send
-    // window is a mistake that has been made here before; the host's window is in its own log
+    // window is a mistake that has been made here before; the worker's window is in its own log
     // (`SLOPTY_PATH_TRACE_MS`), not in this line.
-    println!("  quic path (client→host, feedback only): {}", link.health());
-    print_host_side(session.client, stream).await;
+    println!("  quic path (client→worker, feedback only): {}", link.health());
+    print_worker_side(session.client, stream).await;
 
     out.send(ClientMsg::Screen(ScreenRequest::Close(stream))).await?;
     drop(handle);
@@ -386,25 +386,28 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     Ok(())
 }
 
-/// The host's own view of the stream (capture and encode latency, the capture path) when a
-/// hostd answers on this machine's control socket; nothing when there is none (a remote
-/// host) or the stream is not its. Stream ids are per connection, so the match is on our
+/// The worker's own view of the stream (capture and encode latency, the capture path) when a
+/// The worker answers on this machine's control socket; nothing when there is none (a remote
+/// worker) or the stream is not its. Stream ids are per connection, so the match is on our
 /// client id too: another client's stream 1 is not ours.
-async fn print_host_side(client: slopty_core::ClientId, stream: slopty_core::StreamId) {
-    use slopty_host::ctl::{CtlReply, CtlRequest};
-    let Ok(CtlReply::Screens { live, .. }) = crate::hostctl::call(CtlRequest::Screens).await else {
-        println!("  host side: no local hostd answered (remote host, or not the one streaming)");
+async fn print_worker_side(client: slopty_core::ClientId, stream: slopty_core::StreamId) {
+    use slopty_worker::ctl::{CtlReply, CtlRequest};
+    let Ok(CtlReply::Screens { live, .. }) = crate::workerctl::call(CtlRequest::Screens).await
+    else {
+        println!(
+            "  worker side: no local worker answered (remote worker, or not the one streaming)"
+        );
         return;
     };
     let client = client.to_string();
     let Some(s) = live.iter().find(|s| s.client == client && s.stream == stream.0) else {
-        println!("  host side: local hostd is not the one streaming to us");
+        println!("  worker side: the local worker is not the one streaming to us");
         return;
     };
-    println!("  host capture (display time → SCK callback): {}", s.stats.capture.describe());
-    println!("  host encode (submit → VideoToolbox callback): {}", s.stats.encode.describe());
+    println!("  worker capture (display time → SCK callback): {}", s.stats.capture.describe());
+    println!("  worker encode (submit → VideoToolbox callback): {}", s.stats.encode.describe());
     println!(
-        "  host captured {} (display-crop path {}), dropped {}, encoded {}, refused {}",
+        "  worker captured {} (display-crop path {}), dropped {}, encoded {}, refused {}",
         s.stats.captured, s.stats.cropped, s.stats.dropped, s.stats.encoded, s.stats.queue_full
     );
 }
@@ -418,7 +421,7 @@ struct RateRun {
     count: usize,
 }
 
-/// The host's decisions as `target(verdict)@s`, `/cwnd` when the congestion window rather
+/// The worker's decisions as `target(verdict)@s`, `/cwnd` when the congestion window rather
 /// than the verdict set the target; runs of identical decisions fold into one with a count.
 fn rate_trajectory(rate: &[(f64, u32, RateVerdict, bool)]) -> String {
     if rate.is_empty() {

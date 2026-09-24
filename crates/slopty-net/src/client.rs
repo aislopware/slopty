@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use noq::{Connection, Endpoint};
 use slopty_proto::handshake::{Hello, HelloAck, Rejection};
-use slopty_proto::{ClientMsg, HostMsg};
+use slopty_proto::{ClientMsg, WorkerMsg};
 
 use crate::NetError;
 use crate::addr::HostAddr;
@@ -15,13 +15,13 @@ use crate::framed::{FramedRecv, FramedSend};
 /// answers at all answers in one round trip; without this a dead address waits out the 45 s idle
 /// timeout.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long to wait for the host's answer to `Hello`.
+/// How long to wait for the worker's answer to `Hello`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Errors from the handshake, distinguished so the UI can react (retry vs. update).
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
-    /// The host refused.
+    /// The worker refused.
     #[error("rejected: {0:?}")]
     Rejected(Rejection),
     /// Transport.
@@ -29,19 +29,19 @@ pub enum HandshakeError {
     Net(#[from] NetError),
 }
 
-/// A live connection to a host after a successful `Hello`.
+/// A live connection to a worker after a successful `Hello`.
 #[derive(Debug)]
-pub struct HostConn {
+pub struct WorkerConn {
     /// The QUIC connection.
     pub conn: Connection,
     /// The address that answered.
     pub remote: SocketAddr,
-    /// What the host told us.
+    /// What the worker told us.
     pub ack: HelloAck,
-    /// Control stream, client → host.
+    /// Control stream, client → worker.
     pub tx: FramedSend<ClientMsg>,
-    /// Control stream, host → client.
-    pub rx: FramedRecv<HostMsg>,
+    /// Control stream, worker → client.
+    pub rx: FramedRecv<WorkerMsg>,
 }
 
 /// Bind a client endpoint on every interface, both families, any free port. One per process is
@@ -56,7 +56,7 @@ pub async fn connect(
     endpoint: &Endpoint,
     addr: &HostAddr,
     hello: Hello,
-) -> Result<HostConn, HandshakeError> {
+) -> Result<WorkerConn, HandshakeError> {
     let mut candidates = addr.resolve().await?;
     candidates.sort_by_key(SocketAddr::is_ipv6);
     let mut last = NetError::Connect(format!("{addr}: no address"));
@@ -77,7 +77,7 @@ pub async fn connect_addr(
     endpoint: &Endpoint,
     addr: SocketAddr,
     hello: Hello,
-) -> Result<HostConn, HandshakeError> {
+) -> Result<WorkerConn, HandshakeError> {
     let conn = dial(endpoint, addr, &addr.ip().to_string(), None).await?;
     greet(conn, addr, hello).await
 }
@@ -100,22 +100,22 @@ pub(crate) async fn dial(
         .map_err(|e| NetError::Connect(format!("{addr}: {e}")))
 }
 
-/// `Hello` on a fresh control stream, and the host's answer.
+/// `Hello` on a fresh control stream, and the worker's answer.
 async fn greet(
     conn: Connection,
     remote: SocketAddr,
     hello: Hello,
-) -> Result<HostConn, HandshakeError> {
+) -> Result<WorkerConn, HandshakeError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ClientMsg>::new(send);
-    let mut rx = FramedRecv::<HostMsg>::new(recv);
+    let mut rx = FramedRecv::<WorkerMsg>::new(recv);
     tx.send(&ClientMsg::Hello(hello)).await?;
     let reply = tokio::time::timeout(ACK_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("hello ack timeout"))??;
     match reply {
-        HostMsg::HelloAck(ack) => Ok(HostConn { conn, remote, ack, tx, rx }),
-        HostMsg::Rejected(why) => {
+        WorkerMsg::HelloAck(ack) => Ok(WorkerConn { conn, remote, ack, tx, rx }),
+        WorkerMsg::Rejected(why) => {
             conn.close(0_u32.into(), b"rejected");
             Err(HandshakeError::Rejected(why))
         }
@@ -123,7 +123,7 @@ async fn greet(
     }
 }
 
-impl HostConn {
+impl WorkerConn {
     /// Current RTT.
     #[must_use]
     pub fn rtt(&self) -> Option<Duration> {

@@ -5,7 +5,7 @@
 //! symptom is ScreenCaptureKit `-3801` from a daemon that worked an hour ago, with no prompt to
 //! explain it. Signing with a Developer ID certificate and a fixed identifier makes the designated
 //! requirement the identifier plus the certificate rather than the hash, so one approval covers
-//! every later build (`docs/decisions/input.md`, the host-daemon signing entry).
+//! every later build (`docs/decisions/input.md`, the worker-daemon signing entry).
 
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
@@ -20,7 +20,7 @@ const IDENTIFIER_PREFIX: &str = "dev.aislopware.slopty";
 pub const IDENTITY_ENV: &str = "SLOPTY_SIGN_IDENTITY";
 
 /// The binaries that hold TCC grants, as (file name, identifier suffix).
-const SIGNED: [(&str, &str); 2] = [("slopty-hostd", "hostd"), ("slopty-ptyd", "ptyd")];
+const SIGNED: [(&str, &str); 2] = [("slopty-worker", "worker"), ("slopty-ptyd", "ptyd")];
 
 /// `xtask sign` options.
 #[derive(Args, Debug, Clone, Default)]
@@ -77,7 +77,7 @@ pub fn run(sh: &Shell, opts: &SignOpts) -> Result<()> {
     for (bin, suffix) in SIGNED {
         let path = dir.join(bin);
         if !path.exists() {
-            bail!("missing {path}: build the host daemons first (`cargo xtask run host`)");
+            bail!("missing {path}: build the worker daemons first (`cargo xtask run worker`)");
         }
         let id = identifier(suffix);
         step(
@@ -98,8 +98,8 @@ pub fn run(sh: &Shell, opts: &SignOpts) -> Result<()> {
 
 /// Sign the daemons if a certificate is there, and say so plainly when there is not.
 ///
-/// `run host` calls this: an unsigned daemon still runs, it just loses its permissions on the next
-/// build, so a missing certificate is a warning rather than the end of the run.
+/// `run worker` calls this: an unsigned daemon still runs, it just loses its permissions on the
+/// next build, so a missing certificate is a warning rather than the end of the run.
 pub fn sign_if_possible(sh: &Shell, release: bool) {
     let opts = SignOpts { release, identity: None };
     if let Err(error) = run(sh, &opts) {
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn a_daemon_is_signed_under_its_launchagent_label() {
-        assert_eq!(identifier("hostd"), "dev.aislopware.slopty.hostd");
+        assert_eq!(identifier("worker"), "dev.aislopware.slopty.worker");
         assert_eq!(identifier("ptyd"), "dev.aislopware.slopty.ptyd");
     }
 

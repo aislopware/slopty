@@ -1,6 +1,6 @@
 //! Where a byte stream stands with respect to VT syntax: at a sequence boundary or inside one.
 //!
-//! The host checkpoints a session's state after a quiet spell. A checkpoint replaces the output
+//! The worker checkpoints a session's state after a quiet spell. A checkpoint replaces the output
 //! ptyd kept, so if the last bytes before it were half an escape sequence (or half a UTF-8
 //! character), the half that arrives after a restart would print as text. [`Boundary`] follows
 //! the parser's shape closely enough to say whether the stream is at a boundary; it is a

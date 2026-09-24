@@ -5,13 +5,13 @@
 //! `~/.claude/projects/<escaped working directory>/<session uuid>.jsonl`, where the escaping
 //! replaces every character that is not an ASCII letter or digit with a `-` (so
 //! `/Users/x/.config` becomes `-Users-x--config`). The directory therefore follows from the
-//! working directory the agent was started in, which the host knows: the foreground process's
+//! working directory the agent was started in, which the worker knows: the foreground process's
 //! own cwd, or OSC 7 from the shell that launched it.
 //!
 //! Which file in that directory is *this* session is decided by time: the live session is the
 //! one still being written, so the newest `.jsonl` whose modification time is at or after the
 //! moment the process was first seen. A resumed conversation reuses its old file and moves its
-//! mtime forward, so it is found the same way; a session that has not written since the host
+//! mtime forward, so it is found the same way; a session that has not written since the worker
 //! restarted is found as soon as it writes again.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ pub fn projects_dir(home: &Path) -> PathBuf {
 /// The directory Claude Code writes a session's transcript into, for an agent running in `cwd`.
 ///
 /// Claude Code names the directory after the working directory as the process sees it, which
-/// on macOS is the resolved path (`/private/var/…` for a `/var/…` the host was given), so
+/// on macOS is the resolved path (`/private/var/…` for a `/var/…` the worker was given), so
 /// `cwd` is canonicalised first when it exists; a directory that does not is used as given.
 #[must_use]
 pub fn project_dir(home: &Path, cwd: &Path) -> PathBuf {

@@ -1,7 +1,7 @@
-//! A file card on the canvas: a file on the host, read-only, as the agent left it.
+//! A file card on the canvas: a file on the worker, read-only, as the agent left it.
 //!
 //! The item (`ItemKind::File`) names the path; the text is not in the document. Each client
-//! asks the host for it (`ClientMsg::ReadFile`) when the card appears and again when an agent's
+//! asks the worker for it (`ClientMsg::ReadFile`) when the card appears and again when an agent's
 //! edit or write lands, and draws what came back: line-numbered mono rows in a `uniform_list`
 //! (a 2 000-line file lays out only the rows on screen), or one line saying why there is
 //! nothing to draw. A read that follows one (an agent's edit landed, "reload" pressed) tints
@@ -86,7 +86,7 @@ pub fn find_hits(lines: &[SharedString], needle: &str) -> Vec<usize> {
 pub struct FileView {
     id: ItemId,
     path: String,
-    /// What the host said, `None` until it answers.
+    /// What the worker said, `None` until it answers.
     read: Option<FileRead>,
     /// The text's lines, split once when it arrives.
     lines: Vec<SharedString>,
@@ -126,7 +126,7 @@ impl std::fmt::Debug for FileView {
 }
 
 impl FileView {
-    /// A card for `path`, waiting on the host.
+    /// A card for `path`, waiting on the worker.
     #[must_use]
     pub fn new(id: ItemId, path: &str, theme: Theme) -> Self {
         Self {
@@ -271,7 +271,7 @@ impl FileView {
         self.search.as_ref().map(|s| s.needle.as_str())
     }
 
-    /// The text's lines as drawn (empty until the host answers).
+    /// The text's lines as drawn (empty until the worker answers).
     #[must_use]
     pub fn lines(&self) -> &[SharedString] {
         &self.lines
@@ -441,13 +441,13 @@ impl FileView {
         self.id
     }
 
-    /// The path on the host.
+    /// The path on the worker.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// What the host said, once it has.
+    /// What the worker said, once it has.
     #[must_use]
     pub const fn read(&self) -> Option<&FileRead> {
         self.read.as_ref()
@@ -484,7 +484,7 @@ impl FileView {
         cx.notify();
     }
 
-    /// The host answered (or answered again after an edit). A second text after a first one
+    /// The worker answered (or answered again after an edit). A second text after a first one
     /// marks the lines that differ and scrolls to the first of them.
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
         if self.read.as_ref() == Some(&read) {

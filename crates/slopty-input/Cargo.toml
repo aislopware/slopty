@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "CGEvent injection for remote-window input on the Slopty host (macOS)"
+description = "CGEvent injection for remote-window input on the Slopty worker (macOS)"
 
 [lints]
 workspace = true

@@ -1,7 +1,7 @@
 //! Remote windows on the client: datagram routing, reassembly, hardware decode, and
 //! latest-frame delivery to the UI.
 //!
-//! [`HostLink`](crate::HostLink) reads every datagram on the connection and hands it to a
+//! [`WorkerLink`](crate::WorkerLink) reads every datagram on the connection and hands it to a
 //! [`ScreenRouter`], which fans out by stream id. A stream the UI has not attached yet keeps a
 //! short backlog (its first datagrams usually beat the `Opened` control message), so nothing
 //! is lost at start-up. [`spawn_screen`] runs one task per stream: reassemble, NACK and refresh
@@ -33,13 +33,13 @@ use crate::pacing::{CaptureClock, FrameStamp};
 const STREAM_DEPTH: usize = 2048;
 /// Datagrams kept for a stream nobody has attached yet.
 const PENDING_DEPTH: usize = 512;
-/// How often a receiver report goes to the host.
+/// How often a receiver report goes to the worker.
 const REPORT_EVERY: Duration = Duration::from_millis(50);
 /// Reassembler timer resolution while frames are pending.
 const TICK: Duration = Duration::from_millis(2);
 /// Timer period while nothing is pending: refresh repeats depend on it, and so does the stall
 /// detector, which subtracts silence this loop slept through from what it charges to the link.
-/// Half the stall gap, for the same reason the host heartbeats at half it — a receiver that
+/// Half the stall gap, for the same reason the worker heartbeats at half it — a receiver that
 /// looks exactly as often as a stall is long cannot tell one it watched from one it missed.
 const IDLE_TICK: Duration = Duration::from_millis(25);
 /// RTT assumed before the transport has measured one.
@@ -56,7 +56,7 @@ pub struct ScreenRouter {
     /// Test-only loss injection: drop this many datagrams per thousand, from
     /// `SLOPTY_E2E_DROP_PERMILLE` (read once, at construction). Zero in normal use, which is
     /// the only state the shipped app is ever in — nothing sets the variable but the gated
-    /// tests in `apps/slopty-hostd/tests/e2e.rs`.
+    /// tests in `apps/slopty-worker/tests/e2e.rs`.
     drop_permille: Arc<AtomicU32>,
     lcg: Arc<AtomicU64>,
 }
@@ -221,7 +221,7 @@ impl Arrivals {
     }
 }
 
-/// Where the host's pointer is, in stream pixels.
+/// Where the worker's pointer is, in stream pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct CursorState {
     /// X.
@@ -245,14 +245,14 @@ pub struct ScreenStats {
     pub frames_lost: u64,
     /// Data fragments that never arrived (counted as each frame resolves).
     pub datagrams_lost: u64,
-    /// Parity the host is sending, in thousandths of the data fragments, as observed on the
+    /// Parity the worker is sending, in thousandths of the data fragments, as observed on the
     /// wire: the receiver's view of what the redundancy controller settled on.
     pub parity_permille: u16,
-    /// Data and parity fragments the host cut the frames seen so far into. The ratio is
+    /// Data and parity fragments the worker cut the frames seen so far into. The ratio is
     /// [`Self::parity_permille`]; the counts also say how big the frames were, which is what
     /// decides whether the parity policy could cost anything at all.
     pub data_shards: u64,
-    /// Parity fragments the host added to them.
+    /// Parity fragments the worker added to them.
     pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
@@ -277,7 +277,7 @@ pub struct ScreenStats {
     /// The link is stalled right now (as of the last report).
     pub stalled: bool,
     /// Where every silence past the stall gap went — the stall count broken down by what the
-    /// host's send stamps made of it.
+    /// worker's send stamps made of it.
     pub silences: StallAttribution,
     /// Worst delay between the connection's reader stamping a datagram's arrival and this
     /// worker feeding it to the reassembler. The reassembler measures gaps on the arrival
@@ -299,7 +299,7 @@ pub struct ScreenStats {
     pub hold_p50: Duration,
     /// 95th percentile of the same.
     pub hold_p95: Duration,
-    /// RFC 3550 interarrival jitter on the host's capture clock, as last reported.
+    /// RFC 3550 interarrival jitter on the worker's capture clock, as last reported.
     pub jitter: Duration,
     /// Frames the worker is holding in order behind a missing one, as last reported.
     pub queue_depth: u8,
@@ -344,7 +344,7 @@ impl Audio {
 }
 
 /// A live client-side stream. Dropping it stops the task and unroutes the stream; the caller
-/// still sends `ScreenRequest::Close` so the host stops capturing.
+/// still sends `ScreenRequest::Close` so the worker stops capturing.
 #[derive(Debug)]
 pub struct ScreenHandle {
     stream: StreamId,
@@ -353,7 +353,7 @@ pub struct ScreenHandle {
     stats: watch::Receiver<ScreenStats>,
     /// Audio is decoded but not played while set (shared with the worker).
     muted: Arc<AtomicBool>,
-    /// The host's capture target is producing pictures (shared with the worker).
+    /// The worker's capture target is producing pictures (shared with the worker).
     source_live: Arc<AtomicBool>,
     router: ScreenRouter,
     /// The worker; a detached test handle has none.
@@ -375,7 +375,7 @@ impl ScreenHandle {
         self.frames.clone()
     }
 
-    /// Host pointer position.
+    /// Worker pointer position.
     #[must_use]
     pub fn cursor(&self) -> watch::Receiver<CursorState> {
         self.cursor.clone()
@@ -399,13 +399,13 @@ impl ScreenHandle {
         self.muted.store(muted, Ordering::Relaxed);
     }
 
-    /// The host's `ScreenEvent::Source`: whether the capture target is drawing anything. While
+    /// The worker's `ScreenEvent::Source`: whether the capture target is drawing anything. While
     /// it is not, the worker stops asking for refreshes no frame could answer.
     pub fn set_source_live(&self, live: bool) {
         self.source_live.store(live, Ordering::Relaxed);
     }
 
-    /// Whether the host's capture target is drawing, as last reported.
+    /// Whether the worker's capture target is drawing, as last reported.
     #[must_use]
     pub fn source_live(&self) -> bool {
         self.source_live.load(Ordering::Relaxed)
@@ -443,7 +443,7 @@ impl ScreenHandle {
     }
 }
 
-/// How a screen worker talks back to the host.
+/// How a screen worker talks back to the worker.
 pub struct Uplink {
     /// Control stream (reports, close).
     pub control: mpsc::Sender<ClientMsg>,
@@ -545,11 +545,11 @@ struct Worker {
     audio: AudioSlot,
     /// Decode but do not play while set.
     muted: Arc<AtomicBool>,
-    /// The host says its capture target is producing pictures.
+    /// The worker says its capture target is producing pictures.
     source_live: Arc<AtomicBool>,
     /// The last hint handed to the reassembler, so a hint that has not changed does not
     /// overwrite what the stream itself proved (a video fragment means the source is live,
-    /// whatever the host last said).
+    /// whatever the worker last said).
     source_hint: bool,
     /// Set by the decoder callback when the first picture comes back.
     first_decoded: Arc<Mutex<Option<Instant>>>,
@@ -742,7 +742,7 @@ impl Worker {
         true
     }
 
-    /// Publish the counters and send the host a receiver report. The report never waits for
+    /// Publish the counters and send the worker a receiver report. The report never waits for
     /// room on the control channel: a full channel drops this one (the next follows in
     /// [`REPORT_EVERY`]) rather than holding reassembly and decode behind it.
     fn report(&mut self) {
@@ -776,7 +776,7 @@ impl Worker {
     }
 }
 
-/// The parity ratio the host is sending, in thousandths of the data fragments, from the frame
+/// The parity ratio the worker is sending, in thousandths of the data fragments, from the frame
 /// layouts seen so far. Zero until a frame arrives.
 fn observed_parity(stats: &ReassemblerStats) -> u16 {
     let permille =
@@ -785,7 +785,7 @@ fn observed_parity(stats: &ReassemblerStats) -> u16 {
 }
 
 /// Encode loss feedback for one datagram. A fragment list too long for a datagram degrades to
-/// "every fragment", which the host answers with the whole frame.
+/// "every fragment", which the worker answers with the whole frame.
 fn encode_feedback(feedback: Feedback) -> Bytes {
     if let Ok(body) = slopty_proto::codec::encode_body(&feedback)
         && body.len() <= MAX_DATAGRAM
@@ -920,7 +920,7 @@ mod tests {
         router.detach(StreamId(1));
         router.route(datagram(1, 2), now);
         assert!(rx.try_recv().is_err(), "detached: nothing delivered");
-        // What lands between the detach and the host's `Closed` backlogs like a stream nobody
+        // What lands between the detach and the worker's `Closed` backlogs like a stream nobody
         // attached yet (a re-attach would want it); `forget` on `Closed` lets it go.
         assert!(router.inner.lock().pending.contains_key(&StreamId(1)));
         router.forget(StreamId(1));
@@ -1185,7 +1185,7 @@ mod worker_tests {
         assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
         assert_eq!(late.audio_packets, after.audio_packets, "not played");
 
-        // The host's source hint reaches the worker.
+        // The worker's source hint reaches the worker.
         assert!(h.handle.source_live());
         h.handle.set_source_live(false);
         assert!(!h.handle.source_live());

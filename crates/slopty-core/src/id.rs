@@ -1,8 +1,8 @@
 //! Identifier newtypes.
 //!
-//! Durable identities (sessions, canvas items, hosts) are `UUIDv7` so they sort by creation time
-//! and never collide across hosts. Connection-scoped identities (streams) are small integers
-//! allocated by the host and only meaningful for one connection.
+//! Durable identities (sessions, canvas items, workers) are `UUIDv7` so they sort by creation time
+//! and never collide across workers. Connection-scoped identities (streams) are small integers
+//! allocated by the worker and only meaningful for one connection.
 
 use core::fmt;
 
@@ -71,7 +71,7 @@ macro_rules! uuid_id {
 }
 
 uuid_id!(
-    /// A terminal session (one PTY) on a host. Survives reconnects and host restarts.
+    /// A terminal session (one PTY) on a worker. Survives reconnects and worker restarts.
     SessionId
 );
 uuid_id!(
@@ -80,7 +80,7 @@ uuid_id!(
 );
 uuid_id!(
     /// A worker installation (the machine that runs shells and serves windows, today's
-    /// `slopty-hostd`): a UUID created on its first run and kept in its data dir.
+    /// `slopty-worker`): a UUID created on its first run and kept in its data dir.
     WorkerId
 );
 uuid_id!(
@@ -92,7 +92,7 @@ uuid_id!(
     XferId
 );
 
-/// A window on the host that can be streamed: the `CGWindowID`. macOS reuses these, so a
+/// A window on the worker that can be streamed: the `CGWindowID`. macOS reuses these, so a
 /// client always opens a stream against a listing it just received.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
@@ -104,7 +104,7 @@ impl fmt::Display for WindowId {
     }
 }
 
-/// A connection-scoped stream identity allocated by the host.
+/// A connection-scoped stream identity allocated by the worker.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct StreamId(pub u32);

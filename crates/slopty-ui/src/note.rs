@@ -4,7 +4,7 @@
 //! The text lives in the canvas item (`ItemKind::Note`), so every client sees it. A note that
 //! is not being edited draws its text as Markdown ([`crate::markdown::style`]); a click or the
 //! canvas putting the caret in it swaps in the editor, and blur swaps back. Edits are committed to
-//! the host after a short pause in typing and on blur; a remote change is taken only while this
+//! the worker after a short pause in typing and on blur; a remote change is taken only while this
 //! client is not editing (last writer wins, no merge). A task line (`- [ ] …`) is read as a row
 //! whose box ticks on a click, the one edit that needs no editor.
 
@@ -21,7 +21,7 @@ use gpui_kit::component::text::TextView;
 use slopty_core::ItemId;
 use slopty_theme::Theme;
 
-/// Typing pause before the text is sent to the host.
+/// Typing pause before the text is sent to the worker.
 const COMMIT_AFTER: Duration = Duration::from_millis(400);
 
 /// What an empty note says.

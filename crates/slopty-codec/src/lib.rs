@@ -5,7 +5,7 @@
 //!   control, no reordering, infinite GOP with long-term references, Annex B out.
 //! * `Decoder` (macOS, iOS) — a `VTDecompressionSession` fed Annex B; it rebuilds its format
 //!   description from the parameter sets in front of each keyframe.
-//! * [`audio`] — Opus through `AudioConverter` (encode on the host, decode anywhere) and an
+//! * [`audio`] — Opus through `AudioConverter` (encode on the worker, decode anywhere) and an
 //!   `AudioQueue` player.
 //!
 //! Output is delivered on VideoToolbox's own threads through the sink closure given at

@@ -3,9 +3,9 @@
 //!
 //! macOS throttles timers and network work of applications whose windows are occluded or
 //! hidden (App Nap) and coalesces timers of background processes. The QUIC keep-alive is 5 s
-//! and the app gives a silent host up after 15 s, so a throttled peer can go quiet long enough
+//! and the app gives a silent worker up after 15 s, so a throttled peer can go quiet long enough
 //! for the other side to drop the link. An [`Activity`] with `LatencyCritical` tells the system
-//! this process must keep its timers sharp; the app and the host daemon hold one for their
+//! this process must keep its timers sharp; the app and the worker daemon hold one for their
 //! whole run.
 
 #![cfg(any(target_os = "macos", target_os = "ios"))]
@@ -35,7 +35,7 @@ impl Activity {
     }
 
     /// Keep the machine from idle sleep while the reason holds (the display may still sleep):
-    /// a client is attached and the host has to keep answering it.
+    /// a client is attached and the worker has to keep answering it.
     #[must_use]
     pub fn system_awake(reason: &str) -> Self {
         Self::begin(NSActivityOptions::UserInitiated, reason)

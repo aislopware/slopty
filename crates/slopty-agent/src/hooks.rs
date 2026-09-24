@@ -1,6 +1,6 @@
 //! Registering the `slopty hook` relay in Claude Code's user settings.
 //!
-//! `slopty hook install` writes an entry per event in `~/.claude/settings.json`; the host
+//! `slopty hook install` writes an entry per event in `~/.claude/settings.json`; the worker
 //! daemon runs the same code when a client asks (`ClientMsg::InstallHooks`), because the
 //! human whose agent Slopty is guessing at may be sitting in front of a phone. The document
 //! is edited in place — other people's hooks and every other setting are kept — and written
@@ -267,13 +267,15 @@ mod tests {
         assert!(is_relay(&json!({"type":"command","command":"/a/b/slopty","args":["hook"]})));
         assert!(is_relay(&json!({"type":"command","command":"/a/b/slopty hook"})));
         assert!(!is_relay(
-            &json!({"type":"command","command":"/a/b/slopty","args":["host","status"]})
+            &json!({"type":"command","command":"/a/b/slopty","args":["worker","status"]})
         ));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/other hook"})));
         // Both conditions of each form must hold: one argument that is `hook`, or no
         // arguments and a command line that ends in ` hook`.
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty","args":["hook","x"]})));
-        assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty hook","args":["host"]})));
+        assert!(!is_relay(
+            &json!({"type":"command","command":"/a/b/slopty hook","args":["worker"]})
+        ));
         assert!(!is_relay(&json!({"type":"command","command":"/a/b/slopty"})));
     }
 

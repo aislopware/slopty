@@ -43,7 +43,7 @@ impl Clock for SystemClock {
 /// How a decoded frame got here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FrameStamp {
-    /// Presentation timestamp, from the host's capture clock, widened past the wire's 32-bit
+    /// Presentation timestamp, from the worker's capture clock, widened past the wire's 32-bit
     /// wrap by [`CaptureClock`]; also the frame's identity and its order.
     pub pts_us: u64,
     /// Which picture this is out of the decoder, counted from the first. The pacer reads the
@@ -58,7 +58,7 @@ pub struct FrameStamp {
 
 /// Widens the wire's 32-bit capture timestamp into a monotonic one.
 ///
-/// `FrameInfo::capture_ts_us` carries the low 32 bits of the host's microsecond clock, which
+/// `FrameInfo::capture_ts_us` carries the low 32 bits of the worker's microsecond clock, which
 /// wraps every ~71.6 minutes. Widening it with `u64::from` would make the first frame after a
 /// wrap compare *older* than the last one before it, and every ordering test downstream — the
 /// pacer's, the decoder's parked arrivals — would reject fresh pictures until the truncated
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!((stats.presented, stats.skipped, stats.late), (3, 5, 1));
     }
 
-    /// The host's capture clock is 32 bits of microseconds and wraps every ~71.6 minutes. The
+    /// The worker's capture clock is 32 bits of microseconds and wraps every ~71.6 minutes. The
     /// widened stamp keeps climbing through it, so the pacer never mistakes the first frame of
     /// the new turn for a straggler and freeze the screen until the raw value catches up.
     #[test]

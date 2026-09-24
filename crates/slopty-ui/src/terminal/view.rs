@@ -33,7 +33,7 @@ use crate::kit::FIND_PLACEHOLDER;
 use crate::terminal::element::{CellMetrics, TerminalElement, separator_color};
 use crate::terminal::{latency, url};
 
-/// Hits asked for per search; the host counts every hit regardless.
+/// Hits asked for per search; the worker counts every hit regardless.
 const SEARCH_MAX: u32 = 5_000;
 /// While the search bar is open, output refreshes the hits at most this often.
 const SEARCH_REFRESH: Duration = Duration::from_millis(300);
@@ -91,7 +91,7 @@ mod actions {
             ScrollPageUp,
             /// Scroll a page down towards the output.
             ScrollPageDown,
-            /// Scroll to the oldest line the host keeps.
+            /// Scroll to the oldest line the worker keeps.
             ScrollToTop,
             /// Back to following the output.
             ScrollToBottom,
@@ -158,7 +158,7 @@ struct Search {
     reveal: bool,
     /// The needle is a regular expression.
     regex: bool,
-    /// The host could not compile the regex.
+    /// The worker could not compile the regex.
     invalid: Option<String>,
     _subscription: gpui::Subscription,
 }
@@ -222,7 +222,7 @@ pub enum TerminalViewEvent {
         /// Its body.
         body: String,
     },
-    /// The working directory changed (OSC 7), with the repository the host resolved it to.
+    /// The working directory changed (OSC 7), with the repository the worker resolved it to.
     /// What arrange-by-repo groups on, so it has to follow a `cd` and not stay at whatever the
     /// session opened in.
     Cwd {
@@ -238,7 +238,7 @@ pub enum TerminalViewEvent {
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
     /// The human confirmed closing this shell while its command runs: the canvas sends
-    /// the host `Close`.
+    /// the worker `Close`.
     CloseConfirmed,
     /// A shell command finished (shell integration marks): what was typed, its status, and how
     /// long it ran from the frame the cursor left its prompt to the frame the next prompt
@@ -274,7 +274,7 @@ pub enum TerminalViewEvent {
 /// A placed image with the texture the element paints it from.
 #[derive(Clone, Debug)]
 pub struct PlacedImage {
-    /// Where the host laid it out.
+    /// Where the worker laid it out.
     pub placement: Placement,
     /// The texture, BGRA premultiplied as GPUI wants it.
     pub image: Arc<gpui::RenderImage>,
@@ -374,7 +374,7 @@ pub struct TerminalView {
     touch_selecting: bool,
     /// The search bar, while open.
     search: Option<Search>,
-    /// The agent's state in this session, as the host last reported it.
+    /// The agent's state in this session, as the worker last reported it.
     agent: Option<AgentStatus>,
     /// The search mode the next bar opens with (regex or plain).
     search_regex: bool,
@@ -476,7 +476,7 @@ impl TerminalView {
         }
     }
 
-    /// The host's word on the agent in this session (`None`: no agent).
+    /// The worker's word on the agent in this session (`None`: no agent).
     pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
         self.agent = status;
         cx.notify();
@@ -526,7 +526,7 @@ impl TerminalView {
     }
 
     /// Open the find bar on `needle` (a find in every card chose this one): the field holds
-    /// it and the newest hit is revealed when the host answers.
+    /// it and the newest hit is revealed when the worker answers.
     pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.find(&Find, window, cx);
         let Some(search) = &mut self.search else { return };
@@ -600,7 +600,7 @@ impl TerminalView {
         self.restart_search(cx);
     }
 
-    /// The host rejected the regex.
+    /// The worker rejected the regex.
     fn search_invalid(&mut self, needle: &str, message: String, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
         if needle != search.needle {
@@ -1123,7 +1123,7 @@ impl TerminalView {
     }
 
     /// ⇧-arrow with a selection: where its head moves (a cell sideways, wrapping at the row's
-    /// ends; a row up or down, within the lines the host keeps). `None` when the keystroke is
+    /// ends; a row up or down, within the lines the worker keeps). `None` when the keystroke is
     /// not that.
     fn adjusted_head(
         &self,
@@ -1311,7 +1311,7 @@ impl TerminalView {
         }
     }
 
-    /// ⌘K: the host drops the history and the shell repaints its prompt at the top.
+    /// ⌘K: the worker drops the history and the shell repaints its prompt at the top.
     pub fn clear_screen(&mut self, _: &ClearScreen, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.scroll_to_bottom();
         self.send(TermRequest::Clear);
@@ -1349,7 +1349,7 @@ impl TerminalView {
         self.scroll_lines(i64::from(self.state.size().rows).max(1).saturating_neg(), cx);
     }
 
-    /// ⇧⇱ / ⌘⇱: the oldest line the host keeps at the top.
+    /// ⇧⇱ / ⌘⇱: the oldest line the worker keeps at the top.
     pub fn scroll_to_top(&mut self, _: &ScrollToTop, _window: &mut Window, cx: &mut Context<Self>) {
         self.scroll_lines(i64::MAX, cx);
     }
@@ -1364,7 +1364,7 @@ impl TerminalView {
         self.scroll_lines(i64::MIN, cx);
     }
 
-    /// ⌘A: every line from the oldest the host keeps to the newest; the history not cached
+    /// ⌘A: every line from the oldest the worker keeps to the newest; the history not cached
     /// yet is fetched so the copy that follows has it.
     pub fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
         let size = self.state.size();
@@ -1404,7 +1404,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the host brackets
+    /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the worker brackets
     /// it when the program asked).
     pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
@@ -1555,7 +1555,7 @@ impl TerminalView {
     }
 
     /// A frame reached the display at `now`: its guesses showed the keys in `shown` (their
-    /// sequence numbers) and its grid the host's state after key `input_ack`.
+    /// sequence numbers) and its grid the worker's state after key `input_ack`.
     pub fn presented(&mut self, now: Instant, shown: &[u64], input_ack: u64) {
         self.latency.painted(now, shown, input_ack);
     }
@@ -1782,7 +1782,7 @@ impl TerminalView {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
                 Effect::Cwd { path, repo } => cx.emit(TerminalViewEvent::Cwd { path, repo }),
-                Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "host"),
+                Effect::Error(e) => tracing::warn!(session = %self.session, error = %e, "worker"),
                 Effect::Matches { needle, total, matches } => {
                     self.matches_arrived(&needle, total, matches, cx);
                 }
@@ -1964,7 +1964,7 @@ impl TerminalView {
         self.state.driving()
     }
 
-    /// Ask the host to make this client the driver: the PTY takes our size from now on.
+    /// Ask the worker to make this client the driver: the PTY takes our size from now on.
     pub fn drive(&self) {
         self.send(TermRequest::Drive { drive: true });
     }
@@ -2072,7 +2072,7 @@ impl TerminalView {
         }
         // A program that asked for the mouse gets the wheel (⇧ keeps it for scrolling, as
         // in every terminal); so does anything on the alternate screen, which has no
-        // history here to scroll — the host turns it into cursor keys (alternate scroll).
+        // history here to scroll — the worker turns it into cursor keys (alternate scroll).
         let modes = self.state.modes();
         let to_program = (modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
             || modes.contains(TermModes::ALT_SCREEN);
@@ -2907,7 +2907,7 @@ mod tests {
     }
 
     /// Three command blocks: `ls` (a, b), `false` (nothing), `seq 2` (1, 2, blank), then the
-    /// newest prompt. Lines 0..=5 are history the host already sent, 6..=8 the screen.
+    /// newest prompt. Lines 0..=5 are history the worker already sent, 6..=8 the screen.
     fn with_command_blocks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let screen =
@@ -3644,7 +3644,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-c");
         assert_eq!(text(cx).as_deref(), Some("1\n2"), "blank tail trimmed, prompt rows excluded");
 
-        // ⌘K is the host's to do: one request, nothing typed.
+        // ⌘K is the worker's to do: one request, nothing typed.
         drain_words(&mut rx);
         cx.simulate_keystrokes("cmd-k");
         assert_eq!(drain_words(&mut rx), ["clear"]);
@@ -3831,7 +3831,7 @@ mod tests {
         assert_eq!(items, ["Paste", "Find…", "Clear screen"]);
         assert!(drain_input(&mut rx).is_empty(), "a right click is not reported");
         pick(cx, "clear");
-        assert_eq!(drain_words(&mut rx), ["clear"], "the host clears, nothing typed");
+        assert_eq!(drain_words(&mut rx), ["clear"], "the worker clears, nothing typed");
 
         cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
         right_click(cx);
@@ -4530,7 +4530,7 @@ mod tests {
         cx.run_until_parked();
         while rx.try_recv().is_ok() {}
         wheel(cx, -1.0, mods, TouchPhase::Started);
-        assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the host makes it a key");
+        assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the worker makes it a key");
     }
 
     /// The scrollbar shows over the right edge once there is history and the pointer is over
@@ -4657,7 +4657,7 @@ mod tests {
         out
     }
 
-    /// An input method previews its composition at the cursor and nothing reaches the host
+    /// An input method previews its composition at the cursor and nothing reaches the worker
     /// until it commits; the commit goes out as raw bytes and clears the preview.
     #[gpui::test]
     fn composition_is_previewed_then_committed_as_raw_bytes(cx: &mut TestAppContext) {
@@ -5177,7 +5177,7 @@ mod tests {
     }
 
     /// The meter reads a frame when it is presented — at the next frame callback — not when
-    /// it is painted: the host's echo drawn now counts only once the display takes it.
+    /// it is painted: the worker's echo drawn now counts only once the display takes it.
     #[gpui::test]
     fn a_key_is_timed_when_its_frame_is_presented(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
@@ -5315,7 +5315,7 @@ mod tests {
         assert_eq!(reshaped, 0, "the first screen is still shaped");
     }
 
-    /// Every message the host received that types or clears, oldest first, as one word each.
+    /// Every message the worker received that types or clears, oldest first, as one word each.
     fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {

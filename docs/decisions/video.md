@@ -45,7 +45,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   window whatever the capture path and whatever the content (a scrolling and a static window
   encode in the same time), i.e. the hardware encoder's fixed pipeline, not rate control. The
   host keeps both as p50/p95/max rings per stream (`ScreenStats::capture` / `::encode`, 600
-  frames) and exposes them on the local control socket (`CtlRequest::Screens`, `slopty host
+  frames) and exposes them on the local control socket (`CtlRequest::Screens`, `slopty worker
   screens`); `slopty bench screen` appends them on loopback. Not on the wire: the client has no
   use for the host's internal split, and the protocol number stays with the tracks that need it.
 
@@ -57,7 +57,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   path's latency: end to end (capture → decoded on loopback, `slopty bench screen`)
   **1.7 ms p50 against 9.0 ms** for the window filter in a debug build
   (release: 2.6 ms vs 9.0 ms), the ≥ 3 ms the brief asked for. Rules, in
-  `slopty_host::screen::resolve` / `check_geometry`: crop only while the window is entirely on
+  `slopty_worker::screen::resolve` / `check_geometry`: crop only while the window is entirely on
   one display (`CGGetDisplaysWithRect` + `encloses`) and no on-screen window of another process
   at levels 0–8 overlaps it (`occluded`, from `kCGWindowListOptionOnScreenAboveWindow`); the
   Dock's window is a transparent full-screen hit region at level 20, the menu bar is 24 and
@@ -74,7 +74,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Rulings of the crop path: when it is allowed, what it must never show** (2026-09-06,
   after the Codex review of the first cut). The crop path is an optimisation of the window
   filter and must be indistinguishable from it to the viewer; wherever it cannot be, the
-  window filter serves. `slopty_host::screen::crop_allowed(on_screen, crop, occluded)` is
+  window filter serves. `slopty_worker::screen::crop_allowed(on_screen, crop, occluded)` is
   the rule, unit-tested; `wanted_crop` / `resolve` feed it from the window server.
   1. *Allowed only for an on-screen window* (`kCGWindowIsOnscreen`, `window_on_screen`): a
      minimised window or one on another Space has a frame but nothing at it; the crop would
@@ -92,7 +92,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
      stream never ends by itself, so `check_geometry` treats "no bounds for the window" on the
      crop path as the window gone: stops the capture and fires `on_stop`
      (`CaptureError::Stopped("window closed")`) once, the same event the filter path raises.
-     Gated test `closing_the_window_under_a_display_crop_ends_the_stream` (`slopty-host`)
+     Gated test `closing_the_window_under_a_display_crop_ends_the_stream` (`slopty-worker`)
      kills the Ghostty window and waits for it. First cut returned "no change" and kept
      streaming the old rectangle.
   4. *Audio is the window's application's only.* `sourceRect` scopes the picture, not the
@@ -173,7 +173,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   window". `ScreenEvent::Rate { target_bps, verdict }` goes back to the client on every
   decision so the ⌘⇧I overlay and `slopty bench screen` show the host's target and whether it
   is holding; before, the target lived only in hostd's log on another machine.
-  `PROTOCOL_VERSION` 7 → 8, goldens `client_screen_report` and `host_screen_rate`.
+  `PROTOCOL_VERSION` 7 → 8, goldens `client_screen_report` and `worker_screen_rate`.
   *Policy:* `slopty_media::judge` is a pure function of the decision window
   (`RateWindow`): any stall in the window → `Stall`, freeze (no cut, no grow, the cooldown
   neither restarts nor ticks, the window's loss is discarded — it is the receiver giving up on
@@ -221,10 +221,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   section blamed). Rules that follow, each measured in the same test:
   * `slopty_codec::warm_up` builds one HEVC session from canned 64×64 parameter sets;
     `slopty_client::warm_up_decoder` runs it once per process on its own thread and is
-    called at app launch (`open_workspace`), on the CLI's connect, by `HostLink::start`
+    called at app launch (`open_workspace`), on the CLI's connect, by `WorkerLink::start`
     (`crates/slopty-client/src/link.rs`), and by the test. First picture 526 → 319 ms on
     the first open in a process.
-  * `slopty_host::screen::warm_up` builds and drops a 64×64 HEVC encoder, then starts and
+  * `slopty_worker::screen::warm_up` builds and drops a 64×64 HEVC encoder, then starts and
     stops a 64×64 capture of the first display, when hostd comes online. The capture-only
     version did not move the first `Opened` (270–295 ms); the encoder did (→ 127–140 ms):
     VideoToolbox's first compression session in a process is ~170 ms, the later ones ~10.
@@ -279,7 +279,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   below: "Parity tracks loss asymmetrically, with a deadband" (asymmetric rise ½ / fall ⅛,
   2 % deadband, stalled windows excluded from the estimate).
 
-- ✅ **Host pipeline** (`slopty-host::screen`, verified on hardware 2026-09-04): one
+- ✅ **Host pipeline** (`slopty-worker::screen`, verified on hardware 2026-09-04): one
   `ScreenStream` per open stream: SCK frame → `Encoder::encode` on the SCK queue → packetize in
   the VideoToolbox output callback → bounded datagram queue (4096) → one pump task per
   connection calling `Connection::send_datagram`. Backpressure drops whole *captured* frames
@@ -304,7 +304,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sends a datagram only when the stream-pixel position or visibility changed.
 
 - ✅ **Client receive path** (`slopty-client::screen`, verified end to end 2026-09-04):
-  `HostLink` reads every datagram and a `ScreenRouter` fans out by stream id, keeping a
+  `WorkerLink` reads every datagram and a `ScreenRouter` fans out by stream id, keeping a
   512-datagram backlog for streams whose `Opened` has not been processed yet (datagrams beat the
   control stream). One task per stream: reassemble → decode; the reassembler's timers run at
   2 ms while frames are pending and 50 ms when idle; a receiver report goes out every 50 ms.
@@ -406,7 +406,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (every record the CLI writes, tool calls included), and its path arrives with the first hook
   payload, so the daemon tails that file for the sessions a client asked about and nothing
   else. Wire: `ClientMsg::Transcript(TranscriptFollow)` to start/stop following,
-  `HostMsg::Transcript(TranscriptUpdate { reset, entries })` with a 200-entry snapshot on
+  `WorkerMsg::Transcript(TranscriptUpdate { reset, entries })` with a 200-entry snapshot on
   reset and appended slices afterwards; entries are already reduced to
   `User{text}` / `Assistant{markdown}` / `ToolUse{name, summary}` on the host so the phone
   never parses JSONL and the wire stays small. `PROTOCOL_VERSION` 9 → 10, goldens
@@ -467,7 +467,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   canvas hosting the conversation view without a grid, on the Mac and the phone.
   Landed (2026-09-12, protocol 15): (1) as `slopty_agent::stream`; (2) as `hostd::driven` with
   `ClientMsg::{OpenAgent, AgentSay, AgentAnswer, AgentInterrupt}` and
-  `HostMsg::{AgentPartial, AgentPermission}`, the session a `SessionKind::Agent` in the
+  `WorkerMsg::{AgentPartial, AgentPermission}`, the session a `SessionKind::Agent` in the
   ordinary session list so the canvas, many-clients and reattach machinery is reused unchanged;
   (3) as `TerminalView`'s driven mode (ARCHITECTURE, "Driven agents"). Two rulings made on the
   way: the fake `claude` for the self-test is a Rust binary (`slopty-fake-claude`) handed to the
@@ -494,8 +494,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ≈17 s of asking with the backoff. Different evidence clears each: any datagram, heartbeat
   included, restarts the cap (the host is there); only a video fragment lifts the suppression
   (the source drew). Wire:
-  `SourceState` + the new `ScreenEvent` variant, goldens `host_screen_source` (new) and
-  `host_screen_rate` / `client_hello` re-accepted, PROTOCOL_VERSION 12 → 13. Tests:
+  `SourceState` + the new `ScreenEvent` variant, goldens `worker_screen_source` (new) and
+  `worker_screen_rate` / `client_hello` re-accepted, PROTOCOL_VERSION 12 → 13. Tests:
   `an_idle_source_stops_the_refresh_requests`, `refresh_requests_give_up_after_the_cap` and
   `a_heartbeat_restarts_the_cap_and_a_frame_lifts_the_idle_hint`
   (`crates/slopty-media/tests/pipeline.rs`), `the_placeholder_says_which_end_is_waiting`.
@@ -556,14 +556,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   enumerates with `onScreenWindowsOnly: false`) and ScreenCaptureKit has nothing to deliver for
   it, which is exactly the state the guard is about. Two tests use it:
   `a_window_that_never_draws_is_reported_idle_and_stops_the_asking`
-  (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) for the host and the receiver, and
+  (`apps/slopty-worker/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) for the host and the receiver, and
   `a_remote_window_that_never_draws_waits_instead_of_asking_forever`
   (`crates/slopty-e2e/tests/app.rs`) for the app: ⌘O, pick the row, hide, and then the item's
   `Role::Status` reads "waiting for the window to draw…" while the host counts what it was
   actually asked for. **4 refreshes against the cap of 12**, then silence, and the picture
   returns on its own when the window draws again (MEASUREMENTS.md, "the refresh guard end to
   end"). The host now counts them: `ScreenStats::refreshes`, over the control socket as
-  `slopty host screens` — a client-side counter would only say what the client believes it sent.
+  `slopty worker screens` — a client-side counter would only say what the client believes it sent.
   Known limit the tests make visible rather than fix: `check_source` latches on `encoded > 0`, so
   a window that draws once and *then* hides stays `Live` forever and only the cap protects the
   receiver (superseded 2026-09-06: `SourceTracker` follows recent frames, resetting to `Idle` after
@@ -593,10 +593,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   placeholder and report the window filter for a stream on the crop.
   Not changed: `window_on_screen` still reads `kCGWindowIsOnscreen` — see the entry below for the
   measurement that finally settles it.
-  Tests: `a_frame_captured_while_the_target_is_hidden_is_withheld` (unit, `slopty-host`) is the
+  Tests: `a_frame_captured_while_the_target_is_hidden_is_withheld` (unit, `slopty-worker`) is the
   statement — a frame handed to `on_frame` while the guard is set is counted as withheld and goes
   no further, and it fails the moment the guard is removed. `a_hidden_window_stops_being_served_
-  from_its_crop` (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) drives visible →
+  from_its_crop` (`apps/slopty-worker/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`) drives visible →
   crop path → hide → show for real, with a **second window repainting directly behind the
   target**: without that backdrop the framework has no new frame for the rectangle once the
   window goes, so every assertion about what is not sent passes for free. The client's own frame
@@ -724,8 +724,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   premultiplied, padding alpha) and turns it into the wire's premultiplied BGRA, and refuses
   anything else rather than misread it. Tests: `slopty-capture::cursor::tests` (each layout,
   straight alpha, padded rows, short data, rounding), the host's `shape_tests` (one send per
-  change, a blank read changes nothing), the proto golden `host_screen_cursor`, and headless
-  `the_hosts_cursor_picture_is_drawn_at_its_hotspot` (size and hotspot in points, short bytes
+  change, a blank read changes nothing), the proto golden `worker_screen_cursor`, and headless
+  `the_workers_cursor_picture_is_drawn_at_its_hotspot` (size and hotspot in points, short bytes
   and `None` put the arrow back).
 
 - ✅ **The client's own pointer hides over a card that shows a frame** (2026-09-15). With the
@@ -756,10 +756,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   * a target the geometry tick reports off screen is `Idle` immediately, with no quiet period —
     a window that is not on screen cannot be drawing, whatever the counter says, and that is the
     same evidence the crop guard acts on.
-  Tests: five in `crates/slopty-host/src/screen.rs` (never drew, first frame, drew-then-stopped,
-  a slow target that must not flap, hidden), and the hostd e2e now drives hide → show → hide and
-  asserts the host reports `Idle` the second time — which under the latch it never did. No wire
-  change: the states are the ones `SourceState` already had.
+  Tests: five in `crates/slopty-worker/src/screen.rs` (never drew, first frame, drew-then-stopped,
+  a slow target that must not flap, hidden), and the `slopty-worker` e2e now drives hide → show →
+  hide and asserts the host reports `Idle` the second time — which under the latch it never did. No
+  wire change: the states are the ones `SourceState` already had.
 
 - ❌ **The pacer is not clumping frames under load** (2026-09-06), retiring the leftover the flap
   track raised. The claim was that 19–38 datagram stalls per 90 s under every load shape, against

@@ -1,6 +1,6 @@
 //! `slopty attach`: a raw-mode terminal client that renders frames into the local terminal.
 //!
-//! Keys go to the host as raw bytes (the local terminal already encoded them), so this is the
+//! Keys go to the worker as raw bytes (the local terminal already encoded them), so this is the
 //! exact bytes-in/rows-out path the GPUI apps use minus the prediction layer. Detach with `^]`.
 
 use std::io::Write as _;
@@ -8,10 +8,10 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use rustix::termios::{self, OptionalActions, Termios};
-use slopty_client::{Effect, HostLink, LinkEvent, TermState};
+use slopty_client::{Effect, LinkEvent, TermState, WorkerLink};
 use slopty_core::SessionId;
 use slopty_grid::{Color, Line, Style, StyleFlags, Underline};
-use slopty_net::{ClientMsg, HostMsg};
+use slopty_net::{ClientMsg, WorkerMsg};
 use slopty_proto::input::CellMetrics;
 use slopty_proto::terminal::{CloseReason, OpenSession, TermEvent, TermRequest, TermSize};
 
@@ -22,11 +22,11 @@ const DETACH: u8 = 0x1d;
 
 pub async fn open(
     data_dir: &Path,
-    host: Option<&str>,
+    worker: Option<&str>,
     cwd: Option<String>,
     command: Vec<String>,
 ) -> Result<()> {
-    let mut session = connect_to(data_dir, host).await?;
+    let mut session = connect_to(data_dir, worker).await?;
     let size = local_size()?;
     session
         .conn
@@ -42,16 +42,16 @@ pub async fn open(
         .await?;
     let id = loop {
         match session.conn.rx.recv().await? {
-            HostMsg::SessionOpened(s) => break s.id,
-            HostMsg::Term { event: TermEvent::Error(e), .. } => bail!("host: {e}"),
+            WorkerMsg::SessionOpened(s) => break s.id,
+            WorkerMsg::Term { event: TermEvent::Error(e), .. } => bail!("worker: {e}"),
             _other => {}
         }
     };
     run(session, id).await
 }
 
-pub async fn attach(data_dir: &Path, host: Option<&str>, needle: &str) -> Result<()> {
-    let mut session = connect_to(data_dir, host).await?;
+pub async fn attach(data_dir: &Path, worker: Option<&str>, needle: &str) -> Result<()> {
+    let mut session = connect_to(data_dir, worker).await?;
     let needle = needle.to_lowercase();
     let mut hits =
         session.conn.ack.sessions.iter().filter(|s| s.id.to_string().starts_with(&needle));
@@ -112,7 +112,7 @@ fn enter_raw() -> Result<RawGuard> {
 async fn run(session: Session, id: SessionId) -> Result<()> {
     let Session { conn, endpoint, .. } = session;
     let size = local_size()?;
-    let mut link = HostLink::start(conn);
+    let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events taken")?;
     let mut state = TermState::new(size);
     let raw = enter_raw()?;
@@ -142,7 +142,7 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                             Effect::Exited(status) => {
                                 done = Some(if status == 0 { "exited" } else { "exited with error" });
                             }
-                            Effect::Error(e) => tracing::warn!(error = %e, "host error"),
+                            Effect::Error(e) => tracing::warn!(error = %e, "worker error"),
                             Effect::Title(_)
                             | Effect::Cwd { .. }
                             | Effect::ClipboardWrite(_)
@@ -157,11 +157,11 @@ async fn run(session: Session, id: SessionId) -> Result<()> {
                         break Ok(why);
                     }
                 }
-                Some(LinkEvent::Control(HostMsg::SessionClosed { session, reason })) if session == id => {
+                Some(LinkEvent::Control(WorkerMsg::SessionClosed { session, reason })) if session == id => {
                     break Ok(match reason {
                         CloseReason::Requested => "closed",
                         CloseReason::Exited => "exited",
-                        CloseReason::HostShutdown => "host shut down",
+                        CloseReason::WorkerShutdown => "worker shut down",
                     });
                 }
                 Some(

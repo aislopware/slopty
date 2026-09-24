@@ -1,7 +1,7 @@
 //! The relay loop: one UDP socket both ends speak through, with [`Shaper`] deciding each packet.
 //!
-//! One client per run, learned from the first packet that is not the host's. That is all a
-//! measurement needs, and it keeps the return path unambiguous: whatever the host sends back
+//! One client per run, learned from the first packet that is not the worker's. That is all a
+//! measurement needs, and it keeps the return path unambiguous: whatever the worker sends back
 //! goes to the address the client was last seen at.
 
 use std::net::SocketAddr;
@@ -20,9 +20,9 @@ const MAX_DATAGRAM: usize = 65_536;
 /// What each direction has carried.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Carried {
-    /// Client to host.
+    /// Client to worker.
     pub up: Tally,
-    /// Host to client.
+    /// Worker to client.
     pub down: Tally,
 }
 
@@ -39,28 +39,28 @@ struct Outgoing {
 #[derive(Debug)]
 pub struct Relay {
     socket: Arc<UdpSocket>,
-    host: SocketAddr,
+    worker: SocketAddr,
     /// The run's epoch. Every `leaves` is measured from here, in both the shaper and the senders.
     started: Instant,
     up: Arc<Mutex<Shaper>>,
     down: Arc<Mutex<Shaper>>,
     /// Each direction has one sender, so packets leave in the order they were admitted.
-    to_host: mpsc::UnboundedSender<Outgoing>,
+    to_worker: mpsc::UnboundedSender<Outgoing>,
     to_client: mpsc::UnboundedSender<Outgoing>,
 }
 
 impl Relay {
-    /// Bind a relay at `at`, forwarding to `host` over `link`.
+    /// Bind a relay at `at`, forwarding to `worker` over `link`.
     ///
     /// `at` is normally the wildcard address: the client reaches the relay on loopback while the
-    /// host is on a real interface, and a socket bound to `127.0.0.1` cannot send there.
+    /// worker is on a real interface, and a socket bound to `127.0.0.1` cannot send there.
     ///
     /// # Errors
     ///
     /// If the address is taken.
     pub async fn bind(
         at: SocketAddr,
-        host: SocketAddr,
+        worker: SocketAddr,
         link: Link,
         seed: u64,
     ) -> std::io::Result<Self> {
@@ -71,14 +71,14 @@ impl Relay {
             tokio::spawn(send_in_order(Arc::clone(&socket), started, rx));
             tx
         };
-        let (to_host, to_client) = (sender(), sender());
+        let (to_worker, to_client) = (sender(), sender());
         Ok(Self {
             socket,
-            host,
+            worker,
             started,
             up: Arc::new(Mutex::new(Shaper::new(link, seed))),
             down: Arc::new(Mutex::new(Shaper::new(link, seed ^ 0xffff_ffff))),
-            to_host,
+            to_worker,
             to_client,
         })
     }
@@ -114,9 +114,9 @@ impl Relay {
         loop {
             let (len, from) = self.socket.recv_from(&mut buf).await?;
             let Some(datagram) = buf.get(..len) else { continue };
-            let (side, sender, to) = if from == self.host {
+            let (side, sender, to) = if from == self.worker {
                 let Some(back) = client else {
-                    tracing::warn!("the host spoke before any client did; dropping");
+                    tracing::warn!("the worker spoke before any client did; dropping");
                     continue;
                 };
                 (&self.down, &self.to_client, back)
@@ -125,7 +125,7 @@ impl Relay {
                     tracing::info!(%from, "client");
                     client = Some(from);
                 }
-                (&self.up, &self.to_host, self.host)
+                (&self.up, &self.to_worker, self.worker)
             };
             let fate = side.lock().await.admit(len as u64, self.started.elapsed());
             let Fate::At(leaves) = fate else { continue };
@@ -179,11 +179,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_packet_reaches_the_host_and_the_answer_comes_back_to_the_client() {
-        let host = end().await;
+    async fn a_packet_reaches_the_worker_and_the_answer_comes_back_to_the_client() {
+        let worker = end().await;
         let client = end().await;
         let relay = Arc::new(
-            Relay::bind(wildcard(), host.local_addr().unwrap(), Link::CLEAR, 1).await.unwrap(),
+            Relay::bind(wildcard(), worker.local_addr().unwrap(), Link::CLEAR, 1).await.unwrap(),
         );
         let address = relay.addr().unwrap();
         tokio::spawn({
@@ -192,9 +192,9 @@ mod tests {
         });
 
         client.send_to(b"hello", address).await.unwrap();
-        assert_eq!(next(&host, Duration::from_secs(2)).await.as_deref(), Some(&b"hello"[..]));
-        // The host answers the relay, which is the only address it has ever seen.
-        host.send_to(b"hi back", address).await.unwrap();
+        assert_eq!(next(&worker, Duration::from_secs(2)).await.as_deref(), Some(&b"hello"[..]));
+        // The worker answers the relay, which is the only address it has ever seen.
+        worker.send_to(b"hi back", address).await.unwrap();
         assert_eq!(next(&client, Duration::from_secs(2)).await.as_deref(), Some(&b"hi back"[..]));
 
         let carried = relay.carried().await;
@@ -204,11 +204,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_delayed_link_holds_a_packet_for_its_delay() {
-        let host = end().await;
+        let worker = end().await;
         let client = end().await;
         let link = Link { delay: Duration::from_millis(150), ..Link::CLEAR };
         let relay =
-            Arc::new(Relay::bind(wildcard(), host.local_addr().unwrap(), link, 1).await.unwrap());
+            Arc::new(Relay::bind(wildcard(), worker.local_addr().unwrap(), link, 1).await.unwrap());
         let address = relay.addr().unwrap();
         tokio::spawn({
             let relay = Arc::clone(&relay);
@@ -217,7 +217,7 @@ mod tests {
 
         let sent = Instant::now();
         client.send_to(b"slow", address).await.unwrap();
-        assert!(next(&host, Duration::from_secs(2)).await.is_some(), "it still arrives");
+        assert!(next(&worker, Duration::from_secs(2)).await.is_some(), "it still arrives");
         let took = sent.elapsed();
         assert!(took >= Duration::from_millis(150), "held for the delay, took {took:?}");
         assert!(took < Duration::from_millis(600), "and not much longer, took {took:?}");
@@ -228,12 +228,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_jittered_link_still_delivers_in_the_order_it_was_given() {
         const RUN: u16 = 100;
-        let host = end().await;
+        let worker = end().await;
         let client = end().await;
         // Jitter is the one fault that could reorder: each packet draws its own wait.
         let link = Link { jitter: Duration::from_millis(20), ..Link::CLEAR };
         let relay =
-            Arc::new(Relay::bind(wildcard(), host.local_addr().unwrap(), link, 5).await.unwrap());
+            Arc::new(Relay::bind(wildcard(), worker.local_addr().unwrap(), link, 5).await.unwrap());
         let address = relay.addr().unwrap();
         tokio::spawn({
             let relay = Arc::clone(&relay);
@@ -244,7 +244,7 @@ mod tests {
             client.send_to(&seq.to_be_bytes(), address).await.unwrap();
         }
         for seq in 0..RUN {
-            let datagram = next(&host, Duration::from_secs(2)).await.expect("every one arrives");
+            let datagram = next(&worker, Duration::from_secs(2)).await.expect("every one arrives");
             let bytes: [u8; 2] = datagram.as_slice().try_into().unwrap();
             assert_eq!(u16::from_be_bytes(bytes), seq, "packet {seq} arrived out of turn");
         }
@@ -252,11 +252,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_that_loses_everything_delivers_nothing() {
-        let host = end().await;
+        let worker = end().await;
         let client = end().await;
         let link = Link { loss: 1.0, ..Link::CLEAR };
         let relay =
-            Arc::new(Relay::bind(wildcard(), host.local_addr().unwrap(), link, 1).await.unwrap());
+            Arc::new(Relay::bind(wildcard(), worker.local_addr().unwrap(), link, 1).await.unwrap());
         let address = relay.addr().unwrap();
         tokio::spawn({
             let relay = Arc::clone(&relay);
@@ -266,7 +266,7 @@ mod tests {
         for _packet in 0..5_u32 {
             client.send_to(b"gone", address).await.unwrap();
         }
-        assert!(next(&host, Duration::from_millis(300)).await.is_none());
+        assert!(next(&worker, Duration::from_millis(300)).await.is_none());
         assert_eq!(relay.carried().await.up.lost, 5);
     }
 }

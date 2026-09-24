@@ -1,7 +1,7 @@
 //! A window that does nothing, for the refresh-storm guard.
 //!
 //! The app self-test needs a capture target that produces no frame at all: that is what puts the
-//! host into `SourceState::Idle` and the item into its waiting state, and it is the only way to
+//! worker into `SourceState::Idle` and the item into its waiting state, and it is the only way to
 //! see the receiver's refresh cap from outside. Nothing
 //! already on the desktop can play the part — the window picker lists on-screen windows only, so
 //! the target has to be on screen when it is listed and off screen when the stream opens, and no
@@ -11,13 +11,13 @@
 //! orders it in (without taking the keyboard: `orderFrontRegardless`, never `makeKey`) and then
 //! watches `<dir>` for one-word markers:
 //!
-//! * `hide` — order the window out. It stays in ScreenCaptureKit's window list (the host enumerates
-//!   with `onScreenWindowsOnly: false`) so a stream can still be opened on it, and that stream
-//!   never sees a frame.
-//! * `show` — order it back in and repaint it forever, which is the host's cue that the source is
+//! * `hide` — order the window out. It stays in ScreenCaptureKit's window list (the worker
+//!   enumerates with `onScreenWindowsOnly: false`) so a stream can still be opened on it, and that
+//!   stream never sees a frame.
+//! * `show` — order it back in and repaint it forever, which is the worker's cue that the source is
 //!   live again.
 //! * `sibling` — open a second window of this same process beside the first, and `unsibling` —
-//!   order that one out again. A window of the *same application* going away is what the host's
+//!   order that one out again. A window of the *same application* going away is what the worker's
 //!   accessibility hide watch cannot tell from the target going away, so this is how a false
 //!   suspicion is produced on purpose.
 //! * `popup` — open a borderless, non-activating panel at the pop-up menu level below the window,
@@ -31,7 +31,7 @@
 //! The optional origin is for the crop-path test, which needs a second one of these directly
 //! behind the target: while the target covers it the crop shows the target, and the moment the
 //! target is ordered out the same rectangle is a window that keeps repainting — which is what
-//! makes a leak from the crop something the host has a frame to leak.
+//! makes a leak from the crop something the worker has a frame to leak.
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), String> {
@@ -213,7 +213,7 @@ mod macos {
     }
 
     /// Leave what AppKit thinks of the window after an order, so a test that disagrees with the
-    /// host's window list can tell the two apart.
+    /// worker's window list can tell the two apart.
     fn note(dir: &Path, action: &str, visible: bool) {
         let _written = std::fs::write(dir.join("state"), format!("{action} visible={visible}\n"));
     }

@@ -1,4 +1,4 @@
-//! One PTY-backed child, its output ring and the last host's checkpoint.
+//! One PTY-backed child, its output ring and the last worker's checkpoint.
 
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ pub enum Broadcast {
 
 /// Shared session state.
 pub struct Session {
-    /// The id the host chose when it spawned the session.
+    /// The id the worker chose when it spawned the session.
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
@@ -36,9 +36,9 @@ pub struct Session {
     pub master: Arc<PtyMaster>,
     /// Size of record.
     pub size: Mutex<TermSize>,
-    /// Output since the last checkpoint: tapped by the attached host, read by us while detached.
+    /// Output since the last checkpoint: tapped by the attached worker, read by us while detached.
     pub ring: Mutex<Ring>,
-    /// The last host's terminal state (empty until a host sends one).
+    /// The last worker's terminal state (empty until a worker sends one).
     pub checkpoint: Mutex<Vec<u8>>,
     /// Connection id holding the master, if any.
     pub attached_by: Mutex<Option<u64>>,
@@ -158,7 +158,7 @@ impl Session {
         (ring.drain(), dropped)
     }
 
-    /// Output the attached host read, in order: goes after whatever the ring already holds.
+    /// Output the attached worker read, in order: goes after whatever the ring already holds.
     pub fn tap(&self, bytes: &[u8]) {
         self.ring.lock().push(bytes);
     }

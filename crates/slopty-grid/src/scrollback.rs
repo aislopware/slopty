@@ -1,6 +1,6 @@
 //! Client-side scrollback cache keyed by absolute line index.
 //!
-//! The host numbers every line the terminal has ever produced (0 = first line at session start).
+//! The worker numbers every line the terminal has ever produced (0 = first line at session start).
 //! The visible screen is the last `rows` lines when the viewport is at the bottom. A client keeps
 //! whatever lines it has received in a sparse window and asks for the ranges it is missing when
 //! the user scrolls, so scrolling is local and instant once a range is cached.
@@ -49,7 +49,7 @@ pub struct ScrollbackStats {
     pub cached: usize,
     /// Cache capacity.
     pub capacity: usize,
-    /// Total lines the host reports (history + screen).
+    /// Total lines the worker reports (history + screen).
     pub total: u64,
 }
 
@@ -64,9 +64,9 @@ pub struct Scrollback {
     /// shell; MEASUREMENTS 2026-09-13, the 20-shell zoom).
     prompts: BTreeSet<LineIndex>,
     capacity: usize,
-    /// Number of lines the host currently has (history + visible rows).
+    /// Number of lines the worker currently has (history + visible rows).
     total: u64,
-    /// The first index the host can still serve (older lines were evicted host-side).
+    /// The first index the worker can still serve (older lines were evicted worker-side).
     oldest: LineIndex,
 }
 
@@ -83,14 +83,14 @@ impl Scrollback {
         }
     }
 
-    /// Record the host's current line count and oldest retained index.
+    /// Record the worker's current line count and oldest retained index.
     pub fn set_extent(&mut self, oldest: LineIndex, total: u64) {
         self.total = total;
-        // Only when the host actually dropped something: this runs on every frame, and
+        // Only when the worker actually dropped something: this runs on every frame, and
         // `split_off` walks and rebuilds the map whether or not anything is below `oldest`.
         if oldest > self.oldest {
             self.oldest = oldest;
-            // Lines the host dropped are useless; drop them here too.
+            // Lines the worker dropped are useless; drop them here too.
             self.lines = self.lines.split_off(&oldest);
             self.prompts = self.prompts.split_off(&oldest);
         } else {
@@ -99,7 +99,7 @@ impl Scrollback {
         self.trim();
     }
 
-    /// Total lines on the host.
+    /// Total lines on the worker.
     #[must_use]
     pub const fn total(&self) -> u64 {
         self.total
@@ -165,7 +165,7 @@ impl Scrollback {
     }
 
     /// Sub-ranges of `[start, start + count)` that are not cached and are still retrievable, so
-    /// the client can request exactly those from the host.
+    /// the client can request exactly those from the worker.
     #[must_use]
     pub fn missing(&self, start: LineIndex, count: u64) -> Vec<(LineIndex, u64)> {
         let mut gaps = Vec::new();
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(sb.missing(LineIndex(8), 50), vec![(LineIndex(8), 2)], "clamped to total");
     }
 
-    /// The host's extent arrives on every frame; only a real advance may throw lines away.
+    /// The worker's extent arrives on every frame; only a real advance may throw lines away.
     #[test]
     fn a_repeated_extent_keeps_the_cache() {
         let mut sb = Scrollback::new(100);
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(sb.stats().cached, 2, "nothing was dropped by an unchanged oldest");
         assert_eq!(sb.total(), 60);
         sb.set_extent(LineIndex(7), 60);
-        assert!(sb.get(LineIndex(6)).is_none(), "an advance does drop what the host dropped");
+        assert!(sb.get(LineIndex(6)).is_none(), "an advance does drop what the worker dropped");
         assert!(sb.get(LineIndex(7)).is_some());
     }
 
@@ -273,7 +273,7 @@ mod tests {
         assert!(sb.get(LineIndex(1)).is_none(), "evicted by the capacity");
         assert_eq!(sb.prompt_before(LineIndex(5)), Some(LineIndex(3)));
         sb.set_extent(LineIndex(4), 10);
-        assert_eq!(sb.prompt_before(LineIndex(5)), None, "the host's drop clears it too");
+        assert_eq!(sb.prompt_before(LineIndex(5)), None, "the worker's drop clears it too");
     }
 
     /// A line the screen also holds is one allocation, not two.
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn eviction_is_oldest_first_and_host_extent_wins() {
+    fn eviction_is_oldest_first_and_worker_extent_wins() {
         let mut sb = Scrollback::new(3);
         sb.set_extent(LineIndex(0), 100);
         for i in 0..5_u64 {
@@ -309,9 +309,9 @@ mod tests {
         assert!(sb.get(LineIndex(1)).is_none());
         assert!(sb.get(LineIndex(4)).is_some());
         sb.set_extent(LineIndex(4), 100);
-        assert!(sb.get(LineIndex(3)).is_none(), "host evicted it, so do we");
+        assert!(sb.get(LineIndex(3)).is_none(), "worker evicted it, so do we");
         sb.insert(LineIndex(2), l("late"));
-        assert!(sb.get(LineIndex(2)).is_none(), "below the host's oldest is ignored");
+        assert!(sb.get(LineIndex(2)).is_none(), "below the worker's oldest is ignored");
         assert_eq!(sb.missing(LineIndex(0), 6), vec![(LineIndex(5), 1)], "starts at oldest");
     }
 }

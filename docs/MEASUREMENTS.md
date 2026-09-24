@@ -5,11 +5,11 @@ before trusting; hardware and network are stated per entry.
 
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
-Setup: mac-studio, `slopty-ptyd` + `slopty-hostd` + `slopty ping` on the same machine, debug
+Setup: mac-studio, `slopty-ptyd` + `slopty-worker` + `slopty ping` on the same machine, debug
 build, direct path selected. `slopty ping` sends `ClientMsg::Ping` on the control stream and
 times the `Pong` (application level, includes both daemons' channel hops).
 
-| build of hostd + cli                    | app rtt min | median | max   | QUIC rtt (direct path) |
+| build of worker + cli                    | app rtt min | median | max   | QUIC rtt (direct path) |
 | --------------------------------------- | ----------- | ------ | ----- | ---------------------- |
 | `slopty-net/apple-fast-datapath` on     | 52.8 ms     | 53.8   | 56.9  | 48.3 ms                |
 | feature off (plain `sendmsg`/`recvmsg`) | 0.41 ms     | 0.82   | 1.41  | 1.6 ms                 |
@@ -24,7 +24,7 @@ Ruling: the feature is removed from the workspace (DECISIONS.md, Transport).
 
 ## 2026-09-04 — keystroke echo round trip, loopback, debug build
 
-Setup: mac-studio (Apple silicon), `slopty-ptyd` + `slopty-hostd` + `slopty open -- /bin/sh`
+Setup: mac-studio (Apple silicon), `slopty-ptyd` + `slopty-worker` + `slopty open -- /bin/sh`
 all on the same machine, iroh direct path selected (`slopty sessions` showed
 `*direct ip:192.168.100.240 rtt ~0.6 ms`). Driver: a Python `pty.fork()` wrapper writing one byte
 and timing until the first byte of the echoed frame arrives. Includes Python overhead, the host's
@@ -78,7 +78,7 @@ endpoint alive for the process lifetime, so this is paid once, not per session.
 
 ## 2026-09-04 — screen pipeline, first display at 0.5×, loopback, debug build
 
-Setup: mac-studio (Apple silicon), `crates/slopty-host/tests/screen.rs` opens the main display
+Setup: mac-studio (Apple silicon), `crates/slopty-worker/tests/screen.rs` opens the main display
 (native 1920×1080 pt at 1× → 960×540 stream at `scale: 0.5`, 60 fps cap, 8 Mbit/s HEVC) for 2 s
 with a mostly static desktop, counting datagrams from the pipeline's queue. Latency is
 capture timestamp (SCK, host clock) → packet leaves the VideoToolbox callback, i.e. capture
@@ -94,20 +94,20 @@ queue delay + encode + packetize, measured inside the process.
 Command:
 
 ```sh
-SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-host --no-capture display_stream
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-worker --no-capture display_stream
 ```
 
-End to end through hostd and iroh (`apps/slopty-hostd/tests/e2e.rs`, `screen_stream_over_iroh`):
-86 frames in 3 s reassembled and hardware-decoded on the client, 0 lost, 0 NACKs, 0 FEC
-recoveries on the loopback path.
+End to end through the worker and iroh (`apps/slopty-worker/tests/e2e.rs`,
+`screen_stream_over_iroh`): 86 frames in 3 s reassembled and hardware-decoded on the client, 0
+lost, 0 NACKs, 0 FEC recoveries on the loopback path.
 
 ```sh
-SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-hostd --no-capture screen_stream
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-workerd --no-capture screen_stream
 ```
 
 ## 2026-09-04 — screen stream end to end, native scale, loopback, debug build
 
-Setup: mac-studio, `slopty-hostd --direct-only` and `slopty bench screen` on the same machine
+Setup: mac-studio, `slopty-worker --direct-only` and `slopty bench screen` on the same machine
 (`SLOPTY_DIRECT_ONLY=1`), iroh direct path (QUIC rtt 1–6 ms as reported by the client while
 streaming). Latency is ScreenCaptureKit's frame timestamp (host clock) → decoded frame handed to
 the client, i.e. capture queue + HEVC encode + packetize + QUIC + reassembly + VideoToolbox
@@ -148,14 +148,14 @@ Arrival → present is measured in "start-up over iroh on a quiet machine, and a
 Setup: mac-studio, macOS 26.5, main display 1920×1080 @1x 60 Hz, quiet machine (0 `cargo`/`rustc`
 processes during every run below; the first survey run, on a machine with 200+ rustc processes,
 is quoted where it differs). Source: a Ghostty window 900×500 running `yes` (a scrolling
-terminal), launched by the test or by hand. Loopback: `slopty-ptyd` + `slopty-hostd` in
+terminal), launched by the test or by hand. Loopback: `slopty-ptyd` + `slopty-worker` in
 `/tmp/slopty-glass`, `--direct-only --port 45599`, the CLI paired with `SLOPTY_DIRECT_ONLY=1`.
 
 **Per-frame host instrumentation.** `SCStreamFrameInfoDisplayTime` (mach absolute time, through
 `CMClockMakeHostTimeFromSystemUnits`) equals the sample's presentation timestamp on every
 frame of every path (offset p50 0.00 ms, n=285 per row), so *capture latency* below is display
 time → ScreenCaptureKit callback and *encode* is `VTCompressionSessionEncodeFrame` →
-output callback (`ScreenStats::capture` / `::encode`, `slopty host screens`).
+output callback (`ScreenStats::capture` / `::encode`, `slopty worker screens`).
 
 ### ScreenCaptureKit alone (`slopty-capture/tests/latency.rs`, 5 s per row)
 
@@ -207,18 +207,18 @@ Commands:
 
 ```sh
 SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --test latency --no-capture
-# hostd on the crop / window path, then the bench (release: target/release/…):
-SLOPTY_WINDOW_CAPTURE=crop target/debug/slopty-hostd --direct-only --ptyd-socket /tmp/slopty-glass/ptyd.sock \
-  --ctl-socket /tmp/slopty-glass/hostd.sock --data-dir /tmp/slopty-glass/data --port 45599
-SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_HOSTD_SOCKET=/tmp/slopty-glass/hostd.sock \
+# the worker on the crop / window path, then the bench (release: target/release/…):
+SLOPTY_WINDOW_CAPTURE=crop target/debug/slopty-worker --direct-only --ptyd-socket /tmp/slopty-glass/ptyd.sock \
+  --ctl-socket /tmp/slopty-glass/worker.sock --data-dir /tmp/slopty-glass/data --port 45599
+SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_WORKER_SOCKET=/tmp/slopty-glass/worker.sock \
   target/debug/slopty bench screen --window 3411 --seconds 5
-SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_HOSTD_SOCKET=/tmp/slopty-glass/hostd.sock \
+SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_WORKER_SOCKET=/tmp/slopty-glass/worker.sock \
   target/debug/slopty bench screen --display 6 --seconds 5
 ```
 
 ## 2026-09-05 — encoder rate control: low-latency vs VBV keys, and three variants (debug build)
 
-Command: `SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-host --test screen low_latency_versus_vbv --no-capture`
+Command: `SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-worker --test screen low_latency_versus_vbv --no-capture`
 (the test launches Ghostty running `yes`, then `top -s 1`; 900×500, HEVC unless stated, 60 fps,
 8 Mbit/s, 5 s per row, quiet machine). `keyframe` is the first IDR; `spike` is max/p50 of the
 frames after it.
@@ -268,14 +268,14 @@ history per keystroke. Same run found the 10 KB byte cap on scrollback (60k rows
 
 ## 2026-09-05 — screen stream over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
 
-Setup: `slopty-hostd --direct-only` on mac-studio (Ethernet LAN), `slopty bench screen` on
+Setup: `slopty-worker --direct-only` on mac-studio (Ethernet LAN), `slopty bench screen` on
 macbook-pro over Wi-Fi. The LAN is not reachable from the MacBook, so iroh picked the direct path
 over the WireGuard mesh (`100.107.14.250`, `SLOPTY_DIRECT_ONLY=1`); idle `slopty ping` on that
 path: app rtt min/median/max 6.4 / 9.1 / 12.5 ms, QUIC rtt 10.9 ms, `ping` 0 % loss. Same
 targets as the loopback run above (main display 1920×1080, Ghostty window 900×500 scrolling
 `seq`). The capture→decoded column is meaningless here — two clocks ~903 s apart — so only
 fps, arrival gap, loss and QUIC rtt are recorded; "encoded" is the host's `ScreenStats` line in
-the hostd log, "decoded" the client's count.
+the worker log, "decoded" the client's count.
 
 | run                                  | encoded → decoded | fps  | arrival gap p50 / p90 / max | datagrams | FEC / lost / NACK / refresh | QUIC rtt while streaming |
 | ------------------------------------ | ----------------- | ---- | --------------------------- | --------- | --------------------------- | ------------------------ |
@@ -321,7 +321,7 @@ hold measured in "start-up over iroh on a quiet machine, and arrival → present
 Same setup as the previous section (Ghostty window 900×500 scrolling `seq`, 15 s runs, debug
 build, macbook-pro over Wi-Fi → WireGuard mesh → mac-studio). Client run with
 `RUST_LOG=warn,slopty_media=debug,slopty_client=debug` so every NACK and give-up is logged;
-hostd with `slopty_hostd=debug` logs each NACK it receives with the selected path's QUIC
+The worker with `slopty_worker=debug` logs each NACK it receives with the selected path's QUIC
 stats (`slopty_net::endpoint::describe_health`).
 
 What the traces showed before any change:
@@ -365,13 +365,13 @@ Commands (as in the previous section; the bench loop was
 RUST_LOG=warn,slopty_media=debug,slopty_client=debug SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 \
   /tmp/slopty-bench/slopty bench screen --window 927 --seconds 15
 grep 'frame lost\|nack' <client log>
-grep 'nack\|screen closing' <hostd log>      # path=rtt … cwnd … congestion … lost … space …
+grep 'nack\|screen closing' <worker log>      # path=rtt … cwnd … congestion … lost … space …
 ```
 
 ## 2026-09-05 — BBR3 vs Cubic on the mesh path (host window), debug build
 
 Same bench as above (window 927 scrolling, 15 s, macbook-pro → mac-studio over the mesh),
-host path stats from hostd's `screen closing` line. Two runs each.
+host path stats from the worker's `screen closing` line. Two runs each.
 
 | congestion control | cwnd at close        | QUIC lost pkts | client: lost / NACK / refresh | gap max        |
 | ------------------ | -------------------- | -------------- | ----------------------------- | -------------- |
@@ -385,7 +385,7 @@ not the window. Rtt and delivered fps are unchanged at this bitrate; the real te
 bitrate, still to be measured.
 
 Follow-up, main display 1920×1080 with the same scrolling window on it, 15 s, two runs per
-controller back to back (`SLOPTY_CC=bbr3|cubic` on hostd):
+controller back to back (`SLOPTY_CC=bbr3|cubic` on the worker):
 
 | controller | fps         | gap max          | client lost / NACK / refresh | host QUIC lost pkts | host cwnd at close |
 | ---------- | ----------- | ---------------- | ---------------------------- | ------------------- | ------------------ |
@@ -409,7 +409,7 @@ terminal emulation or repaint on the measuring side.
 
 | path                                            | min  | p50  | p90   | max   | QUIC rtt |
 | ----------------------------------------------- | ---- | ---- | ----- | ----- | -------- |
-| loopback (mac-studio → its own hostd)           | 3.6  | 4.9  | 5.9   | 11.7  | 2.6 ms   |
+| loopback (mac-studio → its own worker)           | 3.6  | 4.9  | 5.9   | 11.7  | 2.6 ms   |
 | macbook-pro over Wi-Fi + mesh, quiet link       | 12.1 | 13.8 | 15.6  | 106.0 | 12 ms    |
 | same, taken during a bad Wi-Fi phase            | 12.5 | 78.9 | 132.2 | 451.5 | 86 ms    |
 
@@ -465,7 +465,7 @@ a few bytes per frame.
 
 ## 2026-09-05 — release build, loopback
 
-`cargo build --release -p slopty-hostd -p slopty-ptyd -p slopty-cli`, hostd restarted from
+`cargo build --release -p slopty-workerd -p slopty-ptyd -p slopty-cli`, the worker restarted from
 `target/release`, same benches as above on mac-studio.
 
 | bench                                        | debug (earlier today)        | release                      |
@@ -502,7 +502,7 @@ instead of cutting it (protocol change; not done here).
 The follow-up above: `ReceiverReport` now carries `stalled_ms` / `stalls`, a window with a
 stall freezes the controller (`RateVerdict::Stall`), the policy's value is separate from the
 cwnd-capped target, and every decision comes back to the client as `ScreenEvent::Rate`, so
-the trajectory below is what `slopty bench screen` printed, not a grep of hostd's log on the
+the trajectory below is what `slopty bench screen` printed, not a grep of worker's log on the
 other machine. Display 6 (1920×1080, a Ghostty window scrolling `seq` on it), 20 s, two runs
 per build, private daemons on port 45560 with their own data dir.
 
@@ -561,14 +561,14 @@ packets, which is the case the stall verdict was built for.
 # on mac-studio: private daemons, own data dir and port
 export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
-RUST_LOG=info,slopty_host=debug SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
-  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock --print-ticket
+RUST_LOG=info,slopty_worker=debug SLOPTY_PORT=45560 target/debug/slopty-worker --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/worker.sock --print-ticket
 open -na Ghostty --args -e seq 1 300000000          # motion on display 6, no synthetic keys
 # on macbook-pro (binary copied with gzip -1 -c target/debug/slopty | ssh macbook-pro 'gunzip -c > /tmp/slopty-bench/stall/slopty')
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/stall/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/stall/slopty pair <ticket>
 /tmp/slopty-bench/stall/slopty bench screen --display 6 --seconds 20   # prints stalls and the target trajectory
-# host side: grep 'rate decision\|screen closing' $SLOPTY_DATA_DIR/hostd.log
+# worker side: grep 'rate decision\|screen closing' $SLOPTY_DATA_DIR/worker.log
 # loopback control: the same bench on mac-studio with SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client
 ```
 
@@ -577,10 +577,10 @@ A window that does not change on screen (`--window 1880`, an idle Ghostty) produ
 the client reports as refresh requests. Not a regression; bench a moving window or the display.
 
 ```sh
-# on macbook-pro, paired with the Mac Studio's manual hostd (SLOPTY_PORT 45550)
+# on macbook-pro, paired with the Mac Studio's manual worker (SLOPTY_PORT 45550)
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
-# on the host: RUST_LOG=info,slopty_host=debug hostd → grep 'bitrate\|stream closed'
+# on the worker: RUST_LOG=info,slopty_worker=debug slopty-worker → grep 'bitrate\|stream closed'
 ```
 
 ## 2026-09-05 — capture heartbeat, loopback, debug build
@@ -589,7 +589,7 @@ The host now sends a bare `Kind::Heartbeat` header whenever nothing left its que
 (`HEARTBEAT_AFTER`, half the receiver's 50 ms stall gap), so a still screen or a capture gap
 no longer reads as a link stall at the receiver. Measured on loopback against the control
 above (display 6, a Ghostty window scrolling `seq`, 20 s, private daemons on port 45560,
-`slopty_host=trace` so every beat is logged with the silence that triggered it).
+`slopty_worker=trace` so every beat is logged with the silence that triggered it).
 
 | run | fps  | first frame | gap p50 / p90 / max     | stalls (stalled) | beats | host target over time (Mbit/s)                                     |
 | --- | ---- | ----------- | ----------------------- | ---------------- | ----- | ------------------------------------------------------------------ |
@@ -623,19 +623,19 @@ spread except the stall attribution, which the beat log settles.
 # on mac-studio: private daemons, own data dir and port (same as the stall section)
 export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
-RUST_LOG=info,slopty_host=trace SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
-  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock > $SLOPTY_DATA_DIR/hostd6.log 2>&1 &
+RUST_LOG=info,slopty_worker=trace SLOPTY_PORT=45560 target/debug/slopty-worker --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/worker.sock > $SLOPTY_DATA_DIR/worker6.log 2>&1 &
 open -na Ghostty --args -e seq 1 300000000
 SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug \
   target/debug/slopty bench screen --display 6 --seconds 20
-grep -E 'heartbeat|rate decision|stream closed' $SLOPTY_DATA_DIR/hostd6.log   # beats, verdicts, ScreenStats { heartbeats }
+grep -E 'heartbeat|rate decision|stream closed' $SLOPTY_DATA_DIR/worker6.log   # beats, verdicts, ScreenStats { heartbeats }
 ```
 
 ## 2026-09-05 — start-up on a cold connection, loopback, debug build
 
-`screen_start_up_over_iroh` (`apps/slopty-hostd/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`):
-one private ptyd + hostd (`--direct-only`, any free port) in a temp dir, then five samples,
-each a fresh pairing ticket over hostd's control socket, a fresh endpoint and key, a cold QUIC
+`screen_start_up_over_iroh` (`apps/slopty-worker/tests/e2e.rs`, gate `SLOPTY_SCREEN_E2E`):
+one private ptyd + worker (`--direct-only`, any free port) in a temp dir, then five samples,
+each a fresh pairing ticket over the worker's control socket, a fresh endpoint and key, a cold QUIC
 connection, and the first display opened at the app's default quality (native scale, 60 fps,
 30 Mbit/s ceiling) for 3 s. The client stamps `Open` sent → first datagram → first frame
 complete → first decoded picture; the host logs `capture started` (enumeration and encoder
@@ -657,13 +657,13 @@ What the logs said: `decoder session configured ms=150` on the first stream in t
 process (3 ms on every later one), inside the stream worker; the reassembler then charged
 the 150 ms it had not read datagrams for as a link stall (`stalled 145–151 ms, stalls 1`,
 verdict `Stall` for the first window — the "QUIC send-side hold" the heartbeat section above
-had blamed). hostd's first `capture started` took 351 ms (`enumerate 60`), later ones 175–190
+had blamed). The worker's first `capture started` took 351 ms (`enumerate 60`), later ones 175–190
 (`enumerate 62–75`). Sample 1's six NACKs were frame tails held by a 5808-byte congestion
 window (BBR3's `ProbeRTT` floor) whose ACK waited on the receiver's 25 ms `max_ack_delay`;
 the pump saw every frame end with ~1.5 KB held for 5–7 ms and one 68 KB frame held 105 ms at
 a 38 KB window.
 
-After (this branch: decoder warm-up at launch, encoder + capture warm-up when hostd comes
+After (this branch: decoder warm-up at launch, encoder + capture warm-up when the worker comes
 online, 2 s enumeration cache, arrival stamps and backlog drain on the client, 2 ms
 `max_ack_delay`, 32-packet initial window, widest-sample cwnd cap; one run per row, five
 samples each):
@@ -677,7 +677,7 @@ samples each):
 | same run, samples 1–4            | 127–138 ms  | 123–131 ms     | 127–138 ms   | 140–149 ms    | 3–42 ms  | 0–2 (0–186 ms)     | 0–5 / 0 / 0           | 0                   |
 
 * First picture on the first stream in both processes: 526 → 319 ms with the decoder warm-up
-  alone, → 184 ms once hostd also warms the encoder (the first `Encoder::new` in a process is
+  alone, → 184 ms once the worker also warms the encoder (the first `Encoder::new` in a process is
   ~170 ms; the capture-only warm-up did not move `opened` — 270–295 ms with it — the encoder
   was the cold part). Later streams: 184–200 → 123–149 ms.
 * `opened` 176–191 → 115–138 ms: the enumeration the client had just done for its listing is
@@ -693,8 +693,8 @@ samples each):
   nothing on the transport side is owed a change.
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_codec=debug,slopty_client=debug \
-  cargo nextest run -p slopty-hostd --no-capture screen_start_up 2>&1 | tee /tmp/startup.log
+SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 RUST_LOG=info,slopty_worker=debug,slopty_codec=debug,slopty_client=debug \
+  cargo nextest run -p slopty-workerd --no-capture screen_start_up 2>&1 | tee /tmp/startup.log
 grep -E '^\| [0-9]' /tmp/startup.log                         # the table
 grep -E 'capture started|keyframe encoded|decoder session|warmed up' /tmp/startup.log
 grep -o 'held_ms=[0-9]* max_bytes=[0-9]*' /tmp/startup.log   # the pump's hold episodes
@@ -703,7 +703,7 @@ SLOPTY_CC=cubic … / SLOPTY_QUIC_IW=10 …                     # controller / i
 
 ## 2026-09-05 — start-up over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
 
-Same private hostd on mac-studio (port 45560, own data dir under `target/e2e-data/startup`),
+Same private worker on mac-studio (port 45560, own data dir under `target/e2e-data/startup`),
 `slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, a
 Ghostty window scrolling `seq` on the display. The link was in its worst state yet: idle
 `slopty ping` 7.7 / 9.2 / 32 ms before the first run, 24 / 41 / 107 ms before the third; the
@@ -741,16 +741,16 @@ What the runs did show, and what changed because of them:
 # mac-studio: private daemons (this worktree's target/e2e-data/startup)
 export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
-RUST_LOG=info,slopty_host=debug,slopty_hostd=debug SLOPTY_PORT=45560 target/debug/slopty-hostd --direct-only \
-  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/hostd.sock --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/hostd.log 2>&1 &
-SLOPTY_HOSTD_SOCKET=$SLOPTY_DATA_DIR/hostd.sock target/debug/slopty host ticket
+RUST_LOG=info,slopty_worker=debug SLOPTY_PORT=45560 target/debug/slopty-worker --direct-only \
+  --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/worker.sock --data-dir $SLOPTY_DATA_DIR/data --port 45560 > $SLOPTY_DATA_DIR/worker.log 2>&1 &
+SLOPTY_WORKER_SOCKET=$SLOPTY_DATA_DIR/worker.sock target/debug/slopty worker ticket
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
 gzip -1 -c target/debug/slopty | ssh macbook-pro 'mkdir -p /tmp/slopty-bench/startup && gunzip -c > /tmp/slopty-bench/startup/slopty && chmod +x /tmp/slopty-bench/startup/slopty'
 # macbook-pro
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/startup/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/startup/slopty pair <ticket>
 /tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20   # "after Open: …", "keyframe spread", stalls, trajectory
-# host side: grep -E 'keyframe encoded|held_ms=[0-9]{3,}|screen closing|stream closed' $SLOPTY_DATA_DIR/hostd.log
+# worker side: grep -E 'keyframe encoded|held_ms=[0-9]{3,}|screen closing|stream closed' $SLOPTY_DATA_DIR/worker.log
 ```
 
 ## 2026-09-05 — gate wall time after the speed-up (mac-studio, 10 cores, warm caches)
@@ -780,7 +780,7 @@ be shared; no tested variant beats the baseline by ≥ 10 %, see below).
 
 The rerun the previous section was owed: same `screen_start_up_over_iroh`, same loopback iroh
 path, but nothing else on the machine (`pgrep -fl 'cargo|rustc'` = 2, `top` 71 % idle, no
-sibling build). Each sample is a fresh QUIC connection to the same private hostd, native scale
+sibling build). Each sample is a fresh QUIC connection to the same private worker, native scale
 at the default quality, streaming display 1 of an otherwise idle desktop. Two runs: 5 × 3 s
 (like-for-like with the "machine quiet" rows above) and 8 × 5 s (more frames, for the
 presentation numbers).
@@ -842,8 +842,8 @@ timer's own and the source's — a still desktop is not a steady 60 fps source, 
 # quiet check first: nothing else building
 pgrep -fl "cargo|rustc" | wc -l && top -l 2 -n 0 -s 1 | grep "CPU usage" | tail -1
 SLOPTY_SCREEN_E2E=1 SLOPTY_E2E_SAMPLES=5 SLOPTY_E2E_SECONDS=3 \
-  RUST_LOG=info,slopty_host=debug,slopty_hostd=debug,slopty_codec=debug,slopty_client=debug \
-  cargo nextest run -p slopty-hostd --no-capture screen_start_up > /tmp/startup-quiet.log 2>&1
+  RUST_LOG=info,slopty_worker=debug,slopty_codec=debug,slopty_client=debug \
+  cargo nextest run -p slopty-workerd --no-capture screen_start_up > /tmp/startup-quiet.log 2>&1
 grep -E '^\| ' /tmp/startup-quiet.log        # both tables: start-up, then arrival → present
 grep -E 'capture started|keyframe encoded|decoder session|warmed up' /tmp/startup-quiet.log
 ```
@@ -855,17 +855,18 @@ Command (both tables from the same test; the "before" run is the same test with
 
 ```sh
 SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
-  cargo nextest run -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+  cargo nextest run -p slopty-workerd --test e2e screen_under_injected_loss --no-capture
 grep -E '^\| ' /tmp/loss-after.log
 ```
 
-Setup: mac-studio, `screen_under_injected_loss` in `apps/slopty-hostd/tests/e2e.rs` — hostd and
-client in one process over iroh's direct path, main display 1920×1080, 5 s per rate, four rates
-back to back. Loss is injected on the client's receive path (`ScreenRouter::set_loss`) from a
-fixed seed, so a rate always drops the same datagrams of the sequence and two builds compare on
-the same losses. "Parity seen" is parity fragments per thousand data fragments *on the wire*, not
-the controller's ratio: the packetizer always sends at least one parity fragment, which on a
-mostly-still desktop (4–8 fragments per frame) dominates whatever ratio is asked for.
+Setup: mac-studio, `screen_under_injected_loss` in `apps/slopty-worker/tests/e2e.rs` — the
+worker and client in one process over iroh's direct path, main display 1920×1080, 5 s per rate,
+four rates back to back. Loss is injected on the client's receive path
+(`ScreenRouter::set_loss`) from a fixed seed, so a rate always drops the same datagrams of the
+sequence and two builds compare on the same losses. "Parity seen" is parity fragments per thousand
+data fragments *on the wire*, not the controller's ratio: the packetizer always sends at least one
+parity fragment, which on a mostly-still desktop (4–8 fragments per frame) dominates whatever
+ratio is asked for.
 
 Before — previous controller (symmetric quarter-weight EWMA, no deadband, stalls counted as
 loss):
@@ -935,12 +936,12 @@ Commands (same test, both profiles; the machine has to be idle — `pgrep -fl "c
 
 ```sh
 SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
-  cargo nextest run -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+  cargo nextest run -p slopty-workerd --test e2e screen_under_injected_loss --no-capture
 SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
-  cargo nextest run --release -p slopty-hostd --test e2e screen_under_injected_loss --no-capture
+  cargo nextest run --release -p slopty-workerd --test e2e screen_under_injected_loss --no-capture
 ```
 
-Setup as in the section above: hostd and client in one process over iroh's direct path, main
+Setup as in the section above: the worker and client in one process over iroh's direct path, main
 display, 5 s per rate, loss injected on the client's receive path from a fixed seed. Two columns
 are new. *Fragments/frame* is `data_shards / frames`, and *one-per-frame would be* is
 `1000 × frames / data_shards` — what the packetizer's one-parity-fragment minimum costs for
@@ -1060,7 +1061,7 @@ from; p50/p95 moved little between quiet and busy runs.
 ### Baseline (main 9d01682 + the probe)
 
 Scenarios (a) and (b) did not complete: the host sent a frame every 2 ms per flooding session
-(500/s × 20), the per-client sink (256) overran and hostd detached the client 19 times in the
+(500/s × 20), the per-client sink (256) overran and the worker detached the client 19 times in the
 first minute ("client cannot keep up; detaching"); the app answered no `dump` for 30 s. With the
 first two fixes in (host 8 ms pace, link batching) but the link still applying per event, the
 harness drew 13 010 frames in the 5 s zoom (every event a draw), p95 15.4 ms, max 305 ms.
@@ -1148,11 +1149,11 @@ guard actually holds outside the media unit tests.
 
 ```sh
 SLOPTY_FLAP_E2E=1 SLOPTY_DATA_DIR=target/e2e-data \
-  cargo nextest run -p slopty-hostd --test e2e path_flap_under_cpu_load --no-capture
+  cargo nextest run -p slopty-workerd --test e2e path_flap_under_cpu_load --no-capture
 # … and path_flap_under_user_initiated_cpu_load, path_flap_under_memory_io_load
 ```
 
-hostd and a client on this machine over iroh with **relays enabled**, so the connection holds a
+The worker and a client on this machine over iroh with **relays enabled**, so the connection holds a
 relay path (`aps1-1.relay.n0.iroh.link`, rtt 55 ms) as well as the loopback direct one and has
 somewhere to flap to. One shell and one display stream; the selected path, its rtt and noq's path
 log sampled every 250 ms for 90 s while a load shape owns the machine. Run one at a time (each
@@ -1177,7 +1178,7 @@ as many. The loss table's 0 stalls came from 5 s windows, not from an idle machi
 ### The refresh guard end to end
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e a_window_that_never_draws --no-capture
 SLOPTY_SCREEN_E2E=1 cargo xtask e2e app   # the app case needs the grant too, and says so
 ```
@@ -1311,7 +1312,7 @@ artifacts with clippy or run concurrently. Tested on `pi/gatetime` worktree agai
   (12.7 s real, 7.5 s build).
 * Nextest rebuilds after touch: `cargo build --tests --workspace -v 2>&1 | grep -c Running` = 0 warm,
   10 units after touch (6 packages: `slopty-client`, `slopty-ui` [lib + test], `slopty-cli` [bin],
-  `slopty-hostd` [bin + test], `slopty-app` [lib + test], `slopty` [bin]).
+  `slopty-worker` [bin + test], `slopty-app` [lib + test], `slopty` [bin]).
 
 ### Results (baseline vs variants)
 
@@ -1382,7 +1383,7 @@ python3 /tmp/sample-children.py /tmp/sample-prepaint-after.txt "Window>::draw"
 ## 2026-09-06 — a hidden window on the crop path
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e a_hidden_window_stops --no-capture
 ```
 
@@ -1412,7 +1413,7 @@ reasons. Only the host's counters can distinguish the two.
 ## 2026-09-06 — how late a hide is, and what the crop sends meanwhile
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e a_hidden_window_stops --no-capture
 ```
 
@@ -1452,7 +1453,7 @@ crop is still open.
 ## 2026-09-06 — the beat behind the geometry call
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e -E 'test(the_heartbeat_keeps_its_cadence)' --no-capture
 ```
 
@@ -1489,7 +1490,7 @@ blocking is elsewhere on the runtime, and a blocked worker delays every timer on
 ## 2026-09-06 — what the crop shows, and which signal knows a hide first
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e -E 'test(what_a_crop_shows) or test(a_hidden_window_stops) \
   or test(how_late_each_way)' --no-capture
 ```
@@ -1536,7 +1537,7 @@ AppKit does; core graphics is a quarter of a second behind, which is the whole o
 ## 2026-09-06 — stalls are not made by load
 
 ```sh
-SLOPTY_FLAP_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_FLAP_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e path_flap_with_no_load --no-capture
 # … and path_flap_under_{cpu,user_initiated_cpu,memory_io,external_cpu}_load
 ```
@@ -1573,7 +1574,7 @@ cannot attribute is charged to the link by design — and not about pacing. That
 
 ## 2026-09-06 — two clients on one host (mac-studio, e2e pair build, loopback)
 
-Two `slopty-app` processes paired with one ptyd + hostd, each driven through its own test socket
+Two `slopty-app` processes paired with one ptyd + worker, each driven through its own test socket
 (`crates/slopty-e2e/tests/pair.rs`, `cargo xtask e2e pair`; the display row also needs
 `SLOPTY_SCREEN_E2E=1`). Debug build, loopback iroh, machine shared with other sessions' builds.
 The `dump` round trip is one socket message gated on the app's next frame, so it resolves time to
@@ -1587,7 +1588,7 @@ Behaviours (each a `MEASURE` line the test prints):
 | (a) shell opened on A, shown on B | 0 ms after A (both from the one `SessionOpened`/`Canvas` broadcast) |
 | (b) both clients type into one session | keys interleaved and complete: `a0b1c2d3e4f5g6h7i8j9`, none lost or reordered |
 | (b) opener drives | A drives, B wears the "take" pill; B's "take" hands the PTY size over |
-| (c) permission badge (hook played to hostd) | on both clients within one poll (≤ 250 ms); "1 needs you" on both |
+| (c) permission badge (hook played to the worker) | on both clients within one poll (≤ 250 ms); "1 needs you" on both |
 | (f) B's flood while A is killed | longest pause 150-176 ms, against a 131-133 ms baseline with A alive (dump-poll floor); guard 600 ms |
 | (f) A's abandoned connection idles out | 44.1 s after relaunch (QUIC `IDLE_TIMEOUT` 45 s); both live clients keep their viewers |
 
@@ -1598,9 +1599,9 @@ Display fanned out to both clients (first display, native 1920×1080, `SLOPTY_SC
 | A | 35 | 4.3 / 57.1 ms | 0 | 0 |
 | B | 45 | 4.3 / 21.5 ms | 0 | 0 |
 
-Host-side fan-out (from `slopty host screens` and `ps` CPU time over 4 s windows):
+Host-side fan-out (from `slopty worker screens` and `ps` CPU time over 4 s windows):
 
-| viewers of the one display | live streams | hostd CPU |
+| viewers of the one display | live streams | worker CPU |
 |---|---|---|
 | two | 2 | 0.15 cores |
 | one | 1 | 0.09 cores |
@@ -1619,9 +1620,9 @@ reading, not the wire. This section takes every silence past the stall gap apart
 # mac-studio, private daemons, own data dir and port; an idle desktop as the target.
 export D=target/e2e-data/stalls && mkdir -p $D/client
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
-RUST_LOG=info,slopty_host=debug SLOPTY_PORT=45571 target/debug/slopty-hostd --direct-only \
-  --ptyd-socket $D/ptyd.sock --ctl-socket $D/hostd.sock > $D/hostd.log 2>&1 &
-TICKET=$(SLOPTY_HOSTD_SOCKET=$D/hostd.sock target/debug/slopty host ticket | tail -1)
+RUST_LOG=info,slopty_worker=debug SLOPTY_PORT=45571 target/debug/slopty-worker --direct-only \
+  --ptyd-socket $D/ptyd.sock --ctl-socket $D/worker.sock > $D/worker.log 2>&1 &
+TICKET=$(SLOPTY_WORKER_SOCKET=$D/worker.sock target/debug/slopty worker ticket | tail -1)
 SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
 SLOPTY_DATA_DIR=$D/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug \
   target/debug/slopty bench screen --display 6 --seconds 90 --max-stalls 0
@@ -1634,24 +1635,24 @@ client's own stream worker was reading (`ScreenStats::reader_lag_max`).
 
 ### Before — every silence past the stall gap, 3 × 90 s
 
-| run | fps  | stalls (stalled) | host-quiet | in-flight | stamp overshot (worst) | wrapped | absent | none pending | worst gap | reader lag max / ≥ 50 ms |
-| --- | ---- | ---------------- | ---------- | --------- | ---------------------- | ------- | ------ | ------------ | --------- | ------------------------ |
-| 1   | 17.8 | 2 (289 ms)       | 2          | 1         | 1 (7.6 ms)             | 0       | 0      | 4 of 4       | 245 ms    | 123.3 ms / 76            |
-| 2   | 21.8 | 0 (102 ms)       | 6          | 0         | 0                      | 0       | 0      | 6 of 6       | 54 ms     | 148.7 ms / 80            |
-| 3   | 26.8 | 2 (169 ms)       | 1          | 1         | 1 (7.3 ms)             | 0       | 0      | 3 of 3       | 117 ms    | 113.3 ms / 64            |
+| run | fps  | stalls (stalled) | worker-quiet | in-flight | stamp overshot (worst) | wrapped | absent | none pending | worst gap | reader lag max / ≥ 50 ms |
+| --- | ---- | ---------------- | ------------ | --------- | ---------------------- | ------- | ------ | ------------ | --------- | ------------------------ |
+| 1   | 17.8 | 2 (289 ms)       | 2            | 1         | 1 (7.6 ms)             | 0       | 0      | 4 of 4       | 245 ms    | 123.3 ms / 76            |
+| 2   | 21.8 | 0 (102 ms)       | 6            | 0         | 0                      | 0       | 0      | 6 of 6       | 54 ms     | 148.7 ms / 80            |
+| 3   | 26.8 | 2 (169 ms)       | 1            | 1         | 1 (7.3 ms)             | 0       | 0      | 3 of 3       | 117 ms    | 113.3 ms / 64            |
 
 13 silences past the gap in 270 s, 4 of them charged. The three buckets the brief asked for:
 
 * **(a) the sender was silent and the stamps said so — 11 of 13.** Nine read cleanly
-  (`host-quiet`); two were thrown away because the host's own interval read *longer* than the
+  (`worker-quiet`); two were thrown away because the host's own interval read *longer* than the
   arrival gap by 7.3 and 7.6 ms, and the old rule discarded any such reading whole and charged
   the entire silence to the link. Both became stalls. The overshoot is structural: `send_ms_lo`
   is written when the host *builds* a datagram, not when QUIC sends it, so two datagrams'
   build→wire delays differ by a few milliseconds and the difference lands on the subtraction.
-* **(b) the receiver was not scheduled — the other 2.** `gap=245.6 ms host_gap=5 ms ended_by=Audio
-  pending=0` and `gap=117.9 ms host_gap=0 ms ended_by=VideoParity pending=0`. Both read as the
-  link having held datagrams, and on loopback with `lost 0 pkts`, `congestion 0` and cwnd at the
-  floor that is not credible. The same runs read the client's stream worker **64–80 datagrams
+* **(b) the receiver was not scheduled — the other 2.** `gap=245.6 ms worker_gap=5 ms
+  ended_by=Audio pending=0` and `gap=117.9 ms worker_gap=0 ms ended_by=VideoParity pending=0`.
+  Both read as the link having held datagrams, and on loopback with `lost 0 pkts`, `congestion 0`
+  and cwnd at the floor that is not credible. The same runs read the client's stream worker **64–80 datagrams
   behind by a stall gap or more, worst 113–149 ms**: this machine descheduled the receiver for
   longer than a stall while the arrival stamps kept coming from the connection's reader task.
 * **(c) genuinely in flight — 0.** No silence survived once (a) and (b) were named. Every one of
@@ -1662,13 +1663,13 @@ gives 0–2 per 90 s. The mechanism is the same either way, and the counters now
 
 ### After — the same command, five samples
 
-| run | fps  | audio pkts | stalls (stalled) | host-quiet | receiver-dozed | in-flight | stamp wrapped / backwards / absent | none pending | worst gap | reader lag max / ≥ 50 ms |
-| --- | ---- | ---------- | ---------------- | ---------- | -------------- | --------- | ---------------------------------- | ------------ | --------- | ------------------------ |
-| 1   | 18.1 | 3 385      | **0** (0 ms)     | 0          | 0              | 0         | 0 / 0 / 0                          | —            | —         | 235.2 ms / 15            |
-| 2   | 22.2 | 3 396      | **0** (0 ms)     | 1          | 0              | 0         | 0 / 0 / 0                          | 1 of 1       | 52 ms     | 40.0 ms / 0              |
-| 3   | 11.6 | 0          | 25 (2001 ms)     | 1          | 0              | 25        | 0 / 0 / 0                          | 4 of 26      | 123 ms    | 19.7 ms / 0              |
-| 4   | 23.4 | 3 207      | 14 (1118 ms)     | 0          | 0              | 14        | 0 / 0 / 0                          | 0 of 14      | 114 ms    | 90.4 ms / 7              |
-| 5   | 29.0 | 0          | 1 (63 ms)        | 0          | 0              | 1         | 0 / 0 / 0                          | 1 of 1       | 63 ms     | 60.4 ms / 109            |
+| run | fps  | audio pkts | stalls (stalled) | worker-quiet | receiver-dozed | in-flight | stamp wrapped / backwards / absent | none pending | worst gap | reader lag max / ≥ 50 ms |
+| --- | ---- | ---------- | ---------------- | ------------ | -------------- | --------- | ---------------------------------- | ------------ | --------- | ------------------------ |
+| 1   | 18.1 | 3 385      | **0** (0 ms)     | 0            | 0              | 0         | 0 / 0 / 0                          | —            | —         | 235.2 ms / 15            |
+| 2   | 22.2 | 3 396      | **0** (0 ms)     | 1            | 0              | 0         | 0 / 0 / 0                          | 1 of 1       | 52 ms     | 40.0 ms / 0              |
+| 3   | 11.6 | 0          | 25 (2001 ms)     | 1            | 0              | 25        | 0 / 0 / 0                          | 4 of 26      | 123 ms    | 19.7 ms / 0              |
+| 4   | 23.4 | 3 207      | 14 (1118 ms)     | 0            | 0              | 14        | 0 / 0 / 0                          | 0 of 14      | 114 ms    | 90.4 ms / 7              |
+| 5   | 29.0 | 0          | 1 (63 ms)        | 0            | 0              | 1         | 0 / 0 / 0                          | 1 of 1       | 63 ms     | 60.4 ms / 109            |
 
 The invariant is the result, not the count: **across all five samples not one stall was charged
 for want of a reading** — `stamp_wrapped`, `stamp_backwards`, `stamp_absent` and `receiver_dozed`
@@ -1677,10 +1678,10 @@ the receiver being descheduled. Every stall that remains is `in_flight`, and the
 why —
 
 ```
-gap=93.9ms host_gap=0ns dozed=0ns link_gap=93.9ms stamp=Host(0ns) ended_by=VideoData pending=1
+gap=93.9ms worker_gap=0ns dozed=0ns link_gap=93.9ms stamp=Worker(0ns) ended_by=VideoData pending=1
 ```
 
-— the host built those fragments together (`Host(0ns)`), the receiver was awake throughout
+— the host built those fragments together (`Worker(0ns)`), the receiver was awake throughout
 (`dozed=0ns`) and **a fragment of the frame was still pending**. That is a hold, and
 `RateVerdict::Stall` freezing on it is correct. What holds them is the host's send side, not the
 network: `cwnd 5808` — QUIC's floor — is about 16 Mbit/s on a 2.9 ms path against a 30 Mbit/s
@@ -1778,7 +1779,7 @@ python3 /tmp/sample-attrib.py /tmp/sample-chrome-after3.txt rasterize_glyph pain
 ### The Mac and the phone on one host (`cargo xtask e2e pair-ios`)
 
 The same host with the second client in the simulator, the a/b/c/g subset the phone supports
-(`crates/slopty-e2e/tests/pair.rs::the_mac_and_the_phone_share_a_host_with_the_simulator`). Run
+(`crates/slopty-e2e/tests/pair.rs::the_mac_and_the_phone_share_a_worker_with_the_simulator`). Run
 once on each device; the app is built and installed on the simulator by the recipe:
 
 ```sh
@@ -1790,7 +1791,7 @@ cargo xtask e2e pair-ios --sim ipad
 |---|---|---|
 | (a) shell opened on the Mac, shown on the phone | 0 ms after the Mac | 0 ms after the Mac |
 | (b) typed on the phone into a shell, read on the Mac | `phone-42` echoed back | `phone-42` echoed back |
-| (c) permission badge (hook played to hostd) | on both, "1 needs you" | on both, "1 needs you" |
+| (c) permission badge (hook played to the worker) | on both, "1 needs you" | on both, "1 needs you" |
 | (g) ⌘W on the Mac closes the shell on both | closed on both | closed on both |
 
 The phone fits two desktop-sized items at a card zoom (0.49), so a shell it types into is first
@@ -1800,7 +1801,7 @@ test-socket command for exactly this; over the relay the run is ~51 s each.
 
 ## 2026-09-06 — a scrolling terminal under injected loss (mac-studio, e2e app build, loopback)
 
-The run MEASUREMENTS "the path under load" said could not be driven from the hostd loss test,
+The run MEASUREMENTS "the path under load" said could not be driven from the worker loss test,
 because that test captures the machine's own still desktop and cannot change it. The app self-test
 can: it floods a shell (`/bin/sh -c 'i=0; while :; do printf …; done'`) so its window is a
 scrolling terminal, then captures the display that window fills. Loss is injected on the app's own
@@ -1828,28 +1829,28 @@ Takeaways, against the still-desktop table above:
 * **Busy frames are recovered the same way, and lose almost nothing.** Parity repairs the bulk
   (29 / 62 / 95 frames at 20 / 50 / 100 ‰), a retransmission mops up the rest; one frame was lost
   at 100 ‰, the two-fragment tail a frame plus one parity cannot cover. The verdict is a rate
-  under one frame in a hundred, as in the hostd test.
+  under one frame in a hundred, as in the worker test.
 * **The capture is the display the app's flood fills, not the app's own window**: the window
   picker does not offer the app its own windows, so a self-test cannot target its own window. The
-  display target still carries the app-driven scrolling content — the point the hostd test could
+  display target still carries the app-driven scrolling content — the point the worker test could
   not reach — plus whatever else is on the desktop. A cleaner isolation (a dedicated scrolling
   helper window, or a second app viewing the first's window) is left for a follow-up.
 
 ## 2026-09-06 — what actually holds a frame on a quiet loopback stream: BBR3's ProbeRTT
 
 Ran on mac-studio, debug binaries, `Display(6)` 1920×1080 HEVC, 60 fps cap, 30 Mbit/s target,
-direct-only on port 45571, private data dir, own ptyd + hostd killed after every sample:
+direct-only on port 45571, private data dir, own ptyd + worker killed after every sample:
 
 ```sh
 D=target/e2e-data/cadence; rm -rf $D; mkdir -p $D/client
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
-RUST_LOG=info,slopty_net=debug,slopty_hostd=debug,slopty_host=debug \
+RUST_LOG=info,slopty_net=debug,slopty_worker=debug \
   SLOPTY_PORT=45571 SLOPTY_PATH_TRACE_MS=100 SLOPTY_CC=bbr3 \
-  target/debug/slopty-hostd --direct-only --ptyd-socket $D/ptyd.sock --ctl-socket $D/hostd.sock \
-  > $D/hostd.log 2>&1 &
-TICKET=$(SLOPTY_HOSTD_SOCKET=$D/hostd.sock target/debug/slopty host ticket | tail -1)
+  target/debug/slopty-worker --direct-only --ptyd-socket $D/ptyd.sock --ctl-socket $D/worker.sock \
+  > $D/worker.log 2>&1 &
+TICKET=$(SLOPTY_WORKER_SOCKET=$D/worker.sock target/debug/slopty worker ticket | tail -1)
 SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
-SLOPTY_CC=bbr3 SLOPTY_HOSTD_SOCKET=$D/hostd.sock SLOPTY_DATA_DIR=$D/client \
+SLOPTY_CC=bbr3 SLOPTY_WORKER_SOCKET=$D/worker.sock SLOPTY_DATA_DIR=$D/client \
   SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen \
   --display 6 --seconds 90 --mbit 30 --max-stalls 0
 ```
@@ -1862,7 +1863,7 @@ prints `quic path (client side)`: the **client→host** connection, which carrie
 and NACKs and nothing else. BBR never gets a delivery-rate sample worth the name on it, so it
 parks that window at `min_pipe_cwnd` (4 × 1452 = 5808 B) for the whole run, every run, whatever
 the media is doing. It never described the stream's send window. The line is now labelled
-`quic path (client→host, feedback only)` and the host's own window is sampled on a timer
+`quic path (client→worker, feedback only)` and the host's own window is sampled on a timer
 (`SLOPTY_PATH_TRACE_MS`, off by default) because a congestion window is only legible as a series.
 
 The conclusion survives the correction, for a different reason than the one recorded.
@@ -1879,7 +1880,7 @@ The conclusion survives the correction, for a different reason than the one reco
 
 Over the five samples: 7 547 holds in all, mean 2.4 ms — and **32 holds of 25 ms or more, 24 of
 them (75 %) with the window at exactly 5 808 bytes.** The stall count follows the long holds run
-for run. Nothing else does: `host captured N, dropped 0, encoded N, queue full 0` in every run,
+for run. Nothing else does: `worker captured N, dropped 0, encoded N, queue full 0` in every run,
 `receiver_dozed` 0 everywhere, and the datagram pump — newly instrumented — never late by more
 than 12 ms. The frames are built, they reach the pump at once, and then QUIC sits on them.
 
@@ -1934,13 +1935,13 @@ ScreenCaptureKit has an audio stream to carry) says the opposite:
 | --- | --- | --- |
 | audio packets | 0, 0, 0, 0, 18 | 2 367 |
 | fps | 8.1–28.9 | 31.3 |
-| `host_quiet` silences past the gap | 0–4 | **0** |
+| `worker_quiet` silences past the gap | 0–4 | **0** |
 | samples with cwnd at 5 808 | 1.4–8.1 % | **23.2 %** (211 / 909) |
 | holds ≥ 25 ms | 1–19 | 28, **27 of them at 5 808** |
 | stalls (stalled) | 0–15 (0–1359 ms) | 14 (1064 ms), all in-flight |
 
 Audio does what a keep-cadence datagram is supposed to do — it removes sender-side silence
-outright, `host_quiet` goes to 0 — and the stalls get *worse*, because the window is not on the
+outright, `worker_quiet` goes to 0 — and the stalls get *worse*, because the window is not on the
 floor for want of datagrams. It is on the floor because the flow is application-limited: a still
 desktop carries about 1 Mbit/s, BBR sizes the window from `bw × min_rtt`, and 1–3 Mbit/s over a
 1.5 ms path is a BDP of well under one packet, so `max(…, MinPipeCwnd)` is the whole answer. More
@@ -2067,9 +2068,9 @@ case it was added for.
 
 Across all sixteen 90 s runs (~24 minutes of streaming, ~2 800 released stalls): **`stamp
 wrapped 0` and `stamp backwards 0` everywhere**, and exactly **one** stall gap past
-`send_ms_lo`'s 256 ms range — 2.016 s in c2, `host_gap=0ns`, `stamp=Absent`, the whole 2.016 s
+`send_ms_lo`'s 256 ms range — 2.016 s in c2, `worker_gap=0ns`, `stamp=Absent`, the whole 2.016 s
 charged to the link. That is the right party: the host had a 1 979 ms send backlog in the same
-run. Every other gap is under 245 ms and reads as `Host(n)` with the link taking the remainder.
+run. Every other gap is under 245 ms and reads as `Worker(n)` with the link taking the remainder.
 
 No widening is proposed, and the reason is structural rather than luck. A wrap needs a datagram
 to *arrive* carrying a stamp more than 256 ms old; when the link holds everything for two seconds
@@ -2084,20 +2085,20 @@ Commands (mac-studio side; the client side is the recipe in "start-up over the m
 # mac-studio, private daemons under this worktree
 D=$PWD/target/e2e-data/mesh; mkdir -p $D/data
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
-RUST_LOG=info,slopty_net=debug,slopty_hostd=debug,slopty_host=debug \
+RUST_LOG=info,slopty_net=debug,slopty_worker=debug \
   SLOPTY_PORT=45550 SLOPTY_PATH_TRACE_MS=100 SLOPTY_CC=bbr3|cubic \
-  target/debug/slopty-hostd --direct-only --ptyd-socket $D/ptyd.sock \
-  --ctl-socket $D/hostd.sock --data-dir $D/data --port 45550 > $D/hostd-<tag>.log 2>&1 &
+  target/debug/slopty-worker --direct-only --ptyd-socket $D/ptyd.sock \
+  --ctl-socket $D/worker.sock --data-dir $D/data --port 45550 > $D/worker-<tag>.log 2>&1 &
 gzip -1 -c target/debug/slopty | ssh macbook-pro 'mkdir -p /tmp/slopty-bench/mesh && gunzip -c > /tmp/slopty-bench/mesh/slopty && chmod +x /tmp/slopty-bench/mesh/slopty'
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # busy rows only
-# macbook-pro, once per run (hostd restarted between runs so SLOPTY_CC takes)
+# macbook-pro, once per run (the worker restarted between runs so SLOPTY_CC takes)
 ssh macbook-pro 'export SLOPTY_DATA_DIR=/tmp/slopty-bench/mesh/data SLOPTY_DIRECT_ONLY=1 \
   RUST_LOG=warn,slopty_media=debug,slopty_client=debug; \
   /tmp/slopty-bench/mesh/slopty bench screen --display 6 --seconds 90 --max-stalls 0'
-# host-side series, per run
-grep 'path health' $D/hostd-<tag>.log   | grep -o 'cwnd=[0-9]*'     # the window as a series
-grep 'quic released' $D/hostd-<tag>.log | grep -o 'held_ms=[0-9]* max_bytes=[0-9]* cwnd=[0-9]*'
-grep -c 'nack not answered' $D/hostd-<tag>.log
+# worker-side series, per run
+grep 'path health' $D/worker-<tag>.log   | grep -o 'cwnd=[0-9]*'     # the window as a series
+grep 'quic released' $D/worker-<tag>.log | grep -o 'held_ms=[0-9]* max_bytes=[0-9]* cwnd=[0-9]*'
+grep -c 'nack not answered' $D/worker-<tag>.log
 ```
 
 ### QUIC initial window 32 vs 10 over the mesh (the measurement the IW ruling was owed)
@@ -2156,21 +2157,21 @@ across the two hours it took to measure everything above.
 
 ## 2026-09-06 — cross-host attention against a real second host
 
-One client, two hosts on two machines: ptyd + hostd + the app on mac-studio, and a second
-ptyd + hostd on macbook-pro started over ssh under `/tmp/slopty-e2e/host2-<pid>` with a private
+One client, two hosts on two machines: ptyd + worker + the app on mac-studio, and a second
+ptyd + worker on macbook-pro started over ssh under `/tmp/slopty-e2e/worker2-<pid>` with a private
 `HOME` (torn down after, `pgrep -f <root>` empty). The app pairs with both, opens a shell on the
 MacBook host that round-trips over the mesh, then the cross-host attention path is driven: a
 permission hook is played to a MacBook session **through the real `slopty hook` relay over ssh**
 (never a Claude Code session, never a keystroke into a shell), the pill badges the cross-host
 sum, a tap switches host and focuses the session, and a `notification_response` carrying only the
-session UUID routes back to the MacBook host. Finally the MacBook hostd is killed mid-stream (row
+session UUID routes back to the MacBook host. Finally the MacBook worker is killed mid-stream (row
 goes amber, mac-studio host keeps streaming) and restarted (green, shell reattaches via live
 I/O). This is the evidence behind the DECISIONS "Cross-host attention" ruling.
 
 ```
 # built here for arm64 (same triple as macbook-pro) and copied by the harness:
-#   gzip -1 -c target/debug/<bin> | ssh macbook-pro 'gunzip -c > /tmp/slopty-e2e/host2-*/bin/<bin>'
-SLOPTY_HOST2=macbook-pro cargo xtask e2e hosts   # ×3
+#   gzip -1 -c target/debug/<bin> | ssh macbook-pro 'gunzip -c > /tmp/slopty-e2e/worker2-*/bin/<bin>'
+SLOPTY_WORKER2=macbook-pro cargo xtask e2e workers   # ×3
 ```
 
 | run | host B up | mesh RTT (path) | hook → pill | full run |
@@ -2198,7 +2199,7 @@ teardown's `pkill -f <root>` killed the ssh shell running it (its own command li
 pattern): `mint_ticket` retries for `STARTUP` and the pattern is `<root>/[b]in/`.
 
 ```
-SLOPTY_HOST2=congtran@192.168.100.240 cargo xtask e2e hosts
+SLOPTY_WORKER2=congtran@192.168.100.240 cargo xtask e2e workers
 ```
 
 | host B up | mesh RTT (path) | hook → pill | full run |
@@ -2213,7 +2214,7 @@ milliseconds. Two daemons before teardown, none after.
 
 `GhosttyEngine::checkpoint` is libghostty-vt's VT formatter over the whole terminal, run by the
 session actor 500 ms after the last output or once 1 MiB has been tapped since the last one
-(`slopty_host::session::{CHECKPOINT_AFTER, CHECKPOINT_EVERY_BYTES}`). Release, mac-studio, an
+(`slopty_worker::session::{CHECKPOINT_AFTER, CHECKPOINT_EVERY_BYTES}`). Release, mac-studio, an
 80×24 engine with `scrollback_lines = 10_000`, filled with 10 024 coloured 70-column lines
 (651 560 bytes) in 64 KiB chunks like PTY reads:
 
@@ -2265,13 +2266,13 @@ measurement goes.
 ## 2026-09-06 — `slopty bench echo` after the ReleaseFast pin: the keystroke path was never parser-bound
 
 Release daemons (13b95f0) on the paired `/tmp/slopty-manual` dirs, direct-only, mac-studio to its
-own hostd (the client dialled the LAN address, not loopback), three runs of 30 bytes into
+own worker (the client dialled the LAN address, not loopback), three runs of 30 bytes into
 `/bin/cat`:
 
 ```sh
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
-SLOPTY_DIRECT_ONLY=1 target/release/slopty-hostd --ptyd-socket /tmp/slopty-manual/ptyd.sock \
-  --ctl-socket /tmp/slopty-manual/hostd.sock --data-dir /tmp/slopty-manual/data &
+SLOPTY_DIRECT_ONLY=1 target/release/slopty-worker --ptyd-socket /tmp/slopty-manual/ptyd.sock \
+  --ctl-socket /tmp/slopty-manual/worker.sock --data-dir /tmp/slopty-manual/data &
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/release/slopty bench echo --count 30
 ```
 
@@ -2288,7 +2289,7 @@ round trip is still the QUIC rtt plus about 3 ms of engine, coalescing and chann
 
 ## 2026-09-06 — leading-edge frame: the 2 ms coalescing window off the keystroke path
 
-Same setup and command as the entry above, hostd rebuilt with `frame_due_after` framing output
+Same setup and command as the entry above, the worker rebuilt with `frame_due_after` framing output
 after a quiet spell at once (`MIN_FRAME_INTERVAL` still paces floods; the read arm of the
 actor's select still folds already-readable bytes into the frame):
 
@@ -2309,7 +2310,7 @@ the engine and the channel hops; the flood cap is unchanged (a `yes` still sends
 ## 2026-09-06 — the accessibility hide watch: the crop-path gap closed from the other side
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e --test-threads 1 --no-capture -E 'test(a_hidden_window_stops) | \
   test(what_a_crop_shows_of_an_empty_rectangle) | test(what_a_crop_shows_of_another_application)'
 ```
@@ -2338,8 +2339,8 @@ still to be read from `suspicions` against `withheld` on a long session.
 ## 2026-09-06 — what a datagram waits in the pump's channel
 
 ```sh
-RUST_LOG="info,iroh::_events::path=debug,slopty_hostd::conn=debug" SLOPTY_FLAP_E2E=1 \
-  SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd --test e2e \
+RUST_LOG="info,iroh::_events::path=debug,slopty_worker::conn=debug" SLOPTY_FLAP_E2E=1 \
+  SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd --test e2e \
   path_flap_with_no_load --no-capture
 # then read the "the datagram pump caught up" lines: waited = p50 / p95 / max over the last
 # 1024 datagrams, worst_wait_ms = the worst single wait since the previous line
@@ -2371,15 +2372,15 @@ of 0 was consistent with a lone descheduled datagram it could not see, and now i
 ```sh
 # release daemons on the manual sockets, both with the keystroke trace on
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
-SLOPTY_DIRECT_ONLY=1 RUST_LOG="info,slopty_host::session=trace,slopty_hostd::conn=trace" \
-  target/release/slopty-hostd --ptyd-socket /tmp/slopty-manual/ptyd.sock \
-  --ctl-socket /tmp/slopty-manual/hostd.sock --data-dir /tmp/slopty-manual/data > hostd.log 2>&1 &
+SLOPTY_DIRECT_ONLY=1 RUST_LOG="info,slopty_worker::session=trace,slopty_worker::conn=trace" \
+  target/release/slopty-worker --ptyd-socket /tmp/slopty-manual/ptyd.sock \
+  --ctl-socket /tmp/slopty-manual/worker.sock --data-dir /tmp/slopty-manual/data > worker.log 2>&1 &
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 \
   RUST_LOG="warn,slopty=trace,slopty_cli=trace,slopty_client::link=trace" \
   target/release/slopty bench echo --count 30 > bench.log 2>&1
 # both logs carry microsecond timestamps from one clock; match each "bench send" to the first
 # line of each later stage after it: term input received → pty input written → echo read →
-# frame flushed → frame sent (hostd) → frame received → bench frame (client)
+# frame flushed → frame sent (worker) → frame received → bench frame (client)
 cargo nextest run -p slopty-engine --release --run-ignored only frame_cost --no-capture
 ```
 
@@ -2390,12 +2391,12 @@ Three runs of 30 bytes into `/bin/cat`, release, mac-studio, before any change:
 
 | stage                                  | p50 (3 runs)      | p90         |
 | -------------------------------------- | ----------------- | ----------- |
-| client → hostd, control stream         | 0.94–1.22 ms      | 1.7–2.1     |
+| client → worker, control stream         | 0.94–1.22 ms      | 1.7–2.1     |
 | conn → actor channel + master write    | 0.12–0.17 ms      | 0.2–0.4     |
 | kernel echo → actor read               | 0.05–0.06 ms      | 0.1         |
 | **actor read → frame flushed**         | **1.38–1.41 ms**  | **1.6–2.0** |
 | sink → forwarder + `stream.send`       | 0.04–0.05 ms      | 0.1–1.9     |
-| hostd → client, session stream         | 0.39–0.59 ms      | 1.0         |
+| worker → client, session stream         | 0.39–0.59 ms      | 1.0         |
 | link events channel → bench task       | 0.06–0.07 ms      | 0.1–0.4     |
 | total (the bench's own number)         | 3.12–3.92 ms      | 4.9–8.5     |
 
@@ -2429,12 +2430,12 @@ Re-measured once the other job had finished (load average 3.2–3.6), three runs
 
 | stage                              | p50 (3 quiet runs) | p90       |
 | ---------------------------------- | ------------------ | --------- |
-| client → hostd, control stream     | 0.42 ms            | 0.45–0.49 |
+| client → worker, control stream     | 0.42 ms            | 0.45–0.49 |
 | conn → actor + master write        | 0.03–0.04 ms       | 0.04–0.07 |
 | kernel echo → actor read           | 0.01 ms            | 0.01–0.03 |
 | actor read → frame flushed         | 0.02–0.03 ms       | 0.03–0.05 |
 | sink → forwarder + `stream.send`   | 0.02 ms            | 0.03      |
-| hostd → client, session stream     | 0.18–0.21 ms       | 0.25–0.27 |
+| worker → client, session stream     | 0.18–0.21 ms       | 0.25–0.27 |
 | link events channel → bench task   | 0.02 ms            | 0.02–0.04 |
 | **total**                          | **0.73–0.75 ms**   | 0.80–1.00 |
 
@@ -2442,13 +2443,13 @@ Everything that is ours is 0.1 ms; the two QUIC legs are 0.6 of the 0.73.
 
 ### The two QUIC legs against the runtime's worker count
 
-Same setup, `TOKIO_WORKER_THREADS=1` for hostd and the bench client against the default (one
+Same setup, `TOKIO_WORKER_THREADS=1` for the worker and the bench client against the default (one
 worker per core), interleaved within two minutes on the loaded machine (load average 22–31):
 
-| runtime            | client → hostd p50 | hostd → client p50 | total p50 | total min |
+| runtime            | client → worker p50 | worker → client p50 | total p50 | total min |
 | ------------------ | ------------------ | ------------------ | --------- | --------- |
-| one worker, run 1  | 0.36 ms            | 0.18 ms            | 0.7 ms    | 0.4 ms    |
-| one worker, run 2  | 0.58 ms            | 0.31 ms            | 1.1 ms    | 0.7 ms    |
+| one thread, run 1  | 0.36 ms            | 0.18 ms            | 0.7 ms    | 0.4 ms    |
+| one thread, run 2  | 0.58 ms            | 0.31 ms            | 1.1 ms    | 0.7 ms    |
 | default, run 1     | 0.62 ms            | 0.30 ms            | 1.3 ms    | 0.9 ms    |
 | default, run 2     | 0.71 ms            | 0.35 ms            | 1.4 ms    | 1.0 ms    |
 
@@ -2456,23 +2457,23 @@ On the loaded machine both legs looked 0.1–0.3 ms shorter with one worker. Qui
 interleaved, two runs each) the difference is gone from the medians and lives only in the
 tails:
 
-| runtime, quiet     | client → hostd p50 / p90 | hostd → client p50 / p90 | total p50 / p90 / max |
+| runtime, quiet     | client → worker p50 / p90 | worker → client p50 / p90 | total p50 / p90 / max |
 | ------------------ | ------------------------ | ------------------------ | --------------------- |
-| one worker, run 1  | 0.41 / 0.47 ms           | 0.20 / 0.26 ms           | 0.8 / 0.8 / 0.9 ms    |
-| one worker, run 2  | 0.40 / 0.45 ms           | 0.19 / 0.25 ms           | 0.7 / 0.8 / 0.9 ms    |
+| one thread, run 1  | 0.41 / 0.47 ms           | 0.20 / 0.26 ms           | 0.8 / 0.8 / 0.9 ms    |
+| one thread, run 2  | 0.40 / 0.45 ms           | 0.19 / 0.25 ms           | 0.7 / 0.8 / 0.9 ms    |
 | default, run 1     | 0.43 / 1.72 ms           | 0.21 / 0.57 ms           | 0.8 / 2.8 / 6.8 ms    |
 | default, run 2     | 0.49 / 0.86 ms           | 0.21 / 0.37 ms           | 0.8 / 1.5 / 6.7 ms    |
 
-So the 0.6 ms of QUIC legs is not the worker count: it is the path through iroh and quinn
+So the 0.6 ms of QUIC legs is not the thread count: it is the path through iroh and quinn
 itself (their socket task, endpoint and connection drivers, and one wake at each end), and
-the same on one worker. What the worker count buys is the tail — p90 0.8 against 1.5–2.8 ms,
+the same on one thread. What the thread count buys is the tail — p90 0.8 against 1.5–2.8 ms,
 max 0.9 against 6.8 — which is worth knowing and not worth a runtime change on the strength
 of two runs (DECISIONS "The QUIC legs are quinn's and iroh's own").
 
 ## 2026-09-06 — a sibling window closing stalls the crop
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e --test-threads 1 --no-capture -E 'test(a_sibling_window_closing) | \
   test(a_hidden_window_stops) | test(what_a_crop_shows_of_an_empty_rectangle) | \
   test(what_a_crop_shows_of_another_application)'
@@ -2529,7 +2530,7 @@ knows, those are the desktop. The hold covers every frame for its duration, whic
 ## 2026-09-06 — pop-ups and siblings against the targeted watch
 
 ```sh
-SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-hostd \
+SLOPTY_SCREEN_E2E=1 SLOPTY_DATA_DIR=target/e2e-data cargo nextest run -p slopty-workerd \
   --test e2e --test-threads 1 --no-capture -E 'test(a_popup_of_the_application) | \
   test(a_sibling_window_closing) | test(a_hidden_window_stops) | \
   test(what_a_crop_shows_of_an_empty_rectangle) | test(what_a_crop_shows_of_another_application)'
@@ -2690,17 +2691,17 @@ build sharing the machine), Mac Studio:
 deep features   cargo hack check --each-feature, 7 crates with features    517 s cold
 deep miri       slopty-proto + slopty-core, PROPTEST_CASES=8              147 s  (codec_props 79 s of it; golden failed)
 deep miri       slopty-proto alone, rerun beside a running gate            416 s  (all green)
-deep sanitize   thread: pty, net, host, codec, -Zbuild-std, 79 tests       263 s  (build ≈ 190 s, run 66 s; no race)
+deep sanitize   thread: pty, net, worker, codec, -Zbuild-std, 79 tests       263 s  (build ≈ 190 s, run 66 s; no race)
 deep coverage   llvm-cov nextest, 553 tests, workspace minus e2e/xtask     359 s  (73.1 % of 75 832 lines)
 ```
 
-Coverage by crate (lines, unit and headless tests only — the app, hostd, capture and the
+Coverage by crate (lines, unit and headless tests only — the app, workerd, capture and the
 CLI are exercised by the live layers this report cannot see): agent 96.6 %, media 95.8 %,
 theme 95.6 %, predict 95.4 %, grid 94.4 %, engine 89.3 %, settings 89.0 %, pty 88.9 %,
 ui 86.4 % (16 587 lines), codec 84.5 %, proto 79.3 %, input 78.4 %, net 73.5 %, client
-73.4 %, core 73.0 %, host 50.7 %, cli 21.2 %, capture 10.9 %, hostd 7.0 %, app 4.0 %.
-The files with real logic and the least cover: `slopty-host/src/manager.rs` 0 %,
-`slopty-client/src/screen.rs` 23 %, `slopty-host/src/screen.rs` 34 %, `slopty-ui/src/screen.rs`
+73.4 %, core 73.0 %, worker 50.7 %, cli 21.2 %, capture 10.9 %, workerd 7.0 %, app 4.0 %.
+The files with real logic and the least cover: `slopty-worker/src/manager.rs` 0 %,
+`slopty-client/src/screen.rs` 23 %, `slopty-worker/src/screen.rs` 34 %, `slopty-ui/src/screen.rs`
 36 %, `slopty-net/src/endpoint.rs` 46 % — the next test passes go there.
 
 Under ThreadSanitizer six tests (the four `session_actor` ones and the two that spawn a pty
@@ -2720,7 +2721,7 @@ run above at `72e7754`: the card at 200 % dropped 116 of 565 frames where it had
 Command, on an idle Mac Studio, dev profile (optimised), the file scenario alone:
 
 ```
-cargo build -p slopty-ptyd -p slopty-hostd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
+cargo build -p slopty-ptyd -p slopty-workerd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e
 SLOPTY_SMOOTH_E2E=1 cargo nextest run -p slopty-e2e --test smooth --no-capture --no-fail-fast -E 'test(a_full_file_card)'
 ```
 
@@ -2862,7 +2863,7 @@ prediction path still answers a key in under 5 ms at p90.
 
 Setup: mac-studio hosting `display 6` (1920×1080 @1x 60 Hz) with a Ghostty window scrolling `seq`,
 `slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, debug
-build, direct path, MTU 1230. **The host ran under launchd** (`slopty host install`), not from a
+build, direct path, MTU 1230. **The host ran under launchd** (`slopty worker install`), not from a
 shell: a shell-spawned daemon is attributed to whatever launched it for TCC purposes, so it never
 gets Screen Recording however the binary is signed. The link was in its best state yet — rtt 9.5 ms,
 0 lost packets, 0 congestion events, the host's window reaching 12.5 MB.
@@ -2902,18 +2903,18 @@ would read drift as effect. The second arm of this run was lost to macbook-pro l
 mid-measurement, which is the other reason to interleave.
 
 ```sh
-# mac-studio: the host must be the launchd one, or TCC denies capture with -3801
-cargo xtask sign && slopty host install --direct-only --port 45560
+# mac-studio: the worker must be the launchd one, or TCC denies capture with -3801
+cargo xtask sign && slopty worker install --direct-only --port 45560
 # per arm: swap the binary under test into place, keep the identity, restart
-cp <hostd-under-test> ~/Library/Application\ Support/Slopty/bin/slopty-hostd
-cargo xtask sign            # re-sign the copy under dev.aislopware.slopty.hostd
-launchctl kickstart -k gui/$(id -u)/dev.aislopware.slopty.hostd
-slopty host doctor          # must show two ticks before the arm counts
+cp <worker-under-test> ~/Library/Application\ Support/Slopty/bin/slopty-worker
+cargo xtask sign            # re-sign the copy under dev.aislopware.slopty.worker
+launchctl kickstart -k gui/$(id -u)/dev.aislopware.slopty.worker
+slopty worker doctor          # must show two ticks before the arm counts
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
 # macbook-pro
-slopty bench screen --host <id> --display 6 --seconds 20
-# host side
-grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-hostd.log
+slopty bench screen --worker <id> --display 6 --seconds 20
+# worker side
+grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-worker.log
 ```
 
 
@@ -2921,7 +2922,7 @@ grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-hostd.log
 
 The run three rulings were waiting on. Setup: mac-studio alone, hosting `display 6`
 (1920×1080 @1x 60 Hz, an idle desktop), debug build. The host is the installed one
-(`slopty host install --direct-only --port 45560 --bind 192.168.100.240`); the client is the
+(`slopty worker install --direct-only --port 45560 --bind 192.168.100.240`); the client is the
 in-process one in `screen_over_a_shaped_link`, dialling through a `slopty-shape` relay per rung.
 Both ends are pinned so the flow cannot leave the relay — the `selected` column of each row is
 asserted, not hoped for. 8 s per rung, seed 1, `Quality::default()`.
@@ -2976,22 +2977,22 @@ The harness keeps two changes anyway, both right on their own terms: it waits fo
 `slopty_codec::warm_up()` before the first rung rather than racing it, and throws the first
 sample away. On the boot volume they cost about a second.
 
-Also worth knowing: `slopty host install` copies the binary, and the copy loses its Screen
+Also worth knowing: `slopty worker install` copies the binary, and the copy loses its Screen
 Recording grant unless `cargo xtask sign` runs immediately before each install.
 
 ```sh
-# the host must be the installed one: TCC attributes a shell-spawned daemon to whatever launched
+# the worker must be the installed one: TCC attributes a shell-spawned daemon to whatever launched
 # it, so a test that spawns its own is refused capture with -3801 however the binary is signed
-cargo xtask sign && slopty host install --direct-only --port 45560 --bind <lan-ip> \
-  --log 'info,slopty_host=debug,slopty_hostd=debug'
-slopty host doctor          # two ticks before the run counts
-SLOPTY_E2E_HOSTD_SOCKET="$HOME/Library/Application Support/Slopty/run/hostd.sock" \
+cargo xtask sign && slopty worker install --direct-only --port 45560 --bind <lan-ip> \
+  --log 'info,slopty_worker=debug'
+slopty worker doctor          # two ticks before the run counts
+SLOPTY_E2E_WORKER_SOCKET="$HOME/Library/Application Support/Slopty/run/worker.sock" \
   SLOPTY_E2E_SECONDS=8 RUST_LOG=info,slopty_client=debug,slopty_codec=debug \
-  cargo nextest run -p slopty-hostd --test e2e -E 'test(screen_over_a_shaped_link)' --no-capture
+  cargo nextest run -p slopty-workerd --test e2e -E 'test(screen_over_a_shaped_link)' --no-capture
 grep -E '^\| ' /tmp/ladder.log                                   # the table
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log \
   | perl -ne 'print "$1 $2 $3\n" if /held_ms=(\d+) max_bytes=(\d+) cwnd=(\d+)/'
-cargo xtask sign && slopty host install --direct-only --port 45560   # put the host back
+cargo xtask sign && slopty worker install --direct-only --port 45560   # put the worker back
 ```
 
 ## 2026-09-15 — the shaped ladder again, against the keyframe rule
@@ -3029,8 +3030,8 @@ encoder sizes a keyframe without regard for what the path can carry is wrong in 
 
 ```sh
 # as the run above, then:
-grep -c "keyframe deferred" ~/Library/Logs/Slopty/slopty-hostd.log     # the rule's own log line
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+grep -c "keyframe deferred" ~/Library/Logs/Slopty/slopty-worker.log     # the rule's own log line
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log \
   | perl -ne 'print "$1 $2\n" if /^(\S+).*bytes=(\d+) keyframe=true/'  # sizes with timestamps
 ```
 
@@ -3073,8 +3074,8 @@ live references, or a gate on the refresh request itself.
 
 ```sh
 # as the runs above, then:
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log | grep "first LTR ack"
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log | grep "first LTR ack"
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log \
   | grep -c "bytes=[0-9]* keyframe=true"
 ```
 
@@ -3127,7 +3128,7 @@ contention. `gap max` is likewise noisy in both directions. The claim is the p90
 count, not the tail of the tail.
 
 **A harness race, found and fixed.** Two runs in three died at `e2e.rs:255` with `ENOTCONN` while
-minting the pairing ticket for the fifth rung. hostd was never down — `up 471 s`, no panic. It
+minting the pairing ticket for the fifth rung. The worker was never down — `up 471 s`, no panic. It
 answers a control request and closes without waiting to be half-closed, so the test's
 `wr.shutdown()` races that close and macOS reports `ENOTCONN` when it loses. The reply is already
 buffered, so the shutdown now tolerates that one error kind and `read_line` decides whether a
@@ -3135,9 +3136,9 @@ reply arrived. Distinct from the `LastOpenPath` flake noted above.
 
 ```sh
 # as the ladder runs above; then, per run:
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log \
   | grep -c "stands on its own is deferred"          # deferral episodes
-perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-hostd.log \
+perl -pe 's/\e\[[0-9;]*m//g' ~/Library/Logs/Slopty/slopty-worker.log \
   | grep -oE "keyframes_deferred: [0-9]+|dropped: [0-9]+"   # per-rung counters
 ```
 
@@ -3274,7 +3275,7 @@ inline. The pointer itself is now asked for only when the counters moved.
 
 ## 2026-09-24 — plaintext QUIC on noq against iroh: connect time and control-stream round trip
 
-Setup: mac-studio, debug builds, `slopty-ptyd` + `slopty-hostd` on port 45597 with private
+Setup: mac-studio, debug builds, `slopty-ptyd` + `slopty-worker` on port 45597 with private
 sockets and data dirs, `slopty ping --count 20` five times per row. The machine was busy (load
 average ~20: other sessions compiling) for both builds alike, so the tails are noisy; the
 medians are the claim. "Connected in" is new in `slopty ping`: from before the client endpoint
@@ -3294,18 +3295,18 @@ Reading: on the same LAN address the median round trip halves (≈1.2 ms → ≈
 connection is up in a third of the time (≈30 ms → ≈11 ms); on loopback the steady connect is
 7–9 ms. The first iroh `Anywhere` connect took 44 s (the relay and discovery warming while the
 ticket's direct address waited); nothing in the noq path can wait on a third party. The two
-40 ms loopback connects are the first two runs after hostd started, not a steady cost.
+40 ms loopback connects are the first two runs after the worker started, not a steady cost.
 
 ```sh
-# common: R=/tmp/slopty-meas; SLOPTY_PTYD_SOCKET=$R/ptyd.sock SLOPTY_HOSTD_SOCKET=$R/hostd.sock
+# common: R=/tmp/slopty-meas; SLOPTY_PTYD_SOCKET=$R/ptyd.sock SLOPTY_WORKER_SOCKET=$R/worker.sock
 #         SLOPTY_PORT=45597 SLOPTY_NO_SHELL_INTEGRATION=1; slopty-ptyd running
 # before (main a88e2e3 plus the "connected in" line; add SLOPTY_DIRECT_ONLY=1 for that row):
-SLOPTY_DATA_DIR=$R/host slopty-hostd --print-ticket > $R/ticket &
+SLOPTY_DATA_DIR=$R/worker slopty-worker --print-ticket > $R/ticket &
 SLOPTY_DATA_DIR=$R/client slopty pair "$(head -1 $R/ticket)"
 SLOPTY_DATA_DIR=$R/client slopty ping --count 20          # ×5
 # after (this branch):
-SLOPTY_DATA_DIR=$R/host slopty-hostd --print-addr &
-SLOPTY_DATA_DIR=$R/client slopty ping --host 127.0.0.1:45597 --count 20   # ×5, then the LAN and tailnet IPs
+SLOPTY_DATA_DIR=$R/worker slopty-worker --print-addr &
+SLOPTY_DATA_DIR=$R/client slopty ping --worker 127.0.0.1:45597 --count 20   # ×5, then the LAN and tailnet IPs
 ```
 
 Not measured: the shaped screen ladder (`screen_over_a_shaped_link`). It runs only against a
@@ -3316,13 +3317,13 @@ initial window, stay unmeasured on this transport; the tuning carried over uncha
 ## 2026-09-25 — the port hint on the PTY read path
 
 The session actor now asks every PTY read whether it names a local server
-(`slopty_host::ports::mentions_local_server`: `localhost:`, `127.0.0.1:`, `0.0.0.0:` or `[::1]:`
-and a port, or an OSC 8 link to a web address), so hostd can scan that session's listening
+(`slopty_worker::ports::mentions_local_server`: `localhost:`, `127.0.0.1:`, `0.0.0.0:` or `[::1]:`
+and a port, or an OSC 8 link to a web address), so the worker can scan that session's listening
 ports. After a hit the session skips the check for a second, so the cost that matters is the
 miss, which every read pays. Release, mac-studio, three runs of 2 000 checks each:
 
 ```
-cargo test -p slopty-host --release --lib -- --ignored local_server_scan_cost --nocapture
+cargo test -p slopty-worker --release --lib -- --ignored local_server_scan_cost --nocapture
 ```
 
 | read | p50 (3 runs) | p99 (3 runs) |
@@ -3372,15 +3373,15 @@ The iOS side runs the same pacer and only builds so far; it has no number yet.
 
 ## 2026-09-25 — echo behind slow requests
 
-Keystroke echo on a `/bin/cat` session while the same connection keeps hostd busy: quick open
+Keystroke echo on a `/bin/cat` session while the same connection keeps the worker busy: quick open
 walking a 20 000-file tree and a window stream opening, back to back, for as long as the typing
 lasts. Each key goes out after the last one's echo came back. Release, mac-studio. Screen
-Recording is not granted to a hostd this test spawns (`-3801`, docs/DEV.md "TCC"), so each
+Recording is not granted to a worker this test spawns (`-3801`, docs/DEV.md "TCC"), so each
 window open fails at ScreenCaptureKit (≈ 9 ms on its own) instead of opening the idle window;
 where the grant exists the same test opens and closes the `slopty-idle-window` window.
 
 ```
-cargo test -p slopty-hostd --release --test e2e echo_is_not_held_behind_slow_requests -- --nocapture
+cargo test -p slopty-workerd --release --test e2e echo_is_not_held_behind_slow_requests -- --nocapture
 ```
 
 | | echo idle p50 / p99 / max | echo under load p50 / p99 / max | quick open p50 | load avg |
@@ -3413,8 +3414,8 @@ cargo test -p slopty-capture --release --test geometry -- --ignored geometry_tic
 
 At 10 Hz that is about 5 ms of window-server time a second per open window before and 2.5 ms
 after. It also no longer runs on the connection's task: the probe runs on the blocking pool from
-the stream's own task, beside that stream's input. Not measured: hostd's CPU per second with one
-idle window stream open. It needs a capture, and a hostd this session can start has no Screen
+the stream's own task, beside that stream's input. Not measured: the worker's CPU per second with one
+idle window stream open. It needs a capture, and a worker this session can start has no Screen
 Recording grant; installing one under launchd would replace the host the user runs.
 
 ## 2026-09-25 — datagrams from the encoder's thread
@@ -3429,7 +3430,7 @@ frame; the arrival is from a frame's first stamp to its last datagram at the cli
 mac-studio, load average 8–19 from other sessions, five alternating pairs:
 
 ```
-cargo test -p slopty-hostd --release --bin slopty-hostd datagram_send_cost -- --ignored --nocapture
+cargo test -p slopty-workerd --release --bin slopty-worker datagram_send_cost -- --ignored --nocapture
 ```
 
 | pair | pump cpu / frame | direct cpu / frame | pump arrival p50 / p99 | direct arrival p50 / p99 |

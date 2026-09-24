@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "slopty: command-line client and host control for Slopty"
+description = "slopty: command-line client and worker control for Slopty"
 
 [lints]
 workspace = true
@@ -27,7 +27,7 @@ slopty-capture.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
-slopty-host.workspace = true
+slopty-worker.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true

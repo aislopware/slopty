@@ -1,14 +1,14 @@
-//! One connection to a host, as a channel of events plus a queue of outbound messages.
+//! One connection to a worker, as a channel of events plus a queue of outbound messages.
 //!
 //! Runs on tokio; a UI on another executor just holds the receiver and the sender.
 
 use std::sync::Arc;
 
 use slopty_core::{SessionId, StreamId, XferId};
-use slopty_net::client::HostConn;
+use slopty_net::client::WorkerConn;
 use slopty_net::framed::FramedRecv;
 use slopty_net::streams::{RawRecv, Uni, accept_uni};
-use slopty_net::{ClientMsg, HostMsg, NetError};
+use slopty_net::{ClientMsg, NetError, WorkerMsg};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::TermEvent;
@@ -26,11 +26,11 @@ use crate::xfer::{Table, Uplink};
 const EVENT_DEPTH: usize = 4096;
 const OUT_DEPTH: usize = 1024;
 
-/// Everything the UI hears from one host.
+/// Everything the UI hears from one worker.
 #[derive(Debug)]
 pub enum LinkEvent {
     /// A control-stream message (session list changes, pongs, agent events, …).
-    Control(HostMsg),
+    Control(WorkerMsg),
     /// A session-stream event.
     Term {
         /// Session.
@@ -52,13 +52,13 @@ pub enum LinkEvent {
         /// Why, for a person.
         error: String,
     },
-    /// The connection is gone; `HostLink` is dead after this.
+    /// The connection is gone; `WorkerLink` is dead after this.
     Disconnected(String),
 }
 
-/// A live host connection.
+/// A live worker connection.
 #[derive(Debug)]
-pub struct HostLink {
+pub struct WorkerLink {
     ack: HelloAck,
     out: mpsc::Sender<ClientMsg>,
     events: Option<mpsc::Receiver<LinkEvent>>,
@@ -70,24 +70,24 @@ pub struct HostLink {
     tasks: JoinSet<()>,
 }
 
-impl HostLink {
+impl WorkerLink {
     /// Wrap a connection: spawns the control reader, the session-stream acceptor and the writer.
-    /// The worker's listening ports arrive as they are (`HostMsg::Ports`), forwarded nowhere.
+    /// The worker's listening ports arrive as they are (`WorkerMsg::Ports`), forwarded nowhere.
     #[must_use]
-    pub fn start(conn: HostConn) -> Self {
+    pub fn start(conn: WorkerConn) -> Self {
         Self::launch(conn, false)
     }
 
     /// [`Self::start`], and every port the worker's shells listen on is served on this
     /// machine's loopback ([`LinkEvent::Ports`] says where): the app's link.
     #[must_use]
-    pub fn start_forwarding(conn: HostConn) -> Self {
+    pub fn start_forwarding(conn: WorkerConn) -> Self {
         Self::launch(conn, true)
     }
 
-    fn launch(conn: HostConn, forward: bool) -> Self {
+    fn launch(conn: WorkerConn, forward: bool) -> Self {
         warm_up_decoder();
-        let HostConn { conn: quic, ack, mut tx, mut rx, .. } = conn;
+        let WorkerConn { conn: quic, ack, mut tx, mut rx, .. } = conn;
         let (events_tx, events_rx) = mpsc::channel(EVENT_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(OUT_DEPTH);
         let mut tasks = JoinSet::new();
@@ -111,9 +111,9 @@ impl HostLink {
                 };
                 tracing::trace!(kind = msg.kind(), "control message");
                 let event = match msg {
-                    HostMsg::Xfer(x) if control_table.on_control(&x) => continue,
-                    HostMsg::Clip(c) if control_clips.on_control(&c) => continue,
-                    HostMsg::Ports { session, ports } if forward => {
+                    WorkerMsg::Xfer(x) if control_table.on_control(&x) => continue,
+                    WorkerMsg::Clip(c) if control_clips.on_control(&c) => continue,
+                    WorkerMsg::Ports { session, ports } if forward => {
                         let forwards = forwards.update(session, ports);
                         LinkEvent::Ports { session, forwards }
                     }
@@ -196,8 +196,8 @@ impl HostLink {
         }
     }
 
-    /// Start receiving a screen stream the host has `Opened`. Drop the handle to stop; send
-    /// `ScreenRequest::Close` as well so the host stops capturing. Callable from any thread.
+    /// Start receiving a screen stream the worker has `Opened`. Drop the handle to stop; send
+    /// `ScreenRequest::Close` as well so the worker stops capturing. Callable from any thread.
     #[must_use]
     pub fn screen(&self, stream: StreamId, codec: VideoCodec) -> ScreenHandle {
         let conn = self.conn.clone();
@@ -229,7 +229,7 @@ impl HostLink {
         Arc::clone(&self.remote)
     }
 
-    /// The host's `HelloAck`.
+    /// The worker's `HelloAck`.
     #[must_use]
     pub const fn ack(&self) -> &HelloAck {
         &self.ack
@@ -258,13 +258,13 @@ impl HostLink {
         slopty_net::endpoint::rtt(&self.conn)
     }
 
-    /// UDP datagrams received so far; unchanged for several seconds means the host is silent.
+    /// UDP datagrams received so far; unchanged for several seconds means the worker is silent.
     #[must_use]
     pub fn received_datagrams(&self) -> u64 {
         slopty_net::endpoint::received_datagrams(&self.conn)
     }
 
-    /// Where the host is and the round trip to it, for diagnostics.
+    /// Where the worker is and the round trip to it, for diagnostics.
     #[must_use]
     pub fn path(&self) -> String {
         slopty_net::endpoint::describe_path(&self.conn)
@@ -290,7 +290,7 @@ impl HostLink {
     }
 }
 
-impl Drop for HostLink {
+impl Drop for WorkerLink {
     fn drop(&mut self) {
         self.tasks.abort_all();
     }
@@ -365,9 +365,9 @@ static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// Pay VideoToolbox's first-session cost (150–400 ms) now, on its own thread, rather than in
 /// the first stream's worker where it holds the keyframe and reads as a link stall.
 ///
-/// Once per process; later calls are free. [`HostLink::start`] calls it, but a session
+/// Once per process; later calls are free. [`WorkerLink::start`] calls it, but a session
 /// created while the first stream is already starting still delays that stream's own
-/// session, so the apps call it at launch, before any host is dialed.
+/// session, so the apps call it at launch, before any worker is dialed.
 pub fn warm_up_decoder() {
     if DECODER_WARM.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;

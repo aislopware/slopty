@@ -1,4 +1,4 @@
-//! Host packetizer → (lossy wire) → client reassembler, end to end.
+//! Worker packetizer → (lossy wire) → client reassembler, end to end.
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +57,7 @@ mod tests {
             }
         }
 
-        /// The stamp the host puts on every datagram: the low byte of its millisecond clock.
+        /// The stamp the worker puts on every datagram: the low byte of its millisecond clock.
         /// One clock drives both ends here, so a datagram packetized now and delivered later
         /// carries the send time, which is what tells a held link from a quiet source.
         fn send_ms_lo(&self) -> u8 {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(actions, vec![Action::RequestRefresh { last_good_frame: 0 }]);
         assert!(h.rx.awaiting_refresh());
         assert!(h.drain().is_empty(), "frames 2 to 4 are dropped: they depended on frame 1");
-        // The host answers with an LTR refresh; everything after it flows again.
+        // The worker answers with an LTR refresh; everything after it flows again.
         let refresh = frame_bytes(6, 4_000);
         let s5 = h.send(&refresh, false, true);
         let s6 = h.send(&frame_bytes(7, 1_000), false, false);
@@ -319,7 +319,7 @@ mod tests {
         h.advance(nack_delay());
         let nack = h.tick();
         assert_eq!(nack.len(), 1);
-        // The host packetizes the next frame straight away; the link holds it for 120 ms with
+        // The worker packetizes the next frame straight away; the link holds it for 120 ms with
         // everything else, which is what makes this a stall rather than a quiet source.
         let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         h.awake(Duration::from_millis(120));
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn reports_carry_the_stall_time_and_count() {
         let mut h = Harness::new();
-        // The host takes a while to send the first frame: that is not a stall.
+        // The worker takes a while to send the first frame: that is not a stall.
         h.advance(Duration::from_millis(300));
         assert!(!h.rx.stalled(h.now));
         let r = h.rx.take_report(h.now, 0);
@@ -353,7 +353,7 @@ mod tests {
         h.deliver(&s0.datagrams);
         h.drain();
         assert_eq!(h.rx.stats().stalls, 0, "the start-up wait is not a release either");
-        // Both of the next frames leave the host now; the link is what holds them back.
+        // Both of the next frames leave the worker now; the link is what holds them back.
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         let s2 = h.send(&frame_bytes(3, 2_000), false, false);
         // 30 ms of silence: an ordinary inter-frame gap, not a stall.
@@ -368,7 +368,7 @@ mod tests {
         let r = h.rx.take_report(h.now, 0);
         assert_eq!((r.stalled_ms, r.stalls), (150, 0), "still on: time, no release yet");
         // 40 ms more, then the link moves again: only the part not yet charged, one release.
-        // The frame was packetized before the silence — the link held it, the host did not.
+        // The frame was packetized before the silence — the link held it, the worker did not.
         h.awake(Duration::from_millis(40));
         h.deliver(&s1.datagrams);
         assert!(!h.rx.stalled(h.now));
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!((r.stalled_ms, r.stalls), (0, 0), "the window is reset");
     }
 
-    /// A source that produces no frames for a while is not a stalled link: the host's
+    /// A source that produces no frames for a while is not a stalled link: the worker's
     /// heartbeats keep the receiver's stall clock running only on silence from the link.
     #[test]
     fn heartbeats_keep_a_quiet_source_from_reading_as_a_stall() {
@@ -419,16 +419,16 @@ mod tests {
         assert_eq!(h.drain().len(), 1, "the frame after the stall is delivered");
     }
 
-    /// A gap the host made itself — the capture had nothing to draw and its heartbeat was late
+    /// A gap the worker made itself — the capture had nothing to draw and its heartbeat was late
     /// — is not the link stalling. The send stamp on the datagram that ends the gap says the
-    /// host was quiet for all of it, so nothing is charged and nothing is counted.
+    /// worker was quiet for all of it, so nothing is charged and nothing is counted.
     #[test]
     fn a_quiet_source_whose_heartbeat_was_late_is_not_a_stall() {
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
         h.drain();
-        // 150 ms with nothing on the wire at all, then the host draws again and sends.
+        // 150 ms with nothing on the wire at all, then the worker draws again and sends.
         h.awake(Duration::from_millis(150));
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         h.deliver(&s1.datagrams);
@@ -437,10 +437,10 @@ mod tests {
         assert_eq!(
             (report.stalled_ms, report.stalls),
             (0, 0),
-            "the host's silence, not the link's"
+            "the worker's silence, not the link's"
         );
         assert_eq!((h.rx.stats().stalls, h.rx.stats().stalled_ms), (0, 0));
-        // While the host says the source is idle, an unfinished gap is not a stall either.
+        // While the worker says the source is idle, an unfinished gap is not a stall either.
         h.rx.set_source_live(false);
         h.awake(Duration::from_millis(400));
         assert!(!h.rx.stalled(h.now));
@@ -452,7 +452,7 @@ mod tests {
     /// A retransmission carries the stamp of the frame it is a copy of, so it must not become
     /// the reference the next gap is measured against: the arrival would be the
     /// retransmission's and the stamp some older frame's, and the difference between them is
-    /// not a host interval at all.
+    /// not a worker interval at all.
     #[test]
     fn a_retransmission_does_not_leave_its_stamp_behind() {
         let mut h = Harness::new();
@@ -460,13 +460,13 @@ mod tests {
         h.deliver(&s0.datagrams);
         h.drain();
         // 30 ms later a retransmission of that frame lands: under the stall gap, no stall, and
-        // its stamp (frame 0's, so 0 ms) is not the host's latest.
+        // its stamp (frame 0's, so 0 ms) is not the worker's latest.
         h.awake(Duration::from_millis(30));
         let resent = h.tx.retransmit(0, &[0]);
         h.deliver(&resent);
         assert_eq!(h.rx.stats().stalls, 0, "30 ms is not a stall");
-        // 70 ms of silence, then a datagram the host sent 60 ms after frame 0. Paired with the
-        // retransmission's stale stamp the host would look busy for 60 of those 70 ms; paired
+        // 70 ms of silence, then a datagram the worker sent 60 ms after frame 0. Paired with the
+        // retransmission's stale stamp the worker would look busy for 60 of those 70 ms; paired
         // with nothing, which is the truth, the whole gap is the link's.
         h.awake(Duration::from_millis(70));
         let beat = heartbeat_datagram(STREAM, 1, 60);
@@ -476,7 +476,7 @@ mod tests {
     }
 
     /// A datagram whose stamp is older than the one before it — reordered, or delayed past its
-    /// successor — must not read as a long host pause. The subtraction is unsigned and wraps,
+    /// successor — must not read as a long worker pause. The subtraction is unsigned and wraps,
     /// so 10 ms backwards looks like 246 ms forwards, which would forgive any stall.
     #[test]
     fn a_stamp_that_goes_backwards_is_not_evidence() {
@@ -486,7 +486,7 @@ mod tests {
         h.drain();
         let beat = heartbeat_datagram(STREAM, 1, 100);
         assert_eq!(h.rx.ingest(&beat, h.now), Ingest::Heartbeat);
-        // 80 ms later, a datagram the host stamped *before* that one.
+        // 80 ms later, a datagram the worker stamped *before* that one.
         h.awake(Duration::from_millis(80));
         let late = heartbeat_datagram(STREAM, 2, 90);
         assert_eq!(h.rx.ingest(&late, h.now), Ingest::Heartbeat);
@@ -495,9 +495,9 @@ mod tests {
     }
 
     /// A link that holds datagrams is still a stall when the source was a little slow too:
-    /// only the host's own share of the gap is forgiven, the rest is charged.
+    /// only the worker's own share of the gap is forgiven, the rest is charged.
     #[test]
-    fn only_the_hosts_share_of_a_gap_is_forgiven() {
+    fn only_the_workers_share_of_a_gap_is_forgiven() {
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
@@ -508,32 +508,36 @@ mod tests {
         h.awake(Duration::from_millis(150));
         h.deliver(&s1.datagrams);
         let report = h.rx.take_report(h.now, 0);
-        assert_eq!((report.stalled_ms, report.stalls), (150, 1), "170 ms of gap, 20 ms of it host");
+        assert_eq!(
+            (report.stalled_ms, report.stalls),
+            (150, 1),
+            "170 ms of gap, 20 ms of it worker"
+        );
         assert_eq!(h.drain().len(), 1);
     }
 
-    /// The stamp is written when the host *builds* a datagram, not when it leaves, so the
+    /// The stamp is written when the worker *builds* a datagram, not when it leaves, so the
     /// interval between two stamps can read a few milliseconds longer than the silence between
     /// their arrivals. That overshoot used to throw the whole reading away and charge the
-    /// silence to the link, which is how a quiet loopback stream reported stalls with the host
+    /// silence to the link, which is how a quiet loopback stream reported stalls with the worker
     /// holding nothing (MEASUREMENTS, "a quiet loopback stream's stalls"). Read as a signed
-    /// offset it says what it means: the host accounts for all of it.
+    /// offset it says what it means: the worker accounts for all of it.
     #[test]
-    fn a_stamp_reading_just_past_the_silence_still_belongs_to_the_host() {
+    fn a_stamp_reading_just_past_the_silence_still_belongs_to_the_worker() {
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
         h.drain();
-        // 60 ms of silence ended by a beat the host stamped 67 ms after the frame.
+        // 60 ms of silence ended by a beat the worker stamped 67 ms after the frame.
         h.awake(Duration::from_millis(60));
         let covering = h.send_ms_lo().wrapping_add(7);
         assert_eq!(h.rx.ingest(&heartbeat_datagram(STREAM, 1, covering), h.now), Ingest::Heartbeat);
         let report = h.rx.take_report(h.now, 0);
-        assert_eq!((report.stalled_ms, report.stalls), (0, 0), "the host's own silence");
+        assert_eq!((report.stalled_ms, report.stalls), (0, 0), "the worker's own silence");
         let silences = h.rx.stats().silences;
-        assert_eq!((silences.host_covered, silences.in_flight), (1, 0));
+        assert_eq!((silences.worker_covered, silences.in_flight), (1, 0));
         // A stamp *before* the one it follows is the unsigned subtraction wrapping, not
-        // truncation: 246 ms of "host interval" inside a 60 ms gap is a datagram that overtook
+        // truncation: 246 ms of "worker interval" inside a 60 ms gap is a datagram that overtook
         // its predecessor, and it buys no forgiveness.
         h.awake(Duration::from_millis(60));
         let backwards = covering.wrapping_sub(10);
@@ -546,7 +550,7 @@ mod tests {
         assert_eq!(h.rx.stats().silences.stamp_backwards, 1);
     }
 
-    /// A capture whose heartbeat runs at a third of its promised rate is still the host being
+    /// A capture whose heartbeat runs at a third of its promised rate is still the worker being
     /// quiet, not the link holding datagrams: the stamps say so, nothing is charged, and the
     /// bitrate controller keeps growing instead of freezing on a stall it never had.
     #[test]
@@ -568,7 +572,7 @@ mod tests {
         let report = h.rx.take_report(h.now, 0);
         assert_eq!((report.stalled_ms, report.stalls), (0, 0));
         let silences = h.rx.stats().silences;
-        assert_eq!((silences.host_quiet, silences.ended_heartbeat), (8, 8));
+        assert_eq!((silences.worker_quiet, silences.ended_heartbeat), (8, 8));
         assert_eq!((silences.in_flight, silences.stamp_wrapped, silences.stamp_absent), (0, 0, 0));
         // What the counter is for: a sender-side silence must not hold the target down.
         let mut c = RateController::new(30_000_000);
@@ -576,7 +580,7 @@ mod tests {
         assert_eq!(decision.map(|d| d.verdict), Some(RateVerdict::Grow));
     }
 
-    /// The other half of the same rule: 200 ms in which the host sent and the receiver was
+    /// The other half of the same rule: 200 ms in which the worker sent and the receiver was
     /// awake to see nothing arrive is one stall of 200 ms, and the controller freezes on it.
     #[test]
     fn two_hundred_milliseconds_in_flight_is_one_stall() {
@@ -584,14 +588,14 @@ mod tests {
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
         h.drain();
-        // The host packetizes the next frame straight away; the link swallows it for 200 ms.
+        // The worker packetizes the next frame straight away; the link swallows it for 200 ms.
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         h.awake(Duration::from_millis(200));
         h.deliver(&s1.datagrams);
         let report = h.rx.take_report(h.now, 0);
         assert_eq!((report.stalled_ms, report.stalls), (200, 1));
         let silences = h.rx.stats().silences;
-        assert_eq!((silences.in_flight, silences.host_quiet, silences.receiver_dozed), (1, 0, 0));
+        assert_eq!((silences.in_flight, silences.worker_quiet, silences.receiver_dozed), (1, 0, 0));
         assert_eq!(h.drain().len(), 1, "the frame arrives late, not lost");
         let mut c = RateController::new(30_000_000);
         let decision = (0..64).find_map(|_| c.on_report(&report, 0, None));
@@ -682,18 +686,18 @@ mod tests {
         }
     }
 
-    /// The host's silence and the receiver's sleep can be the same stretch of time. Forgiving
+    /// The worker's silence and the receiver's sleep can be the same stretch of time. Forgiving
     /// both in full excuses it twice and hides a real hold.
     #[test]
-    fn sleep_inside_the_hosts_own_silence_is_not_forgiven_twice() {
+    fn sleep_inside_the_workers_own_silence_is_not_forgiven_twice() {
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
         h.drain();
-        // The receiver sleeps through the first 100 ms — which is also the host's own silence.
+        // The receiver sleeps through the first 100 ms — which is also the worker's own silence.
         h.advance(Duration::from_millis(100));
         let _woke = h.tick();
-        // The host builds the frame here, 100 ms in; the link then holds it for 100 ms with the
+        // The worker builds the frame here, 100 ms in; the link then holds it for 100 ms with the
         // receiver awake throughout.
         let held = h.send(&frame_bytes(2, 2_000), false, false);
         h.awake(Duration::from_millis(100));
@@ -722,7 +726,7 @@ mod tests {
     #[test]
     fn refresh_requests_repeat_until_a_refresh_frame_arrives() {
         let mut h = Harness::new();
-        // Nothing has arrived; the reassembler nudges the host for an IDR periodically.
+        // Nothing has arrived; the reassembler nudges the worker for an IDR periodically.
         assert!(h.tick().is_empty(), "the constructor counts as the first request");
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
@@ -746,8 +750,8 @@ mod tests {
         assert_eq!(h.rx.stats().refreshes, 2 + u64::try_from(sent).unwrap());
     }
 
-    /// The host says the capture source has produced nothing yet: asking it for a refresh
-    /// cannot help, so the receiver stops until the host says the source is live again. This is
+    /// The worker says the capture source has produced nothing yet: asking it for a refresh
+    /// cannot help, so the receiver stops until the worker says the source is live again. This is
     /// the storm guard — a window that has not drawn used to draw a refresh request every
     /// backoff period for as long as it stayed hidden.
     #[test]
@@ -764,21 +768,21 @@ mod tests {
             assert!(h.tick().is_empty(), "an idle source must not be asked again");
         }
 
-        // The host reports the source live: asking resumes, and from the shortest wait, because
+        // The worker reports the source live: asking resumes, and from the shortest wait, because
         // the first frame is now worth waiting for.
         h.rx.set_source_live(true);
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0 }]);
     }
 
-    /// What clears what: a heartbeat proves the host is alive, so the retry cap starts over, but
-    /// nothing on the wire lifts the idle suppression while the host's word is that the source is
+    /// What clears what: a heartbeat proves the worker is alive, so the retry cap starts over, but
+    /// nothing on the wire lifts the idle suppression while the worker's word is that the source is
     /// idle. Control and video travel separately, so a fragment captured before the target went
     /// away arrives after the statement that it did; taking that as proof would put the receiver
-    /// back to live behind the host's back, and the host — which reports the change, not the
-    /// state — would never say it again. Only the host takes its own statement back.
+    /// back to live behind the worker's back, and the worker — which reports the change, not the
+    /// state — would never say it again. Only the worker takes its own statement back.
     #[test]
-    fn a_heartbeat_restarts_the_cap_and_only_the_host_lifts_the_idle_hint() {
+    fn a_heartbeat_restarts_the_cap_and_only_the_worker_lifts_the_idle_hint() {
         let mut h = Harness::new();
         h.rx.set_source_live(false);
         let mut sent = 0;
@@ -788,7 +792,7 @@ mod tests {
         }
         assert_eq!(sent, 0, "an idle source is not asked");
 
-        // A heartbeat: the host is there, the source still is not. The cap is fresh, but
+        // A heartbeat: the worker is there, the source still is not. The cap is fresh, but
         // suppression holds, so still nothing goes out.
         assert_eq!(h.rx.ingest(&heartbeat_datagram(STREAM, 0, 0), h.now), Ingest::Heartbeat);
         for _ in 0..600 {
@@ -801,7 +805,7 @@ mod tests {
         // already in flight when the window went away, and it says nothing about now.
         let s0 = h.send(&frame_bytes(1, 6_000), true, false);
         h.deliver(&s0.datagrams[..1]);
-        assert!(!h.rx.source_live(), "a frame in flight before the host spoke is not proof");
+        assert!(!h.rx.source_live(), "a frame in flight before the worker spoke is not proof");
         let mut asked = 0;
         for _ in 0..600 {
             h.advance(Duration::from_millis(10));
@@ -813,23 +817,23 @@ mod tests {
         assert_eq!(asked, 1, "an idle source is asked once for the frame it lost, then not again");
         assert!(!h.rx.source_live());
 
-        // The host takes it back — which it does on the tick after the target draws again — and
+        // The worker takes it back — which it does on the tick after the target draws again — and
         // asking resumes from the shortest wait.
         h.rx.set_source_live(true);
         assert!(h.rx.source_live());
         h.advance(cfg().max_hold);
         assert!(
             h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }),
-            "asking resumes once the host says the source draws again"
+            "asking resumes once the worker says the source draws again"
         );
     }
 
-    /// The same fragment against a host that never sends the hint at all: there the receiver has
+    /// The same fragment against a worker that never sends the hint at all: there the receiver has
     /// only the stream to go on, the suppression never comes on, and nothing is suppressed.
     #[test]
-    fn a_host_that_never_sends_the_hint_keeps_asking() {
+    fn a_worker_that_never_sends_the_hint_keeps_asking() {
         let mut h = Harness::new();
-        assert!(h.rx.source_live(), "live until the host says otherwise");
+        assert!(h.rx.source_live(), "live until the worker says otherwise");
         let s0 = h.send(&frame_bytes(1, 6_000), true, false);
         h.deliver(&s0.datagrams[..1]);
         assert!(h.rx.source_live());
@@ -837,7 +841,7 @@ mod tests {
         assert!(h.tick().contains(&Action::RequestRefresh { last_good_frame: 0 }));
     }
 
-    /// Fallback for a host that never sends the hint: the repeats stop on their own. With the
+    /// Fallback for a worker that never sends the hint: the repeats stop on their own. With the
     /// doubling backoff the cap spans about 17 s of asking, then silence until the stream moves.
     #[test]
     fn refresh_requests_give_up_after_the_cap() {
@@ -929,7 +933,7 @@ mod tests {
             (report.frames_ok, report.frames_fec, report.frames_lost, report.datagrams_lost),
             (2, 1, 0, 2)
         );
-        assert_eq!(report.last_host_send_ts_us, 1_000);
+        assert_eq!(report.last_worker_send_ts_us, 1_000);
         assert_eq!((report.acked_ltr_len, report.acked_ltr[0]), (1, 0xabcd));
         assert_eq!(report.late_frames, 1);
         assert_eq!(report.queue_depth, 0);
@@ -1128,7 +1132,7 @@ mod tests {
     }
 
     /// The report ranks the window's holds for its percentiles and smooths the interarrival
-    /// jitter on the host's capture clock.
+    /// jitter on the worker's capture clock.
     #[test]
     fn the_report_ranks_holds_and_smooths_jitter() {
         let mut h = Harness::new();
@@ -1155,7 +1159,7 @@ mod tests {
     }
 
     /// Where a silence is filed: one that began with nothing pending is idle time, one ended
-    /// by a picture says so, and what the host's stamps or the receiver's sleep leave to the
+    /// by a picture says so, and what the worker's stamps or the receiver's sleep leave to the
     /// link is charged from the threshold exactly.
     #[test]
     fn a_silence_is_filed_by_what_was_pending_what_ended_it_and_what_was_left() {
@@ -1180,7 +1184,7 @@ mod tests {
         h.deliver(&s2.datagrams);
         assert_eq!(h.rx.stats().silences.while_idle, 0, "half a frame was pending");
 
-        // The host's stamps account for 20 ms of a 70 ms silence: the 50 ms left is the
+        // The worker's stamps account for 20 ms of a 70 ms silence: the 50 ms left is the
         // threshold exactly, and that is the link's.
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
@@ -1189,7 +1193,7 @@ mod tests {
         h.awake(Duration::from_millis(70));
         assert_eq!(h.rx.ingest(&heartbeat_datagram(STREAM, 1, 20), h.now), Ingest::Heartbeat);
         let silences = h.rx.stats().silences;
-        assert_eq!((silences.in_flight, silences.host_quiet, silences.receiver_dozed), (1, 0, 0));
+        assert_eq!((silences.in_flight, silences.worker_quiet, silences.receiver_dozed), (1, 0, 0));
         assert_eq!(h.rx.take_report(h.now, 0).stalled_ms, 50);
     }
 

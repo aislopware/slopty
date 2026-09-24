@@ -6,7 +6,7 @@ use slopty_core::{ClientId, WorkerId};
 
 use crate::terminal::SessionSummary;
 
-/// What kind of client is connecting; hosts use it for defaults (e.g. touch-sized hit targets).
+/// What kind of client is connecting; workers use it for defaults (e.g. touch-sized hit targets).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ClientKind {
     /// The macOS app.
@@ -20,7 +20,7 @@ pub enum ClientKind {
 }
 
 bitflags! {
-    /// Optional features. A host never uses a capability the client did not announce.
+    /// Optional features. A worker never uses a capability the client did not announce.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct Caps: u32 {
@@ -48,7 +48,7 @@ pub struct Hello {
     pub client: ClientId,
     /// Kind.
     pub kind: ClientKind,
-    /// Human-readable name shown on the host ("Cong's iPad").
+    /// Human-readable name shown on the worker ("Cong's iPad").
     pub name: String,
     /// App version string.
     pub app_version: String,
@@ -56,21 +56,21 @@ pub struct Hello {
     pub caps: Caps,
 }
 
-/// Host's acceptance.
+/// Worker's acceptance.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HelloAck {
-    /// Host protocol version (equals the client's, or `Rejected` was sent instead).
+    /// Worker protocol version (equals the client's, or `Rejected` was sent instead).
     pub protocol: u16,
     /// Worker identity: a UUID the worker keeps in its data directory, so a client keys
     /// everything by it and not by the address it happened to dial.
     pub worker: WorkerId,
-    /// Host name ("mac-studio").
+    /// Worker name ("mac-studio").
     pub name: String,
-    /// Host app version.
+    /// Worker app version.
     pub app_version: String,
-    /// Host features.
+    /// Worker features.
     pub caps: Caps,
-    /// Sessions currently alive on the host, so the client can reattach immediately.
+    /// Sessions currently alive on the worker, so the client can reattach immediately.
     pub sessions: Vec<SessionSummary>,
 }
 
@@ -79,8 +79,8 @@ pub struct HelloAck {
 pub enum Rejection {
     /// Protocol mismatch.
     ProtocolVersion {
-        /// What the host speaks.
-        host: u16,
+        /// What the worker speaks.
+        worker: u16,
     },
     /// Too many clients.
     Busy,

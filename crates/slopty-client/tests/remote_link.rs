@@ -7,13 +7,13 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use slopty_client::{HostLink, LinkEvent};
+    use slopty_client::{LinkEvent, WorkerLink};
     use slopty_core::{ClientId, SessionId, WorkerId, XferId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect};
-    use slopty_net::host::{AcceptedClient, HostListener};
     use slopty_net::streams::{self, RawRecv, Uni};
-    use slopty_net::{ClientMsg, HostAddr, HostMsg};
+    use slopty_net::worker::{AcceptedClient, WorkerListener};
+    use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
     use slopty_proto::PROTOCOL_VERSION;
     use slopty_proto::handshake::{Caps, ClientKind, Hello, HelloAck};
     use slopty_proto::orchestration::Port;
@@ -37,9 +37,9 @@ mod tests {
     }
 
     /// A worker that greets one client and hands its end to the test, and the client's link.
-    async fn pair() -> (AcceptedClient, HostLink, mpsc::Receiver<LinkEvent>) {
+    async fn pair() -> (AcceptedClient, WorkerLink, mpsc::Receiver<LinkEvent>) {
         let listener =
-            HostListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
+            WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
         let port = listener.local_addr().unwrap().port();
         let worker = WorkerId::new();
         let accepted = tokio::spawn(async move {
@@ -47,18 +47,18 @@ mod tests {
             let ack = HelloAck {
                 protocol: PROTOCOL_VERSION,
                 worker,
-                name: "host".to_owned(),
+                name: "worker".to_owned(),
                 app_version: "0".to_owned(),
                 caps: Caps::empty(),
                 sessions: Vec::new(),
             };
-            client.tx.send(&HostMsg::HelloAck(ack)).await.unwrap();
+            client.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
             client
         });
         let endpoint = bind_client().unwrap();
         let addr: HostAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let conn = connect(&endpoint, &addr, hello()).await.unwrap();
-        let mut link = HostLink::start_forwarding(conn);
+        let mut link = WorkerLink::start_forwarding(conn);
         let events = link.events().unwrap();
         let client = tokio::time::timeout(WAIT, accepted).await.unwrap().unwrap();
         (client, link, events)
@@ -126,7 +126,7 @@ mod tests {
         .await;
         let durable = held.len() as u64;
         let offset = XferMsg::Offset { xfer, name, durable };
-        client.tx.send(&HostMsg::Xfer(offset)).await.unwrap();
+        client.tx.send(&WorkerMsg::Xfer(offset)).await.unwrap();
 
         let (header, mut rx) = bulk(&client).await;
         assert_eq!(header.offset, durable, "sent again from what the worker holds");
@@ -162,7 +162,7 @@ mod tests {
         send.write_all(body).await.unwrap();
         send.finish().unwrap();
         let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: body.len() as u64 };
-        client.tx.send(&HostMsg::Xfer(begin)).await.unwrap();
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
         let landed =
             tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap().unwrap();
         let expected = into.path().join("todo.txt");
@@ -185,7 +185,7 @@ mod tests {
                 inline: None,
             }],
         };
-        client.tx.send(&HostMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        client.tx.send(&WorkerMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
         let remote = link.remote();
         let paste = std::thread::spawn(move || remote.clip_data(9, "public.png", WAIT));
         let (generation, uti) = expect(&mut client, |m| match m {
@@ -236,7 +236,7 @@ mod tests {
         let session = SessionId::new();
         let wanted = free_port();
         let ports = vec![port(wanted, session)];
-        client.tx.send(&HostMsg::Ports { session, ports }).await.unwrap();
+        client.tx.send(&WorkerMsg::Ports { session, ports }).await.unwrap();
         let forwards = forwarded(&mut events).await;
         assert_eq!(forwards.len(), 1);
         assert_eq!(forwards[0].local, Some(wanted), "the same port when it is free");
@@ -266,7 +266,7 @@ mod tests {
         let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let busy = taken.local_addr().unwrap().port();
         let ports = vec![port(busy, session)];
-        client.tx.send(&HostMsg::Ports { session, ports }).await.unwrap();
+        client.tx.send(&WorkerMsg::Ports { session, ports }).await.unwrap();
         let forwards = forwarded(&mut events).await;
         let local = forwards[0].local.unwrap();
         assert_ne!(local, busy, "not the taken port");

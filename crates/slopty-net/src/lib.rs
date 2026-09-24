@@ -1,15 +1,15 @@
-//! Transport between Slopty clients and hosts: QUIC over plain UDP (noq), in the clear.
+//! Transport between Slopty clients and workers: QUIC over plain UDP (noq), in the clear.
 //!
-//! Hosts are reached over Tailscale, `WireGuard` or a VPN, which already encrypt and
+//! Workers are reached over Tailscale, `WireGuard` or a VPN, which already encrypt and
 //! authenticate; Slopty adds neither, and admits peers by source address instead.
 //!
 //! * [`crypto`] — the null QUIC crypto provider: parameters exchanged, nothing encrypted.
 //! * [`endpoint`] — bind a tuned endpoint; read a connection's path.
 //! * [`addr`] — `host[:port]`, as a person types it.
-//! * [`admission`] — which source addresses a host lets in.
+//! * [`admission`] — which source addresses a worker lets in.
 //! * [`framed`] — typed, length-prefixed messages over QUIC streams.
-//! * [`host`] — accept loop yielding clients that said `Hello`.
-//! * [`client`] — connect to a host by address.
+//! * [`worker`] — accept loop yielding clients that said `Hello`.
+//! * [`client`] — connect to a worker by address.
 //! * [`server`] — links to the server: its accept loop, and the dial to it.
 //! * [`known`] — the client's id and the workers it has added.
 //!
@@ -17,7 +17,7 @@
 //! serves client ↔ worker and worker, client or agent ↔ server links.
 //!
 //! One QUIC connection carries: the control stream (bidirectional, opened by the client), one
-//! unidirectional session stream per attached terminal (opened by the host), and unreliable
+//! unidirectional session stream per attached terminal (opened by the worker), and unreliable
 //! datagrams for media.
 
 #![forbid(unsafe_code)]
@@ -28,14 +28,14 @@ pub mod client;
 pub mod crypto;
 pub mod endpoint;
 pub mod framed;
-pub mod host;
 pub mod known;
 pub mod server;
 pub mod streams;
+pub mod worker;
 
 pub use addr::HostAddr;
 pub use noq::{Connection, Endpoint};
-pub use slopty_proto::{ClientMsg, HostMsg};
+pub use slopty_proto::{ClientMsg, WorkerMsg};
 
 /// Transport errors.
 #[derive(Debug, thiserror::Error)]

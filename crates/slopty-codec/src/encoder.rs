@@ -1,4 +1,4 @@
-//! `VTCompressionSession` for interactive streaming (macOS host only).
+//! `VTCompressionSession` for interactive streaming (macOS worker only).
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -34,7 +34,7 @@ use slopty_proto::screen::VideoCodec;
 use crate::cf::{self, check};
 use crate::{CodecError, annexb};
 
-/// Which rate-control mode a session runs in. The host only ever runs the low-latency one;
+/// Which rate-control mode a session runs in. The worker only ever runs the low-latency one;
 /// the other exists for the measurement that rejected it (`experiments` feature).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RateControl {
@@ -44,7 +44,7 @@ pub enum RateControl {
     LowLatency,
     /// macOS 26's `VariableBitRate` + `VBVMaxBitRate` + `VBVBufferDuration` on a session
     /// *without* low-latency rate control (the header says they are incompatible with it).
-    /// Measured against `LowLatency` in MEASUREMENTS.md; not used by the host.
+    /// Measured against `LowLatency` in MEASUREMENTS.md; not used by the worker.
     #[cfg(feature = "experiments")]
     Vbv,
 }
@@ -241,7 +241,7 @@ impl Encoder {
     }
 
     /// Set one public `kVTCompressionPropertyKey_*` on the live session; `call` names it in
-    /// the error. The host's property set lives in `configure`.
+    /// the error. The worker's property set lives in `configure`.
     #[cfg(feature = "experiments")]
     pub fn set_property(
         &self,
@@ -807,7 +807,7 @@ mod tests {
     const W: usize = 320;
     const H: usize = 180;
 
-    /// A full-range NV12 frame, the format the host captures, with a moving gradient.
+    /// A full-range NV12 frame, the format the worker captures, with a moving gradient.
     fn frame(index: usize) -> CFRetained<CVPixelBuffer> {
         use objc2_core_video::{
             CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,

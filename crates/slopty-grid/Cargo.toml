@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Terminal frame model shared by host and clients: cells, styles, lines, screens, scrollback cache"
+description = "Terminal frame model shared by worker and clients: cells, styles, lines, screens, scrollback cache"
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 //! The receiver tells a stalled link from a quiet source by silence alone: nothing for a stall
 //! gap means a stall. A window that does not change produces no frames for seconds, and even a
 //! busy capture has holes (ScreenCaptureKit warms up after the first frame, skips a frame now
-//! and then). So the host sends a header-only datagram whenever nothing else left for
+//! and then). So the worker sends a header-only datagram whenever nothing else left for
 //! [`HEARTBEAT_AFTER`], half the stall gap, and the receiver's stall clock only runs on silence
 //! from the link.
 

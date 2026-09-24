@@ -1,4 +1,4 @@
-//! Kitty graphics on the host side: a program's images made into what a client paints.
+//! Kitty graphics on the worker side: a program's images made into what a client paints.
 //!
 //! libghostty keeps the images and lays the placements out; this module turns an image into
 //! wire RGBA (converted, shrunk under the frame cap) and keeps the ledger of what each

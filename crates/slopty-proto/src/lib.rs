@@ -1,11 +1,11 @@
-//! The wire protocol between Slopty clients and hosts.
+//! The wire protocol between Slopty clients and workers.
 //!
 //! Three transports, one vocabulary:
 //!
-//! * **Control stream** — one bidirectional QUIC stream. [`ClientMsg`] one way, [`HostMsg`] the
+//! * **Control stream** — one bidirectional QUIC stream. [`ClientMsg`] one way, [`WorkerMsg`] the
 //!   other, each framed by [`codec`] (u32 length prefix + postcard).
-//! * **Unidirectional streams** — each opens with a [`transfer::UniHead`]. A session stream (host →
-//!   client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
+//! * **Unidirectional streams** — each opens with a [`transfer::UniHead`]. A session stream (worker
+//!   → client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
 //!   input goes back on the control stream so it is never head-of-line blocked behind a large
 //!   frame. A bulk stream (either way, lower priority) carries a file or a large clipboard
 //!   representation as raw bytes.
@@ -35,7 +35,7 @@ pub mod transfer;
 use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
-/// Bumped on any incompatible change. Hosts serve exactly one version; clients must match.
+/// Bumped on any incompatible change. Workers serve exactly one version; clients must match.
 pub const PROTOCOL_VERSION: u16 = 52;
 
 /// Everything a client sends on the control stream.
@@ -50,45 +50,45 @@ pub enum ClientMsg {
         /// The request.
         req: terminal::TermRequest,
     },
-    /// Create a new session; the host answers with `HostMsg::SessionOpened`.
+    /// Create a new session; the worker answers with `WorkerMsg::SessionOpened`.
     OpenSession(terminal::OpenSession),
-    /// Item registry operation (host is authoritative; this is a proposal).
+    /// Item registry operation (worker is authoritative; this is a proposal).
     Items(items::ItemOp),
     /// Remote window request.
     Screen(screen::ScreenRequest),
-    /// Liveness probe; the host echoes it.
+    /// Liveness probe; the worker echoes it.
     Ping {
         /// Sender's monotonic clock, echoed back untouched.
         sent_at: slopty_core::MonoTime,
     },
-    /// Register the `slopty hook` relay in the host's Claude Code settings, so agents there
-    /// report precisely instead of being guessed at; answered with `HostMsg::HooksInstalled`.
+    /// Register the `slopty hook` relay in the worker's Claude Code settings, so agents there
+    /// report precisely instead of being guessed at; answered with `WorkerMsg::HooksInstalled`.
     InstallHooks,
-    /// Read a file on the host for a file card; answered with `HostMsg::File`.
+    /// Read a file on the worker for a file card; answered with `WorkerMsg::File`.
     ReadFile {
-        /// Absolute path on the host.
+        /// Absolute path on the worker.
         path: String,
     },
     /// Paths under `root` that `query` matches, for the palette's quick open; answered with
-    /// `HostMsg::FoundFiles`.
+    /// `WorkerMsg::FoundFiles`.
     FindFiles {
-        /// An absolute directory on the host, or `~` for its home.
+        /// An absolute directory on the worker, or `~` for its home.
         root: String,
         /// What was typed.
         query: String,
     },
-    /// Point the other clients at one item: the host fans it out as `ItemSync::Pointed`
+    /// Point the other clients at one item: the worker fans it out as `ItemSync::Pointed`
     /// and each of them offers a jump to it. Nothing is said about the item itself; a
     /// client that does not know it ignores the pointing.
     Point {
         /// The item.
         item: slopty_core::ItemId,
     },
-    /// The files this client's file cards show, the whole set each time it changes: the host
-    /// looks at each one every so often and answers with `HostMsg::File` again when one has
+    /// The files this client's file cards show, the whole set each time it changes: the worker
+    /// looks at each one every so often and answers with `WorkerMsg::File` again when one has
     /// changed on disk. Empty when the last card goes.
     WatchFiles {
-        /// Absolute paths on the host.
+        /// Absolute paths on the worker.
         paths: Vec<String>,
     },
     /// Clipboard sync.
@@ -119,9 +119,9 @@ impl ClientMsg {
     }
 }
 
-/// Everything a host sends on the control stream.
+/// Everything a worker sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub enum HostMsg {
+pub enum WorkerMsg {
     /// Reply to `Hello`.
     HelloAck(handshake::HelloAck),
     /// Rejected `Hello`.
@@ -189,7 +189,7 @@ pub enum HostMsg {
     },
 }
 
-impl HostMsg {
+impl WorkerMsg {
     /// Variant name, for logs.
     #[must_use]
     pub const fn kind(&self) -> &'static str {

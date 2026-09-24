@@ -1,12 +1,12 @@
 //! The terminal frame model.
 //!
-//! The host's VT engine produces [`Screen`] snapshots and per-row updates; the client stores them,
-//! keeps scrollback in a [`Scrollback`] cache keyed by absolute line index, and renders from
+//! The worker's VT engine produces [`Screen`] snapshots and per-row updates; the client stores
+//! them, keeps scrollback in a [`Scrollback`] cache keyed by absolute line index, and renders from
 //! [`Line`]s. Nothing here parses escape sequences or touches a font: this crate is pure data and
 //! the operations on it (apply a row update, scroll a viewport, look up a cell).
 //!
-//! Widths and grapheme boundaries are decided by the engine on the host and carried explicitly in
-//! every [`Cell`], so a client never re-segments text and can never disagree with the host about
+//! Widths and grapheme boundaries are decided by the engine on the worker and carried explicitly in
+//! every [`Cell`], so a client never re-segments text and can never disagree with the worker about
 //! where a column starts.
 
 #![forbid(unsafe_code)]

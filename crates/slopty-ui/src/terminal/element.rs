@@ -50,7 +50,7 @@ pub struct CellMetrics {
     pub rows: u16,
     /// Device pixels of the *fitted* grid per logical point painted: `scale / zoom`.
     ///
-    /// [`Self::pixel_at`] reports in the units the host measures in — the cell size in
+    /// [`Self::pixel_at`] reports in the units the worker measures in — the cell size in
     /// `TermSize::metrics`, which is whole device pixels of the unzoomed grid — so a pixel
     /// mouse report lands on the cell the pointer is actually over.
     pub pixel_scale: f32,
@@ -93,7 +93,7 @@ impl CellMetrics {
     }
 
     /// Pixel offset within the content area (clamped at 0), in the device pixels of the fitted
-    /// grid — the units the host divides by the cell size it was told.
+    /// grid — the units the worker divides by the cell size it was told.
     #[must_use]
     pub fn pixel_at(&self, pos: Point<Pixels>) -> (u32, u32) {
         let scale = if self.pixel_scale.is_finite() && self.pixel_scale > 0.0 {
@@ -696,12 +696,12 @@ fn segments(cells: &[Cell]) -> impl Iterator<Item = (u16, &[Cell])> {
     })
 }
 
-/// How a local-echo guess is drawn: faint and underlined, so a guess never reads as the host's.
+/// How a local-echo guess is drawn: faint and underlined, so a guess never reads as the worker's.
 const PREDICTED: CellStyle =
     CellStyle { flags: StyleFlags::FAINT, underline: Underline::Single, ..CellStyle::DEFAULT };
 
 /// Screen row `row`'s cells with the predictor's guesses for it written in, or `None` when it
-/// has none: the guesses are then shaped, cached and painted as the host's text is.
+/// has none: the guesses are then shaped, cached and painted as the worker's text is.
 fn predicted_cells(cells: &[Cell], guesses: &VecDeque<Prediction>, row: u16) -> Option<Vec<Cell>> {
     let mut on_row = guesses.iter().filter(|p| p.row == row).peekable();
     on_row.peek()?;
@@ -1173,7 +1173,7 @@ impl Element for TerminalElement {
             let clip = window.content_mask().bounds.intersect(&bounds);
             let (clip_top, clip_bottom) = (clip.top(), clip.bottom());
             let overhang = row_overhang(&grid, &face, metrics.pixel_scale);
-            // Rows above the oldest line the host still has: a `~` filler, shaped once.
+            // Rows above the oldest line the worker still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<Word>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             // "took 3.2 s" at the right end of a prompt row whose command took a while.
@@ -1218,7 +1218,7 @@ impl Element for TerminalElement {
                     });
                     continue;
                 };
-                // The local-echo guesses on this row are cells like the host's.
+                // The local-echo guesses on this row are cells like the worker's.
                 let guessed = predicted
                     .and_then(|(guesses, _)| predicted_cells(&line.cells, guesses, screen_row));
                 let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
@@ -1651,7 +1651,7 @@ impl Element for TerminalElement {
             }
         }
         for (at, line) in &prepared.overlay {
-            // Cover whatever the host currently shows there, then draw the preview or caption.
+            // Cover whatever the worker currently shows there, then draw the preview or caption.
             window.paint_quad(fill(
                 Bounds::new(*at, size(line.width.max(m.cell_width), m.line_height)),
                 prepared.background,
@@ -1701,7 +1701,7 @@ fn paint_placed(window: &mut Window, image: &PreparedImage) {
 ///
 /// The rectangle its shown part fills, and the rectangle the whole image (`image` pixels
 /// wide and high) would fill at that scale, so the renderer samples the placement's source
-/// rectangle. The host lays placements out in its cell pixels (device pixels of the unzoomed
+/// rectangle. The worker lays placements out in its cell pixels (device pixels of the unzoomed
 /// grid, `pixel_scale` of them per point) and in viewport rows; a view scrolled
 /// `view_offset` rows into its history shows them that far down. `None` when nothing would
 /// show (an empty source or size).
@@ -1945,11 +1945,11 @@ mod tests {
         }
     }
 
-    /// A placement's pixels are the host's cell pixels: at display scale 2 a 16 × 32 image
+    /// A placement's pixels are the worker's cell pixels: at display scale 2 a 16 × 32 image
     /// paints 8 × 16 points at its cell plus its offset; a source rectangle shifts the whole
     /// image so that part lands in the placement; a scrolled view moves it down its rows.
     #[test]
-    fn a_placement_is_painted_at_its_cell_in_the_hosts_pixels() {
+    fn a_placement_is_painted_at_its_cell_in_the_workers_pixels() {
         use slopty_proto::terminal::PixelRect;
         let m = metrics(2.0, 1.0);
         let p = Placement {
@@ -2018,12 +2018,12 @@ mod tests {
         assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 25.5)), -2);
     }
 
-    /// A pixel mouse report is in the units the host measures in: device pixels of the *fitted*
-    /// grid, whatever the display's scale and however far the canvas has zoomed. The host
+    /// A pixel mouse report is in the units the worker measures in: device pixels of the *fitted*
+    /// grid, whatever the display's scale and however far the canvas has zoomed. The worker
     /// divides by the cell size it was told (8 × 17 here), so the column it reads back is the
     /// column the pointer is over.
     #[test]
-    fn a_pixel_mouse_report_is_in_the_cell_size_the_host_was_told() {
+    fn a_pixel_mouse_report_is_in_the_cell_size_the_worker_was_told() {
         for scale in [1.0, 2.0] {
             for zoom in [0.5, 1.0, 2.0] {
                 let m = metrics(scale, zoom);
@@ -2459,7 +2459,7 @@ mod tests {
         assert_eq!(memo.text_over(&off, navy, black), navy, "off: the colour as it is");
     }
 
-    /// A guess replaces the host's cell on its row, in the faint, underlined look; other rows
+    /// A guess replaces the worker's cell on its row, in the faint, underlined look; other rows
     /// have none.
     #[test]
     fn a_guess_is_a_cell_of_its_row() {

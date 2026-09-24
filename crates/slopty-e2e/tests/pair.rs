@@ -1,16 +1,16 @@
-//! Two clients on one host, each driven through its own test socket.
+//! Two clients on one worker, each driven through its own test socket.
 //!
-//! Runs only with `SLOPTY_PAIR_E2E=1` (`cargo xtask e2e pair`): ptyd, hostd and two app
-//! processes on this Mac, the second adding the same host address. With
+//! Runs only with `SLOPTY_PAIR_E2E=1` (`cargo xtask e2e pair`): ptyd, the worker and two app
+//! processes on this Mac, the second adding the same worker address. With
 //! `SLOPTY_PAIR_IOS_E2E=1` (`cargo xtask e2e pair-ios [--sim iphone|ipad]`) the second client
 //! is the app in the simulator, running the subset the phone supports.
 //!
 //! The behaviours, one test each, in the order of the brief: (a) a terminal opened on A is on B
 //! within a round trip with the same title, size and rows; (b) typing on both into one session
 //! is serialised, nothing lost or reordered, and the PTY size follows the "take" pill; (c) an
-//! agent's attention badges both, its badge on A reveals A's terminal and only the host
+//! agent's attention badges both, its badge on A reveals A's terminal and only the worker
 //! reporting the agent moved on clears the count, on both at once;
-//! (d) a display streams to both (needs `SLOPTY_SCREEN_E2E`), and the host's `screens` listing
+//! (d) a display streams to both (needs `SLOPTY_SCREEN_E2E`), and the worker's `screens` listing
 //! says how many times it encodes; (e) the items are shared while each client arranges them
 //! in its own layout; (f) A dying leaves B streaming, and a relaunched A catches up; (g) closing on
 //! A closes on B and a note edited on A reads the same on B. Each prints `MEASURE` lines for
@@ -24,7 +24,7 @@ mod tests {
     use slopty_e2e::harness::{Pair, Simulator, Stack};
     use slopty_e2e::{Command, Driver, Dump};
 
-    /// How long a host round trip (open a shell, run a command) may take.
+    /// How long a worker round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
     /// Window size: wide enough for two half-width columns side by side, so both clients can
     /// click into the second shell without scrolling the strip.
@@ -377,10 +377,10 @@ mod tests {
         pair.shutdown().await;
     }
 
-    /// (c) An agent's attention (a hook played to hostd) badges both clients and both count one
-    /// waiting. The badge on A reveals A's terminal, where the TUI's own prompt takes the answer —
-    /// Slopty never answers for the human, so nothing is cleared until the host says the agent
-    /// moved on, and then it clears on both at once.
+    /// (c) An agent's attention (a hook played to the worker) badges both clients and both count
+    /// one waiting. The badge on A reveals A's terminal, where the TUI's own prompt takes the
+    /// answer — Slopty never answers for the human, so nothing is cleared until the worker says
+    /// the agent moved on, and then it clears on both at once.
     #[tokio::test]
     async fn an_agents_attention_badges_both_clients_and_an_answer_clears_both_on_the_mac() {
         if !gated() {
@@ -411,7 +411,7 @@ mod tests {
         );
 
         // The badge on A reveals A's terminal and does no more: the answer belongs to the TUI's own
-        // prompt, so both clients go on counting one until the host says otherwise.
+        // prompt, so both clients go on counting one until the worker says otherwise.
         let (x, y) = button_in(&da, "allow? Bash", bounds).unwrap();
         a.click(x, y).await.unwrap();
         let want = format!("terminal:{session}");
@@ -420,7 +420,7 @@ mod tests {
         let db = b.dump().await.unwrap();
         assert_eq!(needs_you(&db).as_deref(), Some("1 needs you"), "{db:#?}");
 
-        // The agent proceeds (what Claude Code does after Yes): the host says so to both.
+        // The agent proceeds (what Claude Code does after Yes): the worker says so to both.
         pair.stack.play_hook(&session, "PreToolUse", r#","tool_name":"Bash""#).await.unwrap();
         let (a, b) = pair.drivers();
         let running = |d: &Dump| {
@@ -432,7 +432,7 @@ mod tests {
         pair.shutdown().await;
     }
 
-    /// hostd's accumulated CPU time, from `ps` (`MM:SS.cc`).
+    /// The worker's accumulated CPU time, from `ps` (`MM:SS.cc`).
     fn cpu_time(pid: u32) -> Duration {
         let out = std::process::Command::new("ps")
             .args(["-o", "time=", "-p", &pid.to_string()])
@@ -446,16 +446,16 @@ mod tests {
         Duration::from_secs_f64(mins.mul_add(60.0, hours.mul_add(3600.0, secs)))
     }
 
-    /// hostd's CPU share over `for_` (1.0 = one core).
+    /// The worker's CPU share over `for_` (1.0 = one core).
     async fn cpu_share(pid: u32, for_: Duration) -> f64 {
         let (t0, c0) = (Instant::now(), cpu_time(pid));
         tokio::time::sleep(for_).await;
         cpu_time(pid).saturating_sub(c0).as_secs_f64() / t0.elapsed().as_secs_f64()
     }
 
-    /// (d) A display added on A streams to both; the host's `screens` listing says whether it
-    /// encodes once or once per viewer, and hostd's CPU with two viewers against one is the
-    /// cost of the answer. Needs Screen Recording for hostd (`SLOPTY_SCREEN_E2E`).
+    /// (d) A display added on A streams to both; the worker's `screens` listing says whether it
+    /// encodes once or once per viewer, and the worker's CPU with two viewers against one is the
+    /// cost of the answer. Needs Screen Recording for the worker (`SLOPTY_SCREEN_E2E`).
     #[tokio::test]
     async fn a_display_streams_to_both_clients_on_the_mac() {
         if !gated() {
@@ -466,7 +466,7 @@ mod tests {
             return;
         }
         let mut pair = launch().await;
-        let pid = pair.stack.hostd_pid().unwrap();
+        let pid = pair.stack.worker_pid().unwrap();
         let (a, b) = pair.drivers();
         a.add_display().await.unwrap();
         let streaming = |d: &Dump| {
@@ -497,7 +497,7 @@ mod tests {
             assert_eq!((s.skipped, s.late), (0, 0), "{name} dropped or held a frame: {s:#?}");
         }
 
-        // What the host does for two viewers of one display.
+        // What the worker does for two viewers of one display.
         let listing = pair.stack.ctl(&json!({ "cmd": "screens" })).await.unwrap();
         let live = listing["live"].as_array().cloned().unwrap_or_default();
         let clients: std::collections::BTreeSet<&str> =
@@ -507,7 +507,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let one = cpu_share(pid, Duration::from_secs(4)).await;
         println!(
-            "MEASURE (d) pair mac: host streams {} for {} client(s) {:?} · hostd CPU {:.2} cores with two viewers, {:.2} with one",
+            "MEASURE (d) pair mac: worker streams {} for {} client(s) {:?} · the worker CPU {:.2} cores with two viewers, {:.2} with one",
             live.len(),
             clients.len(),
             clients,
@@ -555,7 +555,7 @@ mod tests {
 
     /// (f) A dies without a word; B keeps streaming and typing with no stall; A relaunched on
     /// the same identity reattaches and shows the current rows; when A's dead connection idles
-    /// out at the host, neither client loses its viewer.
+    /// out at the worker, neither client loses its viewer.
     #[tokio::test]
     async fn a_client_dying_leaves_the_other_streaming_and_comes_back_caught_up_on_the_mac() {
         if !gated() {
@@ -604,7 +604,7 @@ mod tests {
         let stall_a = longest_stall(&mut pair.stack.driver, Duration::from_secs(1)).await;
         assert!(stall_a <= STALL_LIMIT, "A is not streaming after its relaunch: {stall_a:?}");
 
-        // The dead connection idles out at the host (QUIC idle timeout): the host drops it
+        // The dead connection idles out at the worker (QUIC idle timeout): the worker drops it
         // and only it; both live clients keep their viewers.
         let start = Instant::now();
         let clients = loop {
@@ -635,11 +635,11 @@ mod tests {
         pair.shutdown().await;
     }
 
-    /// The Mac and the phone on one host: a shell opened on the Mac is on the phone with the
+    /// The Mac and the phone on one worker: a shell opened on the Mac is on the phone with the
     /// same rows, typing on the phone shows on the Mac, an agent's attention badges both, and
     /// ⌘W on the Mac takes the shell off the phone.
     #[tokio::test]
-    async fn the_mac_and_the_phone_share_a_host_with_the_simulator() {
+    async fn the_mac_and_the_phone_share_a_worker_with_the_simulator() {
         let Some(simulator) = simulator() else { return };
         let mut pair = Stack::launch_pair_with_simulator("e2e-pair-ios", simulator).await.unwrap();
         pair.stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -712,8 +712,8 @@ mod tests {
     }
 
     /// The refresh guard with the phone as the viewer. The idle-window helper is an AppKit
-    /// window on the host's Mac (the simulator shares that machine); the phone captures it, and
-    /// because it never draws the phone asks the host for refreshes. The host counts what
+    /// window on the worker's Mac (the simulator shares that machine); the phone captures it, and
+    /// because it never draws the phone asks the worker for refreshes. The worker counts what
     /// actually arrived and it stops at the receiver's cap — the same guard the Mac app self
     /// -test proves, now with the phone doing the asking. An idle source sends no frames, so this
     /// needs no video decode on the simulator, only the picker and the refresh loop. Needs
@@ -728,7 +728,7 @@ mod tests {
         let mut pair = Stack::launch_pair_with_simulator("e2e-guard-ios", simulator).await.unwrap();
         let idle = pair.stack.start_idle_window().await.unwrap();
 
-        // ⌘O on the phone lists the host's on-screen windows; find the idle window's row.
+        // ⌘O on the phone lists the worker's on-screen windows; find the idle window's row.
         let ends = format!(", {}", idle.title());
         let phone = &mut pair.b.driver;
         phone.keys("cmd-o").await.unwrap();
@@ -759,10 +759,10 @@ mod tests {
             .await
             .unwrap();
 
-        // What the host was asked for over the next stretch: a handful, then silence, inside
-        // the receiver's cap — read from the host's own count of what arrived.
+        // What the worker was asked for over the next stretch: a handful, then silence, inside
+        // the receiver's cap — read from the worker's own count of what arrived.
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let screens = pair.stack.host_screens().await.unwrap();
+        let screens = pair.stack.worker_screens().await.unwrap();
         let refreshes: u64 =
             screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
         let cap = u64::from(slopty_media::Config::default().refresh_max_repeats);
@@ -771,13 +771,13 @@ mod tests {
         );
         assert!(refreshes <= cap, "the phone kept asking: {refreshes} > cap {cap}");
 
-        // Drawing again flips the host's source hint back to live for the phone's stream (the
+        // Drawing again flips the worker's source hint back to live for the phone's stream (the
         // picture itself needs a decoder this simulator may not have, so only the hint, which
         // the guard turns on, is asserted).
         idle.show().unwrap();
         pair.b
             .driver
-            .wait_for("the host calls the window live again", STEP, |d| {
+            .wait_for("the worker calls the window live again", STEP, |d| {
                 d.screens.iter().any(|s| s.source == "live")
             })
             .await

@@ -1,7 +1,7 @@
 //! Ports forwarded from a worker: what listens in its shells is reachable here on
 //! `127.0.0.1:<same port>`.
 //!
-//! The same port keeps origins, cookies, OAuth redirects and a dev server's host check working.
+//! The same port keeps origins, cookies, OAuth redirects and a dev server's worker check working.
 //! When it is taken here (the worker on this very Mac, or another worker's forward) the next
 //! free one serves instead, and the forward says so. Each accepted connection is one tunnel
 //! stream to the worker, which joins it to its own `127.0.0.1:<port>`; a finished direction is

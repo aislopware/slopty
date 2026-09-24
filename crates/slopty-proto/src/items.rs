@@ -1,7 +1,7 @@
-//! The host's item registry: what exists on a host for its clients to show (terminals, streamed
-//! windows and displays, notes, file cards). Host-authoritative, snapshot + deltas.
+//! The worker's item registry: what exists on a worker for its clients to show (terminals, streamed
+//! windows and displays, notes, file cards). Worker-authoritative, snapshot + deltas.
 //!
-//! Where an item is shown is not here: each client arranges the items of every host it reaches
+//! Where an item is shown is not here: each client arranges the items of every worker it reaches
 //! in a layout of its own (`slopty_client::layout`), so a phone and a Mac share the set and not
 //! the arrangement.
 
@@ -16,7 +16,7 @@ pub enum ItemKind {
         /// Session.
         session: SessionId,
     },
-    /// A streamed host window.
+    /// A streamed worker window.
     Window {
         /// Window.
         window: WindowId,
@@ -31,14 +31,14 @@ pub enum ItemKind {
         /// Markdown.
         text: String,
     },
-    /// A file on the host, read-only: the text comes over `HostMsg::File`, not the registry.
+    /// A file on the worker, read-only: the text comes over `WorkerMsg::File`, not the registry.
     File {
-        /// Absolute path on the host.
+        /// Absolute path on the worker.
         path: String,
     },
 }
 
-/// One item on a host.
+/// One item on a worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Item {
     /// Identity.
@@ -56,7 +56,7 @@ pub struct Item {
 /// The longest name an item takes, in characters.
 pub const NAME_MAX: usize = 128;
 
-/// A proposed change. The host validates and rebroadcasts as [`ItemSync::Delta`].
+/// A proposed change. The worker validates and rebroadcasts as [`ItemSync::Delta`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ItemOp {
     /// Insert or replace (a rename is an upsert with the new name).
@@ -72,7 +72,7 @@ pub enum ItemOp {
     },
 }
 
-/// Host → client registry state.
+/// Worker → client registry state.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ItemSync {
     /// Every item (on connect and after a gap).

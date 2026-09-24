@@ -1,4 +1,4 @@
-//! `WindowPicker`: jump to a session on the canvas, or choose a host window or display to put
+//! `WindowPicker`: jump to a session on the canvas, or choose a worker window or display to put
 //! on it.
 //!
 //! Shown by the canvas after a `Listing` arrives; a click picks, Escape dismisses. Sessions come
@@ -24,7 +24,7 @@ use crate::colors::{hsla, hsla_alpha};
 pub(crate) const FILTER_PLACEHOLDER: &str = "Type to filter";
 
 /// The picker's empty states: nothing to offer at all, and nothing left after the query.
-pub(crate) const NOTHING_TO_JUMP_TO: &str = "Nothing on the canvas or shareable on the host";
+pub(crate) const NOTHING_TO_JUMP_TO: &str = "Nothing on the canvas or shareable on the worker";
 pub(crate) const NOTHING_MATCHES: &str = "Nothing matches";
 
 /// What the user chose.
@@ -140,7 +140,7 @@ impl Focusable for WindowPicker {
 }
 
 impl WindowPicker {
-    /// A picker over the canvas's sessions and a host listing.
+    /// A picker over the canvas's sessions and a worker listing.
     pub fn new(
         sessions: Vec<SessionRow>,
         mut windows: Vec<WindowInfo>,
@@ -163,7 +163,7 @@ impl WindowPicker {
         }
     }
 
-    /// Every row in its order, before the filter: sessions, then the host's displays and
+    /// Every row in its order, before the filter: sessions, then the worker's displays and
     /// windows.
     fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
@@ -360,7 +360,7 @@ impl Render for WindowPicker {
             rows.push(self.row(id, line, on_pick, ix == chosen, cx).into_any_element());
         }
         let empty = rows.is_empty();
-        let title = "Jump to a session, or add a window from the host";
+        let title = "Jump to a session, or add a window from the worker";
         let nothing = if self.query.is_empty() { NOTHING_TO_JUMP_TO } else { NOTHING_MATCHES };
 
         crate::kit::backdrop(&theme, window)
@@ -454,7 +454,7 @@ mod tests {
         }
     }
 
-    /// The listing is sessions first (in the canvas's order), then the host's displays and
+    /// The listing is sessions first (in the canvas's order), then the worker's displays and
     /// its on-screen windows by app then title, an untitled window under its app's name; a
     /// window off screen (minimised, another Space) is not offered. The filter keeps the rows
     /// whose text holds every word; ↑/↓ wrap over what is visible and ↩ emits the chosen

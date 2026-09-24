@@ -1,6 +1,6 @@
 //! Media transport policy, pure and fuzzable.
 //!
-//! The host side turns each encoded video frame into ≤ 1200-byte datagrams with a fixed
+//! The worker side turns each encoded video frame into ≤ 1200-byte datagrams with a fixed
 //! [`slopty_proto::media::MediaHeader`], adds systematic Reed–Solomon parity per frame
 //! ([`Packetizer`]) and answers NACKs from a short send history. The client side puts the
 //! fragments back together, recovers from parity or retransmission, delivers frames strictly in

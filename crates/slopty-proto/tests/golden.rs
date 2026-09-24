@@ -18,7 +18,7 @@ mod golden {
     use slopty_proto::transfer::{
         BulkHeader, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead, XferMsg,
     };
-    use slopty_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION, codec};
+    use slopty_proto::{ClientMsg, PROTOCOL_VERSION, WorkerMsg, codec};
     use uuid::Uuid;
 
     fn session() -> SessionId {
@@ -59,8 +59,8 @@ mod golden {
         let item = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77));
         snap("client_point", &ClientMsg::Point { item });
         snap(
-            "host_pointed",
-            &HostMsg::Items(slopty_proto::items::ItemSync::Pointed {
+            "worker_pointed",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Pointed {
                 client: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 name: "iPhone".to_owned(),
                 item,
@@ -87,7 +87,7 @@ mod golden {
             },
         );
         snap(
-            "host_term_colors",
+            "worker_term_colors",
             &TermEvent::Colors(ColorOverrides {
                 fg: None,
                 bg: Some([0x28, 0x2c, 0x34]),
@@ -121,7 +121,7 @@ mod golden {
     #[test]
     fn ping_pong() {
         snap("client_ping", &ClientMsg::Ping { sent_at: MonoTime::from_nanos(1_000_000) });
-        snap("host_pong", &HostMsg::Pong { sent_at: MonoTime::from_nanos(1_000_000) });
+        snap("worker_pong", &WorkerMsg::Pong { sent_at: MonoTime::from_nanos(1_000_000) });
     }
 
     #[test]
@@ -139,14 +139,14 @@ mod golden {
             },
         );
         snap(
-            "host_search_invalid",
+            "worker_search_invalid",
             &TermEvent::SearchInvalid {
                 needle: "(".to_owned(),
                 message: "unclosed group".to_owned(),
             },
         );
         snap(
-            "host_matches",
+            "worker_matches",
             &TermEvent::Matches {
                 needle: "fox".to_owned(),
                 total: 3,
@@ -173,8 +173,8 @@ mod golden {
     fn agent() {
         use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
         snap(
-            "host_agent_hook",
-            &HostMsg::Agent(AgentEvent {
+            "worker_agent_hook",
+            &WorkerMsg::Agent(AgentEvent {
                 session: session(),
                 kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
@@ -186,8 +186,8 @@ mod golden {
         );
         // The same session attributed without hooks: the pill is the same, the source is not.
         snap(
-            "host_agent_process",
-            &HostMsg::Agent(AgentEvent {
+            "worker_agent_process",
+            &WorkerMsg::Agent(AgentEvent {
                 session: session(),
                 kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Idle,
@@ -199,22 +199,22 @@ mod golden {
         );
         snap("client_install_hooks", &ClientMsg::InstallHooks);
         snap(
-            "host_hooks_installed",
-            &HostMsg::HooksInstalled {
+            "worker_hooks_installed",
+            &WorkerMsg::HooksInstalled {
                 ok: true,
                 message: "hooks installed in /Users/x/.claude/settings.json".to_owned(),
             },
         );
     }
 
-    /// Where a session runs: the directory it reports and the repository the host resolved it
+    /// Where a session runs: the directory it reports and the repository the worker resolved it
     /// to (protocol 14). The canvas groups shells by that root, so it is wire-visible.
     #[test]
     fn session_place() {
         use slopty_proto::terminal::{SessionState, SessionSummary};
         snap(
-            "host_session_opened",
-            &HostMsg::SessionOpened(SessionSummary {
+            "worker_session_opened",
+            &WorkerMsg::SessionOpened(SessionSummary {
                 id: session(),
                 kind: slopty_proto::terminal::SessionKind::Terminal,
                 title: "zsh".to_owned(),
@@ -228,8 +228,8 @@ mod golden {
             }),
         );
         snap(
-            "host_term_cwd",
-            &HostMsg::Term {
+            "worker_term_cwd",
+            &WorkerMsg::Term {
                 session: session(),
                 event: TermEvent::Cwd {
                     path: "/w/slopty/crates/ui".to_owned(),
@@ -239,8 +239,8 @@ mod golden {
         );
         // Outside any repository the root is absent, and the client falls back to the cwd.
         snap(
-            "host_term_cwd_no_repo",
-            &HostMsg::Term {
+            "worker_term_cwd_no_repo",
+            &WorkerMsg::Term {
                 session: session(),
                 event: TermEvent::Cwd { path: "/tmp".to_owned(), repo: None },
             },
@@ -263,16 +263,16 @@ mod golden {
             },
         );
         snap(
-            "host_found_files",
-            &HostMsg::FoundFiles {
+            "worker_found_files",
+            &WorkerMsg::FoundFiles {
                 root: "~".to_owned(),
                 query: "main".to_owned(),
                 paths: vec!["w/slopty/src/main.rs".to_owned(), "w/manuals/".to_owned()],
             },
         );
         snap(
-            "host_file",
-            &HostMsg::File {
+            "worker_file",
+            &WorkerMsg::File {
                 path: "/w/slopty/src/main.rs".to_owned(),
                 read: slopty_proto::file::FileRead::Text {
                     text: "fn main() {}\n// more".to_owned(),
@@ -283,15 +283,15 @@ mod golden {
             },
         );
         snap(
-            "host_file_missing",
-            &HostMsg::File {
+            "worker_file_missing",
+            &WorkerMsg::File {
                 path: "/w/gone".to_owned(),
                 read: slopty_proto::file::FileRead::Missing { error: "No such file".to_owned() },
             },
         );
         snap(
-            "host_item_file",
-            &HostMsg::Items(slopty_proto::items::ItemSync::Delta {
+            "worker_item_file",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 9,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
@@ -305,8 +305,8 @@ mod golden {
             }),
         );
         snap(
-            "host_item_named",
-            &HostMsg::Items(slopty_proto::items::ItemSync::Delta {
+            "worker_item_named",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 10,
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
@@ -344,7 +344,7 @@ mod golden {
                     frames_fec: 1,
                     frames_lost: 2,
                     datagrams_lost: 9,
-                    last_host_send_ts_us: 0x0102_0304,
+                    last_worker_send_ts_us: 0x0102_0304,
                     hold_p50: slopty_core::Duration::from_millis(4),
                     hold_p95: slopty_core::Duration::from_millis(30),
                     owd_jitter: slopty_core::Duration::from_micros(700),
@@ -358,15 +358,15 @@ mod golden {
             }),
         );
         snap(
-            "host_screen_source",
-            &HostMsg::Screen(ScreenEvent::Source {
+            "worker_screen_source",
+            &WorkerMsg::Screen(ScreenEvent::Source {
                 stream: StreamId(7),
                 state: slopty_proto::screen::SourceState::Idle,
             }),
         );
         snap(
-            "host_screen_cursor",
-            &HostMsg::Screen(ScreenEvent::Cursor {
+            "worker_screen_cursor",
+            &WorkerMsg::Screen(ScreenEvent::Cursor {
                 stream: StreamId(7),
                 shape: Some(slopty_proto::screen::CursorShape {
                     w: 2,
@@ -379,8 +379,8 @@ mod golden {
             }),
         );
         snap(
-            "host_screen_rate",
-            &HostMsg::Screen(ScreenEvent::Rate {
+            "worker_screen_rate",
+            &WorkerMsg::Screen(ScreenEvent::Rate {
                 stream: StreamId(7),
                 target_bps: 9_000_000,
                 verdict: RateVerdict::Stall,
@@ -435,18 +435,18 @@ mod golden {
         );
         snap("client_clip_watch", &ClientMsg::Clip(ClipMsg::Watch(true)));
         snap(
-            "host_clip_fetch",
-            &HostMsg::Clip(ClipMsg::Fetch { generation: 3, uti: "public.png".to_owned() }),
+            "worker_clip_fetch",
+            &WorkerMsg::Clip(ClipMsg::Fetch { generation: 3, uti: "public.png".to_owned() }),
         );
         snap(
-            "host_clip_data",
-            &HostMsg::Clip(ClipMsg::Data {
+            "worker_clip_data",
+            &WorkerMsg::Clip(ClipMsg::Data {
                 generation: 3,
                 uti: "public.html".to_owned(),
                 bytes: b"<b>fox</b>".to_vec(),
             }),
         );
-        snap("host_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
+        snap("worker_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
     }
 
     #[test]
@@ -463,8 +463,8 @@ mod golden {
             }),
         );
         snap(
-            "host_xfer_done",
-            &HostMsg::Xfer(XferMsg::Done {
+            "worker_xfer_done",
+            &WorkerMsg::Xfer(XferMsg::Done {
                 xfer,
                 name: "src/a.rs".to_owned(),
                 path: "/Users/c/p/src/a.rs".to_owned(),
@@ -472,8 +472,8 @@ mod golden {
             }),
         );
         snap(
-            "host_xfer_finished",
-            &HostMsg::Xfer(XferMsg::Finished { xfer, paths: vec!["/Users/c/p/src".to_owned()] }),
+            "worker_xfer_finished",
+            &WorkerMsg::Xfer(XferMsg::Finished { xfer, paths: vec!["/Users/c/p/src".to_owned()] }),
         );
         snap(
             "uni_bulk",
@@ -490,8 +490,8 @@ mod golden {
         snap("uni_session", &UniHead::Session { session });
         snap("tunnel_open", &TunnelOpen { port: 5173 });
         snap(
-            "host_ports",
-            &HostMsg::Ports {
+            "worker_ports",
+            &WorkerMsg::Ports {
                 session,
                 ports: vec![Port {
                     number: 5173,
@@ -506,7 +506,7 @@ mod golden {
     #[test]
     fn term_notification() {
         snap(
-            "host_term_notification",
+            "worker_term_notification",
             &TermEvent::Notification { title: "Tests".to_owned(), body: "all green".to_owned() },
         );
     }
@@ -520,7 +520,7 @@ mod golden {
         let mut output = Line::from_text("x", 8, Style::DEFAULT);
         output.mark = SemanticMark::Output;
         snap(
-            "host_lines_marks",
+            "worker_lines_marks",
             &TermEvent::Lines {
                 start: slopty_grid::LineIndex(3),
                 lines: vec![prompt, cont, output],
@@ -533,7 +533,7 @@ mod golden {
         let mut line = Line::from_text("see https://a.b", 16, Style::DEFAULT);
         line.links.push(Hyperlink { col: 4, len: 11, uri: "https://a.b/".to_owned() });
         snap(
-            "host_lines_links",
+            "worker_lines_links",
             &TermEvent::Lines { start: slopty_grid::LineIndex(40), lines: vec![line] },
         );
     }
@@ -543,7 +543,7 @@ mod golden {
         let mut line = Line::from_text("$ ls", 8, Style::DEFAULT);
         line.cells[1].style.flags = slopty_grid::StyleFlags::BOLD;
         snap(
-            "host_frame",
+            "worker_frame",
             &TermEvent::Frame(Frame {
                 seq: 3,
                 full: false,
@@ -584,7 +584,7 @@ mod golden {
     #[test]
     fn term_image() {
         snap(
-            "host_term_image",
+            "worker_term_image",
             &TermEvent::Image {
                 id: 9,
                 generation: 4,

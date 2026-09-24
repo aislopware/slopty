@@ -1,8 +1,8 @@
-//! One host's item registry as a client sees it.
+//! One worker's item registry as a client sees it.
 //!
-//! The host is authoritative: the client applies every [`ItemSync`] it receives and proposes
+//! The worker is authoritative: the client applies every [`ItemSync`] it receives and proposes
 //! changes as [`ItemOp`]s. So that a rename or a new note shows at once, the client applies its
-//! own proposals immediately (optimistic) and recognises the host's echo of them.
+//! own proposals immediately (optimistic) and recognises the worker's echo of them.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +22,7 @@ pub enum ItemChange {
     /// Everything (snapshot).
     Reset,
     /// An item this registry did not have. `by_me` when this client caused it (its own
-    /// proposal, or the terminal the host made for its `OpenSession`), which is what decides
+    /// proposal, or the terminal the worker made for its `OpenSession`), which is what decides
     /// where the layout puts it.
     Added {
         /// The item.
@@ -34,7 +34,7 @@ pub enum ItemChange {
     Changed(ItemId),
     /// One item disappeared.
     Removed(ItemId),
-    /// The host echoed our own op, or an op on an item already gone: nothing to do.
+    /// The worker echoed our own op, or an op on an item already gone: nothing to do.
     Echo,
     /// Another client pointed at this item. Ephemeral: nothing in the registry changed, and
     /// the item may be one this registry does not have.
@@ -79,7 +79,7 @@ impl ItemDoc {
             .find(|i| matches!(i.kind, ItemKind::Terminal { session: s } if s == session))
     }
 
-    /// Apply a host sync. `me` is this client's id, used to recognise echoes.
+    /// Apply a worker sync. `me` is this client's id, used to recognise echoes.
     pub fn apply_sync(&mut self, sync: ItemSync, me: ClientId) -> ItemChange {
         match sync {
             ItemSync::Snapshot { version, items } => {
@@ -94,7 +94,7 @@ impl ItemDoc {
                     ItemOp::Remove(id) | ItemOp::Sleep { id, .. } => self.items.contains_key(id),
                 };
                 if by == me && known {
-                    // Already applied optimistically. Re-apply anyway so a host-side
+                    // Already applied optimistically. Re-apply anyway so a worker-side
                     // sanitising (a trimmed name) wins.
                     self.apply_op(&op, true);
                     return ItemChange::Echo;
@@ -106,7 +106,7 @@ impl ItemDoc {
         }
     }
 
-    /// Apply an op locally (the optimistic path with `by_me`, and the host's deltas).
+    /// Apply an op locally (the optimistic path with `by_me`, and the worker's deltas).
     pub fn apply_op(&mut self, op: &ItemOp, by_me: bool) -> ItemChange {
         match op {
             ItemOp::Upsert(item) => match self.items.insert(item.id, item.clone()) {
@@ -158,8 +158,8 @@ mod tests {
     }
 
     /// A snapshot replaces everything; another client's upsert is an addition not by me; my
-    /// own optimistic upsert is an addition by me whose echo is nothing, and the host's
-    /// sanitised copy wins; the terminal the host made for my `OpenSession` (never applied
+    /// own optimistic upsert is an addition by me whose echo is nothing, and the worker's
+    /// sanitised copy wins; the terminal the worker made for my `OpenSession` (never applied
     /// here first) is an addition by me.
     #[test]
     fn snapshot_then_deltas_and_echoes() {

@@ -6983,12 +6983,12 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-grid",
- "slopty-host",
  "slopty-net",
  "slopty-proto",
  "slopty-server",
  "slopty-settings",
  "slopty-tools",
+ "slopty-worker",
  "tempfile",
  "tokio",
  "tracing",
@@ -7091,70 +7091,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "slopty-host"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "bytes",
- "ignore",
- "libc",
- "objc2-core-foundation",
- "objc2-core-video",
- "objc2-video-toolbox",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "slopty-capture",
- "slopty-client",
- "slopty-codec",
- "slopty-core",
- "slopty-engine",
- "slopty-grid",
- "slopty-input",
- "slopty-media",
- "slopty-proto",
- "slopty-pty",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "slopty-hostd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "bytes",
- "clap",
- "noq",
- "objc2-application-services",
- "objc2-core-foundation",
- "objc2-core-video",
- "parking_lot",
- "serde_json",
- "slopty-agent",
- "slopty-capture",
- "slopty-client",
- "slopty-codec",
- "slopty-core",
- "slopty-host",
- "slopty-input",
- "slopty-media",
- "slopty-net",
- "slopty-platform",
- "slopty-proto",
- "slopty-settings",
- "slopty-shape",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -7411,6 +7347,70 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "slopty-worker"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "ignore",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-video-toolbox",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "slopty-capture",
+ "slopty-client",
+ "slopty-codec",
+ "slopty-core",
+ "slopty-engine",
+ "slopty-grid",
+ "slopty-input",
+ "slopty-media",
+ "slopty-proto",
+ "slopty-pty",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "slopty-workerd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "bytes",
+ "clap",
+ "noq",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "parking_lot",
+ "serde_json",
+ "slopty-agent",
+ "slopty-capture",
+ "slopty-client",
+ "slopty-codec",
+ "slopty-core",
+ "slopty-input",
+ "slopty-media",
+ "slopty-net",
+ "slopty-platform",
+ "slopty-proto",
+ "slopty-settings",
+ "slopty-shape",
+ "slopty-worker",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

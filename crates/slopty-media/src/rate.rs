@@ -1,6 +1,6 @@
 //! Adaptive video bitrate, driven by the receiver's reports and the QUIC path.
 //!
-//! The client asks for a ceiling (`Quality::bitrate_bps`); the host sends at whatever the path
+//! The client asks for a ceiling (`Quality::bitrate_bps`); the worker sends at whatever the path
 //! sustains below it. Every [`DECIDE_EVERY`] reports (about half a second at the client's
 //! 50 ms cadence) the window is judged by [`judge`], a pure function of the summed reports:
 //!
@@ -22,7 +22,7 @@
 //! The policy's value (`wanted`) and the target the encoder gets are two numbers: the target is
 //! `wanted` capped at 90 % of the selected QUIC path's `cwnd × 8 / rtt`, in every state
 //! including a stall, because datagrams are congestion-controlled and sending past the window
-//! only queues datagrams on the host that go stale before they are sent. The path is sampled
+//! only queues datagrams on the worker that go stale before they are sent. The path is sampled
 //! with every report and the window keeps the *widest* sample: BBR shrinks the congestion
 //! window to four packets for 200 ms every few seconds to re-measure the round trip
 //! (`ProbeRTT`), and a cap read in those 200 ms would cut a loopback stream to a few Mbit/s
@@ -136,9 +136,9 @@ const fn fastest_rung(ceiling: u16, target_bps: u32, bytes: u32) -> u16 {
 ///
 /// Capture keeps running at the ceiling, so a change on screen is still noticed within one display
 /// beat; this only decides how many of those captures reach the encoder. Two consequences to keep
-/// in view: the held-bytes budget in the host's frame guard is `2 / fps` of *time*, so a slower
+/// in view: the held-bytes budget in the worker's frame guard is `2 / fps` of *time*, so a slower
 /// cadence lets QUIC hold proportionally longer before a frame is refused, and frames arriving
-/// 67 ms apart would read as stalls to the receiver were the host not already heartbeating every
+/// 67 ms apart would read as stalls to the receiver were the worker not already heartbeating every
 /// 25 ms of silence.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cadence {
@@ -201,7 +201,7 @@ pub const fn frame_due(elapsed_us: u64, cadence_fps: u16) -> bool {
 pub struct Window {
     /// Datagrams the client counted lost.
     pub lost: u32,
-    /// Datagrams the host sent.
+    /// Datagrams the worker sent.
     pub sent: u32,
     /// Deepest present queue reported.
     pub queue_max: u8,
@@ -413,7 +413,7 @@ mod tests {
         frames_fec: 0,
         frames_lost: 0,
         datagrams_lost: 0,
-        last_host_send_ts_us: 0,
+        last_worker_send_ts_us: 0,
         hold_p50: Duration::ZERO,
         hold_p95: Duration::ZERO,
         owd_jitter: Duration::ZERO,

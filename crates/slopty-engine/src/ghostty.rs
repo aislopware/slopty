@@ -2074,9 +2074,9 @@ mod tests {
     }
 
     /// ⌥b on a Mac client arrives as the layout's `∫` and is typed as such; when the client
-    /// says the key is Alt (its text then the key without ⌥) the host prefixes an escape.
+    /// says the key is Alt (its text then the key without ⌥) the worker prefixes an escape.
     #[test]
-    fn option_as_alt_prefixes_escape_on_the_host() {
+    fn option_as_alt_prefixes_escape_on_the_worker() {
         let mut e = engine(10, 3);
         let mut out = Vec::new();
         let key = |text: Option<&str>, consumed_mods, option_as_alt| KeyEvent {
@@ -2845,7 +2845,7 @@ mod checkpoint_tests {
 
     /// `cargo nextest run -p slopty-engine --release --run-ignored only checkpoint_cost
     /// --no-capture`: how long a checkpoint takes and how big it is at 80x24 with 10 000 lines
-    /// of history, the number behind the checkpoint policy in `slopty_host::session` (recorded
+    /// of history, the number behind the checkpoint policy in `slopty_worker::session` (recorded
     /// in MEASUREMENTS).
     /// What one echoed keystroke costs inside the engine: `write` of one byte, then
     /// `take_frame` for a 60×12 screen (the bench's size) — the "engine+frame" stage of the

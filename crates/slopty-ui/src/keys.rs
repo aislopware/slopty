@@ -1,6 +1,7 @@
-//! GPUI keystrokes → protocol key events. The host's engine does the actual encoding (legacy,
-//! kitty, application modes), so all we do here is name the physical key and pass the text the
-//! layout produced.
+//! GPUI keystrokes → protocol key events.
+//!
+//! The worker's engine does the actual encoding (legacy, kitty, application modes), so all we do
+//! here is name the physical key and pass the text the layout produced.
 
 use gpui::{Keystroke, Modifiers};
 use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
@@ -122,7 +123,7 @@ const fn single_char(c: char) -> KeyCode {
 ///
 /// `alt_is_alt` says the ⌥ held is a modifier (the client's `option_as_alt` setting, resolved
 /// for the side): the text is then the key without ⌥ (ghostty's own view retranslates the
-/// key that way), so the host's encoder prefixes an escape instead of typing the symbol.
+/// key that way), so the worker's encoder prefixes an escape instead of typing the symbol.
 #[must_use]
 pub fn key_event(seq: u64, keystroke: &Keystroke, repeat: bool, alt_is_alt: bool) -> KeyEvent {
     let all = mods(keystroke.modifiers);
@@ -219,7 +220,7 @@ mod tests {
         );
     }
 
-    /// With ⌥ as Alt the event carries the key without ⌥ and the flag, so the host prefixes
+    /// With ⌥ as Alt the event carries the key without ⌥ and the flag, so the worker prefixes
     /// an escape; otherwise the layout's symbol goes as typed, ⌥ consumed.
     #[test]
     fn option_as_alt_rides_on_the_event() {
@@ -244,7 +245,7 @@ mod tests {
         };
         let alt = key_event(3, &shifted, false, true);
         assert_eq!((alt.text.as_deref(), alt.consumed_mods), (Some("B"), Mods::SHIFT));
-        // A symbol key has no text without ⌥; the host prefixes its unshifted codepoint.
+        // A symbol key has no text without ⌥; the worker prefixes its unshifted codepoint.
         let alt_1 = Keystroke { key: "1".to_owned(), key_char: Some("¡".to_owned()), ..alt_b };
         let alt = key_event(4, &alt_1, false, true);
         assert_eq!((alt.text, alt.unshifted, alt.consumed_mods), (None, Some('1'), Mods::empty()));
@@ -266,7 +267,7 @@ mod tests {
     }
 
     /// Every letter, digit, function key and punctuation key names its own code, so a wrong
-    /// row in the table (a letter to its neighbour) cannot pass unnoticed; a key the host has
+    /// row in the table (a letter to its neighbour) cannot pass unnoticed; a key the worker has
     /// no code for is `Unidentified`, never a guess.
     #[test]
     fn every_typed_key_names_its_own_code() {
@@ -334,7 +335,7 @@ mod tests {
         assert_eq!((ev.code, ev.mods, ev.consumed_mods), (KeyCode::A, Mods::SHIFT, Mods::SHIFT));
         assert_eq!((ev.text.as_deref(), ev.unshifted, ev.seq), (Some("A"), Some('a'), 9));
         assert!(!ev.composing && !ev.option_as_alt);
-        // ⌃ produces no text on macOS: nothing is consumed and the host encodes the control.
+        // ⌃ produces no text on macOS: nothing is consumed and the worker encodes the control.
         let ctrl_c = Keystroke {
             modifiers: Modifiers { control: true, ..Modifiers::default() },
             key: "c".to_owned(),

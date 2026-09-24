@@ -176,8 +176,8 @@ mod roundtrip {
         client.shutdown().await.unwrap();
     }
 
-    /// A child's exit status reaches the host as ptyd sends it, with no request of the host's
-    /// to carry it: the host tells its viewers the real status, not a guess made at EOF.
+    /// A child's exit status reaches the worker as ptyd sends it, with no request of the worker's
+    /// to carry it: the worker tells its viewers the real status, not a guess made at EOF.
     #[tokio::test]
     async fn an_exit_arrives_without_a_request_to_carry_it() {
         let daemon = start().await;
@@ -207,8 +207,8 @@ mod roundtrip {
         client.shutdown().await.unwrap();
     }
 
-    /// The attached host copies output into ptyd's ring on the connection that holds the
-    /// master and now and then replaces the ring with the terminal state; the next host to
+    /// The attached worker copies output into ptyd's ring on the connection that holds the
+    /// master and now and then replaces the ring with the terminal state; the next worker to
     /// attach gets that state and the output after it. Taps from any other connection are
     /// ignored.
     #[tokio::test]
@@ -246,7 +246,7 @@ mod roundtrip {
         stranger.checkpoint(id, b"IGNORED".to_vec()).await.unwrap();
         assert_eq!(stranger.list().await.unwrap()[0].checkpoint, b"STATE".len());
 
-        // The host dies: the connection drops and ptyd resumes reading the master itself.
+        // The worker dies: the connection drops and ptyd resumes reading the master itself.
         drop(client);
         drop(master);
         let (mut next, _) = PtydClient::connect(&daemon.socket).await.unwrap();

@@ -21,6 +21,6 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Canvas](decisions/canvas.md) (superseded in part by Workspace)
 - [Workspace](decisions/workspace.md)
 - [Settings](decisions/settings.md)
-- [Hosts](decisions/hosts.md)
+- [Workers](decisions/workers.md)
 - [Multi-client](decisions/multi-client.md)
 - [Claude Code](decisions/claude-code.md)

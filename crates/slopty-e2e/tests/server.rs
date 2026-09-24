@@ -1,6 +1,6 @@
 //! The server with a real worker behind it, driven the way people and agents drive it: the
 //! `slopty` binary with `--json`, and MCP over HTTP. `slopty-server`, `slopty-ptyd` and
-//! `slopty-hostd` from this build run in a temporary directory on ports of their own.
+//! `slopty-worker` from this build run in a temporary directory on ports of their own.
 //!
 //! Runs only with `SLOPTY_SERVER_E2E=1` (`cargo xtask e2e server`). It needs no permission from
 //! the machine, and nothing is typed into a shell the test did not open.
@@ -214,13 +214,14 @@ mod tests {
         .await?;
         clock.lap("close, exit");
 
-        // 6. hostd dies without a goodbye: unreachable within the lease; back under the same id.
-        stack.worker.kill_hostd().await;
+        // 6. The worker dies without a goodbye: unreachable within the lease; back under the same
+        //    id.
+        stack.worker.kill_worker().await;
         let killed = Instant::now();
         stack.worker_is("unreachable", UNREACHABLE_BOUND).await?;
         eprintln!("unreachable {} ms after the kill", killed.elapsed().as_millis());
         clock.lap("unreachable");
-        stack.worker.restart_hostd().await?;
+        stack.worker.restart_worker().await?;
         let back = stack.worker_online(STEP).await?;
         ensure!(back["worker"] == worker_id.as_str(), "the same worker: {back}");
         clock.lap("back online");

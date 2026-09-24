@@ -1,4 +1,4 @@
-//! ptyd + hostd + the app, all from this build, in a temporary directory.
+//! ptyd + worker + the app, all from this build, in a temporary directory.
 //!
 //! Binaries come from `SLOPTY_E2E_BIN_DIR` (set by `cargo xtask e2e`), else `target/debug`
 //! next to the workspace. Every process gets its own data directory under the temp dir, so
@@ -47,11 +47,11 @@ pub const TRANSCRIPT_DONE: &str = concat!(
 pub struct Stack {
     /// The temporary directory (sockets, data dirs, artifacts).
     pub dir: tempfile::TempDir,
-    /// Where the app reaches hostd: `127.0.0.1:<port>`, the port hostd picked.
+    /// Where the app reaches the worker: `127.0.0.1:<port>`, the port the worker picked.
     pub address: String,
     /// Connected to the app's test socket.
     pub driver: Driver,
-    /// ptyd, hostd, app, and any helper windows; killed on drop.
+    /// ptyd, the worker, app, and any helper windows; killed on drop.
     pub children: Vec<Child>,
     /// Which of [`Self::children`] is the app process, so [`Self::kill_app`] kills the app by
     /// role and not the last-pushed child (e.g. an idle-window helper). `None` in a simulator,
@@ -65,8 +65,8 @@ pub struct Stack {
     pub app_env: Vec<(String, String)>,
 }
 
-/// A second client of the same host: another app process (or the app in a simulator) with
-/// its own data directory, identity and test socket, that added the same host address.
+/// A second client of the same worker: another app process (or the app in a simulator) with
+/// its own data directory, identity and test socket, that added the same worker address.
 #[derive(Debug)]
 pub struct SecondApp {
     /// Connected to its test socket.
@@ -77,10 +77,10 @@ pub struct SecondApp {
     pub simulator: Option<Simulator>,
 }
 
-/// Two clients on one host: the stack's own app (`a`) and a [`SecondApp`] (`b`).
+/// Two clients on one worker: the stack's own app (`a`) and a [`SecondApp`] (`b`).
 #[derive(Debug)]
 pub struct Pair {
-    /// ptyd, hostd and the first app.
+    /// ptyd, the worker and the first app.
     pub stack: Stack,
     /// The second app.
     pub b: SecondApp,
@@ -101,7 +101,7 @@ impl IdleWindow {
         &self.title
     }
 
-    /// Take the window off screen. It stays in the host's window list (the host enumerates with
+    /// Take the window off screen. It stays in the worker's window list (the worker enumerates with
     /// `onScreenWindowsOnly: false`), so a stream opened on it captures nothing at all.
     ///
     /// # Errors
@@ -112,7 +112,7 @@ impl IdleWindow {
         Ok(())
     }
 
-    /// Put it back and keep repainting it, which is what makes the host call the source live.
+    /// Put it back and keep repainting it, which is what makes the worker call the source live.
     ///
     /// # Errors
     ///
@@ -181,12 +181,12 @@ async fn wait_for_path(path: &Path, child: &mut Child, what: &str) -> Result<()>
     }
 }
 
-/// One request over hostd's control socket at `path` (newline-delimited JSON, one request
+/// One request over the worker's control socket at `path` (newline-delimited JSON, one request
 /// per connection), and its reply.
 async fn ctl(path: &Path, request: &Value) -> Result<Value> {
     let stream = UnixStream::connect(path)
         .await
-        .with_context(|| format!("connect to hostd at {}", path.display()))?;
+        .with_context(|| format!("connect to the worker at {}", path.display()))?;
     let (rd, mut wr) = stream.into_split();
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
@@ -194,7 +194,7 @@ async fn ctl(path: &Path, request: &Value) -> Result<Value> {
     wr.shutdown().await?;
     let mut reply = String::new();
     BufReader::new(rd).read_line(&mut reply).await?;
-    serde_json::from_str(reply.trim()).context("hostd's reply is not JSON")
+    serde_json::from_str(reply.trim()).context("the worker's reply is not JSON")
 }
 
 /// Wait for a socket path from a process that is not our child (the simulator's).
@@ -213,13 +213,13 @@ async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
 
 async fn daemons(
     root: &Path,
-    host_name: &str,
+    worker_name: &str,
     log: &str,
     env: &[(&str, &str)],
 ) -> Result<(Vec<Child>, String)> {
     let ptyd = spawn_ptyd(root, log, env).await?;
-    let (hostd, address) = spawn_hostd(root, host_name, log, env, None).await?;
-    Ok((vec![ptyd, hostd], address))
+    let (worker, address) = spawn_worker(root, worker_name, log, env, None).await?;
+    Ok((vec![ptyd, worker], address))
 }
 
 /// ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
@@ -231,10 +231,10 @@ fn terminfo_env(root: &Path) -> [(&'static str, std::ffi::OsString); 2] {
     [(slopty_pty::terminfo::DIR_ENV, terminfo.into_os_string()), ("TERMINFO_DIRS", dirs.into())]
 }
 
-/// The variable naming the pasteboard hostd and the app share the clipboard through.
+/// The variable naming the pasteboard the worker and the app share the clipboard through.
 pub const PASTEBOARD_ENV: &str = "SLOPTY_PASTEBOARD";
 
-/// The pasteboard `who` (`host`, or an app's name) of the run under `root` uses: named after
+/// The pasteboard `who` (`worker`, or an app's name) of the run under `root` uses: named after
 /// the run, so no two runs and no two processes share one, and nothing touches the human's
 /// clipboard.
 #[must_use]
@@ -262,36 +262,36 @@ async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Chil
     Ok(ptyd)
 }
 
-/// hostd named `host_name` on the ptyd of [`spawn_ptyd`], with its data in `root/host`, on a
-/// port of its choosing, registered with `server` when one is given; and the loopback address
+/// The worker named `worker_name` on the ptyd of [`spawn_ptyd`], with its data in `root/worker`, on
+/// a port of its choosing, registered with `server` when one is given; and the loopback address
 /// clients reach it on.
-async fn spawn_hostd(
+async fn spawn_worker(
     root: &Path,
-    host_name: &str,
+    worker_name: &str,
     log: &str,
     env: &[(&str, &str)],
     server: Option<&str>,
 ) -> Result<(Child, String)> {
-    let mut command = Command::new(bin("slopty-hostd")?);
+    let mut command = Command::new(bin("slopty-worker")?);
     command
         .arg("--ptyd-socket")
         .arg(root.join("ptyd.sock"))
         .arg("--ctl-socket")
-        .arg(root.join("hostd.sock"))
+        .arg(root.join("worker.sock"))
         .arg("--data-dir")
-        .arg(root.join("host"))
+        .arg(root.join("worker"))
         .arg("--print-addr")
         .arg("--port")
         .arg("0");
     if let Some(server) = server {
         command.arg("--server").arg(server);
     }
-    let mut hostd = command
+    let mut worker = command
         .envs(env.iter().copied())
         .envs(terminfo_env(root))
         .env("RUST_LOG", log)
-        .env("SLOPTY_HOST_NAME", host_name)
-        .env(PASTEBOARD_ENV, pasteboard_name(root, "host"))
+        .env("SLOPTY_WORKER_NAME", worker_name)
+        .env(PASTEBOARD_ENV, pasteboard_name(root, "worker"))
         // A drop whose name is taken in the shell's directory lands here, not in `~`.
         .env("SLOPTY_DROP_DIR", root.join("drops"))
         .stdin(Stdio::null())
@@ -299,20 +299,20 @@ async fn spawn_hostd(
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .context("spawn slopty-hostd")?;
-    let stdout = hostd.stdout.take().context("hostd stdout")?;
+        .context("spawn slopty-worker")?;
+    let stdout = worker.stdout.take().context("worker stdout")?;
     let mut listen = String::new();
     tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut listen))
         .await
-        .context("hostd did not print its address in time")??;
-    Ok((hostd, loopback_address(&listen)?))
+        .context("the worker did not print its address in time")??;
+    Ok((worker, loopback_address(&listen)?))
 }
 
-/// The loopback address a client dials for a hostd that printed `listen` (`[::]:53211`, or a
+/// The loopback address a client dials for a worker that printed `listen` (`[::]:53211`, or a
 /// specific IP when it was bound to one): the port is what matters.
 fn loopback_address(listen: &str) -> Result<String> {
     let listen: std::net::SocketAddr =
-        listen.trim().parse().with_context(|| format!("hostd printed {listen:?}"))?;
+        listen.trim().parse().with_context(|| format!("the worker printed {listen:?}"))?;
     Ok(format!("127.0.0.1:{}", listen.port()))
 }
 
@@ -359,7 +359,7 @@ async fn spawn_app(
         .env("RUST_LOG", log)
         .env("SLOPTY_DATA_DIR", &app_dir)
         .env(crate::SOCKET_ENV, &app_sock)
-        // Local echo would put predicted text in the rows before the host confirms it.
+        // Local echo would put predicted text in the rows before the worker confirms it.
         .env("SLOPTY_PREDICT", "never")
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
@@ -458,12 +458,12 @@ async fn spawn_simulator_app(
     }
 }
 
-/// Ping, add the host at `address` and wait for it to connect.
-async fn add_host(driver: &mut Driver, address: &str) -> Result<()> {
+/// Ping, add the worker at `address` and wait for it to connect.
+async fn add_worker(driver: &mut Driver, address: &str) -> Result<()> {
     driver.ok(&crate::Command::Ping).await?;
-    driver.ok(&crate::Command::AddHost { address: address.to_owned() }).await?;
+    driver.ok(&crate::Command::AddWorker { address: address.to_owned() }).await?;
     driver
-        .wait_for("the host to connect", STARTUP, |d| {
+        .wait_for("the worker to connect", STARTUP, |d| {
             d.workers.iter().any(|w| w.status == "connected")
         })
         .await?;
@@ -471,24 +471,24 @@ async fn add_host(driver: &mut Driver, address: &str) -> Result<()> {
 }
 
 impl Stack {
-    /// Start ptyd, hostd (named `host_name`) and the app; add the host in the app and wait
+    /// Start ptyd, the worker (named `worker_name`) and the app; add the worker in the app and wait
     /// until its canvas is up.
     ///
     /// # Errors
     ///
     /// When a binary is missing, a process dies, or the app does not come up in time.
-    pub async fn launch(host_name: &str) -> Result<Self> {
-        Self::launch_with(host_name, &[]).await
+    pub async fn launch(worker_name: &str) -> Result<Self> {
+        Self::launch_with(worker_name, &[]).await
     }
 
     /// [`Self::launch`] with a fake `claude` (`FAKE_CLAUDE`) first on the daemons' `PATH`
-    /// and a `HOME` of their own, so "+ agent" opens a session the host must attribute
+    /// and a `HOME` of their own, so "+ agent" opens a session the worker must attribute
     /// without any hook ever firing. Drive it with [`Self::fake_claude_stage`].
     ///
     /// # Errors
     ///
     /// As [`Self::launch`], plus when the fake cannot be written.
-    pub async fn launch_with_fake_claude(host_name: &str) -> Result<Self> {
+    pub async fn launch_with_fake_claude(worker_name: &str) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-agent-").tempdir()?;
         let root = dir.path().to_path_buf();
         let home = root.join("home");
@@ -505,7 +505,7 @@ impl Stack {
         let (home, fake_dir) = (home.to_string_lossy(), fake.to_string_lossy());
         let path = format!("{}:{path}", fake.display());
         let env = [("HOME", &*home), ("PATH", &*path), ("SLOPTY_FAKE_CLAUDE_DIR", &*fake_dir)];
-        Self::launch_in(dir, host_name, &env).await
+        Self::launch_in(dir, worker_name, &env).await
     }
 
     /// The private `HOME` the daemons run with, when the launch gave them one (the
@@ -532,9 +532,9 @@ impl Stack {
     /// # Errors
     ///
     /// As [`Self::launch`].
-    pub async fn launch_with(host_name: &str, env: &[(&str, &str)]) -> Result<Self> {
+    pub async fn launch_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
-        Self::launch_in(dir, host_name, env).await
+        Self::launch_in(dir, worker_name, env).await
     }
 
     /// [`Self::launch`] up to the app's first frame, before it knows any worker: what someone
@@ -543,9 +543,9 @@ impl Stack {
     /// # Errors
     ///
     /// As [`Self::launch`].
-    pub async fn launch_first_run(host_name: &str) -> Result<Self> {
+    pub async fn launch_first_run(worker_name: &str) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
-        let mut stack = Self::spawn_in(dir, host_name, &[]).await?;
+        let mut stack = Self::spawn_in(dir, worker_name, &[]).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
@@ -557,27 +557,27 @@ impl Stack {
     /// When the worker does not connect in time.
     pub async fn add_worker(&mut self) -> Result<()> {
         let address = self.address.clone();
-        add_host(&mut self.driver, &address).await
+        add_worker(&mut self.driver, &address).await
     }
 
     /// `env` goes to the daemons and the app alike, on top of the defaults.
     async fn launch_in(
         dir: tempfile::TempDir,
-        host_name: &str,
+        worker_name: &str,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        Self::add(Self::spawn_in(dir, host_name, env).await?).await
+        Self::add(Self::spawn_in(dir, worker_name, env).await?).await
     }
 
     /// The daemons and the app, the worker not yet added.
     async fn spawn_in(
         dir: tempfile::TempDir,
-        host_name: &str,
+        worker_name: &str,
         env: &[(&str, &str)],
     ) -> Result<Self> {
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (mut children, address) = daemons(root, host_name, &log, env).await?;
+        let (mut children, address) = daemons(root, worker_name, &log, env).await?;
         let (app, driver) = spawn_app(root, "app", &log, env).await?;
         let app_ix = Some(children.len());
         children.push(app);
@@ -585,7 +585,7 @@ impl Stack {
         Ok(Self { dir, address, driver, children, app_ix, simulator: None, log, app_env })
     }
 
-    /// Kill the app (SIGKILL: no goodbye to the host, as a crash or a dead battery would
+    /// Kill the app (SIGKILL: no goodbye to the worker, as a crash or a dead battery would
     /// leave it) and reap it. The daemons keep running; [`Self::relaunch_app`] brings it back.
     ///
     /// # Errors
@@ -601,7 +601,7 @@ impl Stack {
     }
 
     /// Start the app again on the same data directory (same identity, same socket path): it
-    /// knows the host and connects by itself. Waits for the link to be up.
+    /// knows the worker and connects by itself. Waits for the link to be up.
     ///
     /// # Errors
     ///
@@ -625,34 +625,37 @@ impl Stack {
         Ok(())
     }
 
-    /// [`Self::launch`] plus a second app on the same host: `b` gets its own data directory,
-    /// identity and socket, and adds the same host address. The
+    /// [`Self::launch`] plus a second app on the same worker: `b` gets its own data directory,
+    /// identity and socket, and adds the same worker address. The
     /// first app is left to open its first shell before the second comes up, so the two do not
     /// both find an empty canvas and open one each.
     ///
     /// # Errors
     ///
     /// As [`Self::launch`], for either app.
-    pub async fn launch_pair(host_name: &str) -> Result<Pair> {
-        let mut stack = Self::launch(host_name).await?;
+    pub async fn launch_pair(worker_name: &str) -> Result<Pair> {
+        let mut stack = Self::launch(worker_name).await?;
         stack.wait_first_shell().await?;
         let (child, mut driver) = spawn_app(stack.dir.path(), "b", &stack.log, &[]).await?;
-        add_host(&mut driver, &stack.address).await?;
+        add_worker(&mut driver, &stack.address).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: Some(child), simulator: None } })
     }
 
     /// [`Self::launch_pair`] with the second app in a booted simulator: the Mac and the phone
-    /// on one host.
+    /// on one worker.
     ///
     /// # Errors
     ///
     /// As [`Self::launch_pair`] and [`Self::launch_on_simulator`].
-    pub async fn launch_pair_with_simulator(host_name: &str, simulator: Simulator) -> Result<Pair> {
-        let mut stack = Self::launch(host_name).await?;
+    pub async fn launch_pair_with_simulator(
+        worker_name: &str,
+        simulator: Simulator,
+    ) -> Result<Pair> {
+        let mut stack = Self::launch(worker_name).await?;
         stack.wait_first_shell().await?;
         let mut driver =
             spawn_simulator_app(stack.dir.path(), "b", &stack.log, &simulator, &[]).await?;
-        add_host(&mut driver, &stack.address).await?;
+        add_worker(&mut driver, &stack.address).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
     }
 
@@ -668,15 +671,15 @@ impl Stack {
         Ok(())
     }
 
-    /// Start ptyd and hostd here and the app in a booted simulator (`simctl launch` with the
+    /// Start ptyd and the worker here and the app in a booted simulator (`simctl launch` with the
     /// socket and data dir in its environment; the simulator shares this file system), then
-    /// add the host and wait as [`Self::launch`] does.
+    /// add the worker and wait as [`Self::launch`] does.
     ///
     /// # Errors
     ///
     /// When a daemon is missing, `simctl` fails, or the app does not bind its socket in time.
-    pub async fn launch_on_simulator(host_name: &str, simulator: Simulator) -> Result<Self> {
-        Self::launch_on_simulator_with(host_name, simulator, &[]).await
+    pub async fn launch_on_simulator(worker_name: &str, simulator: Simulator) -> Result<Self> {
+        Self::launch_on_simulator_with(worker_name, simulator, &[]).await
     }
 
     /// [`Self::launch_on_simulator`] with extra environment for the app, as
@@ -686,11 +689,11 @@ impl Stack {
     ///
     /// As [`Self::launch_on_simulator`].
     pub async fn launch_on_simulator_with(
-        host_name: &str,
+        worker_name: &str,
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        Self::add(Self::spawn_on_simulator(host_name, simulator, env).await?).await
+        Self::add(Self::spawn_on_simulator(worker_name, simulator, env).await?).await
     }
 
     /// [`Self::launch_on_simulator`] up to the first frame, before the app knows any worker,
@@ -700,24 +703,24 @@ impl Stack {
     ///
     /// As [`Self::launch_on_simulator`].
     pub async fn launch_first_run_on_simulator(
-        host_name: &str,
+        worker_name: &str,
         simulator: Simulator,
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(host_name, simulator, &[]).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[]).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
 
     /// The daemons here and the app in the simulator, the worker not yet added.
     async fn spawn_on_simulator(
-        host_name: &str,
+        worker_name: &str,
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (children, address) = daemons(root, host_name, &log, &[]).await?;
+        let (children, address) = daemons(root, worker_name, &log, &[]).await?;
         let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
         Ok(Self {
@@ -732,10 +735,10 @@ impl Stack {
         })
     }
 
-    /// Ping, add the host and wait for the connection.
+    /// Ping, add the worker and wait for the connection.
     async fn add(mut stack: Self) -> Result<Self> {
         let address = stack.address.clone();
-        add_host(&mut stack.driver, &address).await?;
+        add_worker(&mut stack.driver, &address).await?;
         Ok(stack)
     }
 
@@ -757,18 +760,18 @@ impl Stack {
         Ok(())
     }
 
-    /// One request over hostd's control socket (`{"cmd": …}`), and its reply.
+    /// One request over the worker's control socket (`{"cmd": …}`), and its reply.
     ///
     /// # Errors
     ///
-    /// When hostd cannot be reached or answers something that is not JSON.
+    /// When the worker cannot be reached or answers something that is not JSON.
     pub async fn ctl(&self, request: &Value) -> Result<Value> {
-        ctl(&self.path("hostd.sock"), request).await
+        ctl(&self.path("worker.sock"), request).await
     }
 
-    /// hostd's process id (for reading its CPU time).
+    /// The worker's process id (for reading its CPU time).
     #[must_use]
-    pub fn hostd_pid(&self) -> Option<u32> {
+    pub fn worker_pid(&self) -> Option<u32> {
         self.children.get(1).and_then(Child::id)
     }
 
@@ -779,13 +782,13 @@ impl Stack {
     }
 
     /// Play a Claude Code hook in `session` (the id from the dump): write [`TRANSCRIPT`] under
-    /// the run's directory and hand hostd the payload for `event` (plus `fields`, more JSON
+    /// the run's directory and hand the worker the payload for `event` (plus `fields`, more JSON
     /// members) naming it over its control socket, exactly what `slopty hook` relays from the
     /// agent's shell. Nothing is typed into the shell: the agent is simulated from the test.
     ///
     /// # Errors
     ///
-    /// When the transcript cannot be written or hostd refuses the hook.
+    /// When the transcript cannot be written or the worker refuses the hook.
     pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
         let transcript = self.transcript_path();
         std::fs::write(&transcript, TRANSCRIPT)?;
@@ -794,10 +797,10 @@ impl Stack {
             transcript.display()
         );
         let request = json!({ "cmd": "hook", "session": session, "payload": payload });
-        let reply = ctl(&self.path("hostd.sock"), &request).await?;
+        let reply = ctl(&self.path("worker.sock"), &request).await?;
         anyhow::ensure!(
             reply.get("reply").and_then(Value::as_str) == Some("ok"),
-            "hostd refused the hook: {reply}"
+            "the worker refused the hook: {reply}"
         );
         Ok(())
     }
@@ -833,16 +836,16 @@ impl Stack {
         Ok(IdleWindow { markers, title })
     }
 
-    /// The host's live screen streams as `slopty host screens` reads them, straight off hostd's
-    /// control socket.
+    /// The worker's live screen streams as `slopty worker screens` reads them, straight off the
+    /// worker's control socket.
     ///
     /// # Errors
     ///
-    /// When the socket is not there or hostd answers something else.
-    pub async fn host_screens(&self) -> Result<Vec<Value>> {
-        let reply = ctl(&self.path("hostd.sock"), &json!({ "cmd": "screens" })).await?;
+    /// When the socket is not there or the worker answers something else.
+    pub async fn worker_screens(&self) -> Result<Vec<Value>> {
+        let reply = ctl(&self.path("worker.sock"), &json!({ "cmd": "screens" })).await?;
         let live = reply.get("live").and_then(Value::as_array).cloned();
-        live.ok_or_else(|| anyhow::anyhow!("hostd did not list its screens: {reply}"))
+        live.ok_or_else(|| anyhow::anyhow!("the worker did not list its screens: {reply}"))
     }
 
     /// Ask the app to quit, then kill whatever is left.
@@ -869,7 +872,7 @@ impl Stack {
 /// Give the run's named pasteboards back to the system once its processes are gone.
 #[cfg(target_os = "macos")]
 fn release_pasteboards(root: &Path) {
-    for who in ["host", "app", "b"] {
+    for who in ["worker", "app", "b"] {
         slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(root, who)).release();
     }
 }
@@ -915,36 +918,37 @@ impl Drop for Stack {
     }
 }
 
-/// A second host on another machine, reached over ssh.
+/// A second worker on another machine, reached over ssh.
 ///
-/// `slopty-ptyd` and `slopty-hostd` run under one temporary root there, so the app can add
-/// two hosts at once and the cross-host attention path can be driven against a real remote daemon.
+/// `slopty-ptyd` and `slopty-worker` run under one temporary root there, so the app can add
+/// two workers at once and the cross-worker attention path can be driven against a real remote
+/// daemon.
 ///
 /// Everything it creates on the remote lives under `Self::root` and is torn down on
 /// [`Self::shutdown`] (and best-effort on drop). The remote's own `~/.claude` is never touched:
 /// the daemons and the hook relay run with a private `HOME` under the root, and
 /// `slopty hook install` is never run — so no user settings file is written.
 #[derive(Debug)]
-pub struct RemoteHost {
-    /// ssh destination (`$SLOPTY_HOST2`).
+pub struct RemoteWorker {
+    /// ssh destination (`$SLOPTY_WORKER2`).
     ssh: String,
-    /// The remote temp root; everything the host creates lives under it.
+    /// The remote temp root; everything the worker creates lives under it.
     root: String,
     /// The remote binary directory (`root/bin`).
     bin: String,
-    /// The remote hostd control socket.
+    /// The remote worker control socket.
     ctl_sock: String,
     /// The remote private `HOME` (under [`Self::root`]).
     home: String,
     /// The remote transcript path, rewritten before each played hook.
     transcript: String,
-    /// The fixed UDP port hostd binds, so a restart is reachable at the same address.
+    /// The fixed UDP port the worker binds, so a restart is reachable at the same address.
     port: u16,
-    /// ptyd's and hostd's pids on the remote, killed on teardown; hostd's is replaced by
-    /// [`Self::restart_hostd`].
+    /// ptyd's and the worker's pids on the remote, killed on teardown; the worker's is replaced by
+    /// [`Self::restart_worker`].
     ptyd_pid: u32,
-    hostd_pid: u32,
-    /// The display name hostd was given (what the app's switcher shows for this host).
+    worker_pid: u32,
+    /// The display name the worker was given (what the app's switcher shows for this worker).
     name: String,
 }
 
@@ -1067,35 +1071,35 @@ fn teardown_script(pids: &[u32], root: &str, gentle: bool) -> String {
 /// match the shell running the script itself: the remote runs `zsh -c "<script>"`, whose
 /// command line holds every literal in the script, so a plain `pkill -f /tmp/…` killed that
 /// shell first and ssh came back with SIGKILL. `/[b]in/` matches the daemons' paths
-/// (`…/bin/slopty-hostd`) while the script's own text, which spells it with the brackets and
+/// (`…/bin/slopty-worker`) while the script's own text, which spells it with the brackets and
 /// names the root bare only in `rm -rf`, no longer does.
 fn self_excluding(root: &str) -> String {
     format!("{root}/[b]in/")
 }
 
-/// The two-host suite's gate, from the two environment variables.
+/// The two-worker suite's gate, from the two environment variables.
 ///
-/// `Ok(None)` when `SLOPTY_HOST2_E2E` is unset (the suite skips), `Ok(Some(ssh))` when it is set
-/// and `SLOPTY_HOST2` names the second machine, and an error when the gate is on but the machine
+/// `Ok(None)` when `SLOPTY_WORKER2_E2E` is unset (the suite skips), `Ok(Some(ssh))` when it is set
+/// and `SLOPTY_WORKER2` names the second machine, and an error when the gate is on but the machine
 /// is missing, so an enabled suite can never pass by doing nothing.
 ///
 /// # Errors
 ///
-/// When `gate` is set and `host2` is unset or empty.
-pub fn host2_gate(gate: Option<&str>, host2: Option<&str>) -> Result<Option<String>> {
+/// When `gate` is set and `worker2` is unset or empty.
+pub fn worker2_gate(gate: Option<&str>, worker2: Option<&str>) -> Result<Option<String>> {
     if gate.is_none() {
         return Ok(None);
     }
-    match host2 {
+    match worker2 {
         Some(name) if !name.trim().is_empty() => Ok(Some(name.trim().to_owned())),
         _ => bail!(
-            "SLOPTY_HOST2_E2E is set but SLOPTY_HOST2 is empty: name the second machine \
-             (its ssh destination) or unset SLOPTY_HOST2_E2E"
+            "SLOPTY_WORKER2_E2E is set but SLOPTY_WORKER2 is empty: name the second machine \
+             (its ssh destination) or unset SLOPTY_WORKER2_E2E"
         ),
     }
 }
 
-/// The address the app adds the second host by: `explicit` (`SLOPTY_HOST2_ADDR`) when set,
+/// The address the app adds the second worker by: `explicit` (`SLOPTY_WORKER2_ADDR`) when set,
 /// else the host part of the ssh destination `ssh` (`user@host` or `host`), with `port` unless
 /// the address names its own.
 fn remote_address(explicit: Option<&str>, ssh: &str, port: u16) -> String {
@@ -1114,32 +1118,33 @@ fn remote_address(explicit: Option<&str>, ssh: &str, port: u16) -> String {
     }
 }
 
-impl RemoteHost {
-    /// Copy the daemons and the `slopty` CLI to `ssh`, start ptyd and hostd there under a fresh
-    /// temp root with a private `HOME`, and return the host with the address the app adds it
-    /// by: `SLOPTY_HOST2_ADDR` when set (a tailnet or LAN IP, when the ssh destination is an
-    /// alias no resolver knows), else the host part of the ssh destination, on the fixed port.
+impl RemoteWorker {
+    /// Copy the daemons and the `slopty` CLI to `ssh`, start ptyd and the worker there under a
+    /// fresh temp root with a private `HOME`, and return the worker with the address the app
+    /// adds it by: `SLOPTY_WORKER2_ADDR` when set (a tailnet or LAN IP, when the ssh
+    /// destination is an alias no resolver knows), else the worker part of the ssh destination,
+    /// on the fixed port.
     ///
     /// # Errors
     ///
     /// When ssh is unreachable, a binary is missing, or a daemon does not come up.
     pub async fn launch(ssh: &str) -> Result<(Self, String)> {
-        let root = format!("/tmp/slopty-e2e/host2-{}", std::process::id());
+        let root = format!("/tmp/slopty-e2e/worker2-{}", std::process::id());
         let bin = format!("{root}/bin");
         let home = format!("{root}/home");
-        let ctl_sock = format!("{root}/hostd.sock");
+        let ctl_sock = format!("{root}/worker.sock");
         let transcript = format!("{root}/agent.jsonl");
         // The daemons must never read the remote user's real HOME; assert the private one is
         // under our own temp root before anything runs there.
         ensure!(home.starts_with(&root), "private HOME {home} is not under the temp root {root}");
         // A fixed port so a restart (the mid-stream-kill scenario) is reachable at the same
-        // address the app stored when it added the host.
+        // address the app stored when it added the worker.
         let port = 45_560;
         let name = "macbook".to_owned();
 
         // The guard exists before the first byte lands on the remote: a missing binary or a
         // failed copy below drops it, and `Drop` removes whatever was already created there.
-        let mut host = Self {
+        let mut worker = Self {
             ssh: ssh.to_owned(),
             root,
             bin,
@@ -1148,11 +1153,11 @@ impl RemoteHost {
             transcript,
             port,
             ptyd_pid: 0,
-            hostd_pid: 0,
+            worker_pid: 0,
             name,
         };
-        let (root, bin) = (host.root.clone(), host.bin.clone());
-        let home = host.home.clone();
+        let (root, bin) = (worker.root.clone(), worker.bin.clone());
+        let home = worker.home.clone();
         ssh_out(
             ssh,
             &format!("rm -rf {root} && mkdir -p {bin} {home} {root}/data {root}/terminfo"),
@@ -1161,25 +1166,25 @@ impl RemoteHost {
         .context("prepare the remote temp root")?;
 
         let dir = bin_dir()?;
-        for name in ["slopty-ptyd", "slopty-hostd", "slopty"] {
+        for name in ["slopty-ptyd", "slopty-worker", "slopty"] {
             let local = dir.join(name);
             ensure!(local.exists(), "{} is not built (add `-p slopty-cli`?)", local.display());
             copy_bin(ssh, &local, &format!("{bin}/{name}")).await?;
         }
 
-        host.ptyd_pid = host.start_ptyd().await?;
-        host.hostd_pid = host.start_hostd().await?;
-        host.wait_answering().await?;
+        worker.ptyd_pid = worker.start_ptyd().await?;
+        worker.worker_pid = worker.start_worker().await?;
+        worker.wait_answering().await?;
         let address =
-            remote_address(std::env::var("SLOPTY_HOST2_ADDR").ok().as_deref(), ssh, host.port);
-        Ok((host, address))
+            remote_address(std::env::var("SLOPTY_WORKER2_ADDR").ok().as_deref(), ssh, worker.port);
+        Ok((worker, address))
     }
 
     /// The common environment for a remote daemon: a private HOME, a terminfo dir and a
     /// pasteboard of its own, so the run never reads that Mac's clipboard.
     fn daemon_env(&self) -> String {
         let terminfo = format!("{}/terminfo", self.root);
-        let board = pasteboard_name(Path::new(&self.root), "host2");
+        let board = pasteboard_name(Path::new(&self.root), "worker2");
         format!(
             "HOME={} {}={terminfo} TERMINFO_DIRS={terminfo}: RUST_LOG=info \
              {PASTEBOARD_ENV}={board} SLOPTY_DROP_DIR={}/drops",
@@ -1205,47 +1210,47 @@ impl RemoteHost {
         pid.trim().parse().with_context(|| format!("ptyd pid: {pid:?}"))
     }
 
-    /// Start hostd on the remote (backgrounded, on a fixed port so a restart keeps the same
+    /// Start the worker on the remote (backgrounded, on a fixed port so a restart keeps the same
     /// address), returning its pid. It listens on every interface, so the app reaches it over
     /// the mesh or the LAN, whichever the address names.
-    async fn start_hostd(&self) -> Result<u32> {
+    async fn start_worker(&self) -> Result<u32> {
         let env = self.daemon_env();
         let (root, bin, port, name) = (&self.root, &self.bin, self.port, &self.name);
         let pid = ssh_out(
             &self.ssh,
             &format!(
-                "{env} SLOPTY_HOST_NAME={name} \
-                 nohup {bin}/slopty-hostd --ptyd-socket {root}/ptyd.sock \
-                 --ctl-socket {root}/hostd.sock --data-dir {root}/data --port {port} \
-                 >{root}/hostd.log 2>&1 & echo $!"
+                "{env} SLOPTY_WORKER_NAME={name} \
+                 nohup {bin}/slopty-worker --ptyd-socket {root}/ptyd.sock \
+                 --ctl-socket {root}/worker.sock --data-dir {root}/data --port {port} \
+                 >{root}/worker.log 2>&1 & echo $!"
             ),
         )
         .await?;
-        self.wait_remote_socket(&self.ctl_sock, "remote hostd").await?;
-        pid.trim().parse().with_context(|| format!("hostd pid: {pid:?}"))
+        self.wait_remote_socket(&self.ctl_sock, "remote worker").await?;
+        pid.trim().parse().with_context(|| format!("worker pid: {pid:?}"))
     }
 
-    /// Kill the remote hostd (ptyd and the sessions stay), as a host crash would.
+    /// Kill the remote worker (ptyd and the sessions stay), as a worker crash would.
     ///
     /// # Errors
     ///
     /// When the kill cannot be sent.
-    pub async fn kill_hostd(&self) -> Result<()> {
-        ssh_out(&self.ssh, &format!("kill {} 2>/dev/null; true", self.hostd_pid)).await?;
+    pub async fn kill_worker(&self) -> Result<()> {
+        ssh_out(&self.ssh, &format!("kill {} 2>/dev/null; true", self.worker_pid)).await?;
         Ok(())
     }
 
-    /// Start hostd again on the same data dir and port (same identity, reachable at the same
+    /// Start the worker again on the same data dir and port (same identity, reachable at the same
     /// address): the app reconnects on its own.
     ///
     /// # Errors
     ///
-    /// When hostd does not come back up.
-    pub async fn restart_hostd(&mut self) -> Result<()> {
+    /// When the worker does not come back up.
+    pub async fn restart_worker(&mut self) -> Result<()> {
         // The dead daemon left its control socket on disk; drop it so the readiness poll waits
         // for the new process to bind rather than seeing the stale file.
         ssh_out(&self.ssh, &format!("rm -f {}", self.ctl_sock)).await?;
-        self.hostd_pid = self.start_hostd().await?;
+        self.worker_pid = self.start_worker().await?;
         Ok(())
     }
 
@@ -1263,36 +1268,36 @@ impl RemoteHost {
         }
     }
 
-    /// Wait until the remote hostd answers on its control socket. The socket file appears
+    /// Wait until the remote worker answers on its control socket. The socket file appears
     /// before the daemon answers on it (over a fast link the first call can land in that gap),
     /// so a refused call is retried within [`STARTUP`]; the last error carries the remote
-    /// hostd's log tail, which the guard's teardown would otherwise take with it.
+    /// The worker's log tail, which the guard's teardown would otherwise take with it.
     async fn wait_answering(&self) -> Result<()> {
         let script =
-            format!("SLOPTY_HOSTD_SOCKET={} {}/slopty host status", self.ctl_sock, self.bin);
+            format!("SLOPTY_WORKER_SOCKET={} {}/slopty worker status", self.ctl_sock, self.bin);
         let deadline = tokio::time::Instant::now().checked_add(STARTUP);
         loop {
             match ssh_out(&self.ssh, &script).await {
                 Ok(status) => {
                     ensure!(
                         status.contains(&self.name),
-                        "remote hostd answered as someone else: {status:?}"
+                        "remote worker answered as someone else: {status:?}"
                     );
                     return Ok(());
                 }
                 Err(e) if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) => {
                     let log =
-                        ssh_out(&self.ssh, &format!("tail -n 20 {}/hostd.log || true", self.root))
+                        ssh_out(&self.ssh, &format!("tail -n 20 {}/worker.log || true", self.root))
                             .await
                             .unwrap_or_default();
-                    return Err(e.context(format!("remote hostd log:\n{log}")));
+                    return Err(e.context(format!("remote worker log:\n{log}")));
                 }
                 Err(_) => tokio::time::sleep(POLL).await,
             }
         }
     }
 
-    /// Play a Claude Code hook for `session` (the id from the dump) against the remote hostd,
+    /// Play a Claude Code hook for `session` (the id from the dump) against the remote worker,
     /// through the real `slopty hook` relay over ssh: write [`TRANSCRIPT`] on the remote, then
     /// run the relay with `SLOPTY_SESSION` set and the payload on its stdin, exactly what Claude
     /// Code does. Nothing is typed into a shell and no real agent is started.
@@ -1311,7 +1316,7 @@ impl RemoteHost {
         ssh_pipe(
             &self.ssh,
             &format!(
-                "SLOPTY_SESSION={session} SLOPTY_HOSTD_SOCKET={} {}/slopty hook",
+                "SLOPTY_SESSION={session} SLOPTY_WORKER_SOCKET={} {}/slopty hook",
                 self.ctl_sock, self.bin
             ),
             payload.as_bytes(),
@@ -1335,7 +1340,7 @@ impl RemoteHost {
     ///
     /// When ssh cannot be reached or a process survives.
     pub async fn shutdown(self) -> Result<()> {
-        let script = teardown_script(&[self.ptyd_pid, self.hostd_pid], &self.root, true);
+        let script = teardown_script(&[self.ptyd_pid, self.worker_pid], &self.root, true);
         ssh_out(&self.ssh, &script).await?;
         let stray =
             ssh_out(&self.ssh, &format!("pgrep -f {} | wc -l", self_excluding(&self.root))).await?;
@@ -1344,10 +1349,10 @@ impl RemoteHost {
     }
 }
 
-impl Drop for RemoteHost {
+impl Drop for RemoteWorker {
     fn drop(&mut self) {
         // Best-effort synchronous cleanup if `shutdown` was not called (a panicking test).
-        let script = teardown_script(&[self.ptyd_pid, self.hostd_pid], &self.root, false);
+        let script = teardown_script(&[self.ptyd_pid, self.worker_pid], &self.root, false);
         let _best_effort = std::process::Command::new("ssh")
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
             .arg(&self.ssh)
@@ -1387,30 +1392,30 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host2_gate, loopback_address, remote_address, self_excluding, teardown_script};
+    use super::{loopback_address, remote_address, self_excluding, teardown_script, worker2_gate};
 
     /// The kill pattern must match the daemons under the root but not the script that holds
     /// the pattern (the remote shell's own command line).
     #[test]
     fn the_kill_pattern_spares_the_shell_that_runs_it() {
-        let pattern = self_excluding("/tmp/slopty-e2e/host2-1");
-        assert_eq!(pattern, "/tmp/slopty-e2e/host2-1/[b]in/");
+        let pattern = self_excluding("/tmp/slopty-e2e/worker2-1");
+        assert_eq!(pattern, "/tmp/slopty-e2e/worker2-1/[b]in/");
         let re = regex::Regex::new(&pattern).unwrap();
-        assert!(re.is_match("/tmp/slopty-e2e/host2-1/bin/slopty-hostd --port 45560"));
-        assert!(re.is_match("/tmp/slopty-e2e/host2-1/bin/slopty hook"));
-        assert!(!re.is_match(&teardown_script(&[7], "/tmp/slopty-e2e/host2-1", true)));
+        assert!(re.is_match("/tmp/slopty-e2e/worker2-1/bin/slopty-worker --port 45560"));
+        assert!(re.is_match("/tmp/slopty-e2e/worker2-1/bin/slopty hook"));
+        assert!(!re.is_match(&teardown_script(&[7], "/tmp/slopty-e2e/worker2-1", true)));
         assert!(!re.is_match(&format!("pgrep -lf {pattern} || true")));
     }
 
     #[test]
-    fn the_app_dials_loopback_on_the_port_hostd_printed() {
+    fn the_app_dials_loopback_on_the_port_the_worker_printed() {
         assert_eq!(loopback_address("[::]:53211\n").unwrap(), "127.0.0.1:53211");
         assert_eq!(loopback_address("0.0.0.0:7").unwrap(), "127.0.0.1:7");
         loopback_address("not an address").unwrap_err();
     }
 
     #[test]
-    fn the_second_host_is_added_by_its_ssh_host_unless_an_address_is_given() {
+    fn the_second_worker_is_added_by_its_ssh_host_unless_an_address_is_given() {
         assert_eq!(remote_address(None, "macbook-pro", 45_560), "macbook-pro:45560");
         assert_eq!(remote_address(None, "me@100.64.0.5", 45_560), "100.64.0.5:45560");
         assert_eq!(remote_address(Some("192.168.1.7"), "macbook-pro", 45_560), "192.168.1.7:45560");
@@ -1421,10 +1426,10 @@ mod tests {
 
     #[test]
     fn an_unstarted_daemon_is_not_in_the_kill_list() {
-        let s = teardown_script(&[0, 4242], "/tmp/slopty-e2e/host2-1", false);
+        let s = teardown_script(&[0, 4242], "/tmp/slopty-e2e/worker2-1", false);
         assert_eq!(
             s,
-            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/host2-1/[b]in/ 2>/dev/null; rm -rf /tmp/slopty-e2e/host2-1; true"
+            "kill -9 4242 2>/dev/null; pkill -9 -f /tmp/slopty-e2e/worker2-1/[b]in/ 2>/dev/null; rm -rf /tmp/slopty-e2e/worker2-1; true"
         );
         let s = teardown_script(&[0, 0], "/tmp/r", true);
         assert!(s.starts_with("pkill "), "no kill of pids when nothing started: {s}");
@@ -1440,14 +1445,14 @@ mod tests {
 
     #[test]
     fn the_gate_refuses_to_run_without_a_second_machine() {
-        assert!(host2_gate(None, None).unwrap().is_none());
-        assert!(host2_gate(None, Some("mac")).unwrap().is_none());
+        assert!(worker2_gate(None, None).unwrap().is_none());
+        assert!(worker2_gate(None, Some("mac")).unwrap().is_none());
         assert_eq!(
-            host2_gate(Some("1"), Some(" macbook-pro ")).unwrap().as_deref(),
+            worker2_gate(Some("1"), Some(" macbook-pro ")).unwrap().as_deref(),
             Some("macbook-pro")
         );
-        host2_gate(Some("1"), None).unwrap_err();
-        host2_gate(Some("1"), Some("")).unwrap_err();
+        worker2_gate(Some("1"), None).unwrap_err();
+        worker2_gate(Some("1"), Some("")).unwrap_err();
     }
 }
 
@@ -1529,14 +1534,14 @@ impl ServerDaemon {
     }
 }
 
-/// ptyd + hostd from this build, registered with a server as one worker. Killed on drop.
+/// ptyd + worker from this build, registered with a server as one worker. Killed on drop.
 ///
-/// Its sockets and data live under the root it was started in, so a restarted hostd keeps its
+/// Its sockets and data live under the root it was started in, so a restarted worker keeps its
 /// worker id and finds the same ptyd.
 #[derive(Debug)]
 pub struct Worker {
     ptyd: Child,
-    hostd: Option<Child>,
+    daemon: Option<Child>,
     root: PathBuf,
     name: String,
     server: String,
@@ -1546,7 +1551,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Start ptyd and hostd named `name` in `root`, registering with the server at `server`;
+    /// Start ptyd and the worker named `name` in `root`, registering with the server at `server`;
     /// `env` goes to both daemons, and so to the shells.
     ///
     /// # Errors
@@ -1561,10 +1566,10 @@ impl Worker {
     ) -> Result<Self> {
         std::fs::create_dir_all(root)?;
         let ptyd = spawn_ptyd(root, log, env).await?;
-        let (hostd, address) = spawn_hostd(root, name, log, env, Some(server)).await?;
+        let (worker, address) = spawn_worker(root, name, log, env, Some(server)).await?;
         Ok(Self {
             ptyd,
-            hostd: Some(hostd),
+            daemon: Some(worker),
             root: root.to_path_buf(),
             name: name.to_owned(),
             server: server.to_owned(),
@@ -1580,39 +1585,39 @@ impl Worker {
         &self.name
     }
 
-    /// Where clients reach hostd directly, `127.0.0.1:<port>`; a restart picks a new port.
+    /// Where clients reach the worker directly, `127.0.0.1:<port>`; a restart picks a new port.
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Kill hostd (SIGKILL: no goodbye to the server, as a crash or a pulled cable would leave
+    /// Kill the worker (SIGKILL: no goodbye to the server, as a crash or a pulled cable would leave
     /// it) and reap it. ptyd and its shells live on.
-    pub async fn kill_hostd(&mut self) {
-        if let Some(mut hostd) = self.hostd.take() {
-            let _killed = hostd.start_kill();
-            let _reaped = hostd.wait().await;
+    pub async fn kill_worker(&mut self) {
+        if let Some(mut worker) = self.daemon.take() {
+            let _killed = worker.start_kill();
+            let _reaped = worker.wait().await;
         }
     }
 
-    /// Start hostd again on the same ptyd and data directory (so the same worker id).
+    /// Start the worker again on the same ptyd and data directory (so the same worker id).
     ///
     /// # Errors
     ///
-    /// When hostd does not come up.
-    pub async fn restart_hostd(&mut self) -> Result<()> {
-        self.kill_hostd().await;
+    /// When the worker does not come up.
+    pub async fn restart_worker(&mut self) -> Result<()> {
+        self.kill_worker().await;
         let env: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (&**k, &**v)).collect();
-        let (hostd, address) =
-            spawn_hostd(&self.root, &self.name, &self.log, &env, Some(&self.server)).await?;
-        self.hostd = Some(hostd);
+        let (worker, address) =
+            spawn_worker(&self.root, &self.name, &self.log, &env, Some(&self.server)).await?;
+        self.daemon = Some(worker);
         self.address = address;
         Ok(())
     }
 
     /// Kill both daemons and reap them.
     pub async fn shutdown(mut self) {
-        self.kill_hostd().await;
+        self.kill_worker().await;
         let _killed = self.ptyd.start_kill();
         let _reaped = self.ptyd.wait().await;
     }
@@ -1710,7 +1715,7 @@ pub async fn mcp_request(
 }
 
 /// A server and one worker registered with it, in a temporary directory: the server, then
-/// ptyd + hostd dialing it. Everything is killed on drop.
+/// ptyd + worker dialing it. Everything is killed on drop.
 ///
 /// `root/server` is the server's data directory, `root/worker` holds the worker's sockets and
 /// data, and `root/cli` is the CLI's data directory.

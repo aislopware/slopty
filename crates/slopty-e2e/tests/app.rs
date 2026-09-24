@@ -1,4 +1,4 @@
-//! The real app, driven from inside: add a host, open a shell, type, read the rows back,
+//! The real app, driven from inside: add a worker, open a shell, type, read the rows back,
 //! render frames with the app's own renderer and compare them with the goldens.
 //!
 //! Runs only with `SLOPTY_APP_E2E=1` (`cargo xtask e2e app`), since it launches the app. Every
@@ -17,14 +17,14 @@ mod tests {
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction, pixels_near};
     use slopty_e2e::{Button, Command, Stack};
 
-    /// How long a host round trip (open a shell, run a command) may take.
+    /// How long a worker round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
     /// Window size for the renders: small, so the goldens stay small.
     const WINDOW: (f32, f32) = (900.0, 600.0);
     /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
     const TOLERANCE: f64 = 0.01;
     /// Refresh requests the receiver may send for a target that produces no frame, checked
-    /// against the host's own count of what it was asked for.
+    /// against the worker's own count of what it was asked for.
     fn refresh_cap() -> u64 {
         u64::from(slopty_media::Config::default().refresh_max_repeats)
     }
@@ -37,7 +37,7 @@ mod tests {
         true
     }
 
-    /// [`gated`], plus the screen-recording grant hostd needs to capture anything. The rest of
+    /// [`gated`], plus the screen-recording grant the worker needs to capture anything. The rest of
     /// this suite asks the machine for nothing, so a case that captures gates on both.
     fn gated_on_capture() -> bool {
         if !gated() {
@@ -55,7 +55,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let mut stack = Stack::launch("e2e-host").await.unwrap();
+        let mut stack = Stack::launch("e2e-worker").await.unwrap();
         let render_path = stack.path("terminal.png");
         let image_path = stack.path("terminal-image.png");
         let terminfo_db = stack.path("terminfo");
@@ -74,7 +74,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dump.workers.len(), 1, "{dump:#?}");
-        assert_eq!(dump.workers[0].name, "e2e-host");
+        assert_eq!(dump.workers[0].name, "e2e-worker");
         assert_eq!(dump.workspace, "Workspace 1", "{dump:#?}");
         // ptyd compiled ghostty's terminfo into the stack's own database while it came up, so
         // the shells it spawns can be told `TERM=xterm-ghostty` (the dump does not carry a
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(dump.items.len(), 1, "{dump:#?}");
         let term = dump.item("terminal").unwrap().clone();
         assert!(term.active, "{dump:#?}");
-        assert_eq!(term.worker, "e2e-host", "{term:?}");
+        assert_eq!(term.worker, "e2e-worker", "{term:?}");
         assert!(term.bounds[2] > 100.0 && term.bounds[3] > 100.0, "{term:?}");
         // What a screen reader gets: the tile's heading, the grid as a terminal whose value is
         // the cursor row, the titlebar's buttons, all inside the window.
@@ -112,7 +112,7 @@ mod tests {
         // cursor back on this row.
         let prompt_row = dump.terminals[0].cursor[1];
 
-        // Typed text goes client → host → PTY → shell → host → client rows.
+        // Typed text goes client → worker → PTY → shell → worker → client rows.
         drv.type_text("echo e2e-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();
         // The echo, and the prompt back under it (the cursor's row is the grid's a11y value):
@@ -141,7 +141,7 @@ mod tests {
         assert_matches("terminal", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // A kitty graphics image typed through the shell: 16 × 16 red pixels transmitted and
-        // placed at the cursor. The host lays it out, the pixels cross the wire once, and the
+        // placed at the cursor. The worker lays it out, the pixels cross the wire once, and the
         // app paints a block of red the text never has.
         let red_before = pixels_near(&frame, [255, 0, 0]);
         let apc = concat!(
@@ -155,7 +155,7 @@ mod tests {
         let red = pixels_near(&with_image, [255, 0, 0]);
         assert!(red >= red_before + 200, "red block of 256 pixels expected: {red_before} → {red}");
 
-        // ⌘K: the host erases the history and the shell repaints its prompt at the top, so
+        // ⌘K: the worker erases the history and the shell repaints its prompt at the top, so
         // the echo is gone and the cursor is back where a fresh prompt puts it.
         drv.keys("cmd-k").await.unwrap();
         drv.wait_for("the screen to clear", STEP, |d| {
@@ -273,7 +273,7 @@ mod tests {
             "{saved}"
         );
 
-        // ⌘W closes the active one; the host tears its session down and one shell remains.
+        // ⌘W closes the active one; the worker tears its session down and one shell remains.
         drv.keys("cmd-w").await.unwrap();
         let dump =
             drv.wait_for("the first shell to close", STEP, |d| d.items.len() == 1).await.unwrap();
@@ -282,14 +282,14 @@ mod tests {
     }
 
     /// A `claude` nobody registered hooks for: "+ agent" starts the fake one the harness put
-    /// on ptyd's `PATH`, and the host attributes it from its foreground process, then its
+    /// on ptyd's `PATH`, and the worker attributes it from its foreground process, then its
     /// title, then the transcript it writes — each signal taking over from the weaker one.
     #[tokio::test]
-    async fn an_agent_started_without_hooks_is_attributed_from_what_the_host_can_see() {
+    async fn an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see() {
         if !gated() {
             return;
         }
-        let mut stack = Stack::launch_with_fake_claude("e2e-host").await.unwrap();
+        let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         stack
             .driver
@@ -335,7 +335,7 @@ mod tests {
             .await
             .unwrap();
 
-        // It writes its transcript where Claude Code writes one; the host finds the file
+        // It writes its transcript where Claude Code writes one; the worker finds the file
         // from the session's own working directory and reads the turn out of it.
         stack.fake_claude_stage("transcript").unwrap();
         stack
@@ -386,7 +386,7 @@ mod tests {
             .to_owned()
     }
 
-    /// The "hooks" pill, clicked the way a human clicks it, ends in hostd writing Claude
+    /// The "hooks" pill, clicked the way a human clicks it, ends in the worker writing Claude
     /// Code's settings — in the *harness's* home, which is the only home these daemons have.
     ///
     /// The click goes through the accessibility tree: the pill publishes its bounds there
@@ -396,7 +396,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let mut stack = Stack::launch_with_fake_claude("e2e-host").await.unwrap();
+        let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
         // Before anything else: the daemons' home is the run's own directory, so this test
         // cannot touch the developer's `~/.claude` even if the wiring were wrong.
         let home = stack.path("home");
@@ -417,7 +417,7 @@ mod tests {
             .await
             .unwrap();
 
-        // ⌘⇧T starts the fake `claude`; with no hook firing the host has to guess, which is
+        // ⌘⇧T starts the fake `claude`; with no hook firing the worker has to guess, which is
         // exactly when the pill is offered.
         stack.driver.keys("cmd-shift-t").await.unwrap();
         let dump = stack
@@ -445,12 +445,12 @@ mod tests {
             .await
             .unwrap();
 
-        // hostd writes the file; give it the same grace the driver gives the app.
+        // The worker writes the file; give it the same grace the driver gives the app.
         let deadline = std::time::Instant::now() + STEP;
         while !settings.exists() && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(settings.exists(), "hostd wrote {}", settings.display());
+        assert!(settings.exists(), "the worker wrote {}", settings.display());
 
         let registered = slopty_agent::hooks::registered(&settings).unwrap();
         assert_eq!(
@@ -459,7 +459,7 @@ mod tests {
             "every event relays: {registered:?}"
         );
         let written = std::fs::read_to_string(&settings).unwrap();
-        assert!(written.contains("slopty"), "the relay is the slopty beside the host: {written}");
+        assert!(written.contains("slopty"), "the relay is the slopty beside the worker: {written}");
         assert!(written.contains("hook"), "and it is the hook subcommand: {written}");
 
         // Installing the same relay again over what the daemon wrote changes nothing. (The
@@ -467,7 +467,7 @@ mod tests {
         // the UI.) The command has to be the daemon's own — `install` repoints a relay that
         // moved — so read it back out of the file the daemon wrote.
         let relay = relay_command(&written);
-        assert!(relay.ends_with("slopty"), "the relay beside the host: {relay}");
+        assert!(relay.ends_with("slopty"), "the relay beside the worker: {relay}");
         let outcome = slopty_agent::hooks::install_at(&settings, &relay).unwrap();
         assert_eq!(outcome, slopty_agent::hooks::Outcome::Unchanged);
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), written, "byte for byte");
@@ -481,7 +481,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let mut stack = Stack::launch("e2e-host").await.unwrap();
+        let mut stack = Stack::launch("e2e-worker").await.unwrap();
         let render_path = stack.path("note.png");
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -577,14 +577,14 @@ mod tests {
 
     /// A remote window whose target never draws: ⌘O picks it while it is still on screen, the
     /// helper takes it away before the stream opens, and the item says so instead of asking the
-    /// host for refreshes no refresh can answer. Then the window draws again and the picture
+    /// worker for refreshes no refresh can answer. Then the window draws again and the picture
     /// arrives without the client doing anything.
     #[tokio::test]
     async fn a_remote_window_that_never_draws_waits_instead_of_asking_forever() {
         if !gated_on_capture() {
             return;
         }
-        let mut stack = Stack::launch("e2e-host").await.unwrap();
+        let mut stack = Stack::launch("e2e-worker").await.unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         let idle = stack.start_idle_window().await.unwrap();
         stack
@@ -595,7 +595,7 @@ mod tests {
             .await
             .unwrap();
 
-        // ⌘O lists the host's windows. The picker shows on-screen windows only, which is why the
+        // ⌘O lists the worker's windows. The picker shows on-screen windows only, which is why the
         // helper is still on screen here.
         stack.driver.keys("cmd-o").await.unwrap();
         let row = format!(", {}", idle.title());
@@ -615,14 +615,14 @@ mod tests {
             .unwrap_or_else(|| panic!("{:#?}", dump.a11y))
             .clone();
 
-        // Off screen before the stream opens: the host can still capture it, and captures
+        // Off screen before the stream opens: the worker can still capture it, and captures
         // nothing.
         idle.hide().unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let [x, y, w, h] = button.bounds;
         stack.driver.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 
-        // The host says the target is idle; the item says which end everyone is waiting on, and
+        // The worker says the target is idle; the item says which end everyone is waiting on, and
         // a screen reader is told the same thing.
         let dump = stack
             .driver
@@ -639,10 +639,10 @@ mod tests {
             dump.a11y
         );
 
-        // What the host was asked for over the whole time: a handful of refreshes, then silence.
+        // What the worker was asked for over the whole time: a handful of refreshes, then silence.
         // The cap is the receiver's, and this is the only place it can be seen from outside.
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let screens = stack.host_screens().await.unwrap();
+        let screens = stack.worker_screens().await.unwrap();
         let refreshes: u64 =
             screens.iter().filter_map(|s| s.get("stats")?.get("refreshes")?.as_u64()).sum();
         let cap = refresh_cap();
@@ -671,7 +671,7 @@ mod tests {
     /// A scrolling terminal as the capture target under injected loss: the app floods a shell so
     /// its window is busy, captures the display that window fills, and the stream comes back over
     /// loopback with a fixed fraction of its datagrams dropped on the app's receive path
-    /// (`SLOPTY_E2E_DROP_PERMILLE`, one app process per rate). This is the run the hostd loss
+    /// (`SLOPTY_E2E_DROP_PERMILLE`, one app process per rate). This is the run the worker loss
     /// test could not drive (it captures the still desktop it cannot change); here the app self
     /// -test drives the content. Recovery is read from the client's own `ScreenStats`, surfaced
     /// in `dump.screens[].recovery`. Needs the screen-recording grant.
@@ -699,11 +699,11 @@ mod tests {
             // Flood a shell so the app's window is a scrolling terminal, then capture the
             // display it fills. The picker does not offer the app its own window, so the target
             // is the display the flooding window sits on — the app self-test still drives the
-            // content (a shell printing as fast as it can) the hostd loss test could not.
+            // content (a shell printing as fast as it can) the worker loss test could not.
             stack.driver.open(&["/bin/sh", "-c", flood], 1).await.unwrap();
             stack.driver.add_display().await.unwrap();
 
-            // Let it stream: at least 5 s of frames, as the hostd loss table samples.
+            // Let it stream: at least 5 s of frames, as the worker loss table samples.
             stack
                 .driver
                 .wait_for("the window streaming", STEP, |d| d.screens.iter().any(|s| s.frames > 5))
@@ -962,7 +962,7 @@ mod tests {
             return;
         }
         let mut stack = Stack::launch("e2e-clip").await.unwrap();
-        let host_name = pasteboard_name(stack.dir.path(), "host");
+        let worker_name = pasteboard_name(stack.dir.path(), "worker");
         let app_name = pasteboard_name(stack.dir.path(), "app");
         let drv = &mut stack.driver;
         drv.wait_for("the first shell focused", STEP, |d| {
@@ -970,10 +970,10 @@ mod tests {
         })
         .await
         .unwrap();
-        let (host, app) = (MacPasteboard::named(&host_name), MacPasteboard::named(&app_name));
+        let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
 
         let text = format!("copied on the worker {}", std::process::id());
-        host.copy(&[("public.utf8-plain-text", text.as_bytes())]);
+        worker.copy(&[("public.utf8-plain-text", text.as_bytes())]);
         let deadline = std::time::Instant::now() + STEP;
         while app.text().as_deref() != Some(&*text) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(app.text().as_deref(), Some(&*text), "the text arrived inline");
 
         let picture: Vec<u8> = (0..400_000_u32).map(|i| (i % 251) as u8).collect();
-        host.copy(&[("public.png", &picture)]);
+        worker.copy(&[("public.png", &picture)]);
         let deadline = std::time::Instant::now() + STEP;
         while !app.types().iter().any(|t| t == "public.png") && std::time::Instant::now() < deadline
         {
@@ -996,7 +996,7 @@ mod tests {
                 .await
                 .unwrap();
         assert!(read.as_deref() == Some(&*picture), "the picture arrived whole on paste");
-        drop(host);
+        drop(worker);
         stack.shutdown().await;
     }
 

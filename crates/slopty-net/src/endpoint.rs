@@ -11,9 +11,9 @@ use noq::{
 
 use crate::NetError;
 
-/// UDP port a host binds unless told otherwise (`slopty-hostd --port`), and the port a client
+/// UDP port a worker binds unless told otherwise (`slopty-worker --port`), and the port a client
 /// dials when an address names none.
-pub const HOST_PORT: u16 = 45550;
+pub const WORKER_PORT: u16 = 45550;
 
 /// UDP port the server binds unless told otherwise, and the port a worker or client dials when a
 /// server address names none.
@@ -36,14 +36,14 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// Datagram buffers: a few frames of 4K video at 60 fps.
 ///
-/// The host's capture guard skips a frame while the transport still holds the last one's bytes,
+/// The worker's capture guard skips a frame while the transport still holds the last one's bytes,
 /// so this is the ceiling a keyframe burst needs, not the queue a stream lives in: noq drops the
 /// *oldest* datagram when the buffer is full, and a buffer smaller than a keyframe would cut the
 /// head off every one.
 pub const DATAGRAM_BUFFER: usize = 4 << 20;
 /// Longest the peer may sit on an ACK (QUIC's default is 25 ms).
 ///
-/// Media leaves the host in one burst per frame, larger than the congestion window on a
+/// Media leaves the worker in one burst per frame, larger than the congestion window on a
 /// short path (BBR sizes the window from bandwidth × min RTT, ~2 frames on loopback), so the
 /// tail of every frame waits for the ACK of its head. With the default the ACK of an odd
 /// last packet waits the full 25 ms — longer than a frame interval — and that wait reached
@@ -66,7 +66,7 @@ pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
 /// Initial congestion window, in packets of the initial 1200-byte datagram size.
 ///
 /// RFC 9002's 10 packets (noq's default) is sized for an unknown peer on the open Internet;
-/// a host and client on a LAN or a private mesh can afford the burst Chromium's QUIC
+/// a worker and client on a LAN or a private mesh can afford the burst Chromium's QUIC
 /// starts with. The first keyframe is tens to hundreds of kilobytes and every window's worth
 /// of it costs a round trip (MEASUREMENTS.md, "start-up over the mesh").
 const INITIAL_WINDOW_PACKETS: u64 = 32;
@@ -112,7 +112,7 @@ pub fn lease_transport_config() -> TransportConfig {
 }
 
 /// A client config that dials a server on [`lease_transport_config`], for an endpoint whose
-/// default config is the host's.
+/// default config is the worker's.
 #[must_use]
 pub fn lease_client_config() -> noq::ClientConfig {
     let mut config = crate::crypto::client_config();
@@ -168,7 +168,7 @@ fn congestion_controller() -> Arc<dyn noq::congestion::ControllerFactory + Send 
 ///
 /// An unspecified IPv6 address (`[::]`) is bound dual-stack, so one socket answers IPv4 and
 /// IPv6 peers alike (IPv4 ones appear as `::ffff:a.b.c.d`). An address already in use is an
-/// error: falling back to a random port would strand every client that knows the host by its
+/// error: falling back to a random port would strand every client that knows the worker by its
 /// port.
 pub fn bind(local: SocketAddr, server: bool) -> Result<Endpoint, NetError> {
     bind_with(local, server, transport_config())

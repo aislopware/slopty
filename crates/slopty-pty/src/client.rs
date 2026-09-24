@@ -1,4 +1,4 @@
-//! hostd's connection to ptyd.
+//! The worker's connection to ptyd.
 
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -20,9 +20,9 @@ use crate::{PtyError, fdpass};
 pub struct Attached {
     /// The PTY master.
     pub master: OwnedFd,
-    /// The last host's terminal state (empty if none); replay it before `backlog`.
+    /// The last worker's terminal state (empty if none); replay it before `backlog`.
     pub checkpoint: Vec<u8>,
-    /// Output since the checkpoint: tapped by the last host, then read by ptyd while nobody
+    /// Output since the checkpoint: tapped by the last worker, then read by ptyd while nobody
     /// was attached.
     pub backlog: Vec<u8>,
     /// Bytes lost before `backlog`.
@@ -111,7 +111,7 @@ impl PtydClient {
         self.send(&codec::encode(&PtydRequest::Checkpoint { id, state })?).await
     }
 
-    /// Record a resize, so the next host to attach starts at this size.
+    /// Record a resize, so the next worker to attach starts at this size.
     pub async fn resize(&mut self, id: SessionId, size: TermSize) -> Result<(), PtyError> {
         self.expect_ok(&PtydRequest::Resize { id, size }).await
     }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use slopty_core::ClientId;
-use slopty_net::client::{HostConn, bind_client, connect};
+use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::{Endpoint, HostAddr};
 use slopty_proto::PROTOCOL_VERSION;
@@ -92,14 +92,14 @@ fn pick(me: &KnownWorkers, needle: Option<&str>) -> Result<HostAddr> {
     match me.workers() {
         [one] => Ok(one.address.clone()),
         [] => bail!("no workers; run `slopty add <host[:port]>`"),
-        _many => bail!("several workers; pass --host"),
+        _many => bail!("several workers; pass --worker"),
     }
 }
 
 /// A live connection to a worker.
 pub struct Session {
     /// The connection.
-    pub conn: HostConn,
+    pub conn: WorkerConn,
     /// Who we are to the worker (the key of its per-client registries).
     pub client: ClientId,
     /// Our endpoint (closed with the session).
@@ -149,7 +149,7 @@ pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
 /// transport and app latency can be compared.
 pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
     use slopty_core::MonoTime;
-    use slopty_proto::{ClientMsg, HostMsg};
+    use slopty_proto::{ClientMsg, WorkerMsg};
 
     let mut session = connect_to(data_dir, needle).await?;
     println!(
@@ -163,7 +163,7 @@ pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<(
         session.conn.tx.send(&ClientMsg::Ping { sent_at: sent }).await?;
         let rtt = loop {
             match session.conn.rx.recv().await? {
-                HostMsg::Pong { sent_at } if sent_at == sent => {
+                WorkerMsg::Pong { sent_at } if sent_at == sent => {
                     break Duration::from_nanos(MonoTime::now().since(sent).as_nanos());
                 }
                 _other => {}

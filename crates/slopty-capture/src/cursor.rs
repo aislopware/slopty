@@ -1,4 +1,4 @@
-//! The pointer's picture on the host: which cursor the window server is showing, as
+//! The pointer's picture on the worker: which cursor the window server is showing, as
 //! premultiplied BGRA pixels with the hotspot, for a client to draw at the pointer.
 //!
 //! `NSCursor.currentSystemCursor` is the one public reading of a cursor another process set.

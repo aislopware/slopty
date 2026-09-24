@@ -12,7 +12,7 @@ use slopty_proto::screen::{DisplayInfo, WindowInfo};
 
 use crate::CaptureError;
 
-/// A snapshot of the windows and displays on the host, with the ScreenCaptureKit objects
+/// A snapshot of the windows and displays on the worker, with the ScreenCaptureKit objects
 /// needed to open a stream on any of them.
 pub struct Shareable {
     inner: Retained<SCShareableContent>,

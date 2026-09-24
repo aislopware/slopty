@@ -1,4 +1,4 @@
-//! Host side: turn receiver reports into a parity ratio.
+//! Worker side: turn receiver reports into a parity ratio.
 //!
 //! Reed–Solomon parity is the only repair that costs no round trip, which is what makes it the
 //! right first line on a lossy path: a NACK answered one RTT later is a frame the presenter has

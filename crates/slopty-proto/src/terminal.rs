@@ -42,7 +42,7 @@ impl TermSize {
 pub struct OpenSession {
     /// Initial size.
     pub size: TermSize,
-    /// Working directory; the host's default when `None`.
+    /// Working directory; the worker's default when `None`.
     pub cwd: Option<String>,
     /// Program and arguments; the user's login shell when empty.
     pub command: Vec<String>,
@@ -66,19 +66,19 @@ pub enum SessionState {
     },
 }
 
-/// A session as listed by the host.
+/// A session as listed by the worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
     /// Identity.
     pub id: SessionId,
-    /// What runs in it: a shell in a PTY, or an agent the host drives (protocol 15).
+    /// What runs in it: a shell in a PTY, or an agent the worker drives (protocol 15).
     pub kind: SessionKind,
     /// Title (OSC 0/2, else the command).
     pub title: String,
     /// Current working directory if known (OSC 7).
     pub cwd: Option<String>,
     /// The repository [`Self::cwd`] is in, if any: the directory holding its `.git` entry.
-    /// Only the host can resolve it, and a client that groups by repository must not guess.
+    /// Only the worker can resolve it, and a client that groups by repository must not guess.
     pub repo: Option<String>,
     /// Current size.
     pub cols: u16,
@@ -107,14 +107,14 @@ pub enum CloseReason {
     Requested,
     /// The child exited and the session was not retained.
     Exited,
-    /// The host is shutting down.
-    HostShutdown,
+    /// The worker is shutting down.
+    WorkerShutdown,
 }
 
-/// Client → host, scoped to one session.
+/// Client → worker, scoped to one session.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum TermRequest {
-    /// Attach: the host opens a session stream and sends a full frame.
+    /// Attach: the worker opens a session stream and sends a full frame.
     Attach {
         /// The client's size; becomes the PTY size if this client is the driver.
         size: TermSize,
@@ -134,11 +134,11 @@ pub enum TermRequest {
     Key(KeyEvent),
     /// Pointer event.
     Mouse(MouseEvent),
-    /// Paste text (host applies bracketed paste if the mode is on).
+    /// Paste text (worker applies bracketed paste if the mode is on).
     Paste(String),
     /// Raw bytes to the PTY (tooling, tests).
     Raw(Vec<u8>),
-    /// ⌘K: drop the history and repaint the prompt at the top. The host erases the
+    /// ⌘K: drop the history and repaint the prompt at the top. The worker erases the
     /// scrollback as if the program had asked (`CSI 3 J`, so a replay agrees) and sends the
     /// shell ⌃L for the screen.
     Clear,
@@ -261,7 +261,7 @@ pub struct PixelRect {
 /// One image the program placed on the grid (kitty graphics).
 ///
 /// Positions are cells of the viewport, sizes the cell pixels of `TermSize::metrics`, as the
-/// host laid it out.
+/// worker laid it out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Placement {
     /// The image, as `TermEvent::Image` carried it.
@@ -294,13 +294,13 @@ pub struct Placement {
 /// whole file, and pushing that to every viewer would starve the rows behind it.
 pub const MAX_OSC52_BYTES: usize = 256 * 1024;
 
-/// Bytes of image pixels a client keeps for placements, and the host assumes it keeps.
+/// Bytes of image pixels a client keeps for placements, and the worker assumes it keeps.
 ///
-/// The least recently placed image goes first once the budget is over. The host re-sends an
+/// The least recently placed image goes first once the budget is over. The worker re-sends an
 /// image it dropped from its own ledger when a placement needs it again.
 pub const IMAGE_CACHE_BYTES: usize = 48 * 1024 * 1024;
 
-/// Host → client on the session stream.
+/// Worker → client on the session stream.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum TermEvent {
     /// Grid changed.
@@ -318,14 +318,14 @@ pub enum TermEvent {
     Cwd {
         /// The new directory.
         path: String,
-        /// The repository it is in, resolved by the host. `None` outside a repository.
+        /// The repository it is in, resolved by the worker. `None` outside a repository.
         repo: Option<String>,
     },
     /// BEL.
     Bell,
     /// The program wrote to the system clipboard (OSC 52 / OSC 1337 Copy). Text only, at
     /// most [`MAX_OSC52_BYTES`]; every attached client puts it on its own clipboard.
-    /// There is no read counterpart: an OSC 52 `?` is dropped on the host, by design.
+    /// There is no read counterpart: an OSC 52 `?` is dropped on the worker, by design.
     ClipboardWrite {
         /// Contents.
         text: String,

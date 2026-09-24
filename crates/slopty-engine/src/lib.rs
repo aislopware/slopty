@@ -1,4 +1,4 @@
-//! The host-side terminal engine.
+//! The worker-side terminal engine.
 //!
 //! One [`GhosttyEngine`] per session owns the VT state machine (libghostty-vt), turns PTY
 //! output into `Frame` diffs for the wire, serves scrollback pages by absolute line index, and
@@ -75,6 +75,6 @@ pub enum EngineEvent {
 pub struct EngineConfig {
     /// Initial size.
     pub size: TermSize,
-    /// Maximum scrollback lines the host retains.
+    /// Maximum scrollback lines the worker retains.
     pub scrollback_lines: u32,
 }

@@ -17,15 +17,15 @@ use crate::tools::step;
 /// Which live tests to run.
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Case {
-    /// ptyd + hostd + the real app, driven through its test socket: add the host, open a
+    /// ptyd + worker + the real app, driven through its test socket: add the worker, open a
     /// shell, type,
     /// read the rows back, render frames with the app's own renderer and compare them with
     /// the goldens. No permissions needed.
     App,
-    /// ptyd + hostd + a client over loopback QUIC: open a shell, read its output. No
+    /// ptyd + worker + a client over loopback QUIC: open a shell, read its output. No
     /// permissions needed.
-    Host,
-    /// Window geometry, a display stream and the stream through hostd. Needs Screen Recording
+    Worker,
+    /// Window geometry, a display stream and the stream through the worker. Needs Screen Recording
     /// for the test binaries (System Settings ▸ Privacy ▸ Screen Recording).
     Screen,
     /// One pointer move on the main display and back. Needs Accessibility for the test binary.
@@ -38,34 +38,34 @@ pub enum Case {
     /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
     /// indicative only, the simulator has no GPU-backed display link.
     SmoothIos,
-    /// Two clients on one host: two app processes on this Mac, each on its own socket, both
+    /// Two clients on one worker: two app processes on this Mac, each on its own socket, both
     /// added to the same daemons; a terminal opened on one appears on the other, typing on both is
     /// serialised, attention badges both, a client dying leaves the other streaming, closing
     /// and notes propagate. No permissions needed (the display scenario also needs
     /// `SLOPTY_SCREEN_E2E`).
     Pair,
     /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
-    /// the phone on one host.
+    /// the phone on one worker.
     PairIos,
-    /// One client, two hosts on two machines: ptyd + hostd + the app here, ptyd + hostd on a
-    /// second machine over ssh (`SLOPTY_HOST2=<ssh name>`, `SLOPTY_HOST2_ADDR` when the app
+    /// One client, two workers on two machines: ptyd + worker + the app here, ptyd + worker on a
+    /// second machine over ssh (`SLOPTY_WORKER2=<ssh name>`, `SLOPTY_WORKER2_ADDR` when the app
     /// must add it by another address), under a temp root there with a private HOME. Proves
-    /// cross-host attention against a real remote daemon: the app adds two hosts,
+    /// cross-worker attention against a real remote daemon: the app adds two workers,
     /// a shell on the second round-trips over the mesh, a permission hook played to it through
-    /// `slopty hook` badges the cross-host pill and routes a banner back to it, and killing it
+    /// `slopty hook` badges the cross-worker pill and routes a banner back to it, and killing it
     /// mid-stream turns its row amber then green on restart. No permissions needed.
-    Hosts,
-    /// The server with a real worker: `slopty-server` and ptyd + hostd registered with it, on
+    Workers,
+    /// The server with a real worker: `slopty-server` and ptyd + worker registered with it, on
     /// ports of their own, driven through the `slopty` CLI with `--json` and MCP over HTTP:
     /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
-    /// lease lost on a killed hostd and taken back. No permissions needed.
+    /// lease lost on a killed worker and taken back. No permissions needed.
     Server,
-    /// All of the above (not `ios`, which needs a simulator, nor `hosts`, which needs a second
+    /// All of the above (not `ios`, which needs a simulator, nor `workers`, which needs a second
     /// machine).
     All,
-    /// ptyd + hostd on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
-    /// through its test socket: add the host, open a shell, type, read the rows back, render frames
-    /// against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
+    /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
+    /// through its test socket: add the worker, open a shell, type, read the rows back, render
+    /// frames against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
     Ios,
 }
 
@@ -114,9 +114,9 @@ const APP: &[Suite] = &[Suite {
     serial: false,
 }];
 
-const HOST: &[Suite] = &[Suite {
+const WORKER: &[Suite] = &[Suite {
     gate: None,
-    package: "slopty-hostd",
+    package: "slopty-workerd",
     test: "e2e",
     filter: "shell_round_trip",
     serial: false,
@@ -132,7 +132,7 @@ const SCREEN: &[Suite] = &[
     },
     Suite {
         gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-host",
+        package: "slopty-worker",
         test: "screen",
         filter: "",
         serial: false,
@@ -146,7 +146,7 @@ const SCREEN: &[Suite] = &[
     },
     Suite {
         gate: Some("SLOPTY_SCREEN_E2E"),
-        package: "slopty-hostd",
+        package: "slopty-workerd",
         test: "e2e",
         filter: "screen_stream",
         serial: false,
@@ -203,10 +203,10 @@ const PAIR_IOS: &[Suite] = &[Suite {
     serial: true,
 }];
 
-const HOSTS: &[Suite] = &[Suite {
-    gate: Some("SLOPTY_HOST2_E2E"),
+const WORKERS: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_WORKER2_E2E"),
     package: "slopty-e2e",
-    test: "hosts",
+    test: "workers",
     filter: "",
     serial: true,
 }];
@@ -230,18 +230,18 @@ const SMOOTH_IOS: &[Suite] = &[Suite {
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let suites: Vec<&Suite> = match opts.case {
         Case::App => APP.iter().collect(),
-        Case::Host => HOST.iter().collect(),
+        Case::Worker => WORKER.iter().collect(),
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
         Case::Smooth => SMOOTH.iter().collect(),
         Case::SmoothIos => SMOOTH_IOS.iter().collect(),
         Case::Pair => PAIR.iter().collect(),
         Case::PairIos => PAIR_IOS.iter().collect(),
-        Case::Hosts => HOSTS.iter().collect(),
+        Case::Workers => WORKERS.iter().collect(),
         Case::Server => SERVER.iter().collect(),
         Case::All => APP
             .iter()
-            .chain(HOST)
+            .chain(WORKER)
             .chain(SERVER)
             .chain(SCREEN)
             .chain(INPUT)
@@ -264,7 +264,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let _env = [
         sh.push_env("SLOPTY_DATA_DIR", &data_dir),
         sh.push_env("SLOPTY_PTYD_SOCKET", format!("{data_dir}/run/ptyd.sock")),
-        sh.push_env("SLOPTY_HOSTD_SOCKET", format!("{data_dir}/run/hostd.sock")),
+        sh.push_env("SLOPTY_WORKER_SOCKET", format!("{data_dir}/run/worker.sock")),
         sh.push_env("SLOPTY_E2E_BIN_DIR", &bin_dir),
         sh.push_env("SLOPTY_E2E_ARTIFACTS", &artifacts),
         sh.push_env("RUST_LOG", &opts.log),
@@ -286,7 +286,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         "build daemons and app",
         &cmd!(
             sh,
-            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
+            "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
         ),
     )?;
 

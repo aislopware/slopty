@@ -1,4 +1,4 @@
-//! ScreenCaptureKit for the host: enumerate windows and displays, stream one of them as
+//! ScreenCaptureKit for the worker: enumerate windows and displays, stream one of them as
 //! IOSurface-backed pixel buffers ready for the encoder.
 //!
 //! Everything is callback driven and thread-agnostic. ScreenCaptureKit runs its own queues;

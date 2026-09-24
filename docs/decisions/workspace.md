@@ -13,7 +13,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   workspace always at the end. Nothing is placed by hand; everything opens into the strip and
   is moved with keys, swipes or a header drag. Pre-release, so the canvas code and its
   protocol went outright (`CanvasView`, `slopty_client::canvas` and `::arrange`,
-  `CanvasOp::Place/Raise`, `ClientMsg::Look`, `HostMsg::Presence`), no shim.
+  `CanvasOp::Place/Raise`, `ClientMsg::Look`, `WorkerMsg::Presence`), no shim.
 
 - ✅ **Workers, one server, many clients** (2026-09-24). The machines that run shells and
   stream windows are *workers* (what the code called hosts); a later server track will tell
