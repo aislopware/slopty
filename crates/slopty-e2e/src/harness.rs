@@ -1342,15 +1342,6 @@ mod tests {
 /// The MCP protocol revision the server speaks: stateless, no `initialize`.
 pub const MCP_REVISION: &str = "2026-07-28";
 
-/// A UDP port and a TCP port that were free on every interface a moment ago, for a daemon that
-/// must be told its ports: never the defaults, where a developer's own server may run.
-fn free_ports() -> Result<(u16, u16)> {
-    let any = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0));
-    let udp = std::net::UdpSocket::bind(any).context("find a free UDP port")?;
-    let tcp = std::net::TcpListener::bind(any).context("find a free TCP port")?;
-    Ok((udp.local_addr()?.port(), tcp.local_addr()?.port()))
-}
-
 /// `slopty-server` from this build, on ephemeral ports and with its own data directory. Killed
 /// on drop.
 #[derive(Debug)]
@@ -1362,43 +1353,42 @@ pub struct ServerDaemon {
 }
 
 impl ServerDaemon {
-    /// Start the server named `name`, keeping its state in `data_dir`, and wait until its MCP
-    /// listener answers (it binds the QUIC one first).
+    /// Start the server named `name` on ports of its choosing, keeping its state in `data_dir`,
+    /// and return once it has printed where both listeners are bound.
     ///
     /// # Errors
     ///
     /// When the binary is missing, or the server dies or does not listen in time.
     pub async fn start(data_dir: &Path, name: &str, log: &str) -> Result<Self> {
-        let (quic, mcp) = free_ports()?;
         let mut child = Command::new(bin("slopty-server")?)
-            .arg("--port")
-            .arg(quic.to_string())
-            .arg("--mcp-port")
-            .arg(mcp.to_string())
+            .args(["--port", "0", "--mcp-port", "0", "--print-addr"])
             .arg("--data-dir")
             .arg(data_dir)
             .arg("--name")
             .arg(name)
             .env("RUST_LOG", log)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .context("spawn slopty-server")?;
-        let mcp = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, mcp));
-        let up = tokio::time::timeout(STARTUP, async {
-            while tokio::net::TcpStream::connect(mcp).await.is_err() {
-                if let Some(status) = child.try_wait()? {
-                    bail!("slopty-server exited early: {status}");
-                }
-                tokio::time::sleep(POLL).await;
-            }
-            Ok(())
-        })
-        .await;
-        up.map_err(|_elapsed| anyhow::anyhow!("slopty-server did not listen within {STARTUP:?}"))??;
+        let stdout = child.stdout.take().context("slopty-server stdout")?;
+        let mut line = String::new();
+        tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut line))
+            .await
+            .context("slopty-server did not print its addresses in time")??;
+        let bound: Value = serde_json::from_str(line.trim())
+            .with_context(|| format!("slopty-server printed {line:?}"))?;
+        let port = |key: &str| -> Result<u16> {
+            let addr = bound.get(key).and_then(Value::as_str).unwrap_or_default();
+            let addr: std::net::SocketAddr =
+                addr.parse().with_context(|| format!("slopty-server printed {line:?}"))?;
+            Ok(addr.port())
+        };
+        let (quic, mcp) = (port("quic")?, port("mcp")?);
         let address = format!("127.0.0.1:{quic}");
+        let mcp = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, mcp));
         Ok(Self { child, address, mcp, data_dir: data_dir.to_path_buf() })
     }
 

@@ -19,10 +19,12 @@ use slopty_server::{Config, Server};
 #[derive(Parser, Debug)]
 #[command(name = "slopty-server", version, about)]
 struct Args {
-    /// UDP port for worker, client and agent links. Also `SLOPTY_SERVER_PORT`.
+    /// UDP port for worker, client and agent links; 0 picks a free one. Also
+    /// `SLOPTY_SERVER_PORT`.
     #[arg(long, env = "SLOPTY_SERVER_PORT", default_value_t = slopty_net::endpoint::SERVER_PORT)]
     port: u16,
-    /// TCP port for the MCP endpoint (`http://<host>:<port>/mcp`). Also `SLOPTY_MCP_PORT`.
+    /// TCP port for the MCP endpoint (`http://<host>:<port>/mcp`); 0 picks a free one. Also
+    /// `SLOPTY_MCP_PORT`.
     #[arg(long, env = "SLOPTY_MCP_PORT", default_value_t = slopty_net::endpoint::MCP_PORT)]
     mcp_port: u16,
     /// Where `workers.json` lives (default: `$SLOPTY_DATA_DIR/server`, else
@@ -33,6 +35,10 @@ struct Args {
     /// machine's computer name).
     #[arg(long, env = "SLOPTY_SERVER_NAME")]
     name: Option<String>,
+    /// Once both listeners are bound, print where on stdout as one JSON line,
+    /// `{"quic":"[::]:45560","mcp":"[::]:45561"}` (a harness reads the ports `0` picked).
+    #[arg(long)]
+    print_addr: bool,
 }
 
 /// The machine's computer name, else `server`.
@@ -69,6 +75,16 @@ async fn main() -> Result<()> {
         admission: Admission::default(),
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
+    if args.print_addr {
+        let bound = serde_json::json!({
+            "quic": server.quic_addr().to_string(),
+            "mcp": server.mcp_addr().to_string(),
+        });
+        #[expect(clippy::print_stdout, reason = "the addresses are what a harness waits for")]
+        {
+            println!("{bound}");
+        }
+    }
 
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listen for SIGTERM")?;

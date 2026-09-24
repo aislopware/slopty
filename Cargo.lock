@@ -6970,7 +6970,6 @@ dependencies = [
  "slopty-tools",
  "tempfile",
  "tokio",
- "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -7298,6 +7297,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "slopty-net",
  "slopty-server",
  "tokio",
@@ -9840,6 +9840,7 @@ dependencies = [
  "objc2-core-foundation",
  "resvg 0.48.1",
  "serde",
+ "serde_json",
  "toml 1.1.6+spec-1.1.0",
  "xshell",
 ]
