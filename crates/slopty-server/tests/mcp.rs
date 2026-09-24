@@ -144,8 +144,9 @@ mod tests {
             ]
         );
         let wait = &listed["result"]["tools"][8];
-        assert_eq!(wait["inputSchema"]["required"], json!(["worker", "session", "until"]));
-        assert!(wait["description"].as_str().unwrap().contains("240000"));
+        assert_eq!(wait["inputSchema"]["required"], json!(["term"]));
+        let cap = slopty_server::WAIT_CAP_MS.to_string();
+        assert!(wait["description"].as_str().unwrap().contains(&cap), "the cap it names is ours");
 
         let params = json!({ "name": "list_workers", "arguments": {} });
         let called = rpc(mcp, 2, "tools/call", Some("list_workers"), params).await;
@@ -153,14 +154,15 @@ mod tests {
         assert_ne!(result["isError"], json!(true), "{called}");
         let text = result["content"][0]["text"].as_str().unwrap();
         let workers: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(workers[0]["worker"], json!(worker.to_string()), "a plain UUID handle");
-        assert_eq!(workers[0]["liveness"], json!("Online"));
+        assert_eq!(workers[0]["worker"], json!(worker.to_string()));
+        assert_eq!(workers[0]["name"], json!("fake-worker"));
+        assert_eq!(workers[0]["liveness"], json!("online"), "the tools' view, not the wire enum");
         assert!(!text.contains('\n'), "compact: {text}");
 
         // A verb for a worker nobody knows is a tool error the model can read.
         let params = json!({
             "name": "read_screen",
-            "arguments": { "worker": WorkerId::new().to_string(), "session": WorkerId::new().to_string() },
+            "arguments": { "term": format!("{}/{}", WorkerId::new(), WorkerId::new()) },
         });
         let called = rpc(mcp, 3, "tools/call", Some("read_screen"), params).await;
         assert_eq!(called["result"]["isError"], json!(true), "{called}");

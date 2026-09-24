@@ -1,13 +1,16 @@
 //! What the verbs answer, twice: JSON with stable field names for scripts and models (the same
-//! shapes from `--json` and from `slopty mcp`), and text for a person.
+//! shapes from `slopty … --json`, `slopty mcp` and the server's MCP endpoint), and text for a
+//! person.
 //!
 //! A terminal is always named by its `term`, `worker/session` with both ids in full, which
 //! every verb accepts back. Text output shortens it to `name/prefix`, which verbs accept too.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{Command, Line, Port, Screen, TermRef, Waited};
@@ -144,12 +147,37 @@ pub struct PortView {
     term: Option<String>,
 }
 
-/// A file's contents, for JSON.
+/// How a file's contents are spelled in JSON, reading and writing alike.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Encoding {
+    /// The bytes are UTF-8 text, as they are.
+    #[default]
+    Utf8,
+    /// The bytes in standard base64, for anything that is not UTF-8.
+    Base64,
+}
+
+impl Encoding {
+    /// The bytes `content` spells.
+    ///
+    /// # Errors
+    /// Base64 that does not decode.
+    pub fn decode(self, content: String) -> Result<Vec<u8>, data_encoding::DecodeError> {
+        match self {
+            Self::Utf8 => Ok(content.into_bytes()),
+            Self::Base64 => data_encoding::BASE64.decode(content.as_bytes()),
+        }
+    }
+}
+
+/// A file's contents, for JSON: UTF-8 text as it is, anything else in base64.
 #[derive(Debug, Serialize)]
 pub struct FileView<'a> {
     path: &'a str,
     size: usize,
-    text: &'a str,
+    encoding: Encoding,
+    content: Cow<'a, str>,
 }
 
 /// A new terminal, for JSON.
@@ -161,7 +189,7 @@ pub struct OpenedView {
 }
 
 /// Nothing to report, for JSON.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct DoneView {
     ok: bool,
 }
@@ -538,9 +566,13 @@ pub fn ports_text(worker: WorkerId, ports: &[Port]) -> String {
     table(&["PORT", "PID", "PROCESS", "TERM"], rows)
 }
 
-/// A file's text, for JSON.
-pub const fn file<'a>(path: &'a str, text: &'a str) -> FileView<'a> {
-    FileView { path, size: text.len(), text }
+/// A file's contents, for JSON.
+pub fn file<'a>(path: &'a str, bytes: &'a [u8]) -> FileView<'a> {
+    let (encoding, content) = match std::str::from_utf8(bytes) {
+        Ok(text) => (Encoding::Utf8, Cow::Borrowed(text)),
+        Err(_binary) => (Encoding::Base64, Cow::Owned(data_encoding::BASE64.encode(bytes))),
+    };
+    FileView { path, size: bytes.len(), encoding, content }
 }
 
 /// A new terminal, for JSON.
@@ -768,5 +800,23 @@ mod tests {
         assert_eq!(none["status"], "none");
         assert_eq!(none["needs_human"], false);
         assert_eq!(agent_text(None), "no agent");
+    }
+
+    #[test]
+    fn a_file_is_text_when_it_can_be_and_base64_otherwise() {
+        let text = serde_json::to_value(file("/tmp/a", "héllo\n".as_bytes())).unwrap();
+        assert_eq!(
+            text,
+            serde_json::json!({
+                "path": "/tmp/a", "size": 7, "encoding": "utf8", "content": "héllo\n"
+            })
+        );
+        let binary = serde_json::to_value(file("/tmp/b", &[0xff, 0])).unwrap();
+        assert_eq!(binary["encoding"], "base64");
+        assert_eq!(binary["content"], "/wA=");
+        assert_eq!(binary["size"], 2, "the size of the file, not of its spelling");
+        assert_eq!(Encoding::Base64.decode("/wA=".to_owned()).unwrap(), [0xff, 0]);
+        assert_eq!(Encoding::Utf8.decode("/wA=".to_owned()).unwrap(), b"/wA=");
+        Encoding::Base64.decode("not base64".to_owned()).unwrap_err();
     }
 }

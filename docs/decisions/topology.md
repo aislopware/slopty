@@ -218,3 +218,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     temporary file beside the target, fsyncs it and renames it over, keeping the old mode.
     `ListPorts` walks each terminal's process tree with libproc and reports the TCP sockets
     in the listening state.
+
+- ✅ **One tool contract, in `slopty-tools`, for every surface** (2026-09-25). This supersedes
+  the state in which the server's MCP endpoint and `slopty mcp` each kept their own tools: the
+  server took UUID `worker` and `session` arguments, an `until` enum with a `pattern`, and printed
+  the wire enums' serde form; the CLI took `term` strings and printed its own views.
+  - **The crate.** `crates/slopty-tools` holds the resolver (names, id prefixes,
+    `worker/session`), the ops, the JSON and text views, and the MCP tool list with one
+    `tools::call`. It dials nothing: a surface hands it a `Dispatch`, one async
+    `call(Verb) -> Outcome`. The server's `Hub` answers in-process; the CLI's `Link` sends the
+    verb down its QUIC stream and turns a lost connection into a `Failed` outcome.
+  - **The shape is the CLI's.** Tools take `term` strings, worker names or prefixes, and
+    `wait_for`'s flat condition fields, and answer with the snake_case views. A tool failure,
+    a name that does not resolve included, is an `isError` result reading
+    `message (Code)`; an unknown tool is invalid params.
+  - **Files.** `read_file` answers `content` with `encoding` `utf8` when the bytes are UTF-8
+    and `base64` otherwise, plus the file's `size`. `write_file` takes the same two fields,
+    `utf8` by default. `slopty cat --json` prints the same view.
+  - **What stays on each side.** The 240 s wait cap lives in the hub; the tools only pass the
+    timeout through. `wait_for` reports progress through an optional sink: `slopty mcp` turns
+    it into its 10 s progress notifications, and the server's stateless HTTP endpoint gives
+    none. The stdio shim keeps the redial and the needs-a-human notifications.
+  - A test sends the same calls to the server's endpoint and to `slopty mcp` dialled to that
+    server, over one fake worker, and requires identical results.

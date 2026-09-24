@@ -351,6 +351,13 @@ impl Hub {
     }
 }
 
+/// The orchestration tools run on the hub in-process, the same dispatch the QUIC links use.
+impl slopty_tools::Dispatch for Hub {
+    fn call(&self, verb: Verb) -> impl Future<Output = Outcome> + Send {
+        self.dispatch(verb)
+    }
+}
+
 impl Lease {
     /// The worker holding it.
     #[must_use]

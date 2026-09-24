@@ -31,11 +31,12 @@ slopty-host.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true
+slopty-tools.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-insta = { workspace = true, features = [ "json" ] }
+slopty-server.workspace = true
 tempfile.workspace = true

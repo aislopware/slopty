@@ -39,6 +39,7 @@ slopty-ui = { path = "crates/slopty-ui" }
 slopty-agent = { path = "crates/slopty-agent" }
 slopty-settings = { path = "crates/slopty-settings" }
 slopty-server = { path = "crates/slopty-server" }
+slopty-tools = { path = "crates/slopty-tools" }
 slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 
 # core
@@ -94,6 +95,9 @@ tokio = { version = "1.53.1", features = [
     "process",
     "fs",
 ] }
+
+# Joins a list of futures in place, without spawning them.
+futures-util = { version = "0.3.34", default-features = false, features = [ "alloc" ] }
 
 # observability
 tracing = "0.1.44"

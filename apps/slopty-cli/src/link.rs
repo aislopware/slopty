@@ -12,8 +12,9 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{Endpoint, HostAddr};
-use slopty_proto::orchestration::{Outcome, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, RequestId, Role, ToServer};
+use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Environment variable naming the server, between `--server` and the settings file.
@@ -160,14 +161,25 @@ impl Link {
         (Self { calls }, heard)
     }
 
-    /// Send `verb` and wait for its outcome.
-    pub async fn call(&self, verb: Verb) -> Result<Outcome> {
+    /// Send `verb` and wait for its outcome, or for the reason it could not be sent.
+    async fn request(&self, verb: Verb) -> Result<Outcome> {
         let (reply, answer) = oneshot::channel();
         self.calls
             .send(Call { verb, reply })
             .await
             .map_err(|_closed| anyhow!("the connection to the server is closed"))?;
         answer.await.map_err(|_dropped| anyhow!("the connection to the server was lost"))?
+    }
+}
+
+/// A link that cannot carry the verb answers with why, as a failure the caller reads like any
+/// other.
+impl Dispatch for Link {
+    async fn call(&self, verb: Verb) -> Outcome {
+        self.request(verb).await.unwrap_or_else(|e| Outcome::Error {
+            code: ErrorCode::Failed,
+            message: format!("{e:#}"),
+        })
     }
 }
 

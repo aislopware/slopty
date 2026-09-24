@@ -12,15 +12,12 @@ use slopty_net::known::KnownWorkers;
 use slopty_proto::handshake::ClientKind;
 use slopty_proto::orchestration::{Input, WaitUntil, Waited};
 use slopty_proto::server::Role;
+use slopty_tools::ops::{self, DEFAULT_MAX_LINES, DEFAULT_WAIT_MS, Spec};
+use slopty_tools::resolve::Resolver;
+use slopty_tools::view;
 use tokio::io::AsyncReadExt as _;
 
 use crate::link::{self, Link};
-use crate::ops::{self, Spec};
-use crate::resolve::Resolver;
-use crate::view;
-
-/// How long `slopty wait` waits unless told otherwise.
-const DEFAULT_WAIT_MS: u32 = 60_000;
 
 /// A terminal: `worker/session`, the worker by id or name and the session by id or a unique
 /// prefix of it, or a session id (prefix) alone.
@@ -78,7 +75,7 @@ pub enum VerbCmd {
         #[arg(long)]
         since: Option<u64>,
         /// At most this many lines.
-        #[arg(long, default_value_t = 200)]
+        #[arg(long, default_value_t = DEFAULT_MAX_LINES)]
         max: u32,
     },
     /// Commands run in the terminal (OSC 133) with their exit codes.
@@ -311,7 +308,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
         }
         VerbCmd::Wait { term, until, timeout } => {
             let until = until.until()?;
-            let term = ops::term(&mut res, &term).await?;
+            let term = res.term(&term).await?;
             let waited = ops::wait(link, term, until, timeout).await?;
             if json {
                 print_json(&view::waited(&waited))?;
@@ -333,9 +330,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool) -> Result<()> {
         VerbCmd::Cat { worker, path } => {
             let bytes = ops::read_file(&mut res, worker.as_deref(), path.clone()).await?;
             if json {
-                let text = std::str::from_utf8(&bytes)
-                    .with_context(|| format!("{path} is not UTF-8 text; drop --json for bytes"))?;
-                print_json(&view::file(&path, text))?;
+                print_json(&view::file(&path, &bytes))?;
             } else {
                 let mut out = std::io::stdout().lock();
                 out.write_all(&bytes)?;

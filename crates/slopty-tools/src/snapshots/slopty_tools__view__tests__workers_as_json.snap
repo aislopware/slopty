@@ -1,5 +1,5 @@
 ---
-source: apps/slopty-cli/src/view.rs
+source: crates/slopty-tools/src/view.rs
 expression: overview().json()
 ---
 [

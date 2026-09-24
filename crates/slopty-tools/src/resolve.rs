@@ -1,49 +1,40 @@
 //! Turning what a person or a model types into ids: a worker by id, name or id prefix, and a
 //! terminal as `worker/session` with a session-id prefix, or a session alone.
 //!
-//! Full ids cost no round trip; anything else asks the server for the directory or the
-//! terminal list once per resolver.
+//! Full ids cost no round trip; anything else asks for the directory or the terminal list, the
+//! directory at most once per resolver.
 
-use anyhow::{Result, anyhow, bail};
 use slopty_core::{SessionId, WorkerId};
-use slopty_proto::orchestration::{Outcome, TermRef, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::server::{Liveness, WorkerInfo};
 use slopty_proto::terminal::SessionSummary;
 
-use crate::link::Link;
+use crate::{Dispatch, ToolError};
 
-/// An answer that is not the one the verb calls for, or an error, as an `Err`.
-pub fn unexpected(outcome: Outcome) -> anyhow::Error {
-    match outcome {
-        Outcome::Error { code, message } => anyhow!("{message} ({code:?})"),
-        other => anyhow!("the server answered with something else: {other:?}"),
-    }
-}
-
-/// Resolves names against one link, remembering the directory it fetched.
+/// Resolves names against one dispatch, remembering the directory it fetched.
 #[derive(Debug)]
-pub struct Resolver<'a> {
-    link: &'a Link,
+pub struct Resolver<'a, D> {
+    dispatch: &'a D,
     workers: Option<Vec<WorkerInfo>>,
 }
 
-impl<'a> Resolver<'a> {
-    /// A resolver on `link`.
-    pub const fn new(link: &'a Link) -> Self {
-        Self { link, workers: None }
+impl<'a, D: Dispatch> Resolver<'a, D> {
+    /// A resolver on `dispatch`.
+    pub const fn new(dispatch: &'a D) -> Self {
+        Self { dispatch, workers: None }
     }
 
-    /// The link it resolves on.
-    pub const fn link(&self) -> &'a Link {
-        self.link
+    /// Where it resolves.
+    pub const fn dispatch(&self) -> &'a D {
+        self.dispatch
     }
 
     /// The directory, fetched once.
-    pub async fn workers(&mut self) -> Result<&[WorkerInfo]> {
+    pub async fn workers(&mut self) -> Result<&[WorkerInfo], ToolError> {
         if self.workers.is_none() {
-            match self.link.call(Verb::ListWorkers).await? {
+            match self.dispatch.call(Verb::ListWorkers).await {
                 Outcome::Workers(list) => self.workers = Some(list),
-                other => return Err(unexpected(other)),
+                other => return Err(ToolError::unexpected(other)),
             }
         }
         Ok(self.workers.as_deref().unwrap_or_default())
@@ -53,30 +44,38 @@ impl<'a> Resolver<'a> {
     pub async fn terminals(
         &self,
         worker: Option<WorkerId>,
-    ) -> Result<Vec<(WorkerId, SessionSummary)>> {
-        match self.link.call(Verb::ListTerminals { worker }).await? {
+    ) -> Result<Vec<(WorkerId, SessionSummary)>, ToolError> {
+        match self.dispatch.call(Verb::ListTerminals { worker }).await {
             Outcome::Terminals(list) => Ok(list),
-            other => Err(unexpected(other)),
+            other => Err(ToolError::unexpected(other)),
         }
     }
 
     /// A worker: its id, its name, a unique id prefix, or, when `needle` is `None`, the only
     /// worker online.
-    pub async fn worker(&mut self, needle: Option<&str>) -> Result<WorkerId> {
+    pub async fn worker(&mut self, needle: Option<&str>) -> Result<WorkerId, ToolError> {
         if let Some(id) = needle.and_then(|n| n.trim().parse::<WorkerId>().ok()) {
             return Ok(id);
         }
         pick_worker(self.workers().await?, needle)
     }
 
+    /// A worker when `needle` names one; `None` stays `None` (every worker).
+    pub async fn some_worker(
+        &mut self,
+        needle: Option<&str>,
+    ) -> Result<Option<WorkerId>, ToolError> {
+        match needle {
+            Some(w) => self.worker(Some(w)).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// A terminal from `worker/session` or a bare session, each part an id or a prefix and the
     /// worker part also a name.
-    pub async fn term(&mut self, needle: &str) -> Result<TermRef> {
+    pub async fn term(&mut self, needle: &str) -> Result<TermRef, ToolError> {
         let (worker, session) = split_term(needle)?;
-        let worker = match worker {
-            Some(w) => Some(self.worker(Some(w)).await?),
-            None => None,
-        };
+        let worker = self.some_worker(worker).await?;
         if let (Some(worker), Ok(session)) = (worker, session.parse::<SessionId>()) {
             return Ok(TermRef { worker, session });
         }
@@ -85,44 +84,57 @@ impl<'a> Resolver<'a> {
 }
 
 /// `worker/session` split at its last `/`; a needle without one is a session alone.
-pub fn split_term(needle: &str) -> Result<(Option<&str>, &str)> {
+pub fn split_term(needle: &str) -> Result<(Option<&str>, &str), ToolError> {
     let needle = needle.trim();
     let (worker, session) = match needle.rsplit_once('/') {
         Some((w, s)) => (Some(w.trim()), s.trim()),
         None => (None, needle),
     };
     if session.is_empty() || worker.is_some_and(str::is_empty) {
-        bail!("{needle:?} is not a terminal; write it as worker/session");
+        return Err(ToolError::invalid(format!(
+            "{needle:?} is not a terminal; write it as worker/session"
+        )));
     }
     Ok((worker, session))
 }
 
 /// The worker `needle` names: an exact id, then an exact name, then a case-blind name, then a
 /// unique id prefix. Without a needle, the only worker online.
-pub fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<WorkerId> {
+pub fn pick_worker(workers: &[WorkerInfo], needle: Option<&str>) -> Result<WorkerId, ToolError> {
     let Some(needle) = needle.map(str::trim) else {
         let online: Vec<_> = workers.iter().filter(|w| w.liveness == Liveness::Online).collect();
         return match online.as_slice() {
             [one] => Ok(one.worker),
-            [] => bail!("no worker is online"),
-            many => bail!("{} workers are online ({}); pass --worker", many.len(), names(many)),
+            [] => Err(ToolError::new(ErrorCode::WorkerUnreachable, "no worker is online")),
+            many => Err(ToolError::invalid(format!(
+                "{} workers are online ({}); name one as the worker",
+                many.len(),
+                names(many)
+            ))),
         };
     };
+    let lower = needle.to_lowercase();
     let tiers: [&dyn Fn(&WorkerInfo) -> bool; 4] = [
-        &|w| w.worker.to_string() == needle.to_lowercase(),
+        &|w| w.worker.to_string() == lower,
         &|w| w.name == needle,
         &|w| w.name.eq_ignore_ascii_case(needle),
-        &|w| w.worker.to_string().starts_with(&needle.to_lowercase()),
+        &|w| w.worker.to_string().starts_with(&lower),
     ];
     for matches in tiers {
         let hits: Vec<_> = workers.iter().filter(|w| matches(w)).collect();
         match hits.as_slice() {
             [] => {}
             [one] => return Ok(one.worker),
-            many => bail!("{needle:?} matches {} workers: {}", many.len(), names(many)),
+            many => {
+                return Err(ToolError::invalid(format!(
+                    "{needle:?} matches {} workers: {}",
+                    many.len(),
+                    names(many)
+                )));
+            }
         }
     }
-    bail!("no worker is called {needle:?}")
+    Err(ToolError::new(ErrorCode::UnknownWorker, format!("no worker is called {needle:?}")))
 }
 
 fn names(workers: &[&WorkerInfo]) -> String {
@@ -130,18 +142,24 @@ fn names(workers: &[&WorkerInfo]) -> String {
 }
 
 /// The one terminal whose session id starts with `prefix`.
-pub fn pick_session(terminals: &[(WorkerId, SessionSummary)], prefix: &str) -> Result<TermRef> {
+pub fn pick_session(
+    terminals: &[(WorkerId, SessionSummary)],
+    prefix: &str,
+) -> Result<TermRef, ToolError> {
     let prefix = prefix.to_lowercase();
     let hits: Vec<_> =
         terminals.iter().filter(|(_, s)| s.id.to_string().starts_with(&prefix)).collect();
     match hits.as_slice() {
         [(worker, s)] => Ok(TermRef { worker: *worker, session: s.id }),
-        [] => bail!("no terminal matches {prefix:?}"),
-        many => bail!(
+        [] => Err(ToolError::new(
+            ErrorCode::UnknownTerminal,
+            format!("no terminal matches {prefix:?}"),
+        )),
+        many => Err(ToolError::invalid(format!(
             "{prefix:?} matches {} terminals; give more of the id: {}",
             many.len(),
             many.iter().map(|(w, s)| format!("{w}/{}", s.id)).collect::<Vec<_>>().join(", ")
-        ),
+        ))),
     }
 }
 
@@ -193,18 +211,20 @@ mod tests {
         assert_eq!(pick_worker(&w, Some("mac-studio")).unwrap(), studio);
         assert_eq!(pick_worker(&w, Some("macbook")).unwrap(), laptop, "names are case-blind");
         assert_eq!(pick_worker(&w, Some("0199b")).unwrap(), laptop);
-        let err = pick_worker(&w, Some("0199")).unwrap_err().to_string();
-        assert!(err.contains("matches 2 workers"), "{err}");
-        let err = pick_worker(&w, Some("pi")).unwrap_err().to_string();
-        assert!(err.contains("no worker is called"), "{err}");
+        let err = pick_worker(&w, Some("0199")).unwrap_err();
+        assert!(err.message.contains("matches 2 workers"), "{err}");
+        assert_eq!(err.code, ErrorCode::Invalid);
+        let err = pick_worker(&w, Some("pi")).unwrap_err();
+        assert!(err.message.contains("no worker is called"), "{err}");
+        assert_eq!(err.code, ErrorCode::UnknownWorker);
     }
 
     #[test]
     fn an_exact_name_beats_a_case_blind_one() {
         let w = vec![info(STUDIO, "box", Liveness::Online), info(LAPTOP, "Box", Liveness::Online)];
         assert_eq!(pick_worker(&w, Some("Box")).unwrap(), LAPTOP.parse().unwrap());
-        let err = pick_worker(&w, Some("BOX")).unwrap_err().to_string();
-        assert!(err.contains("matches 2 workers"), "{err}");
+        let err = pick_worker(&w, Some("BOX")).unwrap_err();
+        assert!(err.message.contains("matches 2 workers"), "{err}");
     }
 
     #[test]
@@ -214,10 +234,10 @@ mod tests {
             info(STUDIO, "mac-studio", Liveness::Online),
             info(LAPTOP, "MacBook", Liveness::Online),
         ];
-        let err = pick_worker(&both, None).unwrap_err().to_string();
-        assert!(err.contains("pass --worker"), "{err}");
-        let err = pick_worker(&[], None).unwrap_err().to_string();
-        assert!(err.contains("no worker is online"), "{err}");
+        let err = pick_worker(&both, None).unwrap_err();
+        assert!(err.message.contains("name one as the worker"), "{err}");
+        let err = pick_worker(&[], None).unwrap_err();
+        assert!(err.message.contains("no worker is online"), "{err}");
     }
 
     #[test]
@@ -226,7 +246,7 @@ mod tests {
         assert_eq!(split_term(" 0199 ").unwrap(), (None, "0199"));
         split_term("studio/").unwrap_err();
         split_term("/0199").unwrap_err();
-        split_term("").unwrap_err();
+        assert_eq!(split_term("").unwrap_err().code, ErrorCode::Invalid);
     }
 
     fn term(worker: &str, session: &str) -> (WorkerId, SessionSummary) {
@@ -253,18 +273,10 @@ mod tests {
         ];
         let hit = pick_session(&list, "0199A1B2-C3D5").unwrap();
         assert_eq!(hit.worker, LAPTOP.parse().unwrap());
-        let err = pick_session(&list, "0199a1b2").unwrap_err().to_string();
-        assert!(err.contains("matches 2 terminals"), "{err}");
-        let err = pick_session(&list, "ffff").unwrap_err().to_string();
-        assert!(err.contains("no terminal matches"), "{err}");
-    }
-
-    #[test]
-    fn an_error_outcome_carries_its_message() {
-        let e = unexpected(Outcome::Error {
-            code: slopty_proto::orchestration::ErrorCode::UnknownTerminal,
-            message: "no such terminal".to_owned(),
-        });
-        assert_eq!(e.to_string(), "no such terminal (UnknownTerminal)");
+        let err = pick_session(&list, "0199a1b2").unwrap_err();
+        assert!(err.message.contains("matches 2 terminals"), "{err}");
+        let err = pick_session(&list, "ffff").unwrap_err();
+        assert!(err.message.contains("no terminal matches"), "{err}");
+        assert_eq!(err.code, ErrorCode::UnknownTerminal);
     }
 }

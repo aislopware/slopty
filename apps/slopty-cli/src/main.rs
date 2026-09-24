@@ -21,11 +21,8 @@ mod hook;
 mod hostctl;
 mod link;
 mod mcp;
-mod ops;
-mod resolve;
 mod service;
 mod verbs;
-mod view;
 
 use std::path::PathBuf;
 

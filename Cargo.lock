@@ -6952,7 +6952,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "insta",
  "plist",
  "rmcp",
  "rustix",
@@ -6966,7 +6965,9 @@ dependencies = [
  "slopty-host",
  "slopty-net",
  "slopty-proto",
+ "slopty-server",
  "slopty-settings",
+ "slopty-tools",
  "tempfile",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
@@ -7274,23 +7275,20 @@ dependencies = [
 name = "slopty-server"
 version = "0.1.0"
 dependencies = [
- "data-encoding",
  "hyper",
  "hyper-util",
  "parking_lot",
  "rmcp",
- "schemars",
- "serde",
  "serde_json",
  "slopty-core",
  "slopty-net",
  "slopty-proto",
+ "slopty-tools",
  "socket2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -7335,6 +7333,25 @@ dependencies = [
  "serde",
  "slopty-grid",
  "slopty-proto",
+]
+
+[[package]]
+name = "slopty-tools"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "futures-util",
+ "insta",
+ "parking_lot",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "slopty-core",
+ "slopty-proto",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

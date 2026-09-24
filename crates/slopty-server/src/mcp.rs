@@ -1,13 +1,12 @@
-//! The MCP front end: Streamable HTTP (protocol revision 2026-07-28, stateless), one tool per
-//! [`slopty_proto::orchestration::Verb`], dispatched through the same [`Hub::dispatch`] as the
-//! QUIC links.
+//! The MCP front end: Streamable HTTP, protocol revision 2026-07-28, stateless.
+//!
+//! It serves the tools of [`slopty_tools::tools`] over the same [`Hub::dispatch`] as the QUIC
+//! links, so a model sees the tools and answers `slopty mcp` gives.
 //!
 //! The listener admits TCP peers by address like the QUIC one. It does not check `Host`,
 //! because a tailnet name or an IP literal is as legitimate as `localhost`; instead it refuses
 //! every request carrying an `Origin`, which only a browser sends, and which is what a
 //! DNS-rebinding page cannot leave out.
-
-mod tools;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -17,8 +16,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -29,14 +28,6 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 use crate::hub::Hub;
-
-/// What the server tells a model about itself.
-const INSTRUCTIONS: &str = "Slopty drives terminals on the user's machines (workers). \
-Start with list_workers; every other tool takes a worker id from it, and terminal tools also \
-take a session id (from list_terminals, open_terminal or spawn_agent). Handles are plain UUID \
-strings and stay valid until the terminal closes. To run a command: send_input with text \
-ending in \\n, then wait_for (until command_done or output), then read_output from the line \
-list_commands or a previous read_output's `next` gave. Prefer wait_for to polling read_screen.";
 
 /// The MCP tool server.
 #[derive(Clone, Debug)]
@@ -50,41 +41,13 @@ impl Mcp {
     pub const fn new(hub: Hub) -> Self {
         Self { hub }
     }
-
-    /// Every tool, one per verb.
-    #[must_use]
-    pub fn tools() -> Vec<Tool> {
-        tools::all()
-    }
-
-    /// Run the tool `name` with `arguments` and render its outcome as compact JSON text.
-    pub async fn call(
-        &self,
-        name: &str,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let verb = match tools::verb(name, arguments) {
-            Ok(verb) => verb,
-            Err(tools::BadCall::UnknownTool) => {
-                return Err(ErrorData::invalid_params(format!("no tool named {name}"), None));
-            }
-            Err(tools::BadCall::Arguments(why)) => {
-                let text = serde_json::json!({ "error": "Invalid", "message": why }).to_string();
-                return Ok(CallToolResult::error(vec![ContentBlock::text(text)]));
-            }
-        };
-        let outcome = self.hub.dispatch(verb).await;
-        let (text, failed) = tools::render(outcome);
-        let content = vec![ContentBlock::text(text)];
-        Ok(if failed { CallToolResult::error(content) } else { CallToolResult::success(content) })
-    }
 }
 
 impl ServerHandler for Mcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("slopty-server", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(slopty_tools::tools::INSTRUCTIONS)
     }
 
     fn list_tools(
@@ -92,11 +55,11 @@ impl ServerHandler for Mcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(Self::tools())))
+        std::future::ready(Ok(ListToolsResult::with_all_items(slopty_tools::tools::list())))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        Self::tools().into_iter().find(|t| t.name == name)
+        slopty_tools::tools::get(name)
     }
 
     async fn call_tool(
@@ -105,7 +68,10 @@ impl ServerHandler for Mcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
-        self.call(&request.name, arguments).await.map(CallToolResponse::from)
+        // A stateless HTTP call has no stream to send progress on.
+        slopty_tools::tools::call(&self.hub, &request.name, arguments, None)
+            .await
+            .map(CallToolResponse::from)
     }
 }
 
