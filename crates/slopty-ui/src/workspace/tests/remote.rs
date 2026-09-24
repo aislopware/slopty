@@ -278,8 +278,26 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_some(), "a chip per port");
     assert!(cx.debug_bounds(selector("port-8080", tile.item)).is_some());
+    assert!(cx.debug_bounds(selector("port-out-5173", tile.item)).is_some(), "and its arrow");
     let notice = view.read_with(cx, WorkspaceView::toast_text);
     assert_eq!(notice.as_deref(), Some("Port 8080 is taken here; forwarded on 8081"));
+    // The number opens the page in a tile on the shell's worker, at the port served here.
+    let mut studio = studio;
+    studio.drain();
+    let chip = cx.debug_bounds(selector("port-8080", tile.item)).unwrap();
+    cx.simulate_click(chip.center(), Modifiers::none());
+    cx.run_until_parked();
+    let opened: Vec<String> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(ItemOp::Upsert(Item { kind: ItemKind::Browser { url }, .. })) => {
+                Some(url)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, ["http://localhost:8081"]);
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, Vec::new(), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_none(), "gone with the server");

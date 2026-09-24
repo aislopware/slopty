@@ -162,13 +162,13 @@ impl WorkspaceView {
 
     /// Files dropped on `tile`: to the shell's directory for a terminal, whose paths are typed
     /// into it once they are there; to the worker's staging for a remote window, where they
-    /// wait on its clipboard. Nothing happens on a note or a file card.
+    /// wait on its clipboard. Nothing happens on a note, a file or a page.
     pub fn drop_files(&mut self, tile: TileRef, paths: &[PathBuf], cx: &mut Context<Self>) {
         let Some(item) = self.item(tile) else { return };
         let (dest, session) = match item.kind {
             ItemKind::Terminal { session } => (Dest::SessionCwd(session), Some(session)),
             ItemKind::Window { .. } | ItemKind::Display { .. } => (Dest::Staging, None),
-            ItemKind::Note { .. } | ItemKind::File { .. } => return,
+            ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Browser { .. } => return,
         };
         let Some(remote) =
             self.workers.get(&tile.worker).and_then(|w| w.link.as_ref()?.remote.clone())
@@ -311,7 +311,7 @@ impl WorkspaceView {
         }
     }
 
-    /// The palette as the list of forwarded ports; ↩ opens one in the browser.
+    /// The palette as the list of forwarded ports; ↩ opens one in a tile or in the browser.
     pub fn list_ports(&mut self, _: &ListPorts, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             return;
@@ -321,13 +321,20 @@ impl WorkspaceView {
             .iter()
             .flat_map(|(session, forwards)| {
                 let shell = self.terminal_title(*session, cx);
-                forwards.iter().filter_map(move |f| {
-                    let url = f.url()?;
-                    let local = f.local.unwrap_or(f.port.number);
-                    let label = format!("Open localhost:{local}");
-                    let detail = format!("{} · {shell}", f.port.process);
-                    Some(PaletteItem::url(&label, &detail, &url))
-                })
+                forwards
+                    .iter()
+                    .filter_map(move |f| {
+                        let url = f.url()?;
+                        let local = f.local.unwrap_or(f.port.number);
+                        let detail = format!("{} · {shell}", f.port.process);
+                        let tile = format!("Open localhost:{local} in a tile");
+                        let browser = format!("Open localhost:{local} in the browser");
+                        Some([
+                            PaletteItem::in_tile(&tile, &detail, &url),
+                            PaletteItem::url(&browser, &detail, &url),
+                        ])
+                    })
+                    .flatten()
             })
             .collect();
         lines.sort_by(|a, b| a.label.cmp(&b.label));

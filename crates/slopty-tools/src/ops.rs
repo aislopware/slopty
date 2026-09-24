@@ -1,14 +1,12 @@
 //! Each verb once: resolve its handles, send it, and take apart the one answer it expects. The
 //! CLI and both MCP surfaces call these, so a verb means the same on every one of them.
 
-use std::collections::HashMap;
-
 use slopty_core::WorkerId;
 use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::orchestration::{
     Command, Input, Line, Outcome, Port, Screen, TermRef, Verb, WaitUntil, Waited,
 };
-use slopty_proto::server::{Liveness, WorkerInfo};
+use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
 
 use crate::resolve::Resolver;
@@ -20,8 +18,8 @@ pub const DEFAULT_WAIT_MS: u32 = 60_000;
 /// How many lines a read of the output returns when the caller names no limit.
 pub const DEFAULT_MAX_LINES: u32 = 200;
 
-/// The directory, every terminal, and the status of each agent on a worker that is online.
-/// The two lists go out together, then one status request per terminal, all in flight at once.
+/// The directory and every terminal, each with its agent as the server last heard it: the
+/// two lists go out together.
 pub async fn overview<D: Dispatch>(dispatch: &D) -> Result<Overview, ToolError> {
     let (workers, terminals) = tokio::join!(
         dispatch.call(Verb::ListWorkers),
@@ -35,24 +33,7 @@ pub async fn overview<D: Dispatch>(dispatch: &D) -> Result<Overview, ToolError> 
         Outcome::Terminals(list) => list,
         other => return Err(ToolError::unexpected(other)),
     };
-    let online = |w: &WorkerId| {
-        workers.iter().any(|info| info.worker == *w && info.liveness == Liveness::Online)
-    };
-    let asks = terminals.iter().filter(|(w, _)| online(w)).map(|(worker, s)| {
-        let term = TermRef { worker: *worker, session: s.id };
-        async move { (term, dispatch.call(Verb::AgentStatus { term }).await) }
-    });
-    let mut agents = HashMap::new();
-    for (term, answer) in futures_util::future::join_all(asks).await {
-        match answer {
-            Outcome::Agent(Some(agent)) => {
-                agents.insert(term, agent);
-            }
-            Outcome::Agent(None) => {}
-            other => tracing::debug!(?term, ?other, "agent status"),
-        }
-    }
-    Ok(Overview { workers, terminals, agents })
+    Ok(Overview { workers, terminals })
 }
 
 /// Terminals on one worker or all, with the directory to name their workers.

@@ -3269,4 +3269,120 @@ mod tests {
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();
     }
+
+    /// The next `WorkerMsg::Written` for `path`.
+    async fn next_written(worker: &mut WorkerConn, path: &str) -> slopty_proto::file::WriteResult {
+        next_msg(worker, |m| match m {
+            WorkerMsg::Written { path: p, result } if p == path => Some(result),
+            _ => None,
+        })
+        .await
+    }
+
+    /// A file card's save: from the version on disk it replaces the file and every watcher,
+    /// the writer included, hears the new text; from a version older than the disk's it is a
+    /// conflict and nothing is written; a pipe is refused.
+    #[tokio::test]
+    async fn a_save_writes_the_file_and_a_stale_one_conflicts() {
+        use slopty_proto::file::{FileRead, WriteResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let path = dir.path().join("edited.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let name = path.to_string_lossy().into_owned();
+        worker.tx.send(&ClientMsg::ReadFile { path: name.clone() }).await.unwrap();
+        let FileRead::Text { modified_ms: base, .. } = next_file(&mut worker, &name).await else {
+            panic!("a text file")
+        };
+        worker.tx.send(&ClientMsg::WatchFiles { paths: vec![name.clone()] }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let save = |text: &str, base: Option<u64>| ClientMsg::WriteFile {
+            path: name.clone(),
+            text: text.to_owned(),
+            base_modified_ms: base,
+        };
+        worker.tx.send(&save("two\n", Some(base))).await.unwrap();
+        let WriteResult::Saved { size: 4, modified_ms: saved } =
+            next_written(&mut worker, &name).await
+        else {
+            panic!("saved")
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+        let read = next_file(&mut worker, &name).await;
+        assert!(
+            matches!(&read, FileRead::Text { text, modified_ms, .. } if text == "two" && *modified_ms == saved),
+            "the writer's own watch hears the save: {read:?}"
+        );
+
+        worker.tx.send(&save("three\n", Some(base))).await.unwrap();
+        assert_eq!(
+            next_written(&mut worker, &name).await,
+            WriteResult::Conflict { modified_ms: saved },
+            "an edit of the first version"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n", "nothing written");
+
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success(), "mkfifo");
+        let pipe = fifo.to_string_lossy().into_owned();
+        worker
+            .tx
+            .send(&ClientMsg::WriteFile {
+                path: pipe.clone(),
+                text: "x".to_owned(),
+                base_modified_ms: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            next_written(&mut worker, &pipe).await,
+            WriteResult::Failed { error: "Not a regular file".to_owned() }
+        );
+    }
+
+    /// One request on the worker's control socket, and its reply.
+    async fn ctl(
+        sock: &std::path::Path,
+        request: &slopty_worker::ctl::CtlRequest,
+    ) -> slopty_worker::ctl::CtlReply {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stream = tokio::net::UnixStream::connect(sock).await.unwrap();
+        let mut line = serde_json::to_vec(request).unwrap();
+        line.push(b'\n');
+        stream.write_all(&line).await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).await.unwrap();
+        serde_json::from_str(reply.trim()).unwrap()
+    }
+
+    /// A session's summary carries the agent a hook reported in it, for every later listing.
+    #[tokio::test]
+    async fn a_summary_carries_the_agent_a_hook_reported() {
+        use slopty_proto::agent::{AgentKind, AgentStatus};
+        use slopty_worker::ctl::{CtlReply, CtlRequest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let session = open_shell(&mut worker, dir.path()).await;
+        let sock = dir.path().join("worker.sock");
+        let agent_of = async |sock: &std::path::Path| match ctl(sock, &CtlRequest::Status).await {
+            CtlReply::Status { sessions, .. } => {
+                sessions.into_iter().find(|s| s.id == session).map(|s| s.agent)
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(agent_of(&sock).await, Some(None), "a shell has no agent");
+        let payload = r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the build"}"#;
+        let hook = CtlRequest::Hook { session, payload: payload.to_owned() };
+        assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
+        assert_eq!(
+            agent_of(&sock).await,
+            Some(Some((AgentKind::ClaudeCode, AgentStatus::Working)))
+        );
+        let close = ClientMsg::Term { session, req: TermRequest::Close };
+        worker.tx.send(&close).await.unwrap();
+    }
 }

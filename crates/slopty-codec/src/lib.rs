@@ -1,6 +1,8 @@
 //! Hardware video codecs behind a small, callback-driven API.
 //!
 //! * [`annexb`] — pure NAL unit framing, used by both halves and on every platform.
+//! * [`video`] — the worker's encoder seam, [`VideoEncoder`] and [`AudioEncoder`], on every
+//!   platform; `VideoToolbox` and `Opus` implement it on macOS.
 //! * `Encoder` (macOS) — a `VTCompressionSession` tuned for interactive streaming: low-latency rate
 //!   control, no reordering, infinite GOP with long-term references, Annex B out.
 //! * `Decoder` (macOS, iOS) — a `VTDecompressionSession` fed Annex B; it rebuilds its format
@@ -14,6 +16,7 @@
 pub mod annexb;
 #[cfg(target_vendor = "apple")]
 pub mod audio;
+pub mod video;
 
 #[cfg(target_vendor = "apple")]
 mod cf;
@@ -23,13 +26,16 @@ mod decoder;
 mod encoder;
 
 #[cfg(target_vendor = "apple")]
+pub use audio::Opus;
+#[cfg(target_vendor = "apple")]
 pub use cf::micros;
 #[cfg(target_vendor = "apple")]
 pub use decoder::{DecodedFrame, Decoder, PixelBuffer, warm_up};
 #[cfg(all(target_os = "macos", feature = "experiments"))]
 pub use encoder::RateControl;
 #[cfg(target_os = "macos")]
-pub use encoder::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
+pub use encoder::{Encoder, VideoToolbox};
+pub use video::{AudioEncoder, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
 
 /// Codec failures. The `OSStatus` codes are VideoToolbox's (`kVT*Err`, negative).
 #[derive(Clone, Copy, Debug, thiserror::Error)]

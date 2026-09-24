@@ -22,6 +22,8 @@ gpui-kit.workspace = true
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 rustc-hash.workspace = true
+# The native view under the window, where a browser tile's page goes (`browser`).
+raw-window-handle.workspace = true
 # The find bar's regular expressions in a conversation card (`terminal::conversation`).
 # Which lines an agent's edit changed, when a file card reads its file again (`file`).
 similar.workspace = true

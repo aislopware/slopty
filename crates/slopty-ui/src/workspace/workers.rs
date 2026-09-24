@@ -1,15 +1,15 @@
 //! Workers coming and going, and what they say: the registry sync that places tiles, the
 //! sessions, the streams and the files behind the tiles.
 
-use gpui::{AppContext as _, Context, Window};
+use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
-use slopty_proto::file::FileRead;
+use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::items::{ItemKind, ItemSync};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
-use slopty_proto::terminal::{SessionKind, SessionSummary, TermEvent, TermRequest, TermSize};
+use slopty_proto::terminal::{SessionSummary, TermEvent, TermRequest, TermSize};
 
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
 use crate::file::{FileView, FileViewEvent};
@@ -55,11 +55,14 @@ impl WorkspaceView {
         w.watched.clear();
         w.pending_opens.clear();
         for s in &sessions {
-            if s.kind == SessionKind::Terminal && !self.shell_recency.contains(&s.id) {
+            if !self.shell_recency.contains(&s.id) {
                 self.shell_recency.push(s.id);
             }
         }
+        let agents: Vec<SessionSummary> =
+            sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
+        self.seed_agents(&agents, cx);
         cx.notify();
     }
 
@@ -282,9 +285,10 @@ impl WorkspaceView {
         summary: SessionSummary,
         cx: &mut Context<Self>,
     ) {
-        if summary.kind == SessionKind::Terminal && !self.shell_recency.contains(&summary.id) {
+        if !self.shell_recency.contains(&summary.id) {
             self.shell_recency.push(summary.id);
         }
+        self.seed_agents([&summary], cx);
         if let Some(w) = self.workers.get_mut(&key) {
             w.sessions.insert(summary.id, summary);
         }
@@ -472,9 +476,10 @@ impl WorkspaceView {
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
-                    ItemKind::Terminal { .. } | ItemKind::Note { .. } | ItemKind::File { .. } => {
-                        None
-                    }
+                    ItemKind::Terminal { .. }
+                    | ItemKind::Note { .. }
+                    | ItemKind::File { .. }
+                    | ItemKind::Browser { .. } => None,
                 })
                 .collect();
             for &(id, target) in &wanted {
@@ -622,16 +627,35 @@ impl WorkspaceView {
         }
     }
 
-    /// The worker read a file: every card for that path shows it.
+    /// The worker read a file: every tile for that path shows it.
     pub fn file_read(&self, key: WorkerKey, path: &str, read: &FileRead, cx: &mut Context<Self>) {
-        let Some(w) = self.workers.get(&key) else { return };
-        for item in w.doc.items() {
-            if let Some(view) = self.files.get(&item.id)
-                && view.read(cx).path() == path
-            {
-                view.update(cx, |v, cx| v.set_read(read.clone(), cx));
-            }
+        for view in self.files_at(key, path, cx) {
+            view.update(cx, |v, cx| v.set_read(read.clone(), cx));
         }
+    }
+
+    /// The worker answered a save: the tile that sent it hears how it went.
+    pub fn file_written(
+        &self,
+        key: WorkerKey,
+        path: &str,
+        result: &WriteResult,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.files_at(key, path, cx) {
+            view.update(cx, |v, cx| v.written(result.clone(), cx));
+        }
+    }
+
+    /// The tiles showing `path` on `key`.
+    fn files_at(&self, key: WorkerKey, path: &str, cx: &Context<Self>) -> Vec<Entity<FileView>> {
+        let Some(w) = self.workers.get(&key) else { return Vec::new() };
+        w.doc
+            .items()
+            .filter_map(|item| self.files.get(&item.id))
+            .filter(|view| view.read(cx).path() == path)
+            .cloned()
+            .collect()
     }
 
     /// Editors for note items and cards for file items; the ones whose items are gone go.
@@ -680,12 +704,23 @@ impl WorkspaceView {
             if w.link.is_none() {
                 continue;
             }
-            let view = cx.new(|_cx| FileView::new(*id, path, self.theme.clone()));
-            self.subscriptions.push(cx.subscribe(&view, |this, _view, event, cx| match event {
-                FileViewEvent::FindClosed => {
-                    this.pending_focus_self = true;
-                    cx.notify();
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| FileView::new(*id, path, theme, window, cx));
+            let (item, worker, file) = (*id, *key, path.clone());
+            self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
+                match event {
+                    FileViewEvent::FindClosed => this.pending_focus_file = Some(item),
+                    FileViewEvent::Save { text, base_modified_ms } => this.send(
+                        worker,
+                        ClientMsg::WriteFile {
+                            path: file.clone(),
+                            text: text.clone(),
+                            base_modified_ms: *base_modified_ms,
+                        },
+                    ),
+                    FileViewEvent::Reload => this.request_file(item),
                 }
+                cx.notify();
             }));
             if let Some(line) = self.file_focus.remove(id) {
                 view.update(cx, |v, cx| v.focus_line(Some(line), cx));

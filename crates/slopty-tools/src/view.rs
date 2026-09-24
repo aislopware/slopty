@@ -26,15 +26,13 @@ pub fn term_string(term: TermRef) -> String {
     format!("{}/{}", term.worker, term.session)
 }
 
-/// Everything `slopty workers` shows: the directory, the terminals, and each agent's status.
+/// Everything `slopty workers` shows: the directory and the terminals, each with its agent.
 #[derive(Debug, Default)]
 pub struct Overview {
     /// The directory.
     pub workers: Vec<WorkerInfo>,
     /// Every terminal on every worker.
     pub terminals: Vec<(WorkerId, SessionSummary)>,
-    /// The agent in a terminal, where one runs.
-    pub agents: HashMap<TermRef, (AgentKind, AgentStatus)>,
 }
 
 /// A worker, for JSON.
@@ -306,14 +304,21 @@ fn reason_text(reason: &BlockReason) -> String {
 }
 
 impl Overview {
+    /// The agents on `worker` blocked on a human. A worker that is not online has none: what
+    /// it last reported may have been answered since.
     fn waiting(&self, worker: WorkerId) -> Vec<(TermRef, AgentKind, &BlockReason)> {
+        let online =
+            self.workers.iter().any(|w| w.worker == worker && w.liveness == Liveness::Online);
+        if !online {
+            return Vec::new();
+        }
         let mut waiting: Vec<_> = self
             .terminals
             .iter()
             .filter(|(w, _)| *w == worker)
             .filter_map(|(w, s)| {
                 let term = TermRef { worker: *w, session: s.id };
-                let (kind, status) = self.agents.get(&term)?;
+                let (kind, status) = s.agent.as_ref()?;
                 blocked(status).map(|reason| (term, *kind, reason))
             })
             .collect();
@@ -641,7 +646,6 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
 mod tests {
     use slopty_proto::agent::AgentKind;
     use slopty_proto::server::WorkerCaps;
-    use slopty_proto::terminal::SessionKind;
 
     use super::*;
 
@@ -674,7 +678,6 @@ mod tests {
     fn summary(n: u8, title: &str, cwd: &str, state: SessionState) -> SessionSummary {
         SessionSummary {
             id: session(n),
-            kind: SessionKind::Terminal,
             title: title.to_owned(),
             cwd: Some(cwd.to_owned()),
             repo: None,
@@ -683,6 +686,7 @@ mod tests {
             state,
             viewers: 1,
             command: vec!["zsh".to_owned()],
+            agent: None,
         }
     }
 
@@ -705,27 +709,32 @@ mod tests {
                 last_seen_ms: 1_789_999_990_000,
             },
         ];
+        let with_agent = |mut summary: SessionSummary, status: AgentStatus| {
+            summary.agent = Some((AgentKind::ClaudeCode, status));
+            summary
+        };
+        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
         let terminals = vec![
-            (worker(1), summary(1, "zsh", "~/src/slopty", SessionState::Running)),
-            (worker(1), summary(2, "claude", "~/src/slopty", SessionState::Running)),
+            (
+                worker(1),
+                with_agent(
+                    summary(1, "zsh", "~/src/slopty", SessionState::Running),
+                    AgentStatus::Working,
+                ),
+            ),
+            (
+                worker(1),
+                with_agent(summary(2, "claude", "~/src/slopty", SessionState::Running), blocked),
+            ),
             (
                 worker(2),
-                summary(3, "cargo test", "~/src/web", SessionState::Exited { status: 101 }),
+                with_agent(
+                    summary(3, "cargo test", "~/src/web", SessionState::Exited { status: 101 }),
+                    AgentStatus::Blocked(BlockReason::Question),
+                ),
             ),
         ];
-        let mut agents = HashMap::new();
-        agents.insert(
-            TermRef { worker: worker(1), session: session(2) },
-            (
-                AgentKind::ClaudeCode,
-                AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
-            ),
-        );
-        agents.insert(
-            TermRef { worker: worker(1), session: session(1) },
-            (AgentKind::ClaudeCode, AgentStatus::Working),
-        );
-        Overview { workers, terminals, agents }
+        Overview { workers, terminals }
     }
 
     #[test]

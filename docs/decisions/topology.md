@@ -104,9 +104,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - macOS: NSPasteboard.
     - Linux: wl-clipboard-rs or arboard.
 
-  These traits are cut when the worker is renamed, not before. Today's macOS code is the only
-  implementation, and a trait is not written ahead of its second implementation beyond these
-  four seams.
+  These four were cut after the rename (2026-09-25), with macOS still the only
+  implementation. No trait is written ahead of its second implementation beyond these four
+  seams. What was cut:
+  - **Where the traits live.** Each is in its platform crate, in a module that compiles on
+    every target, beside the plain types that cross it. The macOS implementations sit behind
+    `cfg(target_os = "macos")` in the same crates, and the macOS-only dependencies are
+    target-gated. Clippy passes on the three crates for `x86_64-unknown-linux-musl`.
+    - `slopty_capture::CaptureSource` covers the displays and windows (enumerate, resolve, the
+      display crop), frames and audio (start, update, retarget, stop, the frame clock), the
+      window list (bounds, owner, on screen, occlusion, the display under a rectangle), the
+      accessibility resize and hide watch, and the pointer (move counter, location, cursor
+      picture). `ScreenCaptureKit` implements it.
+    - `slopty_codec::VideoEncoder` and `AudioEncoder`, implemented by `VideoToolbox` and `Opus`.
+    - `slopty_input::InputSink`, implemented by `CgEvents`.
+    - `slopty_input::pasteboard::Board`, implemented by `MacBoard`, which already existed.
+  - **How the core uses them.** `slopty_worker::platform::Platform` names one implementation of
+    each seam, and `MacOs` is the one there is. The screen pipeline is
+    `slopty_worker::screen::Pipeline<P: Platform>`. `ScreenStream` is `Pipeline<Native>`, where
+    `Native` is the platform the build serves, so the daemon and the tests did not change.
+  - **Dispatch.** A capture platform is a type with no values whose operations are associated
+    functions, and the stream is generic over it, so every call on the frame path is direct.
+    The one `dyn` is the stream registry's handle on each stream's counters, read by the
+    control socket. The enumeration cache holds its content as `Any` and downcasts it on a hit,
+    once per enumeration.
+  - **Names.** The implementations are newtypes (`VideoToolbox`, `Opus`, `CgEvents`) or a
+    type with no values (`ScreenCaptureKit`) rather than trait impls on `Encoder` or `Injector`
+    themselves. `same_name_method` forbids a trait method and an inherent one of one name on
+    the same type, and renaming either side would have changed the tests.
+  - **Left macOS-only in the core.** Capabilities (`caps.rs`: sysctl, `Os::MacOs`) and the
+    listening ports (`ports.rs`: libproc) are not seams. A Linux worker adds its platform, its
+    `Native`, and those two probes.
 
 - ✅ **The CLI and `slopty mcp` name a terminal `worker/session` and resolve names on the
   client** (2026-09-25).
@@ -119,8 +147,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **One JSON shape per answer.** `slopty … --json` and the `slopty mcp` tools print the same
     views (`apps/slopty-cli/src/view.rs`) with snake_case keys, not the wire enums' serde form.
     `slopty workers` adds each worker's terminal count and the agents waiting on a human, from
-    `ListTerminals` plus one `AgentStatus` per terminal on an online worker, all in flight at
-    once on the one stream.
+    `ListWorkers` and `ListTerminals`, both in flight at once on the one stream. Each listed
+    terminal carries its agent (protocol 53); before that, one `AgentStatus` per terminal on an
+    online worker followed.
   - **`slopty mcp`** holds one `Role::Agent` link for its lifetime and redials when it drops
     (250 ms doubling to 5 s; a call made while it is down dials at once and fails with the
     reason). It speaks revision 2026-07-28, and still negotiates older revisions for a client
@@ -314,3 +343,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Moving an installed worker.** Nothing reads the old label. Boot out
     `dev.aislopware.slopty.hostd` and delete its plist, then run `slopty worker install` from
     the new build; the new signing identifier needs its permissions granted again.
+
+- ✅ **A session's summary carries its agent; the file card saves; a tile can be a web page**
+  (2026-09-25, protocol 53).
+  - **Agent in the summary.** `SessionSummary.agent` is the agent in the session and its status
+    (`None` for a shell), filled on every summary from the daemon's agent table. The worker's
+    `Worker` holds the table's handle from `connect`, and orchestration reads it from there.
+    An agent whose status reads `None` is left out. The server's hub keeps the agent of each
+    listed terminal current from the worker's `Agent` events, so `ListTerminals` answers with
+    live status, and `slopty workers` and the `list_workers` tool no longer send one
+    `AgentStatus` per terminal. A waiting agent on a worker that is not online is not counted:
+    what it last reported may have been answered since. `SessionKind`, a one-variant leftover,
+    is gone.
+  - **Saving a file card.** `ClientMsg::WriteFile { path, text, base_modified_ms }` is answered
+    with `WorkerMsg::Written { path, result }` (`slopty_worker::file::write`).
+    - A file whose modification time on disk is newer than `base_modified_ms` is a `Conflict`
+      carrying the time on disk, and nothing is written. `None` writes regardless. A missing
+      file is created, since an editor saving over a deleted file expects that.
+    - A directory, a pipe or any other non-regular file is `Failed` before it is opened, as a
+      read is. So is a text past `FILE_BYTES` (512 KiB), and a file on disk past it: the card
+      only ever held the first part of such a file, and saving it would cut the file there.
+    - The write is `file::replace`, the same path orchestration's `write_file` takes: a
+      temporary file beside the target, fsync, rename over, the old mode kept. A symbolic
+      link is followed and the file it names is replaced, so the link survives; renaming over
+      the link would have swapped it for a copy.
+    - `Saved` carries the new size and modification time, the base of the next save. The
+      watchers, the writer's own included, hear the new text on their next one-second look,
+      as for any change on disk.
+  - **Browser items.** `ItemKind::Browser { url }` is a web page tile, usually a forwarded
+    port. The registry takes an `http` or `https` address with a host, 2 KiB at most, with no
+    whitespace or control characters, so a shared document cannot make another client open
+    `file:` or `javascript:`.

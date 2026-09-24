@@ -17,81 +17,14 @@ use objc2_core_graphics::{
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
 
-/// A rectangle in global display points (origin top-left, y down, as `CGWindow` reports).
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub struct Rect {
-    /// Left edge.
-    pub x: f64,
-    /// Top edge.
-    pub y: f64,
-    /// Width.
-    pub w: f64,
-    /// Height.
-    pub h: f64,
-}
+#[cfg(test)]
+use crate::source::{Crop, crop_for};
+use crate::source::{Rect, WindowState};
 
 impl Rect {
     const fn from_cg(r: CGRect) -> Self {
         Self { x: r.origin.x, y: r.origin.y, w: r.size.width, h: r.size.height }
     }
-
-    /// Whether `(x, y)` lies inside.
-    #[must_use]
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
-    }
-
-    /// Whether `other` lies entirely inside.
-    #[must_use]
-    pub fn encloses(&self, other: &Self) -> bool {
-        other.x >= self.x
-            && other.y >= self.y
-            && other.x + other.w <= self.x + self.w
-            && other.y + other.h <= self.y + self.h
-    }
-
-    /// Whether the interiors overlap (touching edges do not count).
-    #[must_use]
-    pub fn overlaps(&self, other: &Self) -> bool {
-        self.x < other.x + other.w
-            && other.x < self.x + self.w
-            && self.y < other.y + other.h
-            && other.y < self.y + self.h
-    }
-}
-
-/// The part of a display a stream samples: a window's frame in the display's own point space
-/// (origin at the display's top-left corner), what `SCStreamConfiguration.sourceRect` wants.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub struct Crop {
-    /// Left edge, display points.
-    pub x: f64,
-    /// Top edge, display points.
-    pub y: f64,
-    /// Width, display points.
-    pub w: f64,
-    /// Height, display points.
-    pub h: f64,
-}
-
-/// Where a window sits on a display, for the display-crop capture path.
-///
-/// Returns the crop in the display's point space and the output size in pixels at the
-/// display's `scale`; `None` when the window is not entirely on that display (partly
-/// off-screen, straddling two displays): a crop would show a slice of the desktop where the
-/// window continues, so those keep the window filter.
-#[must_use]
-pub fn crop_for(window: &Rect, display: &Rect, scale: f64) -> Option<(Crop, (u32, u32))> {
-    if window.w <= 0.0 || window.h <= 0.0 || scale <= 0.0 || !display.encloses(window) {
-        return None;
-    }
-    let crop = Crop { x: window.x - display.x, y: window.y - display.y, w: window.w, h: window.h };
-    let even = |points: f64| -> u32 {
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
-        let px = (points * scale).round().clamp(2.0, 16_384.0) as u32;
-        px.next_multiple_of(2)
-    };
-    Some((crop, (even(window.w), even(window.h))))
 }
 
 /// Bounds of a display in global points.
@@ -190,17 +123,6 @@ pub fn window_bounds(id: WindowId) -> Option<Rect> {
     let ok =
         unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), ptr::from_mut(&mut rect)) };
     ok.then(|| Rect::from_cg(rect))
-}
-
-/// What the window list says about one window, read in one round trip.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct WindowState {
-    /// Where it is, in global points.
-    pub bounds: Rect,
-    /// `kCGWindowIsOnscreen`: not minimised, not on another Space, not hidden.
-    pub on_screen: bool,
-    /// The process that owns it.
-    pub owner_pid: i32,
 }
 
 /// Bounds, on-screen state and owner of one window from a single window-list description;

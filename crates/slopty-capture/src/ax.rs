@@ -29,7 +29,7 @@ use objc2_core_foundation::{
     kCFRunLoopDefaultMode,
 };
 
-use crate::geometry::Rect;
+use crate::source::{AxError, TargetWindow, Went};
 
 // The names below are `#define kAX… CFSTR("…")` macros in the SDK's
 // `HIServices/AXAttributeConstants.h` and `HIServices/AXNotificationConstants.h`. No symbol is
@@ -61,27 +61,6 @@ const FRAME_TOLERANCE: f64 = 1.0;
 /// stop that lands between the flag check and the run call waits this long; every other one
 /// wakes the loop at once.
 const RUN_SLICE_SECS: f64 = 1.0;
-
-/// Why a watch could not be started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum AxError {
-    /// The process is not trusted for accessibility; the API answers nothing without it.
-    #[error("this process is not trusted for accessibility")]
-    NotTrusted,
-    /// The accessibility API refused (an `AXError` code: -25204 is "cannot complete", the
-    /// usual answer for a process that is gone or not an application).
-    #[error("accessibility observer failed with AXError {0}")]
-    Observer(i32),
-    /// The watch thread ended before it reported.
-    #[error("the accessibility watch thread ended before it was ready")]
-    Thread,
-    /// The application lists no window with the target's frame and title.
-    #[error("the application lists no window matching the target")]
-    NoWindow,
-    /// The accessibility API refused to set an attribute (an `AXError` code).
-    #[error("accessibility attribute write failed with AXError {0}")]
-    Attribute(i32),
-}
 
 /// Give the window of the application `pid` that matches `target` the size in points.
 ///
@@ -142,25 +121,6 @@ impl Drop for StopHandle {
         let run_loop = unsafe { CFRetained::from_raw(self.0) };
         run_loop.stop();
     }
-}
-
-/// What the watch heard go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Went {
-    /// The target: its element was destroyed or minimised, or the application was hidden. Also
-    /// every window of the application when no element could be matched to the target.
-    Target,
-    /// Another window of the application; the target is untouched.
-    Other,
-}
-
-/// The target as the window list describes it, for matching it to its accessibility element.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TargetWindow {
-    /// `kCGWindowBounds`: screen points, top-left origin, the same space as `AXPosition`.
-    pub bounds: Rect,
-    /// `kCGWindowName`, if the window has one.
-    pub title: Option<String>,
 }
 
 /// What the callback and the owner share.

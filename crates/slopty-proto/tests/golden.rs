@@ -216,7 +216,6 @@ mod golden {
             "worker_session_opened",
             &WorkerMsg::SessionOpened(SessionSummary {
                 id: session(),
-                kind: slopty_proto::terminal::SessionKind::Terminal,
                 title: "zsh".to_owned(),
                 cwd: Some("/w/slopty/crates/ui".to_owned()),
                 repo: Some("/w/slopty".to_owned()),
@@ -225,6 +224,10 @@ mod golden {
                 state: SessionState::Running,
                 viewers: 1,
                 command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
+                agent: Some((
+                    slopty_proto::agent::AgentKind::ClaudeCode,
+                    slopty_proto::agent::AgentStatus::Working,
+                )),
             }),
         );
         snap(
@@ -288,6 +291,38 @@ mod golden {
                 path: "/w/gone".to_owned(),
                 read: slopty_proto::file::FileRead::Missing { error: "No such file".to_owned() },
             },
+        );
+        snap(
+            "client_write_file",
+            &ClientMsg::WriteFile {
+                path: "/w/slopty/notes.md".to_owned(),
+                text: "# Notes\n".to_owned(),
+                base_modified_ms: Some(1_700_000_000_000),
+            },
+        );
+        snap(
+            "worker_written_conflict",
+            &WorkerMsg::Written {
+                path: "/w/slopty/notes.md".to_owned(),
+                result: slopty_proto::file::WriteResult::Conflict {
+                    modified_ms: 1_700_000_000_500,
+                },
+            },
+        );
+        snap(
+            "worker_item_browser",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
+                version: 10,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: slopty_proto::items::ItemOp::Upsert(slopty_proto::items::Item {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
+                    kind: slopty_proto::items::ItemKind::Browser {
+                        url: "http://localhost:5173/".to_owned(),
+                    },
+                    sleeping: false,
+                    name: None,
+                }),
+            }),
         );
         snap(
             "worker_item_file",

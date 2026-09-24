@@ -21,6 +21,8 @@ use crate::WorkerError;
 pub const NOTE_MAX: usize = 64 * 1024;
 /// The longest file path accepted, in bytes.
 pub const PATH_MAX: usize = 4096;
+/// The longest browser address accepted, in bytes.
+pub const URL_MAX: usize = 2048;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Registry {
@@ -188,6 +190,11 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
             {
                 return Err(WorkerError::Items("bad file path".to_owned()));
             }
+            if let ItemKind::Browser { url } = &item.kind
+                && !web_address(url)
+            {
+                return Err(WorkerError::Items("bad url".to_owned()));
+            }
             // A name is what the human typed, trimmed; blank is no name at all.
             item.name = item.name.take().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
             if item.name.as_ref().is_some_and(|n| n.chars().count() > NAME_MAX) {
@@ -197,6 +204,18 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
         }
         other @ (ItemOp::Remove(_) | ItemOp::Sleep { .. }) => other,
     })
+}
+
+/// An `http` or `https` address with a host, [`URL_MAX`] bytes at most, and nothing a URL
+/// leaves out (whitespace, control characters): a tile never opens `file:` or `javascript:`.
+fn web_address(url: &str) -> bool {
+    if url.len() > URL_MAX || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let Some((scheme, rest)) = url.split_once("://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && !host.is_empty()
 }
 
 fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
@@ -344,6 +363,37 @@ mod tests {
         for path in [String::new(), "/".repeat(PATH_MAX + 1)] {
             let err = store.apply(ItemOp::Upsert(file(path)), by).unwrap_err();
             assert!(matches!(&err, WorkerError::Items(m) if m == "bad file path"), "{err:?}");
+        }
+    }
+
+    /// A browser tile takes an http or https address with a host, 2 KiB at most.
+    #[test]
+    fn browser_addresses_are_web_ones() {
+        let (_dir, store) = store();
+        let by = ClientId::new();
+        let page = |url: &str| Item {
+            id: ItemId::new(),
+            kind: ItemKind::Browser { url: url.to_owned() },
+            sleeping: false,
+            name: None,
+        };
+        let long = format!("http://localhost/{}", "a".repeat(URL_MAX - 17));
+        for url in ["http://localhost:5173/", "HTTPS://example.test/a?b#c", &long] {
+            store.apply(ItemOp::Upsert(page(url)), by).unwrap();
+        }
+        let too_long = format!("{long}a");
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "http://",
+            "http:///path",
+            "localhost:5173",
+            "http://local host/",
+            "",
+            &too_long,
+        ] {
+            let err = store.apply(ItemOp::Upsert(page(url)), by).unwrap_err();
+            assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{url}: {err:?}");
         }
     }
 }

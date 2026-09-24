@@ -166,7 +166,7 @@ pub fn pick_session(
 #[cfg(test)]
 mod tests {
     use slopty_proto::server::{Os, WorkerCaps};
-    use slopty_proto::terminal::{SessionKind, SessionState};
+    use slopty_proto::terminal::SessionState;
 
     use super::*;
 
@@ -252,7 +252,6 @@ mod tests {
     fn term(worker: &str, session: &str) -> (WorkerId, SessionSummary) {
         let summary = SessionSummary {
             id: session.parse().unwrap(),
-            kind: SessionKind::Terminal,
             title: String::new(),
             cwd: None,
             repo: None,
@@ -261,6 +260,7 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
+            agent: None,
         };
         (worker.parse().unwrap(), summary)
     }

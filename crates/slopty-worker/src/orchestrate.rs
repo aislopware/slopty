@@ -14,8 +14,8 @@
 pub mod keys;
 mod wait;
 
-use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::io::Read as _;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,7 +108,6 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
-    agents: Arc<dyn Agents>,
 }
 
 impl std::fmt::Debug for Orchestrator {
@@ -118,17 +117,16 @@ impl std::fmt::Debug for Orchestrator {
 }
 
 impl Orchestrator {
-    /// An orchestrator for worker `id`, acting on its sessions, item registry and client
-    /// broadcast.
+    /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry and
+    /// client broadcast.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
         events: broadcast::Sender<WorkerMsg>,
-        agents: Arc<dyn Agents>,
     ) -> Self {
-        Self { inner: Arc::new(Inner { id, worker, items, events, agents }) }
+        Self { inner: Arc::new(Inner { id, worker, items, events }) }
     }
 
     /// Answer one verb. Every failure is an [`Outcome::Error`].
@@ -177,14 +175,14 @@ impl Orchestrator {
                 let handle = self.session(term)?;
                 let feed = matches!(until, WaitUntil::AgentNeedsInput).then(|| AgentFeed {
                     events: inner.events.subscribe(),
-                    now: inner.agents.status(term.session).map(|(_kind, status)| status),
+                    now: inner.worker.agents().status(term.session).map(|(_kind, status)| status),
                 });
                 let timeout = Duration::from_millis(u64::from(timeout_ms));
                 Ok(Outcome::Waited(wait_for(&handle, &until, timeout, feed).await?))
             }
             Verb::AgentStatus { term } => {
                 self.session(term)?;
-                Ok(Outcome::Agent(inner.agents.status(term.session)))
+                Ok(Outcome::Agent(inner.worker.agents().status(term.session)))
             }
             Verb::Close { term } => {
                 self.mine(term.worker)?;
@@ -241,7 +239,7 @@ impl Orchestrator {
     async fn close(&self, session: SessionId) -> Result<(), WorkerError> {
         let inner = &self.inner;
         inner.worker.close(session).await?;
-        inner.agents.forget(session);
+        inner.worker.agents().forget(session);
         let reason = CloseReason::Requested;
         let _sent = inner.events.send(WorkerMsg::SessionClosed { session, reason });
         for delta in inner.items.remove_session(session, ORCHESTRATOR) {
@@ -274,7 +272,7 @@ impl Orchestrator {
         let handle = self.open(&req, ORCHESTRATOR).await?;
         let session = handle.id();
         if let Some(prompt) = prompt {
-            let now = self.inner.agents.status(session).map(|(_kind, status)| status);
+            let now = self.inner.worker.agents().status(session).map(|(_kind, status)| status);
             tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, now }));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
@@ -516,32 +514,9 @@ fn read_file(path: &Path) -> Result<Vec<u8>, Failure> {
     Ok(bytes)
 }
 
-/// Replace a file atomically: write a temporary file beside it, flush it to disk, rename it
-/// over. A reader sees the old contents or the new, never half. An existing file's
-/// permissions carry over (a script stays executable).
+/// Replace a file whole ([`crate::file::replace`]).
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    let name = path.file_name().ok_or_else(|| {
-        Failure::new(ErrorCode::Invalid, format!("{} names no file", path.display()))
-    })?;
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let temp: PathBuf =
-        dir.join(format!(".{}.{}-{stamp}.slopty-tmp", name.to_string_lossy(), std::process::id()));
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-        file.write_all(bytes)?;
-        if let Ok(meta) = std::fs::metadata(path) {
-            file.set_permissions(meta.permissions())?;
-        }
-        file.sync_all()?;
-        std::fs::rename(&temp, path)
-    })();
-    written.map_err(|e| {
-        let _removed = std::fs::remove_file(&temp);
-        io_failure(path, &e)
-    })
+    crate::file::replace(path, bytes).map(drop).map_err(|e| io_failure(path, &e))
 }
 
 #[cfg(test)]

@@ -10,6 +10,10 @@
 mod gallery;
 
 #[cfg(test)]
+#[path = "app/tiles.rs"]
+mod tiles;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 

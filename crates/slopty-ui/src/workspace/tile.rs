@@ -18,6 +18,7 @@ use slopty_theme::{Theme, alpha};
 use super::agents::needs_human;
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
+use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
 
@@ -27,6 +28,10 @@ pub(super) const HEADER_H: f32 = 28.0;
 /// The width of the focus ring, in points at zoom 1: the one accent hairline of the design
 /// system, laid over the tile's own hairline, so the focused tile's frame turns accent.
 const RING: f32 = 1.0;
+
+/// The widest a page's address gets beside its title, in points at zoom 1: the title is what
+/// tells tiles apart, the address only says where.
+const HEADER_URL_MAX: f32 = 180.0;
 
 /// The height of an upload's progress bar along the bottom of the header.
 const PROGRESS: f32 = 2.0;
@@ -112,7 +117,7 @@ pub fn file_title(path: &str) -> String {
     }
 }
 
-/// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`.
+/// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`, `browser`.
 pub(super) const fn kind_name(item: &Item) -> &'static str {
     match item.kind {
         ItemKind::Terminal { .. } => "terminal",
@@ -120,6 +125,7 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
         ItemKind::Display { .. } => "display",
         ItemKind::Note { .. } => "note",
         ItemKind::File { .. } => "file",
+        ItemKind::Browser { .. } => "browser",
     }
 }
 
@@ -135,6 +141,10 @@ impl WorkspaceView {
             ItemKind::Display { display } => format!("Display {display}"),
             ItemKind::Note { text } => note_title(text),
             ItemKind::File { path } => file_title(path),
+            ItemKind::Browser { url } => self
+                .browsers
+                .get(&item.id)
+                .map_or_else(|| crate::browser::short_url(url).to_owned(), |v| v.read(cx).title()),
         }
     }
 
@@ -331,7 +341,8 @@ impl WorkspaceView {
             (pill, bar)
         });
         let (upload, progress) = upload.unzip();
-        // The ports a shell listens on, served here: a click opens one in the browser.
+        // The ports a shell listens on, served here: the number opens the page in a tile, the
+        // arrow beside it in the default browser.
         let ports: Vec<gpui::AnyElement> = match &item.kind {
             ItemKind::Terminal { session } => self
                 .forwards(*session)
@@ -340,24 +351,37 @@ impl WorkspaceView {
                 .map(|forward| {
                     let number = forward.port.number;
                     let label = match forward.local {
-                        Some(local) if local != number => {
-                            format!("{number} \u{2192} {local} \u{2197}")
-                        }
-                        _ => format!("{number} \u{2197}"),
+                        Some(local) if local != number => format!("{number} \u{2192} {local}"),
+                        _ => format!("{number}"),
                     };
+                    let tone = theme.surfaces.text_secondary;
+                    let in_tile = pill(format!("port-{number}"), id, label, tone, theme, chrome)
+                        .role(Role::Link)
+                        .aria_label(SharedString::from(format!("Open port {number} in a tile")));
+                    let out =
+                        pill(format!("port-out-{number}"), id, "\u{2197}", tone, theme, chrome)
+                            .role(Role::Link)
+                            .aria_label(SharedString::from(format!(
+                                "Open port {number} in the browser"
+                            )));
+                    let url = forward.url();
+                    let worker = tile.worker;
                     let forward = forward.clone();
-                    let chip = pill(
-                        format!("port-{number}"),
-                        id,
-                        label,
-                        theme.surfaces.text_secondary,
-                        theme,
-                        chrome,
-                    )
-                    .role(Role::Link)
-                    .aria_label(SharedString::from(format!("Open port {number} in the browser")));
-                    tab_stop(chip, theme.surfaces.accent)
-                        .on_click(move |_ev, _w, _cx| Self::open_forward(&forward))
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap(px(theme.spacing.xxs * k))
+                        .child(tab_stop(in_tile, theme.surfaces.accent).on_click(cx.listener(
+                            move |this, _ev, _w, cx| {
+                                if let Some(url) = &url {
+                                    this.open_browser(Some(worker), url, cx);
+                                }
+                            },
+                        )))
+                        .child(
+                            tab_stop(out, theme.surfaces.accent)
+                                .on_click(move |_ev, _w, _cx| Self::open_forward(&forward)),
+                        )
                         .into_any_element()
                 })
                 .collect(),
@@ -441,30 +465,30 @@ impl WorkspaceView {
                         }))
                         .into_any_element(),
                 );
-                // `$EDITOR` at the line being read, in the shell a "run" goes to.
-                if self.run_target().is_some() {
-                    let edit =
-                        pill("edit", id, "edit", theme.surfaces.text_secondary, theme, chrome)
+            }
+            ItemKind::Browser { .. } => {
+                if let Some(view) = self.browsers.get(&id).cloned() {
+                    let tone = theme.surfaces.text_secondary;
+                    if view.read(cx).page().can_go_back {
+                        let back = pill("back", id, "\u{2190}", tone, theme, chrome)
                             .role(Role::Button)
-                            .aria_label("Open the file in the editor");
+                            .aria_label("Back");
+                        let target = view.clone();
+                        actions.push(
+                            tab_stop(back, theme.surfaces.accent)
+                                .on_click(move |_ev, _w, cx| target.update(cx, BrowserView::back))
+                                .into_any_element(),
+                        );
+                    }
+                    let reload = pill("reload", id, "\u{21bb}", tone, theme, chrome)
+                        .role(Role::Button)
+                        .aria_label("Reload");
                     actions.push(
-                        tab_stop(edit, theme.surfaces.accent)
-                            .on_click(cx.listener(move |this, _ev, _w, cx| this.edit_file(id, cx)))
+                        tab_stop(reload, theme.surfaces.accent)
+                            .on_click(move |_ev, _w, cx| view.update(cx, BrowserView::reload))
                             .into_any_element(),
                     );
                 }
-                let reload =
-                    pill("reload", id, "reload", theme.surfaces.text_secondary, theme, chrome)
-                        .role(Role::Button)
-                        .aria_label("Read the file again");
-                actions.push(
-                    tab_stop(reload, theme.surfaces.accent)
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
-                            this.request_file(id);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
             }
             ItemKind::Note { .. } => {}
         }
@@ -492,6 +516,38 @@ impl WorkspaceView {
                 .size(px(theme.spacing.xs * k))
                 .rounded_full()
                 .bg(hsla(theme.surfaces.warn))
+        });
+        // A file with an edit not yet on disk says so with a dot after its name, as an editor's
+        // tab does; saving keeps the dot until the worker has written it.
+        let unsaved = self.files.get(&id).is_some_and(|v| {
+            let v = v.read(cx);
+            v.dirty() || v.saving()
+        });
+        let unsaved = unsaved.then(|| {
+            div()
+                .id("unsaved")
+                .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
+                .role(Role::Image)
+                .aria_label("Unsaved changes")
+                .flex_none()
+                .size(px(theme.spacing.sm * k))
+                .rounded_full()
+                .bg(hsla(theme.surfaces.text_secondary))
+        });
+        // A page's address, quietly after its title, when the title is not already it.
+        let address = self.browsers.get(&id).and_then(|v| {
+            let v = v.read(cx);
+            (item.name.is_some() || !v.page().title.trim().is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .max_w(px(HEADER_URL_MAX * k))
+                    .overflow_hidden()
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .child(
+                        ChromeText::new(v.short_url().to_owned(), px(theme.typography.small()), k)
+                            .zooming(chrome.zooming),
+                    )
+            })
         });
         let renaming = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.input.clone());
         let heading = SharedString::from(if kind == title {
@@ -554,6 +610,8 @@ impl WorkspaceView {
                     )
                     .into_any_element(),
             })
+            .when_some(address, gpui::ParentElement::child)
+            .when_some(unsaved, gpui::ParentElement::child)
             .when_some(tabs, gpui::ParentElement::child)
             .children(ports)
             .when_some(upload, gpui::ParentElement::child)
@@ -680,11 +738,30 @@ impl WorkspaceView {
                 }
                 None => muted_line("note".into()),
             },
+            ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
+                Some(view) => {
+                    view.update(cx, |v, _| v.set_alpha(placed.alpha));
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(view.clone())
+                        .into_any_element()
+                }
+                None => muted_line("opening…".into()),
+            },
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
-                    let (pad, text_size) = (theme.spacing.sm, theme.typography.small());
+                    let (pad, text_size) = (theme.spacing.sm, theme.typography.mono_size);
                     view.update(cx, |v, _| v.set_layout(k, pad, text_size));
-                    div().flex_1().w_full().overflow_hidden().child(view.clone()).into_any_element()
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(view.clone())
+                        .into_any_element()
                 }
                 None if !worker_up => muted_line(reconnecting()),
                 None => muted_line("reading…".into()),

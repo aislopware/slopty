@@ -17,7 +17,7 @@ use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, Block
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
 use slopty_proto::terminal::{
-    Frame, OpenSession, SessionKind, SessionState, SessionSummary, TermEvent, TermRequest,
+    Frame, OpenSession, SessionState, SessionSummary, TermEvent, TermRequest,
 };
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -92,7 +92,6 @@ fn connect(
 
 fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
     SessionSummary {
-        kind: SessionKind::Terminal,
         id: session,
         title: "shell".into(),
         cwd: cwd.map(str::to_owned),
@@ -102,6 +101,7 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         state: SessionState::Running,
         viewers: 1,
         command: Vec::new(),
+        agent: None,
     }
 }
 
@@ -295,6 +295,52 @@ fn a_file_card_is_titled_by_its_name_and_directory() {
     assert_eq!(file_title("/w/src/main.rs"), "main.rs · src");
     assert_eq!(file_title("main.rs"), "main.rs");
     assert_eq!(file_title("/etc/"), "etc");
+}
+
+/// A file tile asks the worker for its text, takes the keyboard when focused, sends ⌘S as a
+/// `WriteFile` to its own worker, marks the header while the edit is unsaved, and hears how
+/// the write went.
+#[gpui::test]
+fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let path = "/w/notes.md";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    assert!(
+        studio.drain().iter().any(|m| matches!(m, ClientMsg::ReadFile { path: p } if p == path)),
+        "the tile reads its file"
+    );
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Notes".to_owned(),
+        more_lines: 0,
+        size: 8,
+        modified_ms: 1_000,
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the header says so");
+    cx.simulate_keystrokes("cmd-s");
+    cx.run_until_parked();
+    let writes: Vec<ClientMsg> =
+        studio.drain().into_iter().filter(|m| matches!(m, ClientMsg::WriteFile { .. })).collect();
+    assert_eq!(
+        writes,
+        [ClientMsg::WriteFile {
+            path: path.to_owned(),
+            text: "x# Notes\n".to_owned(),
+            base_modified_ms: Some(1_000),
+        }]
+    );
+    let saved = slopty_proto::file::WriteResult::Saved { size: 9, modified_ms: 2_000 };
+    view.update_in(cx, |v, _w, cx| v.file_written(key, path, &saved, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_none(), "saved: the dot goes");
 }
 
 #[test]
@@ -969,6 +1015,58 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting));
     assert!(terminal_focused(&view, cx, session));
+}
+
+/// A worker's summaries name the agent in each session: a connect shows its badge and counts
+/// it before any agent event arrives, and a live event is not overwritten by a later summary.
+#[gpui::test]
+fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (tx, _rx) = mpsc::channel(256);
+    let key = WorkerKey::new(7);
+    let (waiting, working) = (SessionId::new(), SessionId::new());
+    let with = |session, status| SessionSummary {
+        agent: Some((AgentKind::ClaudeCode, status)),
+        ..summary(session, None)
+    };
+    let sessions = vec![
+        with(waiting, AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() })),
+        with(working, AgentStatus::Working),
+        summary(SessionId::new(), None),
+    ];
+    let factory: ScreenFactory =
+        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+    view.update_in(cx, |v, _window, cx| {
+        v.add_worker(key, "studio".to_owned(), cx);
+        let link = WorkerLink { me: ClientId::new(), out: tx, open_screen: factory, remote: None };
+        v.connect_worker(key, "studio".to_owned(), link, sessions, cx);
+        let tile = |session| Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            sleeping: false,
+            name: None,
+        };
+        let items = vec![tile(waiting), tile(working)];
+        v.apply_sync(key, ItemSync::Snapshot { version: 1, items }, cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.needs_you_count(), 1, "the blocked agent counts at once");
+        let status = |s| v.agent_state(s).map(|a| a.status.clone());
+        assert_eq!(status(working), Some(AgentStatus::Working));
+        assert_eq!(v.agents.len(), 2, "the plain shell has no agent");
+    });
+    // The worker's first event says the agent moved on; a summary after it (the session
+    // reopened in the list) does not take that back.
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(waiting) }, cx);
+        v.session_opened(key, with(waiting, AgentStatus::Working), cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.agent_state(waiting).map(|a| a.status.clone()), Some(AgentStatus::Idle));
+        assert_eq!(v.needs_you_count(), 0);
+    });
 }
 
 fn blocked(session: SessionId) -> AgentEvent {

@@ -34,18 +34,11 @@ use slopty_codec::{PixelBuffer, micros};
 use slopty_core::WindowId;
 use slopty_proto::screen::CaptureTarget;
 
-use crate::geometry::{Crop, Rect};
-use crate::{CaptureError, Shareable};
-
-/// Pixel layout of captured frames.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PixelFormat {
-    /// 8-bit 4:2:0 bi-planar, full range (`420f`), BT.709 matrix: what the encoder takes and
-    /// the client's decoder hands its Metal surface path unconverted.
-    Nv12Full,
-    /// 8-bit BGRA; for debugging and screenshots.
-    Bgra,
-}
+use crate::Shareable;
+use crate::source::{
+    AUDIO_CHANNELS, AUDIO_RATE, AudioSink, CaptureConfig, CaptureError, CapturedAudio,
+    CapturedFrame, Crop, PixelFormat, Rect,
+};
 
 impl PixelFormat {
     const fn os_type(self) -> u32 {
@@ -54,26 +47,6 @@ impl PixelFormat {
             Self::Bgra => kCVPixelFormatType_32BGRA,
         }
     }
-}
-
-/// Stream settings.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct CaptureConfig {
-    /// Output width in pixels (even).
-    pub width: u32,
-    /// Output height in pixels (even).
-    pub height: u32,
-    /// Frame rate ceiling.
-    pub fps: u16,
-    /// Pixel layout.
-    pub format: PixelFormat,
-    /// Buffers in flight between ScreenCaptureKit and us; 2 is the latency floor.
-    pub queue_depth: u8,
-    /// Also capture the target's audio (48 kHz stereo, this process excluded).
-    pub audio: bool,
-    /// Sample only this part of the target (a window's frame on a display target); the
-    /// whole target when `None`.
-    pub crop: Option<Crop>,
 }
 
 /// What a fresh `SCStreamConfiguration` holds before anything is set on it.
@@ -101,38 +74,6 @@ pub fn sck_defaults() -> SckDefaults {
             seconds
         });
     SckDefaults { queue_depth, minimum_frame_interval_s }
-}
-
-/// Audio sample rate ScreenCaptureKit is asked for.
-pub const AUDIO_RATE: u32 = 48_000;
-/// Audio channels ScreenCaptureKit is asked for.
-pub const AUDIO_CHANNELS: u32 = 2;
-
-/// A run of audio from the stream: interleaved stereo float at [`AUDIO_RATE`].
-#[derive(Debug)]
-pub struct CapturedAudio {
-    /// Presentation time on the host clock, microseconds.
-    pub pts_us: u64,
-    /// Interleaved L/R samples.
-    pub samples: Vec<f32>,
-}
-
-/// A frame from the stream.
-#[derive(Debug)]
-pub struct CapturedFrame {
-    /// The picture, IOSurface-backed; hand it straight to the encoder.
-    pub image: PixelBuffer,
-    /// Capture time on the host clock (`CMClockGetHostTimeClock`), microseconds: the
-    /// sample's presentation timestamp.
-    pub capture_ts_us: u64,
-    /// When the window server displayed the frame (`SCStreamFrameInfoDisplayTime`), on the
-    /// same clock; `None` when the attachment is missing.
-    pub display_ts_us: Option<u64>,
-    /// Time between the presentation timestamp and this callback, microseconds.
-    pub age_us: u64,
-    /// Capture latency: display time → this callback, microseconds (falls back to `age_us`
-    /// without a display time). What ScreenCaptureKit itself adds.
-    pub latency_us: u64,
 }
 
 /// What to capture, resolved from a [`Shareable`] snapshot.
@@ -207,7 +148,7 @@ impl Target {
         let mut target = Self::display_of_app(kind, &display, &app);
         let display_rect = crate::geometry::display_bounds(display_id);
         let Some((crop, pixel_size)) =
-            crate::geometry::crop_for(&bounds, &display_rect, f64::from(target.point_scale))
+            crate::source::crop_for(&bounds, &display_rect, f64::from(target.point_scale))
         else {
             return Ok(None);
         };
@@ -323,8 +264,6 @@ fn filter_pixel_size(filter: &SCContentFilter) -> ((u32, u32), f32) {
 }
 
 type FrameSink = Box<dyn Fn(CapturedFrame) + Send + Sync>;
-/// Where audio goes; `None` leaves audio off.
-pub type AudioSink = Box<dyn Fn(CapturedAudio) + Send + Sync>;
 type StopSink = Box<dyn Fn(CaptureError) + Send + Sync>;
 
 struct Ivars {

@@ -27,8 +27,8 @@ use gpui::{
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
-    Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo, LatencyInfo, Reply,
-    ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
+    BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
+    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
 use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::items::ItemKind;
@@ -530,6 +530,11 @@ fn apply(
             view.update(cx, |view, cx| view.open_file(&path, line, cx));
             Reply::Ok
         }
+        Command::OpenUrl { url } => {
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, |view, cx| view.open_browser(None, &url, cx));
+            Reply::Ok
+        }
         Command::FramesReset => {
             slopty_ui::frames::reset(cx);
             Reply::Ok
@@ -806,6 +811,7 @@ impl Workspace {
                 ItemKind::Display { .. } => ("display", None),
                 ItemKind::Note { .. } => ("note", None),
                 ItemKind::File { .. } => ("file", None),
+                ItemKind::Browser { .. } => ("browser", None),
             };
             let note = match &item.kind {
                 ItemKind::Note { text } => Some(text.clone()),
@@ -816,10 +822,42 @@ impl Workspace {
                     path: path.clone(),
                     summary: view
                         .file(item.id)
-                        .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary()),
-                    lines: view.file(item.id).map_or(0, |v| v.read(cx).line_count()),
-                    line: view.file(item.id).and_then(|v| v.read(cx).reading_line()),
+                        .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary(cx)),
+                    lines: view.file(item.id).map_or(0, |v| v.read(cx).line_count(cx)),
+                    line: view.file(item.id).and_then(|v| v.read(cx).reading_line(cx)),
+                    edited: view.file(item.id).is_some_and(|v| {
+                        let v = v.read(cx);
+                        v.dirty() || v.saving()
+                    }),
+                    trouble: view.file(item.id).and_then(|v| {
+                        v.read(cx).trouble().map(|t| match t {
+                            slopty_ui::file::Trouble::Conflict => "conflict".to_owned(),
+                            slopty_ui::file::Trouble::Failed(why) => format!("failed: {why}"),
+                        })
+                    }),
+                    read_only: view
+                        .file(item.id)
+                        .and_then(|v| v.read(cx).read_only().map(str::to_owned)),
                 }),
+                _ => None,
+            };
+            let browser = match &item.kind {
+                ItemKind::Browser { url } => Some(view.browser(item.id).map_or_else(
+                    || BrowserItemInfo { url: url.clone(), ..BrowserItemInfo::default() },
+                    |v| {
+                        let v = v.read(cx);
+                        let page = v.live_page();
+                        BrowserItemInfo {
+                            url: url.clone(),
+                            page_url: page.url,
+                            title: page.title,
+                            loading: page.loading,
+                            failed: page.failed,
+                            shown: v.shown(),
+                            snapshot: v.has_snapshot(),
+                        }
+                    },
+                )),
                 _ => None,
             };
             let bounds = view.tile_bounds(tile).map_or([0.0; 4], |b| {
@@ -841,6 +879,7 @@ impl Workspace {
                 sleeping: item.sleeping,
                 note,
                 file,
+                browser,
             });
             if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
                 && let Some(screen) = view.screen(item.id)
@@ -850,6 +889,12 @@ impl Workspace {
                     focused = format!("screen:{}", screen.stream().0);
                 }
                 dump.screens.push(screen_info(item.id, screen));
+            }
+            if view.file(item.id).is_some_and(|f| f.read(cx).focused(window, cx)) {
+                focused = format!("file:{}", item.id);
+            }
+            if view.browser(item.id).is_some_and(|b| b.read(cx).focused()) {
+                focused = format!("browser:{}", item.id);
             }
             if let ItemKind::Terminal { session } = item.kind
                 && let Some(terminal) = view.terminal(session)

@@ -15,8 +15,11 @@ objc2.workspace = true
 objc2-audio-toolbox.workspace = true
 # The clipboard origin marker's type and format (`transfer::ORIGIN_TYPE`), shared with the worker.
 slopty-proto.workspace = true
+block2.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSURL",
+    "NSURLRequest",
+    "NSValue",
     "NSDictionary",
     "NSOperation",
     "NSError",
@@ -24,7 +27,6 @@ objc2-foundation = { workspace = true, features = [
 tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-block2.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",
     "NSFilePromiseProvider",
@@ -33,9 +35,39 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingSession",
     "NSView",
     "block2",
+    # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
+    "NSBitmapImageRep",
+    "objc2-core-foundation",
+] }
+objc2-web-kit = { workspace = true, features = [
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKNavigation",
+    "WKNavigationDelegate",
+    "WKSnapshotConfiguration",
+    "WKWebView",
+    "WKWebViewConfiguration",
 ] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
 objc2-game-controller.workspace = true
-objc2-ui-kit = { workspace = true, features = [ "UIApplication", "UIResponder", "block2" ] }
+objc2-core-foundation.workspace = true
+objc2-ui-kit = { workspace = true, features = [
+    "UIApplication",
+    "UIResponder",
+    "block2",
+    # The browser tile (`web`): its views, the tap that focuses it, the snapshot.
+    "UIView",
+    "UIEvent",
+    "UIImage",
+    "objc2-core-foundation",
+] }
+objc2-web-kit = { workspace = true, features = [
+    "block2",
+    "WKNavigation",
+    "WKNavigationDelegate",
+    "WKSnapshotConfiguration",
+    "WKWebViewConfiguration",
+] }

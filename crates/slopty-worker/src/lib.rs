@@ -17,6 +17,7 @@ pub mod find;
 pub mod items;
 pub mod manager;
 pub mod orchestrate;
+pub mod platform;
 pub mod ports;
 pub mod repo;
 pub mod screen;

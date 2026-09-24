@@ -1,18 +1,23 @@
 //! The worker's pasteboard, for clipboard sync with clients.
 //!
-//! [`Board`] is the little clipboard sync needs from a pasteboard: its `changeCount` (macOS has
-//! no change notification, so it is polled), the types and bytes of what it holds, and a way to
-//! replace that. [`MacBoard`] is `NSPasteboard`, either the general one or a named one; tests use
+//! [`Board`] is the clipboard seam, compiled on every target: the little clipboard sync needs
+//! from a pasteboard. That is its `changeCount` (macOS has no change notification, so it is
+//! polled), the types and bytes of what it holds, and a way to replace that. [`MacBoard`] is
+//! `NSPasteboard`, either the general one or a named one; tests use
 //! a named one ([`MacBoard::unique`]) and release it, so no test ever touches the user's
 //! clipboard.
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2::runtime::ProtocolObject;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardItem, NSPasteboardType, NSPasteboardTypeFileURL,
     NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSPasteboardWriting,
 };
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSData, NSString};
 pub use slopty_proto::transfer::ORIGIN_TYPE;
 /// nspasteboard.org's marker for a secret (a password manager's copy); never synced.
@@ -41,7 +46,12 @@ impl Rep {
     /// Every representation, richest first.
     pub const ALL: [Self; 6] =
         [Self::FileUrl, Self::Png, Self::Tiff, Self::Rtf, Self::Html, Self::Text];
+}
 
+// The type names on the wire are Apple's UTIs; on macOS they come from AppKit's statics. Another
+// platform names them in its own module.
+#[cfg(target_os = "macos")]
+impl Rep {
     /// The uniform type identifier, as AppKit spells it.
     #[must_use]
     pub fn uti(self) -> String {
@@ -86,12 +96,14 @@ pub trait Board: Send + Sync {
 }
 
 /// `NSPasteboard`: the general pasteboard, or a named one.
+#[cfg(target_os = "macos")]
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct MacBoard {
     /// `None` is the general pasteboard.
     name: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl MacBoard {
     /// The general pasteboard: the one ⌘C and ⌘V use.
     #[must_use]
@@ -142,6 +154,7 @@ impl MacBoard {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Board for MacBoard {
     fn change_count(&self) -> isize {
         self.board().changeCount()
@@ -185,6 +198,7 @@ impl Board for MacBoard {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
     use super::*;
 

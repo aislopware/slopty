@@ -501,7 +501,7 @@ mod tests {
     use slopty_core::{SessionId, WorkerId};
     use slopty_proto::orchestration::{Outcome, TermRef, Verb, Waited};
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
-    use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
+    use slopty_proto::terminal::{SessionState, SessionSummary};
 
     use super::*;
 
@@ -554,7 +554,6 @@ mod tests {
                     studio(),
                     SessionSummary {
                         id: shell(),
-                        kind: SessionKind::Terminal,
                         title: "zsh".to_owned(),
                         cwd: None,
                         repo: None,
@@ -563,6 +562,7 @@ mod tests {
                         state: SessionState::Running,
                         viewers: 0,
                         command: Vec::new(),
+                        agent: None,
                     },
                 )]),
                 Verb::WaitFor { .. } => {

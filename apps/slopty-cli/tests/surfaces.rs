@@ -17,7 +17,7 @@ mod tests {
     use slopty_proto::agent::{AgentKind, AgentStatus, BlockReason};
     use slopty_proto::orchestration::{ErrorCode, Line, Outcome, Screen, Verb, Waited};
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
-    use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
+    use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_server::{Config, Server};
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::Command;
@@ -50,7 +50,6 @@ mod tests {
             },
             sessions: vec![SessionSummary {
                 id: shell(),
-                kind: SessionKind::Terminal,
                 title: "claude".to_owned(),
                 cwd: Some("/tmp".to_owned()),
                 repo: None,
@@ -59,6 +58,10 @@ mod tests {
                 state: SessionState::Running,
                 viewers: 0,
                 command: Vec::new(),
+                agent: Some((
+                    AgentKind::ClaudeCode,
+                    AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
+                )),
             }],
         }
     }
@@ -216,8 +219,8 @@ mod tests {
 
             let (mut http, mut stdio) = (http, stdio);
             if *name == "list_workers" {
-                // The hub stamps a worker on every message it sends, and the first call's
-                // agent-status answers land between the two listings.
+                // The hub stamps a worker on every message it sends, and one may land between
+                // the two listings.
                 http.1[0].as_object_mut().unwrap().remove("last_seen_ms");
                 stdio.1[0].as_object_mut().unwrap().remove("last_seen_ms");
             }

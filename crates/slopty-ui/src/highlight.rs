@@ -23,6 +23,8 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use crate::colors::hsla;
 
+pub mod editor;
+
 /// Lines longer than this are left plain: a minified bundle or a data line would cost
 /// seconds and read as noise anyway.
 pub const LINE_MAX: usize = 4_000;

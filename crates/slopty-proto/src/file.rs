@@ -32,3 +32,25 @@ pub enum FileRead {
         error: String,
     },
 }
+
+/// How a [`crate::ClientMsg::WriteFile`] ended.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WriteResult {
+    /// Written whole (a temporary file renamed over the old one).
+    Saved {
+        /// Size on disk now, bytes.
+        size: u64,
+        /// Modification time now, milliseconds since the Unix epoch.
+        modified_ms: u64,
+    },
+    /// The file changed on disk since the version the edit started from; nothing was written.
+    Conflict {
+        /// Its modification time on disk, milliseconds since the Unix epoch.
+        modified_ms: u64,
+    },
+    /// Not written.
+    Failed {
+        /// The OS's word for it.
+        error: String,
+    },
+}

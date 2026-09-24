@@ -1,11 +1,12 @@
 //! A file read for a file card: the first [`FILE_LINES`] lines of a text file on this
-//! machine, or the word for why not.
+//! machine, or the word for why not; and the card's save ([`write()`]), which replaces the file
+//! whole ([`replace`]).
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead};
+use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead, WriteResult};
 
 /// Read `path` for a card: at most [`FILE_BYTES`] from the start, then at most
 /// [`FILE_LINES`] lines of it.
@@ -22,22 +23,15 @@ pub fn read(path: &Path) -> FileRead {
         Ok(meta) => meta,
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
-    if meta.is_dir() {
-        return FileRead::Missing { error: "Is a directory".to_owned() };
-    }
     if !meta.is_file() {
-        return FileRead::Missing { error: "Not a regular file".to_owned() };
+        return FileRead::Missing { error: kind_word(&meta) };
     }
     let mut file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
     let size = meta.len();
-    let modified_ms = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let modified_ms = modified_ms(&meta);
     let mut bytes = Vec::with_capacity(usize::try_from(size.min(FILE_BYTES)).unwrap_or(0));
     if let Err(e) = (&mut file).take(FILE_BYTES).read_to_end(&mut bytes) {
         return FileRead::Missing { error: os_word(&e) };
@@ -59,6 +53,82 @@ pub fn read(path: &Path) -> FileRead {
     };
     let (text, more_lines) = clip(&text, truncated);
     FileRead::Text { text, more_lines, size, modified_ms }
+}
+
+/// Save a file card: replace `path` with `text` unless the file changed on disk since
+/// `base_modified_ms`, the modification time of the version the edit started from.
+///
+/// A file whose time is newer than the base is a `Conflict` and is left alone; no base writes
+/// regardless. Anything but a regular file, and a text or a file on disk past [`FILE_BYTES`]
+/// (the card only ever held its first part), is `Failed` before anything is touched.
+#[must_use]
+pub fn write(path: &Path, text: &str, base_modified_ms: Option<u64>) -> WriteResult {
+    let path = expand_home(path);
+    let failed = |error: String| WriteResult::Failed { error };
+    if text.len() as u64 > FILE_BYTES {
+        return failed(format!("{} bytes is past the {FILE_BYTES}-byte cap", text.len()));
+    }
+    match std::fs::metadata(&path) {
+        Ok(meta) if !meta.is_file() => return failed(kind_word(&meta)),
+        Ok(meta) if meta.len() > FILE_BYTES => {
+            return failed(format!("the file is {} bytes, past the cap", meta.len()));
+        }
+        Ok(meta) => {
+            let on_disk = modified_ms(&meta);
+            if base_modified_ms.is_some_and(|base| base < on_disk) {
+                return WriteResult::Conflict { modified_ms: on_disk };
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return failed(os_word(&e)),
+    }
+    match replace(&path, text.as_bytes()) {
+        Ok(meta) => WriteResult::Saved { size: meta.len(), modified_ms: modified_ms(&meta) },
+        Err(e) => failed(os_word(&e)),
+    }
+}
+
+/// Replace a file atomically, and answer the new file's metadata.
+///
+/// It writes a temporary file in the same directory, flushes it to disk and renames it over,
+/// so a reader sees the old contents or the new, never half. An existing file keeps its
+/// permissions (a script stays executable), a symbolic link keeps pointing at the file it
+/// names, and anything but a regular file is refused.
+///
+/// # Errors
+///
+/// A target that is not a regular file, or whatever the OS refuses.
+pub fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<std::fs::Metadata> {
+    let (path, mode) = match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, kind_word(&meta)));
+        }
+        // Renaming over a link would swap the link for a file; the file it names is replaced.
+        Ok(meta) => (std::fs::canonicalize(path)?, Some(meta.permissions())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (path.to_path_buf(), None),
+        Err(e) => return Err(e),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Names no file"))?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let temp =
+        dir.join(format!(".{}.{}-{nanos}.slopty-tmp", name.to_string_lossy(), std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        file.write_all(bytes)?;
+        if let Some(mode) = mode {
+            file.set_permissions(mode)?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, &path)?;
+        std::fs::metadata(&path)
+    })();
+    if written.is_err() {
+        let _removed = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 /// What a watcher compares between two looks at a file.
@@ -102,6 +172,19 @@ fn clip(text: &str, truncated: bool) -> (String, u32) {
     let more = dropped.saturating_add(u32::from(truncated));
     lines.truncate(kept);
     (lines.join("\n"), more)
+}
+
+/// A file's modification time in milliseconds since the Unix epoch, 0 when the OS has none.
+fn modified_ms(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Why something that is there is not a file to read or write.
+fn kind_word(meta: &std::fs::Metadata) -> String {
+    if meta.is_dir() { "Is a directory" } else { "Not a regular file" }.to_owned()
 }
 
 /// The OS's message without the "(os error N)" suffix.
@@ -226,5 +309,75 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    fn saved(result: &WriteResult) -> u64 {
+        match result {
+            WriteResult::Saved { modified_ms, .. } => *modified_ms,
+            other => panic!("not saved: {other:?}"),
+        }
+    }
+
+    /// A save from the version on disk replaces it and keeps its mode; a save from an older
+    /// version is a conflict and leaves the file as it was.
+    #[test]
+    fn a_save_replaces_the_file_and_an_edit_of_an_old_version_conflicts() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        std::fs::write(&path, "echo one\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let FileRead::Text { modified_ms: base, .. } = read(&path) else { panic!("text") };
+        let first = saved(&write(&path, "echo two\n", Some(base)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo two\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o750, "the mode is kept");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "no temporary file stays behind");
+
+        let stale = first.saturating_sub(1);
+        assert_eq!(
+            write(&path, "echo three\n", Some(stale)),
+            WriteResult::Conflict { modified_ms: first }
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo two\n", "nothing written");
+        saved(&write(&path, "echo four\n", None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo four\n", "no base forces it");
+        saved(&write(&dir.path().join("new.txt"), "fresh", Some(base)));
+    }
+
+    /// A save through a symbolic link replaces the file it names and keeps the link.
+    #[test]
+    fn a_link_keeps_pointing_at_the_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&target, "old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        saved(&write(&link, "new", None));
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    /// A pipe, a directory and anything past the byte cap are refused before a byte is written.
+    #[test]
+    fn a_pipe_a_directory_and_an_oversized_text_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.is_ok_and(|s| s.success()), "mkfifo");
+        let refused = |error: &str| WriteResult::Failed { error: error.to_owned() };
+        assert_eq!(write(&fifo, "x", None), refused("Not a regular file"));
+        assert_eq!(write(dir.path(), "x", None), refused("Is a directory"));
+        let big = dir.path().join("big.txt");
+        let text = "x".repeat(usize::try_from(FILE_BYTES).unwrap() + 1);
+        assert!(matches!(write(&big, &text, None), WriteResult::Failed { .. }));
+        assert!(!big.exists(), "nothing written");
+        std::fs::write(&big, &text).unwrap();
+        assert!(
+            matches!(write(&big, "short", None), WriteResult::Failed { .. }),
+            "a file the card only held part of is not cut to that part"
+        );
+        assert_eq!(std::fs::metadata(&big).unwrap().len(), FILE_BYTES + 1);
     }
 }

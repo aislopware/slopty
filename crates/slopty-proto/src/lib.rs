@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
 
 /// Bumped on any incompatible change. Workers serve exactly one version; clients must match.
-pub const PROTOCOL_VERSION: u16 = 52;
+pub const PROTOCOL_VERSION: u16 = 53;
 
 /// Everything a client sends on the control stream.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -91,6 +91,16 @@ pub enum ClientMsg {
         /// Absolute paths on the worker.
         paths: Vec<String>,
     },
+    /// Replace a text file's contents; answered with `WorkerMsg::Written`.
+    WriteFile {
+        /// Absolute path on the worker.
+        path: String,
+        /// The whole new text.
+        text: String,
+        /// The modification time of the version the edit started from; the worker refuses
+        /// with a conflict when the file on disk is newer. `None` writes regardless.
+        base_modified_ms: Option<u64>,
+    },
     /// Clipboard sync.
     Clip(transfer::ClipMsg),
     /// File transfer control.
@@ -113,6 +123,7 @@ impl ClientMsg {
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
             Self::WatchFiles { .. } => "WatchFiles",
+            Self::WriteFile { .. } => "WriteFile",
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",
         }
@@ -167,6 +178,13 @@ pub enum WorkerMsg {
         /// What was there.
         read: file::FileRead,
     },
+    /// The answer to `ClientMsg::WriteFile`.
+    Written {
+        /// The path written, as asked.
+        path: String,
+        /// What happened.
+        result: file::WriteResult,
+    },
     /// The answer to `ClientMsg::FindFiles`.
     FoundFiles {
         /// The root asked.
@@ -205,6 +223,7 @@ impl WorkerMsg {
             Self::Pong { .. } => "Pong",
             Self::HooksInstalled { .. } => "HooksInstalled",
             Self::File { .. } => "File",
+            Self::Written { .. } => "Written",
             Self::FoundFiles { .. } => "FoundFiles",
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",

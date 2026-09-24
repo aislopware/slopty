@@ -53,7 +53,10 @@ impl WorkspaceView {
                         item.id,
                     ));
                 }
-                ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Note { .. } => {
+                ItemKind::Window { .. }
+                | ItemKind::Display { .. }
+                | ItemKind::Note { .. }
+                | ItemKind::Browser { .. } => {
                     if let Some(name) = item.name.as_deref() {
                         items.push(PaletteItem::item(name, kind_name(item), item.id));
                     }
@@ -170,7 +173,10 @@ impl WorkspaceView {
                 .files
                 .get(&active.id)
                 .and_then(|v| v.read(cx).search_needle().map(str::to_owned)),
-            ItemKind::Note { .. } | ItemKind::Window { .. } | ItemKind::Display { .. } => None,
+            ItemKind::Note { .. }
+            | ItemKind::Window { .. }
+            | ItemKind::Display { .. }
+            | ItemKind::Browser { .. } => None,
         };
         needle.unwrap_or_default()
     }
@@ -215,6 +221,10 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::OpenUrl(url)) => {
                     tracing::info!(%url, "opening a forwarded port");
                     slopty_platform::open_url(url);
+                }
+                PaletteEvent::Run(PaletteRun::OpenInTile(url)) => {
+                    this.palette_return = None;
+                    this.open_browser(None, url, cx);
                 }
                 PaletteEvent::Run(PaletteRun::OpenFile { path, line }) => {
                     let path = this.absolute_in_active_shell(path);
@@ -298,10 +308,12 @@ impl WorkspaceView {
                 }
                 ItemKind::File { .. } => {
                     let Some(view) = self.files.get(&id) else { continue };
-                    let total = crate::file::find_hits(view.read(cx).lines(), &needle).len();
+                    let total = crate::file::find_hits(&view.read(cx).lines(cx), &needle).len();
                     (total, PaletteRun::FindInFile { item: id, needle: needle.clone() })
                 }
-                ItemKind::Window { .. } | ItemKind::Display { .. } => continue,
+                ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
+                    continue;
+                }
             };
             if let Ok(total) = u32::try_from(total) {
                 self.find_hits.insert(id, (total, run));

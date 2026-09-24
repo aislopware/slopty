@@ -27,6 +27,7 @@ use objc2_core_audio_types::{
 use parking_lot::Mutex;
 
 use crate::CodecError;
+use crate::video::AudioEncoder;
 
 /// Sample rate, Hz.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -237,6 +238,20 @@ unsafe extern "C-unwind" fn feed_input(
         *io_packets.as_ptr() = input.frames;
     }
     0
+}
+
+/// [`OpusEncoder`] as the worker's [`AudioEncoder`].
+#[derive(Debug)]
+pub struct Opus(OpusEncoder);
+
+impl AudioEncoder for Opus {
+    fn new() -> Result<Self, CodecError> {
+        OpusEncoder::new().map(Self)
+    }
+
+    fn push(&mut self, samples: &[f32], out: impl FnMut(&[u8])) -> Result<(), CodecError> {
+        self.0.push(samples, out)
+    }
 }
 
 /// PCM in, Opus packets out.

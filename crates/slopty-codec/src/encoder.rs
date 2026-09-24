@@ -32,7 +32,8 @@ use objc2_video_toolbox::{
 use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
-use crate::{CodecError, annexb};
+use crate::video::{EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
+use crate::{CodecError, PixelBuffer, annexb};
 
 /// Which rate-control mode a session runs in. The worker only ever runs the low-latency one;
 /// the other exists for the measurement that rejected it (`experiments` feature).
@@ -47,47 +48,6 @@ pub enum RateControl {
     /// Measured against `LowLatency` in MEASUREMENTS.md; not used by the worker.
     #[cfg(feature = "experiments")]
     Vbv,
-}
-
-/// Encoder settings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct EncoderConfig {
-    /// Pixel width (even).
-    pub width: u32,
-    /// Pixel height (even).
-    pub height: u32,
-    /// Codec.
-    pub codec: VideoCodec,
-    /// Expected frame rate; drives the rate controller's window.
-    pub fps: u16,
-    /// Target bitrate, bits per second.
-    pub bitrate_bps: u32,
-}
-
-/// Per-frame requests.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct FrameOptions {
-    /// Encode an IDR.
-    pub force_keyframe: bool,
-    /// Encode a P-frame from an acknowledged long-term reference (an IDR if none is acked).
-    pub force_ltr_refresh: bool,
-    /// LTR tokens the receiver has acknowledged since the last frame.
-    pub acked_ltr: Vec<u64>,
-}
-
-/// One encoded access unit, Annex B, parameter sets inline before keyframes.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct EncodedPacket {
-    /// Bitstream.
-    pub data: Vec<u8>,
-    /// IDR.
-    pub keyframe: bool,
-    /// Token the receiver must acknowledge for this frame to become a usable LTR.
-    pub ltr_token: Option<u64>,
-    /// This very frame was submitted with `force_ltr_refresh` (and the session has LTR).
-    pub ltr_refresh: bool,
-    /// The presentation timestamp passed to `encode`.
-    pub pts_us: u64,
 }
 
 type Sink = Box<dyn Fn(EncodedPacket) + Send + Sync>;
@@ -470,6 +430,39 @@ impl Encoder {
         // SAFETY: an invalid time means "everything submitted so far".
         let status = unsafe { self.session.complete_frames(kCMTimeInvalid) };
         check("VTCompressionSessionCompleteFrames", status)
+    }
+}
+
+/// [`Encoder`] as the worker's [`VideoEncoder`]: it takes the frames ScreenCaptureKit hands
+/// over, which are `IOSurface`-backed pixel buffers.
+#[derive(Debug)]
+pub struct VideoToolbox(Encoder);
+
+impl VideoEncoder for VideoToolbox {
+    type Image = PixelBuffer;
+
+    fn new(
+        config: EncoderConfig,
+        sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+    ) -> Result<Self, CodecError> {
+        Encoder::new(config, sink).map(Self)
+    }
+
+    fn encode(
+        &self,
+        image: &PixelBuffer,
+        pts_us: u64,
+        options: &FrameOptions,
+    ) -> Result<(), CodecError> {
+        self.0.encode(image.as_cv(), pts_us, options)
+    }
+
+    fn set_bitrate(&self, bps: u32) -> Result<(), CodecError> {
+        self.0.set_bitrate(bps)
+    }
+
+    fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
+        self.0.set_frame_rate(fps)
     }
 }
 

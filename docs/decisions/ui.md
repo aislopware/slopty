@@ -1057,3 +1057,64 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   but the background's namesake clears 4.5:1 (`ansi_text_clears_wcag_aa_on_the_terminal_background`;
   11–14 read 3.1–3.6 before). The minimum now defaults to 3.0 (ruled the same day), so the
   prompt reads without a setting.
+
+- ✅ **The file tile's editor** (2026-09-25). The body is gpui-kit's code editor
+  (`EditorState` in code-editor mode, line numbers on, folding, soft wrap and its own search
+  off), with `.appearance(false)` so the tile's own frame and tokens draw it, in the terminal
+  mono at the tile's text size. Not the alternatives: a text area of our own would rebuild
+  selection, IME, undo and scrolling that gpui-kit already has; gpui-kit's tree-sitter
+  highlighter would bring a second grammar set with its own colours beside syntect's nine
+  theme tokens. The editor takes a highlighter factory, so ours is `highlight::editor`: it
+  keeps the last parse's colours per line, moves them with each edit (`editor::splice`, lines
+  inserted or removed shift the rows below), and parses the whole text again on a background
+  thread 60 ms after the typing stops. Measured (release, the ignored
+  `highlight::editor::tests::timing_of_a_frame_and_a_keystroke`, a 2 000-line Rust file):
+  styling the 60 visible rows costs 16.2 µs a frame, and a newline's splice about 10.6 µs a
+  keystroke, most of it cloning the 2 000 line handles. The full parse stays the 165 ms
+  measured on 2026-09-12, off the main thread, so a keystroke never waits for it and the
+  colours of an edited line catch up once the typing pauses.
+  Saving and the disk:
+  - ⌘S sends the whole text with the modification time it was based on. The worker refuses
+    a save when the file changed since then, and the tile says so. While a save is out, a
+    second ⌘S sends nothing.
+  - A read drops exactly one final newline. The tile puts it back from the size: an
+    unclipped read with `size == text.len() + 1` had one. This is exact for every read the
+    editor can save (a clipped read is read-only), but carrying the flag on the wire would
+    be plainer.
+  - The dirty mark is a small dot in the header, before the actions (a11y "Unsaved
+    changes"). The trouble line is one row above the text, in the muted tone, with "Reload"
+    and "Overwrite" as the kit's small buttons. No modal: a change on disk under an edit is
+    ordinary when an agent works in the same tree.
+  - The text replaced by a read waits for the next render (`apply_pending`), since the
+    editor's `set_value` needs the window.
+  Headless tests (`file/tests.rs`) drive the real editor with real keys: save with its base
+  and newline, the save's own echo, the conflict and both buttons, the silent reload with its
+  tint and caret, read-only, a failed save. The app e2e (`tiles.rs`) edits, saves and
+  catches a change on disk under the live worker, with the goldens `editor`, `editor-dirty`
+  and `editor-conflict`.
+
+- ✅ **The browser tile's native view** (2026-09-25). `slopty_platform::web` owns the
+  `WKWebView`: a clipping view (the strip's area) added to the GPUI window's view from its
+  `raw_window_handle`, and the web view inside it at the tile's body. macOS converts to the
+  unflipped `NSView` coordinates. iOS uses UIKit's top-left points as they are, and speaks to
+  the view by selector, since `objc2-web-kit` types `WKWebView` for macOS only; the fork's iOS
+  window hands out its `UIView`, so both platforms run the same tile. The navigation
+  delegate is shared and takes the web view as a plain object. Why the page is placed in a
+  prepaint and hidden under covers is in workspace.md ("A browser tile is a native page that
+  follows its tile").
+  The keyboard: on the Mac the GPUI view never accepts first responder, so a click on the page
+  hands the keyboard to WebKit as AppKit does for any view that accepts it. One local
+  `NSEvent` monitor per process sees clicks (on a page: the tile takes the focus; elsewhere:
+  the GPUI view gets the keyboard back) and keys (⌃Tab, or a second Esc within 400 ms, give
+  it back and are swallowed). On iOS, a tap on a page is seen in the clip view's hit test
+  and focuses the tile, the page's fields raise the keyboard themselves, and hiding the page
+  ends their editing. A hardware keyboard's ⌃Tab and double Esc reach the page there, since
+  UIKit has no monitor that sees keys first.
+  The snapshot is `takeSnapshot` → PNG → a BGRA `RenderImage` decoded off the main thread,
+  drawn as the body's image. The page's title and address are read after each navigation
+  and once a second while it is open, since scripts change them without navigating. App
+  Transport Security allows plain http to IP addresses and single-label hosts such as
+  `localhost`, which is where forwards live; any other plain-http address fails with the
+  system's reason in the body and a "↻" to try again. The tests load only a page the test
+  serves itself on 127.0.0.1 (`tiles.rs`, golden `browser`), and read the view back over the
+  self-test socket: its title, its own URL, shown or hidden while the palette is open.

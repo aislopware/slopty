@@ -18,6 +18,7 @@
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
 pub mod a11y;
+pub mod browser;
 
 pub mod chrome_text;
 pub mod clipboard;

@@ -9,6 +9,7 @@
 //! * `workers` — connecting, losing and forgetting a worker; the sync that follows.
 //! * `commands` — what the actions do.
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
+//! * `browsers` — web pages in tiles: opening them, and the native view over each.
 //! * `overlays` — the command palette, find in every tile, the window picker.
 //! * `toast` — the one-line notices, undo close, pointing.
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
@@ -18,6 +19,7 @@
 
 pub mod actions;
 mod agents;
+mod browsers;
 mod commands;
 mod overlays;
 pub mod remote;
@@ -42,7 +44,7 @@ use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentEvent;
-use slopty_proto::items::{Item, ItemKind, ItemOp};
+use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
@@ -295,6 +297,11 @@ pub struct WorkspaceView {
     screens: HashMap<ItemId, Entity<ScreenView>>,
     notes: HashMap<ItemId, Entity<NoteView>>,
     files: HashMap<ItemId, Entity<FileView>>,
+    browsers: HashMap<ItemId, Entity<crate::browser::BrowserView>>,
+    /// The app draws a dialog over the workspace: a page's native view must hide under it.
+    covered: bool,
+    /// Bumped every time the workspace draws, so a browser tile knows whether it was drawn.
+    frames_drawn: u64,
     /// The line a file card opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
     /// Window titles the picker or a listing gave (the registry stores ids).
@@ -359,6 +366,8 @@ pub struct WorkspaceView {
     /// A terminal to focus on the next frame.
     pending_focus: Option<SessionId>,
     pending_focus_note: Option<ItemId>,
+    /// A file tile whose editor takes the keyboard on the next frame.
+    pending_focus_file: Option<ItemId>,
     pending_focus_picker: bool,
     pending_focus_self: bool,
     /// Where the layout is saved (`layout.json` in the client's data directory), if anywhere.
@@ -426,6 +435,9 @@ impl WorkspaceView {
             screens: HashMap::new(),
             notes: HashMap::new(),
             files: HashMap::new(),
+            browsers: HashMap::new(),
+            covered: false,
+            frames_drawn: 0,
             file_focus: HashMap::new(),
             titles: HashMap::new(),
             agents: HashMap::new(),
@@ -467,6 +479,7 @@ impl WorkspaceView {
             park_pending: false,
             pending_focus: None,
             pending_focus_note: None,
+            pending_focus_file: None,
             pending_focus_picker: false,
             pending_focus_self: false,
             layout_path: None,
@@ -749,6 +762,9 @@ impl WorkspaceView {
         for view in self.files.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
+        for view in self.browsers.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
         if let Some((_, picker)) = &self.picker {
             picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
@@ -863,6 +879,11 @@ impl WorkspaceView {
         {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
+        if let Some(id) = self.pending_focus_file.take()
+            && let Some(view) = self.files.get(&id)
+        {
+            view.update(cx, |v, cx| v.focus(window, cx));
+        }
     }
 }
 
@@ -879,6 +900,9 @@ impl gpui::Render for WorkspaceView {
             self.layout.set_animate(animate);
         }
         self.reconcile_notes_and_files(window, cx);
+        self.reconcile_browsers(cx);
+        self.frames_drawn = self.frames_drawn.wrapping_add(1);
+        cx.set_global(crate::browser::FrameCount(self.frames_drawn));
         self.apply_pending_focus(window, cx);
         self.sync_clipboard_watch();
         let titlebar = self.render_titlebar(window, cx);
@@ -887,15 +911,8 @@ impl gpui::Render for WorkspaceView {
         let menu = self.render_menu(window, cx);
         let picker = self.picker.as_ref().map(|(_, p)| p.clone());
         let palette = self.palette.clone();
-        let file_focused = self
-            .focused()
-            .and_then(|t| self.item(t))
-            .is_some_and(|i| matches!(i.kind, ItemKind::File { .. }));
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("Workspace");
-        if file_focused {
-            key_context.add("file_card");
-        }
         let root = gpui::div()
             .id("workspace")
             .debug_selector(|| "workspace".to_owned())
@@ -916,6 +933,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
+            .on_action(cx.listener(Self::open_url_palette))
             .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
             .on_action(cx.listener(Self::close_item))
@@ -928,24 +946,6 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::rename_item))
             .on_action(cx.listener(Self::point_others))
             .on_action(cx.listener(Self::find_everywhere))
-            .on_action(cx.listener(|this, _: &LineUp, _w, cx| {
-                this.move_file_line(crate::file::LineMove::Lines(-1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &LineDown, _w, cx| {
-                this.move_file_line(crate::file::LineMove::Lines(1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &PageUp, _w, cx| {
-                this.move_file_line(crate::file::LineMove::Pages(-1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &PageDown, _w, cx| {
-                this.move_file_line(crate::file::LineMove::Pages(1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &LineFirst, _w, cx| {
-                this.move_file_line(crate::file::LineMove::First, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LineLast, _w, cx| {
-                this.move_file_line(crate::file::LineMove::Last, cx);
-            }))
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the workspace has the keyboard.
             .capture_action(cx.listener(
@@ -978,6 +978,7 @@ impl gpui::Render for WorkspaceView {
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
+            .child(Self::browser_sync(cx))
     }
 }
 

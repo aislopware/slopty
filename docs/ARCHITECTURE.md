@@ -253,7 +253,11 @@ requirement the identifier rather than the hash and one approval enough for good
 **Worker link and orchestration.** With a server configured (`--server`, `SLOPTY_SERVER` or
 `[worker] server`), the worker registers with it (`apps/slopty-worker/src/server.rs`). It sends
 its capabilities (`slopty-worker::caps`) and its sessions, forwards session and agent events,
-and redials with capped backoff when the link drops. `slopty-worker::orchestrate::Orchestrator`
+and redials with capped backoff when the link drops. Every `SessionSummary` carries the agent
+running in the session and its status, read from the daemon's agent table (`Worker::summaries`),
+and the server's hub keeps each listed terminal's agent current from the `Agent` events, so
+`ListTerminals` (and `slopty workers`, which counts the agents waiting on a human from it)
+answers without asking each worker. `slopty-worker::orchestrate::Orchestrator`
 answers the verbs the server forwards. It opens terminals through the same path a client's
 `OpenSession` takes, types through the session's key and paste encoders, and reads text views
 of the engine on the session's thread (`GhosttyEngine::screen_text`, `text_lines`,
@@ -454,6 +458,15 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
     as file URLs.
   - ⌘-drag on a path in a terminal drags the file out as an `NSFilePromiseProvider` that
     fetches it (`XferMsg::Fetch`, `Purpose::Download`, from the start).
+- **File cards.** `ReadFile` answers the first 512 KiB and 2 000 lines of a text file,
+  `WatchFiles` looks at each watched file's size and modification time every second and sends
+  a changed one again, and `WriteFile { path, text, base_modified_ms }` saves an edit
+  (`slopty_worker::file::write`). The save writes a temporary file beside the target, fsyncs
+  it and renames it over, keeping the mode and writing through a symbolic link. A file whose
+  modification time is newer than `base_modified_ms` is a `Conflict` and stays as it was. A
+  non-regular file is `Failed`, and so is a text or a file past the 512 KiB cap. The worker
+  answers with `WorkerMsg::Written`, and the watchers, the writer's own included, hear the new
+  text on their next look.
 - **Ports.** A session's listening TCP ports come from its process tree (libproc,
   `slopty_worker::ports`). They are scanned 250 ms after its output names a local address or an
   OSC 8 web link, and every 2 s while it runs a foreground program or listens, never when
@@ -464,6 +477,16 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
     with a half-close.
   - The tile shows a quiet chip ("5173 ↗") that opens the default browser, and the palette
     lists forwarded ports.
+
+**Platform seams.** The pipeline is `slopty_worker::screen::Pipeline<P: Platform>`, and
+`ScreenStream` is `Pipeline<Native>`, macOS today (`slopty_worker::platform`). A `Platform`
+names one implementation of each seam, and each seam is a trait in its platform crate that
+compiles on every target: `CaptureSource` (displays, windows, frames, the window list and the
+pointer; `slopty_capture::ScreenCaptureKit`), `VideoEncoder` and `AudioEncoder`
+(`slopty_codec::VideoToolbox`, `slopty_codec::Opus`) and `InputSink`
+(`slopty_input::CgEvents`). The clipboard seam is `slopty_input::pasteboard::Board`. The
+stream is generic, so the frame path makes direct calls; the one `dyn` is the registry's
+handle on each stream's counters.
 
 Crates: `slopty-capture` (SCK streams, shareable content, pointer/bounds queries, the cursor's picture),
 `slopty-codec` (encode half is `cfg(macos)`), `slopty-media` (`Packetizer` → datagrams + parity +
@@ -510,7 +533,7 @@ window (`slopty-net::endpoint`).
 ## 4. Workspace
 
 Every worker's items in one scrollable tiling workspace, niri's model
-(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, note, file
+(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, note, file, browser
 (`ItemKind` in `crates/slopty-proto/src/items.rs`). The worker keeps only the registry
 (`slopty-worker::items::ItemStore`: the items, their names and sleep; `Upsert`/`Remove`/`Sleep`,
 a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
@@ -521,7 +544,10 @@ springs, swipe tracker, overview), saved as `layout.json` in the client's data d
 tile is `(WorkerKey, ItemId)`, so one `slopty-ui::workspace::WorkspaceView` shows every worker
 at once: its own echo opens right of the focus and takes it, anything from elsewhere joins the
 end of the workspace that last held that worker's tiles. A worker that drops keeps its tiles
-("reconnecting"); its next snapshot removes only what it no longer has. The view draws only
+("reconnecting"); its next snapshot removes only what it no longer has. Each terminal's agent
+badge starts from its `SessionSummary.agent` when the worker connects or the session opens
+(`WorkspaceView::seed_agents`), so a client that joins late names the running agents and
+their status before any event arrives; an event always wins over the seed. The view draws only
 tiles near the view (a far terminal prepares no rows), sizes a terminal's grid from the
 tile's resting rect so a spring never resizes a PTY, lets a remote tile's stream go after 5 s
 off screen, and asks for frames only while something moves. Two-finger swipes drag the strip
@@ -550,39 +576,68 @@ ticks counted after it as `· 1/3`), "note" while empty.
 Any card takes a **name** (⌘E, or a double-click on its title bar; `Item.name`,
 protocol 37, worker-sanitised to 128 characters): document state every client shows in place
 of the derived title until it is cleared, and what the palette's "Go to" line says. A
-**file card** (`ItemKind::File { path }`, protocol 34, `slopty-ui::file`) shows a file on the
-worker read-only: the item names the absolute path and lives in the shared document, the text
-does not — each client asks `ClientMsg::ReadFile` when the card appears (`workspace reconcile_notes_and_files`,
-which also sends the set of paths as `ClientMsg::WatchFiles`, protocol 40: the worker looks at
-each one's size and modification time every second and re-sends a changed file unasked)
-and draws the `WorkerMsg::File` answer (`slopty-worker::file::read`: the first 512 KiB, then the
-first 2 000 lines, `FileRead::Text | Binary | Missing`) as line-numbered mono rows in a
-`uniform_list`, coloured by the grammar the path names (`slopty-ui::highlight`: syntect's
+**file tile** (`ItemKind::File { path }`, `slopty-ui::file`) is an editor on a file on the
+worker: the item names the absolute path and lives in the shared document, the text does
+not. Each client asks `ClientMsg::ReadFile` when the tile appears (`workspace
+reconcile_notes_and_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
+worker looks at each one's size and modification time every second and re-sends a changed
+file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the first
+512 KiB, then the first 2 000 lines, `FileRead::Text | Binary | Missing`) into gpui-kit's code
+editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
+saying why not. Colour comes from the grammar the path names (`slopty-ui::highlight`: syntect's
 bundled grammars on the pure-Rust regex engine, reduced to nine tokens painted from the
-theme's palette, parsed on a background thread after each read; the same hook colours a
-fenced block in an answer through gpui-kit's `TextViewDefaults`, and the changed rows of an
-edit's diff in the agent card, parsed once per entry), or one line saying why not; a read that follows one tints the lines that
-differ (`file::changed_lines`, `similar` over the lines) and scrolls the first into view; a
-card opened from an edit lands on the edit's line (`ToolDetail::Diff.line`, protocol 35: the
-worker finds `old_string` in the file, or `new_string` once the edit landed,
-`transcript::locate`, tinted in the accent tone, `FileView::focus_line`). The
-card reads again when any agent's
-Edit/Write result arrives in the workspace, on its "reload" pill, and when "view" is pressed on
-another call for the same path (one card per path: `WorkspaceView::open_file` reveals the existing
-one). Titled `name · parent` (`workspace::file_title`); its dump entry is `ItemInfo.file`
-(path, summary, lines). The way in is the palette: a path typed in opens as an `Open <path>`
-line against the active shell's directory, and a word asked of the worker's files does the
-same for its hits; the palette lists every card
-as "Go to <title>" after the sessions (`PaletteRun::Item`) and the last five distinct commands
-of the shell a "run" would go to as "Rerun <command>" (`TermState::recent_commands`,
-`PaletteRun::Rerun`, typed through `run_text`). ⌘F with the card active opens a find bar like the
-terminal's (`FileView::find`, key context `FileSearch`): a hit is a line holding the text,
-case-insensitive (`file::find_hits`), tinted in the warn tone, stepped with ⌘G/↩ and wrapped;
-Esc closes it and the workspace takes the keyboard back. An "edit" pill (`edit-<item>`, shown
-while a shell exists) types `${EDITOR:-vi} +line 'path'` into the last-used shell, the line
-being the current find hit or the one the card opened at (`FileView::reading_line`); with
-the card active, ↑/↓/⇞/⇟/Home/End move that reading line (`FileView::move_line`), a click
-on a row sets it, and the "ask" pill mentions it (`@path line N`). The picker (⌘O, a field at
+theme's palette); `highlight::editor::EditorHighlighter` is the editor's highlighter, which
+moves the last parse's colours with each edit (`editor::splice`) and parses the whole text
+again on a background thread 60 ms after the typing stops. The same hook colours a fenced
+block in an answer through gpui-kit's `TextViewDefaults`. ⌘S (`SaveFile`, key context
+`FileEditor`) sends `ClientMsg::WriteFile { path, text, base_modified_ms }`, the text
+carrying the file's final newline when the read implied one (a read drops exactly one; the
+size tells); the header shows a quiet dot while the text differs from the read, and the answer
+(`WorkerMsg::Written`, `FileView::written`) clears it, or keeps it with a one-line reason.
+What the worker sends next is taken by the state the tile is in: its own save's echo changes
+nothing; a clean tile takes a change on disk silently, tints the lines that differ
+(`file::changed_lines`, `similar` over the lines) and puts the caret on the first; a dirty tile
+keeps the edit and shows "Changed on disk" with "Reload" and "Overwrite" inline, and a
+`Conflict` answer to a save does the same. Reload asks for the file again and takes it;
+Overwrite saves with no base. A clipped read (past 512 KiB or 2 000 lines) opens read-only
+with the reason in that line (`file::clipped_reason`), since a save would cut the file. A
+tile opened from an edit lands on the edit's line (`ToolDetail::Diff.line`: the worker finds
+`old_string` in the file, or `new_string` once the edit landed, `transcript::locate`,
+tinted in the accent tone, `FileView::focus_line`). The tile reads again when any agent's
+Edit/Write result arrives in the workspace and when "view" is pressed on another call for the
+same path (one tile per path: `WorkspaceView::open_file` reveals the existing one). Titled
+`name · parent` (`workspace::file_title`); its dump entry is `ItemInfo.file` (path, summary,
+lines, edited, trouble, read-only). The way in is the palette: a path typed in opens as an
+`Open <path>` line against the active shell's directory, and a word asked of the worker's
+files does the same for its hits; either opens the tile with the keyboard in the editor. The
+palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Item`) and the last
+five distinct commands of the shell a "run" would go to as "Rerun <command>"
+(`TermState::recent_commands`, `PaletteRun::Rerun`, typed through `run_text`). ⌘F with the
+tile active opens a find bar like the terminal's (`FileView::find`, key context `FileSearch`):
+a hit is a line holding the text, smart-case (`file::find_hits`), tinted in the warn tone,
+stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
+the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the focus between tiles, not add
+carets (bindings in `FileEditor > Input`).
+
+A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
+usually a forwarded port, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
+on macOS, a `UIView` on iOS, each a subview of the GPUI window's view from its
+`raw_window_handle`). A native view always draws over GPUI, so the page follows the tile
+rather than being drawn by it: each frame the tile's body records where it was drawn
+(`BrowserView::drawn_in`), and a final element's prepaint (`WorkspaceView::browser_sync`)
+asks `browser::placement` where each page goes, over the body and clipped to the strip, or
+hidden while anything GPUI draws covers the strip (the palette, the picker, a menu, the
+overview, an app dialog via `set_covered`), while the tile fades or is off the strip. Hidden,
+the body shows the page's last snapshot (`takeSnapshot` → PNG → `RenderImage`), so covering it
+leaves no hole, and the renders the tests diff show it too. A click on the page gives it the
+keyboard and focuses its tile; on the Mac a local event monitor takes the keyboard back on a
+click elsewhere, ⌃Tab or Esc twice, and on iOS the page's own fields take the keyboard when
+tapped and hiding the page ends their editing. The header shows the page's title and its
+address as text, "←" while there is history and "↻"; the title and address are read after
+each navigation and every second while the page is open. The ways in: a port chip's number
+opens its forward in a tile (its "↗" opens the default browser, as before), "Open URL…" in the
+palette starts at `http://localhost:`, and an address typed into the palette is an "Open
+<address> in a tile" line. Only http and https open (`browser::is_web_url`). The picker (⌘O, a field at
 the top filtering by every word typed, ↑/↓/↩ choosing) lists the workspace's sessions first — agents waiting on the human, then other agents with their status
 line, then plain shells — and a click reveals and focuses that terminal; below them the worker's
 windows and displays. Remote-window items are
@@ -595,7 +650,7 @@ tables (`workspace::palette_items` for the workspace's and the terminal's, the a
 with `extend_palette`; the View menu's "Commands…" opens it on the Mac): typing
 keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
 closes; a path typed in (`src/lib.rs:7`, `~/notes.md`) is an `Open <path>` line first, which
-opens a file card against the active shell's directory (`palette::path_query`); a directory
+opens a file tile against the active shell's directory (`palette::path_query`); a directory
 spelled from the root or home with a slash at the end (`~/proj/`) is instead a "New terminal
 in …" and a "New agent in …" line (`palette::path_items`), the worker expanding `~`; and a word is
 also asked of the worker's files under that directory (`ClientMsg::FindFiles` →
@@ -771,7 +826,13 @@ a note gets `markdown_line_height`, paragraph gaps of one base unit, headings
 stepping down from `title()` and code in the terminal mono at `small()` on `raised`. Headless
 tests read the tokens back through `painted_quads()`: the accent vs hairline item frame, the
 `warn` outline of a blocked agent in both variants, the `error` separator tone, and gpui-kit's
-colours after a sync.
+colours after a sync. gpui-kit's code editor (`EditorState`) is the file tile's body, in the
+terminal mono at the tile's text size, its highlighter the app's own (§4).
+One element is not GPUI's: the browser tile's page is a native `WKWebView` over the Metal
+view, placed each frame from where the tile's body was drawn and hidden whenever GPUI draws
+over the strip (§4). Its chrome (back, reload, the address as text) is GPUI's, from the same
+tokens. The page takes its tile's opacity and hides below `browser::MIN_ALPHA`, so a tile
+fading in or out leaves no page behind; under Reduce Motion there is no fade to follow.
 `slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
 `CVPixelBuffer` (zero copy), draws the worker's cursor from the cursor channel, forwards mouse,
 scroll and keys (including ⌘ chords the workspace does not bind) as `ScreenInput`, and asks the
@@ -955,9 +1016,9 @@ as a dialog over the workspace with a Cancel. The phone adds "Paste", since it h
 | `slopty-predict` | speculative local echo | client |
 | `slopty-net` | plaintext QUIC endpoint (noq + null crypto provider), `host[:port]` addresses, admission by source address, known workers, framed channels | all |
 | `slopty-media` | packetizer, FEC, reassembly, NACK/refresh policy, redundancy | all |
-| `slopty-capture` | ScreenCaptureKit | worker |
-| `slopty-codec` | VideoToolbox encode (worker) / decode (all) | split |
-| `slopty-input` | CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) | worker |
+| `slopty-capture` | the capture seam (`CaptureSource`); ScreenCaptureKit on macOS | worker |
+| `slopty-codec` | the encoder seam (`VideoEncoder`, `AudioEncoder`); VideoToolbox encode (worker) / decode (all) | split |
+| `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) and `NSPasteboard` on macOS | worker |
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-client` | client session state, the item registry mirror, the layout model | client |

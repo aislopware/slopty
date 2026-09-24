@@ -8,7 +8,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::{CaptureTarget, ScreenRequest};
-use slopty_proto::terminal::{OpenSession, SessionKind, TermRequest, TermSize};
+use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
     AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
@@ -20,7 +20,6 @@ use super::actions::{
 };
 use super::toast::ToastKind;
 use super::{AGENT_COMMAND, ClosedTile, KeyTarget, Rename, UNDO_CLOSE, WorkspaceView};
-use crate::file::LineMove;
 use crate::screen::ScreenView;
 use crate::terminal::TerminalView;
 
@@ -54,6 +53,8 @@ impl WorkspaceView {
                 self.finished.remove(&session);
                 self.pending_focus = Some(session);
             }
+            // A file tile is an editor: the keyboard goes into its text, as into a shell.
+            Some(ItemKind::File { .. }) => self.pending_focus_file = Some(tile.item),
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the strip must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -331,12 +332,11 @@ impl WorkspaceView {
 
     // ----- shells ------------------------------------------------------------------------------
 
-    /// `session` is a plain shell: a terminal session (not one the worker drives as an agent),
-    /// drawn here, and one no coding agent has been seen in.
+    /// `session` is a plain shell: a live session drawn here that no coding agent has been seen in.
     pub(super) fn is_shell(&self, session: SessionId) -> bool {
         self.terminals.contains_key(&session)
             && !self.agents.contains_key(&session)
-            && self.summary(session).is_some_and(|s| s.kind == SessionKind::Terminal)
+            && self.summary(session).is_some()
     }
 
     /// The shell a fenced block runs in: the most recently focused one, else the newest.
@@ -589,29 +589,6 @@ impl WorkspaceView {
         }
     }
 
-    /// ↑/↓/⇞/⇟/Home/End with a file card focused: its reading line moves. Nothing while an
-    /// overlay has the keys.
-    pub(super) fn move_file_line(&self, mv: LineMove, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.picker.is_some() {
-            return;
-        }
-        if let Some(view) = self.active_item().and_then(|id| self.files.get(&id)).cloned() {
-            view.update(cx, |v, cx| v.move_line(mv, cx));
-        }
-    }
-
-    /// The card's "edit" pill: the file in `$EDITOR` in the shell the human was last in, at
-    /// the line being read.
-    pub(super) fn edit_file(&mut self, id: ItemId, cx: &mut Context<Self>) {
-        let Some(ItemKind::File { path }) =
-            self.tile_of(id).and_then(|t| self.item(t)).map(|i| i.kind.clone())
-        else {
-            return;
-        };
-        let line = self.files.get(&id).and_then(|v| v.read(cx).reading_line());
-        self.run_in_shell(crate::terminal::url::editor_command(&path, line), cx);
-    }
-
     /// Ask the worker for a file card's text (again).
     pub(super) fn request_file(&self, id: ItemId) {
         let Some(tile) = self.tile_of(id) else { return };
@@ -664,7 +641,10 @@ impl WorkspaceView {
                 }
                 self.remember_closed(tile, item, None, cx);
             }
-            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::File { .. } => {
+            ItemKind::Window { .. }
+            | ItemKind::Display { .. }
+            | ItemKind::File { .. }
+            | ItemKind::Browser { .. } => {
                 self.remember_closed(tile, item, None, cx);
             }
         }

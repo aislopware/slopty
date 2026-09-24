@@ -4,6 +4,10 @@
 //! ScreenCaptureKit queue ──frame──▶ encoder.encode ──VideoToolbox thread──▶ packetize ──▶ sink
 //! ```
 //!
+//! The pipeline ([`Pipeline`]) is generic over the worker's [`Platform`]: capture, encoders and
+//! input are the platform crates' traits, called directly. [`ScreenStream`] is the pipeline on
+//! the platform this build serves.
+//!
 //! Nothing here knows the network: datagrams go to a [`DatagramSink`] the transport (the worker)
 //! implements, from whichever thread produced them, in one call per frame. Everything the client
 //! sends back (reports, NACKs, refresh requests, quality changes) lands on [`ScreenStream`] and
@@ -19,14 +23,17 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use slopty_capture::host_now_us;
 use slopty_capture::{
-    Capture, CaptureConfig, CaptureError, CapturedAudio, CapturedFrame, Crop, HideWatch,
-    PixelFormat, Rect, Shareable, Target, host_now_us,
+    AxError, CaptureConfig, CaptureError, CaptureSource, CapturedAudio, CapturedFrame, Crop,
+    PixelFormat, Rect, TargetWindow, Went, WindowState, crop_for,
 };
-use slopty_codec::audio::OpusEncoder;
-use slopty_codec::{CodecError, EncodedPacket, Encoder, EncoderConfig, FrameOptions};
+use slopty_codec::{
+    AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
+};
 use slopty_core::StreamId;
-use slopty_input::{Injector, InputError};
+use slopty_input::{InputError, InputSink as _};
 pub use slopty_media::PathSample;
 use slopty_media::{
     Cadence, Decision, EncodedFrame, HEARTBEAT_AFTER, MediaError, Packetizer, RateController,
@@ -39,6 +46,22 @@ use slopty_proto::screen::{
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::platform::{Native, Platform};
+
+/// A platform's capture.
+type Source<P> = <P as Platform>::Capture;
+/// A platform's enumeration of shareable content.
+type Content<P> = <Source<P> as CaptureSource>::Content;
+/// A platform's resolved capture target.
+type Resolved<P> = <Source<P> as CaptureSource>::Target;
+/// A frame as a platform's capture delivers it.
+type Frame<P> = CapturedFrame<<Source<P> as CaptureSource>::Image>;
+
+/// Now on the clock `P`'s frames are stamped with, microseconds.
+fn now<P: Platform>() -> u64 {
+    Source::<P>::now_us()
+}
 
 /// Where a stream's datagrams go: the connection's unreliable datagram channel.
 ///
@@ -116,7 +139,7 @@ pub enum ScreenError {
     Input(#[from] InputError),
     /// The accessibility API would not resize the window.
     #[error(transparent)]
-    Resize(#[from] slopty_capture::AxError),
+    Resize(#[from] AxError),
     /// The window is gone from the window list.
     #[error("the window is gone")]
     WindowGone,
@@ -561,23 +584,13 @@ impl Registry {
 /// "start-up on a cold connection"); the second call would return the same objects.
 const SHAREABLE_TTL: Duration = Duration::from_secs(2);
 
-/// The last enumeration and when it was taken.
-static SHAREABLE: Mutex<Option<(Instant, Arc<Shareable>)>> = Mutex::new(None);
+/// The last enumeration and when it was taken. Typed per platform, and one platform runs in a
+/// process, so the downcast back is exact.
+static SHAREABLE: Mutex<Option<(Instant, Arc<dyn std::any::Any + Send + Sync>)>> = Mutex::new(None);
 
 /// Enumerate shareable content, reusing an enumeration younger than `SHAREABLE_TTL`.
-pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
-    if let Some((taken, content)) = SHAREABLE.lock().as_ref()
-        && taken.elapsed() < SHAREABLE_TTL
-    {
-        return Ok(Arc::clone(content));
-    }
-    let (tx, rx) = oneshot::channel();
-    slopty_capture::enumerate(move |result| {
-        let _receiver_gone = tx.send(result);
-    });
-    let content = Arc::new(rx.await.map_err(|_dropped| ScreenError::Closed)??);
-    *SHAREABLE.lock() = Some((Instant::now(), Arc::clone(&content)));
-    Ok(content)
+pub async fn shareable() -> Result<Arc<Content<Native>>, ScreenError> {
+    ScreenStream::shareable().await
 }
 
 /// Start and stop one small capture of the first display; returns how long that took.
@@ -586,54 +599,12 @@ pub async fn shareable() -> Result<Arc<Shareable>, ScreenError> {
 /// process: ~300 ms cold against ~115 ms warm (MEASUREMENTS.md, "start-up on a cold
 /// connection").
 pub async fn warm_up() -> Result<Duration, ScreenError> {
-    let started = Instant::now();
-    let encoder = Encoder::new(
-        EncoderConfig {
-            width: 64,
-            height: 64,
-            codec: VideoCodec::Hevc,
-            fps: 1,
-            bitrate_bps: 100_000,
-        },
-        |_packet| {},
-    )?;
-    drop(encoder);
-    let content = shareable().await?;
-    let display = content.displays().into_iter().next().ok_or(ScreenError::Closed)?;
-    let resolved = Target::resolve(&content, CaptureTarget::Display(display.id))?;
-    let config = CaptureConfig {
-        width: 64,
-        height: 64,
-        fps: 1,
-        format: PixelFormat::Nv12Full,
-        queue_depth: 1,
-        audio: true,
-        crop: None,
-    };
-    let (tx, rx) = oneshot::channel();
-    let capture = Capture::start(
-        &resolved,
-        &config,
-        |_frame| {},
-        Some(Box::new(|_chunk| {})),
-        |_stopped| {},
-        move |result| {
-            let _receiver_gone = tx.send(result);
-        },
-    )?;
-    rx.await.map_err(|_dropped| ScreenError::Closed)??;
-    let (tx, rx) = oneshot::channel();
-    capture.stop(move |result| {
-        let _receiver_gone = tx.send(result);
-    });
-    let _stopped = rx.await;
-    Ok(started.elapsed())
+    ScreenStream::warm_up().await
 }
 
 /// The `Listing` event for the current windows and displays.
 pub async fn listing() -> Result<ScreenEvent, ScreenError> {
-    let content = shareable().await?;
-    Ok(ScreenEvent::Listing { windows: content.windows(), displays: content.displays() })
+    ScreenStream::listing().await
 }
 
 /// Requests folded into the next encoded frame.
@@ -764,14 +735,30 @@ impl Counters {
     }
 }
 
+/// What the registry reads of a stream, whatever platform it runs on.
+trait Counted: Send + Sync {
+    fn stream(&self) -> StreamId;
+    fn counters(&self) -> ScreenStats;
+}
+
+impl<P: Platform> Counted for Shared<P> {
+    fn stream(&self) -> StreamId {
+        self.id
+    }
+
+    fn counters(&self) -> ScreenStats {
+        self.stats()
+    }
+}
+
 /// A handle on one stream's counters that outlives the [`ScreenStream`]'s owner borrow, for
 /// the daemon's control socket (`slopty bench screen` reads the worker side through it).
 #[derive(Clone)]
-pub struct StatsHandle(Arc<Shared>);
+pub struct StatsHandle(Arc<dyn Counted>);
 
 impl std::fmt::Debug for StatsHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StatsHandle").field("stream", &self.0.id).finish()
+        f.debug_struct("StatsHandle").field("stream", &self.0.stream()).finish()
     }
 }
 
@@ -779,13 +766,13 @@ impl StatsHandle {
     /// The stream.
     #[must_use]
     pub fn id(&self) -> StreamId {
-        self.0.id
+        self.0.stream()
     }
 
     /// Counters right now.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
-        self.0.stats()
+        self.0.counters()
     }
 }
 
@@ -793,16 +780,21 @@ impl StatsHandle {
 ///
 /// Loss and reports are answered on the connection's own task, never behind a stream that is
 /// busy rebuilding its encoder or reading the window server.
-#[derive(Clone)]
-pub struct StreamControl(Arc<Shared>);
+pub struct StreamControl<P: Platform = Native>(Arc<Shared<P>>);
 
-impl std::fmt::Debug for StreamControl {
+impl<P: Platform> Clone for StreamControl<P> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<P: Platform> std::fmt::Debug for StreamControl<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamControl").field("stream", &self.0.id).finish()
     }
 }
 
-impl StreamControl {
+impl<P: Platform> StreamControl<P> {
     /// See [`ScreenStream::report`].
     #[must_use]
     pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
@@ -827,16 +819,16 @@ const AUDIO_HOLD_US: u64 = 300_000;
 const AUDIO_FLOOR: f32 = 1e-4;
 
 /// The encoder and the silence gate.
-struct AudioState {
-    encoder: Option<OpusEncoder>,
+struct AudioState<A> {
+    encoder: Option<A>,
     seq: u32,
     last_loud_us: u64,
 }
 
-struct Shared {
+struct Shared<P: Platform = Native> {
     id: StreamId,
-    encoder: RwLock<Option<Encoder>>,
-    audio: Mutex<AudioState>,
+    encoder: RwLock<Option<P::Video>>,
+    audio: Mutex<AudioState<P::Audio>>,
     pending: Mutex<Pending>,
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
@@ -873,7 +865,7 @@ struct Shared {
     /// reads the cursor's picture only while it is.
     pointer_over: AtomicBool,
     /// `host_now_us()` until which frames are held on the accessibility API's word alone
-    /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
+    /// (zero: no suspicion). Set by the hide watch's callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
     suspect_until_us: AtomicU64,
     /// A window of the target's application other than the target went since the filter was
@@ -891,7 +883,7 @@ struct Shared {
     counters: Counters,
 }
 
-impl Shared {
+impl<P: Platform> Shared<P> {
     /// The counters plus the state only the stream knows: whether the display crop is what is
     /// being served right now. Every reader goes through here, so no caller can publish the
     /// snapshot's placeholder and report the window filter for a stream on the crop.
@@ -942,7 +934,7 @@ impl Shared {
         if datagrams.is_empty() {
             return 0;
         }
-        let now = host_now_us();
+        let now = now::<P>();
         let n = u64::try_from(datagrams.len()).unwrap_or(u64::MAX);
         let taken = match self.sink.send(datagrams) {
             Ok(()) => {
@@ -1015,7 +1007,7 @@ impl Shared {
     }
 
     /// ScreenCaptureKit delivered a frame.
-    fn on_frame(&self, frame: &CapturedFrame) {
+    fn on_frame(&self, frame: &Frame<P>) {
         self.counters.captured.fetch_add(1, Ordering::Relaxed);
         self.counters.capture.lock().push(frame.latency_us);
         // Before anything is counted as a picture of the target: while the window is off screen
@@ -1032,7 +1024,7 @@ impl Shared {
         // after the swap has settled, and with the swap landing before the window list knows,
         // those showed the backdrop (MEASUREMENTS.md, "a sibling window closing stalls the
         // crop"). Nothing is sent for the hold, whichever path it arrives on.
-        if self.suspected_at(host_now_us()) {
+        if self.suspected_at(now::<P>()) {
             self.counters.suspected.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -1055,14 +1047,14 @@ impl Shared {
             return;
         }
         if !self.frame_fits() {
-            self.dropped(host_now_us());
+            self.dropped(now::<P>());
             return;
         }
         // A keyframe the link cannot drain is put off and an LTR refresh encoded in its place: a
         // picture the client can decode, at a fraction of the bytes. The request stays pending, so
         // the keyframe follows as soon as the link can carry one or the valve opens. With it
         // deferred there is nothing urgent in this frame, so the cadence rung applies again.
-        let defer = want_keyframe && !self.keyframe_admitted(host_now_us());
+        let defer = want_keyframe && !self.keyframe_admitted(now::<P>());
         if defer && !due {
             return;
         }
@@ -1076,14 +1068,14 @@ impl Shared {
             }
         };
         self.last_encoded_us.store(frame.capture_ts_us, Ordering::Relaxed);
-        self.counters.submitted(frame.capture_ts_us, host_now_us());
+        self.counters.submitted(frame.capture_ts_us, now::<P>());
         let outcome = self
             .encoder
             .read()
             .as_ref()
-            .map(|encoder| encoder.encode(frame.image.as_cv(), frame.capture_ts_us, &options));
+            .map(|encoder| encoder.encode(&frame.image, frame.capture_ts_us, &options));
         if let Some(Err(e)) = outcome {
-            self.counters.returned(frame.capture_ts_us, host_now_us());
+            self.counters.returned(frame.capture_ts_us, now::<P>());
             tracing::warn!(stream = %self.id, error = %e, "encode failed");
             let mut pending = self.pending.lock();
             pending.keyframe |= options.force_keyframe;
@@ -1094,7 +1086,7 @@ impl Shared {
 
     /// ScreenCaptureKit delivered PCM: encode and send unless the source has gone quiet.
     fn on_audio(&self, chunk: &CapturedAudio) {
-        let now = host_now_us();
+        let now = now::<P>();
         let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
         let datagrams: Vec<Bytes> = packets
             .iter()
@@ -1114,7 +1106,7 @@ impl Shared {
             return None;
         }
         if audio.encoder.is_none() {
-            match OpusEncoder::new() {
+            match P::Audio::new() {
                 Ok(encoder) => audio.encoder = Some(encoder),
                 Err(e) => {
                     tracing::warn!(stream = %self.id, error = %e, "no Opus encoder; audio off");
@@ -1142,7 +1134,7 @@ impl Shared {
 
     /// VideoToolbox produced an access unit.
     fn on_packet(&self, packet: &EncodedPacket) {
-        let now = host_now_us();
+        let now = now::<P>();
         self.counters.returned(packet.pts_us, now);
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
@@ -1188,7 +1180,7 @@ impl Shared {
     }
 }
 
-impl Shared {
+impl<P: Platform> Shared<P> {
     /// A receiver report: acknowledged LTR tokens go to the encoder, the loss to the parity
     /// and rate controllers; a changed target is applied to the encoder.
     fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
@@ -1314,9 +1306,12 @@ const fn send_ms_lo(now_us: u64) -> u8 {
 }
 
 /// Build an encoder whose packets flow back into `shared`.
-fn build_encoder(shared: &Weak<Shared>, config: EncoderConfig) -> Result<Encoder, CodecError> {
+fn build_encoder<P: Platform>(
+    shared: &Weak<Shared<P>>,
+    config: EncoderConfig,
+) -> Result<P::Video, CodecError> {
     let weak = Weak::clone(shared);
-    Encoder::new(config, move |packet| {
+    P::Video::new(config, move |packet| {
         if let Some(shared) = weak.upgrade() {
             shared.on_packet(&packet);
         }
@@ -1363,17 +1358,17 @@ pub const fn crop_allowed(on_screen: bool, crop: Option<Crop>, occluded: bool) -
 }
 
 /// The crop a window wants right now, or `None` when it must go through the window filter.
-fn wanted_crop(
+fn wanted_crop<P: Platform>(
     id: slopty_core::WindowId,
-    state: &slopty_capture::WindowState,
+    state: &WindowState,
     point_scale: f64,
 ) -> Option<Crop> {
     let bounds = &state.bounds;
-    let crop = slopty_capture::display_enclosing(bounds).and_then(|display| {
-        let display = slopty_capture::display_bounds(display);
-        slopty_capture::crop_for(bounds, &display, point_scale).map(|(crop, _pixels)| crop)
+    let crop = Source::<P>::display_enclosing(bounds).and_then(|display| {
+        let display = Source::<P>::display_bounds(display);
+        crop_for(bounds, &display, point_scale).map(|(crop, _pixels)| crop)
     });
-    let occluded = slopty_capture::occluded(id, bounds, state.owner_pid);
+    let occluded = Source::<P>::occluded(id, bounds, state.owner_pid);
     crop_allowed(state.on_screen, crop, occluded)
 }
 
@@ -1391,44 +1386,50 @@ pub struct Probe {
 /// Read the target's geometry: one window-list description for the window's bounds, on-screen
 /// state and owner, the occlusion list above it, and the display under it. Blocking; timed into
 /// [`ScreenStats::bounds`], and the bounds are left where the cursor loop reads them.
-fn probe(target: CaptureTarget, point_scale: f64, crop: bool, shared: &Shared) -> Probe {
-    let started = host_now_us();
+fn probe<P: Platform>(
+    target: CaptureTarget,
+    point_scale: f64,
+    crop: bool,
+    shared: &Shared<P>,
+) -> Probe {
+    let started = now::<P>();
     let probe = match target {
         CaptureTarget::Display(_) => {
-            Probe { bounds: slopty_capture::target_bounds(target), window: None }
+            Probe { bounds: Source::<P>::target_bounds(target), window: None }
         }
-        CaptureTarget::Window(id) => match slopty_capture::window_state(id) {
+        CaptureTarget::Window(id) => match Source::<P>::window_state(id) {
             None => Probe { bounds: None, window: None },
             Some(state) => Probe {
                 bounds: Some(state.bounds),
-                window: crop.then(|| (state.on_screen, wanted_crop(id, &state, point_scale))),
+                window: crop.then(|| (state.on_screen, wanted_crop::<P>(id, &state, point_scale))),
             },
         },
     };
-    shared.counters.bounds.lock().push(host_now_us().saturating_sub(started));
+    shared.counters.bounds.lock().push(now::<P>().saturating_sub(started));
     *shared.bounds.lock() = probe.bounds;
     probe
 }
 
 /// Resolve a target, choosing the path for a window.
-fn resolve(
-    content: &Shareable,
+fn resolve<P: Platform>(
+    content: &Content<P>,
     target: CaptureTarget,
-) -> Result<(Target, WindowPath), ScreenError> {
+) -> Result<(Resolved<P>, WindowPath), ScreenError> {
     if let CaptureTarget::Window(id) = target
         && crop_windows()
-        && let Some(bounds) = slopty_capture::window_bounds(id)
-        && let Some(owner) = slopty_capture::window_owner_pid(id)
-        && let Some(candidate) = Target::resolve_crop(content, id)?
+        && let Some(bounds) = Source::<P>::window_bounds(id)
+        && let Some(owner) = Source::<P>::window_owner(id)
+        && let Some(candidate) = Source::<P>::resolve_crop(content, id)?
     {
-        let on_screen = slopty_capture::window_on_screen(id);
-        let occluded = slopty_capture::occluded(id, &bounds, owner);
-        if crop_allowed(on_screen, candidate.crop(), occluded).is_some() {
+        let on_screen = Source::<P>::window_on_screen(id);
+        let occluded = Source::<P>::occluded(id, &bounds, owner);
+        let crop = Source::<P>::crop(&candidate);
+        if crop_allowed(on_screen, crop, occluded).is_some() {
             return Ok((candidate, WindowPath::DisplayCrop));
         }
-        tracing::debug!(%id, on_screen, occluded, crop = ?candidate.crop(), "window filter");
+        tracing::debug!(%id, on_screen, occluded, ?crop, "window filter");
     }
-    Ok((Target::resolve(content, target)?, WindowPath::Filter))
+    Ok((Source::<P>::resolve(content, target)?, WindowPath::Filter))
 }
 
 /// What the stream is asking ScreenCaptureKit to become: a path and crop that are committed
@@ -1523,13 +1524,16 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     (capture, encoder)
 }
 
+/// One live stream on the platform this build serves.
+pub type ScreenStream = Pipeline<Native>;
+
 /// One live stream: capture → encode → packetize → the transport.
-pub struct ScreenStream {
+pub struct Pipeline<P: Platform> {
     id: StreamId,
     target: CaptureTarget,
     native: (u32, u32),
-    capture: Capture,
-    shared: Arc<Shared>,
+    capture: <Source<P> as CaptureSource>::Stream,
+    shared: Arc<Shared<P>>,
     capture_config: CaptureConfig,
     encoder_config: EncoderConfig,
     cursor: JoinHandle<()>,
@@ -1539,16 +1543,16 @@ pub struct ScreenStream {
     /// The accessibility observer on the window's application, for a window target of a
     /// trusted worker; `None` for a display, an untrusted process or an application that would
     /// not be observed. Dropped with the stream.
-    hide_watch: Option<HideWatch>,
+    hide_watch: Option<<Source<P> as CaptureSource>::HideWatch>,
     /// Client input aimed at this stream, in its pixel coordinates.
-    injector: Injector,
+    injector: P::Input,
     point_scale: f64,
     /// Last requested quality; re-applied when the target changes size.
     quality: Quality,
     /// What the client has been told about the source, and the frame history it follows.
     source: SourceTracker,
     /// The enumeration the target was resolved from; filters for a path switch come from it.
-    content: Arc<Shareable>,
+    content: Arc<Content<P>>,
     /// How a window is served right now (committed; see `transitions`).
     path: WindowPath,
     /// The path switch or crop move waiting for ScreenCaptureKit's completion callbacks.
@@ -1567,9 +1571,9 @@ pub struct ScreenStream {
 /// only a couple of refresh requests before it stops asking.
 pub const SOURCE_IDLE_AFTER: Duration = Duration::from_millis(400);
 
-impl std::fmt::Debug for ScreenStream {
+impl<P: Platform> std::fmt::Debug for Pipeline<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ScreenStream")
+        f.debug_struct("Pipeline")
             .field("id", &self.id)
             .field("target", &self.target)
             .field("capture", &self.capture_config)
@@ -1577,7 +1581,97 @@ impl std::fmt::Debug for ScreenStream {
     }
 }
 
-impl ScreenStream {
+impl<P: Platform> Pipeline<P> {
+    /// Enumerate shareable content, reusing an enumeration younger than `SHAREABLE_TTL`.
+    pub async fn shareable() -> Result<Arc<Content<P>>, ScreenError> {
+        let cached = SHAREABLE.lock().as_ref().and_then(|(taken, content)| {
+            (taken.elapsed() < SHAREABLE_TTL).then(|| Arc::clone(content))
+        });
+        if let Some(content) = cached.and_then(|c| c.downcast::<Content<P>>().ok()) {
+            return Ok(content);
+        }
+        let (tx, rx) = oneshot::channel();
+        Source::<P>::enumerate(move |result| {
+            let _receiver_gone = tx.send(result);
+        });
+        let content = Arc::new(rx.await.map_err(|_dropped| ScreenError::Closed)??);
+        let erased: Arc<dyn std::any::Any + Send + Sync> = Arc::<Content<P>>::clone(&content);
+        *SHAREABLE.lock() = Some((Instant::now(), erased));
+        Ok(content)
+    }
+
+    /// Start and stop one small capture of the first display; returns how long that took
+    /// ([`warm_up`]).
+    pub async fn warm_up() -> Result<Duration, ScreenError> {
+        let started = Instant::now();
+        let encoder = P::Video::new(
+            EncoderConfig {
+                width: 64,
+                height: 64,
+                codec: VideoCodec::Hevc,
+                fps: 1,
+                bitrate_bps: 100_000,
+            },
+            |_packet| {},
+        )?;
+        drop(encoder);
+        let content = Self::shareable().await?;
+        let display =
+            Source::<P>::displays(&content).into_iter().next().ok_or(ScreenError::Closed)?;
+        let resolved = Source::<P>::resolve(&content, CaptureTarget::Display(display.id))?;
+        let config = CaptureConfig {
+            width: 64,
+            height: 64,
+            fps: 1,
+            format: PixelFormat::Nv12Full,
+            queue_depth: 1,
+            audio: true,
+            crop: None,
+        };
+        let (tx, rx) = oneshot::channel();
+        let capture = Source::<P>::start(
+            &resolved,
+            &config,
+            |_frame| {},
+            Some(Box::new(|_chunk| {})),
+            |_stopped| {},
+            move |result| {
+                let _receiver_gone = tx.send(result);
+            },
+        )?;
+        rx.await.map_err(|_dropped| ScreenError::Closed)??;
+        let (tx, rx) = oneshot::channel();
+        Source::<P>::stop(&capture, move |result| {
+            let _receiver_gone = tx.send(result);
+        });
+        let _stopped = rx.await;
+        Ok(started.elapsed())
+    }
+
+    /// The `Listing` event for the current windows and displays.
+    pub async fn listing() -> Result<ScreenEvent, ScreenError> {
+        let content = Self::shareable().await?;
+        Ok(ScreenEvent::Listing {
+            windows: Source::<P>::windows(&content),
+            displays: Source::<P>::displays(&content),
+        })
+    }
+
+    /// Set a worker window's size in points ([`resize_window`]).
+    pub fn resize_window(
+        window: slopty_core::WindowId,
+        width: f64,
+        height: f64,
+    ) -> Result<(), ScreenError> {
+        let pid = Source::<P>::window_owner(window).ok_or(ScreenError::WindowGone)?;
+        let bounds = Source::<P>::window_bounds(window).ok_or(ScreenError::WindowGone)?;
+        let title = Source::<P>::window_title(window);
+        let target = TargetWindow { bounds, title };
+        Ok(Source::<P>::resize_window(pid, &target, width, height)?)
+    }
+}
+
+impl<P: Platform> Pipeline<P> {
     /// Resolve `target`, start capturing at `quality`, and return the `Opened` event to send.
     /// Datagrams go to `sink`; `on_event` hears [`StreamEvent::Stopped`] if ScreenCaptureKit
     /// ends the stream (window closed, permission revoked).
@@ -1594,11 +1688,12 @@ impl ScreenStream {
             Arc::new(move |e| on_event(StreamEvent::Stopped(e)))
         };
         let t0 = Instant::now();
-        let content = shareable().await?;
+        let content = Self::shareable().await?;
         let enumerated = t0.elapsed();
-        let (resolved, path) = resolve(&content, target)?;
-        let (mut capture_config, encoder_config) = configs(resolved.pixel_size(), &quality);
-        capture_config.crop = resolved.crop();
+        let (resolved, path) = resolve::<P>(&content, target)?;
+        let native = Source::<P>::pixel_size(&resolved);
+        let (mut capture_config, encoder_config) = configs(native, &quality);
+        capture_config.crop = Source::<P>::crop(&resolved);
 
         let shared = Arc::new(Shared {
             id,
@@ -1609,7 +1704,7 @@ impl ScreenStream {
             redundancy: Mutex::new(Redundancy::new()),
             rate: Mutex::new(RateController::new(encoder_config.bitrate_bps)),
             sent_at_report: AtomicU64::new(0),
-            last_push_us: AtomicU64::new(host_now_us()),
+            last_push_us: AtomicU64::new(now::<P>()),
             fps: std::sync::atomic::AtomicU16::new(capture_config.fps),
             fps_ceiling: std::sync::atomic::AtomicU16::new(capture_config.fps),
             last_encoded_us: AtomicU64::new(0),
@@ -1637,7 +1732,7 @@ impl ScreenStream {
         let (started_tx, started_rx) = oneshot::channel();
         let sink = Arc::clone(&shared);
         let audio_sink = Arc::clone(&shared);
-        let capture = Capture::start(
+        let capture = Source::<P>::start(
             &resolved,
             &capture_config,
             move |frame| sink.on_frame(&frame),
@@ -1661,9 +1756,8 @@ impl ScreenStream {
             "capture started"
         );
 
-        let native = resolved.pixel_size();
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
-        let point_scale = f64::from(resolved.point_scale());
+        let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         // Two tasks, not one. The beat is a promise about time and must never be behind work
         // that takes any: the pointer read in the cursor loop is a window-server round trip, and
         // those have been measured at 90 ms, three beats' worth.
@@ -1673,7 +1767,7 @@ impl ScreenStream {
         #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
         let backing = point_scale.round().clamp(1.0, 4.0) as u8;
         let shape = tokio::spawn(shape_loop(Arc::clone(&shared), backing, Arc::clone(&on_event)));
-        let hide_watch = hide_watch_for(id, target, &shared).await;
+        let hide_watch = hide_watch_for::<P>(id, target, &shared).await;
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
         let opened = ScreenEvent::Opened {
@@ -1685,7 +1779,7 @@ impl ScreenStream {
             scale,
             hdr: false,
         };
-        let injector = Injector::new(target, point_scale * zoom);
+        let injector = P::Input::new(target, point_scale * zoom);
         let stream = Self {
             id,
             target,
@@ -1737,14 +1831,14 @@ impl ScreenStream {
 
     /// What the client's feedback reaches without going through this stream's owner.
     #[must_use]
-    pub fn control(&self) -> StreamControl {
+    pub fn control(&self) -> StreamControl<P> {
         StreamControl(Arc::clone(&self.shared))
     }
 
     /// A handle on the counters for the daemon's registry.
     #[must_use]
     pub fn stats_handle(&self) -> StatsHandle {
-        StatsHandle(Arc::clone(&self.shared))
+        StatsHandle(Arc::<Shared<P>>::clone(&self.shared))
     }
 
     /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
@@ -1811,7 +1905,7 @@ impl ScreenStream {
         let (target, point_scale, shared) =
             (self.target, self.point_scale, Arc::clone(&self.shared));
         let crop = crop_windows();
-        move || probe(target, point_scale, crop, &shared)
+        move || probe::<P>(target, point_scale, crop, &shared)
     }
 
     /// Whether the target has drawn anything, when that answer changed since the client was
@@ -1845,7 +1939,7 @@ impl ScreenStream {
         self.stopped = true;
         tracing::info!(stream = %self.id, "window closed under a display crop: stopping");
         let id = self.id;
-        self.capture.stop(move |result| {
+        Source::<P>::stop(&self.capture, move |result| {
             if let Err(e) = result {
                 tracing::debug!(stream = %id, error = %e, "capture stop");
             }
@@ -1895,7 +1989,7 @@ impl ScreenStream {
         // and is woken by no re-application of the same kind of filter, only by a change of
         // kind (MEASUREMENTS.md, "a sibling window closing stalls the crop"). A false suspicion
         // comes back to the crop on the first tick after the hold.
-        let suspected = self.shared.suspected_at(host_now_us());
+        let suspected = self.shared.suspected_at(now::<P>());
         let mut wanted = if suspected { None } else { available };
         // Another window of the application went (`Shared::sibling_went`): no suspicion, but
         // a crop that keeps its filter is a crop that never gets another frame. One tick on
@@ -1922,7 +2016,7 @@ impl ScreenStream {
             (WindowPath::DisplayCrop, None) => {
                 // To the window filter: clear the crop first, a `sourceRect` on a window
                 // stream would be read in the window's own space.
-                let target = match Target::resolve(&self.content, self.target) {
+                let target = match Source::<P>::resolve(&self.content, self.target) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::warn!(stream = %self.id, error = %e, "window filter");
@@ -1941,7 +2035,7 @@ impl ScreenStream {
                 }
             }
             (WindowPath::Filter, Some(crop)) => {
-                let target = match Target::resolve_crop(&self.content, id) {
+                let target = match Source::<P>::resolve_crop(&self.content, id) {
                     Ok(Some(t)) => t,
                     Ok(None) => return,
                     Err(e) => {
@@ -1966,7 +2060,7 @@ impl ScreenStream {
         let id = self.id;
         let transitions = self.transitions.clone();
         let config = CaptureConfig { crop, ..self.capture_config };
-        self.capture.update(&config, move |result| {
+        Source::<P>::update(&self.capture, &config, move |result| {
             if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture update failed");
             }
@@ -1975,10 +2069,10 @@ impl ScreenStream {
     }
 
     /// Swap the live stream's filter; the completion lands in the transition.
-    fn retarget(&self, target: &Target) {
+    fn retarget(&self, target: &Resolved<P>) {
         let id = self.id;
         let transitions = self.transitions.clone();
-        self.capture.retarget(target, move |result| {
+        Source::<P>::retarget(&self.capture, target, move |result| {
             if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture retarget failed");
             }
@@ -2008,7 +2102,7 @@ impl ScreenStream {
         self.shared.apply_cadence(target);
         self.shared.pending.lock().keyframe = true;
         let id = self.id;
-        self.capture.update(&capture_config, move |result| {
+        Source::<P>::update(&self.capture, &capture_config, move |result| {
             if let Err(e) = result {
                 tracing::warn!(stream = %id, error = %e, "capture reconfigure failed");
             }
@@ -2080,7 +2174,7 @@ impl ScreenStream {
         self.beat.abort();
         drop(self.hide_watch.take());
         let (tx, rx) = oneshot::channel();
-        self.capture.stop(move |result| {
+        Source::<P>::stop(&self.capture, move |result| {
             let _receiver_gone = tx.send(result);
         });
         if let Ok(Err(e)) = rx.await {
@@ -2102,36 +2196,32 @@ pub fn resize_window(
     width: f64,
     height: f64,
 ) -> Result<(), ScreenError> {
-    let pid = slopty_capture::window_owner_pid(window).ok_or(ScreenError::WindowGone)?;
-    let bounds = slopty_capture::window_bounds(window).ok_or(ScreenError::WindowGone)?;
-    let title = slopty_capture::window_title(window);
-    let target = slopty_capture::TargetWindow { bounds, title };
-    Ok(slopty_capture::resize_window(pid, &target, width, height)?)
+    ScreenStream::resize_window(window, width, height)
 }
 
 /// Put a window target's application under the accessibility watch, off the runtime (the
 /// registration is a few window-server round trips). A display has no application to watch;
 /// a worker that is not trusted for accessibility, or an application that will not be observed,
 /// gets the window-list check alone, and says so once.
-async fn hide_watch_for(
+async fn hide_watch_for<P: Platform>(
     id: StreamId,
     target: CaptureTarget,
-    shared: &Arc<Shared>,
-) -> Option<HideWatch> {
+    shared: &Arc<Shared<P>>,
+) -> Option<<Source<P> as CaptureSource>::HideWatch> {
     let CaptureTarget::Window(window) = target else {
         return None;
     };
     let weak = Arc::downgrade(shared);
     let started = tokio::task::spawn_blocking(move || {
-        let pid = slopty_capture::window_owner_pid(window)?;
-        let bounds = slopty_capture::window_bounds(window)?;
-        let title = slopty_capture::window_title(window);
-        let target = slopty_capture::TargetWindow { bounds, title };
-        Some(HideWatch::start(pid, target, move |went| {
+        let pid = Source::<P>::window_owner(window)?;
+        let bounds = Source::<P>::window_bounds(window)?;
+        let title = Source::<P>::window_title(window);
+        let target = TargetWindow { bounds, title };
+        Some(Source::<P>::watch_hides(pid, target, move |went| {
             if let Some(shared) = weak.upgrade() {
                 match went {
-                    slopty_capture::Went::Target => shared.suspect(host_now_us()),
-                    slopty_capture::Went::Other => shared.sibling_went(),
+                    Went::Target => shared.suspect(now::<P>()),
+                    Went::Other => shared.sibling_went(),
                 }
             }
         }))
@@ -2139,7 +2229,8 @@ async fn hide_watch_for(
     .await;
     match started {
         Ok(Some(Ok(watch))) => {
-            tracing::debug!(stream = %id, targeted = watch.targeted(), "accessibility hide watch on");
+            let targeted = Source::<P>::watch_targeted(&watch);
+            tracing::debug!(stream = %id, targeted, "accessibility hide watch on");
             Some(watch)
         }
         Ok(Some(Err(e))) => {
@@ -2159,7 +2250,7 @@ async fn hide_watch_for(
 /// while video flows every datagram moves that moment on, so the task wakes at most once per
 /// [`HEARTBEAT_AFTER`]. Runs until the task is aborted by [`ScreenStream::close`] or the
 /// connection is gone.
-async fn beat_loop(shared: Arc<Shared>) {
+async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
     let mut beats: u32 = 0;
     let mut last_beat_us: Option<u64> = None;
     let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
@@ -2167,7 +2258,7 @@ async fn beat_loop(shared: Arc<Shared>) {
     // this the beat has not merely slipped, it has failed at the one thing it is for.
     let late_beat_us = heartbeat_after_us.saturating_mul(4);
     while !shared.sink.is_closed() {
-        let now = host_now_us();
+        let now = now::<P>();
         // The beat itself counts as traffic even when the transport refused it, so a refusal is
         // retried a period later instead of spun on.
         let last_out = shared.last_push_us.load(Ordering::Relaxed).max(last_beat_us.unwrap_or(0));
@@ -2203,13 +2294,13 @@ const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
 /// Where the pointer is over the target, sent when it moves.
 ///
 /// A still pointer costs one read of the event system's move counters a tick
-/// ([`slopty_capture::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
+/// ([`CaptureSource::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
 /// for when the counters moved, and the target's bounds (which move a still pointer across the
 /// picture) are the ones the owner's geometry probe last read. The pointer read is a
 /// window-server round trip, so it runs on the blocking pool: what this loop must not do is
 /// occupy a runtime worker, because [`beat_loop`] needs one on time (MEASUREMENTS.md, "the beat
 /// behind the geometry call").
-async fn cursor_loop(shared: Arc<Shared>, zoom: f64, point_scale: f64) {
+async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, zoom: f64, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pointer: Option<(u32, (f64, f64))> = None;
@@ -2218,11 +2309,11 @@ async fn cursor_loop(shared: Arc<Shared>, zoom: f64, point_scale: f64) {
     while !shared.sink.is_closed() {
         ticks.tick().await;
         let Some(rect) = *shared.bounds.lock() else { continue };
-        let moves = slopty_capture::pointer_moves();
+        let moves = Source::<P>::pointer_moves();
         let (px, py) = match pointer {
             Some((seen, at)) if seen == moves => at,
             _moved_or_unread => {
-                let Ok(at) = tokio::task::spawn_blocking(slopty_capture::pointer_location).await
+                let Ok(at) = tokio::task::spawn_blocking(Source::<P>::pointer_location).await
                 else {
                     return;
                 };
@@ -2243,14 +2334,8 @@ async fn cursor_loop(shared: Arc<Shared>, zoom: f64, point_scale: f64) {
         }
         last = Some(sample);
         seq = seq.wrapping_add(1);
-        let datagram = cursor_datagram(
-            shared.id,
-            seq,
-            send_ms_lo(host_now_us()),
-            sample.0,
-            sample.1,
-            sample.2,
-        );
+        let datagram =
+            cursor_datagram(shared.id, seq, send_ms_lo(now::<P>()), sample.0, sample.1, sample.2);
         shared.send(&[datagram]);
     }
 }
@@ -2259,8 +2344,8 @@ async fn cursor_loop(shared: Arc<Shared>, zoom: f64, point_scale: f64) {
 /// report each change through `on_event`. Its own task: the first read in a process takes
 /// seconds (`slopty_capture::warm_cursor` pays that at start-up), and a read must never
 /// hold the position loop.
-async fn shape_loop(
-    shared: Arc<Shared>,
+async fn shape_loop<P: Platform>(
+    shared: Arc<Shared<P>>,
     backing: u8,
     on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>,
 ) {
@@ -2273,7 +2358,7 @@ async fn shape_loop(
             continue;
         }
         let Ok(read) =
-            tokio::task::spawn_blocking(move || slopty_capture::cursor_shape(backing)).await
+            tokio::task::spawn_blocking(move || Source::<P>::cursor_shape(backing)).await
         else {
             return;
         };

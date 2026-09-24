@@ -437,6 +437,12 @@ impl Peer<'_> {
             ClientMsg::WatchFiles { paths } => {
                 self.watch_files.send_replace(paths);
             }
+            ClientMsg::WriteFile { path, text, base_modified_ms } => {
+                let (client, out) = (self.client, self.out.clone());
+                self.tasks.spawn(async move {
+                    crate::files::write(client, &out, path, text, base_modified_ms).await;
+                });
+            }
             ClientMsg::Clip(msg) => self.clip(msg).await,
             ClientMsg::Xfer(msg) => self.xfer(msg).await,
             ClientMsg::InstallHooks => {

@@ -31,10 +31,16 @@ pub enum ItemKind {
         /// Markdown.
         text: String,
     },
-    /// A file on the worker, read-only: the text comes over `WorkerMsg::File`, not the registry.
+    /// A text file on the worker, open to edit: the text comes over `WorkerMsg::File`, not the
+    /// registry, and goes back as `ClientMsg::WriteFile`.
     File {
         /// Absolute path on the worker.
         path: String,
+    },
+    /// A web page, usually a server running on the worker reached through a forwarded port.
+    Browser {
+        /// The address, as the client opens it (`http://localhost:5173/`).
+        url: String,
     },
 }
 

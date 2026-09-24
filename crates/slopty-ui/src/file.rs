@@ -1,63 +1,123 @@
-//! A file card on the canvas: a file on the worker, read-only, as the agent left it.
+//! A file tile: a text file on the worker, open to edit.
 //!
-//! The item (`ItemKind::File`) names the path; the text is not in the document. Each client
-//! asks the worker for it (`ClientMsg::ReadFile`) when the card appears and again when an agent's
-//! edit or write lands, and draws what came back: line-numbered mono rows in a `uniform_list`
-//! (a 2 000-line file lays out only the rows on screen), or one line saying why there is
-//! nothing to draw. A read that follows one (an agent's edit landed, "reload" pressed) tints
-//! the lines that changed and scrolls the first of them into view, so the card shows what the
-//! agent just did without the human hunting for it.
-
-use std::sync::Arc;
+//! The item (`ItemKind::File`) names the path; the text is not in the registry. Each client
+//! asks the worker for it (`ClientMsg::ReadFile`) when the tile appears, and the worker's watch
+//! sends it again whenever the file changes on disk. The text sits in gpui-kit's code editor,
+//! coloured by [`crate::highlight::editor`]. ⌘S sends it back whole (`ClientMsg::WriteFile`)
+//! with the modification time the edit started from, so the worker refuses to write over a
+//! change made meanwhile (`WriteResult::Conflict`); the tile then offers, inline, to reload the
+//! disk's text or overwrite it.
+//!
+//! A change on disk while the tile is clean reloads it without a word, tints the lines that
+//! changed and scrolls to the first (an agent's edit shows where it landed). While the tile is
+//! dirty the same change marks the conflict instead, and the edit is kept. A file the worker
+//! clipped (past `FILE_LINES` or `FILE_BYTES`) opens read-only, with the reason in one line.
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
-    UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, RopeExt as _,
+};
 use slopty_core::ItemId;
-use slopty_proto::file::FileRead;
+use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead, WriteResult};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
-use crate::highlight::{self, Span, Syntax};
+use crate::highlight::Syntax;
 use crate::kit::FIND_PLACEHOLDER;
-use crate::terminal::{CloseFind, FindNext, FindPrev};
+use crate::terminal::{CloseFind, Find, FindNext, FindPrev};
 
-/// How the reading line moves on a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineMove {
-    /// By this many lines (negative up).
-    Lines(i64),
-    /// By this many pages of visible rows (negative up).
-    Pages(i64),
-    /// To the first line.
-    First,
-    /// To the last line.
-    Last,
+#[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
+mod actions {
+    gpui::actions!(
+        file,
+        [
+            /// Save the file tile's text to the worker.
+            SaveFile,
+        ]
+    );
 }
+pub use actions::SaveFile;
 
-/// What a file card tells the canvas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The key context of a file tile; ⌘S is bound in it.
+pub const CTX: &str = "FileEditor";
+
+/// What a file tile's bar says when the disk changed under an edit.
+pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
+/// The bar's way out that drops the edit.
+pub(crate) const RELOAD: &str = "Reload";
+/// The bar's way out that keeps the edit.
+pub(crate) const OVERWRITE: &str = "Overwrite";
+
+/// What a file tile tells the workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileViewEvent {
-    /// The find bar closed (Esc, ✕): the keyboard should go back to the canvas.
+    /// The find bar closed (Esc, ✕): the keyboard should go back to the editor.
     FindClosed,
+    /// ⌘S or "Overwrite": write this text to the file.
+    Save {
+        /// The whole text, final newline included when the file had one.
+        text: String,
+        /// The version the edit started from; `None` overwrites whatever is there.
+        base_modified_ms: Option<u64>,
+    },
+    /// "Reload": the edit is dropped; the file is to be read again.
+    Reload,
 }
 
 impl EventEmitter<FileViewEvent> for FileView {}
 
-/// The open find bar of a file card.
+/// A version of the file: what the worker sent, or what this tile saved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Version {
+    /// The text as the worker sends it, without the file's final newline.
+    text: String,
+    /// Whether the file ends with a newline, which the worker's text leaves off.
+    newline: bool,
+    /// Its modification time on disk, milliseconds since the Unix epoch.
+    modified_ms: u64,
+}
+
+impl Version {
+    /// The version a text read describes; the newline is exact because an unclipped read
+    /// drops exactly one trailing newline, and the size on disk says whether there was one.
+    fn of(text: &str, more_lines: u32, size: u64, modified_ms: u64) -> Self {
+        let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        Self {
+            text: text.to_owned(),
+            newline: more_lines == 0 && size == len.saturating_add(1),
+            modified_ms,
+        }
+    }
+
+    /// The bytes the file holds for this text.
+    fn file_text(&self, text: &str) -> String {
+        if self.newline { format!("{text}\n") } else { text.to_owned() }
+    }
+}
+
+/// Why the tile's text and the file disagree, with the way out offered inline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Trouble {
+    /// The file changed on disk under an unsaved edit (or refused a save because it had).
+    Conflict,
+    /// The worker could not write the file; its word.
+    Failed(String),
+}
+
+/// The open find bar of a file tile.
 struct FileSearch {
     input: Entity<InputState>,
     /// What the hits are for.
     needle: String,
-    /// Lines (indices into the card's lines) holding the needle, in order.
+    /// Lines (0-based) holding the needle, in order.
     hits: Vec<usize>,
-    /// Index into `hits` of the one the card is on.
+    /// Index into `hits` of the one the tile is on.
     current: Option<usize>,
     _subscription: Subscription,
 }
@@ -66,7 +126,7 @@ struct FileSearch {
 /// terminal's rule: a needle with no capital matches in any case, one with a capital as
 /// typed.
 #[must_use]
-pub fn find_hits(lines: &[SharedString], needle: &str) -> Vec<usize> {
+pub fn find_hits<S: AsRef<str>>(lines: &[S], needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -76,42 +136,66 @@ pub fn find_hits(lines: &[SharedString], needle: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, line)| {
+            let line = line.as_ref();
             if sensitive { line.contains(&*needle) } else { line.to_lowercase().contains(&needle) }
         })
         .map(|(ix, _)| ix)
         .collect()
 }
 
+/// Why a read cannot be edited, when the worker clipped it: a save would cut the file there.
+#[must_use]
+pub fn clipped_reason(more_lines: u32, size: u64) -> Option<String> {
+    if size > FILE_BYTES {
+        Some(format!("Read-only: larger than {}", size_label(FILE_BYTES)))
+    } else if more_lines > 0 {
+        Some(format!("Read-only: longer than {FILE_LINES} lines"))
+    } else {
+        None
+    }
+}
+
 /// The view of one file item.
 pub struct FileView {
     id: ItemId,
     path: String,
-    /// What the worker said, `None` until it answers.
+    /// What the worker last said, `None` until it answers.
     read: Option<FileRead>,
-    /// The text's lines, split once when it arrives.
-    lines: Vec<SharedString>,
-    /// Lines (indices into `lines`) the last read changed against the one before it, in
-    /// order; empty on a first read and when nothing moved.
+    /// The version the edit started from, once there is text.
+    base: Option<Version>,
+    /// The text sent to be written, until the worker answers.
+    saving: Option<Version>,
+    /// What stops a save, shown as a line under the header with its way out.
+    trouble: Option<Trouble>,
+    /// The next read replaces the text whatever the edit ("Reload" was pressed).
+    discard: bool,
+    /// Why the text cannot be edited (the worker clipped it); none when it can.
+    read_only: Option<String>,
+    editor: Entity<EditorState>,
+    /// Text the editor takes at the next frame: replacing it needs the window, which a
+    /// worker's message does not come with.
+    pending_text: Option<String>,
+    /// A line (0-based) for the caret once the text is in.
+    pending_line: Option<usize>,
+    /// Whether the editor holds something other than the base.
+    dirty: bool,
+    /// Lines (0-based) the last reload changed; empty on a first read and after an edit.
     changed: Vec<usize>,
-    /// The line (index into `lines`) the card was opened at: an edit's place in the file.
+    /// The tints over the changed lines and the find's hits.
+    marks: Option<RangeDecorationCollection>,
+    /// The line the tile was opened at: an edit's place in the file.
     focus: Option<usize>,
     zoom: f32,
     /// Inner padding at zoom 1 (the theme's base spacing).
     pad: f32,
-    /// Text size at zoom 1 (the theme's small size).
+    /// Text size at zoom 1 (the theme's mono size).
     text_size: f32,
     theme: Theme,
-    scroll: UniformListScrollHandle,
     /// The find bar, while open.
     search: Option<FileSearch>,
     /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
     syntax: Option<Syntax>,
-    /// One span list per line, once the background parse of the current text lands.
-    spans: Option<Arc<[Vec<Span>]>>,
-    /// Which text the running parse is for: a read that lands mid-parse drops the old result.
-    generation: u64,
-    /// The parse in flight, dropped (cancelled) with the card.
-    highlighting: Option<Task<()>>,
+    _editor_events: Subscription,
 }
 
 impl std::fmt::Debug for FileView {
@@ -119,112 +203,325 @@ impl std::fmt::Debug for FileView {
         f.debug_struct("FileView")
             .field("id", &self.id)
             .field("path", &self.path)
-            .field("lines", &self.lines.len())
-            .field("zoom", &self.zoom)
+            .field("dirty", &self.dirty)
+            .field("trouble", &self.trouble)
             .finish_non_exhaustive()
     }
 }
 
 impl FileView {
-    /// A card for `path`, waiting on the worker.
-    #[must_use]
-    pub fn new(id: ItemId, path: &str, theme: Theme) -> Self {
+    /// A tile for `path`, waiting on the worker.
+    pub fn new(
+        id: ItemId,
+        path: &str,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx).folding(false).soft_wrap(false);
+            state.set_searchable(false, cx);
+            state
+        });
+        let events = cx.subscribe(&editor, |this, _editor, event, cx| match event {
+            InputEvent::Change => this.edited(cx),
+            InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
+        });
         Self {
             id,
             path: path.to_owned(),
             read: None,
-            lines: Vec::new(),
+            base: None,
+            saving: None,
+            trouble: None,
+            discard: false,
+            read_only: None,
+            editor,
+            pending_text: None,
+            pending_line: None,
+            dirty: false,
             changed: Vec::new(),
+            marks: None,
             focus: None,
             zoom: 1.0,
             pad: 8.0,
-            text_size: 12.0,
+            text_size: 13.0,
             theme,
-            scroll: UniformListScrollHandle::new(),
             search: None,
             syntax: None,
-            spans: None,
-            generation: 0,
-            highlighting: None,
+            _editor_events: events,
         }
     }
 
-    /// The grammar's name ("Rust") once the text is coloured; none before the parse lands or
-    /// for a file the bundle cannot colour.
+    /// Item this tile belongs to.
+    #[must_use]
+    pub const fn id(&self) -> ItemId {
+        self.id
+    }
+
+    /// The path on the worker.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// What the worker last said, once it has.
+    #[must_use]
+    pub const fn read(&self) -> Option<&FileRead> {
+        self.read.as_ref()
+    }
+
+    /// The editor's text as it stands (the text about to arrive, while one is pending).
+    #[must_use]
+    pub fn text(&self, cx: &gpui::App) -> String {
+        self.pending_text.clone().unwrap_or_else(|| self.editor.read(cx).value().to_string())
+    }
+
+    /// The text's lines, as the editor holds them.
+    #[must_use]
+    pub fn lines(&self, cx: &gpui::App) -> Vec<String> {
+        self.text(cx).split('\n').map(str::to_owned).collect()
+    }
+
+    /// Lines in the editor.
+    #[must_use]
+    pub fn line_count(&self, cx: &gpui::App) -> usize {
+        match &self.pending_text {
+            Some(text) => text.split('\n').count(),
+            None => self.editor.read(cx).text().lines_len(),
+        }
+    }
+
+    /// Whether the editor holds an edit not yet saved.
+    #[must_use]
+    pub const fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Whether a save is waiting on the worker.
+    #[must_use]
+    pub const fn saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// What stops a save, if anything.
+    #[must_use]
+    pub const fn trouble(&self) -> Option<&Trouble> {
+        self.trouble.as_ref()
+    }
+
+    /// Why the text cannot be edited, when it cannot.
+    #[must_use]
+    pub fn read_only(&self) -> Option<&str> {
+        self.read_only.as_deref()
+    }
+
+    /// The lines the last reload changed (0-based).
+    #[must_use]
+    pub fn changed(&self) -> &[usize] {
+        &self.changed
+    }
+
+    /// The grammar's name ("Rust"), for a file the bundle can colour.
     #[must_use]
     pub fn coloured_as(&self) -> Option<&'static str> {
-        self.spans.as_ref().and(self.syntax).map(Syntax::name)
+        self.syntax.map(Syntax::name)
     }
 
-    /// Parse `text` on a background thread and take the spans when they land, if this is
-    /// still the text they are for.
-    fn recolour(&mut self, text: Arc<str>, cx: &Context<Self>) {
-        self.generation = self.generation.wrapping_add(1);
-        self.spans = None;
-        let first = text.split('\n').next().unwrap_or_default();
-        self.syntax = Syntax::for_path(&self.path, first);
-        let Some(syntax) = self.syntax else {
-            self.highlighting = None;
-            return;
-        };
-        let generation = self.generation;
-        let parsing = cx.background_spawn(async move { highlight::spans(&text, syntax) });
-        self.highlighting = Some(cx.spawn(async move |this, cx| {
-            let spans = parsing.await;
-            let _gone = this.update(cx, |view, cx| {
-                if view.generation == generation {
-                    view.spans = Some(spans.into());
-                    cx.notify();
-                }
-            });
-        }));
+    /// The editor, for tests and the self-test socket.
+    #[must_use]
+    pub const fn editor(&self) -> &Entity<EditorState> {
+        &self.editor
     }
 
-    /// ↑/↓, ⇞/⇟, Home/End with the card active: move the reading line (the tinted one an
-    /// edit opened the card at, which "edit" opens the editor on) and keep it in view. From
-    /// no line, the first key lands on the top of what is shown.
-    pub fn move_line(&mut self, mv: LineMove, cx: &mut Context<Self>) {
-        let count = self.lines.len();
-        if count == 0 {
-            return;
+    /// The caret's line, 1-based.
+    #[must_use]
+    pub fn reading_line(&self, cx: &gpui::App) -> Option<u32> {
+        let line = self.pending_line.unwrap_or_else(|| {
+            usize::try_from(self.editor.read(cx).cursor_position().line).unwrap_or(0)
+        });
+        u32::try_from(line.saturating_add(1)).ok()
+    }
+
+    /// Give the editor the keyboard.
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.focus(window, cx));
+    }
+
+    /// Whether the editor has the keyboard.
+    #[must_use]
+    pub fn focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        gpui::Focusable::focus_handle(self.editor.read(cx), cx).contains_focused(window, cx)
+    }
+
+    /// Land the caret on `line` (1-based, as a tool names it) and scroll there, now if the
+    /// text is here, else when it arrives. `None` leaves the caret.
+    pub fn focus_line(&mut self, line: Option<u32>, cx: &mut Context<Self>) {
+        self.focus = line.and_then(|l| usize::try_from(l).ok()).map(|l| l.saturating_sub(1));
+        if self.focus.is_some() {
+            self.pending_line = self.focus;
         }
-        let last = count.saturating_sub(1);
-        let at = i64::try_from(self.focus.unwrap_or_else(|| self.top_line())).unwrap_or(0);
-        let to = match (mv, self.focus) {
-            (LineMove::Lines(_) | LineMove::Pages(_), None) => at,
-            (LineMove::Lines(n), Some(_)) => at.saturating_add(n),
-            (LineMove::Pages(n), Some(_)) => at.saturating_add(n.saturating_mul(self.page_lines())),
-            (LineMove::First, _) => 0,
-            (LineMove::Last, _) => i64::try_from(last).unwrap_or(i64::MAX),
-        };
-        let to = usize::try_from(to.max(0)).unwrap_or(0).min(last);
-        self.focus = Some(to);
-        self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
         cx.notify();
     }
 
-    /// The topmost row shown, from the list's last layout (a pending scroll counts).
-    fn top_line(&self) -> usize {
-        let state = self.scroll.0.borrow();
-        state
-            .deferred_scroll_to_item
-            .as_ref()
-            .map_or_else(|| state.base_handle.logical_scroll_top().0, |d| d.item_index)
+    /// The editor's text changed by a keystroke (a replace from here emits nothing).
+    fn edited(&mut self, cx: &mut Context<Self>) {
+        let dirty =
+            self.base.as_ref().is_some_and(|base| *self.editor.read(cx).text() != *base.text);
+        if !self.changed.is_empty() {
+            // The tint said what the last reload did; once the human edits, it says nothing.
+            self.changed.clear();
+            self.remark(cx);
+        }
+        if self.trouble.as_ref().is_some_and(|t| matches!(t, Trouble::Failed(_))) {
+            self.trouble = None;
+        }
+        if self.search.is_some() {
+            self.refresh_hits(cx);
+        }
+        if dirty != self.dirty {
+            self.dirty = dirty;
+        }
+        cx.notify();
     }
 
-    /// Rows the list shows at once, from its last layout; one before any.
-    fn page_lines(&self) -> i64 {
-        let state = self.scroll.0.borrow();
-        let rows = state.last_item_size.map_or(1.0, |size| {
-            let row = f32::from(size.item.height).max(1.0);
-            (f32::from(state.base_handle.bounds().size.height) / row).floor()
-        });
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a floored row count clamped to [1, 10 000] fits an i64 exactly"
-        )]
-        let rows = rows.clamp(1.0, 10_000.0) as i64;
-        rows
+    /// The worker read the file (the first time, after a change on disk, or on "Reload").
+    pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
+        match &read {
+            FileRead::Text { text, more_lines, size, modified_ms } => {
+                let incoming = Version::of(text, *more_lines, *size, *modified_ms);
+                self.read_only = clipped_reason(*more_lines, *size);
+                self.take_version(incoming, cx);
+            }
+            FileRead::Binary { .. } | FileRead::Missing { .. } => {
+                if self.dirty && !self.discard {
+                    // Gone or turned binary under an edit: the edit stays, "Overwrite" puts
+                    // it back.
+                    self.trouble = Some(Trouble::Conflict);
+                } else {
+                    self.base = None;
+                    self.dirty = false;
+                    self.discard = false;
+                    self.trouble = None;
+                }
+            }
+        }
+        self.read = Some(read);
+        cx.notify();
+    }
+
+    /// A text version arrived: taken silently, kept as the new base under an edit that
+    /// already matches it, or marked as a conflict with the edit.
+    fn take_version(&mut self, incoming: Version, cx: &mut Context<Self>) {
+        let current = self.text(cx);
+        let clean = !self.dirty || self.discard;
+        if clean {
+            if self.base.as_ref() != Some(&incoming) || self.discard {
+                self.replace(incoming, cx);
+            }
+            return;
+        }
+        let ours = self.saving.as_ref().is_some_and(|s| s.text == incoming.text);
+        if current == incoming.text || ours {
+            // The disk has what this tile has (or what it just sent): nothing to settle.
+            self.dirty = current != incoming.text;
+            self.base = Some(incoming);
+            self.trouble = None;
+            return;
+        }
+        let stale = self
+            .base
+            .as_ref()
+            .is_some_and(|b| b.text == incoming.text && incoming.modified_ms <= b.modified_ms);
+        if !stale {
+            self.trouble = Some(Trouble::Conflict);
+        }
+    }
+
+    /// The text becomes `incoming`, the edit (if any) dropped.
+    fn replace(&mut self, incoming: Version, cx: &mut Context<Self>) {
+        let reload = self.base.is_some();
+        let old = self.base.as_ref().map(|b| b.text.clone()).unwrap_or_default();
+        self.changed =
+            if reload && !self.discard { changed_lines(&old, &incoming.text) } else { Vec::new() };
+        // A changed line is the reason for this read; the opening line is where a first
+        // text lands.
+        self.pending_line =
+            self.changed.first().copied().or(if reload { None } else { self.focus });
+        if self.syntax.is_none() || !reload {
+            let first = incoming.text.split('\n').next().unwrap_or_default();
+            self.syntax = Syntax::for_path(&self.path, first);
+        }
+        self.pending_text = Some(incoming.text.clone());
+        self.base = Some(incoming);
+        self.dirty = false;
+        self.discard = false;
+        self.trouble = None;
+        cx.notify();
+    }
+
+    /// ⌘S: send the edit, based on the version it started from. Nothing when there is
+    /// nothing to save, the text is clipped, a save is already out, or a conflict is waiting
+    /// for "Reload" or "Overwrite".
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        if !self.dirty
+            || self.read_only.is_some()
+            || self.saving.is_some()
+            || self.trouble == Some(Trouble::Conflict)
+        {
+            return;
+        }
+        let Some(base) = self.base.clone() else { return };
+        self.send(Some(base.modified_ms), cx);
+    }
+
+    /// "Overwrite": write the edit over whatever the disk has now.
+    pub fn overwrite(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() || self.saving.is_some() {
+            return;
+        }
+        self.trouble = None;
+        self.send(None, cx);
+    }
+
+    fn send(&mut self, base_modified_ms: Option<u64>, cx: &mut Context<Self>) {
+        let text = self.text(cx);
+        let newline = self.base.as_ref().is_some_and(|b| b.newline);
+        let sent = Version { text, newline, modified_ms: base_modified_ms.unwrap_or(0) };
+        let file = sent.file_text(&sent.text);
+        tracing::debug!(path = %self.path, bytes = file.len(), ?base_modified_ms, "save file");
+        self.saving = Some(sent);
+        cx.emit(FileViewEvent::Save { text: file, base_modified_ms });
+        cx.notify();
+    }
+
+    /// "Reload": drop the edit and take the disk's text.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.discard = true;
+        self.trouble = None;
+        cx.emit(FileViewEvent::Reload);
+        cx.notify();
+    }
+
+    /// The worker answered a save.
+    pub fn written(&mut self, result: WriteResult, cx: &mut Context<Self>) {
+        let Some(sent) = self.saving.take() else { return };
+        match result {
+            WriteResult::Saved { modified_ms, .. } => {
+                self.dirty = self.text(cx) != sent.text;
+                self.base = Some(Version { modified_ms, ..sent });
+                self.trouble = None;
+            }
+            WriteResult::Conflict { modified_ms } => {
+                tracing::info!(path = %self.path, modified_ms, "save refused: changed on disk");
+                self.trouble = Some(Trouble::Conflict);
+            }
+            WriteResult::Failed { error } => {
+                tracing::warn!(path = %self.path, %error, "save failed");
+                self.trouble = Some(Trouble::Failed(error));
+            }
+        }
+        cx.notify();
     }
 
     /// ⌘F: open the find bar, or put the caret back in it with the text selected.
@@ -255,8 +552,8 @@ impl FileView {
         cx.notify();
     }
 
-    /// Open the find bar on `needle` (a find in every card chose this one): the field holds
-    /// it and the card lands on the first hit.
+    /// Open the find bar on `needle` (a find in every tile chose this one): the field holds
+    /// it and the tile lands on the first hit.
     pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.find(window, cx);
         let Some(search) = &mut self.search else { return };
@@ -271,15 +568,10 @@ impl FileView {
         self.search.as_ref().map(|s| s.needle.as_str())
     }
 
-    /// The text's lines as drawn (empty until the worker answers).
-    #[must_use]
-    pub fn lines(&self) -> &[SharedString] {
-        &self.lines
-    }
-
-    /// Esc or ✕ in the find bar: close it; the canvas takes the keyboard back.
+    /// Esc or ✕ in the find bar: close it; the editor takes the keyboard back.
     pub fn close_find(&mut self, cx: &mut Context<Self>) {
         if self.search.take().is_some() {
+            self.remark(cx);
             cx.emit(FileViewEvent::FindClosed);
             cx.notify();
         }
@@ -291,22 +583,12 @@ impl FileView {
         self.search.is_some()
     }
 
-    /// The line the human is on, 1-based, for an editor: the current hit while finding, else
-    /// the line the card opened at, else none.
-    #[must_use]
-    pub fn reading_line(&self) -> Option<u32> {
-        let hit = self.search.as_ref().and_then(|s| s.current.and_then(|c| s.hits.get(c).copied()));
-        hit.or(self.focus).and_then(|ix| u32::try_from(ix.saturating_add(1)).ok())
-    }
-
-    /// The lines found (indices into what is drawn) and which one the card is on.
+    /// The lines found (0-based) and which one the tile is on.
     #[must_use]
     pub fn hits(&self) -> Option<(&[usize], Option<usize>)> {
         self.search.as_ref().map(|s| (s.hits.as_slice(), s.current))
     }
 
-    /// The field changed: the hits follow, the card landing on the first one at or after
-    /// the line it opened at (an edit's neighbourhood is where a search usually starts).
     fn search_changed(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
         let needle = search.input.read(cx).value().to_string();
@@ -317,17 +599,20 @@ impl FileView {
         self.refresh_hits(cx);
     }
 
-    /// Recount the hits for the needle (it, or the text, changed) and land on the first.
+    /// Recount the hits for the needle (it, or the text, changed) and land on the first at
+    /// or after the caret.
     fn refresh_hits(&mut self, cx: &mut Context<Self>) {
+        let lines = self.lines(cx);
+        let from = usize::try_from(self.editor.read(cx).cursor_position().line).unwrap_or(0);
         let Some(search) = &mut self.search else { return };
-        search.hits = find_hits(&self.lines, &search.needle);
-        let from = self.focus.unwrap_or(0);
+        search.hits = find_hits(&lines, &search.needle);
         search.current = if search.hits.is_empty() {
             None
         } else {
             Some(search.hits.iter().position(|&line| line >= from).unwrap_or(0))
         };
-        self.scroll_to_hit();
+        self.go_to_hit(cx);
+        self.remark(cx);
         cx.notify();
     }
 
@@ -340,15 +625,265 @@ impl FileView {
         }
         let at = i64::try_from(search.current.unwrap_or(0)).unwrap_or(0);
         search.current = usize::try_from(at.saturating_add(delta).rem_euclid(count)).ok();
-        self.scroll_to_hit();
+        self.go_to_hit(cx);
         cx.notify();
     }
 
-    fn scroll_to_hit(&self) {
+    /// Select the current hit's text, which scrolls it into view.
+    fn go_to_hit(&self, cx: &mut Context<Self>) {
         let Some(search) = &self.search else { return };
-        if let Some(line) = search.current.and_then(|c| search.hits.get(c)) {
-            self.scroll.scroll_to_item(*line, ScrollStrategy::Center);
+        let Some(line) = search.current.and_then(|c| search.hits.get(c)).copied() else { return };
+        let needle = search.needle.clone();
+        self.editor.update(cx, |e, cx| {
+            let text = e.text();
+            let start = text.line_start_offset(line);
+            let row = text.slice_line(line).to_string();
+            let at = if needle.chars().any(char::is_uppercase) {
+                row.find(&needle)
+            } else {
+                row.to_lowercase().find(&needle.to_lowercase())
+            };
+            let from = start.saturating_add(at.unwrap_or(0));
+            let to = from.saturating_add(if at.is_some() { needle.len() } else { 0 });
+            e.set_selected_range(from..to.min(text.len()), cx);
+        });
+    }
+
+    /// Paint the tints: the lines the last reload changed, and the find's hits.
+    fn remark(&mut self, cx: &mut Context<Self>) {
+        let s = &self.theme.surfaces;
+        let (tint, hit) = (hsla_alpha(s.success, alpha::FAINT), hsla_alpha(s.warn, alpha::FAINT));
+        let hits = self.search.as_ref().map(|s| s.hits.clone()).unwrap_or_default();
+        let changed = self.changed.clone();
+        let marks = self.editor.update(cx, |e, _cx| {
+            let text = e.text();
+            let line = |row: usize, color| {
+                let start = text.line_start_offset(row);
+                RangeDecoration::new(start..text.line_end_offset(row).max(start.saturating_add(1)))
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(color)
+            };
+            let mut marks: Vec<RangeDecoration> = changed
+                .iter()
+                .filter(|row| **row < text.lines_len())
+                .map(|row| line(*row, tint))
+                .collect();
+            marks.extend(
+                hits.iter().filter(|row| **row < text.lines_len()).map(|row| line(*row, hit)),
+            );
+            marks
+        });
+        match &self.marks {
+            Some(collection) => collection.set(marks, cx),
+            None => {
+                self.marks = Some(
+                    self.editor
+                        .update(cx, |e, cx| e.create_range_decorations_collection(marks, cx)),
+                );
+            }
         }
+    }
+
+    /// Paint scale (the workspace's zoom) and the theme's inset and type size at scale 1.
+    pub const fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32) {
+        self.zoom = zoom;
+        self.pad = pad;
+        self.text_size = text_size;
+    }
+
+    /// Draw by another theme (the workspace swapped it).
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if self.theme == theme {
+            return;
+        }
+        self.theme = theme;
+        self.install_highlighter(cx);
+        self.remark(cx);
+        cx.notify();
+    }
+
+    /// The colours for this file's grammar in this theme.
+    fn install_highlighter(&self, cx: &mut Context<Self>) {
+        let factory = crate::highlight::editor::factory(self.syntax, self.theme.clone());
+        let language = self.syntax.map_or_else(String::new, |s| s.name().to_lowercase());
+        self.editor.update(cx, |e, cx| {
+            e.set_highlighter_factory(factory, cx);
+            e.set_highlighter(language, cx);
+        });
+    }
+
+    /// Apply what waited for a window: new text, then the caret's line.
+    fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.pending_text.take() {
+            let caret = self.editor.read(cx).cursor();
+            let scroll = self.editor.read(cx).scroll_offset();
+            let reload = self.pending_line.is_none();
+            self.editor.update(cx, |e, cx| {
+                e.set_value(text, window, cx);
+                if reload {
+                    // A silent reload keeps the reader where they were.
+                    let at = caret.min(e.text().len());
+                    e.set_selected_range(at..at, cx);
+                    e.set_scroll_offset(scroll, cx);
+                }
+            });
+            self.install_highlighter(cx);
+            self.remark(cx);
+            if self.search.is_some() {
+                self.refresh_hits(cx);
+            }
+        }
+        if let Some(line) = self.pending_line.take() {
+            self.editor.update(cx, |e, cx| {
+                let text = e.text();
+                let at = text.line_start_offset(line.min(text.lines_len().saturating_sub(1)));
+                e.set_selected_range(at..at, cx);
+            });
+        }
+    }
+
+    /// One line about the file for a screen reader: "212 lines, edited", "binary, 1.2 MB",
+    /// "missing: No such file".
+    #[must_use]
+    pub fn summary(&self, cx: &gpui::App) -> String {
+        match &self.read {
+            None => "reading…".to_owned(),
+            Some(FileRead::Text { .. }) => {
+                let n = self.line_count(cx);
+                let mut parts =
+                    vec![if n == 1 { "1 line".to_owned() } else { format!("{n} lines") }];
+                parts.extend(self.coloured_as().map(str::to_owned));
+                let state = if self.read_only.is_some() {
+                    Some("read-only")
+                } else if self.saving.is_some() {
+                    Some("saving")
+                } else {
+                    self.dirty.then_some("edited")
+                };
+                parts.extend(state.map(str::to_owned));
+                parts.extend(self.trouble.as_ref().map(|t| {
+                    match t {
+                        Trouble::Conflict => "changed on disk",
+                        Trouble::Failed(_) => "not saved",
+                    }
+                    .to_owned()
+                }));
+                if !self.changed.is_empty() {
+                    parts.push(format!("{} changed", self.changed.len()));
+                }
+                parts.join(", ")
+            }
+            Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
+            Some(FileRead::Missing { error }) => format!("missing: {error}"),
+        }
+    }
+
+    fn notice(&self, text: String) -> AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(self.pad * self.zoom))
+            .text_size(px(self.theme.typography.small() * self.zoom))
+            .font_family(self.theme.typography.ui_family.clone())
+            .text_color(hsla(self.theme.surfaces.text_muted))
+            .child(SharedString::from(text))
+            .into_any_element()
+    }
+
+    /// The one line under the header: why the text is read-only, or what stopped a save and
+    /// the ways out. None when all is well.
+    fn render_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = self.zoom;
+        let (text, tone, actions): (SharedString, _, Vec<AnyElement>) = match &self.trouble {
+            Some(Trouble::Conflict) => (
+                CHANGED_ON_DISK.into(),
+                s.warn,
+                vec![
+                    self.bar_button(
+                        "file-reload",
+                        RELOAD,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.reload(cx);
+                        }),
+                    ),
+                    self.bar_button(
+                        "file-overwrite",
+                        OVERWRITE,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.overwrite(cx);
+                        }),
+                    ),
+                ],
+            ),
+            Some(Trouble::Failed(error)) => {
+                (format!("Not saved: {error}").into(), s.error, Vec::new())
+            }
+            None => (self.read_only.clone()?.into(), s.text_muted, Vec::new()),
+        };
+        let id = self.id.as_uuid();
+        Some(
+            div()
+                .id("file-bar")
+                .debug_selector(move || format!("file-bar-{id}"))
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm * k))
+                .px(px(theme.spacing.sm * k))
+                .py(px(theme.spacing.xxs * k))
+                .border_b_1()
+                .border_color(hsla(s.border))
+                .bg(hsla_alpha(tone, alpha::FAINT))
+                .text_size(px(theme.typography.small() * k))
+                .font_family(theme.typography.ui_family.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_color(hsla(if tone == s.text_muted { s.text_muted } else { s.text }))
+                        .child(text),
+                )
+                .children(actions)
+                .into_any_element(),
+        )
+    }
+
+    fn bar_button(
+        &self,
+        part: &'static str,
+        label: &'static str,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = self.zoom;
+        let id = self.id.as_uuid();
+        let wash = hsla_alpha(s.text, alpha::FAINT);
+        crate::a11y::tab_stop(
+            div()
+                .id(part)
+                .debug_selector(move || format!("{part}-{id}"))
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .px(px(theme.spacing.sm * k))
+                .rounded(px(theme.radii.xs * k))
+                .text_color(hsla(s.text))
+                .cursor_pointer()
+                .hover(move |st| st.bg(wash))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(label),
+            s.accent,
+        )
+        .on_click(on_click)
+        .into_any_element()
     }
 
     /// The find bar over the top-right corner, as the terminal's.
@@ -434,156 +969,16 @@ impl FileView {
             )
             .into_any_element()
     }
-
-    /// Item this card belongs to.
-    #[must_use]
-    pub const fn id(&self) -> ItemId {
-        self.id
-    }
-
-    /// The path on the worker.
-    #[must_use]
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    /// What the worker said, once it has.
-    #[must_use]
-    pub const fn read(&self) -> Option<&FileRead> {
-        self.read.as_ref()
-    }
-
-    /// Lines drawn.
-    #[must_use]
-    pub const fn line_count(&self) -> usize {
-        self.lines.len()
-    }
-
-    /// The lines the last read changed, indices into what is drawn.
-    #[must_use]
-    pub fn changed(&self) -> &[usize] {
-        &self.changed
-    }
-
-    /// The line the card was opened at, an index into what is drawn.
-    #[must_use]
-    pub const fn focus(&self) -> Option<usize> {
-        self.focus
-    }
-
-    /// Land on `line` (1-based, as a tool names it): tinted, and scrolled into view now if
-    /// the text is here, else when it arrives. `None` clears it.
-    pub fn focus_line(&mut self, line: Option<u32>, cx: &mut Context<Self>) {
-        self.focus = line.and_then(|l| usize::try_from(l).ok()).map(|l| l.saturating_sub(1));
-        if let Some(at) = self.focus
-            && !self.lines.is_empty()
-        {
-            self.scroll
-                .scroll_to_item(at.min(self.lines.len().saturating_sub(1)), ScrollStrategy::Center);
-        }
-        cx.notify();
-    }
-
-    /// The worker answered (or answered again after an edit). A second text after a first one
-    /// marks the lines that differ and scrolls to the first of them.
-    pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
-        if self.read.as_ref() == Some(&read) {
-            return;
-        }
-        let (lines, text): (Vec<SharedString>, Arc<str>) = match &read {
-            FileRead::Text { text, .. } => (
-                text.split('\n').map(|l| SharedString::from(l.to_owned())).collect(),
-                Arc::from(text.as_str()),
-            ),
-            FileRead::Binary { .. } | FileRead::Missing { .. } => (Vec::new(), Arc::from("")),
-        };
-        let had_text = matches!(self.read, Some(FileRead::Text { .. }));
-        self.changed = if had_text && !lines.is_empty() {
-            changed_lines(&self.lines, &lines)
-        } else {
-            Vec::new()
-        };
-        // A changed line is the reason for this read; the opening line is where a first text
-        // lands.
-        let land = self.changed.first().copied().or(if had_text { None } else { self.focus });
-        if let Some(at) = land
-            && !lines.is_empty()
-        {
-            self.scroll
-                .scroll_to_item(at.min(lines.len().saturating_sub(1)), ScrollStrategy::Center);
-        }
-        self.lines = lines;
-        self.read = Some(read);
-        self.recolour(text, cx);
-        // An open find bar follows the new text.
-        if self.search.is_some() {
-            self.refresh_hits(cx);
-        }
-        cx.notify();
-    }
-
-    /// Paint scale (the canvas's zoom) and the theme's inset and type size at scale 1.
-    pub const fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32) {
-        self.zoom = zoom;
-        self.pad = pad;
-        self.text_size = text_size;
-    }
-
-    /// Draw by another theme (the canvas swapped it).
-    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        if self.theme == theme {
-            return;
-        }
-        self.theme = theme;
-        cx.notify();
-    }
-
-    /// One line about the file for a screen reader and the collapsed card: "212 lines",
-    /// "212 lines, 40 more", "binary, 1.2 MB", "missing: No such file".
-    #[must_use]
-    pub fn summary(&self) -> String {
-        match &self.read {
-            None => "reading…".to_owned(),
-            Some(FileRead::Text { more_lines, .. }) => {
-                let n = self.lines.len();
-                let lines = if n == 1 { "1 line".to_owned() } else { format!("{n} lines") };
-                let more =
-                    if *more_lines > 0 { format!(", {more_lines} more") } else { String::new() };
-                let coloured =
-                    self.coloured_as().map_or_else(String::new, |name| format!(", {name}"));
-                let changed = match self.changed.len() {
-                    0 => String::new(),
-                    c => format!(", {c} changed"),
-                };
-                format!("{lines}{more}{changed}{coloured}")
-            }
-            Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
-            Some(FileRead::Missing { error }) => format!("missing: {error}"),
-        }
-    }
-
-    fn notice(&self, text: String) -> AnyElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(self.pad * self.zoom))
-            .text_size(px(self.text_size * self.zoom))
-            .text_color(hsla(self.theme.surfaces.text_muted))
-            .child(SharedString::from(text))
-            .into_any_element()
-    }
 }
 
-/// Indices into `new` of the lines that differ from `old`.
+/// Lines (0-based) of `new` that differ from `old`.
 ///
 /// Every inserted or replaced line, and for a pure deletion the line now standing where the
 /// deleted ones were (clamped to the last line), so a deletion is still pointed at.
 #[must_use]
-pub fn changed_lines(old: &[SharedString], new: &[SharedString]) -> Vec<usize> {
-    let old: Vec<&str> = old.iter().map(SharedString::as_ref).collect();
-    let new: Vec<&str> = new.iter().map(SharedString::as_ref).collect();
+pub fn changed_lines(old: &str, new: &str) -> Vec<usize> {
+    let old: Vec<&str> = old.split('\n').collect();
+    let new: Vec<&str> = new.split('\n').collect();
     let diff = similar::TextDiff::from_slices(&old, &new);
     let mut changed = Vec::new();
     for op in diff.ops() {
@@ -620,208 +1015,56 @@ pub fn size_label(bytes: u64) -> String {
 }
 
 impl Render for FileView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending(window, cx);
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
-        let theme = self.theme.clone();
+        let bar = self.render_bar(cx);
+        let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
-        let pad = self.pad * self.zoom;
         let body = match &self.read {
             None => self.notice("reading…".to_owned()),
-            Some(FileRead::Binary { .. } | FileRead::Missing { .. }) => self.notice(self.summary()),
-            Some(FileRead::Text { more_lines, .. }) => {
-                let more = *more_lines;
-                let count = self.lines.len();
-                let digits = count.max(1).to_string().len();
-                // The gutter is as wide as the last line number, in the mono face.
-                let gutter_ch = f32::from(u8::try_from(digits).unwrap_or(u8::MAX));
-                let lines = self.lines.clone();
-                let spans = self.spans.clone();
-                let font =
-                    crate::fonts::terminal_font(&mono, false, false, theme.typography.ligatures);
-                let run_theme = theme.clone();
-                let changed = self.changed.clone();
-                let focus = self.focus;
-                let (hits, current) = self.search.as_ref().map_or((Vec::new(), None), |s| {
-                    (s.hits.clone(), s.current.and_then(|c| s.hits.get(c).copied()))
-                });
-                let muted = hsla(theme.surfaces.text_muted);
-                let fg = hsla(theme.surfaces.text);
-                let tint = hsla_alpha(theme.surfaces.success, alpha::FAINT);
-                let mark = hsla_alpha(theme.surfaces.accent, alpha::FAINT);
-                let hit = hsla_alpha(theme.surfaces.warn, alpha::FAINT);
-                let here = hsla_alpha(theme.surfaces.warn, alpha::TINT);
-                let this = cx.entity().downgrade();
-                let list = uniform_list(
-                    SharedString::from(format!("file-lines-{id}")),
-                    count,
-                    move |range, _window, _cx| {
-                        range
-                            .filter_map(|ix| {
-                                let line = lines.get(ix)?.clone();
-                                // A line with no spans (a plain file, or the parse still
-                                // running) is plain text, sparing the run vector; the
-                                // coloured card's cost was the shaper's, not this (MEASUREMENTS
-                                // 2026-09-13, "a coloured file card's zoom").
-                                let text = match spans.as_ref().and_then(|s| s.get(ix)) {
-                                    Some(line_spans) => StyledText::new(line.clone())
-                                        .with_runs(highlight::runs(
-                                            line.len(),
-                                            Some(line_spans.as_slice()),
-                                            &font,
-                                            &run_theme,
-                                        ))
-                                        .into_any_element(),
-                                    None => line.into_any_element(),
-                                };
-                                let number = ix.saturating_add(1);
-                                let this = this.clone();
-                                Some(
-                                    div()
-                                        .id(ElementId::NamedInteger(
-                                            "file-line".into(),
-                                            u64::try_from(ix).unwrap_or(u64::MAX),
-                                        ))
-                                        .debug_selector(move || format!("file-line-{id}-{ix}"))
-                                        // A click (a tap) makes the line the reading line.
-                                        .on_click(move |_ev, _window, cx| {
-                                            let _set = this.update(cx, |v, cx| {
-                                                v.focus_line(u32::try_from(number).ok(), cx);
-                                            });
-                                        })
-                                        .flex()
-                                        .gap(px(pad))
-                                        .whitespace_nowrap()
-                                        .when(focus == Some(ix), |el| el.bg(mark))
-                                        .when(changed.binary_search(&ix).is_ok(), |el| el.bg(tint))
-                                        .when(hits.binary_search(&ix).is_ok(), |el| el.bg(hit))
-                                        .when(current == Some(ix), |el| el.bg(here))
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .w(px(gutter_ch * text_size * 0.62))
-                                                .text_color(muted)
-                                                .child(SharedString::from(format!(
-                                                    "{number:>digits$}"
-                                                ))),
-                                        )
-                                        .child(div().text_color(fg).child(text)),
-                                )
-                            })
-                            .collect()
-                    },
-                )
-                .track_scroll(&self.scroll)
-                .flex_1()
-                .w_full();
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .px(px(pad))
-                    .py(px(pad / 2.0))
-                    .child(list)
-                    .when(more > 0, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .italic()
-                                .text_color(hsla(theme.surfaces.text_muted))
-                                .child(SharedString::from(format!("{more} more lines"))),
-                        )
-                    })
-                    .into_any_element()
+            Some(FileRead::Binary { .. } | FileRead::Missing { .. }) if self.base.is_none() => {
+                self.notice(self.summary(cx))
             }
+            Some(_) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    Editor::new(&self.editor)
+                        .appearance(false)
+                        .bordered(false)
+                        .readonly(self.read_only.is_some())
+                        .aria_label(SharedString::from(format!("Text of {}", self.path)))
+                        .font_family(mono.clone())
+                        .text_size(px(text_size))
+                        .h_full(),
+                )
+                .into_any_element(),
         };
         div()
             .id(SharedString::from(format!("file-{id}")))
             .debug_selector(move || format!("file-{id}"))
+            .key_context(CTX)
             .role(Role::Document)
             .aria_label(SharedString::from(format!("File {}", self.path)))
-            .aria_value(SharedString::from(self.summary()))
+            .aria_value(SharedString::from(self.summary(cx)))
+            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
+            .relative()
             .size_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .font_family(mono)
             .text_size(px(text_size))
+            .children(bar)
             .child(body)
             .children(search)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hits_are_the_lines_holding_the_needle_with_smart_case() {
-        let lines: Vec<SharedString> = ["Alpha", "beta", "alpha beta", "gamma"]
-            .iter()
-            .map(|l| SharedString::from(*l))
-            .collect();
-        assert_eq!(find_hits(&lines, "alpha"), [0, 2], "no capital: any case");
-        assert_eq!(find_hits(&lines, "Alpha"), [0], "a capital: as typed");
-        assert_eq!(find_hits(&lines, "BETA"), Vec::<usize>::new());
-        assert_eq!(find_hits(&lines, "delta"), Vec::<usize>::new());
-        assert_eq!(find_hits(&lines, ""), Vec::<usize>::new(), "an empty needle finds nothing");
-    }
-
-    #[test]
-    fn changed_lines_point_at_inserts_replacements_and_deletions() {
-        let l =
-            |v: &[&str]| v.iter().map(|s| SharedString::from((*s).to_owned())).collect::<Vec<_>>();
-        assert_eq!(changed_lines(&l(&["a", "b", "c"]), &l(&["a", "B", "c"])), [1]);
-        assert_eq!(changed_lines(&l(&["a", "c"]), &l(&["a", "b", "b2", "c"])), [1, 2]);
-        assert_eq!(changed_lines(&l(&["a", "b", "c"]), &l(&["a", "c"])), [1]);
-        assert_eq!(
-            changed_lines(&l(&["a", "b"]), &l(&["a"])),
-            [0],
-            "a deleted tail points at the last line"
-        );
-        assert_eq!(changed_lines(&l(&["a"]), &l(&["a"])), Vec::<usize>::new());
-    }
-
-    /// A Rust file is coloured once the background parse lands; a plain file is not; a read
-    /// that follows drops the earlier colours and takes the new ones.
-    #[gpui::test]
-    fn a_file_is_coloured_by_its_grammar_after_the_read(cx: &mut gpui::TestAppContext) {
-        let read = |text: &str| FileRead::Text {
-            text: text.to_owned(),
-            more_lines: 0,
-            size: u64::try_from(text.len()).unwrap_or(0),
-            modified_ms: 0,
-        };
-        let coloured = |v: &FileView, _: &gpui::App| v.coloured_as();
-        let view = cx.new(|_| FileView::new(ItemId::new(), "/w/src/main.rs", Theme::default()));
-        view.update(cx, |v, cx| v.set_read(read("fn main() {}\n// end"), cx));
-        assert_eq!(view.read_with(cx, coloured), None, "not before the parse");
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, coloured), Some("Rust"));
-        view.read_with(cx, |v, _| {
-            let spans = v.spans.as_deref().unwrap_or_default();
-            assert_eq!(spans.len(), 2);
-            let first = |ix: usize| spans.get(ix).and_then(|l| l.first());
-            assert_eq!(first(0).map(|s| s.token), Some(highlight::Token::Keyword));
-            assert_eq!(first(1).map(|s| s.italic), Some(true), "a comment is italic");
-            assert_eq!(v.summary(), "2 lines, Rust");
-        });
-        view.update(cx, |v, cx| v.set_read(read("fn main() {}\n// end\nlet"), cx));
-        assert_eq!(view.read_with(cx, coloured), None, "a new text starts over");
-        cx.run_until_parked();
-        view.read_with(cx, |v, _| assert_eq!(v.spans.as_ref().map(|s| s.len()), Some(3)));
-
-        let plain =
-            cx.new(|_| FileView::new(ItemId::new(), "/w/notes.unknownext", Theme::default()));
-        plain.update(cx, |v, cx| v.set_read(read("just words"), cx));
-        cx.run_until_parked();
-        assert_eq!(plain.read_with(cx, coloured), None);
-        assert_eq!(plain.read_with(cx, |v, _| v.summary()), "1 line");
-    }
-
-    #[test]
-    fn sizes_read_as_a_human_would() {
-        assert_eq!(size_label(512), "512 B");
-        assert_eq!(size_label(1536), "1.5 KB");
-        assert_eq!(size_label(3 * 1024 * 1024), "3.0 MB");
-    }
-}
+mod tests;

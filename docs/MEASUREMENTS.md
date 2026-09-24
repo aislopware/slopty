@@ -3,6 +3,22 @@
 Numbers that drove or confirmed a decision, with the exact command that produced them. Re-run
 before trusting; hardware and network are stated per entry.
 
+## Reading old entries
+
+Entries before 2026-09-24 ran over iroh, and their commands are kept as they were run. Some of
+what they call no longer exists. The plaintext QUIC entry of 2026-09-24 has both forms side by
+side.
+
+- `--direct-only` (the worker, `slopty worker install`) and `SLOPTY_DIRECT_ONLY=1` (clients and
+  benches) chose iroh's direct path. Every connection is direct now, so leave them out.
+- `--print-ticket`, `slopty worker ticket` and `slopty pair` exchanged an iroh ticket. Today the
+  worker prints the address it listens on with `--print-addr`. A client dials it with
+  `--worker <ip>:<port>` on `ping`, `bench`, `sessions` and `attach`, or adds it once with
+  `slopty add`.
+- `shell_round_trip_over_iroh`, `screen_stream_over_iroh` and `screen_start_up_over_iroh` in
+  `apps/slopty-worker/tests/e2e.rs` are now `shell_round_trip_over_quic`,
+  `screen_stream_over_quic` and `screen_start_up_over_quic`.
+
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
 Setup: mac-studio, `slopty-ptyd` + `slopty-worker` + `slopty ping` on the same machine, debug
@@ -125,6 +141,7 @@ datagrams dropped before the router).
 Commands:
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --list
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --display 6 --seconds 5
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --window 927 --seconds 5
@@ -206,6 +223,7 @@ composite. Both rows show the same picture (above).
 Commands:
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --test latency --no-capture
 # the worker on the crop / window path, then the bench (release: target/release/…):
 SLOPTY_WINDOW_CAPTURE=crop target/debug/slopty-worker --direct-only --ptyd-socket /tmp/slopty-glass/ptyd.sock \
@@ -287,6 +305,7 @@ Commands (on macbook-pro, binary copied with `gzip -1 -c target/debug/slopty | s
 'gunzip -c > /tmp/slopty-bench/slopty'`, paired once with `slopty pair <ticket>`):
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1
 /tmp/slopty-bench/slopty ping --count 15
 /tmp/slopty-bench/slopty bench screen --list
@@ -362,6 +381,7 @@ Commands (as in the previous section; the bench loop was
 `/tmp/slopty-manual/fbbench.sh`, typing `seq 1 20000000` into Ghostty before each run):
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 RUST_LOG=warn,slopty_media=debug,slopty_client=debug SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 \
   /tmp/slopty-bench/slopty bench screen --window 927 --seconds 15
 grep 'frame lost\|nack' <client log>
@@ -414,6 +434,7 @@ terminal emulation or repaint on the measuring side.
 | same, taken during a bad Wi-Fi phase            | 12.5 | 78.9 | 132.2 | 451.5 | 86 ms    |
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench echo --count 30
 ```
 
@@ -558,6 +579,7 @@ same bad state for all four; a re-measurement belongs to a day when the mesh doe
 packets, which is the case the stall verdict was built for.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # on mac-studio: private daemons, own data dir and port
 export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
@@ -577,6 +599,7 @@ A window that does not change on screen (`--window 1880`, an idle Ghostty) produ
 the client reports as refresh requests. Not a regression; bench a moving window or the display.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # on macbook-pro, paired with the Mac Studio's manual worker (SLOPTY_PORT 45550)
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
@@ -620,6 +643,7 @@ Not looped: two runs, back to back; the numbers above are within the earlier con
 spread except the stall attribution, which the beat log settles.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # on mac-studio: private daemons, own data dir and port (same as the stall section)
 export SLOPTY_DATA_DIR=/Volumes/Lacie/Workspace/oss/slopty-wt/escapes/target/e2e-data/stall
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
@@ -738,6 +762,7 @@ What the runs did show, and what changed because of them:
   measurement of it is still owed a day with a working link.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # mac-studio: private daemons (this worktree's target/e2e-data/startup)
 export SLOPTY_DATA_DIR=$PWD/target/e2e-data/startup
 target/debug/slopty-ptyd --socket $SLOPTY_DATA_DIR/ptyd.sock &
@@ -1617,6 +1642,7 @@ held a frame). If the host held nothing and the link is loopback, the stalls are
 reading, not the wire. This section takes every silence past the stall gap apart.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # mac-studio, private daemons, own data dir and port; an idle desktop as the target.
 export D=target/e2e-data/stalls && mkdir -p $D/client
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
@@ -1842,6 +1868,7 @@ Ran on mac-studio, debug binaries, `Display(6)` 1920×1080 HEVC, 60 fps cap, 30 
 direct-only on port 45571, private data dir, own ptyd + worker killed after every sample:
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 D=target/e2e-data/cadence; rm -rf $D; mkdir -p $D/client
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
 RUST_LOG=info,slopty_net=debug,slopty_worker=debug \
@@ -2082,6 +2109,7 @@ Commands (mac-studio side; the client side is the recipe in "start-up over the m
 `/tmp/slopty-bench/mesh`):
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # mac-studio, private daemons under this worktree
 D=$PWD/target/e2e-data/mesh; mkdir -p $D/data
 target/debug/slopty-ptyd --socket $D/ptyd.sock &
@@ -2270,6 +2298,7 @@ own worker (the client dialled the LAN address, not loopback), three runs of 30 
 `/bin/cat`:
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-worker --ptyd-socket /tmp/slopty-manual/ptyd.sock \
   --ctl-socket /tmp/slopty-manual/worker.sock --data-dir /tmp/slopty-manual/data &
@@ -2370,6 +2399,7 @@ of 0 was consistent with a lone descheduled datagram it could not see, and now i
 ## 2026-09-06 — the keystroke path, stage by stage
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # release daemons on the manual sockets, both with the keystroke trace on
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
 SLOPTY_DIRECT_ONLY=1 RUST_LOG="info,slopty_worker::session=trace,slopty_worker::conn=trace" \
@@ -2903,6 +2933,7 @@ would read drift as effect. The second arm of this run was lost to macbook-pro l
 mid-measurement, which is the other reason to interleave.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # mac-studio: the worker must be the launchd one, or TCC denies capture with -3801
 cargo xtask sign && slopty worker install --direct-only --port 45560
 # per arm: swap the binary under test into place, keep the identity, restart
@@ -2981,6 +3012,7 @@ Also worth knowing: `slopty worker install` copies the binary, and the copy lose
 Recording grant unless `cargo xtask sign` runs immediately before each install.
 
 ```sh
+# iroh era: see "Reading old entries" at the top for today's flags
 # the worker must be the installed one: TCC attributes a shell-spawned daemon to whatever launched
 # it, so a test that spawns its own is refused capture with -3801 however the binary is signed
 cargo xtask sign && slopty worker install --direct-only --port 45560 --bind <lan-ip> \

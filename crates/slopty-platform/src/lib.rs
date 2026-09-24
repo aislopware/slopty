@@ -13,6 +13,7 @@
 #[cfg(target_os = "macos")]
 pub mod drag;
 pub mod pasteboard;
+pub mod web;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};

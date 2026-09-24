@@ -46,9 +46,6 @@ pub struct InstallOpts {
     /// Data directory (default: `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// No relay, no wide-area lookup (LAN or private mesh only).
-    #[arg(long)]
-    direct_only: bool,
     /// UDP port for the worker (default: the daemon's fixed port).
     #[arg(long)]
     port: Option<u16>,
@@ -123,9 +120,6 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
         Value::Dictionary(d)
     };
     let mut worker_args = Vec::new();
-    if opts.direct_only {
-        worker_args.push("--direct-only".to_owned());
-    }
     if let Some(port) = opts.port {
         worker_args.push("--port".to_owned());
         worker_args.push(port.to_string());
@@ -493,7 +487,6 @@ mod tests {
     #[test]
     fn plists_carry_the_paths_and_flags() {
         let opts = InstallOpts {
-            direct_only: true,
             port: Some(45551),
             bind: Some(std::net::IpAddr::from([192, 168, 1, 10])),
             ..InstallOpts::default()
@@ -509,14 +502,7 @@ mod tests {
             .collect();
         assert_eq!(
             argv,
-            [
-                "/opt/slopty/bin/slopty-worker",
-                "--direct-only",
-                "--port",
-                "45551",
-                "--bind",
-                "192.168.1.10"
-            ]
+            ["/opt/slopty/bin/slopty-worker", "--port", "45551", "--bind", "192.168.1.10"]
         );
         let env = worker["EnvironmentVariables"].as_dictionary().unwrap();
         assert_eq!(env["SLOPTY_WORKER_SOCKET"].as_string(), Some("/data/slopty/run/worker.sock"));

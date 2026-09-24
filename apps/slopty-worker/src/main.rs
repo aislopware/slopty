@@ -210,7 +210,6 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
         daemon.worker.clone(),
         daemon.items.clone(),
         daemon.events.clone(),
-        Arc::new(server::DaemonAgents(Arc::clone(&daemon.agents))),
     );
     let daemon = daemon.clone();
     tokio::spawn(async move {
@@ -247,7 +246,11 @@ async fn main() -> Result<()> {
     let listener = WorkerListener::bind(local, admission(&data_dir))
         .with_context(|| format!("bind {local} (is another worker running?)"))?;
     let listen = listener.local_addr()?;
-    let worker = Worker::connect(args.ptyd_socket).await.context("connect to slopty-ptyd")?;
+    let agents: Arc<parking_lot::Mutex<AgentTable>> = Arc::default();
+    let worker =
+        Worker::connect(args.ptyd_socket, Arc::new(server::DaemonAgents(Arc::clone(&agents))))
+            .await
+            .context("connect to slopty-ptyd")?;
     let (events, _keep) = broadcast::channel(64);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
     let holds: Box<dyn slopty_worker::wake::Holds> = Box::new(Assertions::default());
@@ -264,7 +267,7 @@ async fn main() -> Result<()> {
         name: paths::worker_name(),
         events,
         items,
-        agents: Arc::default(),
+        agents,
         clip: Arc::new(slopty_worker::clip::Clipboard::new(
             args.pasteboard
                 .as_deref()

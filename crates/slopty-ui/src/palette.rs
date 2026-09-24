@@ -50,6 +50,8 @@ pub enum PaletteRun {
     },
     /// Open this address in the default browser (a forwarded port).
     OpenUrl(String),
+    /// Open this address in a browser tile.
+    OpenInTile(String),
     /// Reveal this session and open its find bar on `needle` (find in every card).
     FindIn {
         /// The card's session.
@@ -84,6 +86,7 @@ impl Clone for PaletteRun {
             Self::OpenShell { cwd } => Self::OpenShell { cwd: cwd.clone() },
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
+            Self::OpenInTile(url) => Self::OpenInTile(url.clone()),
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
@@ -110,6 +113,7 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenShell { cwd } => f.debug_struct("OpenShell").field("cwd", cwd).finish(),
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
             Self::OpenUrl(url) => f.debug_tuple("OpenUrl").field(url).finish(),
+            Self::OpenInTile(url) => f.debug_tuple("OpenInTile").field(url).finish(),
             Self::FindIn { session, needle } => {
                 f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
             }
@@ -175,6 +179,16 @@ impl PaletteItem {
             label: label.to_owned(),
             keys: detail.to_owned(),
             run: PaletteRun::OpenUrl(url.to_owned()),
+        }
+    }
+
+    /// A line that opens `url` in a browser tile, `detail` on the right.
+    #[must_use]
+    pub fn in_tile(label: &str, detail: &str, url: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            keys: detail.to_owned(),
+            run: PaletteRun::OpenInTile(url.to_owned()),
         }
     }
 
@@ -376,6 +390,12 @@ pub fn path_query(query: &str) -> Option<(String, Option<u32>)> {
 /// a shell has to know its directory from the start.
 #[must_use]
 pub fn path_items(query: &str) -> Vec<PaletteItem> {
+    if let Some(url) =
+        query.trim().contains("://").then(|| crate::browser::web_url(query)).flatten()
+    {
+        let label = format!("Open {} in a tile", crate::browser::short_url(&url));
+        return vec![PaletteItem::in_tile(&label, "page", &url)];
+    }
     let Some((path, line)) = path_query(query) else {
         return Vec::new();
     };

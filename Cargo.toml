@@ -99,9 +99,6 @@ tokio = { version = "1.53.1", features = [
     "fs",
 ] }
 
-# Joins a list of futures in place, without spawning them.
-futures-util = { version = "0.3.34", default-features = false, features = [ "alloc" ] }
-
 # observability
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = [ "env-filter", "json", "fmt" ] }
@@ -285,6 +282,8 @@ objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
     "UIFeedbackGenerator",
     "UINotificationFeedbackGenerator",
 ] }
+# The browser tile's `WKWebView` (`slopty_platform::web`). Features are per crate.
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 
@@ -297,6 +296,8 @@ gpui_ios = { git = "https://github.com/aislopware/zed.git", branch = "slopty", f
 ] }
 # The platform crate behind `gpui_kit::application()`; named directly only so the `e2e`
 # feature can turn on its `test-support` (`Window::render_to_image` on a real window).
+# The native view under a GPUI window (the browser tile puts a web view in it).
+raw-window-handle = "0.6.2"
 gpui_platform = { git = "https://github.com/aislopware/zed.git", branch = "slopty" }
 # PNG in/out for the e2e render snapshots; the version gpui already builds.
 image = { version = "0.25.10", default-features = false, features = [ "png" ] }

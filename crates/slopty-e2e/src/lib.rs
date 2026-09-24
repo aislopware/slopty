@@ -151,6 +151,12 @@ pub enum Command {
         #[serde(default)]
         line: Option<u32>,
     },
+    /// Open a browser tile for `url` on the context worker, as the palette's "Open URL…"
+    /// does.
+    OpenUrl {
+        /// An http or https address.
+        url: String,
+    },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
     /// Bring a session's terminal into view, make it active and give it the keyboard, as
@@ -412,8 +418,8 @@ pub struct Dump {
     pub notice: Option<String>,
     /// Which kind of tile holds the keyboard (the workspace's own notion).
     pub focus: Option<String>,
-    /// GPUI's focused element: `workspace`, `terminal:<session>`, `screen:<stream>`, `other`,
-    /// or `none`.
+    /// Who has the keyboard: `workspace`, `terminal:<session>`, `screen:<stream>`,
+    /// `file:<item>` (its editor), `browser:<item>` (the page itself), `other`, or `none`.
     pub focused: String,
     /// The active workspace's name.
     #[serde(default)]
@@ -551,7 +557,7 @@ pub struct WorkerInfo {
 pub struct ItemInfo {
     /// Item id.
     pub id: String,
-    /// `terminal`, `window`, `display`, `note`, `file`.
+    /// `terminal`, `window`, `display`, `note`, `file`, `browser`.
     pub kind: String,
     /// The worker holding it, by name.
     #[serde(default)]
@@ -573,9 +579,30 @@ pub struct ItemInfo {
     /// A file card's path and what it shows.
     #[serde(default)]
     pub file: Option<FileItemInfo>,
+    /// A browser tile's page, read from the web view itself.
+    pub browser: Option<BrowserItemInfo>,
 }
 
-/// A file card.
+/// A browser tile.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct BrowserItemInfo {
+    /// The address the item names.
+    pub url: String,
+    /// The page's address now, as the web view reports it.
+    pub page_url: String,
+    /// The page's title, as the web view reports it.
+    pub title: String,
+    /// A navigation is under way.
+    pub loading: bool,
+    /// Why the page failed, if it did.
+    pub failed: Option<String>,
+    /// The native view is on screen.
+    pub shown: bool,
+    /// A picture of the page is ready for when it is hidden.
+    pub snapshot: bool,
+}
+
+/// A file tile.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct FileItemInfo {
     /// Absolute path on the worker.
@@ -584,9 +611,15 @@ pub struct FileItemInfo {
     pub summary: String,
     /// Lines drawn.
     pub lines: usize,
-    /// The reading line, 1-based: the current find hit, else the line the card is on.
+    /// The caret's line, 1-based.
     #[serde(default)]
     pub line: Option<u32>,
+    /// The editor holds an edit not yet on disk (or on its way).
+    pub edited: bool,
+    /// What stops a save: `conflict`, or `failed: <why>`.
+    pub trouble: Option<String>,
+    /// Why the text cannot be edited, when it cannot.
+    pub read_only: Option<String>,
 }
 
 /// One terminal.

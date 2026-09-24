@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 data-encoding.workspace = true
-futures-util.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -21,7 +20,6 @@ slopty-core.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 insta = { workspace = true, features = [ "json" ] }

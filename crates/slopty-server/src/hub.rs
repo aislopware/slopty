@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WorkerId};
-use slopty_proto::agent::AgentEvent;
+use slopty_proto::agent::AgentStatus;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{
     Event, FromServer, Liveness, Refusal, Registration, RequestId, ToServer, WorkerCaps, WorkerInfo,
@@ -63,8 +63,8 @@ struct State {
 #[derive(Debug)]
 struct Entry {
     info: WorkerInfo,
+    /// Each with its agent kept current from the worker's `Agent` events.
     sessions: Vec<SessionSummary>,
-    agents: HashMap<SessionId, AgentEvent>,
     /// Which registration the entry reflects; a lease of another generation is stale.
     generation: u64,
     link: Option<Link>,
@@ -95,13 +95,7 @@ impl Hub {
         let mut state = State::default();
         for mut info in known {
             info.liveness = Liveness::Gone;
-            let entry = Entry {
-                info,
-                sessions: Vec::new(),
-                agents: HashMap::new(),
-                generation: 0,
-                link: None,
-            };
+            let entry = Entry { info, sessions: Vec::new(), generation: 0, link: None };
             state.workers.insert(entry.info.worker, entry);
         }
         let (events, _none) = broadcast::channel(EVENT_BUFFER);
@@ -182,14 +176,12 @@ impl Hub {
                 .collect();
             entry.info = info.clone();
             entry.sessions = sessions;
-            entry.agents.clear();
             entry.generation = generation;
             entry.link = link;
             (reshaped, gone, opened)
         } else {
             let opened = sessions.clone();
-            let entry =
-                Entry { info: info.clone(), sessions, agents: HashMap::new(), generation, link };
+            let entry = Entry { info: info.clone(), sessions, generation, link };
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
@@ -401,11 +393,13 @@ impl Lease {
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);
-                entry.agents.remove(&session);
                 hub.announce(FromServer::Event(Event::SessionClosed { worker, session }));
             }
             ToServer::Agent(event) => {
-                entry.agents.insert(event.session, event.clone());
+                if let Some(summary) = entry.sessions.iter_mut().find(|s| s.id == event.session) {
+                    summary.agent = (event.status != AgentStatus::None)
+                        .then(|| (event.kind, event.status.clone()));
+                }
                 hub.announce(FromServer::Event(Event::Agent { worker, event }));
             }
             ToServer::Hello { .. } | ToServer::Request { .. } => {
@@ -481,9 +475,10 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason};
     use slopty_proto::orchestration::{Screen, TermRef};
     use slopty_proto::server::Os;
-    use slopty_proto::terminal::{SessionKind, SessionState};
+    use slopty_proto::terminal::SessionState;
 
     use super::*;
 
@@ -507,7 +502,6 @@ pub(crate) mod tests {
     pub fn summary(id: SessionId) -> SessionSummary {
         SessionSummary {
             id,
-            kind: SessionKind::Terminal,
             title: "zsh".to_owned(),
             cwd: None,
             repo: None,
@@ -516,6 +510,7 @@ pub(crate) mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
+            agent: None,
         }
     }
 
@@ -704,6 +699,45 @@ pub(crate) mod tests {
         assert!(
             matches!(events.recv().await.unwrap(), FromServer::Event(Event::SessionOpened { summary, .. }) if summary.id == first)
         );
+    }
+
+    /// `ListTerminals` answers with each agent as the worker last reported it, and an agent
+    /// that left leaves its terminal without one.
+    #[tokio::test]
+    async fn listed_terminals_carry_the_agent_as_last_reported() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let session = SessionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
+        let report = |session: SessionId, status: AgentStatus| {
+            ToServer::Agent(AgentEvent {
+                session,
+                kind: AgentKind::ClaudeCode,
+                status,
+                agent_session: None,
+                detail: None,
+                attention: false,
+                source: AgentSource::Hook,
+            })
+        };
+        let listed = async || {
+            let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
+            else {
+                panic!("terminals")
+            };
+            list.into_iter().map(|(_worker, s)| s.agent).collect::<Vec<_>>()
+        };
+        assert_eq!(listed().await, [None], "no agent yet");
+        lease.handle(report(session, AgentStatus::Working));
+        assert_eq!(listed().await, [Some((AgentKind::ClaudeCode, AgentStatus::Working))]);
+        let blocked = AgentStatus::Blocked(BlockReason::Question);
+        lease.handle(report(session, blocked.clone()));
+        assert_eq!(listed().await, [Some((AgentKind::ClaudeCode, blocked))], "kept current");
+        lease.handle(report(session, AgentStatus::None));
+        assert_eq!(listed().await, [None], "the agent left");
+        lease.handle(report(SessionId::new(), AgentStatus::Idle));
+        assert_eq!(listed().await, [None], "a report for a session not listed changes nothing");
     }
 
     #[tokio::test]

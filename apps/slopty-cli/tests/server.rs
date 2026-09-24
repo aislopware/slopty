@@ -16,7 +16,7 @@ mod tests {
     use slopty_proto::server::{
         Event, FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo,
     };
-    use slopty_proto::terminal::{SessionKind, SessionState, SessionSummary};
+    use slopty_proto::terminal::{SessionState, SessionSummary};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, ChildStdin, ChildStdout, Command};
     use tokio::sync::{broadcast, mpsc};
@@ -62,7 +62,6 @@ mod tests {
     fn summary(id: SessionId, title: &str) -> SessionSummary {
         SessionSummary {
             id,
-            kind: SessionKind::Terminal,
             title: title.to_owned(),
             cwd: Some("/tmp".to_owned()),
             repo: None,
@@ -71,6 +70,7 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
+            agent: None,
         }
     }
 
@@ -85,7 +85,13 @@ mod tests {
             Verb::ListWorkers => Outcome::Workers(directory()),
             Verb::ListTerminals { .. } => Outcome::Terminals(vec![
                 (studio(), summary(shell(), "zsh")),
-                (studio(), summary(agent(), "claude")),
+                (
+                    studio(),
+                    SessionSummary {
+                        agent: Some((AgentKind::ClaudeCode, blocked())),
+                        ..summary(agent(), "claude")
+                    },
+                ),
             ]),
             Verb::AgentStatus { term } if term.session == agent() => {
                 Outcome::Agent(Some((AgentKind::ClaudeCode, blocked())))
@@ -238,15 +244,11 @@ mod tests {
                 }],
             }])
         );
-        // The directory and the terminals, then one status request per terminal.
-        let mut verbs = Vec::new();
-        for _ in 0..4 {
-            verbs.push(fake.next_verb().await);
-        }
+        // The directory and the terminals, each carrying its agent: no status request follows.
+        let verbs = [fake.next_verb().await, fake.next_verb().await];
         assert!(verbs.contains(&Verb::ListWorkers), "{verbs:?}");
         assert!(verbs.contains(&Verb::ListTerminals { worker: None }), "{verbs:?}");
-        let asked = TermRef { worker: studio(), session: agent() };
-        assert!(verbs.contains(&Verb::AgentStatus { term: asked }), "{verbs:?}");
+        assert!(fake.verbs.try_recv().is_err(), "no status request per terminal");
     }
 
     #[tokio::test]

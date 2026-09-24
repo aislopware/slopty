@@ -101,6 +101,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘⇧P | command palette |
   | ⌘F / ⌘⇧F | find in the tile / in every tile |
   | ⌘E | name the tile |
+  | ⌘S | save the file tile |
   | ⌘⇧A | next agent that needs you |
   | ⌘⇧O | point the others at the tile |
   | ⌘⇧M / ⌘⇧I | mute a window / stream stats |
@@ -148,6 +149,51 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   Terminal and screen bodies are `Entity::cached` views, so a video frame, a flooding shell or
   the cursor blink repaints only its own tile; the app's once-a-second RTT tick notifies only
   when the shown value changed.
+
+- ✅ **A browser tile is a native page that follows its tile** (2026-09-25). A forwarded
+  port is usually a dev server, and the user wanted it beside the shell that runs it rather
+  than in another app. `ItemKind::Browser { url }` is a tile like any other (placed, moved,
+  closed and taken back the same way), and its page is the platform's `WKWebView`. GPUI draws
+  the whole window into one Metal layer, so the page cannot be a GPUI element; it is a native
+  subview that always draws on top. Three rules follow from that, all in the pure
+  `browser::placement` with its tests:
+  - The page goes where the tile's body was drawn in this frame, measured in the body's
+    prepaint and applied in a prepaint that runs after every tile's, so it never trails the
+    strip by a frame. It is clipped to the strip.
+  - Anything GPUI draws over the strip hides it: the palette, the picker, a menu, the
+    overview (open or on its way), and the app's dialogs through `set_covered`. So does a
+    tile that is off the strip, not drawn, or fading below `MIN_ALPHA`.
+  - A hidden page leaves its last snapshot in the body, taken when it hides and after each
+    load, so covering it shows no hole and the renders the tests diff show the page.
+
+  The page takes the keyboard when it is clicked, and its tile takes the focus. On the Mac, a
+  click elsewhere, ⌃Tab (the ring's way out, as for a remote window) or Esc twice gives the
+  keyboard back. One Esc still reaches the page, since pages use it. The ways in are the port
+  chip, which is now two pills (the port opens its forward in a tile, "↗" still opens the
+  default browser), "Open URL…" in the palette (the field starts at `http://localhost:`),
+  and any http or https address typed into the palette. An existing tile for the same address
+  is focused rather than opened twice. Chrome: the header shows the page's title, then the
+  address as quiet text, "←" while there is history, and "↻". No address field and no tabs:
+  the palette is the address bar.
+  Known limits: a page's ⌘C and ⌘V go through GPUI's key-equivalent handling first; a toast
+  can sit under a page; and the item's address is shared, while the local port of a forward
+  may differ on another client.
+
+- ✅ **A file tile is an editor** (2026-09-25). The user wanted to fix a line where they read
+  it rather than type `$EDITOR` into a shell, so the file tile's body is gpui-kit's code
+  editor (ui.md, "The file tile's editor"). With the keyboard in it, the keys are the editor's,
+  except ⌘F (the tile's find), ⌘⌥↑/↓ (focus up and down, not extra carets) and ⌘S (save). The
+  reading line and its ↑/↓/⇞/⇟ keys, and the "edit" and "reload" pills, went: the caret is
+  the reading line, and a change on disk reloads by itself. Opening a file from the palette
+  puts the keyboard in the editor.
+
+- ✅ **A terminal's agent badge starts from the worker's list** (2026-09-25). A client that
+  connected after an agent started showed a plain shell until the agent's next hook event.
+  Every `SessionSummary` now carries the session's agent and status, so on connect (and when
+  a session opens) the workspace fills each terminal's agent entry from it
+  (`WorkspaceView::seed_agents`). A seed never replaces an entry that an event has already
+  made. The summary does not say whether the status came from hooks or from the process
+  table, so a seed counts as the process table's until the first event.
 
 ## Evidence: niri v26.04
 

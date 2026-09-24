@@ -1,12 +1,12 @@
-//! The files a client reads and watches, answered on tasks of their own: a read, a quick-open
-//! walk or a look at the watched files touches the disk, and none of it may hold up a terminal's
-//! echo on the same connection.
+//! The files a client reads, writes and watches, answered on tasks of their own: a read, a
+//! quick-open walk or a look at the watched files touches the disk, and none of it may hold up a
+//! terminal's echo on the same connection.
 
 use std::collections::HashMap;
 
 use slopty_core::ClientId;
 use slopty_net::WorkerMsg;
-use slopty_proto::file::FileRead;
+use slopty_proto::file::{FileRead, WriteResult};
 use tokio::sync::{mpsc, watch};
 
 /// Paths the palette's quick open is answered with at most.
@@ -29,6 +29,30 @@ pub async fn send_file(client: ClientId, out: &mpsc::Sender<WorkerMsg>, path: St
     };
     tracing::info!(%client, %path, kind, "read file");
     out.send(WorkerMsg::File { path, read }).await.is_ok()
+}
+
+/// Save a file card and answer how it went. Every watcher of the file, the writer's own
+/// included, then hears the new contents from its next look ([`watch`]).
+pub async fn write(
+    client: ClientId,
+    out: &mpsc::Sender<WorkerMsg>,
+    path: String,
+    text: String,
+    base_modified_ms: Option<u64>,
+) {
+    let target = path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        slopty_worker::file::write(std::path::Path::new(&target), &text, base_modified_ms)
+    })
+    .await
+    .unwrap_or_else(|_| WriteResult::Failed { error: "write failed".to_owned() });
+    let outcome = match &result {
+        WriteResult::Saved { .. } => "saved",
+        WriteResult::Conflict { .. } => "conflict",
+        WriteResult::Failed { .. } => "failed",
+    };
+    tracing::info!(%client, %path, outcome, "write file");
+    let _sent = out.send(WorkerMsg::Written { path, result }).await;
 }
 
 /// Answer a quick-open query under `root`.

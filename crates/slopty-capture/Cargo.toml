@@ -5,12 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "ScreenCaptureKit window and display capture for the Slopty worker (macOS)"
+description = "The Slopty worker's capture seam, with ScreenCaptureKit window and display capture on macOS"
 
 [lints]
 workspace = true
 
 [dependencies]
+slopty-core.workspace = true
+slopty-proto.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
@@ -26,9 +31,6 @@ objc2-foundation.workspace = true
 objc2-screen-capture-kit.workspace = true
 parking_lot.workspace = true
 slopty-codec.workspace = true
-slopty-core.workspace = true
-slopty-proto.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

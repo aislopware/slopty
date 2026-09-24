@@ -1,0 +1,114 @@
+//! The worker's encoder seam (`docs/decisions/topology.md`).
+//!
+//! What a screen stream needs from a video and an audio encoder, and the plain types that
+//! cross it. Compiled on every target; each platform implements the traits in a module of its
+//! own (VideoToolbox and `AudioConverter` on macOS).
+
+use slopty_proto::screen::VideoCodec;
+
+use crate::CodecError;
+
+/// Encoder settings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EncoderConfig {
+    /// Pixel width (even).
+    pub width: u32,
+    /// Pixel height (even).
+    pub height: u32,
+    /// Codec.
+    pub codec: VideoCodec,
+    /// Expected frame rate; drives the rate controller's window.
+    pub fps: u16,
+    /// Target bitrate, bits per second.
+    pub bitrate_bps: u32,
+}
+
+/// Per-frame requests.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct FrameOptions {
+    /// Encode an IDR.
+    pub force_keyframe: bool,
+    /// Encode a P-frame from an acknowledged long-term reference (an IDR if none is acked).
+    pub force_ltr_refresh: bool,
+    /// LTR tokens the receiver has acknowledged since the last frame.
+    pub acked_ltr: Vec<u64>,
+}
+
+/// One encoded access unit, Annex B, parameter sets inline before keyframes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EncodedPacket {
+    /// Bitstream.
+    pub data: Vec<u8>,
+    /// IDR.
+    pub keyframe: bool,
+    /// Token the receiver must acknowledge for this frame to become a usable LTR.
+    pub ltr_token: Option<u64>,
+    /// This very frame was submitted with `force_ltr_refresh` (and the session has LTR).
+    pub ltr_refresh: bool,
+    /// The presentation timestamp passed to `encode`.
+    pub pts_us: u64,
+}
+
+/// A hardware video encoder, as a screen stream drives it.
+///
+/// Every call comes from whichever thread has the frame (the capture queue) or the feedback (a
+/// connection task), so an encoder is shared and takes `&self`. Packets come back through the
+/// sink given at construction, on the encoder's own threads.
+pub trait VideoEncoder: Send + Sync + Sized + 'static {
+    /// A picture as the capture delivers it.
+    type Image;
+
+    /// A session for `config`; each encoded access unit goes to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// The platform's encoder refused the configuration.
+    fn new(
+        config: EncoderConfig,
+        sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+    ) -> Result<Self, CodecError>;
+
+    /// Submit one picture; `pts_us` comes back on its packet.
+    ///
+    /// # Errors
+    ///
+    /// The encoder refused the frame.
+    fn encode(
+        &self,
+        image: &Self::Image,
+        pts_us: u64,
+        options: &FrameOptions,
+    ) -> Result<(), CodecError>;
+
+    /// Change the target bitrate, bits per second.
+    ///
+    /// # Errors
+    ///
+    /// The encoder refused the property.
+    fn set_bitrate(&self, bps: u32) -> Result<(), CodecError>;
+
+    /// Tell the rate controller the cadence changed.
+    ///
+    /// # Errors
+    ///
+    /// The encoder refused the property.
+    fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError>;
+}
+
+/// An Opus encoder for the captured audio: 48 kHz interleaved stereo float in, 20 ms packets
+/// out.
+pub trait AudioEncoder: Send + Sized + 'static {
+    /// A fresh encoder.
+    ///
+    /// # Errors
+    ///
+    /// The platform has no encoder to give.
+    fn new() -> Result<Self, CodecError>;
+
+    /// Feed samples; every whole packet they complete goes to `out`, in order.
+    ///
+    /// # Errors
+    ///
+    /// The encoder failed on the samples.
+    fn push(&mut self, samples: &[f32], out: impl FnMut(&[u8])) -> Result<(), CodecError>;
+}

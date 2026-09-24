@@ -22,6 +22,8 @@ actions!(
         AddWindow,
         /// Open a file on the focused tile's worker (the palette, ready for a path).
         OpenFile,
+        /// Open a web page in a tile (the palette, ready for an address).
+        OpenUrl,
         /// Close the focused tile (a shell's session goes after the undo window).
         CloseItem,
         /// Put back the tile closed last, while the offer stands.
@@ -40,8 +42,8 @@ actions!(
         OpenPalette,
         /// The palette as a list of every worker and whether it is reachable; ↩ goes to one.
         ListWorkers,
-        /// The palette as a list of the ports forwarded from the workers; ↩ opens one in the
-        /// browser.
+        /// The palette as a list of the ports forwarded from the workers; ↩ opens one in a
+        /// tile or in the browser.
         ListPorts,
         /// Name the focused tile: a field in its header, ↩ keeps the name (blank clears
         /// it), Esc leaves it as it was.
@@ -99,18 +101,6 @@ actions!(
         FontSmaller,
         /// Terminal text back to the settings' size.
         FontReset,
-        /// Move the active file card's reading line up one line.
-        LineUp,
-        /// Move the active file card's reading line down one line.
-        LineDown,
-        /// Move the active file card's reading line up one page.
-        PageUp,
-        /// Move the active file card's reading line down one page.
-        PageDown,
-        /// Move the active file card's reading line to the first line.
-        LineFirst,
-        /// Move the active file card's reading line to the last line.
-        LineLast,
     ]
 );
 
@@ -127,7 +117,9 @@ pub struct FocusColumn {
 /// back out of it.
 const CTX: Option<&str> = Some("Workspace && !Screen");
 const RING_CTX: Option<&str> = Some("Workspace");
-const FILE_CTX: Option<&str> = Some("Workspace && file_card");
+/// Inside a file tile's editor, gpui-kit's input binds some of the workspace's chords to
+/// editing (⌘⌥↑ adds a caret, ⌘F opens its own search); bound here after it, ours win there.
+const FILE_INPUT: Option<&str> = Some("FileEditor > Input");
 
 /// Key bindings for the workspace context.
 #[must_use]
@@ -177,18 +169,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-=", FontLarger, CTX),
         KeyBinding::new("cmd--", FontSmaller, CTX),
         KeyBinding::new("cmd-0", FontReset, CTX),
-        // The active file card's reading line. Only while a file card is focused (the
-        // workspace sets `file_card` on its context then): a binding matches before a focused
-        // terminal's key handler runs, so an unscoped `up` would take the arrows from a shell.
-        KeyBinding::new("up", LineUp, FILE_CTX),
-        KeyBinding::new("down", LineDown, FILE_CTX),
-        KeyBinding::new("pageup", PageUp, FILE_CTX),
-        KeyBinding::new("pagedown", PageDown, FILE_CTX),
-        KeyBinding::new("home", LineFirst, FILE_CTX),
-        KeyBinding::new("end", LineLast, FILE_CTX),
-        KeyBinding::new("cmd-up", LineFirst, FILE_CTX),
-        KeyBinding::new("cmd-down", LineLast, FILE_CTX),
-        // A file card's find bar: the terminal's find keys, in the bar's own context (no
+        KeyBinding::new("cmd-s", crate::file::SaveFile, Some(crate::file::CTX)),
+        KeyBinding::new("cmd-f", crate::terminal::Find, FILE_INPUT),
+        KeyBinding::new("cmd-alt-up", FocusUp, FILE_INPUT),
+        KeyBinding::new("cmd-alt-down", FocusDown, FILE_INPUT),
+        // A file tile's find bar: the terminal's find keys, in the bar's own context (no
         // terminal around it).
         KeyBinding::new("escape", crate::terminal::CloseFind, Some("FileSearch")),
         KeyBinding::new("cmd-g", crate::terminal::FindNext, Some("FileSearch")),
@@ -216,6 +201,8 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
         w("Open a file", Box::new(OpenFile)),
+        w("Save file", Box::new(crate::file::SaveFile)),
+        w("Open URL…", Box::new(OpenUrl)),
         w("Close tile", Box::new(CloseItem)),
         w("Undo close", Box::new(UndoClose)),
         w("Next agent that needs you", Box::new(NextAttention)),

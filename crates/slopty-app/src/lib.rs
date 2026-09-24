@@ -1161,6 +1161,10 @@ impl Render for Workspace {
         }
         let settings_editor = self.settings_editor.clone();
         let welcome = self.welcome();
+        // A page in a browser tile is a native view over everything GPUI draws: it hides
+        // under the app's own dialogs as it does under the workspace's.
+        let covered = welcome || settings_editor.is_some() || self.adding.is_some();
+        self.view.update(cx, |v, cx| v.set_covered(covered, cx));
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
@@ -1228,6 +1232,9 @@ fn apply_link_event(
         }
         LinkEvent::Control(WorkerMsg::File { path, read }) => {
             view.update(cx, |v, cx| v.file_read(key, &path, &read, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Written { path, result }) => {
+            view.update(cx, |v, cx| v.file_written(key, &path, &result, cx));
         }
         LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths }) => {
             view.update(cx, |v, cx| v.files_found(&root, &query, &paths, cx));

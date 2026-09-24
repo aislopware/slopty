@@ -6,12 +6,14 @@ use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 use slopty_core::SessionId;
+use slopty_proto::agent::AgentStatus;
 use slopty_proto::terminal::{OpenSession, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::socket_path;
 use slopty_pty::{PtydClient, SpawnSpec};
 use tokio::sync::mpsc;
 
 use crate::WorkerError;
+use crate::orchestrate::Agents;
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -43,6 +45,8 @@ struct Inner {
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
     port_hints: mpsc::UnboundedSender<SessionId>,
     port_hints_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// The coding agents seen in the sessions, which every summary carries.
+    agents: Arc<dyn Agents>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -53,8 +57,11 @@ impl std::fmt::Debug for Worker {
 
 impl Worker {
     /// Connect to ptyd (default socket or `$SLOPTY_PTYD_SOCKET`) and adopt every session it
-    /// already holds.
-    pub async fn connect(socket: Option<PathBuf>) -> Result<Self, WorkerError> {
+    /// already holds. `agents` is the daemon's agent table, read into every summary.
+    pub async fn connect(
+        socket: Option<PathBuf>,
+        agents: Arc<dyn Agents>,
+    ) -> Result<Self, WorkerError> {
         let path = socket.unwrap_or_else(socket_path);
         let (mut client, exits) = PtydClient::connect(&path).await?;
         let existing = client.list().await?;
@@ -69,6 +76,7 @@ impl Worker {
                 session_env: Mutex::new(Vec::new()),
                 port_hints,
                 port_hints_rx: Mutex::new(Some(port_hints_rx)),
+                agents,
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
@@ -79,6 +87,12 @@ impl Worker {
             }
         }
         Ok(worker)
+    }
+
+    /// The daemon's agent table.
+    #[must_use]
+    pub fn agents(&self) -> &dyn Agents {
+        &*self.inner.agents
     }
 
     /// Take the exit-notification receiver (once); the caller pumps it into `on_exit`.
@@ -162,7 +176,7 @@ impl Worker {
             .ok_or(WorkerError::NoSuchSession)
     }
 
-    /// Summaries for the session list.
+    /// Summaries for the session list, each with the agent running in it now.
     pub async fn summaries(&self) -> Vec<SessionSummary> {
         let entries: Vec<(SessionId, SessionHandle, Vec<String>, Option<i32>)> = self
             .inner
@@ -178,9 +192,10 @@ impl Worker {
                 Some(status) => SessionState::Exited { status },
                 None => SessionState::Running,
             };
+            let agent =
+                self.inner.agents.status(id).filter(|(_kind, status)| *status != AgentStatus::None);
             out.push(SessionSummary {
                 id,
-                kind: slopty_proto::terminal::SessionKind::Terminal,
                 title: snap.title.clone().unwrap_or_else(|| {
                     command.first().cloned().unwrap_or_else(|| "shell".to_owned())
                 }),
@@ -191,6 +206,7 @@ impl Worker {
                 state,
                 viewers: snap.viewers,
                 command,
+                agent,
             });
         }
         out
