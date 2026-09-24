@@ -8,7 +8,6 @@ use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellSemanticContent, GridRef, Screen as VtScreen, TrackedGridRef};
-use libghostty_vt::selection::Selection;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
     ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
@@ -25,6 +24,10 @@ use slopty_proto::terminal::{ColorOverrides, Frame, PixelRect, Placement, TermCo
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
+
+mod read;
+
+pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 
 /// Longest title or body of a desktop notification passed on: a banner shows a line or two,
 /// and a program can write anything into an OSC.
@@ -117,6 +120,12 @@ pub struct GhosttyEngine {
     /// row out of the prompt without writing to it, and the client's command tracking waits
     /// on that row (a silent `sleep` was not seen running until its output or its end).
     forced_rows: BTreeSet<u64>,
+    /// The OSC 133 command blocks of the active screen, oldest first (see [`read`]).
+    commands: std::collections::VecDeque<read::Block>,
+    /// The primary screen's blocks while the alternate screen is up, as `primary_anchor`.
+    primary_commands: std::collections::VecDeque<read::Block>,
+    /// `133;D` marks seen since the engine started, for a waiter on the next command's end.
+    commands_ended: u64,
     /// Walks the kitty graphics placements of the active screen.
     placements: PlacementIterator<'static>,
     /// The images the clients hold.
@@ -209,6 +218,9 @@ impl GhosttyEngine {
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
+            commands: std::collections::VecDeque::new(),
+            primary_commands: std::collections::VecDeque::new(),
+            commands_ended: 0,
             placements: PlacementIterator::new()?,
             ledger: Ledger::default(),
             uploads: Vec::new(),
@@ -224,19 +236,7 @@ impl GhosttyEngine {
     /// rows of 80 columns (see `docs/MEASUREMENTS.md`).
     fn plain_text(&self) -> Result<String, EngineError> {
         let total = u32::try_from(self.total_rows()?).unwrap_or(u32::MAX);
-        let last_col = self.size.cols.saturating_sub(1);
-        let start = self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y: 0 }))?;
-        let end = self
-            .term
-            .grid_ref(Point::Screen(PointCoordinate { x: last_col, y: total.saturating_sub(1) }))?;
-        let selection = Selection::new(start, end, false);
-        let options = FormatterOptions::new()
-            .with_format(Format::Plain)
-            .with_trim(true)
-            .with_selection(&selection);
-        let mut formatter = Formatter::new(&self.term, options)?;
-        let bytes = formatter.format_alloc(None)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        self.plain_rows(0, total.saturating_sub(1))
     }
 
     /// The whole terminal as the VT byte stream that rebuilds it in a fresh engine of the same
@@ -380,6 +380,7 @@ impl GhosttyEngine {
         self.exit_marks.clear();
         self.prompt_starts.clear();
         self.forced_rows.clear();
+        self.commands.clear();
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }
 
@@ -442,6 +443,8 @@ impl GhosttyEngine {
         let Ok(y) = self.term.cursor_y() else { return };
         let Ok(scrollback) = self.term.scrollback_rows() else { return };
         let line = self.base.saturating_add(scrollback as u64).saturating_add(u64::from(y));
+        let col = self.term.cursor_x().unwrap_or(0);
+        self.note_command_mark(line, col, mark);
         // Evicted history can never be read again; drop its marks with it.
         self.exit_marks = self.exit_marks.split_off(&self.base);
         self.prompt_starts = self.prompt_starts.split_off(&self.base);
@@ -466,12 +469,14 @@ impl GhosttyEngine {
             if on_alt {
                 // Park the primary anchor; alt screen has no history and starts at 0.
                 self.primary_anchor = self.anchor.take();
+                self.primary_commands = std::mem::take(&mut self.commands);
                 self.bump_epoch();
                 self.reanchor()?;
                 return Ok(());
             }
             // Back on primary: restore numbering from the parked anchor if it survived.
             self.anchor = self.primary_anchor.take();
+            self.commands = std::mem::take(&mut self.primary_commands);
             self.epoch = self.epoch.wrapping_add(1);
         }
 
@@ -1395,6 +1400,7 @@ impl GhosttyEngine {
         self.generation = self.generation.wrapping_add(1);
         if reflow {
             self.primary_anchor = None;
+            self.primary_commands.clear();
             self.bump_epoch();
             self.reanchor()?;
         }
