@@ -297,27 +297,34 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
                     .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
             };
             // A conflict resolved by hand rewrites the patch, so `git cherry` cannot vouch for
-            // it either: then accept the branch when it already sits on the new upstream and
-            // replays the fork's patches by subject, in order.
+            // it either: then accept the branch when it sits on a newer upstream than the fork
+            // and replays the fork's patches by subject, in order, before any fixes of its own.
+            // Upstream may have moved again since, so the branch's own base is what counts.
             let upstream_sha = &upstream.sha;
             let replays_every_patch = || {
+                let read = |cmd: xshell::Cmd<'_>| cmd.quiet().read().ok();
                 let subjects = |range: &str| {
-                    cmd!(sh, "git log --format=%s --reverse {range}").quiet().read().ok()
+                    read(cmd!(sh, "git log --format=%s --reverse {range}"))
+                        .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
                 };
-                let fork_base = cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")
-                    .quiet()
-                    .read()
-                    .ok()
-                    .map(|sha| sha.trim().to_owned());
-                let on_upstream = cmd!(sh, "git merge-base --is-ancestor {upstream_sha} {local}")
+                let (Some(fork_base), Some(local_base)) = (
+                    read(cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")),
+                    read(cmd!(sh, "git merge-base {local} {upstream_sha}")),
+                ) else {
+                    return false;
+                };
+                let (fork_base, local_base) = (fork_base.trim(), local_base.trim());
+                let rebased = cmd!(sh, "git merge-base --is-ancestor {fork_base} {local_base}")
                     .quiet()
                     .run()
                     .is_ok();
-                on_upstream
-                    && fork_base.is_some_and(|fork_base| {
-                        subjects(&format!("{upstream_sha}..{local}"))
-                            == subjects(&format!("{fork_base}..{fork_sha}"))
-                    })
+                let (Some(replayed), Some(patches)) = (
+                    subjects(&format!("{local_base}..{local}")),
+                    subjects(&format!("{fork_base}..{fork_sha}")),
+                ) else {
+                    return false;
+                };
+                rebased && replayed.starts_with(&patches)
             };
             ensure!(
                 fork_is_ancestor || carries_every_patch() || replays_every_patch(),

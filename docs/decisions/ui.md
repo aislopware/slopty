@@ -72,6 +72,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   was at upstream head. `vendor/ghostty` is left at `5252b193cf`, 19 commits behind ghostty main:
   the binding pins that commit and a bump means regenerating and re-checking the bindings, which
   is its own change. Nightly moved to 2026-09-13; stable 1.98.1 unchanged.
+  2026-09-24: rebased onto zed main `d528c665e1` (178 commits, fork head `5cda33756c`) and
+  gpui-kit main `aa2c3f77` (v0.6.5, 109 commits, fork head `64cd7539`).
+  - The iOS backend commit conflicted in `gpui_apple`. Upstream moved from `block` to `block2`
+    and made the Metal atlas generic (`AtlasState<MetalAtlasTextures>`, #64331). Resolution:
+    upstream's shapes, with our `supports_shared_storage` flag and the shared macOS+iOS
+    dependency block. Our glyph-size patch still passed the atlas key by reference, which
+    #64331 broke; fixed as its own commit.
+  - `upstream.rs`'s divergence check now also accepts a rebased branch that ends in fix commits
+    of its own after the replayed patches.
+  - Xcode 27.0 shipped without the Metal toolchain, so shader builds failed until
+    `xcodebuild -downloadComponent MetalToolchain` was run.
+  - Adopted for free: atlas-released sprites are skipped instead of crashing, no panic
+    hit-testing past a wrapped line, synthetic drags end on button release, no hover through
+    covering windows, and the a11y adapter no longer leaks on window close. gpui-kit also
+    brought mobile selection handles and an edit menu for `Input`/`TextView`.
+  - Queued as follow-ups: `ShapedLine::cursor` for truncating without reshaping, standalone
+    modifier keystrokes for remote input, and integer `ElementId`s instead of per-frame
+    `format!` ids.
 
 - ✅ **Upstream sync is `cargo xtask upstream check|sync`, run at least weekly** (user standing
   order 2026-09-05: gpui and gpui-kit move fast, keep pulling). `xtask/upstream.toml` records,
