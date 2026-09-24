@@ -534,6 +534,75 @@ mod golden {
             },
         );
     }
+
+    #[test]
+    fn server_links() {
+        use slopty_core::WorkerId;
+        use slopty_proto::orchestration::{Line, Outcome, TermRef, Verb};
+        use slopty_proto::screen::VideoCodec;
+        use slopty_proto::server::{
+            DisplayCap, FromServer, Liveness, Os, Registration, Role, ToServer, WorkerCaps,
+            WorkerInfo,
+        };
+
+        let worker = WorkerId::from_uuid(Uuid::from_u128(0x77));
+        let caps = WorkerCaps {
+            os: Os::MacOs,
+            os_version: "26.5".to_owned(),
+            arch: "aarch64".to_owned(),
+            cpus: 24,
+            memory: 128 << 30,
+            encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
+            displays: vec![DisplayCap { id: 1, w: 2560.0, h: 1440.0, scale: 2.0, hz: 120.0 }],
+            agents: Vec::new(),
+            can_capture: true,
+            can_inject: true,
+            load: 1.5,
+            version: "0.1.0".to_owned(),
+        };
+        snap(
+            "server_worker_hello",
+            &ToServer::Hello {
+                protocol: PROTOCOL_VERSION,
+                role: Role::Worker(Registration {
+                    worker,
+                    name: "mac-studio".to_owned(),
+                    port: 45570,
+                    caps: caps.clone(),
+                    sessions: Vec::new(),
+                }),
+            },
+        );
+        let term = TermRef { worker, session: session() };
+        snap(
+            "server_request",
+            &FromServer::Request {
+                id: 7,
+                verb: Verb::ReadOutput { term, since: Some(1200), max_lines: 200 },
+            },
+        );
+        snap(
+            "server_reply",
+            &ToServer::Reply {
+                id: 7,
+                outcome: Outcome::Output {
+                    lines: vec![Line { index: 1200, text: "cargo build".to_owned() }],
+                    next: 1201,
+                },
+            },
+        );
+        snap(
+            "server_directory",
+            &FromServer::Worker(WorkerInfo {
+                worker,
+                name: "mac-studio".to_owned(),
+                address: "100.64.0.7:45570".to_owned(),
+                liveness: Liveness::Online,
+                caps,
+                last_seen_ms: 1_790_000_000_000,
+            }),
+        );
+    }
 }
 
 #[cfg(test)]

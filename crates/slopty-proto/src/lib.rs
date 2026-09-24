@@ -22,7 +22,9 @@ pub mod file;
 pub mod handshake;
 pub mod input;
 pub mod media;
+pub mod orchestration;
 pub mod screen;
+pub mod server;
 pub mod terminal;
 
 use serde::{Deserialize, Serialize};
