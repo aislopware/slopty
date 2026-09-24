@@ -429,7 +429,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `slopty_net::endpoint::trace_path_health`, `SLOPTY_PATH_TRACE_MS` in milliseconds, off by
   default). One reading at the end of a run cannot tell a window that sat on BBR's four-packet
   floor the whole time from one that dipped there for 200 ms — and a 15 s sample missed the dips
-  entirely. Paired with a **backlog** line in hostd's datagram pump, the host-side twin of
+  entirely. (The pump half is superseded 2026-09-25 by **Media datagrams go to QUIC from the
+  thread that made them**: with no pump there is no channel for a datagram to wait in.)
+  Paired with a **backlog** line in hostd's datagram pump, the host-side twin of
   `receiver_dozed`: a datagram waits either in the pump's channel, because the task did not run,
   or in QUIC's send buffer, because the window holds it, and a receiver sees the same silence for
   both. The pump is never late by more than 12 ms in any sample, which is what makes the
@@ -596,7 +598,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   — QUIC sends them on the next acknowledgement — so refusing a frame while `held` is under `cwnd`
   drops a frame the link would have carried. That case is reachable rather than theoretical: two
   frames fall under one window once `rtt × fps` passes 1.8, which at 60 fps is any path past a
-  30 ms round trip. `DatagramBudget` carries the window beside the held bytes and hostd's pump
+  30 ms round trip. (Amended 2026-09-25: the stream now asks its `DatagramSink` for the window on
+  each captured frame, and only while something is held; the pump below is gone.)
+  `DatagramBudget` carried the window beside the held bytes and hostd's pump
   samples the selected path when a hold starts, when it deepens, and on a poll turn — one that woke
   on `HOLD_POLL` with no datagram to send, which is exactly a hold that is long and quiet, the only
   case where the reading would otherwise go stale. Not on every turn: reading the path takes the
@@ -870,7 +874,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   bytes of IPv4 and UDP). One ask was not taken: a datagram send buffer of about one frame. noq
   drops the *oldest* datagram when that buffer is full and a frame is pushed in one burst, so a
   buffer smaller than a keyframe would cut the head off every keyframe; the standing queue is
-  already held to two frames by the capture guard (`DatagramBudget`), which drops whole frames.
+  already held to two frames by the capture guard (`frame_fits`), which drops whole frames.
   The buffer stays 4 MiB, a ceiling for a burst rather than a queue.
 
   A host binds one dual-stack socket on `[::]` (IPv4 peers arrive as `::ffff:a.b.c.d` and are
@@ -884,3 +888,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   would leave a per-frame HEVC burst unpaced under the 256-MTU pacer cap. The shaped ladder is the
   instrument and it runs only against a launchd-installed host; installing this branch would have
   replaced the host in use, so it was not run.
+
+- ✅ **Media datagrams go to QUIC from the thread that made them** (2026-09-25). A stream hands
+  its datagrams to a `DatagramSink` (hostd's `QuicSink` over the connection) from wherever they
+  were produced: a frame's worth in one `send_many_datagrams` call from VideoToolbox's callback,
+  audio from the capture queue, heartbeats and cursor samples from their tasks. The pump it
+  replaces put every datagram through a 4096-slot channel into a task that read the send buffer
+  and the datagram size beside each `send_datagram`, three connection locks per datagram, and
+  polled at 1 kHz while QUIC held bytes. The capture guard now reads the held bytes from the sink
+  on each captured frame and the window only while something is held, so there is no second
+  queue for a datagram to wait in and nothing to account for it. A datagram larger than the path
+  carries is refused by QUIC as `TooLarge`: that is the packetizer having cut for a size the path
+  had a moment ago, so the batch's datagrams that fit still go, the rest are counted in
+  `ScreenStats::queue_full`, it is logged once per stream, and the stream goes on. The pump
+  ended the connection's media on any send error, `TooLarge` included. Only a closed connection
+  stops a stream's loops now. Measured (MEASUREMENTS.md, "datagrams from the encoder's thread"):
+  median process CPU per 64-datagram frame on loopback 3.43 → 2.47 ms over five alternating
+  pairs; a frame's arrival did not measurably change on loopback (p50 medians 0.86 and 0.96 ms),
+  where the pump was seldom behind. `datagram_send_cost` and its pump twin stay as the
+  instrument.
+
+- ✅ **A connection's loop only routes; anything slow runs beside it** (2026-09-25). Everything
+  a client sent used to be handled inline in one `select!`: a window stream's open (115–300 ms),
+  its close, an encoder rebuild, the 100 ms geometry tick with its window-server reads, a session
+  open waiting on ptyd, quick open walking 20 000 files, file reads and polls, and the pasteboard
+  write behind a paste. A terminal's keys waited behind all of it. Now each screen stream has a
+  task of its own that takes its commands in order (open, input, focus, quality, resize, close)
+  and runs its geometry probe on the blocking pool beside them; loss feedback and reports reach
+  the stream's `StreamControl` straight from the loop; session open and close, quick open, file
+  reads, hook installs and transfer resumes are spawned and report back; the watched files have
+  their own task. A paste chord holds input only for the windows it went to, in order, while the
+  clipboard is asked, fetched and written off the runtime; other windows and every terminal carry
+  on. `echo_is_not_held_behind_slow_requests` (hostd e2e) keeps it so: keystroke echo under a
+  stream of quick opens and window opens on the same connection, p99 against half a quick open.
+  Measured (MEASUREMENTS.md, "echo behind slow requests"): echo p99 33.3 → 4.8–5.3 ms under that
+  load, p50 28.7 → 2.8 ms. `slopty_host::file::read` also refuses what is not a regular file
+  before opening it: a named pipe would wait for a writer on a blocking thread for good.

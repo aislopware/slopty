@@ -18,9 +18,9 @@ pub use ax::{AxError, HideWatch, TargetWindow, Went, resize_window};
 pub use content::{Shareable, enumerate};
 pub use cursor::{AlphaAt, Layout, bgra_premultiplied, cursor_shape, warm_cursor};
 pub use geometry::{
-    Above, Crop, Rect, can_capture, counts_as_occluder, crop_for, display_bounds,
+    Above, Crop, Rect, WindowState, can_capture, counts_as_occluder, crop_for, display_bounds,
     display_enclosing, occluded, occluders, pointer_location, pointer_moves, request_capture,
-    target_bounds, window_bounds, window_on_screen, window_owner_pid, window_title,
+    target_bounds, window_bounds, window_on_screen, window_owner_pid, window_state, window_title,
 };
 pub use snapshot::{Picture, PixelOrder};
 pub use stream::{

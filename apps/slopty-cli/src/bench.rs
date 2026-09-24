@@ -404,7 +404,7 @@ async fn print_host_side(client: slopty_core::ClientId, stream: slopty_core::Str
     println!("  host capture (display time → SCK callback): {}", s.stats.capture.describe());
     println!("  host encode (submit → VideoToolbox callback): {}", s.stats.encode.describe());
     println!(
-        "  host captured {} (display-crop path {}), dropped {}, encoded {}, queue full {}",
+        "  host captured {} (display-crop path {}), dropped {}, encoded {}, refused {}",
         s.stats.captured, s.stats.cropped, s.stats.dropped, s.stats.encoded, s.stats.queue_full
     );
 }

@@ -5,10 +5,9 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_host::screen::{DATAGRAM_QUEUE, DatagramBudget, ScreenStream, StreamEvent, listing};
+    use slopty_host::screen::{ScreenStream, StreamEvent, listing};
     use slopty_proto::media::{Kind, MediaHeader, flags};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent};
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn display_stream_produces_datagrams() {
@@ -22,14 +21,13 @@ mod tests {
         eprintln!("{} windows, {} displays", windows.len(), displays.len());
         let display = displays.first().expect("a display");
 
-        let (tx, mut rx) = mpsc::channel(DATAGRAM_QUEUE);
+        let (sink, mut rx) = super::channel();
         let quality = Quality { fps: 60, bitrate_bps: 8_000_000, scale: 0.5, ..Quality::default() };
         let (mut stream, opened) = ScreenStream::open(
             slopty_core::StreamId(7),
             CaptureTarget::Display(display.id),
             quality,
-            tx,
-            DatagramBudget::new(),
+            sink,
             |e| {
                 if let StreamEvent::Stopped(e) = e {
                     panic!("capture stopped: {e}");
@@ -44,7 +42,7 @@ mod tests {
         let (mut data, mut parity, mut cursor, mut keyframes) = (0_u32, 0_u32, 0_u32, 0_u32);
         let mut frames = std::collections::BTreeSet::new();
         while let Ok(Some(datagram)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            let (header, _payload) = MediaHeader::parse(&datagram.datagram).expect("well-formed");
+            let (header, _payload) = MediaHeader::parse(&datagram).expect("well-formed");
             match Kind::from_u8(header.kind) {
                 Some(Kind::VideoData) => {
                     data += 1;
@@ -142,9 +140,7 @@ mod ghostty {
 mod crop_path {
     use std::time::Duration;
 
-    use slopty_host::screen::{
-        DATAGRAM_QUEUE, DatagramBudget, ScreenStream, StreamEvent, WindowPath,
-    };
+    use slopty_host::screen::{ScreenStream, StreamEvent, WindowPath};
     use slopty_proto::screen::{CaptureTarget, Quality};
     use tokio::sync::mpsc;
 
@@ -159,15 +155,14 @@ mod crop_path {
         }
         let (mut window, id) = super::ghostty::launch(&["sleep", "600"]).await;
         assert!(slopty_capture::window_on_screen(id));
-        let (tx, mut rx) = mpsc::channel(DATAGRAM_QUEUE);
+        let (sink, mut rx) = super::channel();
         let (stopped_tx, mut stopped_rx) = mpsc::channel(1);
         let quality = Quality { fps: 60, bitrate_bps: 8_000_000, scale: 0.5, ..Quality::default() };
         let (mut stream, opened) = ScreenStream::open(
             slopty_core::StreamId(9),
             CaptureTarget::Window(id),
             quality,
-            tx,
-            DatagramBudget::new(),
+            sink,
             move |e| {
                 if let StreamEvent::Stopped(e) = e {
                     let _receiver_gone = stopped_tx.try_send(e.to_string());
@@ -202,13 +197,17 @@ mod crop_path {
                 );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let _event = stream.check_geometry().unwrap();
+            let _event = stream
+                .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+                .unwrap();
         }
 
         window.kill();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let reason = loop {
-            let _event = stream.check_geometry().unwrap();
+            let _event = stream
+                .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+                .unwrap();
             if let Ok(Some(reason)) =
                 tokio::time::timeout(Duration::from_millis(100), stopped_rx.recv()).await
             {
@@ -223,7 +222,9 @@ mod crop_path {
         assert!(reason.contains("window closed"), "{reason}");
         assert!(!slopty_capture::window_on_screen(id), "the window is gone");
         // Once: further ticks stay quiet.
-        let _event = stream.check_geometry().unwrap();
+        let _event = stream
+            .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+            .unwrap();
         tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.unwrap_err();
         stream.close().await;
     }
@@ -488,4 +489,43 @@ mod encoder_rate_control {
         }
         drop(top);
     }
+}
+
+/// A transport that hands every datagram to a channel, for tests that read what a stream sends.
+#[cfg(test)]
+fn channel() -> (
+    std::sync::Arc<dyn slopty_host::DatagramSink>,
+    tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>,
+) {
+    struct Channel(tokio::sync::mpsc::UnboundedSender<bytes::Bytes>);
+
+    impl slopty_host::DatagramSink for Channel {
+        fn send(&self, datagrams: &[bytes::Bytes]) -> Result<(), slopty_host::screen::Refused> {
+            for datagram in datagrams {
+                self.0
+                    .send(datagram.clone())
+                    .map_err(|_gone| slopty_host::screen::Refused::Closed)?;
+            }
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(slopty_proto::media::MAX_DATAGRAM)
+        }
+
+        fn held(&self) -> usize {
+            0
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            self.0.is_closed()
+        }
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (std::sync::Arc::new(Channel(tx)), rx)
 }

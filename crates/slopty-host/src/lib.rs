@@ -26,7 +26,7 @@ pub mod xfer;
 
 pub use items::ItemStore;
 pub use manager::Host;
-pub use screen::{DatagramBudget, ScreenError, ScreenStream};
+pub use screen::{DatagramSink, ScreenError, ScreenStream};
 pub use session::{ClientSink, SessionHandle};
 
 /// Host errors.

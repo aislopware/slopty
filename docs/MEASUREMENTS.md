@@ -3369,3 +3369,79 @@ macOS compositor. Measured and rejected:
   and motion repeated 153 refreshes.
 
 The iOS side runs the same pacer and only builds so far; it has no number yet.
+
+## 2026-09-25 — echo behind slow requests
+
+Keystroke echo on a `/bin/cat` session while the same connection keeps hostd busy: quick open
+walking a 20 000-file tree and a window stream opening, back to back, for as long as the typing
+lasts. Each key goes out after the last one's echo came back. Release, mac-studio. Screen
+Recording is not granted to a hostd this test spawns (`-3801`, docs/DEV.md "TCC"), so each
+window open fails at ScreenCaptureKit (≈ 9 ms on its own) instead of opening the idle window;
+where the grant exists the same test opens and closes the `slopty-idle-window` window.
+
+```
+cargo test -p slopty-hostd --release --test e2e echo_is_not_held_behind_slow_requests -- --nocapture
+```
+
+| | echo idle p50 / p99 / max | echo under load p50 / p99 / max | quick open p50 | load avg |
+| --- | --- | --- | --- | --- |
+| before (one run) | 3.01 / 4.36 / 4.42 ms | **28.68 / 33.31 / 69.60 ms** | 27.4 ms | ≈ 6 |
+| after, run 1 | 2.78 / 4.11 / 4.31 ms | **2.81 / 4.79 / 7.18 ms** | 28.9 ms | ≈ 16 |
+| after, run 2 | 2.91 / 5.09 / 6.06 ms | 2.77 / 5.25 / 8.12 ms | 28.1 ms | ≈ 16 |
+
+Before, a key typed during a quick open waited out the walk: the echo's median under load was
+the walk's median. After, the load leaves the echo where it is idle. The test fails when the
+loaded p99 reaches half a quick open, which the old loop does on every run.
+
+## 2026-09-25 — the geometry tick off the connection
+
+What one geometry tick of a window stream costs in window-server calls, against the idle window
+(`slopty-idle-window`, found by owner pid; the window list needs no Screen Recording). Before, a
+tick read bounds, on-screen state and owner as three window-list descriptions, and the cursor
+loop read the bounds again at the same 10 Hz. After, one description answers all three and the
+cursor loop reads what the probe left. Both include the occlusion list and the display lookup.
+Release, mac-studio, 2 000 ticks a run, three runs:
+
+```
+cargo test -p slopty-capture --release --test geometry -- --ignored geometry_tick_cost --nocapture
+```
+
+| | p50 | p99 | max |
+| --- | --- | --- | --- |
+| separate reads | 551 / 513 / 513 µs | 3 270 / 2 805 / 2 782 µs | 15.2 / 6.1 / 6.8 ms |
+| one description | **264 / 242 / 244 µs** | **541 / 537 / 552 µs** | 3.3 / 3.6 / 3.2 ms |
+
+At 10 Hz that is about 5 ms of window-server time a second per open window before and 2.5 ms
+after. It also no longer runs on the connection's task: the probe runs on the blocking pool from
+the stream's own task, beside that stream's input. Not measured: hostd's CPU per second with one
+idle window stream open. It needs a capture, and a hostd this session can start has no Screen
+Recording grant; installing one under launchd would replace the host the user runs.
+
+## 2026-09-25 — datagrams from the encoder's thread
+
+64 datagrams of 1 150 B per frame (a 62 KB P-frame at 30 Mbit/s), 300 frames at 60 fps,
+produced on a plain thread as VideoToolbox's callback produces them, sent over loopback QUIC to
+a client in the same process. "Pump" is the path this replaced, kept as the test's twin: a
+4 096-slot channel into a task that reads the send buffer and the datagram size beside every
+`send_datagram` and polls at 1 kHz while QUIC holds bytes. "Direct" is `QuicSink`, one
+`send_many_datagrams` per frame. CPU is the whole process (both ends of the connection) per
+frame; the arrival is from a frame's first stamp to its last datagram at the client. Release,
+mac-studio, load average 8–19 from other sessions, five alternating pairs:
+
+```
+cargo test -p slopty-hostd --release --bin slopty-hostd datagram_send_cost -- --ignored --nocapture
+```
+
+| pair | pump cpu / frame | direct cpu / frame | pump arrival p50 / p99 | direct arrival p50 / p99 |
+| --- | --- | --- | --- | --- |
+| 1 | 3.43 ms | 2.47 ms | 2.06 / 7.5 ms | 1.60 / 9.9 ms |
+| 2 | 3.33 ms | 2.17 ms | 0.86 / 1.5 ms | 0.81 / 1.2 ms |
+| 3 | 2.77 ms | 2.77 ms | 0.84 / 0.95 ms | 0.84 / 6.9 ms |
+| 4 | 4.63 ms | 2.30 ms | 1.51 / 13.7 ms | 0.96 / 40.0 ms |
+| 5 | 3.50 ms | 3.47 ms | 0.82 / 18.3 ms | 1.59 / 10.3 ms |
+
+Median CPU per frame 3.43 → 2.47 ms. The arrival does not move measurably on loopback, where
+the pump was seldom behind (median p50 0.86 against 0.96 ms); the tails in both columns are this
+machine's load, not either path. What the change removes that no loopback run shows is the
+pump's own failure: any send error, `TooLarge` included, ended the connection's media, where a
+datagram cut for a stale size now costs only itself (`a_too_large_datagram_costs_itself_and_a_closed_link_takes_nothing`).

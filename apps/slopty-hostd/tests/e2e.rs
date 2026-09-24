@@ -317,6 +317,206 @@ mod tests {
         }
     }
 
+    /// Keystroke echo while the same connection keeps the host busy with slow requests: quick
+    /// open walking 20 000 files, and window streams opening (onto the idle window where Screen
+    /// Recording is granted; failing at ScreenCaptureKit where it is not). None of that may put
+    /// a terminal's echo behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn echo_is_not_held_behind_slow_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        for d in 0..200 {
+            let sub = tree.join(format!("d{d:03}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for f in 0..100 {
+                std::fs::write(sub.join(format!("f{f:03}.txt")), b"").unwrap();
+            }
+        }
+        let markers = dir.path().join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let title = format!("slopty echo {}", std::process::id());
+        let mut helper = Command::new(bin_of("slopty-e2e", "slopty-idle-window"))
+            .arg(&markers)
+            .arg(&title)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn the idle window");
+        wait_for_marker(&markers.join("ready"), "the idle window").await;
+
+        let (_guard, mut host) = connect(dir.path()).await;
+        let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
+        host.tx
+            .send(&ClientMsg::OpenSession(OpenSession {
+                size,
+                cwd: None,
+                command: vec!["/bin/cat".to_owned()],
+                env: Vec::new(),
+                title: None,
+                attach: true,
+            }))
+            .await
+            .unwrap();
+        let (_session, mut frames) = session_stream(&host).await;
+        let session = next_msg(&mut host, |m| match m {
+            HostMsg::SessionOpened(summary) => Some(summary.id),
+            _ => None,
+        })
+        .await;
+
+        // Where Screen Recording is granted the listing names the idle window; where it is not
+        // there is no listing, and an open fails at ScreenCaptureKit instead.
+        host.tx.send(&ClientMsg::Screen(ScreenRequest::List)).await.unwrap();
+        let window = tokio::time::timeout(
+            Duration::from_secs(2),
+            next_msg(&mut host, |m| match m {
+                HostMsg::Screen(ScreenEvent::Listing { windows, .. }) => {
+                    Some(windows.iter().find(|w| w.title == title).map(|w| w.id))
+                }
+                _ => None,
+            }),
+        )
+        .await
+        .ok()
+        .flatten();
+        eprintln!("idle window: {window:?}");
+        let target = CaptureTarget::Window(window.unwrap_or(WindowId(u32::MAX)));
+
+        let HostConn { tx, rx, .. } = host;
+        let (send, mut outbox) = tokio::sync::mpsc::channel::<ClientMsg>(64);
+        let writer = tokio::spawn(async move {
+            let mut tx = tx;
+            while let Some(msg) = outbox.recv().await {
+                tx.send(&msg).await.unwrap();
+            }
+        });
+        // Every answer to a slow request, and the streams to close again.
+        let (answered, mut answers) = tokio::sync::mpsc::channel::<HostMsg>(64);
+        let reader = tokio::spawn(async move {
+            let mut rx = rx;
+            while let Ok(msg) = rx.recv().await {
+                if matches!(msg, HostMsg::FoundFiles { .. } | HostMsg::Screen(_))
+                    && answered.send(msg).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let baseline = echoes(&send, &mut frames, session, 60).await;
+        let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let load = {
+            let (send, busy) = (send.clone(), std::sync::Arc::clone(&busy));
+            let root = tree.to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                let mut walks = Vec::new();
+                let mut opens = Vec::new();
+                while busy.load(std::sync::atomic::Ordering::Relaxed) {
+                    let started = std::time::Instant::now();
+                    let find = ClientMsg::FindFiles { root: root.clone(), query: "nothing".into() };
+                    send.send(find).await.unwrap();
+                    let open = ScreenRequest::Open { target, quality: Quality::default() };
+                    send.send(ClientMsg::Screen(open)).await.unwrap();
+                    let (mut found, mut screen) = (false, false);
+                    while !(found && screen) {
+                        match tokio::time::timeout(STEP, answers.recv()).await.unwrap().unwrap() {
+                            HostMsg::FoundFiles { .. } => {
+                                found = true;
+                                walks.push(started.elapsed().as_secs_f64() * 1e3);
+                            }
+                            HostMsg::Screen(ScreenEvent::Opened { stream, .. }) => {
+                                screen = true;
+                                opens.push(started.elapsed().as_secs_f64() * 1e3);
+                                let close = ClientMsg::Screen(ScreenRequest::Close(stream));
+                                send.send(close).await.unwrap();
+                            }
+                            HostMsg::Screen(ScreenEvent::Closed { .. }) if !screen => {
+                                screen = true;
+                                opens.push(started.elapsed().as_secs_f64() * 1e3);
+                            }
+                            _other => {}
+                        }
+                    }
+                }
+                (walks, opens)
+            })
+        };
+        let loaded = echoes(&send, &mut frames, session, 200).await;
+        busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (walks, opens) = load.await.unwrap();
+
+        let (b50, b99, bmax) = p50_p99_max(&baseline);
+        let (l50, l99, lmax) = p50_p99_max(&loaded);
+        let (w50, _w99, wmax) = p50_p99_max(&walks);
+        let (o50, _o99, omax) = p50_p99_max(&opens);
+        eprintln!(
+            "echo idle p50 {b50:.2} / p99 {b99:.2} / max {bmax:.2} ms; under load p50 {l50:.2} / \
+             p99 {l99:.2} / max {lmax:.2} ms; quick open p50 {w50:.1} / max {wmax:.1} ms over {}; \
+             window open p50 {o50:.1} / max {omax:.1} ms over {}",
+            walks.len(),
+            opens.len()
+        );
+        // The median, not the tail: echo queued behind the handlers sat near a quick open's own
+        // time (p50 28.7 ms), while a parallel test run alone stretches the tail past 20 ms.
+        assert!(
+            l50 < w50 / 4.0,
+            "echo p50 {l50:.2} ms waits behind a {w50:.1} ms quick open on the same connection"
+        );
+
+        writer.abort();
+        reader.abort();
+        std::fs::write(markers.join("quit"), b"").unwrap();
+        let _stopped = helper.wait().await;
+    }
+
+    fn p50_p99_max(samples: &[f64]) -> (f64, f64, f64) {
+        let mut sorted = samples.to_vec();
+        let (p50, _p90, max) = quantiles(&mut sorted);
+        let last = sorted.len().saturating_sub(1);
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an index below 2^53"
+        )]
+        let i = ((last as f64) * 0.99).round() as usize;
+        (p50, sorted.get(i).copied().unwrap_or(0.0), max)
+    }
+
+    /// Type `count` keys into a `/bin/cat` session one at a time, each after the last one's echo
+    /// came back; the round trips in milliseconds.
+    async fn echoes(
+        send: &tokio::sync::mpsc::Sender<ClientMsg>,
+        frames: &mut FramedRecv<TermEvent>,
+        session: SessionId,
+        count: usize,
+    ) -> Vec<f64> {
+        let mut took = Vec::with_capacity(count);
+        for i in 0..count {
+            let key = b'a'.saturating_add(u8::try_from(i % 26).unwrap());
+            let sent = std::time::Instant::now();
+            let req = TermRequest::Raw(vec![key]);
+            send.send(ClientMsg::Term { session, req }).await.unwrap();
+            loop {
+                let ev = tokio::time::timeout(STEP, frames.recv()).await.unwrap().unwrap();
+                if matches!(ev, TermEvent::Frame(_)) {
+                    break;
+                }
+            }
+            took.push(sent.elapsed().as_secs_f64() * 1e3);
+            // A line of 64: the terminal's line buffer stays far from full.
+            if i % 64 == 63 {
+                send.send(ClientMsg::Term { session, req: TermRequest::Raw(b"\x15".to_vec()) })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                while tokio::time::timeout(Duration::from_millis(30), frames.recv()).await.is_ok() {
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        took
+    }
+
     /// Open a shell, have it print `marker`, and wait for the marker on the screen.
     async fn open_shell_and_see(
         host: &mut HostConn,

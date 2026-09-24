@@ -36,10 +36,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// Datagram buffers: a few frames of 4K video at 60 fps.
 ///
-/// The host's capture guard keeps the standing queue at two frames (`DatagramBudget`), so this is
-/// the ceiling a keyframe burst needs, not the queue a stream lives in: noq drops the *oldest*
-/// datagram when the buffer is full, and a buffer smaller than a keyframe would cut the head off
-/// every one.
+/// The host's capture guard skips a frame while the transport still holds the last one's bytes,
+/// so this is the ceiling a keyframe burst needs, not the queue a stream lives in: noq drops the
+/// *oldest* datagram when the buffer is full, and a buffer smaller than a keyframe would cut the
+/// head off every one.
 pub const DATAGRAM_BUFFER: usize = 4 << 20;
 /// Longest the peer may sit on an ACK (QUIC's default is 25 ms).
 ///

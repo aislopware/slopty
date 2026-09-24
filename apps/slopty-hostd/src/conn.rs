@@ -1,13 +1,18 @@
 //! One client connection.
+//!
+//! The loop here only routes. A terminal's keys, a window's input and the client's loss feedback
+//! are handled where they arrive; everything that waits on something slow (a window stream, the
+//! disk, ptyd, the pasteboard) runs on a task of its own and reports back through [`Done`]. What
+//! one request costs therefore never lands on another terminal's echo (MEASUREMENTS.md, "echo
+//! behind slow requests").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_host::HostError;
 use slopty_host::clip::Paste;
-use slopty_host::screen::{
-    DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, StreamEvent, listing,
-};
+use slopty_host::screen::{StreamControl, listing};
 use slopty_host::session::{ClientSink, Outbound};
 use slopty_net::host::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
@@ -15,23 +20,14 @@ use slopty_proto::PROTOCOL_VERSION;
 use slopty_proto::handshake::{Caps, HelloAck};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::ItemSync;
-use slopty_proto::screen::{Feedback, ScreenEvent, ScreenInput, ScreenRequest};
+use slopty_proto::screen::{Feedback, ScreenInput, ScreenRequest};
 use slopty_proto::terminal::{CloseReason, TermEvent, TermRequest, TermSize};
 use slopty_proto::transfer::{ClipMsg, Dest, XferMsg};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, watch};
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::Daemon;
-
-/// How often a stream's target is checked for a size change.
-/// Also how fast a window on the display-crop path follows a drag: the crop lags a move by
-/// one period plus ScreenCaptureKit's ~20 ms configuration update (MEASUREMENTS.md, "capture
-/// floor"), during which one edge of the picture shows the desktop the window left.
-const GEOMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
-/// Paths the palette's quick open is answered with at most.
-const FILES_LISTED: usize = 8;
-/// How often the files behind a client's file cards are looked at for a change.
-const FILES_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
+use crate::screens::{Command, Told};
 
 /// Events buffered per attached session before the client is considered stuck.
 const SINK_DEPTH: usize = 256;
@@ -54,10 +50,72 @@ fn is_paste_chord(input: &ScreenInput) -> bool {
     )
 }
 
-/// Window input held back, in order, while a paste's clipboard is fetched from the client.
+/// Input for the windows a paste went to, held back in order while the client's clipboard is
+/// put on the pasteboard. Every other window, and every terminal, carries on.
 struct Held {
+    streams: HashSet<StreamId>,
     inputs: Vec<(StreamId, ScreenInput)>,
-    until: tokio::time::Instant,
+    stage: Stage,
+}
+
+/// Where a held paste is.
+enum Stage {
+    /// Asking the clipboard what the paste needs (it writes at once when the offer is whole).
+    Deciding,
+    /// Waiting for the client's representations, until the chord goes on regardless.
+    Fetching { until: tokio::time::Instant },
+    /// Writing them to the pasteboard.
+    Writing,
+}
+
+/// Where one window input goes while pastes may be holding some back.
+#[derive(Debug, PartialEq)]
+enum Route {
+    /// To its window now.
+    Now(ScreenInput),
+    /// Behind the paste its window is waiting on.
+    Held,
+    /// A paste chord that starts a hold: the clipboard is to be asked what it needs.
+    Began,
+}
+
+/// Route one input for `stream`. A paste chord holds its window, and joins a hold already under
+/// way; input for a held window queues behind the chord, in order; anything else goes now.
+fn route(held: &mut Option<Held>, stream: StreamId, input: ScreenInput) -> Route {
+    let chord = is_paste_chord(&input);
+    match held {
+        Some(held) if chord || held.streams.contains(&stream) => {
+            held.streams.insert(stream);
+            held.inputs.push((stream, input));
+            Route::Held
+        }
+        None if chord => {
+            *held = Some(Held {
+                streams: HashSet::from([stream]),
+                inputs: vec![(stream, input)],
+                stage: Stage::Deciding,
+            });
+            Route::Began
+        }
+        Some(_) | None => Route::Now(input),
+    }
+}
+
+/// What a task the loop started reports back to it.
+enum Done {
+    /// A session this client opened asked to be attached at once.
+    Attach { session: SessionId, size: TermSize },
+    /// What a paste needs, or `None` when the clipboard could not be asked.
+    PastePlan(Option<Paste>),
+    /// The client's clipboard is on the pasteboard.
+    PasteWritten,
+}
+
+/// One screen stream as the loop sees it: where its commands go, and once it is open, where
+/// feedback goes.
+struct Screen {
+    commands: mpsc::UnboundedSender<Command>,
+    control: Option<StreamControl>,
 }
 
 pub async fn serve(daemon: Daemon, client: AcceptedClient) {
@@ -99,25 +157,27 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     }
 
     let mut events = daemon.events.subscribe();
-    let (datagrams, datagram_rx) = mpsc::channel::<Queued>(DATAGRAM_QUEUE);
-    let budget = DatagramBudget::new();
-    let pump = tokio::spawn(pump_datagrams(conn.clone(), datagram_rx, budget.clone()));
-    let health = tokio::spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "host"));
+    let mut tasks = JoinSet::new();
+    tasks.spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "host"));
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
-    let feedback = tokio::spawn(read_feedback(conn.clone(), feedback_tx));
+    tasks.spawn(read_feedback(conn.clone(), feedback_tx));
     let (clips_tx, mut clips_rx) = mpsc::channel::<crate::xfer::ClipData>(CLIP_DEPTH);
-    let uni = tokio::spawn(crate::xfer::accept(
+    tasks.spawn(crate::xfer::accept(
         daemon.clone(),
         conn.clone(),
         hello.client,
         out.clone(),
         clips_tx,
     ));
-    let tunnels = tokio::spawn(crate::tunnel::accept(conn.clone(), hello.client));
+    tasks.spawn(crate::tunnel::accept(conn.clone(), hello.client));
+    let (watch_files, watched) = watch::channel(Vec::new());
+    tasks.spawn(crate::files::watch(hello.client, out.clone(), watched));
     let known = daemon.ports.lock().known();
     for (session, ports) in known {
         out.send(HostMsg::Ports { session, ports }).await.map_err(|_gone| NetError::Closed)?;
     }
+    let (done, mut done_rx) = mpsc::unbounded_channel();
+    let (told, mut told_rx) = mpsc::unbounded_channel();
     let link = conn.stable_id();
     let mut peer = Peer {
         daemon,
@@ -127,39 +187,20 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         out,
         attached: HashMap::new(),
         screens: HashMap::new(),
+        streams: JoinSet::new(),
         next_stream: 1,
-        datagrams,
-        budget,
-        pump,
-        health,
-        feedback,
-        watched: HashMap::new(),
-        uni,
-        tunnels,
+        tasks,
+        done,
+        told,
+        watch_files,
         downloads: HashMap::new(),
         held: None,
         link,
     };
     daemon.wake.lock().client_joined();
 
-    // Window resizes on the host are polled: ScreenCaptureKit keeps scaling the old output
-    // size until the capture is reconfigured.
-    let mut geometry = tokio::time::interval(GEOMETRY_PERIOD);
-    geometry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut files = tokio::time::interval(FILES_PERIOD);
-    files.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
-            _ = files.tick(), if !peer.watched.is_empty() => {
-                if !peer.poll_files().await {
-                    break Ok("writer gone");
-                }
-            }
-            _ = geometry.tick(), if !peer.screens.is_empty() => {
-                if !peer.check_geometry().await {
-                    break Ok("writer gone");
-                }
-            }
             msg = rx.recv() => {
                 let msg = match msg {
                     Ok(m) => m,
@@ -170,10 +211,14 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, &clip.uti, clip.bytes),
-            () = held_until(peer.held.as_ref()), if peer.held.is_some() => {
+            Some(done) = done_rx.recv() => peer.done(done).await,
+            Some(told) = told_rx.recv() => peer.told(told),
+            () = fetching_until(peer.held.as_ref()) => {
                 tracing::debug!(client = %peer.client, "paste went on without the clipboard");
-                peer.release_held(false);
+                peer.release_held();
             }
+            Some(_finished) = peer.tasks.join_next(), if !peer.tasks.is_empty() => {}
+            Some(_finished) = peer.streams.join_next(), if !peer.streams.is_empty() => {}
             ev = events.recv() => {
                 match ev {
                     // The host's clipboard goes only to the clients that want it now.
@@ -197,20 +242,23 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
         }
     };
+    // Nothing more goes to this client, and nothing the streams still say may wait on it.
+    writer.abort();
     peer.close_screens().await;
     // Whatever ended the loop, the client must not be left on a live connection nobody
     // serves; a no-op when the connection is already closed.
     peer.conn.close(0_u32.into(), b"done");
     drop(peer);
-    writer.abort();
     result
 }
 
-/// Wake when held input is due to go on regardless.
-async fn held_until(held: Option<&Held>) {
+/// Wake when a paste waiting for the client's clipboard is due to go on regardless.
+async fn fetching_until(held: Option<&Held>) {
     match held {
-        Some(held) => tokio::time::sleep_until(held.until).await,
-        None => std::future::pending().await,
+        Some(Held { stage: Stage::Fetching { until }, .. }) => {
+            tokio::time::sleep_until(*until).await;
+        }
+        _ => std::future::pending().await,
     }
 }
 
@@ -266,220 +314,11 @@ async fn read_feedback(conn: Connection, out: mpsc::Sender<Feedback>) {
     }
 }
 
-/// How long the pump waits for the next datagram before looking again, while anything is
-/// outstanding: QUIC still holding what it took, or datagrams still queued for it.
-///
-/// It is also the promise the pump's own lateness is measured against. A turn that asks for
-/// this much and comes back far later is this task not being scheduled, which is the only way
-/// to tell that from the path holding the bytes.
-const HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(1);
-
-/// One stretch during which QUIC held datagrams in its send buffer (congestion window or
-/// pacing), for the debug log: when it began, the most it held, the window at that moment.
-struct Hold {
-    since: std::time::Instant,
-    max_bytes: usize,
-    cwnd_at_max: u64,
-}
-
-/// One stretch during which datagrams waited in the pump's channel, ahead of QUIC.
-///
-/// `behind` sums only the turns the pump *owed* them — the gaps in which the queue was already
-/// non-empty when the loop last looked — rather than the wall clock since the backlog was first
-/// noticed. Timing from the moment `recv` hands over the first datagram measures how long the
-/// drain took and misses the sleep before it entirely, which is how a pump descheduled for
-/// 200 ms could wake, drain in 1 ms and report 1 ms behind.
-///
-/// `late` is the worst single turn: how far past [`HOLD_POLL`] one trip round the loop took
-/// while work was outstanding. That is the pump not being scheduled, stated directly.
-#[derive(Default, PartialEq, Eq, Debug)]
-struct Backlog {
-    behind: std::time::Duration,
-    late: std::time::Duration,
-    max_queued: usize,
-}
-
-impl Backlog {
-    /// Fold in one turn of the pump loop: `since` is how long the turn took and `queued` is what
-    /// was already waiting when the *previous* turn looked. Only called when that was non-zero.
-    fn turn(&mut self, since: std::time::Duration, queued: usize) {
-        self.behind = self.behind.saturating_add(since);
-        self.late = self.late.max(since.saturating_sub(HOLD_POLL));
-        self.max_queued = self.max_queued.max(queued);
-    }
-}
-
-/// Samples the queue-wait quantiles are computed over: 10 s of frames at 60 fps and ~10
-/// datagrams a frame would be more; this is enough to say what the last stretch looked like.
-const WAIT_WINDOW: usize = 1024;
-
-/// A datagram that waited longer than this in the pump's channel is logged on its own, even
-/// with no backlog around it: a queue that was empty when the pump last looked and then held
-/// one datagram for the length of a deschedule is invisible to the turn accounting above.
-const LATE_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
-
-/// How long each datagram waited in the pump's channel, read from the stamp `Queued` carries,
-/// over the last [`WAIT_WINDOW`] of them. This is the measurement the backlog accounting
-/// approximates: not how the pump's turns went, but what each datagram actually paid.
-#[derive(Debug, Default)]
-struct Waits {
-    ring: std::collections::VecDeque<u64>,
-    /// The worst single wait since the last time it was reported.
-    worst_us: u64,
-}
-
-impl Waits {
-    fn push(&mut self, waited_us: u64) {
-        if self.ring.len() >= WAIT_WINDOW {
-            self.ring.pop_front();
-        }
-        self.ring.push_back(waited_us);
-        self.worst_us = self.worst_us.max(waited_us);
-    }
-
-    fn quantiles(&self) -> Quantiles {
-        let (a, b) = self.ring.as_slices();
-        let mut all = Vec::with_capacity(a.len().saturating_add(b.len()));
-        all.extend_from_slice(a);
-        all.extend_from_slice(b);
-        Quantiles::of(&all)
-    }
-
-    /// The worst wait since the last call, and forget it.
-    fn take_worst_us(&mut self) -> u64 {
-        std::mem::take(&mut self.worst_us)
-    }
-}
-
-/// Drain the media queue into QUIC datagrams, tracking what the path can carry.
-///
-/// Logs every stretch during which QUIC held datagrams back (the send buffer was not empty):
-/// media that waits there is latency the receiver sees as a stall, and the length and size
-/// of those holds is what start-up and bitrate steps are judged by.
-///
-/// Logs the other half too. A datagram waits in one of two places, and only the second is the
-/// path's doing: in this task's channel, because the pump has not run; or in QUIC's send buffer,
-/// because the window or the pacer holds it. A receiver cannot tell them apart — both are
-/// silence on the link — so a stall charged to the network needs the backlog line ruled out
-/// first.
-async fn pump_datagrams(conn: Connection, mut rx: mpsc::Receiver<Queued>, budget: DatagramBudget) {
-    let mut last_budget = 0;
-    let mut hold: Option<Hold> = None;
-    let mut backlog: Option<Backlog> = None;
-    let mut waits = Waits::default();
-    // When a lone late datagram was last logged, so a stretch of them is one line a second.
-    let mut late_logged: Option<std::time::Instant> = None;
-    // What the previous turn of the loop saw, so this one can tell how long the pump owed a
-    // turn to datagrams that were already waiting.
-    let mut last_turn = std::time::Instant::now();
-    let mut queued_before = 0_usize;
-    loop {
-        // Poll while anything is outstanding, so every turn with work to do has a deadline to
-        // be late against; block only when there is nothing to be late for.
-        let waiting = hold.is_some() || queued_before > 0;
-        let datagram = if waiting {
-            match tokio::time::timeout(HOLD_POLL, rx.recv()).await {
-                Ok(Some(d)) => Some(d),
-                Ok(None) => break,
-                Err(_elapsed) => None,
-            }
-        } else {
-            rx.recv().await
-        };
-        let now = std::time::Instant::now();
-        let since = now.saturating_duration_since(last_turn);
-        last_turn = now;
-        let held =
-            slopty_net::endpoint::DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
-        budget.set_held(held);
-        let queued = rx.len();
-        if queued_before > 0 {
-            backlog.get_or_insert_with(Backlog::default).turn(since, queued_before);
-        }
-        if queued == 0
-            && let Some(b) = backlog.take()
-        {
-            tracing::debug!(
-                behind_ms = b.behind.as_millis(),
-                late_ms = b.late.as_millis(),
-                max_queued = b.max_queued,
-                waited = %waits.quantiles().describe(),
-                worst_wait_ms = waits.take_worst_us() / 1000,
-                "the datagram pump caught up"
-            );
-        }
-        queued_before = queued;
-        // The capture guard sizes its budget from the window (`frame_fits`), so it is sampled
-        // when a hold starts, when the hold deepens, and on a poll turn — one that woke on
-        // `HOLD_POLL` with no datagram, which is exactly a hold that is long and quiet, the
-        // only case where the reading would otherwise go stale. Not on every turn: reading the
-        // path takes the connection's lock the QUIC driver wants, and a 30 Mbit/s frame is
-        // ~50 datagrams, so "every turn" would be thousands of samples a second.
-        let deepening = hold.as_ref().is_some_and(|h: &Hold| held > h.max_bytes);
-        let sample = held > 0 && (hold.is_none() || deepening || datagram.is_none());
-        let cwnd = if sample {
-            let (_rtt, cwnd) = slopty_net::endpoint::path_rtt_cwnd(&conn).unwrap_or_default();
-            budget.set_cwnd(cwnd);
-            cwnd
-        } else {
-            0
-        };
-        match (&mut hold, held) {
-            (None, 0) => {}
-            (None, bytes) => {
-                hold = Some(Hold {
-                    since: std::time::Instant::now(),
-                    max_bytes: bytes,
-                    cwnd_at_max: cwnd,
-                });
-            }
-            (Some(h), 0) => {
-                tracing::debug!(
-                    held_ms = h.since.elapsed().as_millis(),
-                    max_bytes = h.max_bytes,
-                    cwnd = h.cwnd_at_max,
-                    "quic released the datagrams it held"
-                );
-                hold = None;
-            }
-            (Some(h), bytes) => {
-                if bytes > h.max_bytes {
-                    h.max_bytes = bytes;
-                    h.cwnd_at_max = cwnd;
-                }
-            }
-        }
-        let Some(queued_datagram) = datagram else { continue };
-        let waited_us = queued_datagram.waited_us();
-        let datagram = queued_datagram.datagram;
-        waits.push(waited_us);
-        if waited_us > u64::try_from(LATE_WAIT.as_micros()).unwrap_or(u64::MAX)
-            && backlog.is_none()
-            && late_logged.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
-        {
-            late_logged = Some(std::time::Instant::now());
-            tracing::debug!(
-                waited_ms = waited_us / 1000,
-                queued,
-                "a datagram waited in the pump's channel with no backlog to charge it to"
-            );
-        }
-        if let Some(max) = conn.max_datagram_size() {
-            if max != last_budget {
-                tracing::debug!(max, "datagram budget");
-                budget.set(max);
-                last_budget = max;
-            }
-            if datagram.len() > max {
-                // Cut for a larger budget than the path has now; the next frame adapts.
-                continue;
-            }
-        }
-        if let Err(e) = conn.send_datagram(datagram) {
-            tracing::debug!(error = %e, "send_datagram");
-            break;
-        }
-    }
+/// Tell the client a request about `session` failed.
+async fn report(out: &mpsc::Sender<HostMsg>, client: ClientId, session: SessionId, e: &HostError) {
+    tracing::warn!(%client, %session, error = %e, "request failed");
+    let event = TermEvent::Error(e.to_string());
+    let _sent = out.send(HostMsg::Term { session, event }).await;
 }
 
 /// One client's view of the daemon: its connection, outbound control queue, and attachments.
@@ -492,20 +331,16 @@ struct Peer<'d> {
     out: mpsc::Sender<HostMsg>,
     /// Per attached session: the stream pump and the sink the actor writes into.
     attached: HashMap<SessionId, (JoinHandle<()>, ClientSink)>,
-    screens: HashMap<StreamId, ScreenStream>,
+    screens: HashMap<StreamId, Screen>,
+    /// The screen streams' own tasks, awaited when the connection ends.
+    streams: JoinSet<()>,
     next_stream: u32,
-    datagrams: mpsc::Sender<Queued>,
-    budget: DatagramBudget,
-    pump: JoinHandle<()>,
-    /// The periodic congestion-window sample; a no-op task unless the trace is on.
-    health: JoinHandle<()>,
-    feedback: JoinHandle<()>,
-    /// Files behind this client's file cards, each with the stamp it was last seen with.
-    watched: HashMap<String, Option<(u64, u128)>>,
-    /// Accepts the client's unidirectional streams (uploads, clipboard data).
-    uni: JoinHandle<()>,
-    /// Accepts the client's tunnels.
-    tunnels: JoinHandle<()>,
+    /// Everything else running for this connection: the readers, the slow requests.
+    tasks: JoinSet<()>,
+    done: mpsc::UnboundedSender<Done>,
+    told: mpsc::UnboundedSender<Told>,
+    /// The files behind this client's file cards, for the task that watches them.
+    watch_files: watch::Sender<Vec<String>>,
     /// Files going down, by transfer.
     downloads: HashMap<XferId, JoinHandle<()>>,
     /// Window input waiting for a paste's clipboard.
@@ -524,11 +359,6 @@ impl Drop for Peer<'_> {
                 let _ignored = handle.detach_sink(self.client, sink);
             }
         }
-        self.pump.abort();
-        self.health.abort();
-        self.feedback.abort();
-        self.uni.abort();
-        self.tunnels.abort();
         for task in self.downloads.values() {
             task.abort();
         }
@@ -546,24 +376,29 @@ impl Peer<'_> {
             ClientMsg::Ping { sent_at } => {
                 let _sent = self.out.send(HostMsg::Pong { sent_at }).await;
             }
-            ClientMsg::OpenSession(req) => match self.daemon.host.open(&req).await {
-                Ok(handle) => {
+            ClientMsg::OpenSession(req) => {
+                let (daemon, client) = (self.daemon.clone(), self.client);
+                let (out, done) = (self.out.clone(), self.done.clone());
+                self.tasks.spawn(async move {
+                    let handle = match daemon.host.open(&req).await {
+                        Ok(handle) => handle,
+                        Err(e) => return report(&out, client, SessionId::nil(), &e).await,
+                    };
                     let session = handle.id();
                     // Whoever opened it sizes it, whichever client attaches first.
-                    let _reserved = handle.reserve_driver(self.client);
-                    let summaries = self.daemon.host.summaries().await;
+                    let _reserved = handle.reserve_driver(client);
+                    let summaries = daemon.host.summaries().await;
                     if let Some(summary) = summaries.into_iter().find(|s| s.id == session) {
-                        let _sent = self.daemon.events.send(HostMsg::SessionOpened(summary));
+                        let _sent = daemon.events.send(HostMsg::SessionOpened(summary));
                     }
-                    if let Some(delta) = self.daemon.items.ensure_terminal(session, self.client) {
-                        let _sent = self.daemon.events.send(HostMsg::Items(delta));
+                    if let Some(delta) = daemon.items.ensure_terminal(session, client) {
+                        let _sent = daemon.events.send(HostMsg::Items(delta));
                     }
                     if req.attach {
-                        self.attach(session, req.size).await;
+                        let _sent = done.send(Done::Attach { session, size: req.size });
                     }
-                }
-                Err(e) => self.report(SessionId::nil(), &e).await,
-            },
+                });
+            }
             ClientMsg::Term { session, req } => {
                 if matches!(req, TermRequest::Raw(_) | TermRequest::Key(_)) {
                     tracing::trace!(client = %self.client, %session, "term input received");
@@ -581,53 +416,70 @@ impl Peer<'_> {
                 Ok(delta) => {
                     let _sent = self.daemon.events.send(HostMsg::Items(delta));
                 }
-                Err(e) => self.report(SessionId::nil(), &e).await,
+                Err(e) => report(&self.out, self.client, SessionId::nil(), &e).await,
             },
             ClientMsg::Screen(req) => self.screen(req).await,
             ClientMsg::FindFiles { root, query } => {
-                let paths = if query.is_empty() {
-                    Vec::new()
-                } else {
-                    let (dir, needle) = (root.clone(), query.clone());
-                    tokio::task::spawn_blocking(move || {
-                        let dir = slopty_host::file::expand_home(std::path::Path::new(&dir));
-                        slopty_host::find::matching(&dir, &needle, FILES_LISTED)
-                    })
-                    .await
-                    .unwrap_or_default()
-                };
-                let _sent = self.out.send(HostMsg::FoundFiles { root, query, paths }).await;
+                self.tasks.spawn(crate::files::find(self.out.clone(), root, query));
             }
             ClientMsg::ReadFile { path } => {
                 // A paired client already has a shell here; a read is nothing it could not do.
-                let _sent = self.send_file(path).await;
+                let (client, out) = (self.client, self.out.clone());
+                self.tasks.spawn(async move {
+                    crate::files::send_file(client, &out, path).await;
+                });
             }
             ClientMsg::WatchFiles { paths } => {
-                let mut watched = HashMap::with_capacity(paths.len());
-                for path in paths {
-                    // A path kept keeps its stamp; a new one is stamped as it is now (the
-                    // card's own read shows that state).
-                    let stamp = if let Some(stamp) = self.watched.remove(&path) {
-                        stamp
-                    } else {
-                        let target = path.clone();
-                        tokio::task::spawn_blocking(move || {
-                            slopty_host::file::stamp(std::path::Path::new(&target))
-                        })
-                        .await
-                        .unwrap_or(None)
-                    };
-                    watched.insert(path, stamp);
-                }
-                tracing::debug!(client = %self.client, files = watched.len(), "watch files");
-                self.watched = watched;
+                self.watch_files.send_replace(paths);
             }
             ClientMsg::Clip(msg) => self.clip(msg).await,
             ClientMsg::Xfer(msg) => self.xfer(msg).await,
             ClientMsg::InstallHooks => {
-                let (ok, message) = install_hooks().await;
-                tracing::info!(client = %self.client, ok, %message, "install hooks");
-                let _sent = self.out.send(HostMsg::HooksInstalled { ok, message }).await;
+                let (client, out) = (self.client, self.out.clone());
+                self.tasks.spawn(async move {
+                    let (ok, message) = install_hooks().await;
+                    tracing::info!(%client, ok, %message, "install hooks");
+                    let _sent = out.send(HostMsg::HooksInstalled { ok, message }).await;
+                });
+            }
+        }
+    }
+
+    /// A task the loop started finished its part.
+    async fn done(&mut self, done: Done) {
+        match done {
+            Done::Attach { session, size } => self.attach(session, size).await,
+            Done::PastePlan(Some(Paste::Fetch { generation, utis })) => {
+                tracing::debug!(client = %self.client, generation, ?utis, "paste waits for the clipboard");
+                for uti in utis {
+                    let fetch = ClipMsg::Fetch { generation, uti };
+                    let _sent = self.out.send(HostMsg::Clip(fetch)).await;
+                }
+                let until = tokio::time::Instant::now()
+                    .checked_add(PASTE_WAIT)
+                    .unwrap_or_else(tokio::time::Instant::now);
+                if let Some(held) = &mut self.held {
+                    held.stage = Stage::Fetching { until };
+                }
+            }
+            Done::PastePlan(Some(Paste::Ready) | None) => self.release_held(),
+            Done::PasteWritten => {
+                tracing::debug!(client = %self.client, "pasteboard set for a paste");
+                self.release_held();
+            }
+        }
+    }
+
+    /// A screen stream's task says where it is.
+    fn told(&mut self, told: Told) {
+        match told {
+            Told::Opened(id, control) => {
+                if let Some(screen) = self.screens.get_mut(&id) {
+                    screen.control = Some(control);
+                }
+            }
+            Told::Gone(id) => {
+                self.screens.remove(&id);
             }
         }
     }
@@ -648,9 +500,7 @@ impl Peer<'_> {
             ClipMsg::Data { generation, uti, bytes } => self.clip_data(generation, &uti, bytes),
             ClipMsg::Unavailable { generation } => {
                 tracing::debug!(client = %self.client, generation, "client clipboard gone");
-                if self.held.is_some() {
-                    self.release_held(true);
-                }
+                self.write_held();
             }
         }
     }
@@ -658,29 +508,54 @@ impl Peer<'_> {
     /// A representation of the client's clipboard arrived; the held paste goes on once all it
     /// waits for is here.
     fn clip_data(&mut self, generation: u64, uti: &str, bytes: Vec<u8>) {
-        let whole = self.daemon.clip.supply(self.link, generation, uti, bytes);
-        if whole && self.held.is_some() {
-            self.release_held(true);
+        if self.daemon.clip.supply(self.link, generation, uti, bytes) {
+            self.write_held();
         }
     }
 
-    /// Send the held input on, having put the client's clipboard on the pasteboard first
-    /// when `write`.
-    fn release_held(&mut self, write: bool) {
+    /// A paste waiting for the client's clipboard has all of it that is coming: put it on the
+    /// pasteboard, off the runtime, and send the held input on once it is there.
+    fn write_held(&mut self) {
+        let Some(held) = &mut self.held else { return };
+        if !matches!(held.stage, Stage::Fetching { .. }) {
+            return;
+        }
+        held.stage = Stage::Writing;
+        let (clip, link, done) = (Arc::clone(&self.daemon.clip), self.link, self.done.clone());
+        self.tasks.spawn(async move {
+            let _written = tokio::task::spawn_blocking(move || clip.write_incoming(link)).await;
+            let _sent = done.send(Done::PasteWritten);
+        });
+    }
+
+    /// Send the held input on to its windows, in the order it came.
+    fn release_held(&mut self) {
         let Some(held) = self.held.take() else { return };
-        if write && self.daemon.clip.write_incoming(self.link) {
-            tracing::debug!(client = %self.client, "pasteboard set for a paste");
-        }
         for (stream, input) in held.inputs {
-            self.inject(stream, &input);
+            self.command(stream, Command::Input(input));
         }
     }
 
-    fn inject(&mut self, stream: StreamId, input: &ScreenInput) {
-        if let Some(s) = self.screens.get_mut(&stream)
-            && let Err(e) = s.inject(input)
-        {
-            tracing::debug!(client = %self.client, %stream, error = %e, "input");
+    /// Input for a window. A paste chord first puts the client's clipboard on the pasteboard;
+    /// until it is there, input for that window waits behind the chord.
+    fn input(&mut self, stream: StreamId, input: ScreenInput) {
+        match route(&mut self.held, stream, input) {
+            Route::Now(input) => self.command(stream, Command::Input(input)),
+            Route::Held => {}
+            Route::Began => {
+                let (clip, link) = (Arc::clone(&self.daemon.clip), self.link);
+                let done = self.done.clone();
+                self.tasks.spawn(async move {
+                    let plan = tokio::task::spawn_blocking(move || clip.paste(link)).await;
+                    let _sent = done.send(Done::PastePlan(plan.ok()));
+                });
+            }
+        }
+    }
+
+    fn command(&self, stream: StreamId, command: Command) {
+        if let Some(screen) = self.screens.get(&stream) {
+            let _gone = screen.commands.send(command);
         }
     }
 
@@ -695,16 +570,21 @@ impl Peer<'_> {
                 self.daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
             }
             XferMsg::Resume { xfer, name } => {
-                let transfers = std::sync::Arc::clone(&self.daemon.transfers);
-                let asked = name.clone();
-                let durable =
-                    tokio::task::spawn_blocking(move || transfers.durable(xfer, &asked)).await;
-                let msg = match durable {
-                    Ok(Ok(durable)) => XferMsg::Offset { xfer, name, durable },
-                    Ok(Err(e)) => XferMsg::Failed { xfer, name: Some(name), error: e.to_string() },
-                    Err(e) => XferMsg::Failed { xfer, name: Some(name), error: e.to_string() },
-                };
-                let _sent = self.out.send(HostMsg::Xfer(msg)).await;
+                let transfers = Arc::clone(&self.daemon.transfers);
+                let out = self.out.clone();
+                self.tasks.spawn(async move {
+                    let asked = name.clone();
+                    let durable =
+                        tokio::task::spawn_blocking(move || transfers.durable(xfer, &asked)).await;
+                    let msg = match durable {
+                        Ok(Ok(durable)) => XferMsg::Offset { xfer, name, durable },
+                        Ok(Err(e)) => {
+                            XferMsg::Failed { xfer, name: Some(name), error: e.to_string() }
+                        }
+                        Err(e) => XferMsg::Failed { xfer, name: Some(name), error: e.to_string() },
+                    };
+                    let _sent = out.send(HostMsg::Xfer(msg)).await;
+                });
             }
             XferMsg::Cancel { xfer } => {
                 tracing::info!(client = %self.client, %xfer, "transfer cancelled");
@@ -739,59 +619,12 @@ impl Peer<'_> {
         Some(cwd.to_string_lossy().into_owned())
     }
 
-    /// Read `path` and send what is there; `false` when the writer is gone.
-    async fn send_file(&self, path: String) -> bool {
-        let target = path.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            slopty_host::file::read(std::path::Path::new(&target))
-        })
-        .await
-        .unwrap_or_else(|_| slopty_proto::file::FileRead::Missing {
-            error: "read failed".to_owned(),
-        });
-        let kind = match &read {
-            slopty_proto::file::FileRead::Text { .. } => "text",
-            slopty_proto::file::FileRead::Binary { .. } => "binary",
-            slopty_proto::file::FileRead::Missing { .. } => "missing",
-        };
-        tracing::info!(client = %self.client, %path, kind, "read file");
-        self.out.send(HostMsg::File { path, read }).await.is_ok()
-    }
-
-    /// Look at every watched file; one whose stamp moved is read and sent again. `false`
-    /// when the writer is gone.
-    async fn poll_files(&mut self) -> bool {
-        let paths: Vec<String> = self.watched.keys().cloned().collect();
-        let stamps = tokio::task::spawn_blocking(move || {
-            paths
-                .into_iter()
-                .map(|path| {
-                    let stamp = slopty_host::file::stamp(std::path::Path::new(&path));
-                    (path, stamp)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await;
-        let Ok(stamps) = stamps else { return true };
-        for (path, stamp) in stamps {
-            let Some(seen) = self.watched.get_mut(&path) else { continue };
-            if *seen == stamp {
-                continue;
-            }
-            *seen = stamp;
-            if !self.send_file(path).await {
-                return false;
-            }
-        }
-        true
-    }
-
     async fn screen(&mut self, req: ScreenRequest) {
         match req {
             ScreenRequest::List => {
                 let out = self.out.clone();
                 let client = self.client;
-                tokio::spawn(async move {
+                self.tasks.spawn(async move {
                     match listing().await {
                         Ok(event) => {
                             let _sent = out.send(HostMsg::Screen(event)).await;
@@ -803,65 +636,27 @@ impl Peer<'_> {
             ScreenRequest::Open { target, quality } => {
                 let id = StreamId(self.next_stream);
                 self.next_stream = self.next_stream.wrapping_add(1).max(1);
-                let out = self.out.clone();
-                let on_event = move |e: StreamEvent| {
-                    let event = match e {
-                        StreamEvent::Stopped(e) => {
-                            ScreenEvent::Closed { stream: id, reason: e.to_string() }
-                        }
-                        StreamEvent::Cursor(shape) => {
-                            ScreenEvent::Cursor { stream: id, shape: Some(shape) }
-                        }
-                    };
-                    let _sent = out.try_send(HostMsg::Screen(event));
+                let (commands, rx) = mpsc::unbounded_channel();
+                self.screens.insert(id, Screen { commands, control: None });
+                let link = crate::screens::Link {
+                    daemon: self.daemon.clone(),
+                    client: self.client,
+                    conn: self.conn.clone(),
+                    out: self.out.clone(),
+                    told: self.told.clone(),
                 };
-                let opened = ScreenStream::open(
-                    id,
-                    target,
-                    quality,
-                    self.datagrams.clone(),
-                    self.budget.clone(),
-                    on_event,
-                )
-                .await;
-                match opened {
-                    Ok((stream, event)) => {
-                        tracing::info!(client = %self.client, %id, ?target, "screen opened");
-                        self.daemon.screens.insert(&self.client, target, stream.stats_handle());
-                        self.screens.insert(id, stream);
-                        let _sent = self.out.send(HostMsg::Screen(event)).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(client = %self.client, ?target, error = %e, "screen open");
-                        let event = ScreenEvent::Closed { stream: id, reason: e.to_string() };
-                        let _sent = self.out.send(HostMsg::Screen(event)).await;
-                    }
-                }
+                self.streams.spawn(crate::screens::run(link, id, target, quality, rx));
             }
             ScreenRequest::Close(id) => {
-                if let Some(stream) = self.screens.remove(&id) {
-                    tracing::info!(
-                        client = %self.client,
-                        %id,
-                        path = %slopty_net::endpoint::describe_health(&self.conn),
-                        "screen closing"
-                    );
-                    stream.close().await;
-                    self.daemon.screens.remove(&self.client, id);
-                    let reason = "closed by client".to_owned();
-                    let event = ScreenEvent::Closed { stream: id, reason };
-                    let _sent = self.out.send(HostMsg::Screen(event)).await;
+                if let Some(screen) = self.screens.remove(&id) {
+                    let _gone = screen.commands.send(Command::Close);
                 }
             }
             ScreenRequest::SetQuality { stream, quality } => {
-                if let Some(s) = self.screens.get_mut(&stream)
-                    && let Err(e) = s.set_quality(&quality)
-                {
-                    tracing::warn!(client = %self.client, %stream, error = %e, "set quality");
-                }
+                self.command(stream, Command::SetQuality(quality));
             }
             ScreenRequest::Report { stream, report } => {
-                if let Some(s) = self.screens.get(&stream) {
+                if let Some(control) = self.screens.get(&stream).and_then(|s| s.control.as_ref()) {
                     let path =
                         slopty_net::endpoint::path_rtt_cwnd(&self.conn).map(|(rtt, cwnd)| {
                             slopty_host::screen::PathSample {
@@ -871,8 +666,8 @@ impl Peer<'_> {
                                 cwnd,
                             }
                         });
-                    if let Some(decision) = s.report(&report, path) {
-                        let event = ScreenEvent::Rate {
+                    if let Some(decision) = control.report(&report, path) {
+                        let event = slopty_proto::screen::ScreenEvent::Rate {
                             stream,
                             target_bps: decision.target_bps,
                             verdict: decision.verdict,
@@ -882,59 +677,20 @@ impl Peer<'_> {
                     }
                 }
             }
-            ScreenRequest::Input { stream, input } => {
-                if let Some(held) = &mut self.held {
-                    held.inputs.push((stream, input));
-                    return;
-                }
-                if is_paste_chord(&input)
-                    && let Paste::Fetch { generation, utis } = self.daemon.clip.paste(self.link)
-                {
-                    tracing::debug!(client = %self.client, generation, ?utis, "paste waits for the clipboard");
-                    for uti in utis {
-                        let fetch = ClipMsg::Fetch { generation, uti };
-                        let _sent = self.out.send(HostMsg::Clip(fetch)).await;
-                    }
-                    let until = tokio::time::Instant::now()
-                        .checked_add(PASTE_WAIT)
-                        .unwrap_or_else(tokio::time::Instant::now);
-                    self.held = Some(Held { inputs: vec![(stream, input)], until });
-                    return;
-                }
-                self.inject(stream, &input);
-            }
-            ScreenRequest::Focus(stream) => {
-                if let Some(s) = self.screens.get_mut(&stream)
-                    && let Err(e) = s.focus()
-                {
-                    tracing::debug!(client = %self.client, %stream, error = %e, "focus");
-                }
-            }
+            ScreenRequest::Input { stream, input } => self.input(stream, input),
+            ScreenRequest::Focus(stream) => self.command(stream, Command::Focus),
             ScreenRequest::Resize { stream, width, height } => {
-                let Some(asked) =
-                    self.screens.get(&stream).and_then(|s| s.resize_points(width, height))
-                else {
-                    tracing::debug!(client = %self.client, %stream, "resize: not a window stream");
-                    return;
-                };
-                let client = self.client;
-                // Off the runtime: a few accessibility round trips.
-                drop(tokio::task::spawn_blocking(move || {
-                    let (window, w, h) = asked;
-                    match slopty_host::screen::resize_window(window, w, h) {
-                        Ok(()) => tracing::debug!(%client, %stream, w, h, "window resized"),
-                        Err(e) => tracing::debug!(%client, %stream, error = %e, "resize"),
-                    }
-                }));
+                self.command(stream, Command::Resize { width, height });
             }
         }
     }
 
     /// Loss feedback from a datagram: retransmit or refresh.
     fn feedback(&self, feedback: Feedback) {
+        let control = |stream| self.screens.get(&stream).and_then(|s| s.control.as_ref());
         match feedback {
             Feedback::Nack { stream, frame, fragments } => {
-                if let Some(s) = self.screens.get(&stream) {
+                if let Some(control) = control(stream) {
                     tracing::debug!(
                         %stream,
                         frame,
@@ -942,45 +698,23 @@ impl Peer<'_> {
                         path = %slopty_net::endpoint::describe_health(&self.conn),
                         "nack"
                     );
-                    s.nack(frame, &fragments);
+                    control.nack(frame, &fragments);
                 }
             }
             Feedback::Refresh { stream, last_good_frame } => {
-                if let Some(s) = self.screens.get(&stream) {
-                    s.request_refresh(last_good_frame);
+                if let Some(control) = control(stream) {
+                    control.request_refresh(last_good_frame);
                 }
             }
         }
     }
 
-    /// Tell the client about streams whose target changed size, and about targets that have
-    /// drawn nothing yet (so the receiver stops asking for a refresh no frame can answer).
-    /// False once the client is gone.
-    async fn check_geometry(&mut self) -> bool {
-        let mut events = Vec::new();
-        for (id, stream) in &mut self.screens {
-            match stream.check_geometry() {
-                Ok(Some(event)) => events.push(event),
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(client = %self.client, stream = %id, error = %e, "geometry");
-                }
-            }
-            events.extend(stream.check_source());
-        }
-        for event in events {
-            if self.out.send(HostMsg::Screen(event)).await.is_err() {
-                return false;
-            }
-        }
-        true
-    }
-
+    /// Let go of every stream and wait for each to stop capturing. The command channels
+    /// closing, rather than a `Close`, tells a stream its client is gone: there is no one to
+    /// say "closed" to.
     async fn close_screens(&mut self) {
-        for (id, stream) in self.screens.drain() {
-            stream.close().await;
-            self.daemon.screens.remove(&self.client, id);
-        }
+        self.screens.clear();
+        while self.streams.join_next().await.is_some() {}
     }
 
     async fn term(&mut self, session: SessionId, req: TermRequest) {
@@ -994,22 +728,22 @@ impl Peer<'_> {
             }
             TermRequest::Close => {
                 self.forget(session);
-                let reason = CloseReason::Requested;
-                match self.daemon.end_session(session, reason, self.client).await {
-                    Ok(()) => {
-                        tracing::debug!(client = %self.client, %session, "closed on request");
+                let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
+                self.tasks.spawn(async move {
+                    match daemon.end_session(session, CloseReason::Requested, client).await {
+                        Ok(()) => tracing::debug!(%client, %session, "closed on request"),
+                        // Gone already: most often its program exited, and a client closes a
+                        // terminal on seeing that.
+                        Err(HostError::NoSuchSession) => {}
+                        Err(e) => report(&out, client, session, &e).await,
                     }
-                    // Gone already: most often its program exited, and a client closes a
-                    // terminal on seeing that.
-                    Err(HostError::NoSuchSession) => {}
-                    Err(e) => self.report(session, &e).await,
-                }
+                });
             }
             other => {
                 let outcome =
                     self.daemon.host.get(session).and_then(|h| h.request(self.client, other));
                 if let Err(e) = outcome {
-                    self.report(session, &e).await;
+                    report(&self.out, self.client, session, &e).await;
                 }
             }
         }
@@ -1021,17 +755,11 @@ impl Peer<'_> {
         }
     }
 
-    async fn report(&self, session: SessionId, e: &HostError) {
-        tracing::warn!(client = %self.client, %session, error = %e, "request failed");
-        let event = TermEvent::Error(e.to_string());
-        let _sent = self.out.send(HostMsg::Term { session, event }).await;
-    }
-
     /// Attach to `session`: open a uni stream and pump the actor's events into it.
     async fn attach(&mut self, session: SessionId, size: TermSize) {
         let handle = match self.daemon.host.get(session) {
             Ok(h) => h,
-            Err(e) => return self.report(session, &e).await,
+            Err(e) => return report(&self.out, self.client, session, &e).await,
         };
         self.forget(session);
         let stream = match slopty_net::streams::open_session(&self.conn, session).await {
@@ -1043,7 +771,7 @@ impl Peer<'_> {
         };
         let (sink, mut events) = mpsc::channel::<Outbound>(SINK_DEPTH);
         if let Err(e) = handle.attach(self.client, size, sink.clone()) {
-            return self.report(session, &e).await;
+            return report(&self.out, self.client, session, &e).await;
         }
         let client = self.client;
         let task = tokio::spawn(async move {
@@ -1071,63 +799,39 @@ impl Peer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use slopty_proto::input::{KeyAction, KeyCode, Mods};
+    use slopty_proto::screen::ScreenInput;
 
-    use super::{Backlog, HOLD_POLL, WAIT_WINDOW, Waits};
+    use super::{Route, StreamId, route};
 
-    /// 200 ms of sleep, less the millisecond the loop was entitled to take.
-    const LATE: Duration = match Duration::from_millis(200).checked_sub(HOLD_POLL) {
-        Some(late) => late,
-        None => Duration::ZERO,
-    };
-
-    /// The scenario the review named: the pump is descheduled for 200 ms while datagrams pile
-    /// up, then wakes and drains them in a millisecond. Timing the stretch from the moment
-    /// `recv` first hands one over would report 1 ms; the sleep is the whole of the lag.
-    #[test]
-    fn a_pump_descheduled_before_it_drains_reports_the_sleep_not_the_drain() {
-        let mut b = Backlog::default();
-        b.turn(Duration::from_millis(200), 40);
-        assert_eq!(b.behind, Duration::from_millis(200));
-        assert_eq!(b.late, LATE);
-        assert_eq!(b.max_queued, 40);
-        // Draining the rest quickly adds its own small cost and erases nothing.
-        for _ in 0..40 {
-            b.turn(Duration::from_micros(25), 1);
-        }
-        assert_eq!(b.behind, Duration::from_millis(201));
-        assert_eq!(b.late, LATE, "the worst turn stands");
-        assert_eq!(b.max_queued, 40);
+    fn key(code: KeyCode, mods: Mods) -> ScreenInput {
+        ScreenInput::Key { code, action: KeyAction::Press, mods, text: None }
     }
 
-    /// The wait ring keeps the last window of stamps, reports their quantiles, and hands out
-    /// the worst wait once: a 200 ms deschedule shows up as the max even after a thousand
-    /// quick datagrams have pushed it out of the window's median.
+    /// A paste holds only the window it went to, in order; another window's input goes on, and a
+    /// second paste joins the hold behind the first. The release hands the held input back in the
+    /// order it came.
     #[test]
-    fn the_wait_ring_reports_the_last_window_and_the_worst_once() {
-        let mut w = Waits::default();
-        w.push(200_000);
-        for _ in 0..WAIT_WINDOW {
-            w.push(50);
-        }
-        let q = w.quantiles();
+    fn a_paste_holds_its_own_window_and_no_other() {
+        let (a, b, c) = (StreamId(1), StreamId(2), StreamId(3));
+        let paste = || key(KeyCode::V, Mods::SUPER);
+        let typed = |code| key(code, Mods::empty());
+        let mut held = None;
+
+        assert_eq!(route(&mut held, a, typed(KeyCode::A)), Route::Now(typed(KeyCode::A)));
+        assert_eq!(route(&mut held, a, paste()), Route::Began);
+        assert_eq!(route(&mut held, a, typed(KeyCode::B)), Route::Held, "behind the chord");
+        assert_eq!(route(&mut held, b, typed(KeyCode::C)), Route::Now(typed(KeyCode::C)));
+        assert_eq!(route(&mut held, c, paste()), Route::Held, "a second paste waits too");
+        assert_eq!(route(&mut held, c, typed(KeyCode::D)), Route::Held);
+        assert_eq!(route(&mut held, b, typed(KeyCode::E)), Route::Now(typed(KeyCode::E)));
+        let with_ctrl = key(KeyCode::V, Mods::SUPER | Mods::CTRL);
+        assert_eq!(route(&mut held, b, with_ctrl.clone()), Route::Now(with_ctrl), "not a paste");
+
+        let released = held.take().map(|h| h.inputs).unwrap_or_default();
         assert_eq!(
-            (q.n as usize, q.p50_us, q.max_us),
-            (WAIT_WINDOW, 50, 50),
-            "the window moved on"
+            released,
+            [(a, paste()), (a, typed(KeyCode::B)), (c, paste()), (c, typed(KeyCode::D)),]
         );
-        assert_eq!(w.take_worst_us(), 200_000, "the worst wait does not");
-        assert_eq!(w.take_worst_us(), 0, "and is reported once");
-    }
-
-    /// A pump that keeps its promise every turn is never late, however long the backlog lasts.
-    #[test]
-    fn a_pump_that_keeps_its_turn_is_never_late() {
-        let mut b = Backlog::default();
-        for _ in 0..100 {
-            b.turn(HOLD_POLL, 3);
-        }
-        assert_eq!(b.late, Duration::ZERO);
-        assert_eq!(b.behind, HOLD_POLL.saturating_mul(100), "still time datagrams spent queued");
     }
 }

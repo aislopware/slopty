@@ -192,6 +192,41 @@ pub fn window_bounds(id: WindowId) -> Option<Rect> {
     ok.then(|| Rect::from_cg(rect))
 }
 
+/// What the window list says about one window, read in one round trip.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WindowState {
+    /// Where it is, in global points.
+    pub bounds: Rect,
+    /// `kCGWindowIsOnscreen`: not minimised, not on another Space, not hidden.
+    pub on_screen: bool,
+    /// The process that owns it.
+    pub owner_pid: i32,
+}
+
+/// Bounds, on-screen state and owner of one window from a single window-list description;
+/// `None` when the window list no longer knows it.
+#[must_use]
+pub fn window_state(id: WindowId) -> Option<WindowState> {
+    let description = window_description(id)?;
+    // SAFETY: framework-provided constant strings.
+    let (bounds_key, on_screen_key, pid_key): (&CFString, &CFString, &CFString) =
+        unsafe { (kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowOwnerPID) };
+    let bounds: CFRetained<CFDictionary> = description.get(bounds_key)?.downcast().ok()?;
+    let mut rect = CGRect::default();
+    // SAFETY: `bounds` is the dictionary form of a rect; `rect` is a valid out pointer.
+    let ok =
+        unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), ptr::from_mut(&mut rect)) };
+    if !ok {
+        return None;
+    }
+    let on_screen = description
+        .get(on_screen_key)
+        .and_then(|v| v.downcast::<objc2_core_foundation::CFBoolean>().ok())
+        .is_some_and(|b| b.as_bool());
+    let owner_pid = description.get(pid_key)?.downcast::<CFNumber>().ok()?.as_i32()?;
+    Some(WindowState { bounds: Rect::from_cg(rect), on_screen, owner_pid })
+}
+
 /// Title of one window from the window list, if it has a non-empty one.
 #[must_use]
 pub fn window_title(id: WindowId) -> Option<String> {

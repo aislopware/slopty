@@ -1,18 +1,18 @@
 //! Remote window streaming: one pipeline per open stream.
 //!
 //! ```text
-//! ScreenCaptureKit queue ──frame──▶ encoder.encode ──VideoToolbox thread──▶ packetize ──▶ queue
-//!                                                                                          │
-//!                              transport (hostd) drains the queue into QUIC datagrams ◀─────┘
+//! ScreenCaptureKit queue ──frame──▶ encoder.encode ──VideoToolbox thread──▶ packetize ──▶ sink
 //! ```
 //!
-//! Nothing here touches the network: datagrams go into a bounded queue the transport owns, and
-//! everything the client sends back (reports, NACKs, refresh requests, quality changes) lands on
-//! [`ScreenStream`] methods. When the queue is full the capture callback drops whole frames
-//! rather than letting latency build up; the client notices the gap and asks for a refresh.
+//! Nothing here knows the network: datagrams go to a [`DatagramSink`] the transport (hostd)
+//! implements, from whichever thread produced them, in one call per frame. Everything the client
+//! sends back (reports, NACKs, refresh requests, quality changes) lands on [`ScreenStream`] and
+//! [`StreamControl`] methods. When the transport already holds more than the guard allows the
+//! capture callback drops whole frames rather than letting latency build up; the client notices
+//! the gap and asks for a refresh.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -37,41 +37,43 @@ use slopty_proto::screen::{
     CaptureTarget, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput, SourceState,
     VideoCodec,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-/// Datagrams buffered between the pipeline and the transport. At 1.2 kB each this is a few
-/// 4K keyframes; the capture callback starts dropping frames when fewer than
-/// `LOW_WATER` slots are free.
-pub const DATAGRAM_QUEUE: usize = 4096;
-/// Free queue slots below which a captured frame is dropped instead of encoded.
-const LOW_WATER: usize = 256;
-
-/// A datagram in the queue between the pipeline and the transport, stamped with when it was
-/// put there.
+/// Where a stream's datagrams go: the connection's unreliable datagram channel.
 ///
-/// The pump reads the stamp on the way out: the difference is the time the datagram spent
-/// waiting for the pump to run, which no turn timing can see for a queue that was empty when
-/// the pump last looked.
-#[derive(Clone, Debug)]
-pub struct Queued {
-    /// The datagram to send.
-    pub datagram: Bytes,
-    /// `host_now_us()` when it was queued.
-    pub queued_at_us: u64,
+/// Called from the thread that produced the datagrams (VideoToolbox's callback, the capture
+/// queue, a timer task), never through a queue of this crate's own: a datagram handed to the
+/// transport at once is one that cannot wait for a task to be scheduled.
+pub trait DatagramSink: Send + Sync {
+    /// Hand `datagrams` to the transport, in order, in one call. Older datagrams the transport
+    /// still holds may be dropped to make room: video is unreliable by design.
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`], for the whole batch.
+    fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused>;
+    /// The largest datagram the path carries now; `None` when the peer takes none.
+    fn max_size(&self) -> Option<usize>;
+    /// Bytes of datagrams the transport holds, waiting for the congestion window or the pacer.
+    fn held(&self) -> usize;
+    /// The path's congestion window, bytes; `0` when unknown.
+    fn cwnd(&self) -> u64;
+    /// The connection is gone: nothing sent now arrives.
+    fn is_closed(&self) -> bool;
 }
 
-impl Queued {
-    /// How long this datagram has been in the queue, microseconds.
-    #[must_use]
-    pub fn waited_us(&self) -> u64 {
-        host_now_us().saturating_sub(self.queued_at_us)
-    }
+/// Why the transport would not take a batch of datagrams.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// One of them is larger than the path carries: cut for a size the path no longer has.
+    TooLarge,
+    /// The connection is gone, or never took datagrams.
+    Closed,
 }
+
 /// Cursor sample period (120 Hz); a datagram goes out only when the position changed.
 const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
-/// Cursor ticks between re-reads of the target's bounds (10 Hz).
-const BOUNDS_EVERY: u64 = 12;
 /// How often the cursor's picture is read while the pointer is over the target (30 Hz). It
 /// goes to the client only when it changed.
 const SHAPE_PERIOD: Duration = Duration::from_millis(33);
@@ -90,7 +92,7 @@ pub enum StreamEvent {
 ///
 /// The accessibility signal cannot name the window, so it is a suspicion; the window list is
 /// the confirmation and it lags the order-out by 256–266 ms (MEASUREMENTS.md, "which signal
-/// knows first"), read on a geometry tick every `BOUNDS_EVERY × CURSOR_PERIOD` ≈ 100 ms. The
+/// knows first"), read on the owner's geometry tick (hostd: every 100 ms). The
 /// watch matches the target to its element once, so another window of the application going
 /// is not a suspicion (`ScreenStats::siblings`); only when it could not match — the
 /// application does not list the window — does any window's going cost a freeze this long. A
@@ -123,69 +125,6 @@ pub enum ScreenError {
     Closed,
 }
 
-/// What the transport reports about the connection, shared by every stream on it.
-///
-/// The bytes one datagram may carry (starts at the protocol maximum; lowered while QUIC's
-/// path MTU is still 1200 bytes), how many bytes of datagrams QUIC is holding in its send
-/// buffer waiting for the congestion window, and how wide that window is.
-#[derive(Clone, Debug)]
-pub struct DatagramBudget {
-    max_datagram: Arc<AtomicUsize>,
-    held: Arc<AtomicUsize>,
-    cwnd: Arc<AtomicU64>,
-}
-
-impl Default for DatagramBudget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DatagramBudget {
-    /// Protocol maximum, nothing held, no window sampled yet.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            max_datagram: Arc::new(AtomicUsize::new(MAX_DATAGRAM)),
-            held: Arc::new(AtomicUsize::new(0)),
-            cwnd: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Record what the path carries.
-    pub fn set(&self, bytes: usize) {
-        self.max_datagram.store(bytes, Ordering::Relaxed);
-    }
-
-    /// Current budget.
-    #[must_use]
-    pub fn get(&self) -> usize {
-        self.max_datagram.load(Ordering::Relaxed)
-    }
-
-    /// Record how many bytes QUIC is holding back right now.
-    pub fn set_held(&self, bytes: usize) {
-        self.held.store(bytes, Ordering::Relaxed);
-    }
-
-    /// Bytes QUIC is holding back, as last reported.
-    #[must_use]
-    pub fn held(&self) -> usize {
-        self.held.load(Ordering::Relaxed)
-    }
-
-    /// Record the selected path's congestion window.
-    pub fn set_cwnd(&self, bytes: u64) {
-        self.cwnd.store(bytes, Ordering::Relaxed);
-    }
-
-    /// The congestion window as last sampled; `0` until the pump has held something.
-    #[must_use]
-    pub fn cwnd(&self) -> u64 {
-        self.cwnd.load(Ordering::Relaxed)
-    }
-}
-
 /// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
 /// is dropped instead of encoded.
 ///
@@ -195,10 +134,10 @@ impl DatagramBudget {
 /// capture is fresher than anything that would wait behind it.
 const HELD_FRAMES: u64 = 2;
 
-/// Whether a captured frame should be encoded given what is queued ahead of it.
+/// Whether a captured frame should be encoded given what the transport holds ahead of it.
 ///
-/// `free` slots in the datagram queue, `held` bytes in QUIC's send buffer against a congestion
-/// window of `cwnd`, at `target_bps` and `fps`.
+/// `held` bytes in QUIC's send buffer against a congestion window of `cwnd`, at `target_bps`
+/// and `fps`.
 ///
 /// Two frames' worth is a *time* budget written in bytes, so it has to be recomputed from the
 /// rate actually in force: at 30 Mbit/s and 60 fps it is 125 KB, at the 1 Mbit/s floor it is
@@ -212,10 +151,7 @@ const HELD_FRAMES: u64 = 2;
 /// drops one the link would have carried. That case is real where the round trip is long:
 /// `per_frame × 2` falls under one window once `rtt × fps` passes 1.8.
 #[must_use]
-pub const fn frame_fits(free: usize, held: usize, cwnd: u64, target_bps: u64, fps: u16) -> bool {
-    if free < LOW_WATER {
-        return false;
-    }
+pub const fn frame_fits(held: usize, cwnd: u64, target_bps: u64, fps: u16) -> bool {
     let fps = if fps == 0 { 1 } else { fps as u64 };
     let per_frame = match (target_bps / 8).checked_div(fps) {
         Some(bytes) => bytes,
@@ -372,7 +308,8 @@ impl LatencyRing {
 pub struct ScreenStats {
     /// Frames ScreenCaptureKit delivered.
     pub captured: u64,
-    /// Frames dropped because the datagram queue was nearly full.
+    /// Frames dropped because the transport already held more than the guard allows
+    /// ([`frame_fits`]).
     pub dropped: u64,
     /// Frames captured and thrown away because the target was not on screen: the picture was of
     /// whatever is behind it. Zero on a stream whose target never left the screen.
@@ -393,9 +330,10 @@ pub struct ScreenStats {
     pub siblings: u64,
     /// Encoded frames packetized.
     pub encoded: u64,
-    /// Datagrams queued for the transport (data, parity, retransmits, cursor).
+    /// Datagrams the transport took (data, parity, retransmits, audio, cursor, heartbeats).
     pub datagrams: u64,
-    /// Datagrams discarded because the queue was full.
+    /// Datagrams the transport refused: the connection was gone, or a datagram was larger
+    /// than the path carries.
     pub queue_full: u64,
     /// Heartbeats sent while the source was quiet.
     pub heartbeats: u64,
@@ -424,8 +362,8 @@ pub struct ScreenStats {
     /// a silence of `STALL_GAP` a stall, so this is the number that says whether the host is
     /// keeping its own promise.
     pub beat_gap: Quantiles,
-    /// How long the window-geometry call in the cursor loop took, over the last
-    /// `LATENCY_WINDOW` of them: the work the beat used to wait behind.
+    /// How long the geometry probe took (its window-server reads, off the runtime), over the
+    /// last `LATENCY_WINDOW` of them: the work the beat used to wait behind.
     pub bounds: Quantiles,
     /// The longest gap between two beats since the stream opened, microseconds. The quantiles
     /// above are over a sliding window of `LATENCY_WINDOW` beats — about twenty seconds — so
@@ -851,6 +789,37 @@ impl StatsHandle {
     }
 }
 
+/// The part of a stream the client's feedback reaches directly.
+///
+/// Loss and reports are answered on the connection's own task, never behind a stream that is
+/// busy rebuilding its encoder or reading the window server.
+#[derive(Clone)]
+pub struct StreamControl(Arc<Shared>);
+
+impl std::fmt::Debug for StreamControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamControl").field("stream", &self.0.id).finish()
+    }
+}
+
+impl StreamControl {
+    /// See [`ScreenStream::report`].
+    #[must_use]
+    pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
+        self.0.report(report, path)
+    }
+
+    /// See [`ScreenStream::request_refresh`].
+    pub fn request_refresh(&self, last_good_frame: u32) {
+        self.0.request_refresh(last_good_frame);
+    }
+
+    /// See [`ScreenStream::nack`].
+    pub fn nack(&self, frame: u32, fragments: &[u16]) {
+        self.0.nack(frame, fragments);
+    }
+}
+
 /// Audio gate: after this long without a sample above [`AUDIO_FLOOR`] the stream stops
 /// sending packets (silent apps cost nothing on the wire; the client pads silence).
 const AUDIO_HOLD_US: u64 = 300_000;
@@ -892,17 +861,17 @@ struct Shared {
     /// The client has acknowledged a long-term reference, so an LTR refresh is a picture it can
     /// decode and a keyframe is not the only way out of a hole. Nothing clears it: a client that
     /// goes away takes the stream with it.
-    ltr_acked: std::sync::atomic::AtomicBool,
+    ltr_acked: AtomicBool,
     /// Whether frames come through the display-crop path right now.
-    cropped: std::sync::atomic::AtomicBool,
+    cropped: AtomicBool,
     /// The target window is not on screen. Nothing ScreenCaptureKit delivers can be a picture of
     /// it, so nothing is sent: under a display crop the rectangle holds whatever is behind the
     /// window, and a swap to the window filter that the framework rejected leaves the crop
     /// running while this side believes otherwise. Set from the geometry tick.
-    target_hidden: std::sync::atomic::AtomicBool,
+    target_hidden: AtomicBool,
     /// The host's pointer is over the target, as the cursor loop last saw it; the shape loop
     /// reads the cursor's picture only while it is.
-    pointer_over: std::sync::atomic::AtomicBool,
+    pointer_over: AtomicBool,
     /// `host_now_us()` until which frames are held on the accessibility API's word alone
     /// (zero: no suspicion). Set by the [`HideWatch`] callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
@@ -912,9 +881,13 @@ struct Shared {
     /// when any window of that application is ordered out, and only a change of filter kind
     /// wakes it (MEASUREMENTS.md, "a sibling window closing stalls the crop"); the geometry
     /// tick takes a stream on the crop through the window filter and back.
-    filter_stalled: std::sync::atomic::AtomicBool,
-    out: mpsc::Sender<Queued>,
-    budget: DatagramBudget,
+    filter_stalled: AtomicBool,
+    /// Where the stream's datagrams go.
+    sink: Arc<dyn DatagramSink>,
+    /// A too-large datagram has been logged; it is a sizing bug, said once.
+    too_large_logged: AtomicBool,
+    /// The target's bounds as the last geometry probe read them, for the cursor loop.
+    bounds: Mutex<Option<Rect>>,
     counters: Counters,
 }
 
@@ -960,20 +933,61 @@ impl Shared {
         tracing::debug!(stream = %self.id, fps, bps, "cadence");
     }
 
-    /// Queue a datagram; a full queue drops it (video is unreliable by design).
-    fn push(&self, datagram: Bytes) -> bool {
-        let queued_at_us = host_now_us();
-        match self.out.try_send(Queued { datagram, queued_at_us }) {
-            Ok(()) => {
-                self.counters.datagrams.fetch_add(1, Ordering::Relaxed);
-                self.last_push_us.store(queued_at_us, Ordering::Relaxed);
-                true
-            }
-            Err(_full_or_closed) => {
-                self.counters.queue_full.fetch_add(1, Ordering::Relaxed);
-                false
-            }
+    /// Hand `datagrams` to the transport now, in one call; how many it took.
+    ///
+    /// A datagram too large for the path is a sizing bug, not the end of the stream: the
+    /// packetizer cut the frame for a size the path had when it started and has no longer. The
+    /// ones that still fit go, the rest are counted as refused, and it is logged once.
+    fn send(&self, datagrams: &[Bytes]) -> u64 {
+        if datagrams.is_empty() {
+            return 0;
         }
+        let now = host_now_us();
+        let n = u64::try_from(datagrams.len()).unwrap_or(u64::MAX);
+        let taken = match self.sink.send(datagrams) {
+            Ok(()) => {
+                self.counters.datagrams.fetch_add(n, Ordering::Relaxed);
+                self.last_push_us.store(now, Ordering::Relaxed);
+                return n;
+            }
+            Err(Refused::Closed) => {
+                self.counters.queue_full.fetch_add(n, Ordering::Relaxed);
+                return 0;
+            }
+            Err(Refused::TooLarge) => {
+                let max = self.sink.max_size().unwrap_or(0);
+                if !self.too_large_logged.swap(true, Ordering::Relaxed) {
+                    let largest = datagrams.iter().map(Bytes::len).max().unwrap_or(0);
+                    tracing::warn!(stream = %self.id, largest, max, "a datagram larger than the path carries: the frame was cut for a stale size");
+                }
+                let fitting: Vec<Bytes> =
+                    datagrams.iter().filter(|d| d.len() <= max).cloned().collect();
+                let sent = !fitting.is_empty() && self.sink.send(&fitting).is_ok();
+                if sent {
+                    let m = u64::try_from(fitting.len()).unwrap_or(u64::MAX);
+                    self.counters.datagrams.fetch_add(m, Ordering::Relaxed);
+                    self.last_push_us.store(now, Ordering::Relaxed);
+                    m
+                } else {
+                    0
+                }
+            }
+        };
+        self.counters.queue_full.fetch_add(n.saturating_sub(taken), Ordering::Relaxed);
+        taken
+    }
+
+    /// Whether the transport can take another frame now ([`frame_fits`]). The window is only
+    /// asked for when something is held: with nothing held any frame fits.
+    fn frame_fits(&self) -> bool {
+        let held = self.sink.held();
+        let cwnd = if held == 0 { 0 } else { self.sink.cwnd() };
+        frame_fits(
+            held,
+            cwnd,
+            self.counters.bitrate_bps.load(Ordering::Relaxed),
+            self.fps.load(Ordering::Relaxed),
+        )
     }
 
     /// The accessibility API says a window of the target's application went at `now`: hold
@@ -1040,14 +1054,7 @@ impl Shared {
         if !due && !want_keyframe {
             return;
         }
-        let fits = frame_fits(
-            self.out.capacity(),
-            self.budget.held(),
-            self.budget.cwnd(),
-            self.counters.bitrate_bps.load(Ordering::Relaxed),
-            self.fps.load(Ordering::Relaxed),
-        );
-        if !fits {
+        if !self.frame_fits() {
             self.dropped(host_now_us());
             return;
         }
@@ -1089,13 +1096,12 @@ impl Shared {
     fn on_audio(&self, chunk: &CapturedAudio) {
         let now = host_now_us();
         let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
-        for (seq, packet) in packets {
-            if let Some(datagram) = audio_datagram(self.id, seq, send_ms_lo(now), &packet)
-                && self.push(datagram)
-            {
-                self.counters.audio_packets.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        let datagrams: Vec<Bytes> = packets
+            .iter()
+            .filter_map(|(seq, packet)| audio_datagram(self.id, *seq, send_ms_lo(now), packet))
+            .collect();
+        let taken = self.send(&datagrams);
+        self.counters.audio_packets.fetch_add(taken, Ordering::Relaxed);
     }
 
     /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
@@ -1167,15 +1173,15 @@ impl Shared {
             ltr_refresh: packet.ltr_refresh,
             capture_ts_us,
         };
-        let mut packetizer = self.packetizer.lock();
-        packetizer.set_max_datagram(self.budget.get());
-        match packetizer.packetize(&frame, send_ms_lo(now)) {
-            Ok(sent) => {
-                for datagram in &sent.datagrams {
-                    if !self.push(datagram.clone()) {
-                        break;
-                    }
-                }
+        let max = self.sink.max_size().map_or(MAX_DATAGRAM, |m| m.min(MAX_DATAGRAM));
+        let cut = {
+            let mut packetizer = self.packetizer.lock();
+            packetizer.set_max_datagram(max);
+            packetizer.packetize(&frame, send_ms_lo(now)).map(|sent| sent.datagrams.clone())
+        };
+        match cut {
+            Ok(datagrams) => {
+                self.send(&datagrams);
             }
             Err(e) => tracing::warn!(stream = %self.id, error = %e, "packetize failed"),
         }
@@ -1250,7 +1256,7 @@ impl Shared {
         }
         if keyframe_fits(
             self.keyframe_bytes.load(Ordering::Relaxed),
-            self.budget.held(),
+            self.sink.held(),
             self.counters.bitrate_bps.load(Ordering::Relaxed),
         ) {
             return true;
@@ -1268,7 +1274,7 @@ impl Shared {
                 tracing::debug!(
                     stream = %self.id,
                     estimate = self.keyframe_bytes.load(Ordering::Relaxed),
-                    held = self.budget.held(),
+                    held = self.sink.held(),
                     target_bps = self.counters.bitrate_bps.load(Ordering::Relaxed),
                     "a picture that stands on its own is deferred: the link cannot drain one"
                 );
@@ -1288,26 +1294,15 @@ impl Shared {
     /// Retransmit fragments of a recent frame, unless the transport is holding more than the
     /// frame budget (see [`ScreenStream::nack`]).
     fn nack(&self, frame: u32, fragments: &[u16]) {
-        let fits = frame_fits(
-            self.out.capacity(),
-            self.budget.held(),
-            self.budget.cwnd(),
-            self.counters.bitrate_bps.load(Ordering::Relaxed),
-            self.fps.load(Ordering::Relaxed),
-        );
-        if !fits {
-            tracing::debug!(stream = %self.id, frame, held = self.budget.held(), "nack not answered: transport is holding frames");
+        if !self.frame_fits() {
+            tracing::debug!(stream = %self.id, frame, held = self.sink.held(), "nack not answered: transport is holding frames");
             return;
         }
         let datagrams = self.packetizer.lock().retransmit(frame, fragments);
         if datagrams.is_empty() {
             tracing::debug!(stream = %self.id, frame, "nack for a frame outside the history");
         }
-        for datagram in datagrams {
-            if !self.push(datagram) {
-                break;
-            }
-        }
+        self.send(&datagrams);
     }
 }
 
@@ -1370,17 +1365,49 @@ pub const fn crop_allowed(on_screen: bool, crop: Option<Crop>, occluded: bool) -
 /// The crop a window wants right now, or `None` when it must go through the window filter.
 fn wanted_crop(
     id: slopty_core::WindowId,
-    bounds: &Rect,
+    state: &slopty_capture::WindowState,
     point_scale: f64,
-    on_screen: bool,
 ) -> Option<Crop> {
+    let bounds = &state.bounds;
     let crop = slopty_capture::display_enclosing(bounds).and_then(|display| {
         let display = slopty_capture::display_bounds(display);
         slopty_capture::crop_for(bounds, &display, point_scale).map(|(crop, _pixels)| crop)
     });
-    let owner = slopty_capture::window_owner_pid(id)?;
-    let occluded = slopty_capture::occluded(id, bounds, owner);
-    crop_allowed(on_screen, crop, occluded)
+    let occluded = slopty_capture::occluded(id, bounds, state.owner_pid);
+    crop_allowed(state.on_screen, crop, occluded)
+}
+
+/// What the window server says about a stream's target: everything [`ScreenStream::check_geometry`]
+/// decides from, read off the runtime by [`ScreenStream::prober`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Probe {
+    /// The target's bounds in points; `None` when a window is gone.
+    bounds: Option<Rect>,
+    /// For a window that may be served from a display crop: whether it is on screen, and the crop
+    /// it could be served from (on one display, uncovered), before any suspicion.
+    window: Option<(bool, Option<Crop>)>,
+}
+
+/// Read the target's geometry: one window-list description for the window's bounds, on-screen
+/// state and owner, the occlusion list above it, and the display under it. Blocking; timed into
+/// [`ScreenStats::bounds`], and the bounds are left where the cursor loop reads them.
+fn probe(target: CaptureTarget, point_scale: f64, crop: bool, shared: &Shared) -> Probe {
+    let started = host_now_us();
+    let probe = match target {
+        CaptureTarget::Display(_) => {
+            Probe { bounds: slopty_capture::target_bounds(target), window: None }
+        }
+        CaptureTarget::Window(id) => match slopty_capture::window_state(id) {
+            None => Probe { bounds: None, window: None },
+            Some(state) => Probe {
+                bounds: Some(state.bounds),
+                window: crop.then(|| (state.on_screen, wanted_crop(id, &state, point_scale))),
+            },
+        },
+    };
+    shared.counters.bounds.lock().push(host_now_us().saturating_sub(started));
+    *shared.bounds.lock() = probe.bounds;
+    probe
 }
 
 /// Resolve a target, choosing the path for a window.
@@ -1496,7 +1523,7 @@ fn configs(native: (u32, u32), quality: &Quality) -> (CaptureConfig, EncoderConf
     (capture, encoder)
 }
 
-/// One live stream: capture → encode → packetize into the transport's queue.
+/// One live stream: capture → encode → packetize → the transport.
 pub struct ScreenStream {
     id: StreamId,
     target: CaptureTarget,
@@ -1552,14 +1579,13 @@ impl std::fmt::Debug for ScreenStream {
 
 impl ScreenStream {
     /// Resolve `target`, start capturing at `quality`, and return the `Opened` event to send.
-    /// Datagrams are queued on `out`; `on_event` hears [`StreamEvent::Stopped`] if ScreenCaptureKit
+    /// Datagrams go to `sink`; `on_event` hears [`StreamEvent::Stopped`] if ScreenCaptureKit
     /// ends the stream (window closed, permission revoked).
     pub async fn open(
         id: StreamId,
         target: CaptureTarget,
         quality: Quality,
-        out: mpsc::Sender<Queued>,
-        budget: DatagramBudget,
+        sink: Arc<dyn DatagramSink>,
         on_event: impl Fn(StreamEvent) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
         let on_event: Arc<dyn Fn(StreamEvent) + Send + Sync> = Arc::new(on_event);
@@ -1589,14 +1615,15 @@ impl ScreenStream {
             last_encoded_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             keyframe_deferred_us: AtomicU64::new(0),
-            ltr_acked: std::sync::atomic::AtomicBool::new(false),
-            cropped: std::sync::atomic::AtomicBool::new(path == WindowPath::DisplayCrop),
-            target_hidden: std::sync::atomic::AtomicBool::new(false),
-            pointer_over: std::sync::atomic::AtomicBool::new(false),
+            ltr_acked: AtomicBool::new(false),
+            cropped: AtomicBool::new(path == WindowPath::DisplayCrop),
+            target_hidden: AtomicBool::new(false),
+            pointer_over: AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
-            filter_stalled: std::sync::atomic::AtomicBool::new(false),
-            out,
-            budget,
+            filter_stalled: AtomicBool::new(false),
+            sink,
+            too_large_logged: AtomicBool::new(false),
+            bounds: Mutex::new(None),
             counters: Counters::new(),
         });
         let t_encoder = Instant::now();
@@ -1638,10 +1665,10 @@ impl ScreenStream {
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
         let point_scale = f64::from(resolved.point_scale());
         // Two tasks, not one. The beat is a promise about time and must never be behind work
-        // that takes any: the geometry and pointer calls in the cursor loop are window-server
-        // round trips that have been measured at 90 ms, three beats' worth.
+        // that takes any: the pointer read in the cursor loop is a window-server round trip, and
+        // those have been measured at 90 ms, three beats' worth.
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
-        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), target, zoom, point_scale));
+        let cursor = tokio::spawn(cursor_loop(Arc::clone(&shared), zoom, point_scale));
         #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
         #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
         let backing = point_scale.round().clamp(1.0, 4.0) as u8;
@@ -1708,6 +1735,12 @@ impl ScreenStream {
         self.shared.stats()
     }
 
+    /// What the client's feedback reaches without going through this stream's owner.
+    #[must_use]
+    pub fn control(&self) -> StreamControl {
+        StreamControl(Arc::clone(&self.shared))
+    }
+
     /// A handle on the counters for the daemon's registry.
     #[must_use]
     pub fn stats_handle(&self) -> StatsHandle {
@@ -1741,10 +1774,11 @@ impl ScreenStream {
     /// Follow the target: a window the user resized on the host gets a stream of its new
     /// size (fresh encoder, keyframe) and the client hears `Geometry`; one on the display-crop
     /// path that moved gets its crop moved, and one that went under another window (or off
-    /// its display) falls back to the window filter until it is clear again. Cheap when
-    /// nothing changed (a WindowServer query or three); call it a few times a second.
-    pub fn check_geometry(&mut self) -> Result<Option<ScreenEvent>, ScreenError> {
-        let Some(rect) = slopty_capture::target_bounds(self.target) else {
+    /// its display) falls back to the window filter until it is clear again. Decided from `probe`,
+    /// which [`Self::prober`] read off the runtime; nothing here waits on the window server.
+    /// Call it a few times a second.
+    pub fn check_geometry(&mut self, probe: &Probe) -> Result<Option<ScreenEvent>, ScreenError> {
+        let Some(rect) = probe.bounds else {
             self.window_gone();
             return Ok(None);
         };
@@ -1752,10 +1786,8 @@ impl ScreenStream {
         let px = |points: f64| (points * self.point_scale).round().clamp(2.0, 16_384.0) as u32;
         let native = (px(rect.w), px(rect.h));
         let resized = native != self.native;
-        if let CaptureTarget::Window(id) = self.target
-            && crop_windows()
-        {
-            self.follow_window(id, &rect);
+        if let (CaptureTarget::Window(id), Some((on_screen, crop))) = (self.target, probe.window) {
+            self.follow_window(id, on_screen, crop);
         }
         if !resized {
             return Ok(None);
@@ -1770,6 +1802,16 @@ impl ScreenStream {
             width: self.capture_config.width,
             height: self.capture_config.height,
         }))
+    }
+
+    /// The window-server reads [`Self::check_geometry`] decides from, as a call to make off the
+    /// runtime: one window-list description, the occlusion list and a display lookup, 0.2–0.6 ms
+    /// (MEASUREMENTS.md, "the geometry tick off the connection").
+    pub fn prober(&self) -> impl FnOnce() -> Probe + Send + 'static {
+        let (target, point_scale, shared) =
+            (self.target, self.point_scale, Arc::clone(&self.shared));
+        let crop = crop_windows();
+        move || probe(target, point_scale, crop, &shared)
     }
 
     /// Whether the target has drawn anything, when that answer changed since the client was
@@ -1812,16 +1854,20 @@ impl ScreenStream {
     }
 
     /// Keep a window on the right path: crop where it is now, or the window filter while
-    /// something covers it. On-screen state and occlusion are checked every time since other
-    /// windows move too. Nothing is committed here: the completion callbacks of the
-    /// ScreenCaptureKit calls settle the transition on a later tick, and a failed one is simply
-    /// asked again.
-    fn follow_window(&mut self, id: slopty_core::WindowId, rect: &Rect) {
+    /// something covers it. On-screen state and occlusion come from every probe, since other
+    /// windows move too; `available` is the crop the probe found, before any suspicion. Nothing is
+    /// committed here: the completion callbacks of the ScreenCaptureKit calls settle the
+    /// transition on a later tick, and a failed one is simply asked again.
+    fn follow_window(
+        &mut self,
+        id: slopty_core::WindowId,
+        on_screen: bool,
+        available: Option<Crop>,
+    ) {
         // First, and outside everything below: the guard must not depend on the transition state
         // machine. A swap that ScreenCaptureKit keeps rejecting leaves `settle` busy for as long
         // as it keeps failing, and those are exactly the ticks where the crop is still running
         // over a window that is no longer there.
-        let on_screen = slopty_capture::window_on_screen(id);
         if self.shared.target_hidden.swap(!on_screen, Ordering::Relaxed) == on_screen {
             tracing::info!(stream = %self.id, on_screen, "target visibility");
         }
@@ -1850,8 +1896,7 @@ impl ScreenStream {
         // kind (MEASUREMENTS.md, "a sibling window closing stalls the crop"). A false suspicion
         // comes back to the crop on the first tick after the hold.
         let suspected = self.shared.suspected_at(host_now_us());
-        let mut wanted =
-            if suspected { None } else { wanted_crop(id, rect, self.point_scale, on_screen) };
+        let mut wanted = if suspected { None } else { available };
         // Another window of the application went (`Shared::sibling_went`): no suspicion, but
         // a crop that keeps its filter is a crop that never gets another frame. One tick on
         // the window filter is the change of kind that wakes the framework; the crop is
@@ -2113,7 +2158,7 @@ async fn hide_watch_for(
 /// not read as a stalled link). Sleeps until the moment one would be due rather than polling:
 /// while video flows every datagram moves that moment on, so the task wakes at most once per
 /// [`HEARTBEAT_AFTER`]. Runs until the task is aborted by [`ScreenStream::close`] or the
-/// transport queue closes.
+/// connection is gone.
 async fn beat_loop(shared: Arc<Shared>) {
     let mut beats: u32 = 0;
     let mut last_beat_us: Option<u64> = None;
@@ -2121,10 +2166,10 @@ async fn beat_loop(shared: Arc<Shared>) {
     // Four times the promise, which is twice the gap the receiver already calls a stall: past
     // this the beat has not merely slipped, it has failed at the one thing it is for.
     let late_beat_us = heartbeat_after_us.saturating_mul(4);
-    while !shared.out.is_closed() {
+    while !shared.sink.is_closed() {
         let now = host_now_us();
-        // The beat itself counts as traffic even when the queue refused it, so a full queue
-        // is retried a period later instead of spun on.
+        // The beat itself counts as traffic even when the transport refused it, so a refusal is
+        // retried a period later instead of spun on.
         let last_out = shared.last_push_us.load(Ordering::Relaxed).max(last_beat_us.unwrap_or(0));
         if let Some(wait) = beat_due_in(now.saturating_sub(last_out), heartbeat_after_us) {
             tokio::time::sleep(wait).await;
@@ -2142,7 +2187,7 @@ async fn beat_loop(shared: Arc<Shared>) {
             }
         }
         last_beat_us = Some(now);
-        shared.push(heartbeat_datagram(shared.id, beats, send_ms_lo(now)));
+        shared.send(&[heartbeat_datagram(shared.id, beats, send_ms_lo(now))]);
     }
 }
 
@@ -2160,33 +2205,19 @@ const fn beat_due_in(silence_us: u64, after_us: u64) -> Option<Duration> {
 /// A still pointer costs one read of the event system's move counters a tick
 /// ([`slopty_capture::pointer_moves`], tens of nanoseconds): the pointer itself is only asked
 /// for when the counters moved, and the target's bounds (which move a still pointer across the
-/// picture) at 10 Hz. Both are window-server round trips, so they run on the blocking pool:
-/// what this loop must not do is occupy a runtime worker, because [`beat_loop`] needs one on
-/// time (MEASUREMENTS.md, "the beat behind the geometry call").
-async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, point_scale: f64) {
+/// picture) are the ones the owner's geometry probe last read. The pointer read is a
+/// window-server round trip, so it runs on the blocking pool: what this loop must not do is
+/// occupy a runtime worker, because [`beat_loop`] needs one on time (MEASUREMENTS.md, "the beat
+/// behind the geometry call").
+async fn cursor_loop(shared: Arc<Shared>, zoom: f64, point_scale: f64) {
     let mut ticks = tokio::time::interval(CURSOR_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut bounds: Option<Rect> = None;
     let mut pointer: Option<(u32, (f64, f64))> = None;
     let mut last: Option<(i32, i32, bool)> = None;
     let mut seq: u32 = 0;
-    let mut tick: u64 = 0;
-    while !shared.out.is_closed() {
+    while !shared.sink.is_closed() {
         ticks.tick().await;
-        if tick.is_multiple_of(BOUNDS_EVERY) {
-            let counters = Arc::clone(&shared);
-            let measured = tokio::task::spawn_blocking(move || {
-                let started = host_now_us();
-                let rect = slopty_capture::target_bounds(target);
-                counters.counters.bounds.lock().push(host_now_us().saturating_sub(started));
-                rect
-            })
-            .await;
-            let Ok(rect) = measured else { return };
-            bounds = rect;
-        }
-        tick = tick.wrapping_add(1);
-        let Some(rect) = bounds else { continue };
+        let Some(rect) = *shared.bounds.lock() else { continue };
         let moves = slopty_capture::pointer_moves();
         let (px, py) = match pointer {
             Some((seen, at)) if seen == moves => at,
@@ -2220,7 +2251,7 @@ async fn cursor_loop(shared: Arc<Shared>, target: CaptureTarget, zoom: f64, poin
             sample.1,
             sample.2,
         );
-        shared.push(datagram);
+        shared.send(&[datagram]);
     }
 }
 
@@ -2236,7 +2267,7 @@ async fn shape_loop(
     let mut ticks = tokio::time::interval(SHAPE_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = ShapeDedup::default();
-    while !shared.out.is_closed() {
+    while !shared.sink.is_closed() {
         ticks.tick().await;
         if !shared.pointer_over.load(Ordering::Relaxed) {
             continue;
@@ -2302,15 +2333,68 @@ mod tests {
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
 
-    /// A stream's shared state with no encoder and nowhere to send: enough to drive
-    /// [`Shared::on_frame`] and read what it counted.
-    fn shared_for_frames() -> (Arc<Shared>, mpsc::Receiver<Queued>) {
-        shared_with_queue(8)
+    /// A transport that keeps what it is sent: it holds what a test says it holds, carries
+    /// datagrams up to `max` bytes, and can be closed.
+    struct Wire {
+        sent: Mutex<Vec<Bytes>>,
+        calls: AtomicU64,
+        held: std::sync::atomic::AtomicUsize,
+        max: std::sync::atomic::AtomicUsize,
+        closed: AtomicBool,
     }
 
-    /// [`shared_for_frames`] with a datagram queue of `capacity`.
-    fn shared_with_queue(capacity: usize) -> (Arc<Shared>, mpsc::Receiver<Queued>) {
-        let (out, rx) = mpsc::channel(capacity);
+    impl Wire {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                sent: Mutex::new(Vec::new()),
+                calls: AtomicU64::new(0),
+                held: std::sync::atomic::AtomicUsize::new(0),
+                max: std::sync::atomic::AtomicUsize::new(MAX_DATAGRAM),
+                closed: AtomicBool::new(false),
+            })
+        }
+
+        fn drain(&self) -> Vec<Bytes> {
+            std::mem::take(&mut *self.sent.lock())
+        }
+    }
+
+    impl DatagramSink for Wire {
+        fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.closed.load(Ordering::Relaxed) {
+                return Err(Refused::Closed);
+            }
+            let max = self.max.load(Ordering::Relaxed);
+            if datagrams.iter().any(|d| d.len() > max) {
+                return Err(Refused::TooLarge);
+            }
+            self.sent.lock().extend_from_slice(datagrams);
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(self.max.load(Ordering::Relaxed))
+        }
+
+        fn held(&self) -> usize {
+            self.held.load(Ordering::Relaxed)
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A stream's shared state with no encoder, sending to a [`Wire`]: enough to drive
+    /// [`Shared::on_frame`] and read what it counted and sent.
+    fn shared_for_frames() -> (Arc<Shared>, Arc<Wire>) {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared {
             id: StreamId(1),
             encoder: RwLock::new(None),
@@ -2326,17 +2410,18 @@ mod tests {
             last_encoded_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             keyframe_deferred_us: AtomicU64::new(0),
-            ltr_acked: std::sync::atomic::AtomicBool::new(false),
-            cropped: std::sync::atomic::AtomicBool::new(true),
-            target_hidden: std::sync::atomic::AtomicBool::new(false),
-            pointer_over: std::sync::atomic::AtomicBool::new(false),
+            ltr_acked: AtomicBool::new(false),
+            cropped: AtomicBool::new(true),
+            target_hidden: AtomicBool::new(false),
+            pointer_over: AtomicBool::new(false),
             suspect_until_us: AtomicU64::new(0),
-            filter_stalled: std::sync::atomic::AtomicBool::new(false),
-            out,
-            budget: DatagramBudget::new(),
+            filter_stalled: AtomicBool::new(false),
+            sink,
+            too_large_logged: AtomicBool::new(false),
+            bounds: Mutex::new(None),
             counters: Counters::new(),
         });
-        (shared, rx)
+        (shared, wire)
     }
 
     #[test]
@@ -2382,7 +2467,7 @@ mod tests {
         let seen = Arc::clone(&counts);
         registry.observe(move |n| seen.lock().push(n));
         let handle = |id: u32| {
-            let (shared, _rx) = shared_for_frames();
+            let (shared, _wire) = shared_for_frames();
             // Fresh from the helper: nothing else holds it, so the unwrap cannot fail.
             let mut shared = Arc::try_unwrap(shared).ok().expect("fresh");
             shared.id = StreamId(id);
@@ -2450,7 +2535,7 @@ mod tests {
     /// here, and the beats keep their cadence because they are no longer on that task.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_geometry_call_does_not_make_the_beat_late() {
-        let (shared, mut rx) = shared_for_frames();
+        let (shared, wire) = shared_for_frames();
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         // Whatever the cursor loop does, it does it like this: off the runtime's workers. It
         // spins rather than sleeps because a sleeping thread is not what a window-server round
@@ -2476,10 +2561,7 @@ mod tests {
             seen.beat_gap_worst_us
         );
         // The beats really went out, rather than only being counted.
-        let mut sent: u64 = 0;
-        while rx.try_recv().is_ok() {
-            sent = sent.saturating_add(1_u64);
-        }
+        let sent = wire.drain().len();
         assert!(sent >= 8, "only {sent} datagrams for {} beats", seen.heartbeats);
     }
 
@@ -2492,12 +2574,12 @@ mod tests {
         assert_eq!(beat_due_in(u64::MAX, 25_000), None);
     }
 
-    /// A full queue refuses the beat, and the loop waits a period before the next try rather
-    /// than spinning on the refusal.
+    /// A transport that refuses the beat does not make the loop spin on the refusal: it waits a
+    /// period before the next try.
     #[tokio::test]
     async fn a_refused_beat_is_retried_a_period_later() {
-        let (shared, _rx) = shared_with_queue(1);
-        assert!(shared.push(Bytes::from_static(b"fills the queue")));
+        let (shared, wire) = shared_for_frames();
+        wire.max.store(0, Ordering::Relaxed);
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         tokio::time::sleep(Duration::from_millis(200)).await;
         beat.abort();
@@ -2513,7 +2595,7 @@ mod tests {
     /// lapses without confirmation, frames flow again.
     #[test]
     fn a_frame_captured_under_suspicion_is_held_until_the_hold_lapses() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
         let hold_us = u64::try_from(SUSPICION_HOLD.as_micros()).unwrap();
         // Built first: the first pixel buffer of a process takes longer than the hold.
         let frame = a_frame();
@@ -2556,7 +2638,7 @@ mod tests {
     /// the guard and the gate both read, and a target that recovers moves it back.
     #[test]
     fn a_collapsed_target_takes_the_stream_down_the_cadence_ladder() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
 
         shared.apply_cadence(1_000_000);
         assert_eq!(shared.fps.load(Ordering::Relaxed), 15, "2 KB a frame at 60 is not a picture");
@@ -2568,8 +2650,7 @@ mod tests {
     /// decides which of them the encoder is given, and it counts in time rather than in frames.
     #[test]
     fn the_cadence_gate_hands_the_encoder_one_capture_a_period() {
-        // A full-sized queue: the guard below the gate refuses everything under its low-water mark.
-        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        let (shared, _wire) = shared_for_frames();
         shared.fps.store(30, Ordering::Relaxed);
 
         // One buffer, moved through the beats: building a `CVPixelBuffer` costs far more than the
@@ -2604,7 +2685,7 @@ mod tests {
     /// crop it is a picture of whatever is behind it.
     #[test]
     fn a_frame_captured_while_the_target_is_hidden_is_withheld() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
 
         shared.on_frame(&a_frame());
         let seen = shared.stats();
@@ -2743,31 +2824,35 @@ mod tests {
         assert_eq!(counters.snapshot().encode.n, 2, "a forgotten frame is not a sample");
     }
 
-    /// A datagram goes out when the queue has room; a full or closed queue drops it and counts
-    /// the drop, so the stats say what the link never saw.
+    /// A batch goes to the transport in one call. A datagram larger than the path now carries is
+    /// a sizing bug, not the end of the stream: the ones that fit still go and the rest are
+    /// counted as refused. A closed connection takes nothing, and the loops see it.
     #[test]
-    fn a_full_or_closed_queue_drops_the_datagram_and_counts_it() {
-        let (shared, mut rx) = shared_with_queue(1);
-        assert!(shared.push(Bytes::from_static(b"a")));
-        assert!(!shared.push(Bytes::from_static(b"b")), "the queue holds one");
-        assert_eq!(rx.try_recv().map(|q| q.datagram), Ok(Bytes::from_static(b"a")));
-        assert!(shared.push(Bytes::from_static(b"c")), "room again once drained");
-        drop(rx);
-        assert!(!shared.push(Bytes::from_static(b"d")), "closed");
+    fn a_too_large_datagram_costs_itself_and_a_closed_link_takes_nothing() {
+        let (shared, wire) = shared_for_frames();
+        let batch = [Bytes::from_static(b"a"), Bytes::from_static(b"bb"), Bytes::from_static(b"c")];
+        assert_eq!(shared.send(&batch), 3);
+        assert_eq!(wire.calls.load(Ordering::Relaxed), 1, "one call for the whole batch");
+        assert_eq!(wire.drain(), batch);
+
+        wire.max.store(1, Ordering::Relaxed);
+        assert_eq!(shared.send(&batch), 2, "the two that fit");
+        assert_eq!(wire.drain(), [Bytes::from_static(b"a"), Bytes::from_static(b"c")]);
+        assert!(!shared.sink.is_closed(), "the stream goes on");
+
+        wire.closed.store(true, Ordering::Relaxed);
+        assert_eq!(shared.send(&batch), 0);
+        assert!(wire.drain().is_empty());
         let stats = shared.stats();
-        assert_eq!((stats.datagrams, stats.queue_full), (2, 2));
+        assert_eq!((stats.datagrams, stats.queue_full), (5, 4));
     }
 
-    fn drain(rx: &mut mpsc::Receiver<Queued>) -> Vec<Bytes> {
-        std::iter::from_fn(|| rx.try_recv().ok().map(|q| q.datagram)).collect()
-    }
-
-    /// An access unit from the encoder is packetized into the queue and counted; a NACK for a
-    /// frame in the packetizer's history answers with those fragments, one outside it with
-    /// nothing, and none at all while QUIC holds more than the frame budget.
+    /// An access unit from the encoder is packetized and handed over in one call, and counted; a
+    /// NACK for a frame in the packetizer's history answers with those fragments, one outside it
+    /// with nothing, and none at all while QUIC holds more than the frame budget.
     #[test]
-    fn an_encoded_packet_is_queued_and_a_nack_answers_from_history() {
-        let (shared, mut rx) = shared_with_queue(DATAGRAM_QUEUE);
+    fn an_encoded_packet_is_sent_and_a_nack_answers_from_history() {
+        let (shared, wire) = shared_for_frames();
         shared.counters.bitrate_bps.store(30_000_000, Ordering::Relaxed);
         let packet = EncodedPacket {
             data: vec![7; 3000],
@@ -2777,26 +2862,27 @@ mod tests {
             pts_us: host_now_us(),
         };
         shared.on_packet(&packet);
-        let sent = drain(&mut rx);
+        let sent = wire.drain();
         assert!(sent.len() >= 3, "3 000 bytes under the MTU: {}", sent.len());
+        assert_eq!(wire.calls.load(Ordering::Relaxed), 1, "the frame in one call");
         let stats = shared.stats();
         assert_eq!((stats.encoded, stats.datagrams), (1, sent.len() as u64));
         shared.nack(0, &[0, 1]);
-        assert_eq!(drain(&mut rx).len(), 2, "two fragments of frame 0 again");
+        assert_eq!(wire.drain().len(), 2, "two fragments of frame 0 again");
         shared.nack(0, &[]);
-        assert!(!drain(&mut rx).is_empty(), "no fragments named: the whole frame's data");
+        assert!(!wire.drain().is_empty(), "no fragments named: the whole frame's data");
         shared.nack(9, &[0]);
-        assert!(drain(&mut rx).is_empty(), "frame 9 was never sent");
-        shared.budget.set_held(10_000_000);
+        assert!(wire.drain().is_empty(), "frame 9 was never sent");
+        wire.held.store(10_000_000, Ordering::Relaxed);
         shared.nack(0, &[0]);
-        assert!(drain(&mut rx).is_empty(), "QUIC is holding seconds of frames");
+        assert!(wire.drain().is_empty(), "QUIC is holding seconds of frames");
     }
 
     /// A refresh request marks the next frame; a report hands acknowledged LTR tokens to the
     /// encoder's options and counts the datagrams sent since the last one.
     #[test]
     fn a_refresh_and_a_report_reach_the_next_frame_options() {
-        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        let (shared, _wire) = shared_for_frames();
         shared.request_refresh(41);
         assert!(shared.pending.lock().refresh);
         assert_eq!(shared.stats().refreshes, 1);
@@ -2812,7 +2898,7 @@ mod tests {
     /// hold sends nothing, and each packet carries the next sequence number.
     #[test]
     fn audio_is_gated_by_silence_and_numbered() -> Result<(), String> {
-        let (shared, _rx) = shared_with_queue(DATAGRAM_QUEUE);
+        let (shared, _wire) = shared_for_frames();
         let samples = usize::try_from(FRAME_SAMPLES * CHANNELS).map_err(|e| e.to_string())?;
         let quiet = vec![0.0_f32; samples];
         let loud: Vec<f32> = (0..samples).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
@@ -2834,23 +2920,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transport_budget_the_queue_age_and_the_crop_knob_are_plain_values() {
-        let budget = DatagramBudget::default();
-        assert_eq!((budget.get(), budget.held(), budget.cwnd()), (MAX_DATAGRAM, 0, 0));
-        budget.set(1200);
-        budget.set_held(4096);
-        budget.set_cwnd(4920);
-        assert_eq!((budget.get(), budget.held(), budget.cwnd()), (1200, 4096, 4920));
-        let shared_budget = budget.clone();
-        budget.set_held(0);
-        assert_eq!(shared_budget.held(), 0, "clones share the counters");
-        assert_eq!(shared_budget.cwnd(), 4920, "the window too");
-
-        let queued = Queued { datagram: Bytes::new(), queued_at_us: host_now_us() - 5_000 };
-        assert!(queued.waited_us() >= 5_000, "age is measured from when it was queued");
-        let future = Queued { datagram: Bytes::new(), queued_at_us: u64::MAX };
-        assert_eq!(future.waited_us(), 0, "a clock step back reads as no wait, not a wrap");
-
+    fn the_clock_byte_and_the_crop_knob_are_plain_values() {
         assert_eq!(send_ms_lo(0), 0);
         assert_eq!(send_ms_lo(255_999), 255);
         assert_eq!(send_ms_lo(256_000), 0, "the low byte of the millisecond clock wraps");
@@ -2860,7 +2930,7 @@ mod tests {
         assert!(!crop_windows_from(Some("window")));
         assert!(crop_windows_from(Some("anything else")), "an unknown value is the default");
 
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
         assert!(!shared.filter_stalled.load(Ordering::Relaxed));
         shared.sibling_went();
         shared.sibling_went();
@@ -2871,25 +2941,23 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_fits_unless_the_queue_or_quic_holds_too_much() {
+    fn a_frame_fits_unless_quic_holds_too_much() {
         // 30 Mbit/s at 60 fps: 62.5 KB per frame, two frames may be held.
-        assert!(frame_fits(DATAGRAM_QUEUE, 0, 5_808, 30_000_000, 60));
-        assert!(frame_fits(DATAGRAM_QUEUE, 125_000, 5_808, 30_000_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 125_001, 5_808, 30_000_000, 60));
-        // The datagram queue's low-water mark still applies.
-        assert!(!frame_fits(LOW_WATER - 1, 0, 5_808, 30_000_000, 60));
+        assert!(frame_fits(0, 5_808, 30_000_000, 60));
+        assert!(frame_fits(125_000, 5_808, 30_000_000, 60));
+        assert!(!frame_fits(125_001, 5_808, 30_000_000, 60));
         // A collapsed path: 1.8 Mbit/s at 60 fps is 3.7 KB a frame, so the budget is 7.4 KB —
         // 33 ms of queue against the 146 ms a fixed 32 KB floor would have allowed at this
         // rate, which is the whole point of sizing it from the rate in force.
-        assert!(frame_fits(DATAGRAM_QUEUE, 7_500, 4_920, 1_800_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 7_501, 4_920, 1_800_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 32 * 1024, 4_920, 1_800_000, 60));
+        assert!(frame_fits(7_500, 4_920, 1_800_000, 60));
+        assert!(!frame_fits(7_501, 4_920, 1_800_000, 60));
+        assert!(!frame_fits(32 * 1024, 4_920, 1_800_000, 60));
         // One window is the floor: past `rtt × fps` of 1.8 two frames fall under it, and bytes
         // inside the window leave on the next acknowledgement rather than standing in a queue.
         // 1 Mbit/s at 60 fps is 2 083 B a frame, two of them 4 166, under a 4 920 B window.
-        assert!(frame_fits(DATAGRAM_QUEUE, 4_920, 4_920, 1_000_000, 60));
-        assert!(!frame_fits(DATAGRAM_QUEUE, 4_921, 4_920, 1_000_000, 60));
-        assert!(frame_fits(DATAGRAM_QUEUE, 0, 0, 0, 0), "nothing known, nothing held");
+        assert!(frame_fits(4_920, 4_920, 1_000_000, 60));
+        assert!(!frame_fits(4_921, 4_920, 1_000_000, 60));
+        assert!(frame_fits(0, 0, 0, 0), "nothing known, nothing held");
     }
 
     #[test]
@@ -2925,7 +2993,7 @@ mod tests {
 
     #[test]
     fn a_keyframe_is_deferred_only_when_a_refresh_can_go_out_instead() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
         shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
         // The client has never acknowledged a reference, so a refresh would decode into nothing
@@ -2953,7 +3021,7 @@ mod tests {
     /// link is most of them, and a refresh is an IDR here — so this is where the budget bites.
     #[test]
     fn a_dropped_frame_asks_for_a_refresh_only_when_the_link_could_carry_one() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
         shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
 
@@ -2979,7 +3047,7 @@ mod tests {
 
     #[test]
     fn a_link_that_recovers_ends_the_deferral_without_the_valve() {
-        let (shared, _rx) = shared_for_frames();
+        let (shared, _wire) = shared_for_frames();
         shared.ltr_acked.store(true, Ordering::Relaxed);
         shared.keyframe_bytes.store(133_960, Ordering::Relaxed);
         shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);

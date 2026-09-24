@@ -81,7 +81,7 @@ pub async fn run(cmd: HostCmd) -> Result<()> {
             for (state, list) in [("live", live), ("closed", closed)] {
                 for s in list {
                     println!(
-                        "{state}  client {}  stream {}  {:?}\n  capture {}  encode {}\n  captured {} (crop path {})  dropped {}  encoded {}  queue full {}  bitrate {} bps",
+                        "{state}  client {}  stream {}  {:?}\n  capture {}  encode {}\n  captured {} (crop path {})  dropped {}  encoded {}  refused {}  bitrate {} bps",
                         s.client,
                         s.stream,
                         s.target,

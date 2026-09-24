@@ -17,17 +17,21 @@ use slopty_proto::file::{FILE_BYTES, FILE_LINES, FileRead};
 #[must_use]
 pub fn read(path: &Path) -> FileRead {
     let path = expand_home(path);
-    let mut file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(e) => return FileRead::Missing { error: os_word(&e) },
-    };
-    let meta = match file.metadata() {
+    // Looked at before it is opened: opening a named pipe waits for a writer that may never come.
+    let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
     if meta.is_dir() {
         return FileRead::Missing { error: "Is a directory".to_owned() };
     }
+    if !meta.is_file() {
+        return FileRead::Missing { error: "Not a regular file".to_owned() };
+    }
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) => return FileRead::Missing { error: os_word(&e) },
+    };
     let size = meta.len();
     let modified_ms = meta
         .modified()
@@ -123,6 +127,19 @@ mod tests {
         let second = stamp(&path).ok_or("stamped")?;
         assert_ne!(first, second, "a write changes it");
         assert_eq!(second.0, 4);
+        Ok(())
+    }
+
+    /// A named pipe is answered at once rather than opened: opening one waits for a writer, and
+    /// a card on it would hold a blocking thread for good.
+    #[test]
+    fn a_named_pipe_is_not_opened() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.is_ok_and(|s| s.success()), "mkfifo");
+        let error = "Not a regular file".to_owned();
+        assert_eq!(read(&fifo), FileRead::Missing { error });
         Ok(())
     }
 

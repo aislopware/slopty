@@ -231,8 +231,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `shareable()` keeps its last enumeration for 2 s (`SHAREABLE_TTL`) because a client
     lists, picks and opens within seconds and each enumeration is 60–75 ms.
     `Opened` 176–191 → 113–138 ms, first open included.
-  * The datagram pump publishes how many bytes QUIC is holding (`DatagramBudget::held`,
-    4 MiB buffer minus `datagram_send_buffer_space`) and logs every episode; the capture
+  * The datagram pump published how many bytes QUIC is holding (then `DatagramBudget::held`,
+    now `DatagramSink::held`: 4 MiB buffer minus `datagram_send_buffer_space`); the capture
     callback drops a frame, flagged for an LTR refresh, while more than two frames' worth at
     the current target (32 KiB floor) is held (`frame_fits`), and a NACK is answered only
     under the same condition. Over the mesh at a 4800-byte window the pump had held 275–365 KB
@@ -290,9 +290,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Datagram budget**: QUIC's datagram limit starts near 1168 B at the 1200-byte initial MTU
   and grows with path-MTU discovery, so the protocol's 1200-byte `MAX_DATAGRAM` is a ceiling,
-  not a promise. The pump reads `Connection::max_datagram_size()` into a shared
-  `DatagramBudget`; the packetizer cuts the next frame to it (`Packetizer::set_max_datagram`),
-  and a datagram cut before the budget shrank is discarded rather than rejected by QUIC.
+  not a promise. The packetizer cuts each frame to `Connection::max_datagram_size()` as the
+  stream's `DatagramSink` reads it just before the cut (`Packetizer::set_max_datagram`).
+  Amended 2026-09-25 (transport.md, **Media datagrams go to QUIC from the thread that made
+  them**): a datagram cut before the limit shrank is refused by QUIC with `TooLarge`; the rest of
+  its batch still goes, the refusal is counted and logged once, and the stream carries on.
 
 - ✅ **Stream ids** are allocated per connection by the host, starting at 1; `WindowId` *is*
   the `CGWindowID` (clients open against a listing they just received, so reuse is harmless).

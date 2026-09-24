@@ -22,7 +22,7 @@
 //! The policy's value (`wanted`) and the target the encoder gets are two numbers: the target is
 //! `wanted` capped at 90 % of the selected QUIC path's `cwnd × 8 / rtt`, in every state
 //! including a stall, because datagrams are congestion-controlled and sending past the window
-//! only fills the datagram queue on the host (`queue_full` in the stats). The path is sampled
+//! only queues datagrams on the host that go stale before they are sent. The path is sampled
 //! with every report and the window keeps the *widest* sample: BBR shrinks the congestion
 //! window to four packets for 200 ms every few seconds to re-measure the round trip
 //! (`ProbeRTT`), and a cap read in those 200 ms would cut a loopback stream to a few Mbit/s

@@ -6962,6 +6962,7 @@ dependencies = [
  "slopty-codec",
  "slopty-core",
  "slopty-proto",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]
