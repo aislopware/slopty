@@ -35,8 +35,26 @@ enum State {
 impl Boundary {
     /// Follow `bytes`.
     pub fn feed(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.step(b);
+        let mut rest = bytes;
+        while let Some((&b, tail)) = rest.split_first() {
+            if self.state != State::Ground {
+                self.step(b);
+                rest = tail;
+                continue;
+            }
+            // Text up to the next escape moves the state only through its characters, and a
+            // character is at most four bytes, so only the run's last four decide where it ends.
+            let run = memchr::memchr(0x1b, rest).unwrap_or(rest.len());
+            let (text, after) = rest.split_at(run);
+            for &c in text.get(text.len().saturating_sub(4)..).unwrap_or_default() {
+                self.step(c);
+            }
+            if let Some((&esc, tail)) = after.split_first() {
+                self.step(esc);
+                rest = tail;
+            } else {
+                rest = after;
+            }
         }
     }
 
@@ -160,6 +178,37 @@ mod tests {
         assert!(!ground_after(b"\x1b]0;half\x1b["));
         assert!(!ground_after(b"\x1bP+q\x1b["));
         assert!(!ground_after(b"\x1b[3\x1bP"), "an escape inside a CSI starts a string");
+    }
+
+    /// The fast path over text agrees with stepping every byte, whatever the text holds.
+    #[test]
+    fn skipping_text_lands_where_stepping_does() {
+        let pieces: [&[u8]; 12] = [
+            b"plain",
+            b"\xe2\x94\x80",
+            b"\xe2",
+            b"\x94",
+            b"\xf0\x9f\x98\x80",
+            b"\x1b[31m",
+            b"\x1b]0;t",
+            b"\x07",
+            b"\x18",
+            b"\x80\x80",
+            b"\xc3",
+            b"\x1b",
+        ];
+        let mut stream = Vec::new();
+        for round in 0_usize..400 {
+            let piece = pieces.get(round.wrapping_mul(7).wrapping_add(round / 3) % 12).copied();
+            stream.extend_from_slice(piece.unwrap_or_default());
+            let mut fast = Boundary::default();
+            fast.feed(&stream);
+            let mut slow = Boundary::default();
+            for &b in &stream {
+                slow.step(b);
+            }
+            assert_eq!(fast, slow, "after {stream:?}");
+        }
     }
 
     #[test]

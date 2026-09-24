@@ -1,4 +1,4 @@
-//! [`VtEngine`] backed by libghostty-vt.
+//! The terminal engine, backed by libghostty-vt.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,13 +24,15 @@ use slopty_proto::terminal::{ColorOverrides, Frame, PixelRect, Placement, TermCo
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
-use crate::{EngineConfig, EngineError, EngineEvent, VtEngine, convert, osc133, search};
+use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 /// Longest title or body of a desktop notification passed on: a banner shows a line or two,
 /// and a program can write anything into an OSC.
 const NOTIFICATION_CHARS: usize = 512;
 
-/// How long a program may hold synchronized output (mode 2026) before we ship frames anyway.
+/// How long a program may hold synchronized output (mode 2026) before the engine ends the hold
+/// itself: libghostty has no clock, so a program that never releases one would freeze its
+/// screen.
 const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// A prompt row takes the exit status of a `133;D` this many rows above it at most: the shell
@@ -39,13 +41,36 @@ const EXIT_LOOKBACK_ROWS: u64 = 4;
 
 type Events = Rc<RefCell<Vec<EngineEvent>>>;
 
+/// A render hold (synchronized output, mode 2026) in progress. The render state holds the
+/// frame the program left on screen when it began, and frames come from that until it ends.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    since: MonoTime,
+    /// History rows when it began, which the captured frame's rows are numbered against.
+    scrollback: u64,
+}
+
+/// Who a frame is for, which decides what building it consumes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Take {
+    /// The changes since the last frame, for every viewer.
+    Diff,
+    /// Every row, for every viewer (a resize): the next sequence number, all images again.
+    Everyone,
+    /// Every row, for a viewer joining: the current sequence number, and the dirty state the
+    /// other viewers' next diff needs is left as it is.
+    Joiner,
+}
+
 /// libghostty-vt engine. `!Send`: lives on the session thread that owns the PTY reader.
 pub struct GhosttyEngine {
     // Dropped before `term` (declaration order): it holds a pointer to the terminal.
     anchor: Option<Anchor>,
     primary_anchor: Option<Anchor>,
     term: Terminal<'static, 'static>,
-    render: RenderState<'static>,
+    /// Shared with the render-hold callback, which captures a frame into it.
+    render: Rc<RefCell<RenderState<'static>>>,
+    hold: Rc<std::cell::Cell<Option<Hold>>>,
     rows_iter: RowIterator<'static>,
     cells_iter: CellIterator<'static>,
     key_enc: key::Encoder<'static>,
@@ -65,10 +90,19 @@ pub struct GhosttyEngine {
     /// The primary screen as VT bytes, taken just before the program switched to the alternate
     /// screen, so a checkpoint made on the alternate screen can carry both.
     primary_snapshot: Option<Vec<u8>>,
+    /// Counts the writes, resizes and colour changes, so work over the whole terminal (the
+    /// primary snapshot, search's plain text) is redone only when something changed.
+    generation: u64,
+    /// The `generation` `primary_snapshot` was taken at.
+    primary_at: u64,
+    /// Search's plain text of the history and the screen, and the `generation` it is of.
+    search_text: Option<(u64, String)>,
+    /// A write since the last colour check carried an OSC or a reset, and the next write
+    /// checks again in case the sequence was split across the two.
+    colours_touched: bool,
     /// The tail of the last chunk when it ended inside a possible alternate-screen switch
     /// (`ESC [ ? 10`), so a switch split across two reads is still seen before it completes.
     alt_prefix: Vec<u8>,
-    sync_since: Option<MonoTime>,
     buttons_down: u8,
     scratch: String,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
@@ -139,12 +173,16 @@ impl GhosttyEngine {
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
         install_callbacks(&mut term, &events, &light)?;
+        let render = Rc::new(RefCell::new(RenderState::new()?));
+        let hold = Rc::new(std::cell::Cell::new(None));
+        install_render_hold(&mut term, &render, &hold)?;
 
         let mut engine = Self {
             anchor: None,
             primary_anchor: None,
             term,
-            render: RenderState::new()?,
+            render,
+            hold,
             rows_iter: RowIterator::new()?,
             cells_iter: CellIterator::new()?,
             key_enc: key::Encoder::new()?,
@@ -159,8 +197,11 @@ impl GhosttyEngine {
             base: 0,
             on_alt: false,
             primary_snapshot: None,
+            generation: 0,
+            primary_at: u64::MAX,
+            search_text: None,
+            colours_touched: false,
             alt_prefix: Vec::new(),
-            sync_since: None,
             buttons_down: 0,
             scratch: String::with_capacity(16),
             uri_buf: vec![0; 256],
@@ -209,29 +250,42 @@ impl GhosttyEngine {
     /// followed by the alternate screen; a program that leaves the alternate screen after the
     /// replay finds its primary where it was.
     ///
+    /// The bytes are appended to `out`.
+    ///
     /// # Errors
     ///
     /// When the formatter fails.
-    pub fn checkpoint(&mut self) -> Result<Vec<u8>, EngineError> {
-        let active = self.format_active_screen()?;
+    pub fn checkpoint(&mut self, out: &mut Vec<u8>) -> Result<(), EngineError> {
         if !self.on_alt {
-            // Also the fallback for a switch [`Self::write`] fails to see: at worst the primary
-            // comes back as of this checkpoint.
-            self.primary_snapshot = Some(active.clone());
-            return Ok(active);
+            let active = self.primary_now()?;
+            out.extend_from_slice(active);
+            return Ok(());
         }
-        let primary = self.primary_snapshot.clone().unwrap_or_default();
-        let mut out = primary.clone();
+        let active = self.format_active_screen()?;
+        let primary = self.primary_snapshot.as_deref().unwrap_or_default();
+        out.reserve(primary.len().saturating_add(active.len()).saturating_add(64));
+        out.extend_from_slice(primary);
         // Each blob only sets the modes that differ from the defaults, so a mode the primary
         // had on and the program turned off on the alternate screen would stay on: put every
         // mode the primary set back to its default before the alternate screen sets its own.
-        out.extend_from_slice(&mode_resets(&primary));
+        out.extend_from_slice(&mode_resets(primary));
         // Enter the alternate screen here, saving the primary cursor the snapshot just placed,
         // and home: the formatter writes content from wherever the cursor is, and it is where
         // the primary left it. Its own `?1049h` (in the modes it emits) is then a no-op.
         out.extend_from_slice(b"\x1b[?1049h\x1b[H");
         out.extend_from_slice(&active);
-        Ok(out)
+        Ok(())
+    }
+
+    /// The primary screen as VT bytes now, formatted again only if something changed since
+    /// the last time. Also the fallback for an alternate-screen switch [`Self::feed`] fails to
+    /// see: at worst the primary comes back as of the last checkpoint.
+    fn primary_now(&mut self) -> Result<&[u8], EngineError> {
+        if self.primary_at != self.generation || self.primary_snapshot.is_none() {
+            self.primary_snapshot = Some(self.format_active_screen()?);
+            self.primary_at = self.generation;
+        }
+        Ok(self.primary_snapshot.as_deref().unwrap_or_default())
     }
 
     /// The active screen and the terminal state around it, as VT bytes.
@@ -300,20 +354,8 @@ impl GhosttyEngine {
         Ok(out)
     }
 
-    /// Current epoch of line numbering.
-    #[must_use]
-    pub const fn epoch(&self) -> u32 {
-        self.epoch
-    }
-
-    /// Absolute index of the oldest retrievable line.
-    #[must_use]
-    pub const fn oldest_line(&self) -> LineIndex {
-        LineIndex(self.base)
-    }
-
     /// Absolute index one past the newest line (history + screen).
-    pub fn total_lines(&self) -> Result<u64, EngineError> {
+    fn total_lines(&self) -> Result<u64, EngineError> {
         Ok(self.base.saturating_add(self.term.total_rows()? as u64))
     }
 
@@ -351,26 +393,40 @@ impl GhosttyEngine {
             let mut probe = std::mem::take(&mut self.alt_prefix);
             probe.extend(chunk.iter().take(8));
             if alt_enter_at(&probe) == Some(0) {
-                self.primary_snapshot = self.format_active_screen().ok();
+                self.snapshot_primary();
             }
         }
         let switch_at = if self.on_alt { None } else { alt_enter_at(chunk) };
         let rest = match switch_at {
             Some(at) => {
                 let (before, from_switch) = chunk.split_at(at);
-                self.term.vt_write(before);
-                self.settle_or_bump();
+                if !before.is_empty() {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.term.vt_write(before);
+                    self.settle_or_bump();
+                }
                 if !self.on_alt {
-                    self.primary_snapshot = self.format_active_screen().ok();
+                    self.snapshot_primary();
                 }
                 from_switch
             }
             None => chunk,
         };
+        self.generation = self.generation.wrapping_add(1);
         self.term.vt_write(rest);
         self.settle_or_bump();
         if !self.on_alt {
             self.alt_prefix = alt_prefix_of(chunk).to_vec();
+        }
+    }
+
+    /// Keep the primary screen for a checkpoint made on the alternate screen. A program that
+    /// starts right after a checkpoint (nothing written since) reuses it rather than formatting
+    /// the whole history again on the session's thread.
+    fn snapshot_primary(&mut self) {
+        if let Err(e) = self.primary_now() {
+            tracing::warn!(error = %e, "primary snapshot failed");
+            self.primary_snapshot = None;
         }
     }
 
@@ -423,11 +479,17 @@ impl GhosttyEngine {
             Some(anchor) => anchor
                 .tracked
                 .point(PointSpace::Screen)?
-                .map(|p| anchor.abs.saturating_sub(u64::from(p.y))),
+                .map(|p| (anchor.abs.saturating_sub(u64::from(p.y)), u64::from(p.y))),
             None => None,
         };
         match followed {
-            Some(base) => self.base = base,
+            Some((base, y)) => {
+                self.base = base;
+                // Still on the newest row (nothing scrolled): the anchor stays as it is.
+                if y.saturating_add(1) == self.total_rows()? {
+                    return Ok(());
+                }
+            }
             None => self.bump_epoch(),
         }
         self.reanchor()
@@ -444,7 +506,7 @@ impl GhosttyEngine {
         })
     }
 
-    fn modes_inner(&self) -> Result<TermModes, EngineError> {
+    fn modes(&self) -> Result<TermModes, EngineError> {
         let t = &self.term;
         let mut m = TermModes::empty();
         m.set(TermModes::ALT_SCREEN, self.on_alt);
@@ -459,40 +521,59 @@ impl GhosttyEngine {
         Ok(m)
     }
 
-    /// Whether synchronized output is holding frames back (with a timeout so a stuck program
-    /// cannot freeze the display).
-    fn sync_held(&mut self) -> Result<bool, EngineError> {
-        if !self.term.mode(Mode::SYNC_OUTPUT)? {
-            self.sync_since = None;
-            return Ok(false);
+    /// The render hold in force, after ending one that lasted past [`SYNC_OUTPUT_TIMEOUT`].
+    fn hold_in_force(&mut self) -> Result<Option<Hold>, EngineError> {
+        let Some(hold) = self.hold.get() else { return Ok(None) };
+        if hold.since.elapsed() < SYNC_OUTPUT_TIMEOUT {
+            return Ok(Some(hold));
         }
-        let since = *self.sync_since.get_or_insert_with(MonoTime::now);
-        Ok(since.elapsed() < SYNC_OUTPUT_TIMEOUT)
+        // Setting the mode by hand is not reported back, and a program that sets it again
+        // cannot push the deadline: a new hold only begins once this one ended.
+        self.term.set_mode(Mode::SYNC_OUTPUT, false)?;
+        self.hold.set(None);
+        Ok(None)
     }
 
-    fn build_frame(
-        &mut self,
-        input_ack: u64,
-        force_full: bool,
-    ) -> Result<Option<Frame>, EngineError> {
-        let snapshot = self.render.update(&self.term)?;
+    /// How long until the render hold in force times out, when one is: the session frames
+    /// then, whether or not the program writes again.
+    #[must_use]
+    pub fn hold_remaining(&self) -> Option<std::time::Duration> {
+        self.hold
+            .get()
+            .map(|h| SYNC_OUTPUT_TIMEOUT.to_std().saturating_sub(h.since.elapsed().to_std()))
+    }
+
+    fn build_frame(&mut self, input_ack: u64, take: Take) -> Result<Option<Frame>, EngineError> {
+        let hold = self.hold_in_force()?;
+        let render = Rc::clone(&self.render);
+        let mut render = render.borrow_mut();
+        // During a hold the render state keeps the frame captured when it began.
+        let snapshot =
+            if hold.is_some() { render.snapshot() } else { render.update(&self.term)? };
         let dirty = snapshot.dirty()?;
-        let full = force_full || dirty == Dirty::Full;
-        // A placement added or deleted moves no cell, but the frame must say so.
+        let full = take != Take::Diff || dirty == Dirty::Full;
+        // A placement added or deleted moves no cell, but the frame must say so. Rows forced
+        // by a prompt mark are read from the live grid, so they wait for the hold to end.
         let graphics_gen = self.term.kitty_graphics()?.generation()?;
+        let forcing = hold.is_none() && !self.forced_rows.is_empty();
         if !full
             && dirty == Dirty::Clean
-            && graphics_gen == self.graphics_gen
-            && self.forced_rows.is_empty()
+            && (graphics_gen == self.graphics_gen || hold.is_some())
+            && !forcing
         {
             return Ok(None);
         }
-        self.graphics_gen = graphics_gen;
+        if take != Take::Joiner && hold.is_none() {
+            self.graphics_gen = graphics_gen;
+        }
 
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
         let cursor = Self::cursor(&snapshot)?;
-        let scrollback = self.term.scrollback_rows()? as u64;
+        let scrollback = match hold {
+            Some(h) => h.scrollback,
+            None => self.term.scrollback_rows()? as u64,
+        };
         let mut updates = Vec::with_capacity(if full { usize::from(rows) } else { 8 });
 
         let mut row_iter = self.rows_iter.update(&snapshot)?;
@@ -505,7 +586,12 @@ impl GhosttyEngine {
             // The row flag may be a false positive, but a row without it has no placeholders.
             let placeholders = raw.has_kitty_virtual_placeholder()?;
             let abs = self.base.saturating_add(scrollback).saturating_add(u64::from(y));
-            let forced = self.forced_rows.remove(&abs);
+            let forced = forcing
+                && if take == Take::Joiner {
+                    self.forced_rows.contains(&abs)
+                } else {
+                    self.forced_rows.remove(&abs)
+                };
             if full || row.dirty()? || forced {
                 let mut line = Line::blank(cols);
                 let mut first_semantic = None;
@@ -593,7 +679,9 @@ impl GhosttyEngine {
                     )
                 });
                 updates.push(RowUpdate { row: y, line });
-                row.set_dirty(false)?;
+                if take != Take::Joiner {
+                    row.set_dirty(false)?;
+                }
             } else if placeholders {
                 let mut cell_iter = self.cells_iter.update(row)?;
                 let mut x: u16 = 0;
@@ -616,17 +704,29 @@ impl GhosttyEngine {
             runs.finish();
             y = y.saturating_add(1);
         }
-        // A forced row that is no longer on the screen has nothing left to say.
-        self.forced_rows.clear();
-        snapshot.set_dirty(Dirty::Clean)?;
-
-        let total = self.total_rows()?;
-        self.seq = self.seq.wrapping_add(1);
-        if force_full {
-            // A client attaching or resyncing holds nothing yet.
-            self.ledger.clear();
-        }
-        let images = if graphics_gen == 0 { Vec::new() } else { self.placed(&runs.into_runs())? };
+        let total = scrollback.saturating_add(u64::from(rows));
+        let images = match take {
+            Take::Joiner => {
+                // The joiner holds no image, and what it is sent it holds alongside the other
+                // viewers: from here on the ledger is those, and whatever else the others hold
+                // is shipped again when it is placed again.
+                self.ledger.clear();
+                self.placed_if(graphics_gen, runs)?
+            }
+            Take::Everyone | Take::Diff => {
+                if forcing {
+                    // A forced row that is no longer on the screen has nothing left to say.
+                    self.forced_rows.clear();
+                }
+                snapshot.set_dirty(Dirty::Clean)?;
+                self.seq = self.seq.wrapping_add(1);
+                if take == Take::Everyone {
+                    // Every viewer takes this frame as a resync, holding nothing yet.
+                    self.ledger.clear();
+                }
+                self.placed_if(graphics_gen, runs)?
+            }
+        };
         Ok(Some(Frame {
             seq: self.seq,
             full,
@@ -634,7 +734,7 @@ impl GhosttyEngine {
             cols,
             rows,
             cursor,
-            modes: self.modes_inner()?,
+            modes: self.modes()?,
             oldest_line: LineIndex(self.base),
             first_visible_line: LineIndex(self.base.saturating_add(scrollback)),
             total_lines: self.base.saturating_add(total),
@@ -642,6 +742,10 @@ impl GhosttyEngine {
             updates,
             images,
         }))
+    }
+
+    fn placed_if(&mut self, graphics_gen: u64, runs: Runs) -> Result<Vec<Placement>, EngineError> {
+        if graphics_gen == 0 { Ok(Vec::new()) } else { self.placed(&runs.into_runs()) }
     }
 
     /// Every placement on the viewport, as libghostty lays it out at the client's cell size,
@@ -811,13 +915,6 @@ impl GhosttyEngine {
             });
         }
         Ok(line)
-    }
-
-    /// Whether the terminal's viewport is showing the active area. The host never scrolls it, but
-    /// a program can't either, so this is a debug assertion helper.
-    #[must_use]
-    pub fn viewport_pinned(&self) -> bool {
-        self.term.viewport_active().unwrap_or(true)
     }
 }
 
@@ -1149,6 +1246,31 @@ fn install_callbacks(
     Ok(())
 }
 
+/// Capture the frame a program leaves on screen when it begins a render hold (synchronized
+/// output), into the render state frames are built from until the hold ends.
+fn install_render_hold(
+    term: &mut Terminal<'static, 'static>,
+    render: &Rc<RefCell<RenderState<'static>>>,
+    hold: &Rc<std::cell::Cell<Option<Hold>>>,
+) -> Result<(), EngineError> {
+    let (render, hold) = (Rc::clone(render), Rc::clone(hold));
+    term.on_render_hold(move |t, held| {
+        if !held {
+            hold.set(None);
+            return;
+        }
+        // Nothing after the start of the hold is processed yet: this is the finished frame.
+        // Without the capture the hold is not honoured, and frames show the live screen.
+        let captured = render.try_borrow_mut().is_ok_and(|mut r| r.update(t).is_ok());
+        let scrollback = t.scrollback_rows().map(|n| n as u64);
+        hold.set(match (captured, scrollback) {
+            (true, Ok(scrollback)) => Some(Hold { since: MonoTime::now(), scrollback }),
+            _ => None,
+        });
+    })?;
+    Ok(())
+}
+
 /// The colours a program asking with OSC 10/11/12 `?` or OSC 4 is told: the dark theme,
 /// the one every client starts in. Without defaults libghostty answers the first three with
 /// nothing, and a TUI that asks (neovim, helix, delta) waits its timeout or guesses.
@@ -1216,8 +1338,16 @@ fn overrides(term: &Terminal<'_, '_>) -> Result<ColorOverrides, EngineError> {
     Ok(ColorOverrides { fg, bg, cursor, palette })
 }
 
-impl VtEngine for GhosttyEngine {
-    fn write(&mut self, bytes: &[u8]) {
+/// Whether `bytes` may change the colours: they are set by OSC sequences (4, 10-12, 104,
+/// 110-112, 21) and reset by RIS (`ESC c`).
+fn may_touch_colours(bytes: &[u8]) -> bool {
+    memchr::memchr_iter(0x1b, bytes)
+        .any(|at| matches!(bytes.get(at.saturating_add(1)), Some(b']' | b'c')))
+}
+
+impl GhosttyEngine {
+    /// Feed PTY output.
+    pub fn write(&mut self, bytes: &[u8]) {
         // Feed up to each prompt mark separately so the cursor row at the mark is exact.
         let mut rest = bytes;
         while let Some(found) = self.osc.scan(rest) {
@@ -1227,17 +1357,29 @@ impl VtEngine for GhosttyEngine {
             rest = tail;
         }
         self.feed(rest);
-        // libghostty has no colour-change callback; the current set against the defaults is
-        // a handful of reads per chunk, and a change is an event.
+        // libghostty has no colour-change callback. The current set against the defaults is
+        // eight reads and two palette copies, so it is looked at only after a write that could
+        // have changed it, and once more after that for a sequence split across two writes.
+        let touched = may_touch_colours(bytes);
+        if !touched && !std::mem::replace(&mut self.colours_touched, false) {
+            return;
+        }
+        self.colours_touched = touched;
         if let Ok(now) = overrides(&self.term)
             && now != self.overrides
         {
             self.overrides = now.clone();
+            self.generation = self.generation.wrapping_add(1);
             self.events.borrow_mut().push(EngineEvent::Colors(now));
         }
     }
 
-    fn resize(&mut self, size: TermSize) -> Result<(), EngineError> {
+    /// Resize; reflows the primary screen and invalidates line numbering.
+    ///
+    /// # Errors
+    ///
+    /// A zero size or cell metric, or libghostty-vt failing.
+    pub fn resize(&mut self, size: TermSize) -> Result<(), EngineError> {
         check_size(size)?;
         if size == self.size {
             return Ok(());
@@ -1250,6 +1392,7 @@ impl VtEngine for GhosttyEngine {
             u32::from(size.metrics.cell_height),
         )?;
         self.size = size;
+        self.generation = self.generation.wrapping_add(1);
         if reflow {
             self.primary_anchor = None;
             self.bump_epoch();
@@ -1258,22 +1401,68 @@ impl VtEngine for GhosttyEngine {
         Ok(())
     }
 
-    fn size(&self) -> TermSize {
+    /// Current size.
+    #[must_use]
+    pub const fn size(&self) -> TermSize {
         self.size
     }
 
-    fn take_frame(&mut self, input_ack: u64) -> Result<Option<Frame>, EngineError> {
-        if self.sync_held()? {
-            return Ok(None);
-        }
-        self.build_frame(input_ack, false)
+    /// The next diff for every viewer, if anything changed since the last frame. `input_ack`
+    /// is the highest key sequence number whose bytes reached the PTY before this frame's
+    /// output was consumed. During a render hold it is the frame the program left on screen
+    /// when the hold began, once.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn take_frame(&mut self, input_ack: u64) -> Result<Option<Frame>, EngineError> {
+        self.build_frame(input_ack, Take::Diff)
     }
 
-    fn full_frame(&mut self, input_ack: u64) -> Result<Frame, EngineError> {
-        self.build_frame(input_ack, true)?.ok_or(EngineError::InvalidSize("empty frame"))
+    /// Every row, for every viewer (a resize): the next sequence number, and every image
+    /// shipped again.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn full_frame(&mut self, input_ack: u64) -> Result<Frame, EngineError> {
+        self.build_frame(input_ack, Take::Everyone)?.ok_or(EngineError::InvalidSize("empty frame"))
     }
 
-    fn lines(&self, start: LineIndex, count: u32) -> Result<(LineIndex, Vec<Line>), EngineError> {
+    /// Every row for one viewer joining (attach, catching up), with the images it needs sent
+    /// ahead. The frame carries the sequence number of the last frame the others had, and what
+    /// changed since is still theirs to take: take the pending diff first
+    /// ([`Self::take_frame`]), so it does not reach the joiner as a gap.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn join_frame(&mut self, input_ack: u64) -> Result<(Frame, Vec<ImageUpload>), EngineError> {
+        let others = std::mem::take(&mut self.uploads);
+        let frame = self.build_frame(input_ack, Take::Joiner);
+        let joiner = std::mem::replace(&mut self.uploads, others);
+        let frame = frame?.ok_or(EngineError::InvalidSize("empty frame"))?;
+        Ok((frame, joiner))
+    }
+
+    /// Nobody is watching: drop what the next frame would have carried that the next joiner's
+    /// frame does not, without building it.
+    pub fn discard_frame(&mut self) {
+        self.forced_rows.clear();
+        self.uploads.clear();
+    }
+
+    /// Scrollback lines by absolute index. Lines outside `[oldest, total)` are omitted, so the
+    /// result may be shorter than `count`; it starts at `start` clamped to `oldest`.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn lines(
+        &self,
+        start: LineIndex,
+        count: u32,
+    ) -> Result<(LineIndex, Vec<Line>), EngineError> {
         let total = self.total_lines()?;
         let first = start.0.max(self.base);
         let end = first.saturating_add(u64::from(count)).min(total);
@@ -1288,20 +1477,36 @@ impl VtEngine for GhosttyEngine {
         Ok((LineIndex(first), out))
     }
 
-    fn modes(&self) -> Result<TermModes, EngineError> {
-        self.modes_inner()
-    }
-
-    fn search(&self, needle: &str, regex: bool, max: u32) -> Result<search::Found, EngineError> {
+    /// Find `needle` in the retained history and the screen (see [`search::find`]); `regex`
+    /// treats it as a pattern.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Pattern`] when the pattern does not compile; libghostty-vt failing.
+    pub fn search(
+        &mut self,
+        needle: &str,
+        regex: bool,
+        max: u32,
+    ) -> Result<search::Found, EngineError> {
         if needle.is_empty() {
             return Ok(search::Found::default());
         }
         let pattern = search::Pattern::new(needle, regex).map_err(EngineError::Pattern)?;
-        let text = self.plain_text()?;
-        Ok(search::find(&text, &pattern, LineIndex(self.base), max))
+        // A find bar searches on every keystroke; the history is formatted once per change.
+        if self.search_text.as_ref().is_none_or(|(at, _)| *at != self.generation) {
+            self.search_text = Some((self.generation, self.plain_text()?));
+        }
+        let text = self.search_text.as_ref().map_or("", |(_, text)| text.as_str());
+        Ok(search::find(text, &pattern, LineIndex(self.base), max))
     }
 
-    fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
+    /// Encode a key event into `out`. Appends nothing for keys the terminal does not encode.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn encode_key(&mut self, event: &KeyEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
         let ev = &mut self.key_ev;
         ev.set_action(convert::key_action(event.action))
             .set_key(convert::key(event.code))
@@ -1323,7 +1528,16 @@ impl VtEngine for GhosttyEngine {
         }
     }
 
-    fn encode_mouse(&mut self, event: &MouseEvent, out: &mut Vec<u8>) -> Result<(), EngineError> {
+    /// Encode a mouse event into `out` according to the active tracking mode and format.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn encode_mouse(
+        &mut self,
+        event: &MouseEvent,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EngineError> {
         if let MouseAction::Wheel { rows, .. } = event.action
             && !self.term.is_mouse_tracking()?
         {
@@ -1413,7 +1627,13 @@ impl VtEngine for GhosttyEngine {
         }
     }
 
-    fn encode_paste(&mut self, text: &str, out: &mut Vec<u8>) -> Result<(), EngineError> {
+    /// Encode pasted text, bracketed when the program asked for it. Unsafe control characters
+    /// are stripped when not bracketed.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn encode_paste(&self, text: &str, out: &mut Vec<u8>) -> Result<(), EngineError> {
         let bracketed = self.term.mode(Mode::BRACKETED_PASTE)?;
         let mut data = text.as_bytes().to_vec();
         let mut buf = vec![0_u8; data.len().saturating_add(16)];
@@ -1430,7 +1650,12 @@ impl VtEngine for GhosttyEngine {
         Ok(())
     }
 
-    fn encode_focus(&mut self, focused: bool, out: &mut Vec<u8>) -> Result<(), EngineError> {
+    /// Encode a focus change, if the program asked to be told.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn encode_focus(&self, focused: bool, out: &mut Vec<u8>) -> Result<(), EngineError> {
         if !self.term.mode(Mode::FOCUS_EVENT)? {
             return Ok(());
         }
@@ -1441,15 +1666,24 @@ impl VtEngine for GhosttyEngine {
         Ok(())
     }
 
-    fn drain_events(&mut self) -> Vec<EngineEvent> {
+    /// Side effects since the last drain.
+    pub fn drain_events(&self) -> Vec<EngineEvent> {
         std::mem::take(&mut *self.events.borrow_mut())
     }
 
-    fn drain_images(&mut self) -> Vec<ImageUpload> {
+    /// Images the frames taken since the last drain place and the viewers do not hold yet:
+    /// sent ahead of those frames (see [`graphics::Ledger`]).
+    pub fn drain_images(&mut self) -> Vec<ImageUpload> {
         std::mem::take(&mut self.uploads)
     }
 
-    fn set_colors(&mut self, colors: &TermColors) -> Result<(), EngineError> {
+    /// The colours the driver paints with: what colour queries (OSC 10/11/12 `?`, OSC 4)
+    /// answer from now on. The default is the dark theme's.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn set_colors(&mut self, colors: &TermColors) -> Result<(), EngineError> {
         set_colors(&mut self.term, colors)?;
         let light = is_light(colors.bg);
         // A program that asked to be told (mode 2031) hears a scheme change unprompted.
@@ -1584,7 +1818,7 @@ mod tests {
         .unwrap();
         let b = e.full_frame(0).unwrap();
         assert_ne!(a.epoch, b.epoch);
-        assert_eq!((a.epoch, e.epoch()), (0, b.epoch));
+        assert_eq!((a.epoch, e.epoch), (0, b.epoch));
         assert_eq!((b.cols, b.rows), (20, 4));
         assert_eq!(
             e.size(),
@@ -1593,13 +1827,13 @@ mod tests {
         // New metrics alone are no reflow; one of the dimensions alone is.
         let metrics = CellMetrics { cell_width: 9, cell_height: 18 };
         e.resize(TermSize { cols: 20, rows: 4, metrics }).unwrap();
-        assert_eq!(e.epoch(), b.epoch, "metrics only");
+        assert_eq!(e.epoch, b.epoch, "metrics only");
         e.resize(TermSize { cols: 21, rows: 4, metrics }).unwrap();
-        assert_eq!(e.epoch(), b.epoch + 1, "columns");
+        assert_eq!(e.epoch, b.epoch + 1, "columns");
         e.resize(TermSize { cols: 21, rows: 5, metrics }).unwrap();
-        assert_eq!(e.epoch(), b.epoch + 2, "rows");
+        assert_eq!(e.epoch, b.epoch + 2, "rows");
         e.resize(TermSize { cols: 21, rows: 5, metrics }).unwrap();
-        assert_eq!(e.epoch(), b.epoch + 2, "the same size again");
+        assert_eq!(e.epoch, b.epoch + 2, "the same size again");
     }
 
     #[test]
@@ -1634,7 +1868,71 @@ mod tests {
         e.write(b"\x1b[?2026l");
         let f = e.take_frame(1).unwrap().expect("released");
         assert!(f.updates.iter().any(|u| u.line.text() == "held"), "{f:?}");
-        assert!(e.viewport_pinned());
+        assert!(e.term.viewport_active().unwrap());
+    }
+
+    /// A program that finishes a frame and starts the next inside one read: the finished frame
+    /// goes out, not the half-drawn one after it, and not nothing until the hold ends.
+    #[test]
+    fn a_hold_begun_again_in_the_same_read_ships_the_finished_frame() {
+        let mut e = engine(10, 3);
+        let _first = e.full_frame(0).unwrap();
+        e.write(b"\x1b[?2026h\x1b[Hdone\x1b[?2026l\x1b[?2026h\x1b[Hhalf");
+        let f = e.take_frame(0).unwrap().expect("the finished frame");
+        let row0 = f.updates.iter().find(|u| u.row == 0).map(|u| u.line.text());
+        assert_eq!(row0.as_deref(), Some("done"), "{f:?}");
+        assert!(e.take_frame(0).unwrap().is_none(), "nothing more while the hold lasts");
+        let remaining = e.hold_remaining().expect("a hold in force");
+        assert!(remaining <= std::time::Duration::from_secs(1), "{remaining:?}");
+        e.write(b"\x1b[?2026l");
+        assert_eq!(e.hold_remaining(), None);
+        let f = e.take_frame(0).unwrap().expect("released");
+        let row0 = f.updates.iter().find(|u| u.row == 0).map(|u| u.line.text());
+        assert_eq!(row0.as_deref(), Some("half"));
+    }
+
+    /// A viewer joining gets every row at the sequence number the others are at, and the
+    /// others' next diff still carries what changed.
+    #[test]
+    fn a_joiners_frame_takes_nothing_from_the_other_viewers() {
+        let mut e = engine(10, 3);
+        let first = e.full_frame(0).unwrap();
+        e.write(b"one");
+        let (join, uploads) = e.join_frame(0).unwrap();
+        assert!(join.full && uploads.is_empty());
+        assert_eq!(join.seq, first.seq, "no sequence number taken");
+        assert!(join.updates.iter().any(|u| u.line.text() == "one"));
+        let diff = e.take_frame(0).unwrap().expect("the others' diff is still due");
+        assert_eq!(diff.seq, first.seq + 1);
+        assert!(diff.updates.iter().any(|u| u.line.text() == "one"), "{diff:?}");
+    }
+
+    /// Search formats the history once per change, not once per keystroke in the find bar.
+    #[test]
+    fn search_reuses_the_text_until_something_is_written() {
+        let mut e = engine(20, 3);
+        e.write(b"alpha\r\nbeta\r\n");
+        assert_eq!(e.search("beta", false, 10).unwrap().total, 1);
+        let generation = e.generation;
+        assert_eq!(e.search("alp", false, 10).unwrap().total, 1);
+        assert_eq!(e.search_text.as_ref().map(|(at, _)| *at), Some(generation));
+        e.write(b"beta again\r\n");
+        assert_eq!(e.search("beta", false, 10).unwrap().total, 2, "a write is seen");
+    }
+
+    /// Colours are checked only after a write that could change them, and one after it.
+    #[test]
+    fn colour_changes_are_seen_even_split_across_writes() {
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]11;rgb:12/34/");
+        e.write(b"56\x1b\\");
+        let colours = e.drain_events().into_iter().find_map(|ev| match ev {
+            EngineEvent::Colors(c) => Some(c),
+            _ => None,
+        });
+        assert_eq!(colours.and_then(|c| c.bg), Some([0x12, 0x34, 0x56]));
+        assert!(may_touch_colours(b"x\x1bc"));
+        assert!(!may_touch_colours(b"plain \x1b[31m text"));
     }
 
     #[test]
@@ -2391,7 +2689,7 @@ mod checkpoint_tests {
     /// Text of every retained line, history then screen.
     fn all_text(e: &GhosttyEngine) -> Vec<String> {
         let total = u32::try_from(e.total_lines().unwrap()).unwrap();
-        let (_start, lines) = e.lines(e.oldest_line(), total).unwrap();
+        let (_start, lines) = e.lines(LineIndex(e.base), total).unwrap();
         lines.iter().map(|l| l.text().trim_end().to_owned()).collect()
     }
 
@@ -2413,13 +2711,21 @@ mod checkpoint_tests {
         a.set_colors(&slopty_theme::TerminalPalette::LIGHT.wire()).unwrap();
         a.write(b"plain\r\n");
         let mut b = engine(12, 3, 100);
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         b.write(&checkpoint);
         assert!(colors(&mut b).is_empty(), "a light driver's palette is not a program's change");
         assert_eq!(all_text(&b), all_text(&a));
         a.write(b"\x1b]11;#282c34\x1b\\\x1b]12;#ffffff\x1b\\\x1b]4;1;#e06c75;200;#123456\x1b\\");
         let _seen = colors(&mut a);
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         let mut c = engine(12, 3, 100);
         c.write(&checkpoint);
         assert_eq!(
@@ -2440,7 +2746,11 @@ mod checkpoint_tests {
             a.write(format!("line {i}\r\n").as_bytes());
         }
         a.write(b"\x1b[1;31mred\x1b[0m plain\x1b[?2004h\x1b[?1h\x1b[2;4H");
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
 
         let mut b = engine(12, 3, 100);
         b.write(&checkpoint);
@@ -2470,7 +2780,11 @@ mod checkpoint_tests {
         // The switch and the alt-screen drawing arrive in one read, as they do from a program.
         a.write(b"\x1b[?1049h\x1b[H~ editor");
         assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN));
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
 
         let mut b = engine(10, 2, 100);
         b.write(&checkpoint);
@@ -2489,7 +2803,11 @@ mod checkpoint_tests {
     fn a_scrolled_screen_with_blank_rows_keeps_its_history_and_cursor() {
         let mut a = engine(20, 3, 100);
         a.write(b"one\r\ntwo\r\nthree\r\nfour\r\n\r\n\x1b[A");
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         let mut b = engine(20, 3, 100);
         b.write(&checkpoint);
         assert_eq!(all_text(&b), all_text(&a));
@@ -2501,7 +2819,11 @@ mod checkpoint_tests {
     fn a_scrolling_region_comes_back_with_the_cursor_below_it() {
         let mut a = engine(20, 4, 100);
         a.write(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\x1b[1;2r\x1b[?6h\x1b[2;1Hx");
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         assert!(margins_at(&checkpoint).is_some());
         let mut b = engine(20, 4, 100);
         b.write(&checkpoint);
@@ -2582,7 +2904,11 @@ mod checkpoint_tests {
         let raw_fill = start.elapsed();
         eprintln!("checkpoint_cost: raw libghostty-vt fill {raw_fill:?} vs engine fill {fill:?}");
         let start = std::time::Instant::now();
-        let bytes = e.checkpoint().unwrap();
+        let bytes = {
+            let mut v = Vec::new();
+            e.checkpoint(&mut v).unwrap();
+            v
+        };
         let took = start.elapsed();
         let start = std::time::Instant::now();
         let mut b = engine(80, 24, 10_000);
@@ -2630,7 +2956,11 @@ mod checkpoint_tests {
         assert!(!a.modes().unwrap().contains(TermModes::ALT_SCREEN));
         a.write(b"49h\x1b[Halt");
         assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN));
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         let mut b = engine(20, 3, 100);
         b.write(&checkpoint);
         assert_eq!(all_text(&b), all_text(&a));
@@ -2645,7 +2975,11 @@ mod checkpoint_tests {
         let mut a = engine(20, 3, 100);
         a.write(b"\x1b[?1h\x1b[?1049h\x1b[?1l");
         assert!(!a.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
-        let checkpoint = a.checkpoint().unwrap();
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         let mut b = engine(20, 3, 100);
         b.write(&checkpoint);
         assert!(!b.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
@@ -2657,7 +2991,11 @@ mod checkpoint_tests {
     fn a_primary_checkpoint_stays_as_the_fallback_snapshot() {
         let mut a = engine(20, 3, 100);
         a.write(b"kept\r\n");
-        let _first = a.checkpoint().unwrap();
+        let _first = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
         assert!(a.primary_snapshot.is_some());
     }
 

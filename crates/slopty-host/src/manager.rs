@@ -68,7 +68,7 @@ impl Host {
         tokio::spawn(tap_loop(Arc::downgrade(&host.inner), tap_rx));
         for info in existing {
             tracing::info!(session = %info.id, pid = info.pid, "adopting session from ptyd");
-            if let Err(e) = host.adopt(info.id, info.size, Vec::new()).await {
+            if let Err(e) = host.adopt(info.id, info.size, Vec::new(), info.exited).await {
                 tracing::warn!(session = %info.id, error = %e, "adopt failed");
             }
         }
@@ -81,10 +81,11 @@ impl Host {
         self.inner.exits.lock().take()
     }
 
-    /// Record a child exit reported by ptyd.
+    /// Record a child exit reported by ptyd, and tell the session's viewers.
     pub fn on_exit(&self, id: SessionId, status: i32) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {
             e.exited = Some(status);
+            e.handle.exited(status);
         }
     }
 
@@ -110,7 +111,7 @@ impl Host {
             size: req.size,
         };
         self.inner.ptyd.lock().await.spawn(id, spec).await?;
-        self.adopt(id, req.size, req.command.clone()).await
+        self.adopt(id, req.size, req.command.clone(), None).await
     }
 
     async fn adopt(
@@ -118,6 +119,7 @@ impl Host {
         id: SessionId,
         size: TermSize,
         command: Vec<String>,
+        exited: Option<i32>,
     ) -> Result<SessionHandle, HostError> {
         let attached = self.inner.ptyd.lock().await.attach(id).await?;
         if attached.dropped > 0 {
@@ -131,15 +133,13 @@ impl Host {
             tap: self.inner.tap.clone(),
             size: if attached.size == TermSize::default() { size } else { attached.size },
             scrollback_lines: SCROLLBACK_LINES,
+            exited,
         })?;
-        self.inner
-            .sessions
-            .lock()
-            .insert(id, Entry { handle: handle.clone(), command, exited: None });
+        self.inner.sessions.lock().insert(id, Entry { handle: handle.clone(), command, exited });
         Ok(handle)
     }
 
-    /// Look up.
+    /// The running session `id`.
     pub fn get(&self, id: SessionId) -> Result<SessionHandle, HostError> {
         self.inner
             .sessions
@@ -147,12 +147,6 @@ impl Host {
             .get(&id)
             .map(|e| e.handle.clone())
             .ok_or(HostError::NoSuchSession)
-    }
-
-    /// Ids.
-    #[must_use]
-    pub fn ids(&self) -> Vec<SessionId> {
-        self.inner.sessions.lock().keys().copied().collect()
     }
 
     /// Summaries for the session list.
@@ -216,21 +210,16 @@ impl Host {
         self.inner.ptyd.lock().await.close(id).await?;
         Ok(())
     }
-
-    /// Tell ptyd about a size change so a future host sees the truth.
-    pub async fn record_size(&self, id: SessionId, size: TermSize) -> Result<(), HostError> {
-        self.inner.ptyd.lock().await.resize(id, size).await?;
-        Ok(())
-    }
 }
 
-/// Taps waiting for ptyd: 64 KiB reads at most, so this bounds the memory a stalled ptyd can
-/// cost the host at about 64 MiB; a full queue makes the actor checkpoint early instead.
+/// Taps waiting for ptyd, from every session: 64 KiB reads at most, so this bounds the memory a
+/// stalled ptyd can cost the host at about 64 MiB. A session whose tap does not fit stops
+/// tapping and checkpoints as soon as the queue has room, which replaces what it did not tap.
 const TAP_QUEUE: usize = 1024;
 
-/// Forward output copies and checkpoints to ptyd on the host's connection until the host goes
-/// away. The taps ride the same connection as the requests, and only that connection may tap
-/// (ptyd checks it holds the master), so a dying host's last taps and its EOF reach ptyd in
+/// Forward output copies, checkpoints and sizes to ptyd on the host's connection until the
+/// host goes away. The taps ride the same connection as the requests, and only that connection may
+/// tap (ptyd checks it holds the master), so a dying host's last taps and its EOF reach ptyd in
 /// order. A failed send is logged and the loop goes on: the next request will notice a dead
 /// ptyd, and a rejected frame (too large) must not stop the other sessions' taps.
 async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
@@ -245,7 +234,8 @@ async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
 
 async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::PtyError> {
     match tap {
-        Tap::Output { id, bytes } => ptyd.output(id, bytes).await,
+        Tap::Output { id, bytes } => ptyd.output(id, &bytes).await,
         Tap::Checkpoint { id, state } => ptyd.checkpoint(id, state).await,
+        Tap::Resize { id, size } => ptyd.resize(id, size).await,
     }
 }

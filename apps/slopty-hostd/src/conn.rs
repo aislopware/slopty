@@ -7,7 +7,7 @@ use slopty_host::HostError;
 use slopty_host::screen::{
     DATAGRAM_QUEUE, DatagramBudget, Quantiles, Queued, ScreenStream, StreamEvent, listing,
 };
-use slopty_host::session::ClientSink;
+use slopty_host::session::{ClientSink, Outbound};
 use slopty_net::host::{AuthenticatedClient, open_session_stream};
 use slopty_net::{ClientMsg, Connection, HostMsg, NetError};
 use slopty_proto::PROTOCOL_VERSION;
@@ -891,20 +891,20 @@ impl Peer<'_> {
                 return;
             }
         };
-        let (sink, mut events) = mpsc::channel::<TermEvent>(SINK_DEPTH);
+        let (sink, mut events) = mpsc::channel::<Outbound>(SINK_DEPTH);
         if let Err(e) = handle.attach(self.client, size, sink.clone()) {
             return self.report(session, &e).await;
         }
         let client = self.client;
         let task = tokio::spawn(async move {
             let mut stream = stream;
-            while let Some(ev) = events.recv().await {
+            while let Some(out) = events.recv().await {
                 let send_from = std::time::Instant::now();
-                if let Err(e) = stream.send(&ev).await {
+                if let Err(e) = stream.send_raw(out.wire()).await {
                     tracing::debug!(%client, %session, error = %e, "session stream ended");
                     break;
                 }
-                if matches!(ev, TermEvent::Frame(_)) {
+                if out.is_frame() {
                     tracing::trace!(
                         %client,
                         %session,

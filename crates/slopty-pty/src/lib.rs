@@ -3,7 +3,7 @@
 //! * [`pty`] — open a pseudo-terminal, spawn a child on it, resize it, do async I/O on the master.
 //! * [`ring`] — the bounded byte ring ptyd drains output into while no host is attached.
 //! * [`protocol`] — messages between hostd and ptyd, framed with [`slopty_proto::codec`].
-//! * [`fdpass`] — `SCM_RIGHTS` transfer of the master over the Unix socket.
+//! * [`fdpass`] — frames plus `SCM_RIGHTS` fds over the Unix socket.
 //! * [`client`] — the hostd side of the ptyd socket.
 //! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
 //! * [`terminfo`] — ghostty's terminfo entry, compiled on start-up so `TERM=xterm-ghostty`.

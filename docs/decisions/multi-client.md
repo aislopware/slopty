@@ -116,3 +116,21 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
   (`where_a_client_looks_reaches_the_others`). Not done: pointing at a region or a line —
   a card is the unit the canvas names, and a line in a file is the file card's reading
   line, which a name could carry later.
+
+- ✅ **A joiner takes nothing from the others, and a slow viewer is skipped, never dropped**
+  (2026-09-24). An attach built its full frame with the frame path everyone shares. That
+  consumed the dirty rows and took a sequence number, but only the joiner saw the frame. The
+  other viewers found a gap and asked to resync, which again took the diff the first had
+  waited for. On a busy terminal two clients traded resyncs about once a round trip. A viewer
+  whose sink filled (256 events, about two seconds of frames) was removed from the actor. Its
+  connection still held the sink, so it got no frames, no event and no gap to notice, while
+  its keys still reached the shell. Now an attach first sends the others the diff they are
+  owed. Then the joiner's frame is built at their sequence number without touching the dirty
+  state (`GhosttyEngine::join_frame`), with the images it needs from a fresh ledger. A viewer
+  whose sink is full is marked behind and sent nothing. A task waits for half its sink to
+  drain, and the viewer is then introduced again: the driver line, title, directory, colours,
+  a whole frame at the others' sequence number, and the exit. Frames are encoded once for
+  every viewer (`session::Outbound`), not cloned and encoded per viewer. Tests: actor
+  `viewers_joining_a_busy_session_never_make_the_others_resync`,
+  `a_slow_viewer_is_skipped_then_caught_up_never_dropped`; engine
+  `a_joiners_frame_takes_nothing_from_the_other_viewers`.

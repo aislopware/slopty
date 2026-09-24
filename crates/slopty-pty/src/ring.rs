@@ -39,7 +39,7 @@ impl Ring {
 
     /// Take everything out.
     pub fn drain(&mut self) -> Vec<u8> {
-        self.buf.drain(..).collect()
+        Vec::from(std::mem::take(&mut self.buf))
     }
 
     /// Forget everything, including the count of what was dropped: the bytes are accounted

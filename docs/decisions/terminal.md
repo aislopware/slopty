@@ -1154,3 +1154,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_screen_shown_again_shapes_nothing`, `a_sprite_is_masked_once_and_not_while_zooming`,
   `a_held_key_is_predicted_timed_and_follows_the_output`,
   `a_key_is_timed_when_its_frame_is_presented`; predict `a_stale_guess_is_hidden_without_a_frame`.
+
+- ✅ **libghostty-vt at ghostty `7c40388b2`: synchronized output is a render hold** (2026-09-24).
+  `vendor/ghostty` moved 145 commits (from `5252b193c`); the libghostty-rs fork pins the same
+  commit and its bindings are regenerated. Upstream touched the VT library in six places:
+  mode lookup by a comptime sorted set (faster `mode()`), DECRQM answering ANSI modes and not
+  truncating 16-bit ones, Unicode 18 widths, `RESIZE_PULL_SCROLLBACK` (for ConPTY; a Unix pty
+  keeps no screen of its own, so the default stays), and `GHOSTTY_TERMINAL_OPT_RENDER_HOLD`.
+  That last one replaced our mode-2026 polling. The engine checked `SYNC_OUTPUT` when it built
+  a frame, so a program that ended a frame and began the next inside one PTY read was seen as
+  held, and its finished frame was lost. The timeout ran from the first frame that saw the
+  mode set, and it only fired when more output came. Now the fork wraps the callback
+  (`Terminal::on_render_hold`) and a way to read the render state without updating it
+  (`RenderState::snapshot`). The engine captures the frame into the render state when a hold
+  begins, as ghostty's header advises, and builds frames from that capture until the hold ends.
+  After `SYNC_OUTPUT_TIMEOUT` (1 s) it ends the hold itself by resetting the mode. A program
+  cannot push that deadline back, because setting the mode again during a hold starts nothing.
+  The session actor arms a timer for the deadline, so a program that sets 2026 and falls
+  silent is still let go. The capture keeps the history length it was numbered against. One
+  edge stays: at the scrollback cap, lines evicted after the capture shift its absolute
+  numbering until the next frame. There is still no colour-change callback. The eight reads
+  and two palette copies that find the program's colour changes now run only after a write
+  that carries an OSC or a RIS, plus the write after it. Tests: engine
+  `a_hold_begun_again_in_the_same_read_ships_the_finished_frame`,
+  `colour_changes_are_seen_even_split_across_writes`; actor
+  `a_hold_that_is_never_released_times_out_without_more_output`; fork
+  `render_hold_reports_mode_2026_and_sees_the_finished_frame`.
+
+- ✅ **Input waits in the actor, and the exit is the child's own** (2026-09-24). The actor wrote
+  a request with `write_all` and awaited it inside its select, so while a paste larger than the
+  tty's input queue went in, nothing read the PTY. A program that echoes as it reads (`cat`,
+  `tr`, a shell) then blocked on its full output, and the session hung. Input now goes into a
+  queue. The tty takes what fits with a non-blocking write, the rest waits for writability in
+  its own arm of the select, and reads go on between them. A key is acknowledged
+  (`input_ack`) once its last byte is written. Query answers the engine produces join the
+  same queue, in order. At PTY EOF the actor used to tell viewers `Exited { status: 0 }`,
+  while the real status sat unread in ptyd's socket: `PtydClient::pump` had no caller. A task
+  now reads the ptyd connection the whole time and hands replies to requests in order. An
+  `Exited` goes to the host as it arrives, and the host passes it to the session, which tells
+  the viewers the real status. A session adopted after its child died starts with the status
+  ptyd recorded. A resize is sent to ptyd on the tap queue, followed by a checkpoint at the
+  new size, so a replacement host replays at the size the program draws for. The ptyd protocol
+  is 3: `Detach` and `Signal` had no sender and are gone. Tests: actor
+  `a_large_paste_into_an_echoing_program_does_not_deadlock`,
+  `the_viewers_are_told_the_real_exit_status_of_the_child`,
+  `a_resize_reaches_ptyd_and_the_next_checkpoint_is_at_it`; ptyd
+  `an_exit_arrives_without_a_request_to_carry_it`.

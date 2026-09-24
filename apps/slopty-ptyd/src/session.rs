@@ -17,16 +17,16 @@ use tokio::sync::{broadcast, watch};
 pub enum Broadcast {
     /// A child exited.
     Exited {
-        /// Session.
+        /// The session whose child it was.
         id: SessionId,
-        /// Status.
+        /// Exit code, or the terminating signal negated.
         status: i32,
     },
 }
 
 /// Shared session state.
 pub struct Session {
-    /// Id.
+    /// The id the host chose when it spawned the session.
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
@@ -199,12 +199,11 @@ impl Session {
     }
 
     /// Send a signal to the child's process group (the child is its own session leader).
-    pub fn signal(&self, signal: i32) -> Result<(), std::io::Error> {
+    pub fn signal(&self, signal: nix::sys::signal::Signal) -> Result<(), std::io::Error> {
         let pid =
             i32::try_from(self.pid).map_err(|_overflow| std::io::Error::other("pid overflow"))?;
-        let sig = nix::sys::signal::Signal::try_from(signal)
-            .map_err(|_bad| std::io::Error::other("bad signal"))?;
-        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), sig).map_err(std::io::Error::from)
+        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal)
+            .map_err(std::io::Error::from)
     }
 }
 

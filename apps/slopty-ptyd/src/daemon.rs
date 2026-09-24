@@ -1,13 +1,12 @@
 //! Socket server: one task per connection, shared session table.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::os::fd::OwnedFd;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result};
-use bytes::BytesMut;
+use nix::sys::signal::Signal;
 use parking_lot::Mutex;
 use slopty_core::SessionId;
 use slopty_proto::codec;
@@ -75,6 +74,7 @@ pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Resul
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept")?;
+                fdpass::widen_buffers(&stream);
                 let st = Arc::clone(&state);
                 tokio::spawn(async move {
                     let id = st.next_conn.fetch_add(1, Ordering::Relaxed);
@@ -90,14 +90,10 @@ pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Resul
     tracing::info!("shutting down: hanging up every session");
     let sessions: Vec<Arc<Session>> = state.sessions.lock().values().cloned().collect();
     for s in sessions {
-        let _ignored = s.signal(libc_sighup());
+        let _ignored = s.signal(Signal::SIGHUP);
     }
     let _ignored = std::fs::remove_file(socket);
     Ok(())
-}
-
-const fn libc_sighup() -> i32 {
-    1
 }
 
 /// Create the socket directory (0700) and bind, replacing a dead socket file.
@@ -125,8 +121,7 @@ struct Connection {
     id: u64,
     stream: UnixStream,
     state: Arc<State>,
-    buf: BytesMut,
-    fds: VecDeque<OwnedFd>,
+    inbox: fdpass::Inbox,
     attached: HashSet<SessionId>,
     greeted: bool,
 }
@@ -137,8 +132,7 @@ impl Connection {
             id,
             stream,
             state,
-            buf: BytesMut::with_capacity(64 << 10),
-            fds: VecDeque::new(),
+            inbox: fdpass::Inbox::default(),
             attached: HashSet::new(),
             greeted: false,
         }
@@ -148,16 +142,16 @@ impl Connection {
         let mut events = self.state.events.subscribe();
         let result = loop {
             tokio::select! {
-                read = fdpass::recv(&self.stream, &mut self.buf, &mut self.fds) => {
+                read = self.inbox.recv(&self.stream) => {
                     match read {
                         Ok(0) => break Ok(()),
                         Ok(_) => {}
                         Err(e) => break Err(e.into()),
                     }
                     // Stray fds from a client are closed on drop; we never expect any.
-                    self.fds.clear();
+                    self.inbox.close_fds();
                     loop {
-                        let req = match codec::try_decode::<PtydRequest>(&mut self.buf) {
+                        let req = match self.inbox.decode::<PtydRequest>() {
                             Ok(Some(req)) => req,
                             Ok(None) => break,
                             Err(e) => return Err(e.into()),
@@ -272,16 +266,6 @@ impl Connection {
                 let ev = PtydEvent::Attached { id, checkpoint, backlog, dropped, size };
                 self.reply(&ev, Some(session.master_fd())).await
             }
-            PtydRequest::Detach { id } => {
-                let Some(session) = self.session(id) else {
-                    return self.error(Some(id), "no such session").await;
-                };
-                if self.attached.remove(&id) {
-                    *session.attached_by.lock() = None;
-                    session.resume_reader();
-                }
-                self.reply(&PtydEvent::Ok, None).await
-            }
             PtydRequest::Output { id, bytes } => {
                 // No reply by contract. Only the connection holding the master may tap: its
                 // frames and its EOF arrive in one order, so everything a dying host tapped is
@@ -312,27 +296,18 @@ impl Connection {
                     Err(e) => self.error(Some(id), e.to_string()).await,
                 }
             }
-            PtydRequest::Signal { id, signal } => {
-                let Some(session) = self.session(id) else {
-                    return self.error(Some(id), "no such session").await;
-                };
-                match session.signal(signal) {
-                    Ok(()) => self.reply(&PtydEvent::Ok, None).await,
-                    Err(e) => self.error(Some(id), e.to_string()).await,
-                }
-            }
             PtydRequest::Close { id } => {
                 let Some(session) = self.state.sessions.lock().remove(&id) else {
                     return self.error(Some(id), "no such session").await;
                 };
                 self.attached.remove(&id);
                 if session.exited.lock().is_none() {
-                    let _hup = session.signal(libc_sighup());
+                    let _hup = session.signal(Signal::SIGHUP);
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         if s.exited.lock().is_none() {
-                            let _kill = s.signal(9);
+                            let _kill = s.signal(Signal::SIGKILL);
                         }
                     });
                 }

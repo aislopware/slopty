@@ -3181,3 +3181,93 @@ cargo nextest run -p slopty-ui --no-capture -E 'test(a_screen_shown_again_shapes
 # as segment_hash does, per hasher, and prints ns/word)
 cd /tmp/hashbench && cargo run --release --offline -q
 ```
+
+## 2026-09-24 — the host hot paths: ptyd transfer, repeated search, the write path
+
+Release, mac-studio, a busy machine (load average 33–48, other agents building). "Before" is
+main `a88e2e3` exported with `git archive` to `/tmp/slopty-base`, with `vendor/ghostty` at
+`5252b193c` and the same ptyd measurement test added. "After" is the working tree: ghostty
+`7c40388b2`, fdpass reading into a scratch buffer kept per connection, 1 MiB socket buffers,
+the search text cached per terminal generation, the colour check only after an OSC or RIS, the
+anchor kept while nothing scrolls, and the memchr scanners. Each tree ran the same command
+three times, alternating:
+
+```
+cargo nextest run -p slopty-engine -p slopty-ptyd --release --run-ignored only \
+  -E 'test(frame_cost) | test(checkpoint_cost) | test(search_cost) | test(checkpoint_transfer_cost)' \
+  --no-capture
+```
+
+| measurement | before (3 runs) | after (3 runs) |
+| --- | --- | --- |
+| 4 MiB `Checkpoint` to ptyd, then `List`, p50 | 137 / 115 / 122 ms | **14 / 11 / 18 ms** |
+| same, max of 20 | 248 / 275 / 249 ms | 87 / 38 / 138 ms |
+| search a 50 001-line history again, nothing written between, plain p50 | 70 / 16 / 37 ms | **11 / 6.1 / 6.0 ms** |
+| same, regex p50 | 55 / 16 / 16 ms | 5.6 / 5.6 / 5.6 ms |
+| format the plain text (the first search's extra cost) p50 | 55 / 10.3 / 10.4 ms | 10.5 / 10.3 / 10.4 ms |
+| one typed byte: `write` p50 / p90 / max | 1/2/38, 0/0/1, 1/2/59 µs | 0/0/0, 0/0/0, 0/0/2 µs |
+| one typed byte: `take_frame` p50 / max | 5/66, 2/25, 5/75 µs | 2/26, 2/25, 2/25 µs |
+| 10 024 coloured lines through the engine (raw `vt_write` 1.6 ms) | 3.2 / 3.6 / 3.3 ms | 2.8 / 3.6 / 3.6 ms |
+
+The ptyd transfer is the fdpass fix. Each `recvmsg` used to zero a scratch `Vec` as large as
+the frame still owed (`try_decode` reserves the whole frame), through an 8 KiB socket buffer:
+about 430 reads, each zeroing up to 4 MiB. Repeated search is the cache: a find bar searches
+on every keystroke, and each of those searches formatted the whole history again. The single
+byte's `write` lost the colour check (eight FFI reads and two 256-entry palette copies) and
+the tracked-pin churn. The 10k-line fill is inside this machine's noise in both trees. It has
+no OSC and ten chunks, so the per-chunk savings do not show. The number that says whether the
+scanners' memchr path matters on escape-dense output is still owed, from a quiet machine.
+
+## 2026-09-24 — the media path's copies, the audio backlog, the still pointer
+
+Release, mac-studio. Each "before" was run on the unchanged code with the same test before the
+change went in. `docs/decisions/video.md` and `audio.md` (2026-09-24) hold the rulings.
+
+```
+cargo nextest run -p slopty-codec --release --run-ignored only -E 'test(cost)' --no-capture
+cargo nextest run -p slopty-media --release --run-ignored only packetize_cost --no-capture
+cargo nextest run -p slopty-codec --release a_stall_burst --no-capture
+cargo nextest run -p slopty-capture --release --run-ignored only pointer_read_cost --no-capture
+```
+
+**Host, VideoToolbox's output to an Annex B packet** (`packet_conversion_cost`, four slices per
+access unit, on the encoder's callback thread):
+
+| access unit | before | after |
+| --- | --- | --- |
+| 62 KB P-frame | 10.1 µs | 1.2 µs |
+| 300 KB keyframe | 24.2 µs | 5.3 µs |
+
+**Host, packetize** (`packetize_cost`, 2 000 frames each; the history's eviction included):
+
+| frame | parity | before | after |
+| --- | --- | --- | --- |
+| 62 KB P-frame, 64 datagrams | 200‰ | 23.5 µs | 17.4 µs |
+| 62 KB P-frame, 53 datagrams | 0 | 8.1 µs | 2.5 µs |
+| 300 KB keyframe, 305 datagrams | 200‰ | 131.5 µs | 131.6 µs |
+| 300 KB keyframe, 254 datagrams | 0 | 35.0 µs | 12.7 µs |
+
+Reed–Solomon dominates a parity keyframe either way; what went is the per-fragment allocation
+and the second copy.
+
+**Client, a received access unit to a sample buffer** (`access_unit_conversion_cost`, a 1 MB
+keyframe with its parameter sets): 4.84 ms before (two byte-by-byte scans, a copy into a vector,
+a copy into the block buffer), **60 µs** after (one `memchr` scan, one write into the block).
+
+**Audio, how far behind the host the listener is** (`a_stall_burst_does_not_leave_lasting_delay`,
+a model driven through the ring's own `push`/`pull` on a 1 ms clock: steady 20 ms packets, a
+250 ms stall, the held packets in one burst; the ring plus the device buffers queued ahead of
+it):
+
+| | after the burst | 1.25 s later |
+| --- | --- | --- |
+| before: 200 ms cap, 3 × 20 ms buffers | 260 ms | 260 ms |
+| after: trim to 40 ms past 50 ms, 3 × 10 ms buffers | 70 ms | 74 ms mean over 1.5–3 s |
+
+This is a model of the ring, not a reading at the DAC; the device's own output latency comes on
+top of both rows alike.
+
+**Host, one look at the pointer** (`pointer_read_cost`, 2 000 calls): `CGEventCreate` +
+location 13.8 µs, which the cursor loop paid through a `spawn_blocking` hop 120 times a second
+per open window; the four move/drag counters (`CGEventSourceCounterForEventType`) 43 ns, read
+inline. The pointer itself is now asked for only when the counters moved.

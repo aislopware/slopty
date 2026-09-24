@@ -51,7 +51,10 @@ The host runs `libghostty-vt` against the real PTY and ships **rendered rows**, 
   that dies leaves the others streaming and reattaches on relaunch (its dead connection's cleanup
   detaches only its own sinks, `Sender::same_channel`). See DECISIONS "Multi-client" for the
   state-ownership and input-contention rulings.
-- A slow link never falls behind a fast program: the host coalesces to one diff per tick.
+- A slow link never falls behind a fast program: the host coalesces to one diff per tick, and a
+  viewer whose sink fills is skipped rather than dropped, then sent one whole frame at the
+  others' sequence number once it drains. A joining viewer's frame is built the same way, so
+  nobody else is made to resync.
 - The client needs no VT engine at all. iOS never builds Zig.
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
@@ -111,7 +114,7 @@ the defaults the engine sets: the dark theme's foreground, background, cursor an
 at start (`ghostty::set_colors`, from `slopty_theme::TerminalPalette::DARK.wire()`), then
 whatever the driver paints with — every client sends `TermRequest::Colors(TermColors)` after
 its attach and on a theme change, the session keeps each viewer's, and the driver's (on
-attach, on claiming the wheel, on a change) reach `VtEngine::set_colors`. The driver's
+attach, on claiming the wheel, on a change) reach `GhosttyEngine::set_colors`. The driver's
 background also decides the colour scheme: `CSI ? 996 n` is answered light or dark from its
 luma, and a program that set mode 2031 hears a change of scheme unprompted. Cell colours still
 travel symbolically (`Color::Default`/`Palette`/`Rgb`), so each client's own theme paints
@@ -207,7 +210,8 @@ connection, which is the only one ptyd accepts taps from) and replaces the ring 
 `Checkpoint`, the engine's whole state as VT bytes from libghostty-vt's formatter (palette,
 modes, every retained row, margins, cursor): right after adopting, then 500 ms after the last
 output (deferred while the output stands inside an escape sequence) or once 1 MiB has been
-tapped. `Attach` returns the checkpoint and the ring, and the new host's engine replays them in
+tapped, and after a resize (the size goes to ptyd first, on the same queue). `Attach` returns
+the checkpoint and the ring, and the new host's engine replays them in
 that order, so the screen, the scrollback, the directory and the program's colour changes (the
 checkpoint carries them as the OSC sequences that made them, never a palette dump) survive a
 hostd restart or crash; what the replay reports is kept for the first attach, not broadcast or
@@ -899,7 +903,7 @@ way the CLI does and the host's connect loop starts.
 | `slopty-core` | ids, clocks, errors, small shared types | all |
 | `slopty-proto` | wire messages, versioning, codec (postcard) | all |
 | `slopty-grid` | terminal frame model, row diff, line cache | all |
-| `slopty-engine` | `VtEngine` trait + libghostty-vt backend | host |
+| `slopty-engine` | libghostty-vt engine: frames, scrollback, input encoders | host |
 | `slopty-pty` | openpty/spawn/resize, ptyd protocol | host |
 | `slopty-predict` | speculative local echo | client |
 | `slopty-net` | iroh endpoint (`Reach::Anywhere` relays+pkarr, or `DirectOnly`), pairing/auth, channels | all |

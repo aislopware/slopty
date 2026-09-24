@@ -172,25 +172,6 @@ pub fn get_size(fd: impl AsFd) -> Result<(u16, u16), PtyError> {
     Ok((ws.ws_col, ws.ws_row))
 }
 
-/// Whether the line discipline is in canonical mode and echoing — what the prediction engine
-/// needs to know to decide if local echo is safe.
-pub fn line_discipline(fd: impl AsFd) -> Result<LineDiscipline, PtyError> {
-    let t = rustix::termios::tcgetattr(fd).map_err(|e| PtyError::os("tcgetattr", e))?;
-    Ok(LineDiscipline {
-        echo: t.local_modes.contains(rustix::termios::LocalModes::ECHO),
-        canonical: t.local_modes.contains(rustix::termios::LocalModes::ICANON),
-    })
-}
-
-/// Termios facts the client cares about.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct LineDiscipline {
-    /// `ECHO` set.
-    pub echo: bool,
-    /// `ICANON` set.
-    pub canonical: bool,
-}
-
 /// Async master end.
 #[derive(Debug)]
 pub struct PtyMaster {
@@ -218,7 +199,7 @@ impl PtyMaster {
         }
     }
 
-    /// Write everything.
+    /// Write all of `data`, waiting on the tty as long as it takes.
     pub async fn write_all(&self, mut data: &[u8]) -> Result<(), PtyError> {
         while !data.is_empty() {
             let mut guard = self.fd.writable().await.map_err(|e| PtyError::os("writable", e))?;
@@ -229,6 +210,23 @@ impl PtyMaster {
             }
         }
         Ok(())
+    }
+
+    /// Write what the tty takes right now, without waiting: the number of bytes written, 0 when
+    /// its input queue is full. A writer that must also keep reading (a program that echoes
+    /// its input fills the output while the input queue waits on it) writes with this and
+    /// [`Self::writable`] rather than [`Self::write_all`].
+    pub fn try_write(&self, data: &[u8]) -> Result<usize, PtyError> {
+        match self.fd.try_io(Interest::WRITABLE, |inner| write_fd(inner, data)) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(PtyError::os("write", e)),
+        }
+    }
+
+    /// Wait until the tty may take input again.
+    pub async fn writable(&self) -> Result<(), PtyError> {
+        self.fd.writable().await.map(drop).map_err(|e| PtyError::os("writable", e))
     }
 
     /// The raw fd (for `TIOCSWINSZ`, termios queries).

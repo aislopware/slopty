@@ -3,14 +3,16 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStructVariant as _;
+use serde::{Deserialize, Serialize, Serializer};
 use slopty_core::SessionId;
 use slopty_proto::terminal::TermSize;
 
+use crate::PtyError;
 use crate::pty::SpawnSpec;
 
 /// Bumped on incompatible change. Both sides must match exactly.
-pub const PTYD_PROTOCOL: u16 = 2;
+pub const PTYD_PROTOCOL: u16 = 3;
 
 /// Bytes ptyd retains per session: output read while detached, or tapped by the host since
 /// its last checkpoint.
@@ -39,21 +41,16 @@ pub enum PtydRequest {
         spec: SpawnSpec,
     },
     /// Hand over the master and the detached backlog. Answer: `Attached` (with fd) or `Error`.
-    /// ptyd stops reading the master until the connection drops or `Detach` arrives.
+    /// ptyd stops reading the master until the connection drops.
     Attach {
-        /// Session.
-        id: SessionId,
-    },
-    /// Give the master back to ptyd's care; ptyd resumes draining.
-    Detach {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
     },
     /// A copy of output the attached host just read from the master. No reply. ptyd appends it
     /// to the session's ring so that a host which dies without detaching can be replaced by one
     /// that replays everything since the last `Checkpoint`.
     Output {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// The bytes, in read order.
         bytes: Vec<u8>,
@@ -62,28 +59,21 @@ pub enum PtydRequest {
     /// would emit to rebuild itself: modes, palette, scrollback, screen, cursor). No reply. ptyd
     /// keeps the newest one and empties the ring, since the ring's bytes are now inside it.
     Checkpoint {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// The state.
         state: Vec<u8>,
     },
     /// Resize (ptyd owns the size of record so a reattaching host sees the truth).
     Resize {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// New size.
         size: TermSize,
     },
-    /// Send a signal to the child's process group.
-    Signal {
-        /// Session.
-        id: SessionId,
-        /// Signal number.
-        signal: i32,
-    },
     /// Kill the child and forget the session.
     Close {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
     },
     /// Enumerate sessions.
@@ -104,7 +94,7 @@ pub enum PtydEvent {
     },
     /// Spawned.
     Spawned {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// Child pid.
         pid: u32,
@@ -113,7 +103,7 @@ pub enum PtydEvent {
     /// host left (empty if none); `backlog` is every byte since it — tapped by that host, then
     /// read by ptyd while detached; `dropped` is how many bytes fell off the ring before that.
     Attached {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// The last host's terminal state, replayed before `backlog`.
         checkpoint: Vec<u8>,
@@ -130,7 +120,7 @@ pub enum PtydEvent {
     Sessions(Vec<SessionInfo>),
     /// A child exited. Unsolicited; may arrive at any time.
     Exited {
-        /// Session.
+        /// The session it is about.
         id: SessionId,
         /// Exit status, or the signal number negated.
         status: i32,
@@ -147,7 +137,7 @@ pub enum PtydEvent {
 /// One session as ptyd sees it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
-    /// Id.
+    /// The id the host chose when it spawned the session.
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
@@ -163,4 +153,56 @@ pub struct SessionInfo {
     pub backlog: usize,
     /// Checkpoint bytes held.
     pub checkpoint: usize,
+}
+
+/// [`PtydRequest::Output`] as its codec frame, encoded from a borrow: the tap copies the bytes
+/// once, into the frame, instead of into a request first and the frame after.
+///
+/// # Errors
+///
+/// A frame over the codec's limit.
+pub fn output_frame(id: SessionId, bytes: &[u8]) -> Result<Vec<u8>, PtyError> {
+    use slopty_proto::codec::{CodecError, MAX_FRAME_BYTES, PREFIX_BYTES};
+
+    /// Serializes as `PtydRequest::Output` does: the variant's index, then its fields.
+    struct Output<'a> {
+        id: SessionId,
+        bytes: &'a [u8],
+    }
+    impl Serialize for Output<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut v = serializer.serialize_struct_variant("PtydRequest", 3, "Output", 2)?;
+            v.serialize_field("id", &self.id)?;
+            v.serialize_field("bytes", self.bytes)?;
+            v.end()
+        }
+    }
+
+    let mut frame = Vec::with_capacity(bytes.len().saturating_add(32));
+    frame.extend_from_slice(&[0; PREFIX_BYTES]);
+    let mut frame = postcard::to_extend(&Output { id, bytes }, frame)
+        .map_err(|e| PtyError::Codec(CodecError::Encode(e)))?;
+    let body = frame.len().saturating_sub(PREFIX_BYTES);
+    if body > MAX_FRAME_BYTES {
+        return Err(PtyError::Codec(CodecError::TooLarge { len: body, max: MAX_FRAME_BYTES }));
+    }
+    let prefix = u32::try_from(body).unwrap_or(u32::MAX).to_le_bytes();
+    if let Some(head) = frame.get_mut(..PREFIX_BYTES) {
+        head.copy_from_slice(&prefix);
+    }
+    Ok(frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_borrowed_output_frame_is_the_requests_frame() {
+        let id = SessionId::new();
+        let bytes = b"\x1b[31mred\x1b[0m".repeat(40);
+        let owned =
+            slopty_proto::codec::encode(&PtydRequest::Output { id, bytes: bytes.clone() }).unwrap();
+        assert_eq!(output_frame(id, &bytes).unwrap(), owned.to_vec());
+    }
 }

@@ -1,13 +1,16 @@
 //! The session actor.
 
+use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use bytes::{Buf as _, Bytes, BytesMut};
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::boundary::Boundary;
-use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, VtEngine as _};
+use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
+use slopty_proto::codec;
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
 use slopty_proto::terminal::{ColorOverrides, TermColors, TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
@@ -30,9 +33,38 @@ const READ_BUF: usize = 64 << 10;
 /// Search hits sent back at most; the count still covers every hit.
 const MAX_SEARCH_MATCHES: u32 = 5_000;
 
-/// Where a client's events go. Bounded: a client that cannot keep up gets dropped rather than
-/// stalling the session (it can reattach and receive a full frame).
-pub type ClientSink = mpsc::Sender<TermEvent>;
+/// Where a client's events go.
+///
+/// Bounded: a viewer whose sink fills is marked behind rather than stalling the session. It is
+/// sent nothing until the sink has drained to half, then a whole frame that picks up where the
+/// others are.
+pub type ClientSink = mpsc::Sender<Outbound>;
+
+/// One event for the viewers, encoded once however many it goes to.
+#[derive(Clone, Debug)]
+pub struct Outbound {
+    wire: Bytes,
+    frame: bool,
+}
+
+impl Outbound {
+    fn encode(ev: &TermEvent) -> Result<Self, codec::CodecError> {
+        Ok(Self { wire: codec::encode(ev)?, frame: matches!(ev, TermEvent::Frame(_)) })
+    }
+
+    /// The event as the session stream carries it (length prefix, then postcard): write it
+    /// with `FramedSend::send_raw`.
+    #[must_use]
+    pub fn wire(&self) -> &[u8] {
+        &self.wire
+    }
+
+    /// Whether it carries a [`TermEvent::Frame`].
+    #[must_use]
+    pub const fn is_frame(&self) -> bool {
+        self.frame
+    }
+}
 
 /// Commands into the actor.
 enum Cmd {
@@ -42,6 +74,7 @@ enum Cmd {
     Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     Probe { reply: oneshot::Sender<Probe> },
+    Exited { status: i32 },
     Close,
 }
 
@@ -54,9 +87,9 @@ pub struct Snapshot {
     pub cwd: Option<String>,
     /// The repository that cwd is in, resolved when it last changed.
     pub repo: Option<String>,
-    /// Size.
+    /// The terminal's size, which the driver sets.
     pub size: TermSize,
-    /// Attached clients.
+    /// Clients attached to it.
     pub viewers: u16,
     /// Exit status if the child is gone.
     pub exited: Option<i32>,
@@ -94,6 +127,7 @@ impl std::fmt::Debug for Cmd {
             Self::Request { .. } => "Request",
             Self::Snapshot { .. } => "Snapshot",
             Self::Probe { .. } => "Probe",
+            Self::Exited { .. } => "Exited",
             Self::Close => "Close",
         };
         f.write_str(name)
@@ -101,7 +135,7 @@ impl std::fmt::Debug for Cmd {
 }
 
 impl SessionHandle {
-    /// Session id.
+    /// The session this handle reaches.
     #[must_use]
     pub const fn id(&self) -> SessionId {
         self.id
@@ -142,7 +176,7 @@ impl SessionHandle {
         self.send(Cmd::Request { client, req, at: tokio::time::Instant::now() })
     }
 
-    /// Current state.
+    /// The title, directory, size, viewers and exit as the actor knows them now.
     pub async fn snapshot(&self) -> Result<Snapshot, HostError> {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Snapshot { reply })?;
@@ -156,6 +190,11 @@ impl SessionHandle {
         rx.await.map_err(|_gone| HostError::SessionClosed)
     }
 
+    /// The child exited with `status` (ptyd reaped it): the viewers are told.
+    pub fn exited(&self, status: i32) {
+        let _ignored = self.tx.send(Cmd::Exited { status });
+    }
+
     /// Stop the actor (the PTY master closes; ptyd decides the child's fate).
     pub fn close(&self) {
         let _ignored = self.tx.send(Cmd::Close);
@@ -167,29 +206,36 @@ impl SessionHandle {
 }
 
 /// What the actor hands ptyd so the session outlives this host: a copy of every byte read from
-/// the master, and now and then the engine's whole state (see `Actor::checkpoint`).
+/// the master, now and then the engine's whole state (see `Actor::checkpoint`), and the size.
 #[derive(Debug)]
 pub enum Tap {
     /// Output just read from the master.
     Output {
-        /// Session.
+        /// The session it is of.
         id: SessionId,
         /// The bytes.
         bytes: Vec<u8>,
     },
     /// The terminal state, replacing everything tapped before it.
     Checkpoint {
-        /// Session.
+        /// The session it is of.
         id: SessionId,
         /// VT bytes from [`GhosttyEngine::checkpoint`].
         state: Vec<u8>,
+    },
+    /// The terminal was resized: the size the next host starts at.
+    Resize {
+        /// The session it is of.
+        id: SessionId,
+        /// The new size.
+        size: TermSize,
     },
 }
 
 /// What the actor needs to start.
 #[derive(Debug)]
 pub struct SessionStart {
-    /// Id.
+    /// The session this actor runs.
     pub id: SessionId,
     /// The PTY master from ptyd.
     pub master: OwnedFd,
@@ -203,6 +249,8 @@ pub struct SessionStart {
     pub size: TermSize,
     /// Scrollback lines to retain.
     pub scrollback_lines: u32,
+    /// The child's exit status, when ptyd reaped it before this host adopted the session.
+    pub exited: Option<i32>,
 }
 
 /// Spawn the actor thread.
@@ -240,6 +288,22 @@ struct Viewer {
     size: TermSize,
     /// The colours this client paints with, once it said (the driver's reach the engine).
     colors: Option<TermColors>,
+    /// Its sink filled: it is sent nothing until it drains, then a whole frame.
+    behind: bool,
+}
+
+/// Input on its way to the PTY. The tty takes what fits in its input queue; the rest waits
+/// here while the actor keeps reading, because a program that echoes its input as it reads
+/// (a shell, `cat`) stops reading when its output is not read, and a writer that waited for
+/// the whole paste to go in would never read that output.
+#[derive(Debug, Default)]
+struct Input {
+    pending: BytesMut,
+    /// Bytes queued and bytes written since the session started.
+    queued: u64,
+    written: u64,
+    /// Where each request's bytes end in the stream, and the key it carried if any.
+    ends: VecDeque<(u64, Option<u64>)>,
 }
 
 /// Where one keystroke is on its way through the actor, for the trace that takes the echo
@@ -258,6 +322,10 @@ struct Actor {
     engine: GhosttyEngine,
     master: Arc<PtyMaster>,
     rx: mpsc::UnboundedReceiver<Cmd>,
+    /// A viewer that was behind has room again (sent by the task waiting on its sink).
+    drained_tx: mpsc::UnboundedSender<(ClientId, ClientSink)>,
+    drained_rx: mpsc::UnboundedReceiver<(ClientId, ClientSink)>,
+    input: Input,
     echo: EchoTrace,
     viewers: Vec<Viewer>,
     driver: Option<ClientId>,
@@ -268,6 +336,8 @@ struct Actor {
     /// [`crate::repo::root_of`] of `cwd`, resolved once per change rather than per summary.
     repo: Option<String>,
     exited: Option<i32>,
+    /// The master read EOF or failed: the child is gone, whatever its status turns out to be.
+    pty_closed: bool,
     /// Highest key seq written to the PTY.
     written_seq: u64,
     /// `written_seq` as of the most recent PTY read: what the next frame may acknowledge.
@@ -275,6 +345,9 @@ struct Actor {
     frame_due: Option<tokio::time::Instant>,
     /// When the last frame left, for [`MIN_FRAME_INTERVAL`].
     last_frame: Option<tokio::time::Instant>,
+    /// When the program's render hold (synchronized output) times out: the frame is taken then
+    /// even if the program never writes again.
+    hold_due: Option<tokio::time::Instant>,
     /// Copies of output and checkpoints, for ptyd.
     tap: mpsc::Sender<Tap>,
     /// Output has arrived since the last checkpoint.
@@ -283,6 +356,8 @@ struct Actor {
     tapped_since_checkpoint: usize,
     /// A tap did not fit the channel: ptyd's ring has a hole until the next checkpoint.
     tap_lost: bool,
+    /// A resize ptyd has not been told of, because the tap channel was full.
+    size_untold: Option<TermSize>,
     /// When the next checkpoint is due (`CHECKPOINT_AFTER` past the last output).
     checkpoint_due: Option<tokio::time::Instant>,
     /// Where the output stands in VT syntax, so a quiet-spell checkpoint never cuts a sequence.
@@ -341,22 +416,28 @@ impl Actor {
         }
         let repo = cwd.as_deref().and_then(crate::repo::root_of_str);
         let master = Arc::new(PtyMaster::new(start.master)?);
+        let (drained_tx, drained_rx) = mpsc::unbounded_channel();
         Ok(Self {
             id: start.id,
             engine,
             master,
             rx,
+            drained_tx,
+            drained_rx,
+            input: Input::default(),
             viewers: Vec::new(),
             driver: None,
             title,
             cwd,
             program_colors,
             repo,
-            exited: None,
+            exited: start.exited,
+            pty_closed: start.exited.is_some(),
             written_seq: 0,
             ack_seq: 0,
             frame_due: None,
             last_frame: None,
+            hold_due: None,
             echo: EchoTrace::default(),
             tap: start.tap,
             // Whatever we replayed is in ptyd's ring or checkpoint already; the first checkpoint
@@ -364,6 +445,7 @@ impl Actor {
             dirty_since_checkpoint: true,
             tapped_since_checkpoint: 0,
             tap_lost: false,
+            size_untold: None,
             checkpoint_due: None,
             boundary: Boundary::default(),
         })
@@ -371,85 +453,48 @@ impl Actor {
 
     async fn run(mut self) {
         let mut buf = vec![0_u8; READ_BUF];
-        let reader = Arc::clone(&self.master);
+        let pty = Arc::clone(&self.master);
         // The replay answered nothing yet: take its title and cwd, then checkpoint at once.
         // ptyd handed us its ring with the master, so until this lands another restart would
         // have nothing but the previous checkpoint.
-        self.after_output().await;
+        self.after_output();
         self.checkpoint(true);
         loop {
-            let frame_timer = async {
-                match self.frame_due {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
-            let checkpoint_timer = async {
-                match self.checkpoint_due {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
+            let writing = !self.input.pending.is_empty() && !self.pty_closed;
             tokio::select! {
                 biased;
                 cmd = self.rx.recv() => {
                     let Some(cmd) = cmd else { break };
-                    if !self.handle(cmd).await {
+                    if !self.handle(cmd) {
                         break;
                     }
                 }
-                read = reader.read(&mut buf), if self.exited.is_none() => match read {
+                Some((client, sink)) = self.drained_rx.recv() => self.catch_up(client, &sink),
+                writable = pty.writable(), if writing => match writable {
+                    Ok(()) => self.write_input(),
+                    Err(e) => self.input_failed(&e),
+                },
+                read = pty.read(&mut buf), if !self.pty_closed => match read {
                     Ok(0) => {
                         tracing::info!(session = %self.id, "pty closed");
+                        self.pty_closed = true;
                         self.flush_frame();
-                        self.exited = Some(self.exited.unwrap_or(0));
-                        self.broadcast(&TermEvent::Exited { status: 0 });
                     }
-                    Ok(n) => {
-                        self.ack_seq = self.written_seq;
-                        if let Some(input_at) = self.echo.input_at
-                            && self.echo.read_at.is_none()
-                        {
-                            let now = tokio::time::Instant::now();
-                            self.echo.read_at = Some(now);
-                            tracing::trace!(
-                                session = %self.id,
-                                echo_us = now.saturating_duration_since(input_at).as_micros(),
-                                bytes = n,
-                                "echo read"
-                            );
-                        }
-                        let bytes = buf.get(..n).unwrap_or_default();
-                        let shown = String::from_utf8_lossy(bytes);
-                        tracing::trace!(session = %self.id, n, bytes = %shown.escape_debug(), "pty read");
-                        self.engine.write(bytes);
-                        self.tap_output(bytes);
-                        self.after_output().await;
-                        // Frame right here when nothing paces it. A timer set to "now" is not
-                        // now: tokio rounds a deadline up to its next millisecond tick and the
-                        // driver parks until then, which put 1.4 ms between a keystroke's echo
-                        // and its frame (MEASUREMENTS.md, "the keystroke path, stage by stage").
-                        // The timer is for the flood, where the next frame is owed later.
-                        let now = tokio::time::Instant::now();
-                        let due = frame_due_after(now, self.last_frame);
-                        if due <= now {
-                            self.frame_due = None;
-                            self.flush_frame();
-                        } else if self.frame_due.is_none() {
-                            self.frame_due = Some(due);
-                        }
-                    }
+                    Ok(n) => self.on_output(buf.get(..n).unwrap_or_default()),
                     Err(e) => {
                         tracing::warn!(session = %self.id, error = %e, "pty read failed");
-                        self.exited = Some(-1);
-                        self.broadcast(&TermEvent::Exited { status: -1 });
+                        self.pty_closed = true;
                     }
                 },
-                () = frame_timer => {
+                () = sleep_until_due(self.frame_due) => {
                     self.frame_due = None;
                     self.flush_frame();
                 }
-                () = checkpoint_timer => {
+                () = sleep_until_due(self.hold_due) => {
+                    self.flush_frame();
+                    self.arm_hold();
+                }
+                () = sleep_until_due(self.checkpoint_due) => {
                     self.checkpoint_due = None;
                     self.checkpoint(false);
                 }
@@ -458,27 +503,80 @@ impl Actor {
         tracing::debug!(session = %self.id, "actor stopped");
     }
 
+    /// Bytes just read from the master.
+    fn on_output(&mut self, bytes: &[u8]) {
+        self.ack_seq = self.written_seq;
+        if let Some(input_at) = self.echo.input_at
+            && self.echo.read_at.is_none()
+        {
+            let now = tokio::time::Instant::now();
+            self.echo.read_at = Some(now);
+            tracing::trace!(
+                session = %self.id,
+                echo_us = now.saturating_duration_since(input_at).as_micros(),
+                bytes = bytes.len(),
+                "echo read"
+            );
+        }
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let shown = String::from_utf8_lossy(bytes);
+            tracing::trace!(session = %self.id, n = bytes.len(), bytes = %shown.escape_debug(), "pty read");
+        }
+        self.engine.write(bytes);
+        self.tap_output(bytes);
+        self.after_output();
+        self.arm_hold();
+        let now = tokio::time::Instant::now();
+        // Frame right here when nothing paces it. A timer set to "now" is not now: tokio
+        // rounds a deadline up to its next millisecond tick and the driver parks until then,
+        // which put 1.4 ms between a keystroke's echo and its frame (MEASUREMENTS.md, "the
+        // keystroke path, stage by stage"). The timer is for the flood, where the next frame
+        // is owed later.
+        let due = frame_due_after(now, self.last_frame);
+        if due <= now {
+            self.frame_due = None;
+            self.flush_frame();
+        } else if self.frame_due.is_none() {
+            self.frame_due = Some(due);
+        }
+    }
+
+    /// Wake when the program's render hold times out. One that already has is ended by the
+    /// next frame built, so it needs no timer (and with nobody watching, none is built).
+    fn arm_hold(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.hold_due = self
+            .engine
+            .hold_remaining()
+            .filter(|left| !left.is_zero())
+            .map(|left| now.checked_add(left).unwrap_or(now));
+    }
+
     /// Copy output to ptyd's ring and schedule the checkpoint that will fold it away.
     fn tap_output(&mut self, bytes: &[u8]) {
         self.dirty_since_checkpoint = true;
         self.boundary.feed(bytes);
-        self.tapped_since_checkpoint = self.tapped_since_checkpoint.saturating_add(bytes.len());
-        if let Err(e) = self.tap.try_send(Tap::Output { id: self.id, bytes: bytes.to_vec() }) {
-            // Full or gone: the ring has a hole. The next checkpoint replaces the ring, so
-            // pull it forward rather than leaving a replay that would misparse mid-sequence.
-            if !self.tap_lost {
+        if !self.tap_lost {
+            self.tapped_since_checkpoint = self.tapped_since_checkpoint.saturating_add(bytes.len());
+            if let Err(e) = self.tap.try_send(Tap::Output { id: self.id, bytes: bytes.to_vec() }) {
+                // Full or gone: the ring has a hole. The next checkpoint replaces the ring, so
+                // pull it forward rather than leaving a replay that would misparse mid-sequence.
                 tracing::warn!(session = %self.id, error = %e, "output tap dropped; checkpointing early");
+                self.tap_lost = true;
             }
-            self.tap_lost = true;
         }
         if self.tap_lost || self.tapped_since_checkpoint >= CHECKPOINT_EVERY_BYTES {
             // Right here rather than through the timer: the select prefers the master, and a
             // flood that keeps it readable would starve a timer indefinitely.
             self.checkpoint(true);
         } else {
-            let now = tokio::time::Instant::now();
-            self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+            self.checkpoint_after_quiet();
         }
+    }
+
+    fn checkpoint_after_quiet(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
     }
 
     /// Hand ptyd the engine's whole state, so a host that replaces this one starts from it.
@@ -489,10 +587,14 @@ impl Actor {
         if !self.dirty_since_checkpoint {
             return;
         }
-        if !force && !self.boundary.is_ground() {
-            let now = tokio::time::Instant::now();
-            self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+        // A state the queue has no room for would be formatted for nothing; while the ring has
+        // a hole that is every read of a flood.
+        if self.tap.capacity() == 0 || (!force && !self.boundary.is_ground()) {
+            self.checkpoint_after_quiet();
             return;
+        }
+        if let Some(size) = self.size_untold.take() {
+            self.tell_size(size);
         }
         let mut state = Vec::new();
         if let Some(t) = &self.title {
@@ -501,12 +603,9 @@ impl Actor {
             state.extend_from_slice(t.as_bytes());
             state.extend_from_slice(b"\x1b\\");
         }
-        match self.engine.checkpoint() {
-            Ok(bytes) => state.extend_from_slice(&bytes),
-            Err(e) => {
-                tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
-                return;
-            }
+        if let Err(e) = self.engine.checkpoint(&mut state) {
+            tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+            return;
         }
         if state.len() > CHECKPOINT_MAX_BYTES {
             // ptyd would refuse the frame; keep the ring instead (it holds the output since
@@ -524,21 +623,23 @@ impl Actor {
             Err(e) => {
                 // Try again after the next quiet spell; the ring keeps growing meanwhile.
                 tracing::warn!(session = %self.id, error = %e, "checkpoint not sent");
-                let now = tokio::time::Instant::now();
-                self.checkpoint_due = Some(now.checked_add(CHECKPOINT_AFTER).unwrap_or(now));
+                self.checkpoint_after_quiet();
             }
         }
     }
 
+    /// Tell ptyd the size, so a host that replaces this one starts the replay at it.
+    fn tell_size(&mut self, size: TermSize) {
+        if self.tap.try_send(Tap::Resize { id: self.id, size }).is_err() {
+            self.size_untold = Some(size);
+        }
+    }
+
     /// Side effects of the bytes just consumed.
-    async fn after_output(&mut self) {
+    fn after_output(&mut self) {
         for ev in self.engine.drain_events() {
             match ev {
-                EngineEvent::PtyWrite(bytes) => {
-                    if let Err(e) = self.master.write_all(&bytes).await {
-                        tracing::warn!(session = %self.id, error = %e, "query response write failed");
-                    }
-                }
+                EngineEvent::PtyWrite(bytes) => self.queue_input(&bytes, None),
                 EngineEvent::Bell => self.broadcast(&TermEvent::Bell),
                 EngineEvent::Colors(colors) => {
                     self.program_colors = colors.clone();
@@ -571,19 +672,77 @@ impl Actor {
         }
     }
 
+    /// Queue bytes for the PTY behind whatever is still waiting, and write what fits now.
+    /// `key` is the key sequence number they carry, acknowledged once they are all written.
+    fn queue_input(&mut self, bytes: &[u8], key: Option<u64>) {
+        if bytes.is_empty() || self.pty_closed {
+            return;
+        }
+        self.input.pending.extend_from_slice(bytes);
+        self.input.queued = self.input.queued.saturating_add(bytes.len() as u64);
+        self.input.ends.push_back((self.input.queued, key));
+        self.write_input();
+    }
+
+    /// Write as much of the queued input as the tty takes without waiting.
+    fn write_input(&mut self) {
+        let from = tokio::time::Instant::now();
+        while !self.input.pending.is_empty() {
+            match self.master.try_write(&self.input.pending) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.input.pending.advance(n);
+                    self.input.written = self.input.written.saturating_add(n as u64);
+                }
+                Err(e) => return self.input_failed(&e),
+            }
+        }
+        let mut done = false;
+        while let Some(&(end, key)) = self.input.ends.front() {
+            if end > self.input.written {
+                break;
+            }
+            self.input.ends.pop_front();
+            if let Some(seq) = key {
+                self.written_seq = self.written_seq.max(seq);
+            }
+            done = true;
+        }
+        if done {
+            let now = tokio::time::Instant::now();
+            // The stamp the echo trace measures from; a keystroke that lands while the
+            // previous one is still in flight restarts the trace, which is what a bench that
+            // waits for each frame never does.
+            self.echo = EchoTrace { input_at: Some(now), read_at: None };
+            tracing::trace!(
+                session = %self.id,
+                write_us = now.saturating_duration_since(from).as_micros(),
+                queued = self.input.pending.len(),
+                "pty input written"
+            );
+        }
+    }
+
+    fn input_failed(&mut self, e: &slopty_pty::PtyError) {
+        tracing::warn!(session = %self.id, error = %e, "pty write failed");
+        self.input.pending.clear();
+        self.input.ends.clear();
+        self.input.written = self.input.queued;
+        self.broadcast(&TermEvent::Error(e.to_string()));
+    }
+
     fn flush_frame(&mut self) {
-        if self.viewers.is_empty() {
-            // Still consume dirty state so the next attach gets a clean full frame.
-            let _consumed = self.engine.take_frame(self.ack_seq);
-            let _unwatched = self.engine.drain_images();
+        if self.viewers.iter().all(|v| v.behind) {
+            // Nobody to diff for: whoever joins or catches up next is sent every row anyway.
+            self.engine.discard_frame();
             return;
         }
         match self.engine.take_frame(self.ack_seq) {
             Ok(Some(frame)) => {
                 let now = tokio::time::Instant::now();
                 self.last_frame = Some(now);
-                for image in self.images() {
-                    self.broadcast(&image);
+                for image in self.engine.drain_images() {
+                    self.broadcast(&image_event(image));
                 }
                 self.broadcast(&TermEvent::Frame(frame));
                 if let (Some(input_at), Some(read_at)) =
@@ -605,27 +764,106 @@ impl Actor {
         }
     }
 
+    /// Encode `ev` once and hand it to every viewer that keeps up.
     fn broadcast(&mut self, ev: &TermEvent) {
-        let mut dead = Vec::new();
-        for (i, v) in self.viewers.iter().enumerate() {
-            match v.sink.try_send(ev.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(session = %self.id, client = %v.client, "client cannot keep up; detaching");
-                    dead.push(i);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => dead.push(i),
+        if self.viewers.iter().all(|v| v.behind) {
+            return;
+        }
+        let Some(out) = self.encode(ev) else { return };
+        let mut gone = Vec::new();
+        for i in 0..self.viewers.len() {
+            if !self.deliver(i, &out) {
+                gone.push(i);
             }
         }
-        for i in dead.into_iter().rev() {
+        for i in gone.into_iter().rev() {
             let v = self.viewers.swap_remove(i);
             self.on_viewer_gone(v.client);
         }
     }
 
-    fn send_to(&self, client: ClientId, ev: TermEvent) {
-        if let Some(v) = self.viewers.iter().find(|v| v.client == client) {
-            let _ignored = v.sink.try_send(ev);
+    fn send_to(&mut self, client: ClientId, ev: &TermEvent) {
+        let Some(i) = self.viewers.iter().position(|v| v.client == client && !v.behind) else {
+            return;
+        };
+        if let Some(out) = self.encode(ev) {
+            // A closed sink is its connection's to detach.
+            let _open = self.deliver(i, &out);
+        }
+    }
+
+    fn encode(&self, ev: &TermEvent) -> Option<Outbound> {
+        Outbound::encode(ev)
+            .inspect_err(|e| tracing::error!(session = %self.id, error = %e, "event not encoded"))
+            .ok()
+    }
+
+    /// Hand `out` to viewer `i` unless it is behind, marking it behind when its sink is full.
+    /// `false` when the viewer is gone.
+    fn deliver(&mut self, i: usize, out: &Outbound) -> bool {
+        let Some(v) = self.viewers.get_mut(i) else { return true };
+        if v.behind {
+            return true;
+        }
+        match v.sink.try_send(out.clone()) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                v.behind = true;
+                tracing::warn!(session = %self.id, client = %v.client, "viewer behind; frames skipped until it drains");
+                let (client, sink, drained) = (v.client, v.sink.clone(), self.drained_tx.clone());
+                let room = (sink.max_capacity() / 2).max(1);
+                tokio::task::spawn_local(async move {
+                    if sink.reserve_many(room).await.is_ok() {
+                        let _ignored = drained.send((client, sink));
+                    }
+                });
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    /// A viewer that was behind has room again: the others take the diff they are owed first,
+    /// then it is sent everything a joiner is, at their sequence number.
+    fn catch_up(&mut self, client: ClientId, sink: &ClientSink) {
+        let Some(i) =
+            self.viewers.iter().position(|v| v.client == client && v.sink.same_channel(sink))
+        else {
+            return;
+        };
+        self.flush_frame();
+        if let Some(v) = self.viewers.get_mut(i) {
+            v.behind = false;
+        }
+        tracing::info!(session = %self.id, %client, "viewer caught up");
+        let driving = self.driver == Some(client);
+        self.send_to(client, &TermEvent::Driver { you: driving });
+        self.introduce(client);
+    }
+
+    /// What a viewer joining is told: the title, the directory, the program's colours, every
+    /// row with the images on them, and the exit if the child is gone.
+    fn introduce(&mut self, client: ClientId) {
+        if let Some(t) = self.title.clone() {
+            self.send_to(client, &TermEvent::Title(t));
+        }
+        if let Some(path) = self.cwd.clone() {
+            self.send_to(client, &TermEvent::Cwd { path, repo: self.repo.clone() });
+        }
+        if self.program_colors != ColorOverrides::default() {
+            self.send_to(client, &TermEvent::Colors(self.program_colors.clone()));
+        }
+        match self.engine.join_frame(self.ack_seq) {
+            Ok((frame, images)) => {
+                for image in images {
+                    self.send_to(client, &image_event(image));
+                }
+                self.send_to(client, &TermEvent::Frame(frame));
+            }
+            Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
+        }
+        if let Some(status) = self.exited {
+            self.send_to(client, &TermEvent::Exited { status });
         }
     }
 
@@ -636,7 +874,7 @@ impl Actor {
             // laptop left still gets a fitting terminal.
             if let Some(next) = self.viewers.first().map(|v| (v.client, v.size)) {
                 self.driver = Some(next.0);
-                self.send_to(next.0, TermEvent::Driver { you: true });
+                self.send_to(next.0, &TermEvent::Driver { you: true });
                 self.apply_size(next.1);
             }
         }
@@ -665,15 +903,15 @@ impl Actor {
             tracing::error!(session = %self.id, error = %e, "engine resize failed");
             return;
         }
+        self.tell_size(size);
+        // The checkpoint ptyd holds was formatted at the old size; the next one is at this.
+        self.dirty_since_checkpoint = true;
+        self.checkpoint_after_quiet();
         self.broadcast(&TermEvent::Resized { cols: size.cols, rows: size.rows });
-        self.send_full_frame_to_all();
-    }
-
-    fn send_full_frame_to_all(&mut self) {
         match self.engine.full_frame(self.ack_seq) {
             Ok(frame) => {
-                for image in self.images() {
-                    self.broadcast(&image);
+                for image in self.engine.drain_images() {
+                    self.broadcast(&image_event(image));
                 }
                 self.broadcast(&TermEvent::Frame(frame));
             }
@@ -681,65 +919,30 @@ impl Actor {
         }
     }
 
-    /// The pixels the frame just taken places and the clients do not hold: sent ahead of it.
-    fn images(&mut self) -> Vec<TermEvent> {
-        self.engine
-            .drain_images()
-            .into_iter()
-            .map(|u| TermEvent::Image {
-                id: u.id,
-                generation: u.generation,
-                width: u.width,
-                height: u.height,
-                rgba: u.rgba,
-            })
-            .collect()
-    }
-
     /// Returns `false` when the actor should stop.
-    async fn handle(&mut self, cmd: Cmd) -> bool {
+    fn handle(&mut self, cmd: Cmd) -> bool {
         match cmd {
             Cmd::Attach { client, size, sink } => {
+                // The others take what they are owed before the joiner's frame is built at
+                // their sequence number; built first, it would take their diff from them.
+                self.flush_frame();
                 // A re-attach (resync, reconnect) keeps the colours the client already said.
                 let colors =
                     self.viewers.iter().find(|v| v.client == client).and_then(|v| v.colors);
                 self.viewers.retain(|v| v.client != client);
-                self.viewers.push(Viewer { client, sink, size, colors });
+                self.viewers.push(Viewer { client, sink, size, colors, behind: false });
                 if self.driver.is_none() {
                     self.driver = Some(client);
-                    self.send_to(client, TermEvent::Driver { you: true });
+                    self.send_to(client, &TermEvent::Driver { you: true });
                     self.apply_size(size);
                     self.apply_colors_of(client);
                 } else if self.driver == Some(client) {
                     // A reconnecting driver (relaunched app) learns it still drives.
-                    self.send_to(client, TermEvent::Driver { you: true });
+                    self.send_to(client, &TermEvent::Driver { you: true });
                     self.apply_size(size);
                     self.apply_colors_of(client);
                 }
-                if let Some(t) = &self.title {
-                    self.send_to(client, TermEvent::Title(t.clone()));
-                }
-                if let Some(c) = &self.cwd {
-                    self.send_to(
-                        client,
-                        TermEvent::Cwd { path: c.clone(), repo: self.repo.clone() },
-                    );
-                }
-                if self.program_colors != ColorOverrides::default() {
-                    self.send_to(client, TermEvent::Colors(self.program_colors.clone()));
-                }
-                match self.engine.full_frame(self.ack_seq) {
-                    Ok(frame) => {
-                        for image in self.images() {
-                            self.send_to(client, image);
-                        }
-                        self.send_to(client, TermEvent::Frame(frame));
-                    }
-                    Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
-                }
-                if let Some(status) = self.exited {
-                    self.send_to(client, TermEvent::Exited { status });
-                }
+                self.introduce(client);
             }
             Cmd::Detach { client, sink } => {
                 let before = self.viewers.len();
@@ -754,10 +957,10 @@ impl Actor {
                 if let Some(old) = self.driver.replace(client)
                     && old != client
                 {
-                    self.send_to(old, TermEvent::Driver { you: false });
+                    self.send_to(old, &TermEvent::Driver { you: false });
                 }
             }
-            Cmd::Request { client, req, at } => self.request(client, req, at).await,
+            Cmd::Request { client, req, at } => self.request(client, req, at),
             Cmd::Snapshot { reply } => {
                 let _ignored = reply.send(Snapshot {
                     title: self.title.clone(),
@@ -771,9 +974,7 @@ impl Actor {
             Cmd::Probe { reply } => {
                 // A child that already exited has no foreground process; asking would only
                 // read whatever the kernel put in its place.
-                let foreground = self
-                    .exited
-                    .is_none()
+                let foreground = (!self.pty_closed)
                     .then(|| slopty_pty::process::foreground(self.master.as_fd()))
                     .flatten();
                 let _ignored = reply.send(Probe {
@@ -782,14 +983,20 @@ impl Actor {
                     cwd: self.cwd.clone(),
                 });
             }
+            Cmd::Exited { status } => {
+                self.exited = Some(status);
+                self.flush_frame();
+                self.broadcast(&TermEvent::Exited { status });
+            }
             Cmd::Close => return false,
         }
         true
     }
 
-    async fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
-        let queued_us = at.elapsed().as_micros();
+    fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
+        tracing::trace!(session = %self.id, queued_us = at.elapsed().as_micros(), "request");
         let mut bytes = Vec::new();
+        let mut key = None;
         let result = match req {
             TermRequest::Attach { .. } | TermRequest::Detach | TermRequest::Close => Ok(()),
             TermRequest::Resize(size) => {
@@ -815,9 +1022,9 @@ impl Actor {
                     if let Some(old) = self.driver.replace(client)
                         && old != client
                     {
-                        self.send_to(old, TermEvent::Driver { you: false });
+                        self.send_to(old, &TermEvent::Driver { you: false });
                     }
-                    self.send_to(client, TermEvent::Driver { you: true });
+                    self.send_to(client, &TermEvent::Driver { you: true });
                     if let Some(size) =
                         self.viewers.iter().find(|v| v.client == client).map(|v| v.size)
                     {
@@ -826,17 +1033,13 @@ impl Actor {
                     self.apply_colors_of(client);
                 } else if self.driver == Some(client) {
                     self.driver = None;
-                    self.send_to(client, TermEvent::Driver { you: false });
+                    self.send_to(client, &TermEvent::Driver { you: false });
                 }
                 Ok(())
             }
-            TermRequest::Key(key) => {
-                let seq = key.seq;
-                let r = self.engine.encode_key(&key, &mut bytes);
-                if r.is_ok() && !bytes.is_empty() {
-                    self.written_seq = self.written_seq.max(seq);
-                }
-                r
+            TermRequest::Key(event) => {
+                key = Some(event.seq);
+                self.engine.encode_key(&event, &mut bytes)
             }
             TermRequest::Mouse(m) => self.engine.encode_mouse(&m, &mut bytes),
             TermRequest::Paste(text) => self.engine.encode_paste(&text, &mut bytes),
@@ -851,15 +1054,17 @@ impl Actor {
                 const ERASE_SCROLLBACK: &[u8] = b"\x1b[3J";
                 self.engine.write(ERASE_SCROLLBACK);
                 self.tap_output(ERASE_SCROLLBACK);
-                self.after_output().await;
+                self.after_output();
                 bytes = vec![0x0c];
                 Ok(())
             }
             TermRequest::Focus { focused } => self.engine.encode_focus(focused, &mut bytes),
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(4096)) {
-                    Ok((start, lines)) => self.send_to(client, TermEvent::Lines { start, lines }),
-                    Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
+                    Ok((start, lines)) => {
+                        self.send_to(client, &TermEvent::Lines { start, lines });
+                    }
+                    Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
                 }
                 Ok(())
             }
@@ -867,41 +1072,38 @@ impl Actor {
                 match self.engine.search(&needle, regex, max.min(MAX_SEARCH_MATCHES)) {
                     Ok(found) => self.send_to(
                         client,
-                        TermEvent::Matches { needle, total: found.total, matches: found.matches },
+                        &TermEvent::Matches { needle, total: found.total, matches: found.matches },
                     ),
                     Err(slopty_engine::EngineError::Pattern(message)) => {
-                        self.send_to(client, TermEvent::SearchInvalid { needle, message });
+                        self.send_to(client, &TermEvent::SearchInvalid { needle, message });
                     }
-                    Err(e) => self.send_to(client, TermEvent::Error(e.to_string())),
+                    Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
                 }
                 Ok(())
             }
         };
-        if let Err(e) = result {
-            self.send_to(client, TermEvent::Error(e.to_string()));
-            return;
+        match result {
+            Ok(()) => self.queue_input(&bytes, key.filter(|_| !bytes.is_empty())),
+            Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
         }
-        if bytes.is_empty() {
-            return;
-        }
-        let write_from = tokio::time::Instant::now();
-        if let Err(e) = self.master.write_all(&bytes).await {
-            tracing::warn!(session = %self.id, error = %e, "pty write failed");
-            self.send_to(client, TermEvent::Error(e.to_string()));
-            return;
-        }
-        let now = tokio::time::Instant::now();
-        // The stamp the echo trace measures from; a keystroke that lands while the previous
-        // one is still in flight restarts the trace, which is what a bench that waits for each
-        // frame never does.
-        self.echo = EchoTrace { input_at: Some(now), read_at: None };
-        tracing::trace!(
-            session = %self.id,
-            queued_us,
-            write_us = now.saturating_duration_since(write_from).as_micros(),
-            bytes = bytes.len(),
-            "pty input written"
-        );
+    }
+}
+
+async fn sleep_until_due(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The pixels of an image the viewers do not hold yet, sent ahead of the frame placing it.
+fn image_event(u: ImageUpload) -> TermEvent {
+    TermEvent::Image {
+        id: u.id,
+        generation: u.generation,
+        width: u.width,
+        height: u.height,
+        rgba: u.rgba,
     }
 }
 

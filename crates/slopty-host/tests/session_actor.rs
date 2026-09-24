@@ -6,7 +6,7 @@ mod actor {
 
     use slopty_core::{ClientId, SessionId};
     use slopty_grid::LineIndex;
-    use slopty_host::session::{self, SessionStart, Tap};
+    use slopty_host::session::{self, Outbound, SessionStart, Tap};
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::terminal::{Frame, TermColors, TermEvent, TermRequest, TermSize};
     use slopty_pty::{Pty, SpawnSpec};
@@ -43,14 +43,21 @@ mod actor {
             tap,
             size: size(40, 6),
             scrollback_lines: 1000,
+            exited: None,
         })
         .unwrap();
         (handle, child, tap_rx)
     }
 
+    /// The event an actor sent, decoded from the wire as the client would.
+    fn event(out: &Outbound) -> TermEvent {
+        let mut buf = bytes::BytesMut::from(out.wire());
+        slopty_proto::codec::try_decode(&mut buf).unwrap().expect("one whole event")
+    }
+
     /// Apply frames onto a local screen model and return its text once `pred` holds.
     async fn wait_for(
-        rx: &mut mpsc::Receiver<TermEvent>,
+        rx: &mut mpsc::Receiver<Outbound>,
         mut pred: impl FnMut(&[TermEvent], &slopty_grid::Screen) -> bool,
     ) -> (Vec<TermEvent>, slopty_grid::Screen) {
         let mut seen = Vec::new();
@@ -63,6 +70,7 @@ mod actor {
                     panic!("timeout waiting for events; {seen:?}\nscreen:\n{}", text(&screen))
                 })
                 .expect("sink closed");
+            let ev = event(&ev);
             if let TermEvent::Frame(f) = &ev {
                 apply(&mut screen, f);
             }
@@ -128,10 +136,13 @@ mod actor {
         assert_eq!(last_ack, Some(3), "the frame carrying the echo acknowledges the keys");
 
         session.request(me, TermRequest::Raw(b"\x04".to_vec())).unwrap();
-        let _exit =
+        // ptyd reaps the child and the host passes the status on; here the test is both.
+        let status = child.wait().await.unwrap();
+        session.exited(status.code().unwrap());
+        let (events, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
                 .await;
-        child.wait().await.unwrap();
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Exited { status: 0 })));
         session.close();
     }
 
@@ -156,7 +167,7 @@ mod actor {
                 {
                     break state;
                 }
-                Tap::Checkpoint { .. } => {}
+                Tap::Checkpoint { .. } | Tap::Resize { .. } => {}
             }
         };
         let text_out = String::from_utf8_lossy(&output);
@@ -432,11 +443,9 @@ mod actor {
             scrollback_lines: 100,
         })
         .unwrap();
-        slopty_engine::VtEngine::write(
-            &mut e,
-            b"\x1b]7;file:///tmp\x1b\\\x1b]11;#282c34\x1b\\hello",
-        );
-        let checkpoint = e.checkpoint().unwrap();
+        e.write(b"\x1b]7;file:///tmp\x1b\\\x1b]11;#282c34\x1b\\hello");
+        let mut checkpoint = Vec::new();
+        e.checkpoint(&mut checkpoint).unwrap();
         let (session, mut child, _tap) =
             start_tapped(&["/bin/sh", "-c", "read x; exit 0"], checkpoint);
         let a = ClientId::new();
@@ -587,7 +596,7 @@ mod actor {
                 // The actor checkpoints once at start, before any output; only one
                 // after the head of the sequence would be inside it.
                 Tap::Checkpoint { .. } if !output.is_empty() => checkpoints_while_open += 1,
-                Tap::Checkpoint { .. } => {}
+                Tap::Checkpoint { .. } | Tap::Resize { .. } => {}
             }
         }
         assert!(output.starts_with(b"\x1b]0;half"), "{output:?}");
@@ -681,7 +690,7 @@ done
                 .await
                 .unwrap_or_else(|_| panic!("not seen running within a second; {effects:?}"))
                 .expect("sink closed");
-            pump(std::slice::from_ref(&ev), &mut state, &mut effects);
+            pump(&[event(&ev)], &mut state, &mut effects);
         }
         assert!(
             effects.iter().any(
@@ -732,5 +741,194 @@ done
         assert_eq!(clips, [cap], "the one at the cap arrives, the one past it does not");
         session.close();
         let _killed = child.kill().await;
+    }
+
+    /// A shell loop printing `n` numbered lines `pause` seconds apart, then `DONE`.
+    fn flood(n: u32, pause: &str) -> String {
+        format!(
+            "read x; i=0; while [ $i -lt {n} ]; do echo line $i; sleep {pause}; i=$((i+1)); done; echo DONE; sleep 30"
+        )
+    }
+
+    /// Frames a viewer received, in order: `(seq, full)`.
+    fn frames(events: &[TermEvent]) -> Vec<(u64, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Frame(f) => Some((f.seq, f.full)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every place a viewer's frames skip a sequence number: `(before, after, after is full)`.
+    fn jumps(frames: &[(u64, bool)]) -> Vec<(u64, u64, bool)> {
+        frames
+            .windows(2)
+            .filter_map(|w| match w {
+                [(prev, _), (seq, full)] if *seq != prev.wrapping_add(1) => {
+                    Some((*prev, *seq, *full))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A viewer joining a busy session is sent every row at the others' sequence number, so
+    /// the others' frames run on without a gap: nobody is made to resync, however often
+    /// someone joins.
+    #[tokio::test]
+    async fn viewers_joining_a_busy_session_never_make_the_others_resync() {
+        let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
+        let a = ClientId::new();
+        let (tx_a, mut rx_a) = mpsc::channel(4096);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let mut joiners = Vec::new();
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let (tx, rx) = mpsc::channel(4096);
+            session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+            joiners.push(rx);
+        }
+        let (events, _) = wait_for(&mut rx_a, |_, s| text(s).contains("DONE")).await;
+        let seen = frames(&events);
+        assert!(seen.len() > 20, "a busy session: {seen:?}");
+        assert_eq!(jumps(&seen), [], "the first viewer never skips a frame");
+        for mut rx in joiners {
+            let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("DONE")).await;
+            let seen = frames(&events);
+            assert!(seen.first().is_some_and(|(_, full)| *full), "{seen:?}");
+            assert_eq!(jumps(&seen), [], "a joiner's frames run on from its first");
+        }
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A viewer that stops reading is not dropped: it is skipped while its sink is full, and
+    /// once it drains it is sent one whole frame at the others' sequence number and the
+    /// diffs after it.
+    #[tokio::test]
+    async fn a_slow_viewer_is_skipped_then_caught_up_never_dropped() {
+        let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
+        let fast = ClientId::new();
+        let (tx_fast, mut rx_fast) = mpsc::channel(4096);
+        session.attach(fast, size(40, 6), tx_fast).unwrap();
+        let slow = ClientId::new();
+        let (tx_slow, mut rx_slow) = mpsc::channel(8);
+        session.attach(slow, size(40, 6), tx_slow).unwrap();
+        session.request(fast, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        // Long enough for some fifty frames, six times what the slow sink holds.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(session.snapshot().await.unwrap().viewers, 2, "the slow viewer stays");
+        let (events, screen) = wait_for(&mut rx_slow, |_, s| text(s).contains("DONE")).await;
+        let seen = jumps(&frames(&events));
+        assert!(!seen.is_empty(), "the slow viewer skipped frames while it was full");
+        assert!(seen.iter().all(|&(_, _, full)| full), "each skip ends in a whole frame: {seen:?}");
+        let caught_up = events.iter().filter(|e| matches!(e, TermEvent::Driver { .. })).count();
+        assert_eq!(caught_up, seen.len(), "introduced again after each skip: {events:?}");
+        assert!(text(&screen).contains("line 149\nDONE"), "{}", text(&screen));
+        let (events, _) = wait_for(&mut rx_fast, |_, s| text(s).contains("DONE")).await;
+        assert_eq!(jumps(&frames(&events)), [], "the fast viewer is not held back");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A paste far larger than the tty's input queue into a program that echoes as it reads:
+    /// the actor keeps reading the echo while the paste goes in, so neither side waits on the
+    /// other forever.
+    #[tokio::test]
+    async fn a_large_paste_into_an_echoing_program_does_not_deadlock() {
+        // `tr` echoes each line back in capitals, after the tty's own echo of it.
+        let (session, mut child) = start(&["/usr/bin/tr", "a-z", "A-Z"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(4096);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let mut paste = format!("{}\n", "x".repeat(99)).repeat(2_600);
+        paste.push_str("end\n");
+        session.request(me, TermRequest::Paste(paste)).unwrap();
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("END")).await;
+        assert!(text(&screen).contains("END"), "{}", text(&screen));
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1, "the actor answers");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The exit the viewers are told is the status the child exited with, once its reaper
+    /// says so, not a guess at the end of its output.
+    #[tokio::test]
+    async fn the_viewers_are_told_the_real_exit_status_of_the_child() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "read x; exit 3"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let status = child.wait().await.unwrap().code().unwrap();
+        assert_eq!(status, 3);
+        session.exited(status);
+        let (events, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
+                .await;
+        let exits: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Exited { status } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exits, [3]);
+        assert_eq!(session.snapshot().await.unwrap().exited, Some(3));
+        session.close();
+    }
+
+    /// A program that begins synchronized output and never ends it is let go after the
+    /// timeout, whether or not it writes again: its screen does not freeze.
+    #[tokio::test]
+    async fn a_hold_that_is_never_released_times_out_without_more_output() {
+        let (session, mut child) =
+            start(&["/bin/sh", "-c", "read x; printf '\\033[?2026hheld'; sleep 30"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let _first =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        let asked = tokio::time::Instant::now();
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("held")).await;
+        let waited = asked.elapsed();
+        assert!(text(&screen).contains("held"));
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_secs(3),
+            "shown after the hold timed out, not before and not never: {waited:?}"
+        );
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A resize is told to ptyd, and the checkpoint after it is taken at the new size, so a
+    /// host that replaces this one replays at the size the program draws for.
+    #[tokio::test]
+    async fn a_resize_reaches_ptyd_and_the_next_checkpoint_is_at_it() {
+        let (session, mut child, mut taps) =
+            start_tapped(&["/bin/sh", "-c", "read x; exit 0"], Vec::new());
+        let me = ClientId::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let _first =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(_)))).await;
+        session.request(me, TermRequest::Resize(size(50, 8))).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        let mut told = None;
+        loop {
+            match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
+                Tap::Resize { size, .. } => told = Some(size),
+                Tap::Checkpoint { .. } if told.is_some() => break,
+                Tap::Checkpoint { .. } | Tap::Output { .. } => {}
+            }
+        }
+        assert_eq!(told, Some(size(50, 8)));
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
     }
 }

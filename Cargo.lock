@@ -4396,7 +4396,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git?branch=slopty#e69a909a2a12c5969596275e5efe91b0c78b0cb8"
+source = "git+https://github.com/aislopware/libghostty-rs.git?branch=slopty#bd22b938bd7674a435ed3376a2330189cde29da4"
 dependencies = [
  "bitflags 2.13.2",
  "int-enum",
@@ -4407,7 +4407,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git?branch=slopty#e69a909a2a12c5969596275e5efe91b0c78b0cb8"
+source = "git+https://github.com/aislopware/libghostty-rs.git?branch=slopty#bd22b938bd7674a435ed3376a2330189cde29da4"
 
 [[package]]
 name = "libloading"
@@ -8338,6 +8338,7 @@ dependencies = [
  "insta",
  "libc",
  "nix",
+ "postcard",
  "rustix",
  "serde",
  "slopty-core",
@@ -8353,7 +8354,6 @@ name = "slopty-ptyd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "nix",
  "parking_lot",

@@ -1,15 +1,15 @@
 //! hostd's connection to ptyd.
 
-use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
 use std::path::Path;
+use std::sync::Arc;
 
-use bytes::BytesMut;
 use slopty_core::SessionId;
 use slopty_proto::codec;
 use slopty_proto::terminal::TermSize;
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::protocol::{PTYD_PROTOCOL, PtydEvent, PtydRequest, SessionInfo};
 use crate::pty::SpawnSpec;
@@ -31,14 +31,28 @@ pub struct Attached {
     pub size: TermSize,
 }
 
-/// One connection. Requests are answered in order; unsolicited `Exited` events are delivered
-/// through the channel returned by [`PtydClient::connect`].
+/// A reply, with the fd that rode on it.
+type Reply = (PtydEvent, Option<OwnedFd>);
+
+/// One connection, answering requests in order.
+///
+/// A task reads the socket the whole time, so the unsolicited `Exited` events reach the
+/// channel [`PtydClient::connect`] returns as ptyd sends them, whether or not a request is in
+/// flight. Every method that sends takes `&mut self`: two frames written at once could
+/// interleave on the stream, and a reply slot queued out of order would answer the wrong
+/// request.
 #[derive(Debug)]
 pub struct PtydClient {
-    stream: UnixStream,
-    buf: BytesMut,
-    fds: VecDeque<OwnedFd>,
-    exits: mpsc::UnboundedSender<(SessionId, i32)>,
+    stream: Arc<UnixStream>,
+    /// Where the reader hands the next reply; queued before its request is sent.
+    replies: mpsc::UnboundedSender<oneshot::Sender<Reply>>,
+    reader: JoinHandle<()>,
+}
+
+impl Drop for PtydClient {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 impl PtydClient {
@@ -48,11 +62,16 @@ impl PtydClient {
     ) -> Result<(Self, mpsc::UnboundedReceiver<(SessionId, i32)>), PtyError> {
         let stream =
             UnixStream::connect(path).await.map_err(|e| PtyError::os("connect ptyd", e))?;
-        let (exits, rx) = mpsc::unbounded_channel();
-        let mut client =
-            Self { stream, buf: BytesMut::with_capacity(64 << 10), fds: VecDeque::new(), exits };
-        match client.call(&PtydRequest::Hello { protocol: PTYD_PROTOCOL }).await? {
-            PtydEvent::Hello { protocol, .. } if protocol == PTYD_PROTOCOL => Ok((client, rx)),
+        fdpass::widen_buffers(&stream);
+        let stream = Arc::new(stream);
+        let (exits, exits_rx) = mpsc::unbounded_channel();
+        let (replies, replies_rx) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(read_loop(Arc::clone(&stream), replies_rx, exits));
+        let mut client = Self { stream, replies, reader };
+        match client.call(&PtydRequest::Hello { protocol: PTYD_PROTOCOL }).await?.0 {
+            PtydEvent::Hello { protocol, .. } if protocol == PTYD_PROTOCOL => {
+                Ok((client, exits_rx))
+            }
             PtydEvent::Hello { protocol, .. } => {
                 Err(PtyError::ProtocolMismatch { ours: PTYD_PROTOCOL, theirs: protocol })
             }
@@ -62,7 +81,7 @@ impl PtydClient {
 
     /// Spawn a session; returns the child pid.
     pub async fn spawn(&mut self, id: SessionId, spec: SpawnSpec) -> Result<u32, PtyError> {
-        match self.call(&PtydRequest::Spawn { id, spec }).await? {
+        match self.call(&PtydRequest::Spawn { id, spec }).await?.0 {
             PtydEvent::Spawned { pid, .. } => Ok(pid),
             other => Self::unexpected(other),
         }
@@ -71,64 +90,30 @@ impl PtydClient {
     /// Take the master.
     pub async fn attach(&mut self, id: SessionId) -> Result<Attached, PtyError> {
         match self.call(&PtydRequest::Attach { id }).await? {
-            PtydEvent::Attached { checkpoint, backlog, dropped, size, .. } => {
-                let master = self.fds.pop_front().ok_or(PtyError::UnexpectedReply)?;
+            (PtydEvent::Attached { checkpoint, backlog, dropped, size, .. }, Some(master)) => {
                 Ok(Attached { master, checkpoint, backlog, dropped, size })
             }
-            other => Self::unexpected(other),
+            (other, _) => Self::unexpected(other),
         }
     }
 
-    /// Return the master to ptyd's care (drop your copy after this).
-    pub async fn detach(&mut self, id: SessionId) -> Result<(), PtyError> {
-        self.expect_ok(&PtydRequest::Detach { id }).await
-    }
-
     /// Hand ptyd a copy of output just read from an attached master. Fire-and-forget: ptyd
-    /// never replies, so this only waits for the socket to take the bytes. Use a connection of
-    /// its own for these, so they never sit between a request and its reply.
-    pub async fn output(&mut self, id: SessionId, bytes: Vec<u8>) -> Result<(), PtyError> {
-        self.send_nowait(&PtydRequest::Output { id, bytes }).await
+    /// never replies, so this only waits for the socket to take the bytes.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
+    pub async fn output(&mut self, id: SessionId, bytes: &[u8]) -> Result<(), PtyError> {
+        self.send(&crate::protocol::output_frame(id, bytes)?).await
     }
 
     /// Hand ptyd the session's current terminal state; it replaces the previous checkpoint and
     /// empties the ring. Fire-and-forget, like [`Self::output`].
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
     pub async fn checkpoint(&mut self, id: SessionId, state: Vec<u8>) -> Result<(), PtyError> {
-        self.send_nowait(&PtydRequest::Checkpoint { id, state }).await
+        self.send(&codec::encode(&PtydRequest::Checkpoint { id, state })?).await
     }
 
-    async fn send_nowait(&mut self, req: &PtydRequest) -> Result<(), PtyError> {
-        self.drain_unsolicited()?;
-        let frame = codec::encode(req)?;
-        fdpass::send(&self.stream, &frame, None).await
-    }
-
-    /// Route whatever ptyd has already sent (child exits). Requests that carry no reply never
-    /// read, so without this a run of exits with no other traffic would fill ptyd's send buffer
-    /// and stall it on us while we stall on it.
-    fn drain_unsolicited(&mut self) -> Result<(), PtyError> {
-        loop {
-            match self.stream.try_read_buf(&mut self.buf) {
-                Ok(0) => return Err(PtyError::Closed),
-                Ok(_read) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(PtyError::os("read ptyd", e)),
-            }
-        }
-        while let Some(ev) = codec::try_decode::<PtydEvent>(&mut self.buf)? {
-            self.route_unsolicited(&ev);
-        }
-        Ok(())
-    }
-
-    /// Record a resize.
+    /// Record a resize, so the next host to attach starts at this size.
     pub async fn resize(&mut self, id: SessionId, size: TermSize) -> Result<(), PtyError> {
         self.expect_ok(&PtydRequest::Resize { id, size }).await
-    }
-
-    /// Signal the child.
-    pub async fn signal(&mut self, id: SessionId, signal: i32) -> Result<(), PtyError> {
-        self.expect_ok(&PtydRequest::Signal { id, signal }).await
     }
 
     /// Kill and forget.
@@ -136,9 +121,9 @@ impl PtydClient {
         self.expect_ok(&PtydRequest::Close { id }).await
     }
 
-    /// Enumerate.
+    /// Every session ptyd holds, attached or not.
     pub async fn list(&mut self) -> Result<Vec<SessionInfo>, PtyError> {
-        match self.call(&PtydRequest::List).await? {
+        match self.call(&PtydRequest::List).await?.0 {
             PtydEvent::Sessions(list) => Ok(list),
             other => Self::unexpected(other),
         }
@@ -149,16 +134,8 @@ impl PtydClient {
         self.expect_ok(&PtydRequest::Shutdown).await
     }
 
-    /// Wait for the next unsolicited event without sending anything (call from a dedicated
-    /// task when idle so `Exited` events flow promptly).
-    pub async fn pump(&mut self) -> Result<(), PtyError> {
-        let ev = self.next_event().await?;
-        self.route_unsolicited(&ev);
-        Ok(())
-    }
-
     async fn expect_ok(&mut self, req: &PtydRequest) -> Result<(), PtyError> {
-        match self.call(req).await? {
+        match self.call(req).await?.0 {
             PtydEvent::Ok => Ok(()),
             other => Self::unexpected(other),
         }
@@ -171,34 +148,59 @@ impl PtydClient {
         }
     }
 
-    async fn call(&mut self, req: &PtydRequest) -> Result<PtydEvent, PtyError> {
+    async fn send(&self, frame: &[u8]) -> Result<(), PtyError> {
+        fdpass::send(&self.stream, frame, None).await
+    }
+
+    /// Send a request and wait for its reply. `&mut self` keeps one request in flight per
+    /// sender, so the reader's queue of reply slots is in request order.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
+    async fn call(&mut self, req: &PtydRequest) -> Result<Reply, PtyError> {
         let frame = codec::encode(req)?;
-        fdpass::send(&self.stream, &frame, None).await?;
+        let (slot, reply) = oneshot::channel();
+        self.replies.send(slot).map_err(|_closed| PtyError::Closed)?;
+        self.send(&frame).await?;
+        reply.await.map_err(|_closed| PtyError::Closed)
+    }
+}
+
+/// Read ptyd until it hangs up: exits go to `exits`, anything else answers the oldest request.
+/// Returning drops `replies`, which fails every request still waiting.
+async fn read_loop(
+    stream: Arc<UnixStream>,
+    mut replies: mpsc::UnboundedReceiver<oneshot::Sender<Reply>>,
+    exits: mpsc::UnboundedSender<(SessionId, i32)>,
+) {
+    let mut inbox = fdpass::Inbox::default();
+    loop {
         loop {
-            let ev = self.next_event().await?;
+            let ev = match inbox.decode::<PtydEvent>() {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ptyd sent a frame that does not decode");
+                    return;
+                }
+            };
             if let PtydEvent::Exited { id, status } = ev {
-                let _ignored = self.exits.send((id, status));
+                let _ignored = exits.send((id, status));
                 continue;
             }
-            return Ok(ev);
-        }
-    }
-
-    fn route_unsolicited(&self, ev: &PtydEvent) {
-        if let PtydEvent::Exited { id, status } = *ev {
-            let _ignored = self.exits.send((id, status));
-        } else {
-            tracing::warn!(?ev, "ptyd sent an unexpected unsolicited event");
-        }
-    }
-
-    async fn next_event(&mut self) -> Result<PtydEvent, PtyError> {
-        loop {
-            if let Some(ev) = codec::try_decode::<PtydEvent>(&mut self.buf)? {
-                return Ok(ev);
+            // The fd rides on the first byte of its frame, so it is queued by now.
+            let fd = matches!(ev, PtydEvent::Attached { .. }).then(|| inbox.take_fd()).flatten();
+            match replies.try_recv() {
+                Ok(slot) => {
+                    let _ignored = slot.send((ev, fd));
+                }
+                Err(_none) => tracing::warn!(?ev, "ptyd replied to nothing"),
             }
-            if fdpass::recv(&self.stream, &mut self.buf, &mut self.fds).await? == 0 {
-                return Err(PtyError::Closed);
+        }
+        match inbox.recv(&stream).await {
+            Ok(0) => return,
+            Ok(_read) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "ptyd connection ended");
+                return;
             }
         }
     }

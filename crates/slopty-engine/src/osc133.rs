@@ -60,12 +60,16 @@ impl Scanner {
     /// ended. Bytes after it are not looked at (call again with them). `None` means the whole
     /// slice was consumed; a sequence still open at the end carries over to the next call.
     pub fn scan(&mut self, bytes: &[u8]) -> Option<Found> {
-        for (i, &b) in bytes.iter().enumerate() {
+        let mut i = 0;
+        while let Some(&b) = bytes.get(i) {
+            let at = i;
+            i = i.saturating_add(1);
             let done = match &mut self.state {
                 State::Ground => {
-                    if b == 0x1b {
-                        self.state = State::Esc;
-                    }
+                    // Output is mostly text: jump to the next escape rather than stepping to it.
+                    let skip = memchr::memchr(0x1b, bytes.get(at..).unwrap_or_default())?;
+                    self.state = State::Esc;
+                    i = at.saturating_add(skip).saturating_add(1);
                     None
                 }
                 State::Esc => {
@@ -102,7 +106,7 @@ impl Scanner {
             if let Some(found) = done {
                 self.state = State::Ground;
                 if let Some(mark) = found {
-                    return Some(Found { end: i.saturating_add(1), mark });
+                    return Some(Found { end: i, mark });
                 }
             }
         }
