@@ -1,10 +1,12 @@
-//! What the UI asks of a worker beyond the control stream: files up and down, and the bytes of
-//! a clipboard offer. Behind a trait so the UI's tests can record the calls.
+//! What the UI asks of a worker beyond the control stream: files up and down, the bytes of a
+//! clipboard offer, and a port of the worker served here. Behind a trait so the UI's tests can
+//! record the calls.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use slopty_core::XferId;
 use slopty_net::{ClientMsg, Connection};
 use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, XferMsg};
@@ -12,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::LinkEvent;
 use crate::clip::{ClipCache, fits_inline};
+use crate::tunnel::Forwards;
 use crate::xfer::{self, Uplink};
 
 /// Files and clipboard bytes to and from one worker.
@@ -35,6 +38,11 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// Answer the worker's fetch of this client's offer `generation`: inline when it fits,
     /// else on a bulk stream.
     fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>);
+
+    /// Serve the worker's loopback `port` on this machine, until the link goes, and say
+    /// where: the same port when it is free here, else the next free one. `None` on a link
+    /// that forwards nothing, or when no local port could be had.
+    fn forward(&self, port: u16) -> Option<u16>;
 }
 
 /// The [`Remote`] of a live link.
@@ -44,19 +52,22 @@ pub struct LinkRemote {
     clips: Arc<ClipCache>,
     events: mpsc::Sender<LinkEvent>,
     runtime: tokio::runtime::Handle,
+    /// The link's port forwards, shared with its control reader; `None` when it forwards none.
+    forwards: Option<Arc<Mutex<Forwards>>>,
 }
 
 impl LinkRemote {
     /// The remote of a link: its uplink and clipboard cache, where its failures are reported,
-    /// and the runtime its tasks run on.
+    /// the runtime its tasks run on, and its port forwards if it has any.
     #[must_use]
     pub const fn new(
         up: Uplink,
         clips: Arc<ClipCache>,
         events: mpsc::Sender<LinkEvent>,
         runtime: tokio::runtime::Handle,
+        forwards: Option<Arc<Mutex<Forwards>>>,
     ) -> Self {
-        Self { up, clips, events, runtime }
+        Self { up, clips, events, runtime, forwards }
     }
 
     const fn conn(&self) -> &Connection {
@@ -128,5 +139,12 @@ impl Remote for LinkRemote {
                 tracing::debug!(generation, error = %e, "clipboard bulk");
             }
         });
+    }
+
+    fn forward(&self, port: u16) -> Option<u16> {
+        let forwards = self.forwards.as_ref()?;
+        // A listener is a tokio socket and its accept loop a tokio task: both need the runtime.
+        let _runtime = self.runtime.enter();
+        forwards.lock().pin(port)
     }
 }

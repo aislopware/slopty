@@ -1,6 +1,11 @@
 //! A browser tile: a web page, usually a server on the worker reached through a forwarded
 //! port, in a native web view laid over the tile.
 //!
+//! The item's address is the worker's (`http://localhost:5173/` means port 5173 on the
+//! worker), so every client of the worker opens the same page. Each client serves that port
+//! on its own loopback, at whatever local port it could get, and rewrites the address to it
+//! before the page loads ([`local_url`]).
+//!
 //! GPUI cannot draw a page, so the page is the platform's web view (`slopty_platform::web`),
 //! a native view that always draws above everything GPUI draws. The workspace measures the
 //! tile's body every frame and asks [`placement`] where the page goes: over the body, cut to
@@ -20,7 +25,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, canvas, div, img,
     px,
 };
-use slopty_client::layout::Rect;
+use slopty_client::layout::{Rect, WorkerKey};
 use slopty_core::ItemId;
 use slopty_theme::Theme;
 
@@ -35,12 +40,14 @@ pub const MIN_ALPHA: f32 = 0.05;
 const POLL: Duration = Duration::from_secs(1);
 
 /// What GPUI is drawing over the strip this frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cover {
     /// An overlay: the palette, the picker, a titlebar menu, a dialog of the app's.
     pub overlay: bool,
     /// The overview, open or on its way.
     pub overview: bool,
+    /// Where a toast was drawn, at the foot of the strip: pages end above it.
+    pub toast: Option<Rect>,
 }
 
 /// Where a page goes this frame.
@@ -64,15 +71,22 @@ pub enum Placement {
 #[must_use]
 pub fn placement(body: Option<Rect>, strip: Rect, alpha: f32, cover: Cover) -> Placement {
     let Some(frame) = body else { return Placement::Hidden };
-    let visible = frame.w >= 1.0 && frame.h >= 1.0 && frame.intersects(&strip);
+    // A native page draws over everything, so the clip stops where a toast starts.
+    let clip = match cover.toast {
+        Some(toast) if toast.y < strip.y + strip.h => {
+            Rect { h: (toast.y - strip.y).max(0.0), ..strip }
+        }
+        _ => strip,
+    };
+    let visible = frame.w >= 1.0 && frame.h >= 1.0 && clip.h >= 1.0 && frame.intersects(&clip);
     if cover.overlay || cover.overview || alpha < MIN_ALPHA || !visible {
         return Placement::Hidden;
     }
-    Placement::Shown { clip: strip, frame, alpha: alpha.min(1.0) }
+    Placement::Shown { clip, frame, alpha: alpha.min(1.0) }
 }
 
 /// Where a tile's body was drawn, and in which of the workspace's frames.
-type Drawn = Rc<Cell<Option<(u64, Bounds<Pixels>)>>>;
+pub(crate) type Drawn = Rc<Cell<Option<(u64, Bounds<Pixels>)>>>;
 
 /// What a browser tile tells the workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +115,14 @@ pub struct PageState {
 /// The view of one browser item.
 pub struct BrowserView {
     id: ItemId,
+    worker: WorkerKey,
+    /// The item's address, as the worker sees it.
     url: String,
+    /// The address this client loads: `url` with a loopback port moved to where this client
+    /// serves it. `None` until the worker's port is served here.
+    local: Option<String>,
+    /// The address the open page was last given.
+    loaded: Option<String>,
     page: PageState,
     /// Where the body was drawn, and in which frame of the workspace's.
     drawn: Drawn,
@@ -128,12 +149,16 @@ impl std::fmt::Debug for BrowserView {
 impl EventEmitter<BrowserEvent> for BrowserView {}
 
 impl BrowserView {
-    /// A tile for `url`; the page itself opens the first time the tile is shown.
+    /// A tile for `url` on `worker`; the page itself opens the first time the tile is shown
+    /// once the address is served here ([`Self::set_local`]).
     #[must_use]
-    pub fn new(id: ItemId, url: &str, theme: Theme) -> Self {
+    pub fn new(id: ItemId, worker: WorkerKey, url: &str, theme: Theme) -> Self {
         Self {
             id,
+            worker,
             url: url.to_owned(),
+            local: None,
+            loaded: None,
             page: PageState { url: url.to_owned(), loading: true, ..PageState::default() },
             drawn: Rc::default(),
             alpha: 1.0,
@@ -150,10 +175,55 @@ impl BrowserView {
         self.id
     }
 
-    /// The address the item names.
+    /// The address the item names, as the worker sees it.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The worker the item is on.
+    #[must_use]
+    pub const fn worker(&self) -> WorkerKey {
+        self.worker
+    }
+
+    /// The address this client loads, once it has one.
+    #[must_use]
+    pub fn local_url(&self) -> Option<&str> {
+        self.local.as_deref()
+    }
+
+    /// Where this client reaches the page. `None` forgets it (the worker's link came back,
+    /// so the port is served anew); an address the open page is not on loads in it.
+    pub fn set_local(&mut self, local: Option<String>, cx: &mut Context<Self>) {
+        if self.local == local {
+            return;
+        }
+        if let Some(address) = &local
+            && self.native.open()
+            && self.loaded.as_ref() != Some(address)
+        {
+            tracing::info!(item = %self.id, %address, "the page moves to a new local port");
+            self.native.load(address);
+            self.loaded = Some(address.clone());
+        }
+        self.local = local;
+        cx.notify();
+    }
+
+    /// The page cannot be reached from here; `why` shows in the body, and "↻" tries again.
+    pub fn unreachable(&mut self, why: String, cx: &mut Context<Self>) {
+        self.page.failed = Some(why);
+        self.page.loading = false;
+        self.local = None;
+        self.native.hide();
+        cx.notify();
+    }
+
+    /// The address this client loads has to be worked out (again).
+    #[must_use]
+    pub const fn needs_local(&self) -> bool {
+        self.local.is_none() && self.page.failed.is_none()
     }
 
     /// What the page shows, as last read.
@@ -166,10 +236,17 @@ impl BrowserView {
     /// readback); the last read when there is no view.
     #[must_use]
     pub fn live_page(&self) -> PageState {
-        self.native.page().map_or_else(
-            || self.page.clone(),
-            |page| PageState { failed: self.page.failed.clone(), ..page },
-        )
+        self.native.page().map_or_else(|| self.page.clone(), |page| self.as_the_worker_sees(page))
+    }
+
+    /// `page` read from the view, its address put back on the worker's port and the last
+    /// failure kept.
+    fn as_the_worker_sees(&self, page: PageState) -> PageState {
+        let url = match &self.loaded {
+            Some(loaded) => worker_url(&page.url, loaded, &self.url),
+            None => page.url,
+        };
+        PageState { url, failed: self.page.failed.clone(), ..page }
     }
 
     /// Whether the page is on screen now.
@@ -221,7 +298,8 @@ impl BrowserView {
         match placement {
             Placement::Shown { clip, frame, alpha } if self.page.failed.is_none() => {
                 if !self.native.open() {
-                    self.open(window, cx);
+                    let Some(address) = self.local.clone() else { return };
+                    self.open(&address, window, cx);
                 }
                 self.native.place(clip, frame, alpha);
             }
@@ -235,17 +313,18 @@ impl BrowserView {
         }
     }
 
-    fn open(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn open(&mut self, address: &str, window: &Window, cx: &mut Context<Self>) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<native::Event>();
         let sink: Rc<dyn Fn(native::Event)> = Rc::new(move |event| {
             let _sent = tx.send(event);
         });
-        if !self.native.create(window, &self.url, sink) {
+        if !self.native.create(window, address, sink) {
             self.page.failed = Some("This device has no web view".to_owned());
             cx.notify();
             return;
         }
-        tracing::info!(item = %self.id, url = %self.url, "browser tile opened");
+        self.loaded = Some(address.to_owned());
+        tracing::info!(item = %self.id, url = %self.url, %address, "browser tile opened");
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = rx.recv().await {
                 if this.update(cx, |view, cx| view.native_event(event, cx)).is_err() {
@@ -305,7 +384,7 @@ impl BrowserView {
     /// Read the page's title and address again; a change repaints the header.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self.native.page() else { return };
-        let page = PageState { failed: self.page.failed.clone(), ..page };
+        let page = self.as_the_worker_sees(page);
         if page != self.page {
             self.page = page;
             cx.notify();
@@ -322,7 +401,10 @@ impl BrowserView {
     /// Load the page again; a failed page gets another try.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         if self.page.failed.take().is_some() {
-            self.native.load(&self.url);
+            // Never opened: the port is asked for again on the next frame.
+            if let Some(address) = &self.loaded {
+                self.native.load(address);
+            }
         } else {
             self.native.reload();
         }
@@ -339,6 +421,25 @@ impl BrowserView {
     /// Take the keyboard back from the page.
     pub fn release(&self) {
         self.native.release();
+    }
+
+    /// Give the page the keyboard and show the platform's key handling `key` (`cmd-a`,
+    /// `cmd-shift-z`), as a key down would: the self-test's way in. Whether it was taken for
+    /// the page.
+    #[must_use]
+    pub fn press(&self, key: &str) -> bool {
+        self.native.focus();
+        let mut command = false;
+        let mut shift = false;
+        let mut last = "";
+        for part in key.split('-') {
+            match part {
+                "cmd" => command = true,
+                "shift" => shift = true,
+                other => last = other,
+            }
+        }
+        self.native.press(last, command, shift)
     }
 
     /// The header's words: the page's title, else its address without the scheme.
@@ -389,6 +490,70 @@ pub fn web_url(text: &str) -> Option<String> {
     let text = text.trim();
     let url = if text.contains("://") { text.to_owned() } else { format!("http://{text}") };
     is_web_url(&url).then_some(url)
+}
+
+/// The scheme and authority of an address, and the rest (path, query, fragment).
+fn split_origin(url: &str) -> Option<(&str, &str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    Some((scheme, authority, tail))
+}
+
+/// The worker's port an address names, when its host is the worker's loopback.
+///
+/// Those hosts are `localhost`, `127.0.0.1` and `[::1]`; the port is the one this client has
+/// to serve for the page to load. `None` for any other host, which every client reaches as it
+/// is.
+#[must_use]
+pub fn worker_port(url: &str) -> Option<u16> {
+    let (scheme, authority, _) = split_origin(url)?;
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let (host, after) = v6.split_once(']')?;
+        (host, after.strip_prefix(':'))
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    if !loopback {
+        return None;
+    }
+    match port {
+        Some(port) => port.parse().ok(),
+        None if scheme.eq_ignore_ascii_case("https") => Some(443),
+        None => Some(80),
+    }
+}
+
+/// `url` with its loopback port moved to `local`, where this client serves the worker's.
+///
+/// The host stays (it is the page's origin, for cookies and redirects), except `[::1]`: the
+/// forward listens on IPv4 only, so it becomes `localhost`.
+#[must_use]
+pub fn local_url(url: &str, local: u16) -> String {
+    let Some((scheme, authority, tail)) = split_origin(url) else { return url.to_owned() };
+    let host = if authority.starts_with('[') {
+        "localhost"
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(host, _)| host)
+    };
+    format!("{scheme}://{host}:{local}{tail}")
+}
+
+/// `page`, an address the view reports, as the worker would name it: on the origin this
+/// client `loaded` from, the item's own origin (`item`) goes back in; elsewhere, unchanged.
+#[must_use]
+pub fn worker_url(page: &str, loaded: &str, item: &str) -> String {
+    let (Some((_, _, tail)), Some((ls, la, _)), Some((is, ia, _))) =
+        (split_origin(page), split_origin(loaded), split_origin(item))
+    else {
+        return page.to_owned();
+    };
+    let on_loaded = split_origin(page).is_some_and(|(s, a, _)| s == ls && a == la);
+    if on_loaded { format!("{is}://{ia}{tail}") } else { page.to_owned() }
 }
 
 /// A PNG as GPUI keeps pictures: premultiplied BGRA.
@@ -566,6 +731,10 @@ mod native {
                 view.release();
             }
         }
+
+        pub fn press(&self, key: &str, command: bool, shift: bool) -> bool {
+            self.view.as_ref().is_some_and(|v| v.press(key, command, shift))
+        }
     }
 }
 
@@ -593,8 +762,29 @@ mod tests {
     #[test]
     fn anything_gpui_draws_on_top_hides_the_page() {
         let covered = |cover| placement(Some(BODY), STRIP, 1.0, cover);
-        assert_eq!(covered(Cover { overlay: true, overview: false }), Placement::Hidden);
-        assert_eq!(covered(Cover { overlay: false, overview: true }), Placement::Hidden);
+        assert_eq!(covered(Cover { overlay: true, ..Cover::default() }), Placement::Hidden);
+        assert_eq!(covered(Cover { overview: true, ..Cover::default() }), Placement::Hidden);
+    }
+
+    #[test]
+    fn a_toast_cuts_the_page_short_above_it() {
+        let toast = Rect { x: 400.0, y: 740.0, w: 400.0, h: 36.0 };
+        let cover = Cover { toast: Some(toast), ..Cover::default() };
+        let above = Rect { h: 700.0, ..STRIP };
+        assert_eq!(
+            placement(Some(BODY), STRIP, 1.0, cover),
+            Placement::Shown { clip: above, frame: BODY, alpha: 1.0 },
+            "the page ends where the toast begins"
+        );
+        let low = Rect { y: 745.0, h: 40.0, ..BODY };
+        assert_eq!(placement(Some(low), STRIP, 1.0, cover), Placement::Hidden, "all under it");
+        let gone = Rect { y: 900.0, ..toast };
+        let cover = Cover { toast: Some(gone), ..Cover::default() };
+        assert_eq!(
+            placement(Some(BODY), STRIP, 1.0, cover),
+            Placement::Shown { clip: STRIP, frame: BODY, alpha: 1.0 },
+            "a toast below the strip cuts nothing"
+        );
     }
 
     #[test]
@@ -628,6 +818,33 @@ mod tests {
         assert_eq!(web_url("ftp://a.test"), None);
         assert_eq!(short_url("http://localhost:5173/"), "localhost:5173");
         assert_eq!(short_url("http://localhost:5173/app/"), "localhost:5173/app/");
+    }
+
+    #[test]
+    fn a_loopback_address_is_the_worker_s_and_moves_to_the_local_port() {
+        assert_eq!(worker_port("http://localhost:5173/"), Some(5173));
+        assert_eq!(worker_port("http://LOCALHOST:5173"), Some(5173));
+        assert_eq!(worker_port("http://127.0.0.1:8080/a?b#c"), Some(8080));
+        assert_eq!(worker_port("http://[::1]:3000/"), Some(3000));
+        assert_eq!(worker_port("http://localhost/"), Some(80));
+        assert_eq!(worker_port("https://localhost/"), Some(443));
+        assert_eq!(worker_port("https://example.test:8443/"), None, "not the worker's");
+        assert_eq!(worker_port("http://localhost.example.test/"), None);
+
+        assert_eq!(
+            local_url("http://localhost:5173/app?x=1", 5174),
+            "http://localhost:5174/app?x=1"
+        );
+        assert_eq!(local_url("http://127.0.0.1:8080", 8081), "http://127.0.0.1:8081");
+        assert_eq!(local_url("http://[::1]:3000/", 3001), "http://localhost:3001/");
+        assert_eq!(local_url("http://localhost/", 8000), "http://localhost:8000/");
+
+        let (loaded, item) = ("http://localhost:5174/", "http://localhost:5173/");
+        assert_eq!(
+            worker_url("http://localhost:5174/docs#a", loaded, item),
+            "http://localhost:5173/docs#a"
+        );
+        assert_eq!(worker_url("https://example.test/", loaded, item), "https://example.test/");
     }
 
     #[test]

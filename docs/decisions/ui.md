@@ -1067,22 +1067,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   theme tokens. The editor takes a highlighter factory, so ours is `highlight::editor`: it
   keeps the last parse's colours per line, moves them with each edit (`editor::splice`, lines
   inserted or removed shift the rows below), and parses the whole text again on a background
-  thread 60 ms after the typing stops. Measured (release, the ignored
-  `highlight::editor::tests::timing_of_a_frame_and_a_keystroke`, a 2 000-line Rust file):
-  styling the 60 visible rows costs 16.2 µs a frame, and a newline's splice about 10.6 µs a
-  keystroke, most of it cloning the 2 000 line handles. The full parse stays the 165 ms
-  measured on 2026-09-12, off the main thread, so a keystroke never waits for it and the
-  colours of an edited line catch up once the typing pauses.
+  thread 60 ms after the typing stops. What that costs a frame and a keystroke is in
+  MEASUREMENTS.md (2026-09-25, "the editor's highlighter"): tens of microseconds, so a
+  keystroke never waits for a parse, and an edited line's colours catch up once the typing
+  pauses.
   Saving and the disk:
   - ⌘S sends the whole text with the modification time it was based on. The worker refuses
     a save when the file changed since then, and the tile says so. While a save is out, a
     second ⌘S sends nothing.
-  - A read drops exactly one final newline. The tile puts it back from the size: an
-    unclipped read with `size == text.len() + 1` had one. This is exact for every read the
-    editor can save (a clipped read is read-only), but carrying the flag on the wire would
-    be plainer.
+  - A read drops the file's final newline and says whether there was one
+    (`FileRead::Text.final_newline`); a save puts it back.
   - The dirty mark is a small dot in the header, before the actions (a11y "Unsaved
-    changes"). The trouble line is one row above the text, in the muted tone, with "Reload"
+    changes"). The header carries no text pills: find is ⌘F and the palette's "Find in
+    terminal or file", and the file leaves the app by its proxy, a small page drawn before the
+    title as a Mac document window has one (a11y "Drag the file out"). Not the title itself:
+    dragging the header moves the tile. The trouble line is one row above the text, in the muted tone, with "Reload"
     and "Overwrite" as the kit's small buttons. No modal: a change on disk under an edit is
     ordinary when an agent works in the same tree.
   - The text replaced by a read waits for the next render (`apply_pending`), since the
@@ -1110,6 +1109,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and focuses the tile, the page's fields raise the keyboard themselves, and hiding the page
   ends their editing. A hardware keyboard's ⌃Tab and double Esc reach the page there, since
   UIKit has no monitor that sees keys first.
+  The GPUI view answers every key equivalent itself and never passes one to its subviews,
+  so a page with the keyboard would lose ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z to the workspace. The
+  monitor takes those (`web::edit_for`, by the character the key types) and does them in the
+  page: the edit actions up the responder chain from the page's first responder, undo and
+  redo on the web view's own undo manager. The app e2e shows the monitor those keys on the
+  page's window (`Command::PageKeys`) and reads the page's own undo, redo and select-all back
+  from its title; copy, cut and paste take the same path and are left to the unit test,
+  since they would touch the machine's clipboard.
   The snapshot is `takeSnapshot` → PNG → a BGRA `RenderImage` decoded off the main thread,
   drawn as the body's image. The page's title and address are read after each navigation
   and once a second while it is open, since scripts change them without navigating. App

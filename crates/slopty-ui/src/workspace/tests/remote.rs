@@ -20,10 +20,13 @@ enum Call {
     Upload(XferId, Vec<PathBuf>, Dest),
     Cancel(XferId),
     SendClip(u64, String, Vec<u8>),
+    Forward(u16),
 }
 
+/// Records the calls; serves a worker port here `offset` ports up, as a client whose ports
+/// are partly taken would.
 #[derive(Debug)]
-struct Recorder(mpsc::UnboundedSender<Call>);
+struct Recorder(mpsc::UnboundedSender<Call>, u16);
 
 impl Remote for Recorder {
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
@@ -45,12 +48,26 @@ impl Remote for Recorder {
     fn send_clip(&self, generation: u64, uti: String, bytes: Vec<u8>) {
         self.0.send(Call::SendClip(generation, uti, bytes)).unwrap();
     }
+
+    fn forward(&self, port: u16) -> Option<u16> {
+        self.0.send(Call::Forward(port)).unwrap();
+        port.checked_add(self.1)
+    }
 }
 
 /// A worker connected with a recording [`Remote`], and a pasteboard in memory.
 fn connect_remote(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
+) -> (Fake, mpsc::UnboundedReceiver<Call>, Rc<Memory>) {
+    connect_remote_at(view, cx, 0)
+}
+
+/// [`connect_remote`], the worker's ports served here `offset` ports up.
+fn connect_remote_at(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    offset: u16,
 ) -> (Fake, mpsc::UnboundedReceiver<Call>, Rc<Memory>) {
     let (tx, rx) = mpsc::channel(256);
     let (calls, recorded) = mpsc::unbounded_channel();
@@ -63,7 +80,7 @@ fn connect_remote(
     view.update_in(cx, |v, _window, cx| {
         v.set_pasteboard(shared);
         v.add_worker(key, "studio".to_owned(), cx);
-        let remote: Arc<dyn Remote> = Arc::new(Recorder(calls));
+        let remote: Arc<dyn Remote> = Arc::new(Recorder(calls, offset));
         let link = WorkerLink { me, out: tx, open_screen: factory, remote: Some(remote) };
         v.connect_worker(key, "studio".to_owned(), link, Vec::new(), cx);
         v.apply_sync(key, ItemSync::Snapshot { version: 0, items: Vec::new() }, cx);
@@ -281,7 +298,8 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("port-out-5173", tile.item)).is_some(), "and its arrow");
     let notice = view.read_with(cx, WorkspaceView::toast_text);
     assert_eq!(notice.as_deref(), Some("Port 8080 is taken here; forwarded on 8081"));
-    // The number opens the page in a tile on the shell's worker, at the port served here.
+    // The number opens the page in a tile on the shell's worker, named by the worker's port:
+    // each client serves it where it can.
     let mut studio = studio;
     studio.drain();
     let chip = cx.debug_bounds(selector("port-8080", tile.item)).unwrap();
@@ -297,8 +315,53 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
             _ => None,
         })
         .collect();
-    assert_eq!(opened, ["http://localhost:8081"]);
+    assert_eq!(opened, ["http://localhost:8080/"]);
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, Vec::new(), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_none(), "gone with the server");
+}
+
+/// Two clients of one worker show one browser item, the worker's address; each loads it from
+/// the local port it serves the worker's port on, and asks its own link for that port.
+#[gpui::test]
+fn a_browser_item_is_the_worker_s_address_served_at_each_client_s_own_port(
+    cx: &mut TestAppContext,
+) {
+    let url = "http://localhost:5173/app";
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Browser { url: url.to_owned() },
+        sleeping: false,
+        name: None,
+    };
+    let mut loaded = Vec::new();
+    for offset in [0, 1] {
+        let (view, cx) = workspace(cx);
+        let (studio, mut calls, _board) = connect_remote_at(&view, cx, offset);
+        let items = vec![item.clone()];
+        view.update_in(cx, |v, _window, cx| {
+            v.apply_sync(studio.key, ItemSync::Snapshot { version: 1, items }, cx);
+        });
+        cx.run_until_parked();
+        let (named, local) = view.read_with(cx, |v, cx| {
+            let b = v.browser(item.id).map(|b| b.read(cx));
+            (b.map(|b| b.url().to_owned()), b.and_then(|b| b.local_url().map(str::to_owned)))
+        });
+        assert_eq!(named.as_deref(), Some(url), "the item keeps the worker's address");
+        loaded.push(local);
+        let mut forwards = Vec::new();
+        while let Ok(call) = calls.try_recv() {
+            if let Call::Forward(port) = call {
+                forwards.push(port);
+            }
+        }
+        assert_eq!(forwards, [5173], "asked once, for the worker's port");
+    }
+    assert_eq!(
+        loaded,
+        [
+            Some("http://localhost:5173/app".to_owned()),
+            Some("http://localhost:5174/app".to_owned())
+        ]
+    );
 }

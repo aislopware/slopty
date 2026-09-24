@@ -327,10 +327,10 @@ impl WorkspaceView {
                         let url = f.url()?;
                         let local = f.local.unwrap_or(f.port.number);
                         let detail = format!("{} · {shell}", f.port.process);
-                        let tile = format!("Open localhost:{local} in a tile");
+                        let tile = format!("Open localhost:{} in a tile", f.port.number);
                         let browser = format!("Open localhost:{local} in the browser");
                         Some([
-                            PaletteItem::in_tile(&tile, &detail, &url),
+                            PaletteItem::in_tile(&tile, &detail, &f.worker_url()),
                             PaletteItem::url(&browser, &detail, &url),
                         ])
                     })

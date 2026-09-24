@@ -315,6 +315,7 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
         more_lines: 0,
         size: 8,
         modified_ms: 1_000,
+        final_newline: true,
     };
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {

@@ -32,10 +32,17 @@ pub struct Forward {
 }
 
 impl Forward {
-    /// The address to open in a browser.
+    /// The address to open in a browser here.
     #[must_use]
     pub fn url(&self) -> Option<String> {
         self.local.map(|local| format!("http://localhost:{local}"))
+    }
+
+    /// The address as the worker names it, the same on every client: what a browser tile's
+    /// item holds.
+    #[must_use]
+    pub fn worker_url(&self) -> String {
+        format!("http://localhost:{}/", self.port.number)
     }
 }
 
@@ -49,6 +56,9 @@ pub struct Forwards {
     conn: Connection,
     /// Ports each session reported.
     sessions: HashMap<SessionId, Vec<Port>>,
+    /// Ports asked for by name (a browser tile's address), kept while the link lives whether
+    /// or not a session lists them.
+    pinned: BTreeSet<u16>,
     /// One listener per worker port, whichever sessions report it.
     listeners: BTreeMap<u16, Listener>,
 }
@@ -63,18 +73,51 @@ impl Forwards {
     /// Forwards over `conn`, none yet.
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        Self { conn, sessions: HashMap::new(), listeners: BTreeMap::new() }
+        Self { conn, sessions: HashMap::new(), pinned: BTreeSet::new(), listeners: BTreeMap::new() }
     }
 
     /// `session` listens on `ports` now (the whole set). Listeners start for new ports and stop
-    /// for ports no session has any more; returns the session's forwards.
+    /// for ports neither a session nor a pin has any more; returns the session's forwards.
+    /// Call it inside the link's runtime.
     pub fn update(&mut self, session: SessionId, ports: Vec<Port>) -> Vec<Forward> {
         if ports.is_empty() {
             self.sessions.remove(&session);
         } else {
             self.sessions.insert(session, ports.clone());
         }
-        let wanted: BTreeSet<u16> = self.sessions.values().flatten().map(|p| p.number).collect();
+        self.listen();
+        ports
+            .into_iter()
+            .map(|port| {
+                let local = self.local(port.number);
+                Forward { port, local }
+            })
+            .collect()
+    }
+
+    /// Serve the worker's `port` here until the link goes, whether or not a session lists it;
+    /// where it is reachable here. Call it inside the link's runtime.
+    pub fn pin(&mut self, port: u16) -> Option<u16> {
+        self.pinned.insert(port);
+        self.listen();
+        self.local(port)
+    }
+
+    /// Where the worker's `port` is reachable here, if it is served.
+    #[must_use]
+    pub fn local(&self, port: u16) -> Option<u16> {
+        self.listeners.get(&port).and_then(|l| l.local)
+    }
+
+    /// A listener for every port a session lists or a pin holds, and none for the rest.
+    fn listen(&mut self) {
+        let wanted: BTreeSet<u16> = self
+            .sessions
+            .values()
+            .flatten()
+            .map(|p| p.number)
+            .chain(self.pinned.iter().copied())
+            .collect();
         self.listeners.retain(|port, listener| {
             let keep = wanted.contains(port);
             if !keep && let Some(task) = listener.task.take() {
@@ -97,13 +140,6 @@ impl Forwards {
             };
             self.listeners.insert(port, listener);
         }
-        ports
-            .into_iter()
-            .map(|port| {
-                let local = self.listeners.get(&port.number).and_then(|l| l.local);
-                Forward { port, local }
-            })
-            .collect()
     }
 
     /// Stop every listener (the link is going).
@@ -115,6 +151,7 @@ impl Forwards {
         }
         self.listeners.clear();
         self.sessions.clear();
+        self.pinned.clear();
     }
 }
 

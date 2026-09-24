@@ -13,7 +13,13 @@ type Events = Rc<RefCell<Vec<FileViewEvent>>>;
 
 fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
     let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));
-    FileRead::Text { text: text.to_owned(), more_lines: 0, size, modified_ms }
+    FileRead::Text {
+        text: text.to_owned(),
+        more_lines: 0,
+        size,
+        modified_ms,
+        final_newline: newline,
+    }
 }
 
 /// A tile for `path` in its own window, its events recorded, drawn once.
@@ -181,8 +187,13 @@ fn a_clean_tile_takes_a_change_on_disk_and_tints_the_lines(cx: &mut TestAppConte
 #[gpui::test]
 fn a_clipped_file_opens_read_only_with_the_reason(cx: &mut TestAppContext) {
     let (view, events, cx) = tile(cx, "/w/big.log");
-    let read =
-        FileRead::Text { text: "first".to_owned(), more_lines: 12, size: 40_000, modified_ms: 1 };
+    let read = FileRead::Text {
+        text: "first".to_owned(),
+        more_lines: 12,
+        size: 40_000,
+        modified_ms: 1,
+        final_newline: false,
+    };
     arrives(&view, cx, read);
     view.read_with(cx, |v, _| {
         assert_eq!(v.read_only(), Some("Read-only: longer than 2000 lines"));

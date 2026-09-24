@@ -70,6 +70,43 @@ pub struct Page {
 
 type Sink = Rc<dyn Fn(WebEvent)>;
 
+/// An editing command a page with the keyboard takes from a ⌘ key. The GPUI view answers
+/// every key equivalent before its subviews see one, so these are handed to the page
+/// directly instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    /// ⌘C.
+    Copy,
+    /// ⌘X.
+    Cut,
+    /// ⌘V.
+    Paste,
+    /// ⌘A.
+    SelectAll,
+    /// ⌘Z.
+    Undo,
+    /// ⇧⌘Z.
+    Redo,
+}
+
+/// The editing command of a key: `key` is the character it types without modifiers (so the
+/// layout decides, as it does for the Edit menu), `other` any of ⌃ and ⌥.
+#[must_use]
+pub fn edit_for(key: &str, command: bool, shift: bool, other: bool) -> Option<Edit> {
+    if !command || other {
+        return None;
+    }
+    match (key.to_lowercase().as_str(), shift) {
+        ("c", false) => Some(Edit::Copy),
+        ("x", false) => Some(Edit::Cut),
+        ("v", false) => Some(Edit::Paste),
+        ("a", false) => Some(Edit::SelectAll),
+        ("z", false) => Some(Edit::Undo),
+        ("z", true) => Some(Edit::Redo),
+        _ => None,
+    }
+}
+
 struct DelegateIvars {
     sink: Sink,
 }
@@ -111,5 +148,24 @@ impl Delegate {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars { sink });
         // SAFETY: `NSObject`'s `init` on a freshly allocated instance with ivars set.
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_edit_keys_go_to_the_page_and_nothing_else_does() {
+        assert_eq!(edit_for("c", true, false, false), Some(Edit::Copy));
+        assert_eq!(edit_for("x", true, false, false), Some(Edit::Cut));
+        assert_eq!(edit_for("v", true, false, false), Some(Edit::Paste));
+        assert_eq!(edit_for("a", true, false, false), Some(Edit::SelectAll));
+        assert_eq!(edit_for("z", true, false, false), Some(Edit::Undo));
+        assert_eq!(edit_for("Z", true, true, false), Some(Edit::Redo), "⇧ reports a capital");
+        assert_eq!(edit_for("c", false, false, false), None, "a plain c is typing");
+        assert_eq!(edit_for("c", true, false, true), None, "⌥⌘C is not copy");
+        assert_eq!(edit_for("v", true, true, false), None, "⇧⌘V is not paste");
+        assert_eq!(edit_for("t", true, false, false), None, "⌘T stays the workspace's");
     }
 }

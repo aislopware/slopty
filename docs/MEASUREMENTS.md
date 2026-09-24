@@ -3478,3 +3478,26 @@ the pump was seldom behind (median p50 0.86 against 0.96 ms); the tails in both 
 machine's load, not either path. What the change removes that no loopback run shows is the
 pump's own failure: any send error, `TooLarge` included, ended the connection's media, where a
 datagram cut for a stale size now costs only itself (`a_too_large_datagram_costs_itself_and_a_closed_link_takes_nothing`).
+
+## 2026-09-25 — the editor's highlighter: a frame and a keystroke
+
+The file tile's body is gpui-kit's code editor with our syntect highlighter
+(`slopty_ui::highlight::editor`). What it costs on the UI thread, on a 2 000-line Rust file
+(the worker's read cap): styling the 60 rows a tile shows, which the editor asks for every
+frame it paints, and moving the colours below a typed newline (`editor::splice`), which runs
+on every edit. The full parse stays off the UI thread (2026-09-12: ≈ 165 ms for 2 000 lines)
+and starts 60 ms after the typing stops. Release, mac-studio, two runs (the second at a load
+average of 8.7 from other sessions):
+
+```
+cargo test -p slopty-ui --release --lib timing_of_a_frame_and_a_keystroke -- --ignored --nocapture
+```
+
+| run | 60 rows styled, per frame | a newline spliced, per keystroke |
+| --- | --- | --- |
+| 1 | 16.2 µs | 10.6 µs |
+| 2 | 18.4 µs | 11.0 µs |
+
+Both are two to three orders under a 16.7 ms frame. Most of the splice is cloning the
+2 000 per-line handles (`Arc<[Span]>`); a keystroke on a line recolours that line only when the
+next background parse lands.

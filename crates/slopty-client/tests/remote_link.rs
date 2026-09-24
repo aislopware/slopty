@@ -1,6 +1,7 @@
 //! The client's link against a scripted worker in-process, over UDP on loopback: an upload
 //! resumed after the worker cut its stream, a download, a clipboard representation fetched on
-//! paste, and a port forwarded to a real local connection.
+//! paste, a port forwarded to a real local connection, and one port of the worker served by
+//! two clients on this machine at two local ports.
 
 #[cfg(test)]
 mod tests {
@@ -273,5 +274,47 @@ mod tests {
         tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
         // The port the session no longer lists is let go: it can be bound again.
         drop(std::net::TcpListener::bind(("127.0.0.1", wanted)).unwrap());
+    }
+
+    /// A browser tile names the worker's port; each client serves it where it can. Two clients
+    /// on one machine asking for the same worker port get two local ports, each reaching that
+    /// port on its worker, and a pin outlives the sessions' port lists.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_clients_serve_one_worker_port_on_their_own_local_ports() {
+        let (mut first, first_link, mut first_events) = pair().await;
+        let (second, second_link, _second_events) = pair().await;
+        let wanted = free_port();
+        let here = first_link.remote().forward(wanted);
+        let there = second_link.remote().forward(wanted);
+        assert_eq!(here, Some(wanted), "the first client gets the worker's own port");
+        let there = there.unwrap();
+        assert_ne!(there, wanted, "the second moves to a free one");
+        assert_eq!(second_link.remote().forward(wanted), Some(there), "asking again is stable");
+
+        let worker = {
+            let conn = second.conn.clone();
+            tokio::spawn(async move {
+                let (open, mut send, _rx) = streams::accept_tunnel(&conn).await.unwrap();
+                send.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+                send.finish().unwrap();
+                open.port
+            })
+        };
+        let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", there)).await.unwrap();
+        browser.shutdown().await.unwrap();
+        let mut answer = Vec::new();
+        tokio::time::timeout(WAIT, browser.read_to_end(&mut answer)).await.unwrap().unwrap();
+        assert_eq!(answer, b"HTTP/1.1 204 No Content\r\n\r\n");
+        let reached = tokio::time::timeout(WAIT, worker).await.unwrap().unwrap();
+        assert_eq!(reached, wanted, "the local port reaches the worker's port, not its own");
+
+        // A session that listed the port and stops keeps the pinned forward up.
+        let session = SessionId::new();
+        let ports = vec![port(wanted, session)];
+        first.tx.send(&WorkerMsg::Ports { session, ports }).await.unwrap();
+        assert_eq!(forwarded(&mut first_events).await[0].local, Some(wanted), "one listener");
+        first.tx.send(&WorkerMsg::Ports { session, ports: Vec::new() }).await.unwrap();
+        assert!(forwarded(&mut first_events).await.is_empty());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", wanted)).is_err(), "still served");
     }
 }

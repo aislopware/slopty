@@ -84,15 +84,9 @@ struct Version {
 }
 
 impl Version {
-    /// The version a text read describes; the newline is exact because an unclipped read
-    /// drops exactly one trailing newline, and the size on disk says whether there was one.
-    fn of(text: &str, more_lines: u32, size: u64, modified_ms: u64) -> Self {
-        let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
-        Self {
-            text: text.to_owned(),
-            newline: more_lines == 0 && size == len.saturating_add(1),
-            modified_ms,
-        }
+    /// The version a text read describes.
+    fn of(text: &str, final_newline: bool, modified_ms: u64) -> Self {
+        Self { text: text.to_owned(), newline: final_newline, modified_ms }
     }
 
     /// The bytes the file holds for this text.
@@ -388,8 +382,8 @@ impl FileView {
     /// The worker read the file (the first time, after a change on disk, or on "Reload").
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
         match &read {
-            FileRead::Text { text, more_lines, size, modified_ms } => {
-                let incoming = Version::of(text, *more_lines, *size, *modified_ms);
+            FileRead::Text { text, more_lines, size, modified_ms, final_newline } => {
+                let incoming = Version::of(text, *final_newline, *modified_ms);
                 self.read_only = clipped_reason(*more_lines, *size);
                 self.take_version(incoming, cx);
             }

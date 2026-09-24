@@ -23,6 +23,8 @@ objc2-foundation = { workspace = true, features = [
     "NSDictionary",
     "NSOperation",
     "NSError",
+    # A page's ⌘Z and ⇧⌘Z go to its own undo manager (`web`).
+    "NSUndoManager",
 ] }
 tracing.workspace = true
 

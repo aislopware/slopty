@@ -364,7 +364,7 @@ impl WorkspaceView {
                             .aria_label(SharedString::from(format!(
                                 "Open port {number} in the browser"
                             )));
-                    let url = forward.url();
+                    let url = forward.worker_url();
                     let worker = tile.worker;
                     let forward = forward.clone();
                     div()
@@ -372,11 +372,7 @@ impl WorkspaceView {
                         .flex_none()
                         .gap(px(theme.spacing.xxs * k))
                         .child(tab_stop(in_tile, theme.surfaces.accent).on_click(cx.listener(
-                            move |this, _ev, _w, cx| {
-                                if let Some(url) = &url {
-                                    this.open_browser(Some(worker), url, cx);
-                                }
-                            },
+                            move |this, _ev, _w, cx| this.open_browser(Some(worker), &url, cx),
                         )))
                         .child(
                             tab_stop(out, theme.surfaces.accent)
@@ -430,42 +426,6 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::File { path } => {
-                // Pressed and dragged: the file leaves the app as a promise the worker keeps.
-                #[cfg(target_os = "macos")]
-                {
-                    let path = path.clone();
-                    let worker = tile.worker;
-                    let drag =
-                        pill("drag", id, "drag", theme.surfaces.text_secondary, theme, chrome)
-                            .role(Role::Button)
-                            .aria_label("Drag the file out")
-                            .cursor_grab()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _ev, _w, cx| {
-                                    this.drag_out(worker, &path);
-                                    cx.stop_propagation();
-                                }),
-                            );
-                    actions.push(drag.into_any_element());
-                }
-                #[cfg(not(target_os = "macos"))]
-                let _: &String = path;
-                let find = pill("find", id, "find", theme.surfaces.text_secondary, theme, chrome)
-                    .role(Role::Button)
-                    .aria_label("Find in the file");
-                actions.push(
-                    tab_stop(find, theme.surfaces.accent)
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            if let Some(view) = this.files.get(&id).cloned() {
-                                this.focus_tile(tile, cx);
-                                view.update(cx, |v, cx| v.find(window, cx));
-                            }
-                        }))
-                        .into_any_element(),
-                );
-            }
             ItemKind::Browser { .. } => {
                 if let Some(view) = self.browsers.get(&id).cloned() {
                     let tone = theme.surfaces.text_secondary;
@@ -490,7 +450,7 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::Note { .. } => {}
+            ItemKind::Note { .. } | ItemKind::File { .. } => {}
         }
         // The actions stay out of sight until the tile is hovered or focused: a wall of tiles
         // reads as titles, not buttons. Touch has no hover, so the focused tile shows them.
@@ -549,6 +509,7 @@ impl WorkspaceView {
                     )
             })
         });
+        let proxy = self.file_proxy(item, tile, chrome, cx);
         let renaming = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.input.clone());
         let heading = SharedString::from(if kind == title {
             title.clone()
@@ -589,6 +550,7 @@ impl WorkspaceView {
                 }),
             )
             .when_some(away, gpui::ParentElement::child)
+            .when_some(proxy, gpui::ParentElement::child)
             .child(match renaming {
                 // The name field takes the title's place; a click in it must not start a move.
                 Some(input) => div()
@@ -621,6 +583,68 @@ impl WorkspaceView {
             .child(actions)
             .when_some(progress, gpui::ParentElement::child)
             .into_any_element()
+    }
+
+    /// A file tile's proxy: a small page before its title, as a Mac document window has.
+    /// Dragged, the file leaves the app as a promise the worker keeps; the rest of the header
+    /// still moves the tile.
+    #[cfg(target_os = "macos")]
+    fn file_proxy(
+        &self,
+        item: &Item,
+        tile: TileRef,
+        chrome: Chrome,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let ItemKind::File { path } = &item.kind else { return None };
+        let theme = &self.theme;
+        let k = chrome.k;
+        let id = item.id;
+        let path = path.clone();
+        let worker = tile.worker;
+        let page = div()
+            .w(px(theme.spacing.sm * k))
+            .h(px(theme.spacing.md * k))
+            .border_1()
+            .border_color(hsla(theme.surfaces.text_secondary))
+            .rounded(px(theme.radii.xs * k * 0.5));
+        Some(
+            div()
+                .id("file-proxy")
+                .debug_selector(move || format!("file-proxy-{}", id.as_uuid()))
+                .role(Role::Button)
+                .aria_label("Drag the file out")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(theme.spacing.lg * k))
+                .rounded(px(theme.radii.xs * k))
+                .hover(|s| s.bg(hsla_alpha(theme.surfaces.text_secondary, alpha::FAINT)))
+                .cursor_grab()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, _w, cx| {
+                        this.drag_out(worker, &path);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(page)
+                .into_any_element(),
+        )
+    }
+
+    /// No file leaves the app by a drag here.
+    #[cfg(not(target_os = "macos"))]
+    #[expect(clippy::unused_self, reason = "the macOS twin draws the proxy")]
+    const fn file_proxy(
+        &self,
+        _item: &Item,
+        _tile: TileRef,
+        _chrome: Chrome,
+        _cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        None
     }
 
     /// The body. A terminal's grid is sized from where its tile comes to rest, not from the

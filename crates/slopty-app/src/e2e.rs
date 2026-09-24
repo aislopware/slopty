@@ -535,6 +535,20 @@ fn apply(
             view.update(cx, |view, cx| view.open_browser(None, &url, cx));
             Reply::Ok
         }
+        Command::PageKeys { url, keys } => {
+            let view = workspace.read(cx).view.clone();
+            let page = view.read(cx).items().find_map(|(_, item)| match &item.kind {
+                ItemKind::Browser { url: u } if *u == url => {
+                    view.read(cx).browser(item.id).cloned()
+                }
+                _ => None,
+            });
+            match page {
+                Some(page) if page.read(cx).press(&keys) => Reply::Ok,
+                Some(_) => Reply::Error { message: format!("the page did not take {keys}") },
+                None => Reply::Error { message: "no browser tile".to_owned() },
+            }
+        }
         Command::FramesReset => {
             slopty_ui::frames::reset(cx);
             Reply::Ok
@@ -849,6 +863,7 @@ impl Workspace {
                         let page = v.live_page();
                         BrowserItemInfo {
                             url: url.clone(),
+                            local_url: v.local_url().map(str::to_owned),
                             page_url: page.url,
                             title: page.title,
                             loading: page.loading,

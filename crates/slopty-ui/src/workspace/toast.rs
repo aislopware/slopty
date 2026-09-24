@@ -179,6 +179,15 @@ impl WorkspaceView {
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
         };
+        let drawn = std::rc::Rc::clone(&self.toast_drawn);
+        let frame = self.frames_drawn;
+        // Where the toast is, for a browser tile's page to stop above it.
+        let measure = gpui::canvas(
+            move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),
+            |_bounds, (), _window, _cx| {},
+        )
+        .absolute()
+        .inset_0();
         Some(
             div()
                 .absolute()
@@ -188,6 +197,7 @@ impl WorkspaceView {
                 .flex()
                 .justify_center()
                 .child(inner)
+                .child(measure)
                 .into_any_element(),
         )
     }

@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use slopty_core::{SessionId, StreamId, XferId};
 use slopty_net::client::WorkerConn;
 use slopty_net::framed::FramedRecv;
@@ -97,13 +98,14 @@ impl WorkerLink {
 
         let control_events = events_tx.clone();
         let (control_table, control_clips) = (Arc::clone(&table), Arc::clone(&clips));
-        let mut forwards = Forwards::new(quic.clone());
+        let forwards = Arc::new(Mutex::new(Forwards::new(quic.clone())));
+        let shared_forwards = forward.then(|| Arc::clone(&forwards));
         tasks.spawn(async move {
             loop {
                 let msg = match rx.recv().await {
                     Ok(msg) => msg,
                     Err(e) => {
-                        forwards.clear();
+                        forwards.lock().clear();
                         let _sent =
                             control_events.send(LinkEvent::Disconnected(e.to_string())).await;
                         break;
@@ -114,7 +116,7 @@ impl WorkerLink {
                     WorkerMsg::Xfer(x) if control_table.on_control(&x) => continue,
                     WorkerMsg::Clip(c) if control_clips.on_control(&c) => continue,
                     WorkerMsg::Ports { session, ports } if forward => {
-                        let forwards = forwards.update(session, ports);
+                        let forwards = forwards.lock().update(session, ports);
                         LinkEvent::Ports { session, forwards }
                     }
                     msg => LinkEvent::Control(msg),
@@ -183,7 +185,8 @@ impl WorkerLink {
 
         let runtime = tokio::runtime::Handle::current();
         let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
-        let remote = Arc::new(LinkRemote::new(up, clips, events_tx, runtime.clone()));
+        let remote =
+            Arc::new(LinkRemote::new(up, clips, events_tx, runtime.clone(), shared_forwards));
         Self {
             ack,
             out: out_tx,

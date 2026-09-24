@@ -39,7 +39,9 @@ pub enum ItemKind {
     },
     /// A web page, usually a server running on the worker reached through a forwarded port.
     Browser {
-        /// The address, as the client opens it (`http://localhost:5173/`).
+        /// The address as the worker sees it (`http://localhost:5173/`). A loopback address is
+        /// the worker's own: each client opens it through its forward of that port, whatever
+        /// local port the forward took.
         url: String,
     },
 }

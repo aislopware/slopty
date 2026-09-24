@@ -155,7 +155,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   than in another app. `ItemKind::Browser { url }` is a tile like any other (placed, moved,
   closed and taken back the same way), and its page is the platform's `WKWebView`. GPUI draws
   the whole window into one Metal layer, so the page cannot be a GPUI element; it is a native
-  subview that always draws on top. Three rules follow from that, all in the pure
+  subview that always draws on top. Four rules follow from that, all in the pure
   `browser::placement` with its tests:
   - The page goes where the tile's body was drawn in this frame, measured in the body's
     prepaint and applied in a prepaint that runs after every tile's, so it never trails the
@@ -163,6 +163,11 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   - Anything GPUI draws over the strip hides it: the palette, the picker, a menu, the
     overview (open or on its way), and the app's dialogs through `set_covered`. So does a
     tile that is off the strip, not drawn, or fading below `MIN_ALPHA`.
+  - A toast at the foot of the strip cuts every page's clip short at the toast's top edge,
+    measured where the toast was drawn in the same frame, so a toast is never under a page.
+    A page entirely below that edge hides. Cutting the whole width, not just the toast's
+    box, keeps the clip one rectangle; it costs the bottom few rows of a page for the
+    seconds a toast shows.
   - A hidden page leaves its last snapshot in the body, taken when it hides and after each
     load, so covering it shows no hole and the renders the tests diff show the page.
 
@@ -175,9 +180,28 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   is focused rather than opened twice. Chrome: the header shows the page's title, then the
   address as quiet text, "←" while there is history, and "↻". No address field and no tabs:
   the palette is the address bar.
-  Known limits: a page's ⌘C and ⌘V go through GPUI's key-equivalent handling first; a toast
-  can sit under a page; and the item's address is shared, while the local port of a forward
-  may differ on another client.
+  A page with the keyboard gets ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z: the Mac's key monitor hands them
+  to the page before the workspace's key equivalents can take them (ui.md, "The browser
+  tile's native view").
+
+- ✅ **A browser tile's address is the worker's** (2026-09-25). The item is shared by every
+  client of the worker, while each client serves the worker's ports on its own loopback at
+  whatever port it could get (5173 here, 5174 on a machine where 5173 was taken). So the item
+  holds the address as the worker sees it (`http://localhost:5173/`), and each client rewrites
+  it when the page loads (`browser::local_url`). A host that is the worker's loopback
+  (`localhost`, `127.0.0.1`, `[::1]`) has its port served here: the workspace asks the
+  worker's link for it (`Remote::forward`, which pins a forward in `tunnel::Forwards` until
+  the link goes, whether or not a session still lists the port) and loads the page from the
+  local port it gets. The host stays, so the page's origin, cookies and redirects are the
+  same on every client, except `[::1]`, which becomes `localhost` because the forward listens
+  on IPv4. A link that comes back is asked again, and an open page moves to the new port if
+  it changed. The header, the dump and the address the page reports are put back on the
+  worker's port (`browser::worker_url`), so every client names the page alike. Any other
+  host loads as it is. The port chip and the port list make items with the worker's port.
+  Tests: two links on one machine asking for the same worker port get two local ports that
+  both reach it (`slopty-client` `remote_link`); two headless workspaces show one item at
+  their own ports; the app e2e opens a page whose port the test's own server already holds
+  here, so it loads through a forward on another port.
 
 - ✅ **A file tile is an editor** (2026-09-25). The user wanted to fix a line where they read
   it rather than type `$EDITOR` into a shell, so the file tile's body is gpui-kit's code
@@ -185,7 +209,9 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   except ⌘F (the tile's find), ⌘⌥↑/↓ (focus up and down, not extra carets) and ⌘S (save). The
   reading line and its ↑/↓/⇞/⇟ keys, and the "edit" and "reload" pills, went: the caret is
   the reading line, and a change on disk reloads by itself. Opening a file from the palette
-  puts the keyboard in the editor.
+  puts the keyboard in the editor. The header's "drag" and "find" text pills went the same
+  day, as the de-slop pass removed such pills elsewhere: find is ⌘F and the palette, and the
+  file is dragged out by a small page glyph before its title (ui.md).
 
 - ✅ **A terminal's agent badge starts from the worker's list** (2026-09-25). A client that
   connected after an agent started showed a plain shell until the agent's next hook event.

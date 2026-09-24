@@ -157,6 +157,15 @@ pub enum Command {
         /// An http or https address.
         url: String,
     },
+    /// Give the page of the browser tile for `url` the keyboard and show the key monitor
+    /// `keys` (a chord such as `cmd-a` or `cmd-shift-z`) as a key down on its window; replies
+    /// with an error when the monitor let the key through.
+    PageKeys {
+        /// The tile's address, as its item names it.
+        url: String,
+        /// The chord.
+        keys: String,
+    },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
     /// Bring a session's terminal into view, make it active and give it the keyboard, as
@@ -586,9 +595,11 @@ pub struct ItemInfo {
 /// A browser tile.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct BrowserItemInfo {
-    /// The address the item names.
+    /// The address the item names, as the worker sees it.
     pub url: String,
-    /// The page's address now, as the web view reports it.
+    /// Where this client loads it: the worker's loopback port moved to the one served here.
+    pub local_url: Option<String>,
+    /// The page's address now, as the web view reports it, put back on the worker's port.
     pub page_url: String,
     /// The page's title, as the web view reports it.
     pub title: String,

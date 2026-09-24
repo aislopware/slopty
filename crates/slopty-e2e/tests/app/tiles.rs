@@ -152,7 +152,18 @@ const PAGE: &str = "<!doctype html><html><head><meta charset=utf-8>\
 <p style=\"margin:0;color:#6e6e73\">A page on localhost, in a browser tile.</p></div>\
 </body></html>";
 
-/// Serve [`PAGE`] on an ephemeral localhost port until the process ends; the port.
+/// A field with an edit already made in it, its value and selection length in the title,
+/// so the test reads what an edit key did from the web view's title.
+const EDIT_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>edit</title>\
+</head><body><input id=f value=abc><script>\
+const f=document.getElementById('f');\
+const show=()=>{document.title='v='+f.value+'|s='+(f.selectionEnd-f.selectionStart);};\
+f.addEventListener('input',show);document.addEventListener('selectionchange',show);\
+f.focus();f.setSelectionRange(3,3);document.execCommand('insertText',false,'xyz');show();\
+</script></body></html>";
+
+/// Serve [`PAGE`], and [`EDIT_PAGE`] at `/edit`, on an ephemeral localhost port until the
+/// process ends; the port.
 fn serve_page() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -160,13 +171,15 @@ fn serve_page() -> u16 {
         for stream in listener.incoming().flatten() {
             let mut reader = BufReader::new(&stream);
             let mut line = String::new();
+            let _read = reader.read_line(&mut line);
+            let page = if line.starts_with("GET /edit ") { EDIT_PAGE } else { PAGE };
             while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
                 line.clear();
             }
             let answer = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
-                PAGE.len()
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                page.len()
             );
             let _sent = (&stream).write_all(answer.as_bytes());
         }
@@ -174,8 +187,10 @@ fn serve_page() -> u16 {
     port
 }
 
-/// A page the test serves opens in a tile: the web view reports its title and address, the
-/// tile's header says them, and the page hides while the palette is over it.
+/// A page the test serves opens in a tile: the item names the worker's port, which is taken
+/// here by the test's own server, so the client serves it on another and the page loads
+/// through the tunnel. The web view reports its title and address, the tile's header says
+/// them, and the page hides while the palette is over it.
 #[tokio::test]
 async fn a_page_on_localhost_opens_in_a_browser_tile() {
     if !gated() {
@@ -199,8 +214,10 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
         .await
         .unwrap();
     let page = dump.item("browser").and_then(|i| i.browser.clone()).unwrap();
-    assert_eq!(page.url, url);
-    assert_eq!(page.page_url, url, "the web view's own address");
+    assert_eq!(page.url, url, "the item keeps the worker's address");
+    let local = page.local_url.clone().unwrap();
+    assert!(local.starts_with("http://127.0.0.1:") && local != url, "served elsewhere: {local}");
+    assert_eq!(page.page_url, url, "the web view's address, on the worker's port");
     assert!(page.failed.is_none(), "{page:?}");
     golden(drv, &dir, "browser").await;
 
@@ -218,5 +235,28 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
     })
     .await
     .unwrap();
+
+    // The edit keys reach the page, not the workspace: undo and redo the page's own edit,
+    // then select the field's text. (Copy, cut and paste take the same path; they are left
+    // out here because they would touch this machine's clipboard.)
+    let edit = format!("http://127.0.0.1:{port}/edit");
+    drv.ok(&Command::OpenUrl { url: edit.clone() }).await.unwrap();
+    let title_of = |d: &Dump| {
+        d.items
+            .iter()
+            .filter_map(|i| i.browser.as_ref())
+            .find(|b| b.url == edit)
+            .map(|b| b.title.clone())
+            .unwrap_or_default()
+    };
+    drv.wait_for("the edit page, its edit made", STEP, |d| title_of(d).starts_with("v=abcxyz|"))
+        .await
+        .unwrap();
+    for (keys, want) in
+        [("cmd-z", "v=abc|"), ("cmd-shift-z", "v=abcxyz|"), ("cmd-a", "v=abcxyz|s=6")]
+    {
+        drv.ok(&Command::PageKeys { url: edit.clone(), keys: keys.to_owned() }).await.unwrap();
+        drv.wait_for(keys, STEP, |d| title_of(d).starts_with(want)).await.unwrap();
+    }
     stack.shutdown().await;
 }

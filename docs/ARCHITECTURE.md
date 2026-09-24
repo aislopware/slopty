@@ -82,7 +82,7 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
 the OSC 8 run the worker put on the row, else the URL found in the cached row text
 (`slopty-ui::terminal::url`); ⌘-hover underlines it. A file path under the pointer
 (`src/main.rs:12:5`, `url::path_at_col`) opens the same way: ⌘-click types
-`${EDITOR:-vi} +12 'src/main.rs'` at the prompt, or opens a file card for it while a command
+`${EDITOR:-vi} +12 'src/main.rs'` at the prompt, or opens a file tile for it while a command
 runs and on a tap the phone's key-bar ⌘ armed (`TerminalViewEvent::ViewFile`, the workspace
 making the path absolute against the shell's directory, `WorkspaceView::absolute_in_session`).
 - **Prediction**: the client applies mosh-style speculative echo for printable keys, confidence
@@ -475,8 +475,12 @@ forwarded TCP connection is a client-opened bidirectional stream that opens with
     with a notice), so origins, cookies and OAuth redirects keep working.
   - Each accepted connection becomes a tunnel, which the worker joins to `127.0.0.1` (then `::1`)
     with a half-close.
-  - The tile shows a quiet chip ("5173 ↗") that opens the default browser, and the palette
-    lists forwarded ports.
+  - The tile shows each port as two quiet pills: the number ("5173", or "8080 → 8081" when
+    served on another port here) opens a browser tile, and "↗" opens the default browser. The
+    palette's port list offers both.
+  - A browser tile names the worker's port, and a client serves any port it names on demand
+    (`Remote::forward`, a pin in `tunnel::Forwards` kept while the link lives), so a page opens
+    on every client even when no session lists its port there any more (§4).
 
 **Platform seams.** The pipeline is `slopty_worker::screen::Pipeline<P: Platform>`, and
 `ScreenStream` is `Pipeline<Native>`, macOS today (`slopty_worker::platform`). A `Platform`
@@ -591,8 +595,7 @@ moves the last parse's colours with each edit (`editor::splice`) and parses the 
 again on a background thread 60 ms after the typing stops. The same hook colours a fenced
 block in an answer through gpui-kit's `TextViewDefaults`. ⌘S (`SaveFile`, key context
 `FileEditor`) sends `ClientMsg::WriteFile { path, text, base_modified_ms }`, the text
-carrying the file's final newline when the read implied one (a read drops exactly one; the
-size tells); the header shows a quiet dot while the text differs from the read, and the answer
+carrying the file's final newline when the read had one (`FileRead::Text.final_newline`); the header shows a quiet dot while the text differs from the read, and the answer
 (`WorkerMsg::Written`, `FileView::written`) clears it, or keeps it with a one-line reason.
 What the worker sends next is taken by the state the tile is in: its own save's echo changes
 nothing; a clean tile takes a change on disk silently, tints the lines that differ
@@ -606,7 +609,8 @@ tile opened from an edit lands on the edit's line (`ToolDetail::Diff.line`: the 
 tinted in the accent tone, `FileView::focus_line`). The tile reads again when any agent's
 Edit/Write result arrives in the workspace and when "view" is pressed on another call for the
 same path (one tile per path: `WorkspaceView::open_file` reveals the existing one). Titled
-`name · parent` (`workspace::file_title`); its dump entry is `ItemInfo.file` (path, summary,
+`name · parent` (`workspace::file_title`), after a small page glyph that drags the file out
+of the app (macOS, `WorkspaceView::file_proxy`); its dump entry is `ItemInfo.file` (path, summary,
 lines, edited, trouble, read-only). The way in is the palette: a path typed in opens as an
 `Open <path>` line against the active shell's directory, and a word asked of the worker's
 files does the same for its hits; either opens the tile with the keyboard in the editor. The
@@ -620,22 +624,30 @@ the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the 
 carets (bindings in `FileEditor > Input`).
 
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
-usually a forwarded port, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
+usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
 on macOS, a `UIView` on iOS, each a subview of the GPUI window's view from its
 `raw_window_handle`). A native view always draws over GPUI, so the page follows the tile
 rather than being drawn by it: each frame the tile's body records where it was drawn
 (`BrowserView::drawn_in`), and a final element's prepaint (`WorkspaceView::browser_sync`)
 asks `browser::placement` where each page goes, over the body and clipped to the strip, or
 hidden while anything GPUI draws covers the strip (the palette, the picker, a menu, the
-overview, an app dialog via `set_covered`), while the tile fades or is off the strip. Hidden,
+overview, an app dialog via `set_covered`), while the tile fades or is off the strip; a
+toast cuts the clip short at its top edge (`Cover::toast`, measured where the toast was drawn
+that frame). Hidden,
 the body shows the page's last snapshot (`takeSnapshot` → PNG → `RenderImage`), so covering it
 leaves no hole, and the renders the tests diff show it too. A click on the page gives it the
 keyboard and focuses its tile; on the Mac a local event monitor takes the keyboard back on a
-click elsewhere, ⌃Tab or Esc twice, and on iOS the page's own fields take the keyboard when
-tapped and hiding the page ends their editing. The header shows the page's title and its
+click elsewhere, ⌃Tab or Esc twice, and hands ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z to the page
+(`web::edit_for`), which the GPUI view's key equivalents would otherwise take; on iOS the
+page's own fields take the keyboard when tapped and hiding the page ends their editing. The
+item's address is the worker's (`http://localhost:5173/`, the same on every client): each
+client asks its link to serve a loopback port the address names (`Remote::forward`) and loads
+the page from the local port it got (`browser::local_url`), asking again when the link comes
+back; what the header and the dump show is put back on the worker's port
+(`browser::worker_url`). The header shows the page's title and its
 address as text, "←" while there is history and "↻"; the title and address are read after
 each navigation and every second while the page is open. The ways in: a port chip's number
-opens its forward in a tile (its "↗" opens the default browser, as before), "Open URL…" in the
+opens the worker's port in a tile (its "↗" opens the default browser, as before), "Open URL…" in the
 palette starts at `http://localhost:`, and an address typed into the palette is an "Open
 <address> in a tile" line. Only http and https open (`browser::is_web_url`). The picker (⌘O, a field at
 the top filtering by every word typed, ↑/↓/↩ choosing) lists the workspace's sessions first — agents waiting on the human, then other agents with their status

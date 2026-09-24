@@ -51,8 +51,9 @@ pub fn read(path: &Path) -> FileRead {
         }
         Err(_) => return FileRead::Binary { size },
     };
+    let final_newline = !truncated && text.ends_with('\n');
     let (text, more_lines) = clip(&text, truncated);
-    FileRead::Text { text, more_lines, size, modified_ms }
+    FileRead::Text { text, more_lines, size, modified_ms, final_newline }
 }
 
 /// Save a file card: replace `path` with `text` unless the file changed on disk since
@@ -241,8 +242,9 @@ mod tests {
         let text = dir.path().join("a.txt");
         std::fs::write(&text, "one\ntwo\n").unwrap();
         match read(&text) {
-            FileRead::Text { text, more_lines, size, modified_ms } => {
+            FileRead::Text { text, more_lines, size, modified_ms, final_newline } => {
                 assert_eq!((text.as_str(), more_lines, size), ("one\ntwo", 0, 8));
+                assert!(final_newline, "the newline clip() drops is reported");
                 assert!(modified_ms > 0);
             }
             other => panic!("{other:?}"),

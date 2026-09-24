@@ -282,6 +282,7 @@ mod golden {
                     more_lines: 3,
                     size: 4096,
                     modified_ms: 1_788_000_000_000,
+                    final_newline: false,
                 },
             },
         );

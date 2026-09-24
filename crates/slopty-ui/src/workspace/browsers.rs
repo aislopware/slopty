@@ -1,6 +1,8 @@
 //! Web pages in tiles: opening one (a forwarded port, an address typed into the palette), a
 //! view per browser item, and each frame the native page put over its tile or hidden.
 
+use std::sync::Arc;
+
 use gpui::{AppContext as _, Context, Entity, IntoElement as _, Styled as _, Window, canvas};
 use slopty_client::layout::{Rect, WorkerKey};
 use slopty_core::ItemId;
@@ -75,19 +77,19 @@ impl WorkspaceView {
     /// A view for every browser item; the ones whose items are gone go (and their pages with
     /// them).
     pub(super) fn reconcile_browsers(&mut self, cx: &mut Context<Self>) {
-        let wanted: Vec<(ItemId, String)> = self
+        let wanted: Vec<(ItemId, WorkerKey, String)> = self
             .items()
-            .filter_map(|(_, item)| match &item.kind {
-                ItemKind::Browser { url } => Some((item.id, url.clone())),
+            .filter_map(|(key, item)| match &item.kind {
+                ItemKind::Browser { url } => Some((item.id, key, url.clone())),
                 _ => None,
             })
             .collect();
-        for (id, url) in &wanted {
+        for (id, key, url) in &wanted {
             if self.browsers.contains_key(id) {
                 continue;
             }
             let theme = self.theme.clone();
-            let view = cx.new(|_cx| BrowserView::new(*id, url, theme));
+            let view = cx.new(|_cx| BrowserView::new(*id, *key, url, theme));
             let item = *id;
             self.subscriptions.push(cx.subscribe(&view, move |this, _view, event, cx| {
                 match event {
@@ -106,7 +108,46 @@ impl WorkspaceView {
             self.subscriptions.push(cx.observe(&view, |_this, _view, cx| cx.notify()));
             self.browsers.insert(*id, view);
         }
-        self.browsers.retain(|id, _| wanted.iter().any(|(w, _)| w == id));
+        self.browsers.retain(|id, _| wanted.iter().any(|(w, ..)| w == id));
+        let browsers = &self.browsers;
+        self.browser_links.retain(|id, _| browsers.contains_key(id));
+    }
+
+    /// Where each page loads on this client: an address on the worker's loopback goes to the
+    /// local port this client serves that port on, asked of the worker's link the first time
+    /// and again whenever the link is a new one.
+    fn serve_browsers(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<Entity<BrowserView>> = self.browsers.values().cloned().collect();
+        for view in views {
+            let (id, key, url, needs) = {
+                let v = view.read(cx);
+                (v.id(), v.worker(), v.url().to_owned(), v.needs_local())
+            };
+            let Some(port) = crate::browser::worker_port(&url) else {
+                if needs {
+                    view.update(cx, |v, cx| v.set_local(Some(url), cx));
+                }
+                continue;
+            };
+            let Some(remote) = self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
+            else {
+                continue;
+            };
+            let same_link = self
+                .browser_links
+                .get(&id)
+                .is_some_and(|w| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&remote)));
+            if same_link && !needs {
+                continue;
+            }
+            self.browser_links.insert(id, Arc::downgrade(&remote));
+            let local = remote.forward(port);
+            tracing::info!(item = %id, port, ?local, "browser tile's port served here");
+            view.update(cx, |v, cx| match local {
+                Some(local) => v.set_local(Some(crate::browser::local_url(&url, local)), cx),
+                None => v.unreachable(format!("Port {port} could not be served here"), cx),
+            });
+        }
     }
 
     /// What GPUI draws over the strip this frame, for the pages to hide under.
@@ -117,11 +158,20 @@ impl WorkspaceView {
                 || self.picker.is_some()
                 || self.menu.is_some(),
             overview: self.layout.overview_open() || self.drawn_zoom < 1.0,
+            toast: self.toast_drawn.get().filter(|(frame, _)| *frame == self.frames_drawn).map(
+                |(_, b)| Rect {
+                    x: f32::from(b.origin.x),
+                    y: f32::from(b.origin.y),
+                    w: f32::from(b.size.width),
+                    h: f32::from(b.size.height),
+                },
+            ),
         }
     }
 
     /// Each page over its tile's body as drawn this frame, or hidden.
-    fn sync_browsers(&self, window: &Window, cx: &mut Context<Self>) {
+    fn sync_browsers(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.serve_browsers(cx);
         let frame = self.frames_drawn;
         let cover = self.cover();
         let v = self.viewport;

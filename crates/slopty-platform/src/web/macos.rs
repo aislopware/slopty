@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2::{MainThreadMarker, MainThreadOnly as _, sel};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags,
     NSEventType, NSImage, NSResponder, NSView,
@@ -24,7 +24,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration};
 
-use super::{Delegate, Frame, Page, Sink, WebEvent};
+use super::{Delegate, Edit, Frame, Page, Sink, WebEvent, edit_for};
 
 /// Two presses of Esc closer than this give the keyboard back; one alone reaches the page.
 const DOUBLE_ESCAPE: Duration = Duration::from_millis(400);
@@ -189,6 +189,35 @@ impl WebView {
         has_keyboard(&self.watched)
     }
 
+    /// Show the key monitor a key down on the page's window, as AppKit would, `key` being
+    /// the character it types, with ⌘ and ⇧ as given: the self-test's way to prove what the
+    /// monitor does with it. Whether the monitor took it.
+    #[must_use]
+    pub fn press(&self, key: &str, command: bool, shift: bool) -> bool {
+        let Some(window) = self.watched.web.window() else { return false };
+        let mut flags = NSEventModifierFlags::empty();
+        if command {
+            flags |= NSEventModifierFlags::Command;
+        }
+        if shift {
+            flags |= NSEventModifierFlags::Shift;
+        }
+        let chars = NSString::from_str(key);
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            NSPoint::new(0.0, 0.0),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            &chars,
+            &chars,
+            false,
+            0,
+        );
+        event.is_some_and(|event| screen(&event))
+    }
+
     /// Ask for a picture of the page; it comes back as [`WebEvent::Snapshot`].
     pub fn snapshot(&self) {
         let sink = Rc::clone(&self.watched.sink);
@@ -295,10 +324,22 @@ fn screen(event: &NSEvent) -> bool {
 }
 
 /// A key while `w` has the keyboard: ⌃Tab, or a second Esc soon after the first, gives it
-/// back and is swallowed; anything else reaches the page.
+/// back and is swallowed; an edit key ([`edit_for`]) is done in the page and swallowed, so
+/// the GPUI view's key equivalents never take it; anything else reaches the page.
 fn key_down(w: &Watched, event: &NSEvent) -> bool {
     let flags = event.modifierFlags();
     let code = event.keyCode();
+    let key = event.charactersIgnoringModifiers().map(|k| k.to_string()).unwrap_or_default();
+    let edit = edit_for(
+        &key,
+        flags.contains(NSEventModifierFlags::Command),
+        flags.contains(NSEventModifierFlags::Shift),
+        flags.intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Option),
+    );
+    if let Some(edit) = edit {
+        perform(w, edit);
+        return true;
+    }
     let control = flags.contains(NSEventModifierFlags::Control);
     let bare = !flags.intersects(
         NSEventModifierFlags::Control
@@ -342,6 +383,29 @@ fn mouse_down(mine: &[&Rc<Watched>], event: &NSEvent) {
         release(w);
         (w.sink)(WebEvent::Released);
     }
+}
+
+/// Do `edit` in `w`'s page, as the Edit menu would: the action goes up the responder chain
+/// from the page's first responder, and undo to the web view's own undo manager.
+fn perform(w: &Watched, edit: Edit) {
+    let action = match edit {
+        Edit::Copy => sel!(copy:),
+        Edit::Cut => sel!(cut:),
+        Edit::Paste => sel!(paste:),
+        Edit::SelectAll => sel!(selectAll:),
+        Edit::Undo | Edit::Redo => {
+            if let Some(undo) = w.web.undoManager() {
+                if edit == Edit::Undo { undo.undo() } else { undo.redo() }
+            }
+            return;
+        }
+    };
+    let Some(responder) = w.web.window().and_then(|window| window.firstResponder()) else {
+        return;
+    };
+    // SAFETY: AppKit rule: a standard edit action takes its sender as the argument, and nil
+    // is a valid sender; `tryToPerform:with:` walks the responder chain from the receiver.
+    let _done = unsafe { responder.tryToPerform_with(action, None) };
 }
 
 fn contains(rect: NSRect, p: NSPoint) -> bool {

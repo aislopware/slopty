@@ -298,10 +298,14 @@ pub struct WorkspaceView {
     notes: HashMap<ItemId, Entity<NoteView>>,
     files: HashMap<ItemId, Entity<FileView>>,
     browsers: HashMap<ItemId, Entity<crate::browser::BrowserView>>,
+    /// The link each browser tile's port is served by: a new link serves it anew.
+    browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
     /// The app draws a dialog over the workspace: a page's native view must hide under it.
     covered: bool,
     /// Bumped every time the workspace draws, so a browser tile knows whether it was drawn.
     frames_drawn: u64,
+    /// Where the toast was drawn, and in which frame: pages stop above it.
+    toast_drawn: crate::browser::Drawn,
     /// The line a file card opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
     /// Window titles the picker or a listing gave (the registry stores ids).
@@ -436,8 +440,10 @@ impl WorkspaceView {
             notes: HashMap::new(),
             files: HashMap::new(),
             browsers: HashMap::new(),
+            browser_links: HashMap::new(),
             covered: false,
             frames_drawn: 0,
+            toast_drawn: Rc::default(),
             file_focus: HashMap::new(),
             titles: HashMap::new(),
             agents: HashMap::new(),

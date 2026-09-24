@@ -20,6 +20,9 @@ pub enum FileRead {
         size: u64,
         /// Last modification, milliseconds since the Unix epoch.
         modified_ms: u64,
+        /// The file ends with a newline, which `text` leaves off; a save puts it back. False
+        /// when the text was clipped.
+        final_newline: bool,
     },
     /// Not text (a NUL byte, or not UTF-8 in what was read).
     Binary {

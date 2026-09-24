@@ -217,6 +217,14 @@ impl WebView {
         false
     }
 
+    /// The Mac's key monitor has no UIKit twin: a hardware keyboard's keys go to the page
+    /// natively, so nothing is taken here.
+    #[must_use]
+    #[expect(clippy::unused_self, reason = "the Mac twin shows its window's monitor the key")]
+    pub const fn press(&self, _key: &str, _command: bool, _shift: bool) -> bool {
+        false
+    }
+
     /// Ask for a picture of the page; it comes back as [`WebEvent::Snapshot`].
     pub fn snapshot(&self) {
         let sink = Rc::clone(&self.sink);
