@@ -55,6 +55,11 @@ pub enum Case {
     /// `slopty hook` badges the cross-host pill and routes a banner back to it, and killing it
     /// mid-stream turns its row amber then green on restart. No permissions needed.
     Hosts,
+    /// The server with a real worker: `slopty-server` and ptyd + hostd registered with it, on
+    /// ports of their own, driven through the `slopty` CLI with `--json` and MCP over HTTP:
+    /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
+    /// lease lost on a killed hostd and taken back. No permissions needed.
+    Server,
     /// All of the above (not `ios`, which needs a simulator, nor `hosts`, which needs a second
     /// machine).
     All,
@@ -206,6 +211,14 @@ const HOSTS: &[Suite] = &[Suite {
     serial: true,
 }];
 
+const SERVER: &[Suite] = &[Suite {
+    gate: Some("SLOPTY_SERVER_E2E"),
+    package: "slopty-e2e",
+    test: "server",
+    filter: "",
+    serial: false,
+}];
+
 const SMOOTH_IOS: &[Suite] = &[Suite {
     gate: Some("SLOPTY_SMOOTH_IOS_E2E"),
     package: "slopty-e2e",
@@ -225,9 +238,16 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Pair => PAIR.iter().collect(),
         Case::PairIos => PAIR_IOS.iter().collect(),
         Case::Hosts => HOSTS.iter().collect(),
-        Case::All => {
-            APP.iter().chain(HOST).chain(SCREEN).chain(INPUT).chain(SMOOTH).chain(PAIR).collect()
-        }
+        Case::Server => SERVER.iter().collect(),
+        Case::All => APP
+            .iter()
+            .chain(HOST)
+            .chain(SERVER)
+            .chain(SCREEN)
+            .chain(INPUT)
+            .chain(SMOOTH)
+            .chain(PAIR)
+            .collect(),
         Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
@@ -266,7 +286,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         "build daemons and app",
         &cmd!(
             sh,
-            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
+            "cargo build -p slopty-ptyd -p slopty-hostd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
         ),
     )?;
 

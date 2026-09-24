@@ -35,6 +35,13 @@
    (temp root, private HOME, torn down after), to prove cross-host attention — the pill sums
    both hosts, a banner routes to the host holding its session, and a hook is played only
    through `slopty hook` over ssh, never a real agent.
+   `cargo xtask e2e server` (gate `SLOPTY_SERVER_E2E`, about 7 s) is the server with a real
+   worker: `slopty-server`, then ptyd + hostd registered with it through `--server`, on ports of
+   their own under a temp root (`harness::ServerStack`). It drives them only through the
+   `slopty` binary with `--json` and MCP over HTTP. It covers the directory with capabilities,
+   a shell typed to, waited on and read back, files both ways (binary too), a listener found by
+   `ports`, a close, and a shell that exits on its own. A killed hostd must turn unreachable
+   and come back online under the same id.
 4. **Live desktop**, `cargo xtask e2e host|screen|input|all` (gates `SLOPTY_SCREEN_E2E`,
    `SLOPTY_INPUT_E2E`): real capture and real event posting, own data dir under `target/e2e/`.
    The assertions live inside those tests.

@@ -4,6 +4,7 @@
 //! next to the workspace. Every process gets its own data directory under the temp dir, so
 //! nothing installed on the machine is read or written, and everything is killed on drop.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -216,18 +217,28 @@ async fn daemons(
     log: &str,
     env: &[(&str, &str)],
 ) -> Result<(Vec<Child>, String)> {
-    let ptyd_sock = root.join("ptyd.sock");
-    // ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
-    // `~/.terminfo` and let the shells it spawns read it back from here. The trailing
-    // separator is ncurses' way of saying "then the system database".
+    let ptyd = spawn_ptyd(root, log, env).await?;
+    let (hostd, address) = spawn_hostd(root, host_name, log, env, None).await?;
+    Ok((vec![ptyd, hostd], address))
+}
+
+/// ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
+/// `~/.terminfo` and let the shells it spawns read it back from here. The trailing separator
+/// is ncurses' way of saying "then the system database".
+fn terminfo_env(root: &Path) -> [(&'static str, std::ffi::OsString); 2] {
     let terminfo = root.join("terminfo");
-    let terminfo_dirs = format!("{}:", terminfo.display());
+    let dirs = format!("{}:", terminfo.display());
+    [(slopty_pty::terminfo::DIR_ENV, terminfo.into_os_string()), ("TERMINFO_DIRS", dirs.into())]
+}
+
+/// ptyd on `root/ptyd.sock`, up once its socket is.
+async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Child> {
+    let ptyd_sock = root.join("ptyd.sock");
     let mut ptyd = Command::new(bin("slopty-ptyd")?)
         .arg("--socket")
         .arg(&ptyd_sock)
         .envs(env.iter().copied())
-        .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
-        .env("TERMINFO_DIRS", &terminfo_dirs)
+        .envs(terminfo_env(root))
         .env("RUST_LOG", log)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -236,21 +247,36 @@ async fn daemons(
         .spawn()
         .context("spawn slopty-ptyd")?;
     wait_for_path(&ptyd_sock, &mut ptyd, "slopty-ptyd").await?;
+    Ok(ptyd)
+}
 
-    let ctl_sock = root.join("hostd.sock");
-    let mut hostd = Command::new(bin("slopty-hostd")?)
+/// hostd named `host_name` on the ptyd of [`spawn_ptyd`], with its data in `root/host`, on a
+/// port of its choosing, registered with `server` when one is given; and the loopback address
+/// clients reach it on.
+async fn spawn_hostd(
+    root: &Path,
+    host_name: &str,
+    log: &str,
+    env: &[(&str, &str)],
+    server: Option<&str>,
+) -> Result<(Child, String)> {
+    let mut command = Command::new(bin("slopty-hostd")?);
+    command
         .arg("--ptyd-socket")
-        .arg(&ptyd_sock)
+        .arg(root.join("ptyd.sock"))
         .arg("--ctl-socket")
-        .arg(&ctl_sock)
+        .arg(root.join("hostd.sock"))
         .arg("--data-dir")
         .arg(root.join("host"))
         .arg("--print-addr")
         .arg("--port")
-        .arg("0")
+        .arg("0");
+    if let Some(server) = server {
+        command.arg("--server").arg(server);
+    }
+    let mut hostd = command
         .envs(env.iter().copied())
-        .env(slopty_pty::terminfo::DIR_ENV, &terminfo)
-        .env("TERMINFO_DIRS", &terminfo_dirs)
+        .envs(terminfo_env(root))
         .env("RUST_LOG", log)
         .env("SLOPTY_HOST_NAME", host_name)
         .stdin(Stdio::null())
@@ -264,7 +290,7 @@ async fn daemons(
     tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut listen))
         .await
         .context("hostd did not print its address in time")??;
-    Ok((vec![ptyd, hostd], loopback_address(&listen)?))
+    Ok((hostd, loopback_address(&listen)?))
 }
 
 /// The loopback address a client dials for a hostd that printed `listen` (`[::]:53211`, or a
@@ -1310,5 +1336,392 @@ mod tests {
         );
         host2_gate(Some("1"), None).unwrap_err();
         host2_gate(Some("1"), Some("")).unwrap_err();
+    }
+}
+
+/// The MCP protocol revision the server speaks: stateless, no `initialize`.
+pub const MCP_REVISION: &str = "2026-07-28";
+
+/// A UDP port and a TCP port that were free on every interface a moment ago, for a daemon that
+/// must be told its ports: never the defaults, where a developer's own server may run.
+fn free_ports() -> Result<(u16, u16)> {
+    let any = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0));
+    let udp = std::net::UdpSocket::bind(any).context("find a free UDP port")?;
+    let tcp = std::net::TcpListener::bind(any).context("find a free TCP port")?;
+    Ok((udp.local_addr()?.port(), tcp.local_addr()?.port()))
+}
+
+/// `slopty-server` from this build, on ephemeral ports and with its own data directory. Killed
+/// on drop.
+#[derive(Debug)]
+pub struct ServerDaemon {
+    child: Child,
+    address: String,
+    mcp: std::net::SocketAddr,
+    data_dir: PathBuf,
+}
+
+impl ServerDaemon {
+    /// Start the server named `name`, keeping its state in `data_dir`, and wait until its MCP
+    /// listener answers (it binds the QUIC one first).
+    ///
+    /// # Errors
+    ///
+    /// When the binary is missing, or the server dies or does not listen in time.
+    pub async fn start(data_dir: &Path, name: &str, log: &str) -> Result<Self> {
+        let (quic, mcp) = free_ports()?;
+        let mut child = Command::new(bin("slopty-server")?)
+            .arg("--port")
+            .arg(quic.to_string())
+            .arg("--mcp-port")
+            .arg(mcp.to_string())
+            .arg("--data-dir")
+            .arg(data_dir)
+            .arg("--name")
+            .arg(name)
+            .env("RUST_LOG", log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn slopty-server")?;
+        let mcp = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, mcp));
+        let up = tokio::time::timeout(STARTUP, async {
+            while tokio::net::TcpStream::connect(mcp).await.is_err() {
+                if let Some(status) = child.try_wait()? {
+                    bail!("slopty-server exited early: {status}");
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            Ok(())
+        })
+        .await;
+        up.map_err(|_elapsed| anyhow::anyhow!("slopty-server did not listen within {STARTUP:?}"))??;
+        let address = format!("127.0.0.1:{quic}");
+        Ok(Self { child, address, mcp, data_dir: data_dir.to_path_buf() })
+    }
+
+    /// `127.0.0.1:<port>`: what a worker's and the CLI's `--server` take.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The MCP endpoint on loopback (`http://<mcp>/mcp`).
+    #[must_use]
+    pub const fn mcp(&self) -> std::net::SocketAddr {
+        self.mcp
+    }
+
+    /// Where it keeps `workers.json`.
+    #[must_use]
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Kill the server (SIGKILL) and reap it.
+    pub async fn kill(&mut self) {
+        let _killed = self.child.start_kill();
+        let _reaped = self.child.wait().await;
+    }
+}
+
+/// ptyd + hostd from this build, registered with a server as one worker. Killed on drop.
+///
+/// Its sockets and data live under the root it was started in, so a restarted hostd keeps its
+/// worker id and finds the same ptyd.
+#[derive(Debug)]
+pub struct Worker {
+    ptyd: Child,
+    hostd: Option<Child>,
+    root: PathBuf,
+    name: String,
+    server: String,
+    log: String,
+    env: Vec<(String, String)>,
+    address: String,
+}
+
+impl Worker {
+    /// Start ptyd and hostd named `name` in `root`, registering with the server at `server`;
+    /// `env` goes to both daemons, and so to the shells.
+    ///
+    /// # Errors
+    ///
+    /// When a binary is missing or a daemon does not come up.
+    pub async fn start(
+        root: &Path,
+        name: &str,
+        server: &str,
+        log: &str,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
+        std::fs::create_dir_all(root)?;
+        let ptyd = spawn_ptyd(root, log, env).await?;
+        let (hostd, address) = spawn_hostd(root, name, log, env, Some(server)).await?;
+        Ok(Self {
+            ptyd,
+            hostd: Some(hostd),
+            root: root.to_path_buf(),
+            name: name.to_owned(),
+            server: server.to_owned(),
+            log: log.to_owned(),
+            env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+            address,
+        })
+    }
+
+    /// The name it registers under.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Where clients reach hostd directly, `127.0.0.1:<port>`; a restart picks a new port.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// Kill hostd (SIGKILL: no goodbye to the server, as a crash or a pulled cable would leave
+    /// it) and reap it. ptyd and its shells live on.
+    pub async fn kill_hostd(&mut self) {
+        if let Some(mut hostd) = self.hostd.take() {
+            let _killed = hostd.start_kill();
+            let _reaped = hostd.wait().await;
+        }
+    }
+
+    /// Start hostd again on the same ptyd and data directory (so the same worker id).
+    ///
+    /// # Errors
+    ///
+    /// When hostd does not come up.
+    pub async fn restart_hostd(&mut self) -> Result<()> {
+        self.kill_hostd().await;
+        let env: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (&**k, &**v)).collect();
+        let (hostd, address) =
+            spawn_hostd(&self.root, &self.name, &self.log, &env, Some(&self.server)).await?;
+        self.hostd = Some(hostd);
+        self.address = address;
+        Ok(())
+    }
+
+    /// Kill both daemons and reap them.
+    pub async fn shutdown(mut self) {
+        self.kill_hostd().await;
+        let _killed = self.ptyd.start_kill();
+        let _reaped = self.ptyd.wait().await;
+    }
+}
+
+/// `slopty … --json` against the server at `server`, with the CLI's own data directory
+/// `data_dir` and `stdin` on its standard input: the answer parsed.
+///
+/// # Errors
+///
+/// When the CLI exits non-zero (its stderr is in the error), or prints something that is not
+/// JSON.
+pub async fn slopty_json(
+    server: &str,
+    data_dir: &Path,
+    args: &[&str],
+    stdin: &[u8],
+) -> Result<Value> {
+    let mut child = Command::new(bin("slopty")?)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(["--server", server, "--json"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn slopty")?;
+    let mut input = child.stdin.take().context("slopty stdin")?;
+    input.write_all(stdin).await?;
+    drop(input);
+    let out = tokio::time::timeout(STARTUP, child.wait_with_output())
+        .await
+        .with_context(|| format!("slopty {args:?} did not finish within {STARTUP:?}"))??;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    ensure!(out.status.success(), "slopty {args:?}: {}: {}", out.status, stderr.trim());
+    serde_json::from_slice(&out.stdout).with_context(|| {
+        format!("slopty {args:?} printed {:?}", String::from_utf8_lossy(&out.stdout))
+    })
+}
+
+/// One JSON-RPC request to the MCP endpoint at `addr`, over plain HTTP/1.1; the response.
+///
+/// It goes the way a stateless client of revision [`MCP_REVISION`] sends it: the revision in
+/// `_meta` and the headers, no `initialize`. `params` is an object; `tools/call` names its tool
+/// in `params.name`.
+///
+/// # Errors
+///
+/// When the endpoint cannot be reached, answers other than 200, or not with one JSON body.
+pub async fn mcp_request(
+    addr: std::net::SocketAddr,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut params = params;
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": MCP_REVISION,
+        "io.modelcontextprotocol/clientInfo": { "name": "slopty-e2e", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    params.as_object_mut().context("MCP params are an object")?.insert("_meta".to_owned(), meta);
+    let name = params.get("name").and_then(Value::as_str).map(str::to_owned);
+    let body =
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
+    let mut request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+         Connection: close\r\nMCP-Protocol-Version: {MCP_REVISION}\r\nMcp-Method: {method}\r\n",
+        body.len()
+    );
+    if let (Some(name), "tools/call") = (&name, method) {
+        write!(request, "Mcp-Name: {name}\r\n")?;
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+    let exchange = async {
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.write_all(request.as_bytes()).await?;
+        let mut response = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response).await?;
+        anyhow::Ok(response)
+    };
+    let response = tokio::time::timeout(STARTUP, exchange)
+        .await
+        .with_context(|| format!("MCP {method} did not answer within {STARTUP:?}"))??;
+    let response = String::from_utf8(response).context("MCP answered non-UTF-8")?;
+    let (head, body) =
+        response.split_once("\r\n\r\n").with_context(|| format!("no HTTP head: {response:?}"))?;
+    let status = head.split(' ').nth(1).unwrap_or_default();
+    ensure!(status == "200", "MCP {method}: HTTP {status}: {body}");
+    serde_json::from_str(body).with_context(|| format!("MCP {method} answered {body:?}"))
+}
+
+/// A server and one worker registered with it, in a temporary directory: the server, then
+/// ptyd + hostd dialing it. Everything is killed on drop.
+///
+/// `root/server` is the server's data directory, `root/worker` holds the worker's sockets and
+/// data, and `root/cli` is the CLI's data directory.
+#[derive(Debug)]
+pub struct ServerStack {
+    /// The temporary root.
+    pub dir: tempfile::TempDir,
+    /// The server.
+    pub server: ServerDaemon,
+    /// The worker.
+    pub worker: Worker,
+}
+
+impl ServerStack {
+    /// Start a server, then a worker named `worker_name` registered with it, and return once
+    /// the server lists the worker online. The worker's shells get
+    /// `BASH_SILENCE_DEPRECATION_WARNING=1`, so a `/bin/bash` prints only its prompt.
+    ///
+    /// # Errors
+    ///
+    /// When a binary is missing, a daemon dies, or the worker never comes online.
+    pub async fn launch(worker_name: &str) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-server-").tempdir()?;
+        let root = dir.path();
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let server_dir = root.join("server");
+        std::fs::create_dir_all(&server_dir)?;
+        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let env = [("BASH_SILENCE_DEPRECATION_WARNING", "1")];
+        let worker =
+            Worker::start(&root.join("worker"), worker_name, server.address(), &log, &env).await?;
+        let stack = Self { dir, server, worker };
+        stack.worker_online(STARTUP).await?;
+        Ok(stack)
+    }
+
+    /// Where to put a file for this run.
+    #[must_use]
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// `slopty <args> --server <this server> --json`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// As [`slopty_json`].
+    pub async fn slopty(&self, args: &[&str]) -> Result<Value> {
+        self.slopty_with_stdin(args, b"").await
+    }
+
+    /// [`Self::slopty`] with `stdin` on the CLI's standard input (`put`).
+    ///
+    /// # Errors
+    ///
+    /// As [`slopty_json`].
+    pub async fn slopty_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Result<Value> {
+        slopty_json(self.server.address(), &self.path("cli"), args, stdin).await
+    }
+
+    /// One MCP request to this server ([`mcp_request`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`mcp_request`].
+    pub async fn mcp(&self, id: u64, method: &str, params: Value) -> Result<Value> {
+        mcp_request(self.server.mcp(), id, method, params).await
+    }
+
+    /// The worker as `slopty workers --json` lists it, if it does.
+    ///
+    /// # Errors
+    ///
+    /// When the CLI fails.
+    pub async fn worker_entry(&self) -> Result<Option<Value>> {
+        let workers = self.slopty(&["workers"]).await?;
+        let name = self.worker.name();
+        let all = workers.as_array().context("workers is a list")?;
+        Ok(all.iter().find(|w| w["name"] == name).cloned())
+    }
+
+    /// Wait until the server lists the worker with `liveness`, for at most `bound`; its entry.
+    ///
+    /// # Errors
+    ///
+    /// When it does not within `bound`.
+    pub async fn worker_is(&self, liveness: &str, bound: Duration) -> Result<Value> {
+        let started = tokio::time::Instant::now();
+        loop {
+            let entry = self.worker_entry().await?;
+            if let Some(entry) = entry.as_ref().filter(|w| w["liveness"] == liveness) {
+                return Ok(entry.clone());
+            }
+            ensure!(
+                started.elapsed() < bound,
+                "the worker is not {liveness} after {bound:?}: {entry:?}"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// [`Self::worker_is`] online.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::worker_is`].
+    pub async fn worker_online(&self, bound: Duration) -> Result<Value> {
+        self.worker_is("online", bound).await
+    }
+
+    /// Kill the worker, then the server, and reap them.
+    pub async fn shutdown(mut self) {
+        self.worker.shutdown().await;
+        self.server.kill().await;
     }
 }
