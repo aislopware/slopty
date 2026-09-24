@@ -26,12 +26,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   From<CVPixelBuffer>` is typed against the fork's version (0.5.2 while zed stays there), so a
   bump to 0.6 fails `slopty-ui` — it moves when the fork's does (comment beside the req).
 
-- ✅ nextest 0.9.144 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
-  cargo-deny 0.20.2 · cargo-shear 1.13.4 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
-  typos 1.50.1 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
+- ✅ nextest 0.9.146 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
+  cargo-deny 0.20.2 · cargo-shear 1.14.0 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
+  typos 1.50.2 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
 
 - ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message
-  (`cargo gate` over the range since the last tag); `git-cliff` 2.14.1 computes
+  (`cargo gate` over the range since the last tag); `git-cliff` 2.14.2 computes
   the next version (`--bumped-version`, pre-1.0 rules: breaking → minor, feat → patch) and writes
   `CHANGELOG.md`; `cargo xtask release` glues them and tags `vX.Y.Z`. Rejected: cocogitto
   (last release 2026-03, overlaps both), release-plz / cargo-release (crates.io-centric; nothing

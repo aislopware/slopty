@@ -7,19 +7,19 @@ use crate::tools::{has, step};
 
 /// Tools installed with `cargo binstall`. Versions are floors; binstall fetches prebuilt binaries.
 const TOOLS: &[(&str, &str)] = &[
-    ("cargo-nextest", "0.9.144"),
+    ("cargo-nextest", "0.9.146"),
     ("cargo-deny", "0.20.2"),
-    ("cargo-shear", "1.13.4"),
+    ("cargo-shear", "1.14.0"),
     ("cargo-hack", "0.6.45"),
     ("cargo-llvm-cov", "0.9.1"),
     ("cargo-mutants", "27.1.0"),
     ("cargo-insta", "1.48.0"),
     ("cargo-semver-checks", "0.50.0"),
-    ("typos-cli", "1.50.1"),
+    ("typos-cli", "1.50.2"),
     ("taplo-cli", "0.10.0"),
     ("bacon", "3.25.0"),
     ("samply", "0.13.1"),
-    ("git-cliff", "2.14.1"),
+    ("git-cliff", "2.14.2"),
     ("committed", "1.1.11"),
 ];
 

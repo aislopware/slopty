@@ -42,7 +42,7 @@ slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 
 # core
 anyhow = "1.0.104"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 regex = "1.13.1"
 bitflags = { version = "2.13.2", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
@@ -55,7 +55,7 @@ memchr = "2.8.3"
 rustc-hash = "2.1.3"
 parking_lot = "0.12.5"
 uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
-camino = { version = "1.2.5", features = [ "serde1" ] }
+camino = { version = "1.2.6", features = [ "serde1" ] }
 
 # serialization
 serde = { version = "1.0.229", features = [ "derive", "rc" ] }
@@ -70,7 +70,7 @@ syntect = { version = "5.3.0", default-features = false, features = [
     "dump-load",
 ] }
 postcard = { version = "1.1.3", default-features = false, features = [ "alloc", "use-std" ] }
-zerocopy = { version = "0.8.57", features = [ "derive" ] }
+zerocopy = { version = "0.8.58", features = [ "derive" ] }
 toml = "1.1.6"
 
 # async / io
@@ -90,7 +90,7 @@ tokio = { version = "1.53.1", features = [
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = [ "env-filter", "json", "fmt" ] }
 plist = "1.10.1"
-rustix = { version = "1.1.4", features = [
+rustix = { version = "1.1.5", features = [
     "fs",
     "process",
     "pty",
@@ -296,16 +296,16 @@ libghostty-vt = { git = "https://github.com/aislopware/libghostty-rs.git", branc
 ] }
 
 # cli / scripts
-clap = { version = "4.6.6", features = [ "derive", "env" ] }
+clap = { version = "4.6.7", features = [ "derive", "env" ] }
 xshell = "0.2.7"
 resvg = { version = "0.48.1", default-features = false }
-icns = "0.4.0"
+icns = "0.5.0"
 
 # testing
 insta = { version = "1.48.0", features = [ "yaml", "redactions" ] }
 proptest = "1.11.0"
 tempfile = "3.27.0"
-ignore = "0.4.23"
+ignore = "0.4.33"
 pretty_assertions = "1.4.1"
 
 # ---------------------------------------------------------------------------------------------
