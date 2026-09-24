@@ -1,12 +1,13 @@
 //! `xtask gate`: everything that must be green before a commit lands.
 //!
-//! The gate checks a **snapshot** of the working tree (`target/gate/tree`, synced from
-//! `git ls-files` before every run) rather than the tree itself, so the tree stays free to
-//! edit while the gate runs and what passed is exactly what was synced. The cargo steps run as
+//! The gate checks a **snapshot of the index** (`target/gate/tree`, synced from the staged
+//! blobs before every run), not the working tree: several agents edit this one checkout at
+//! once, so the tree stays free to edit while the gate runs and what passed is exactly what
+//! the next `git commit` records. Stage what you mean to land, then gate it. The cargo steps run as
 //! parallel **lanes**, each on its own target dir under `target/gate/` (cargo serialises
 //! concurrent builds that share one), so the wall time is the longest lane, not the sum.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
@@ -36,14 +37,16 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     crate::upstream::warn_if_stale();
     let root = repo_root()?;
     if opts.fix {
-        // Fixers write to the working tree, which is what the snapshot then reads.
+        // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
         fmt(sh, true)?;
         shear(sh, true)?;
         typos(sh, true)?;
     }
-    // A formatting failure should not cost a build: checked first, alone, in a second.
-    fmt(sh, false)?;
     let tree = if opts.in_place { root.clone() } else { snapshot(&root)? };
+    // A formatting failure should not cost a build: checked first, alone, in a second.
+    let tree_sh = Shell::new()?;
+    tree_sh.change_dir(&tree);
+    fmt(&tree_sh, false)?;
     let lanes = root.join("target").join("gate");
     let lane = |name: &str| -> Result<Shell> {
         let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
@@ -69,10 +72,8 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
                     deny(&sh)?;
                     shear(&sh, false)?;
                     typos(&sh, false)?;
-                    // The git-backed ones read the working tree: same files, and the history.
-                    let main = main()?;
-                    taplo(&main, false)?;
-                    commits(&main)
+                    // `committed` reads the history, which only the checkout has.
+                    commits(&main()?)
                 }),
             ));
         }
@@ -111,78 +112,170 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     Ok(())
 }
 
-/// Sync the working tree (tracked and untracked-but-not-ignored files, as `git ls-files`
-/// reads it) into `target/gate/tree`: a file is copied when it is missing or differs, so
-/// cargo in the snapshot rebuilds exactly what changed; files the tree no longer has are
-/// removed; a submodule (`vendor/ghostty`, pinned, never edited here) is a symlink to the
-/// real one.
+/// Sync the **index** (what `git commit` would record, not the working tree) into
+/// `target/gate/tree`. Several agents edit this one checkout at once, so only the staged state
+/// is a unit anyone vouched for: what passes is exactly what the next commit records. Blobs are
+/// read in one `git cat-file --batch` pass; a manifest of the blob each path was last written
+/// from keeps unchanged files untouched, so cargo in the snapshot rebuilds exactly what changed.
+/// Paths the index no longer lists are removed; a submodule (`vendor/ghostty`) is a symlink to
+/// a checkout at the commit the index pins ([`submodule_at`]).
 fn snapshot(root: &Utf8Path) -> Result<Utf8PathBuf> {
     let started = Instant::now();
-    let tree = root.join("target").join("gate").join("tree");
+    let gate = root.join("target").join("gate");
+    let tree = gate.join("tree");
+    let manifest_path = gate.join("tree.index");
     std::fs::create_dir_all(&tree).with_context(|| format!("create {tree}"))?;
     let sh = Shell::new()?;
     sh.change_dir(root);
-    let listed =
-        cmd!(sh, "git ls-files -z --cached --others --exclude-standard").quiet().output()?;
+    let listed = cmd!(sh, "git ls-files --stage -z").quiet().output()?;
+    let before: HashMap<String, String> = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(sha, rel)| (rel.to_owned(), sha.to_owned())))
+        .collect();
+    let mut after: HashMap<String, String> = HashMap::new();
     let mut wanted: HashSet<String> = HashSet::new();
-    let mut copied = 0_usize;
-    for rel in listed.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        let rel = std::str::from_utf8(rel).context("a path in the tree is not UTF-8")?;
-        let src = root.join(rel);
-        let dst = tree.join(rel);
-        // Deleted in the tree but still in the index: not part of the snapshot.
-        let Ok(meta) = std::fs::symlink_metadata(&src) else { continue };
+    let mut fetch: Vec<(String, String, bool)> = Vec::new();
+    for entry in listed.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let entry = std::str::from_utf8(entry).context("an index path is not UTF-8")?;
+        let Some((meta, rel)) = entry.split_once('\t') else { continue };
+        let mut fields = meta.split(' ');
+        let (Some(mode), Some(sha), Some(stage)) = (fields.next(), fields.next(), fields.next())
+        else {
+            bail!("unexpected `git ls-files --stage` line: {entry}");
+        };
+        if stage != "0" {
+            bail!("{rel} is unmerged in the index");
+        }
         wanted.insert(rel.to_owned());
+        let dst = tree.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if meta.is_dir() {
-            if std::fs::symlink_metadata(&dst).is_err() {
-                std::os::unix::fs::symlink(&src, &dst).with_context(|| format!("link {dst}"))?;
-            }
-            continue;
-        }
-        if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&src)?;
-            if std::fs::read_link(&dst).ok().as_deref() != Some(&target) {
+        if mode == "160000" {
+            let module = submodule_at(root, &gate, rel, sha)?;
+            if std::fs::read_link(&dst).ok().as_deref() != Some(module.as_std_path()) {
                 let _removed = std::fs::remove_file(&dst);
-                std::os::unix::fs::symlink(&target, &dst)?;
-                copied = copied.saturating_add(1);
+                std::os::unix::fs::symlink(&module, &dst).with_context(|| format!("link {dst}"))?;
             }
             continue;
         }
-        if !same_file(&src, &dst, &meta)? {
-            std::fs::copy(&src, &dst).with_context(|| format!("copy {rel}"))?;
-            // `copy` clones the source's mtime on APFS. A lane may have built the old bytes
-            // *after* that mtime, so cargo would call the new bytes fresh: stamp them now.
-            std::fs::File::options()
-                .write(true)
-                .open(&dst)?
-                .set_modified(std::time::SystemTime::now())
-                .with_context(|| format!("touch {rel}"))?;
-            copied = copied.saturating_add(1);
+        let key = format!("{mode}:{sha}");
+        let present = std::fs::symlink_metadata(&dst).is_ok();
+        if !present || before.get(rel) != Some(&key) {
+            fetch.push((rel.to_owned(), sha.to_owned(), mode == "120000"));
         }
+        after.insert(rel.to_owned(), key);
     }
+    let written = write_blobs(root, &tree, &fetch, &after)?;
     let removed = prune(&tree, &tree, &wanted)?;
+    let manifest = after.iter().fold(String::new(), |mut s, (rel, key)| {
+        s.push_str(key);
+        s.push(' ');
+        s.push_str(rel);
+        s.push('\n');
+        s
+    });
+    std::fs::write(&manifest_path, manifest).with_context(|| format!("write {manifest_path}"))?;
     println!(
-        "  snapshot {} files: {copied} copied, {removed} removed ({:.1?})",
+        "  snapshot of the index, {} files: {written} written, {removed} removed ({:.1?})",
         wanted.len(),
         started.elapsed()
     );
     Ok(tree)
 }
 
-/// Whether the snapshot's copy already matches: same length and not older than the source
-/// (a copy is always newer than what it copied), else the bytes decide.
-fn same_file(src: &Utf8Path, dst: &Utf8Path, src_meta: &std::fs::Metadata) -> Result<bool> {
-    let Ok(dst_meta) = std::fs::metadata(dst) else { return Ok(false) };
-    if dst_meta.len() != src_meta.len() {
-        return Ok(false);
+/// A checkout of submodule `rel` at the commit the index pins, under `target/gate/modules/`:
+/// the working submodule may be mid-bump, and the snapshot must build what the index records.
+/// It is a worktree of the submodule's own repository, so it shares its objects and moving it
+/// to another commit rewrites only the files that differ.
+fn submodule_at(root: &Utf8Path, gate: &Utf8Path, rel: &str, sha: &str) -> Result<Utf8PathBuf> {
+    let module = gate.join("modules").join(rel.replace('/', "__"));
+    let sh = Shell::new()?;
+    if module.join(".git").exists() {
+        sh.change_dir(&module);
+        let head = cmd!(sh, "git rev-parse HEAD").quiet().read()?;
+        if head.trim() != sha {
+            cmd!(sh, "git checkout --quiet --detach {sha}").quiet().run()?;
+        }
+    } else {
+        std::fs::create_dir_all(gate.join("modules"))?;
+        sh.change_dir(root.join(rel));
+        cmd!(sh, "git worktree add --quiet --detach --force {module} {sha}").quiet().run()?;
     }
-    if dst_meta.modified()? >= src_meta.modified()? {
-        return Ok(true);
+    Ok(module)
+}
+
+/// Write the blobs `fetch` names into `tree`, reading them all through one
+/// `git cat-file --batch`. A file whose bytes already match keeps its mtime; a rewritten one is
+/// stamped now, because a lane may have built the old bytes after the blob's own time.
+fn write_blobs(
+    root: &Utf8Path,
+    tree: &Utf8Path,
+    fetch: &[(String, String, bool)],
+    modes: &HashMap<String, String>,
+) -> Result<usize> {
+    use std::io::{BufRead as _, Read as _, Write as _};
+    if fetch.is_empty() {
+        return Ok(0);
     }
-    Ok(std::fs::read(src)? == std::fs::read(dst)?)
+    let mut child = std::process::Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn git cat-file")?;
+    let mut stdin = child.stdin.take().context("git cat-file stdin")?;
+    let shas = fetch.iter().fold(String::new(), |mut s, (_, sha, _)| {
+        s.push_str(sha);
+        s.push('\n');
+        s
+    });
+    let feeder = std::thread::spawn(move || stdin.write_all(shas.as_bytes()));
+    let mut out = std::io::BufReader::new(child.stdout.take().context("git cat-file stdout")?);
+    let mut written = 0_usize;
+    for (rel, sha, link) in fetch {
+        let mut header = String::new();
+        out.read_line(&mut header)?;
+        let size: usize = header
+            .split(' ')
+            .nth(2)
+            .and_then(|s| s.trim().parse().ok())
+            .with_context(|| format!("git cat-file header for {sha}: {header:?}"))?;
+        let mut blob = vec![0_u8; size];
+        out.read_exact(&mut blob)?;
+        let mut newline = [0_u8; 1];
+        out.read_exact(&mut newline)?;
+        let dst = tree.join(rel);
+        if *link {
+            let target = std::str::from_utf8(&blob).context("a symlink target is not UTF-8")?;
+            if std::fs::read_link(&dst).ok().as_deref() != Some(Utf8Path::new(target).as_std_path())
+            {
+                let _removed = std::fs::remove_file(&dst);
+                std::os::unix::fs::symlink(target, &dst)?;
+                written = written.saturating_add(1);
+            }
+            continue;
+        }
+        if std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
+            let _removed = std::fs::remove_file(&dst);
+        }
+        if std::fs::read(&dst).is_ok_and(|old| old == blob) {
+            continue;
+        }
+        std::fs::write(&dst, &blob).with_context(|| format!("write {rel}"))?;
+        let executable = modes.get(rel).is_some_and(|k| k.starts_with("100755"));
+        let mode = if executable { 0o755 } else { 0o644 };
+        std::fs::set_permissions(&dst, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+        written = written.saturating_add(1);
+    }
+    feeder.join().map_err(|panic| anyhow::anyhow!("git cat-file feeder panicked: {panic:?}"))??;
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("git cat-file failed: {status}");
+    }
+    Ok(written)
 }
 
 /// Remove every file under `dir` that the tree no longer lists, and the directories that
@@ -284,7 +377,8 @@ fn typos(sh: &Shell, fix: bool) -> Result<()> {
 /// trees before its `exclude` list applies, which took ~90 s.
 fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     let check: &[&str] = if apply { &[] } else { &["--check"] };
-    let files = cmd!(sh, "git ls-files *.toml").read()?;
+    let root = repo_root()?;
+    let files = cmd!(sh, "git -C {root} ls-files *.toml").read()?;
     let files: Vec<&str> = files.lines().collect();
     quiet_step("taplo", cmd!(sh, "taplo fmt {check...} {files...}"))
 }

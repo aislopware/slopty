@@ -55,8 +55,8 @@ enum Cmd {
         /// Only run the fast checks (fmt + clippy + unit tests on the host triple).
         #[arg(long)]
         quick: bool,
-        /// Check the working tree in place instead of its snapshot under `target/gate/tree`
-        /// (CI, or a tree nobody edits while the gate runs).
+        /// Check the working tree in place instead of the index snapshot under
+        /// `target/gate/tree` (CI, where the tree is the commit).
         #[arg(long)]
         in_place: bool,
     },

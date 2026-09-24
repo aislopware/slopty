@@ -31,11 +31,14 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 
 ## Gate
 `cargo gate` is fmt, clippy `-D warnings` on all targets and all three triples, nextest,
-doctests, rustdoc, deny, shear, typos, taplo and `committed`. It syncs the working tree into
-`target/gate/tree` and checks that snapshot in parallel lanes on `target/gate/*` target dirs,
-so the tree stays free to edit while it runs; what passed is the tree as it was when the gate
-started. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree first;
-`--in-place` checks the tree itself (CI). Per-lane times are in the log.
+doctests, rustdoc, deny, shear, typos, taplo and `committed`. It checks the **index**, not the
+working tree: the staged blobs are synced into `target/gate/tree` (submodules checked out at
+the commit the index pins, under `target/gate/modules`) and checked in parallel lanes on
+`target/gate/*` target dirs. Several agents edit this one checkout at once, so stage exactly
+the change you mean to land (`git add <paths>`), gate it, and commit it; the tree stays free to
+edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree
+first (stage what they changed); `--in-place` checks the tree itself (CI). Per-lane times are
+in the log.
 
 ## Deep checks (on a schedule, not per commit)
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir

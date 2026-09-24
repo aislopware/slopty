@@ -28,10 +28,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ nextest 0.9.144 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
   cargo-deny 0.20.2 · cargo-shear 1.13.4 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
-  typos 1.50.1 · taplo 0.10 · prek 0.5.2 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
+  typos 1.50.1 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
 
-- ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message (commit-msg
-  hook via prek, and `cargo gate` over the range since the last tag); `git-cliff` 2.14.1 computes
+- ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message
+  (`cargo gate` over the range since the last tag); `git-cliff` 2.14.1 computes
   the next version (`--bumped-version`, pre-1.0 rules: breaking → minor, feat → patch) and writes
   `CHANGELOG.md`; `cargo xtask release` glues them and tags `vX.Y.Z`. Rejected: cocogitto
   (last release 2026-03, overlaps both), release-plz / cargo-release (crates.io-centric; nothing
@@ -131,3 +131,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and licence gates are the supply-chain check), `cargo-audit` (deny covers it), `cargo-udeps`
   (shear), `cargo-fuzz` (libFuzzer is a C++ runtime; proptest covers the codec and the grid),
   release `debug-assertions` (cost on every frame for what the test profile already runs).
+
+- ✅ **No git hooks; the gate checks the index** (2026-09-24). Several agents now edit one
+  checkout at once, since worktrees each cost a cold GPUI build.
+  - **Why prek's hooks went.** Its pre-commit hook stashed unstaged changes, ran
+    `cargo fmt --all --check` over the *working tree*, then restored them. That failed a commit
+    on another agent's half-edited file and raced that agent's writes. The stash/restore cycle
+    can silently drop an edit that lands in between.
+  - **What covers it now.** `cargo gate` already runs fmt, taplo, typos and `committed`, and it
+    now snapshots the **index** (`git cat-file --batch` into `target/gate/tree`, submodules at
+    their pinned commits), so what it passes is exactly what the commit records.
+  - Removed: the prek hooks, `.pre-commit-config.yaml` and prek from `xtask setup`.

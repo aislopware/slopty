@@ -1,4 +1,4 @@
-# Commit message lint (crate-ci/committed). Enforced by the prek commit-msg hook and in CI.
+# Commit message lint (crate-ci/committed). Enforced by `cargo gate` over the range since the last tag.
 style = "conventional"
 subject_length = 72
 subject_capitalized = false

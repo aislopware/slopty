@@ -19,7 +19,6 @@ const TOOLS: &[(&str, &str)] = &[
     ("taplo-cli", "0.10.0"),
     ("bacon", "3.25.0"),
     ("samply", "0.13.1"),
-    ("prek", "0.5.2"),
     ("git-cliff", "2.14.1"),
     ("committed", "1.1.11"),
 ];
@@ -57,11 +56,5 @@ pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
-    if has(sh, "prek") {
-        step(
-            "install git hooks",
-            &cmd!(sh, "prek install --hook-type pre-commit --hook-type commit-msg"),
-        )?;
-    }
     Ok(())
 }
