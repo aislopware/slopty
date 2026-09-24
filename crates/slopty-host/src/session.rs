@@ -9,12 +9,13 @@ use std::time::Duration;
 use bytes::{Buf as _, Bytes, BytesMut};
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::boundary::Boundary;
+use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
 use slopty_proto::codec;
 use slopty_proto::screen::MAX_CLIPBOARD_BYTES;
 use slopty_proto::terminal::{ColorOverrides, TermColors, TermEvent, TermRequest, TermSize};
 use slopty_pty::PtyMaster;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::HostError;
 
@@ -74,6 +75,7 @@ enum Cmd {
     Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     Probe { reply: oneshot::Sender<Probe> },
+    Read { read: Read, reply: oneshot::Sender<Result<Text, HostError>> },
     Exited { status: i32 },
     Close,
 }
@@ -111,11 +113,90 @@ pub struct Probe {
     pub cwd: Option<String>,
 }
 
+/// What has happened in a session, for waiters: counters that only grow, published on a
+/// [`watch`] channel so a waiter wakes on a change instead of asking. The channel closes when
+/// the actor stops.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Activity {
+    /// PTY reads consumed.
+    pub output: u64,
+    /// Commands ended (OSC 133 `D`), as [`GhosttyEngine::commands_ended`] counts them.
+    pub commands_ended: u64,
+    /// The child is gone: its exit was reported or the master closed.
+    pub exited: bool,
+}
+
+/// A text view of the session's terminal ([`SessionHandle::read`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Read {
+    /// The screen.
+    Screen,
+    /// Retained lines ([`GhosttyEngine::text_lines`]).
+    Output {
+        /// First line wanted.
+        since: Option<u64>,
+        /// At most this many.
+        max: u32,
+    },
+    /// OSC 133 command blocks ([`GhosttyEngine::commands`]).
+    Commands {
+        /// Blocks whose prompt is at or after this line.
+        since: Option<u64>,
+    },
+    /// Where the cursor is.
+    Position,
+    /// Text written since a position ([`GhosttyEngine::text_since`]).
+    Since(Position),
+    /// The first command that ended at or after a position ([`GhosttyEngine::ended_after`]).
+    EndedAfter(Position),
+}
+
+/// The answer to a [`Read`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Text {
+    /// For [`Read::Screen`]: the screen with the title and directory the actor holds.
+    Screen {
+        /// Rows and cursor.
+        screen: ScreenText,
+        /// Title from OSC 0/2.
+        title: Option<String>,
+        /// Directory from OSC 7.
+        cwd: Option<String>,
+    },
+    /// For [`Read::Output`].
+    Output(TextLines),
+    /// For [`Read::Commands`].
+    Commands(Vec<CommandBlock>),
+    /// For [`Read::Position`].
+    Position(Position),
+    /// For [`Read::Since`].
+    Since(TextSince),
+    /// For [`Read::EndedAfter`]: where that command's `133;D` was written.
+    Ended(Option<Position>),
+}
+
 /// Cloneable handle to a running session actor.
 #[derive(Clone, Debug)]
 pub struct SessionHandle {
     id: SessionId,
     tx: mpsc::UnboundedSender<Cmd>,
+    activity: watch::Receiver<Activity>,
+    /// Where orchestration's waits have read up to (see [`Self::mark`]).
+    marks: Arc<parking_lot::Mutex<Marks>>,
+}
+
+/// Orchestration's read positions in a session: output matched up to `output`, commands
+/// reported up to `command`.
+#[derive(Clone, Copy, Debug, Default)]
+struct Marks {
+    output: Option<Position>,
+    command: Option<Position>,
+}
+
+/// `at` is past `mark`, or in another line numbering (which replaces it).
+fn ahead(mark: Option<Position>, at: Position) -> bool {
+    let place = |p: Position| (p.line, p.col);
+    mark.is_none_or(|m| m.epoch != at.epoch || place(m) < place(at))
 }
 
 impl std::fmt::Debug for Cmd {
@@ -127,6 +208,7 @@ impl std::fmt::Debug for Cmd {
             Self::Request { .. } => "Request",
             Self::Snapshot { .. } => "Snapshot",
             Self::Probe { .. } => "Probe",
+            Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Close => "Close",
         };
@@ -188,6 +270,58 @@ impl SessionHandle {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Probe { reply })?;
         rx.await.map_err(|_gone| HostError::SessionClosed)
+    }
+
+    /// Read the terminal as text, on the actor's thread.
+    pub async fn read(&self, read: Read) -> Result<Text, HostError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Cmd::Read { read, reply })?;
+        rx.await.map_err(|_gone| HostError::SessionClosed)?
+    }
+
+    /// The session's [`Activity`], marked seen as of now: `changed()` wakes on what happens
+    /// next, and errors once the actor has stopped.
+    #[must_use]
+    pub fn activity(&self) -> watch::Receiver<Activity> {
+        let mut rx = self.activity.clone();
+        rx.mark_unchanged();
+        rx
+    }
+
+    /// Where orchestration's output matching reads from next, as `expect` keeps its buffer:
+    /// set where orchestration first touched the session (opened it, typed into it, waited on
+    /// it) and moved past each match. `None` until then.
+    #[must_use]
+    pub fn mark(&self) -> Option<Position> {
+        self.marks.lock().output
+    }
+
+    /// Set the mark unless it is set already; the mark in force either way.
+    pub fn mark_if_unset(&self, at: Position) -> Position {
+        *self.marks.lock().output.get_or_insert(at)
+    }
+
+    /// Move the mark to `at`, never back within one line numbering.
+    pub fn advance_mark(&self, at: Position) {
+        let mut marks = self.marks.lock();
+        if ahead(marks.output, at) {
+            marks.output = Some(at);
+        }
+    }
+
+    /// Where the last command a `CommandDone` wait reported ended; `None` before one did.
+    #[must_use]
+    pub fn command_mark(&self) -> Option<Position> {
+        self.marks.lock().command
+    }
+
+    /// A `CommandDone` wait reported the command that ended at `at`; the next one waits for a
+    /// later command.
+    pub fn advance_command_mark(&self, at: Position) {
+        let mut marks = self.marks.lock();
+        if ahead(marks.command, at) {
+            marks.command = Some(at);
+        }
     }
 
     /// The child exited with `status` (ptyd reaped it): the viewers are told.
@@ -257,7 +391,9 @@ pub struct SessionStart {
 pub fn spawn(start: SessionStart) -> Result<SessionHandle, HostError> {
     let (tx, rx) = mpsc::unbounded_channel();
     let id = start.id;
-    let handle = SessionHandle { id, tx };
+    let (activity_tx, activity) =
+        watch::channel(Activity { exited: start.exited.is_some(), ..Activity::default() });
+    let handle = SessionHandle { id, tx, activity, marks: Arc::default() };
     thread::Builder::new()
         .name(format!("session-{id}"))
         .spawn(move || {
@@ -270,7 +406,7 @@ pub fn spawn(start: SessionStart) -> Result<SessionHandle, HostError> {
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                match Actor::new(start, rx) {
+                match Actor::new(start, rx, activity_tx) {
                     Ok(actor) => actor.run().await,
                     Err(e) => tracing::error!(session = %id, error = %e, "session start failed"),
                 }
@@ -362,6 +498,8 @@ struct Actor {
     checkpoint_due: Option<tokio::time::Instant>,
     /// Where the output stands in VT syntax, so a quiet-spell checkpoint never cuts a sequence.
     boundary: Boundary,
+    /// What waiters watch.
+    activity: watch::Sender<Activity>,
 }
 
 /// A checkpoint follows this much quiet after output. Shorter means a crashed host loses less
@@ -387,7 +525,11 @@ fn frame_due_after(
 }
 
 impl Actor {
-    fn new(start: SessionStart, rx: mpsc::UnboundedReceiver<Cmd>) -> Result<Self, HostError> {
+    fn new(
+        start: SessionStart,
+        rx: mpsc::UnboundedReceiver<Cmd>,
+        activity: watch::Sender<Activity>,
+    ) -> Result<Self, HostError> {
         let mut engine = GhosttyEngine::new(EngineConfig {
             size: start.size,
             scrollback_lines: start.scrollback_lines,
@@ -448,6 +590,7 @@ impl Actor {
             size_untold: None,
             checkpoint_due: None,
             boundary: Boundary::default(),
+            activity,
         })
     }
 
@@ -479,11 +622,13 @@ impl Actor {
                         tracing::info!(session = %self.id, "pty closed");
                         self.pty_closed = true;
                         self.flush_frame();
+                        self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                     }
                     Ok(n) => self.on_output(buf.get(..n).unwrap_or_default()),
                     Err(e) => {
                         tracing::warn!(session = %self.id, error = %e, "pty read failed");
                         self.pty_closed = true;
+                        self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                     }
                 },
                 () = sleep_until_due(self.frame_due) => {
@@ -526,6 +671,11 @@ impl Actor {
         self.tap_output(bytes);
         self.after_output();
         self.arm_hold();
+        let ended = self.engine.commands_ended();
+        self.activity.send_modify(|a| {
+            a.output = a.output.wrapping_add(1);
+            a.commands_ended = ended;
+        });
         let now = tokio::time::Instant::now();
         // Frame right here when nothing paces it. A timer set to "now" is not now: tokio
         // rounds a deadline up to its next millisecond tick and the driver parks until then,
@@ -985,12 +1135,32 @@ impl Actor {
             }
             Cmd::Exited { status } => {
                 self.exited = Some(status);
+                self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                 self.flush_frame();
                 self.broadcast(&TermEvent::Exited { status });
+            }
+            Cmd::Read { read, reply } => {
+                let _ignored = reply.send(self.read(read));
             }
             Cmd::Close => return false,
         }
         true
+    }
+
+    fn read(&self, read: Read) -> Result<Text, HostError> {
+        let engine = &self.engine;
+        Ok(match read {
+            Read::Screen => Text::Screen {
+                screen: engine.screen_text()?,
+                title: self.title.clone(),
+                cwd: self.cwd.clone(),
+            },
+            Read::Output { since, max } => Text::Output(engine.text_lines(since, max)?),
+            Read::Commands { since } => Text::Commands(engine.commands(since)?),
+            Read::Position => Text::Position(engine.position()?),
+            Read::Since(from) => Text::Since(engine.text_since(from)?),
+            Read::EndedAfter(from) => Text::Ended(engine.ended_after(from)),
+        })
     }
 
     fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {

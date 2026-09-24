@@ -166,3 +166,55 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Timeout cap.** The server caps `wait_for` at 240 s, under Claude Code's five-minute idle
     abort of an MCP call. It gives a forwarded wait its own timeout plus 15 s before it stops
     waiting on the worker, and every other forwarded verb 60 s.
+
+- ✅ **The worker's side of the link: registration, redial, and what the verbs mean** (2026-09-25).
+  - **Joining.** `slopty-hostd` registers with the server named by `--server`, else
+    `SLOPTY_SERVER`, else `[worker] server` in `settings.toml` (port 45560 when none is given).
+    With none it runs on its own as before. The link is one task beside the rest of the
+    daemon. It hears the daemon's events on its own broadcast subscription and forwards
+    `SessionOpened`, `SessionClosed` and `Agent`. If it falls behind, it registers again,
+    because a fresh registration carries the whole state. Every forwarded verb runs in a task
+    of its own, so a long `WaitFor` holds up nothing. A dead or absent server costs the
+    terminals and the clients nothing.
+  - **Redial.** After a link ends the worker dials again after 250 ms, doubling to 5 s, forever.
+    A link that lived 10 s resets the delay. A `DuplicateWorker` refusal (the server still
+    holds the link a restart dropped) is retried every second. The lease's keep-alive is the
+    server's, so the worker adds no pings of its own.
+  - **Capabilities.** OS, CPUs, memory and encoders are fixed. The agents come from one
+    `claude --version` at start, through the login shell when the daemon's `PATH` lacks it.
+    Permissions and displays are looked at every 5 s, since TCC and display changes send a
+    daemon no notice. The load is compared every 30 s and sent only when it moved by more
+    than 0.5.
+  - **`SendInput`.** `Text` is what a keyboard's input method commits, so it goes as raw bytes,
+    and each newline is an Enter press through the key encoder. `Paste` goes through the paste
+    encoder and is bracketed when the program asked for it. `Keys` are `[mods+]key` names,
+    turned into the key events a client sends so the program's keyboard modes apply. Every
+    name is checked before any is sent, and a bad one is `Invalid` with the forms that parse.
+  - **Waits read the way `expect` does.** The first design matched only output written after
+    the `WaitFor` arrived. In a test with both calls in one process, `echo hi` had printed
+    before the wait began often enough to fail, and over the server hop it would be the usual
+    case. So each session keeps a mark. It starts where orchestration first touched the
+    session: the first byte of a terminal a verb opened, else where the cursor stood before
+    the first input or wait. `Output` scans from the mark and moves it past the matching line.
+    `CommandDone` is met by the first command whose `133;D` came at or after the mark, and it
+    consumes that command. A command that ended before its wait arrived therefore still counts,
+    and the same line or command never ends two waits. `Quiet` restarts on any output. `Exit`
+    holds once the program is gone. `AgentNeedsInput` holds at once for an agent blocked on a
+    human, and otherwise at its next report of blocked, idle or done. An agent already idle
+    when the wait starts has usually just been typed to, so its idle status is stale. Every
+    wait sleeps on the session's activity channel and the agent events, never on a timer that
+    asks again.
+  - **Read views.** Each view is a message to the session's thread, answered from
+    libghostty's grid with the plain-text formatter search uses. When search already
+    formatted the history at this generation, the view slices that text. Otherwise it
+    formats only the rows asked for, so a read near the end of a 50 000-line history costs
+    those rows, not the 10 ms the whole history takes (MEASUREMENTS, 2026-09-24). A wait
+    formats each row about once: it reads from the cursor's row of its last read, at most
+    4096 rows at a time. `ReadOutput` stops at the last row with text when it reaches the
+    end, and returns 10 000 lines at most. The command blocks keep their marks in stream
+    order, so a command with no output or two prompts on adjacent rows stay apart, and the
+    marks survive a full-screen program.
+  - `ReadFile` refuses files over 16 MiB, since a reply is one frame. `WriteFile` writes a
+    temporary file beside the target, fsyncs it and renames it over, keeping the old mode.
+    `ListPorts` walks each terminal's process tree with libproc and reports the TCP sockets
+    in the listening state.

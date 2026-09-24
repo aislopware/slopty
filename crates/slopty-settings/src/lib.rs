@@ -281,6 +281,15 @@ pub struct HostSettings {
     pub allow: Vec<String>,
 }
 
+/// `[worker]`: how `slopty-hostd` joins a server.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkerSettings {
+    /// The server to register with, `host[:port]` (port 45560 when absent); empty runs the
+    /// worker on its own. `--server` and `SLOPTY_SERVER` take precedence.
+    pub server: String,
+}
+
 /// The whole file.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -297,6 +306,8 @@ pub struct Settings {
     pub colors: ColorSettings,
     /// The host daemon.
     pub host: HostSettings,
+    /// The host daemon as a worker of a server.
+    pub worker: WorkerSettings,
 }
 
 /// Why a file could not be used.
@@ -463,6 +474,12 @@ ansi = []
 # connects. Traffic is not encrypted by Slopty: the VPN or tailnet is the
 # boundary. Read when slopty-hostd starts.
 allow = []
+
+[worker]
+# The server this Mac registers with as a worker, \"host\" or \"host:port\"
+# (port 45560 when absent). Empty runs it on its own. Read when slopty-hostd
+# starts; --server and SLOPTY_SERVER override it.
+server = \"\"
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
@@ -789,6 +806,15 @@ mod tests {
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
+        assert!(text.contains("server = \"\""), "{text}");
+    }
+
+    #[test]
+    fn worker_keys() {
+        let loaded = Settings::parse("[worker]\nserver = \"studio.tail1234.ts.net\"\n");
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        assert_eq!(loaded.settings.worker.server, "studio.tail1234.ts.net");
+        assert!(Settings::default().worker.server.is_empty(), "on its own by default");
     }
 
     #[test]

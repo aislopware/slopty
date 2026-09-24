@@ -12,6 +12,7 @@ mod agents;
 mod conn;
 mod ctl;
 mod paths;
+mod server;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +52,11 @@ struct Args {
     /// `SLOPTY_BIND`.
     #[arg(long = "bind", env = "SLOPTY_BIND")]
     bind: Option<std::net::IpAddr>,
+    /// The server to register with as a worker, `host[:port]` (port 45560 when absent); also
+    /// `SLOPTY_SERVER`, else `[worker] server` in `settings.toml`. Without one the worker runs
+    /// on its own.
+    #[arg(long, env = "SLOPTY_SERVER")]
+    server: Option<String>,
 }
 
 /// Who may connect: the `[host] allow` ranges of `settings.toml` in `data_dir`, else the
@@ -146,6 +152,46 @@ async fn watch_pasteboard(daemon: Daemon) -> ! {
     }
 }
 
+/// Register with the configured server, if there is one, on a task of its own: capabilities
+/// are probed first (the agents' versions follow once their `--version` answers), then the
+/// link dials and keeps dialing (`server::run`).
+fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) {
+    let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
+    let addr = match server::configured(flag, &settings) {
+        Ok(Some(addr)) => addr,
+        Ok(None) => {
+            tracing::info!("no server configured; running on our own");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "server address ignored; running on our own");
+            return;
+        }
+    };
+    let endpoint = match slopty_net::client::bind_client() {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            tracing::warn!(error = %e, "no endpoint to dial the server from; running on our own");
+            return;
+        }
+    };
+    let orchestrator = slopty_host::orchestrate::Orchestrator::new(
+        daemon.id,
+        daemon.host.clone(),
+        daemon.items.clone(),
+        daemon.events.clone(),
+        Arc::new(server::DaemonAgents(Arc::clone(&daemon.agents))),
+    );
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        let (caps, watched) = tokio::sync::watch::channel(slopty_host::caps::probe(&[]).await);
+        tokio::spawn(server::run(daemon, orchestrator, endpoint, addr, watched));
+        let agents = slopty_host::caps::installed_agents().await;
+        caps.send_modify(|c| c.agents.clone_from(&agents));
+        slopty_host::caps::watch(caps, agents).await;
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -216,6 +262,8 @@ async fn main() -> Result<()> {
         ctl_path.to_string_lossy().into_owned(),
     )]);
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
+
+    join_server(&daemon, args.server.as_deref(), &data_dir);
 
     let allow: Vec<String> =
         daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();

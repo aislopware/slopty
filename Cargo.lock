@@ -7075,10 +7075,12 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ignore",
+ "libc",
  "objc2-core-foundation",
  "objc2-core-video",
  "objc2-video-toolbox",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "slopty-capture",

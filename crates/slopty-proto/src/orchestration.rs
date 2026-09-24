@@ -39,16 +39,22 @@ pub enum Input {
 }
 
 /// What [`Verb::WaitFor`] waits for.
+///
+/// Waits read the way `expect` does, from a per-session mark rather than from when the call
+/// arrives: a command often finishes before a wait sent after it reaches the worker. The mark
+/// starts at a terminal's first byte when a verb opened it, else where the cursor stood before
+/// the first [`Verb::SendInput`] or wait. A met wait moves the mark past what met it, so no
+/// line or command ends two waits.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum WaitUntil {
-    /// A line of output (after the call started) matches this regular expression.
+    /// A line of output at or after the mark matches this regular expression.
     Output(String),
     /// No output for this many milliseconds.
     Quiet {
         /// Milliseconds of silence.
         ms: u32,
     },
-    /// The command running now finishes (OSC 133 `D`), or the next one does if none runs.
+    /// A command ends (OSC 133 `D`) at or after the mark, including one that already has.
     CommandDone,
     /// The session's program exits.
     Exit,

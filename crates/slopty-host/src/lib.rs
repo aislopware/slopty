@@ -6,12 +6,17 @@
 //! [`items::ItemStore`] is the authoritative, persisted item registry.
 //! [`repo`] answers which repository a session's working directory is in, which only the
 //! machine the shell runs on can know; [`file::read`] reads a file for a file card.
+//! [`orchestrate::Orchestrator`] answers the verbs the server forwards (open, type, read, wait,
+//! files, [`ports`]); [`caps`] says what this worker can do.
 
+pub mod caps;
 pub mod ctl;
 pub mod file;
 pub mod find;
 pub mod items;
 pub mod manager;
+pub mod orchestrate;
+pub mod ports;
 pub mod repo;
 pub mod screen;
 pub mod session;

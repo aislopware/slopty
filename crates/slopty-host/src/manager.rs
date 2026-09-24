@@ -203,6 +203,13 @@ impl Host {
         out
     }
 
+    /// The process ptyd spawned for each session whose program still runs: the roots of the
+    /// process trees `ListPorts` walks.
+    pub async fn pids(&self) -> Result<Vec<(SessionId, u32)>, HostError> {
+        let infos = self.inner.ptyd.lock().await.list().await?;
+        Ok(infos.into_iter().filter(|i| i.exited.is_none()).map(|i| (i.id, i.pid)).collect())
+    }
+
     /// Kill the child and drop the session everywhere.
     pub async fn close(&self, id: SessionId) -> Result<(), HostError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(HostError::NoSuchSession)?;

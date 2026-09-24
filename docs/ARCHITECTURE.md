@@ -250,6 +250,18 @@ silently. `cargo xtask sign` (and `xtask run host`, which calls it) signs both d
 `dev.aislopware.slopty.hostd` and `….ptyd` with a Developer ID certificate, which makes the
 requirement the identifier rather than the hash and one approval enough for good.
 
+**Worker link and orchestration.** With a server configured (`--server`, `SLOPTY_SERVER` or
+`[worker] server`), hostd registers as a worker (`apps/slopty-hostd/src/server.rs`). It sends
+its capabilities (`slopty-host::caps`) and its sessions, forwards session and agent events,
+and redials with capped backoff when the link drops. `slopty-host::orchestrate::Orchestrator`
+answers the verbs the server forwards. It opens terminals through the same path a client's
+`OpenSession` takes, types through the session's key and paste encoders, and reads text views
+of the engine on the session's thread (`GhosttyEngine::screen_text`, `text_lines`,
+`text_since`, `commands`). `WaitFor` sleeps on the session's `Activity` watch channel and
+matches output from a per-session mark, as `expect` does. `slopty-host::ports` finds the TCP
+listeners in each terminal's process tree through libproc. Rulings in
+`docs/decisions/topology.md`.
+
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
 `slopty-host`; app `slopty-ptyd`.
@@ -904,7 +916,7 @@ workspace, as does "Add worker" (with a Cancel): type or paste an address (`mac-
 | `slopty-codec` | VideoToolbox encode (host) / decode (all) | split |
 | `slopty-input` | CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation) | host |
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | host |
-| `slopty-host` | session manager, mux, fan-out | host |
+| `slopty-host` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | host |
 | `slopty-client` | client session state, the item registry mirror, the layout model | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
