@@ -1,0 +1,49 @@
+---
+source: apps/slopty-cli/src/view.rs
+expression: overview().json()
+---
+[
+  {
+    "worker": "0199a000-0000-7000-8000-000000000001",
+    "name": "mac-studio",
+    "liveness": "online",
+    "address": "100.64.0.3:45550",
+    "os": "macos",
+    "os_version": "26.5",
+    "arch": "aarch64",
+    "cpus": 24,
+    "memory": 68719476736,
+    "load": 1.5,
+    "version": "0.1.0",
+    "can_capture": true,
+    "can_inject": true,
+    "last_seen_ms": 1790000000000,
+    "terminals": 2,
+    "waiting": [
+      {
+        "term": "0199a000-0000-7000-8000-000000000001/0199a1b2-c3d4-7000-8000-00000000abcd",
+        "agent": "claude_code",
+        "reason": "permission",
+        "tool": "Bash"
+      }
+    ]
+  },
+  {
+    "worker": "0199a000-0000-7000-8000-000000000002",
+    "name": "macbook-pro",
+    "liveness": "unreachable",
+    "address": "100.64.0.7:45550",
+    "os": "macos",
+    "os_version": "26.5.1",
+    "arch": "aarch64",
+    "cpus": 24,
+    "memory": 68719476736,
+    "load": 1.5,
+    "version": "0.1.0",
+    "can_capture": true,
+    "can_inject": true,
+    "last_seen_ms": 1789999990000,
+    "terminals": 1,
+    "waiting": []
+  }
+]

@@ -1,0 +1,8 @@
+---
+source: apps/slopty-cli/src/view.rs
+expression: "terminals_text(&o.workers, &o.terminals)"
+---
+TERM                  STATE       SIZE    VIEWERS  TITLE       CWD
+mac-studio/0199a1b1   running     120x40  1        zsh         ~/src/slopty
+mac-studio/0199a1b2   running     120x40  1        claude      ~/src/slopty
+macbook-pro/0199a1b3  exited 101  120x40  1        cargo test  ~/src/web

@@ -1,4 +1,4 @@
-//! `slopty open|attach`: a raw-mode terminal client that renders frames into the local terminal.
+//! `slopty attach`: a raw-mode terminal client that renders frames into the local terminal.
 //!
 //! Keys go to the host as raw bytes (the local terminal already encoded them), so this is the
 //! exact bytes-in/rows-out path the GPUI apps use minus the prediction layer. Detach with `^]`.

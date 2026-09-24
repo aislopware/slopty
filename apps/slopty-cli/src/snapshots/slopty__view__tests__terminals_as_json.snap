@@ -1,0 +1,57 @@
+---
+source: apps/slopty-cli/src/view.rs
+expression: "terminals_json(&o.workers, &o.terminals)"
+---
+[
+  {
+    "term": "0199a000-0000-7000-8000-000000000001/0199a1b1-c3d4-7000-8000-00000000abcd",
+    "worker": "0199a000-0000-7000-8000-000000000001",
+    "worker_name": "mac-studio",
+    "session": "0199a1b1-c3d4-7000-8000-00000000abcd",
+    "title": "zsh",
+    "cwd": "~/src/slopty",
+    "repo": null,
+    "cols": 120,
+    "rows": 40,
+    "running": true,
+    "exit_status": null,
+    "viewers": 1,
+    "command": [
+      "zsh"
+    ]
+  },
+  {
+    "term": "0199a000-0000-7000-8000-000000000001/0199a1b2-c3d4-7000-8000-00000000abcd",
+    "worker": "0199a000-0000-7000-8000-000000000001",
+    "worker_name": "mac-studio",
+    "session": "0199a1b2-c3d4-7000-8000-00000000abcd",
+    "title": "claude",
+    "cwd": "~/src/slopty",
+    "repo": null,
+    "cols": 120,
+    "rows": 40,
+    "running": true,
+    "exit_status": null,
+    "viewers": 1,
+    "command": [
+      "zsh"
+    ]
+  },
+  {
+    "term": "0199a000-0000-7000-8000-000000000002/0199a1b3-c3d4-7000-8000-00000000abcd",
+    "worker": "0199a000-0000-7000-8000-000000000002",
+    "worker_name": "macbook-pro",
+    "session": "0199a1b3-c3d4-7000-8000-00000000abcd",
+    "title": "cargo test",
+    "cwd": "~/src/web",
+    "repo": null,
+    "cols": 120,
+    "rows": 40,
+    "running": false,
+    "exit_status": 101,
+    "viewers": 1,
+    "command": [
+      "zsh"
+    ]
+  }
+]

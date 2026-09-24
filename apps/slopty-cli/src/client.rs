@@ -70,15 +70,6 @@ pub async fn add(data_dir: &Path, address: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn workers(data_dir: &Path) -> Result<()> {
-    let me = known(data_dir)?;
-    println!("client {}", me.client());
-    for w in me.workers() {
-        println!("{}  {}  {}", w.worker_id, w.address, w.name);
-    }
-    Ok(())
-}
-
 pub fn forget(data_dir: &Path, needle: &str) -> Result<()> {
     let mut me = known(data_dir)?;
     let worker = me.find(needle).context("no unique worker matches")?.clone();

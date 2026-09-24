@@ -1,11 +1,15 @@
 //! `slopty` — the command-line face of Slopty.
 //!
+//! * `slopty workers|terminals|open|send|wait|…` drive workers through the server, one verb each
+//!   (`slopty_proto::orchestration`), as text or `--json`.
+//! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
+//! * `slopty server …` runs `slopty-server` as a `LaunchAgent`.
 //! * `slopty host …` talks to the local `slopty-hostd` over its control socket.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
 //! * `slopty add <host[:port]>` remembers a worker (today's `slopty-hostd`) by its address.
-//! * `slopty sessions|open|attach` are a real client over QUIC: a raw-mode terminal that renders
-//!   frames locally. It is the reference client for latency measurements and works before (and
-//!   without) the GPUI apps.
+//! * `slopty sessions|attach` are a real client over QUIC straight to a worker: a raw-mode terminal
+//!   that renders frames locally. It is the reference client for latency measurements and works
+//!   before (and without) the GPUI apps.
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "a CLI; stdout is its UI")]
 #![forbid(unsafe_code)]
@@ -15,7 +19,13 @@ mod bench;
 mod client;
 mod hook;
 mod hostctl;
+mod link;
+mod mcp;
+mod ops;
+mod resolve;
 mod service;
+mod verbs;
+mod view;
 
 use std::path::PathBuf;
 
@@ -29,12 +39,29 @@ struct Cli {
     /// Data directory (default: `$SLOPTY_DATA_DIR` or `~/Library/Application Support/Slopty`).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+    /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[client]` in
+    /// settings.toml).
+    #[arg(long, global = true)]
+    server: Option<String>,
+    /// Print the answer as JSON.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    #[command(flatten)]
+    Verb(verbs::VerbCmd),
+    /// Serve the verbs to an AI agent over MCP on stdio.
+    #[command(after_help = mcp::REGISTER_HELP)]
+    Mcp,
+    /// Run the server as a `LaunchAgent`.
+    Server {
+        #[command(subcommand)]
+        cmd: service::ServerCmd,
+    },
     /// Control the local host daemon.
     Host {
         #[command(subcommand)]
@@ -56,8 +83,6 @@ enum Cmd {
         /// `host[:port]`.
         address: String,
     },
-    /// Workers this machine has added.
-    Workers,
     /// Forget a worker.
     Forget {
         /// Worker name, address or id prefix.
@@ -69,18 +94,6 @@ enum Cmd {
         /// omitted).
         #[arg(long)]
         host: Option<String>,
-    },
-    /// Open a session and attach to it.
-    Open {
-        /// Worker name, address or id prefix, or any `host[:port]`.
-        #[arg(long)]
-        host: Option<String>,
-        /// Working directory on the host.
-        #[arg(long)]
-        cwd: Option<String>,
-        /// Program and arguments (the login shell when empty).
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
     },
     /// Measure application round-trip time to a host (control-stream ping).
     Ping {
@@ -96,13 +109,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BenchCmd,
     },
-    /// Attach to an existing session.
+    /// Attach to a session straight on its worker, or open one and attach when no session is
+    /// given. Detach with `^]`.
     Attach {
         /// Worker name, address or id prefix, or any `host[:port]`.
         #[arg(long)]
         host: Option<String>,
         /// Session id prefix.
-        session: String,
+        session: Option<String>,
+        /// Working directory for a new session.
+        #[arg(long, conflicts_with = "session")]
+        cwd: Option<String>,
+        /// Program and arguments for a new session, after `--` (the login shell when omitted).
+        #[arg(last = true, conflicts_with = "session")]
+        command: Vec<String>,
     },
 }
 
@@ -191,14 +211,18 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Verb(cmd) => verbs::run(cmd, cli.server.as_deref(), &data_dir, cli.json).await,
+        Cmd::Mcp => mcp::run(cli.server.as_deref(), &data_dir).await,
+        Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
         Cmd::Add { address } => client::add(&data_dir, &address).await,
-        Cmd::Workers => client::workers(&data_dir),
         Cmd::Forget { host } => client::forget(&data_dir, &host),
         Cmd::Sessions { host } => client::sessions(&data_dir, host.as_deref()).await,
-        Cmd::Open { host, cwd, command } => {
+        Cmd::Attach { host, session: Some(session), .. } => {
+            attach::attach(&data_dir, host.as_deref(), &session).await
+        }
+        Cmd::Attach { host, session: None, cwd, command } => {
             attach::open(&data_dir, host.as_deref(), cwd, command).await
         }
-        Cmd::Attach { host, session } => attach::attach(&data_dir, host.as_deref(), &session).await,
         Cmd::Ping { host, count } => client::ping(&data_dir, host.as_deref(), count).await,
         Cmd::Bench { cmd: BenchCmd::Echo { host, count } } => {
             bench::echo(&data_dir, host.as_deref(), count).await
@@ -216,5 +240,15 @@ async fn main() -> Result<()> {
                 bench::ScreenBench { window, display, seconds, scale, fps, mbit, max_stalls };
             bench::screen(&data_dir, host.as_deref(), spec).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        super::Cli::command().debug_assert();
     }
 }

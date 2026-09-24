@@ -1,0 +1,11 @@
+---
+source: apps/slopty-cli/src/view.rs
+expression: overview().text()
+---
+NAME         STATE        ADDRESS           OS            TERMINALS  WAITING
+mac-studio   online       100.64.0.3:45550  macOS 26.5    2          1
+macbook-pro  unreachable  100.64.0.7:45550  macOS 26.5.1  1          -
+
+waiting on a human:
+  TERM                 AGENT        FOR                  TITLE
+  mac-studio/0199a1b2  Claude Code  permission for Bash  claude

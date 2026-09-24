@@ -18,7 +18,9 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 plist.workspace = true
-rustix.workspace = true
+rmcp = { workspace = true, features = [ "transport-io" ] }
+rustix = { workspace = true, features = [ "system" ] }
+serde.workspace = true
 serde_json.workspace = true
 slopty-agent.workspace = true
 slopty-capture.workspace = true
@@ -30,5 +32,10 @@ slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-settings.workspace = true
 tokio = { workspace = true, features = [ "io-std" ] }
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+insta = { workspace = true, features = [ "json" ] }
+tempfile.workspace = true

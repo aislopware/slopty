@@ -1,4 +1,9 @@
-//! `slopty host install|uninstall`: the host daemons as `LaunchAgents`.
+//! `slopty host install|uninstall` and `slopty server install|uninstall|status`: the host
+//! daemons and the server as `LaunchAgents`.
+//!
+//! The server is one more agent, `slopty-server`, installed the same way: copied to
+//! `<data dir>/bin/`, `KeepAlive`, its port baked into the plist, and `install` waits until it
+//! answers a hello on loopback.
 //!
 //! Two agents in `~/Library/LaunchAgents`: `slopty-ptyd` (the PTY custodian, keeps shells alive
 //! across daemon restarts) and `slopty-hostd`, both `KeepAlive` so launchd restarts either one
@@ -15,9 +20,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use clap::Args;
+use clap::{Args, Subcommand};
 use plist::{Dictionary, Value};
 use slopty_host::ctl::{CtlReply, CtlRequest};
+use slopty_net::HostAddr;
+use slopty_net::endpoint::SERVER_PORT;
+use slopty_proto::server::Role;
 
 use crate::hostctl;
 
@@ -97,36 +105,21 @@ fn home() -> PathBuf {
 
 /// The two agents' property lists for `opts`, in start order.
 ///
-/// `ProcessType Interactive` keeps the daemons out of App Nap and lets `slopty-hostd` reach
-/// ScreenCaptureKit and the window server (a `Background` agent gets neither); `ThrottleInterval`
-/// makes a crash loop restart every 2 s rather than launchd's 10 s default.
+/// `LimitLoadToSessionType Aqua` puts them in the login session, where `slopty-hostd` reaches
+/// ScreenCaptureKit and the window server.
 pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(String, Value)> {
     let layout = Layout::new(data_dir);
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let common = |label: &str, program: &str, args: &[String], env: Vec<(&str, String)>| {
-        let mut d = Dictionary::new();
-        d.insert("Label".into(), Value::String(label.to_owned()));
-        let mut argv = vec![Value::String(path(&bin_dir.join(program)))];
-        argv.extend(args.iter().cloned().map(Value::String));
-        d.insert("ProgramArguments".into(), Value::Array(argv));
         let mut vars = Dictionary::new();
-        vars.insert("RUST_LOG".into(), Value::String(opts.log.clone()));
-        vars.insert("SLOPTY_DATA_DIR".into(), Value::String(path(data_dir)));
         vars.insert("SLOPTY_PTYD_SOCKET".into(), Value::String(path(&layout.ptyd_socket())));
         vars.insert("SLOPTY_HOSTD_SOCKET".into(), Value::String(path(&layout.hostd_socket())));
         for (k, v) in env {
             vars.insert(k.into(), Value::String(v));
         }
-        d.insert("EnvironmentVariables".into(), Value::Dictionary(vars));
-        d.insert("RunAtLoad".into(), Value::Boolean(true));
-        d.insert("KeepAlive".into(), Value::Boolean(true));
-        d.insert("ThrottleInterval".into(), Value::Integer(2.into()));
-        d.insert("ProcessType".into(), Value::String("Interactive".into()));
+        let program = bin_dir.join(program);
+        let mut d = launch_agent(label, &program, args, &opts.log, data_dir, vars);
         d.insert("LimitLoadToSessionType".into(), Value::String("Aqua".into()));
-        d.insert("WorkingDirectory".into(), Value::String(path(&home())));
-        let log = layout.logs.join(format!("{program}.log"));
-        d.insert("StandardOutPath".into(), Value::String(path(&log)));
-        d.insert("StandardErrorPath".into(), Value::String(path(&log)));
         Value::Dictionary(d)
     };
     let mut hostd_args = Vec::new();
@@ -147,21 +140,50 @@ pub fn plists(opts: &InstallOpts, bin_dir: &Path, data_dir: &Path) -> Vec<(Strin
     ]
 }
 
+/// What every Slopty `LaunchAgent` shares: `program args…` with `RUST_LOG` and
+/// `SLOPTY_DATA_DIR` (plus `vars`) in its environment, restarted when it dies and at login, its
+/// output in `~/Library/Logs/Slopty/<program>.log`.
+///
+/// `ProcessType Interactive` keeps it out of App Nap and background quality of service, where
+/// every answer would wait on a throttled timer; `ThrottleInterval` makes a crash loop restart
+/// every 2 s rather than launchd's 10 s default.
+fn launch_agent(
+    label: &str,
+    program: &Path,
+    args: &[String],
+    log: &str,
+    data_dir: &Path,
+    mut vars: Dictionary,
+) -> Dictionary {
+    let layout = Layout::new(data_dir);
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let mut d = Dictionary::new();
+    d.insert("Label".into(), Value::String(label.to_owned()));
+    let mut argv = vec![Value::String(path(program))];
+    argv.extend(args.iter().cloned().map(Value::String));
+    d.insert("ProgramArguments".into(), Value::Array(argv));
+    vars.insert("RUST_LOG".into(), Value::String(log.to_owned()));
+    vars.insert("SLOPTY_DATA_DIR".into(), Value::String(path(data_dir)));
+    d.insert("EnvironmentVariables".into(), Value::Dictionary(vars));
+    d.insert("RunAtLoad".into(), Value::Boolean(true));
+    d.insert("KeepAlive".into(), Value::Boolean(true));
+    d.insert("ThrottleInterval".into(), Value::Integer(2.into()));
+    d.insert("ProcessType".into(), Value::String("Interactive".into()));
+    d.insert("WorkingDirectory".into(), Value::String(path(&home())));
+    let name = program.file_name().map_or_else(|| "slopty".into(), |n| n.to_string_lossy());
+    let log = layout.logs.join(format!("{name}.log"));
+    d.insert("StandardOutPath".into(), Value::String(path(&log)));
+    d.insert("StandardErrorPath".into(), Value::String(path(&log)));
+    d
+}
+
 /// The binaries an installation carries.
 const BINARIES: [&str; 3] = ["slopty-ptyd", "slopty-hostd", "slopty"];
 
 /// Copy the binaries, write the plists, (re)bootstrap both agents, wait for the daemon and
 /// print a ticket.
 pub async fn install(opts: &InstallOpts) -> Result<()> {
-    let source = match &opts.bin_dir {
-        Some(dir) => dir.clone(),
-        None => std::env::current_exe()
-            .context("current exe")?
-            .parent()
-            .context("exe dir")?
-            .to_path_buf(),
-    };
-    let source = source.canonicalize().with_context(|| format!("{}", source.display()))?;
+    let source = binaries_source(opts.bin_dir.as_deref())?;
     for bin in BINARIES {
         let p = source.join(bin);
         if !p.is_file() {
@@ -280,6 +302,190 @@ fn launchctl(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// launchd label of the server.
+pub const SERVER_LABEL: &str = "dev.aislopware.slopty.server";
+
+/// `slopty server …`.
+#[derive(Subcommand, Debug)]
+pub enum ServerCmd {
+    /// Run `slopty-server` as a `LaunchAgent` (starts now and at every login).
+    Install(ServerInstallOpts),
+    /// Stop the `LaunchAgent` and remove it.
+    Uninstall,
+    /// Whether the `LaunchAgent` is installed and running, and whether the server answers.
+    Status,
+}
+
+/// `slopty server install` options.
+#[derive(Args, Debug, Clone)]
+pub struct ServerInstallOpts {
+    /// Where to copy `slopty-server` from (default: this binary's directory).
+    #[arg(long)]
+    bin_dir: Option<PathBuf>,
+    /// UDP port for the server (default: its fixed port).
+    #[arg(long)]
+    port: Option<u16>,
+    /// `RUST_LOG` for the server.
+    #[arg(long, default_value = "info")]
+    log: String,
+}
+
+/// The server's property list: `slopty-server [--port N]` out of `bin_dir`.
+fn server_plist(opts: &ServerInstallOpts, bin_dir: &Path, data_dir: &Path) -> Value {
+    let args = opts.port.map(|p| vec!["--port".to_owned(), p.to_string()]).unwrap_or_default();
+    let program = bin_dir.join("slopty-server");
+    Value::Dictionary(launch_agent(
+        SERVER_LABEL,
+        &program,
+        &args,
+        &opts.log,
+        data_dir,
+        Dictionary::new(),
+    ))
+}
+
+/// The port an installed server's property list names, else the default.
+fn installed_port(plist: &Path) -> u16 {
+    let argv = Value::from_file(plist).ok().and_then(|v| {
+        let args = v.as_dictionary()?.get("ProgramArguments")?.as_array()?.clone();
+        Some(args.into_iter().filter_map(Value::into_string).collect::<Vec<_>>())
+    });
+    argv.as_deref().and_then(port_arg).unwrap_or(SERVER_PORT)
+}
+
+/// The value of `--port` in an argument list.
+fn port_arg(argv: &[String]) -> Option<u16> {
+    argv.iter()
+        .position(|a| a == "--port")
+        .and_then(|i| argv.get(i.saturating_add(1)))?
+        .parse()
+        .ok()
+}
+
+/// Dial the server on loopback as an agent and return its name.
+async fn probe(port: u16) -> Result<String> {
+    let endpoint = slopty_net::client::bind_client()?;
+    let address = HostAddr::new("127.0.0.1", port);
+    let role = Role::Agent { name: "slopty server".to_owned() };
+    let name = match slopty_net::server::connect(&endpoint, &address, role).await {
+        Ok(link) => {
+            link.close();
+            Ok(link.name)
+        }
+        Err(e) => Err(e.into()),
+    };
+    crate::client::close_endpoint(&endpoint).await;
+    name
+}
+
+/// `slopty server …`.
+pub async fn server(cmd: ServerCmd, data_dir: &Path) -> Result<()> {
+    match cmd {
+        ServerCmd::Install(opts) => install_server(&opts, data_dir).await,
+        ServerCmd::Uninstall => uninstall_server(data_dir),
+        ServerCmd::Status => {
+            server_status(data_dir).await;
+            Ok(())
+        }
+    }
+}
+
+/// Copy `slopty-server`, write its plist, (re)bootstrap it and wait until it answers.
+async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()> {
+    let source = binaries_source(opts.bin_dir.as_deref())?;
+    let from = source.join("slopty-server");
+    if !from.is_file() {
+        bail!(
+            "{} not found; build it (cargo build -p slopty-server) or pass --bin-dir",
+            from.display()
+        );
+    }
+    let layout = Layout::new(data_dir);
+    let bin_dir = layout.bin();
+    for dir in [&layout.logs, &layout.agents, &bin_dir] {
+        std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    }
+    let uid = rustix::process::getuid().as_raw();
+    bootout(uid, SERVER_LABEL);
+    if bin_dir != source {
+        let to = bin_dir.join("slopty-server");
+        std::fs::copy(&from, &to)
+            .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
+    }
+    let path = layout.plist(SERVER_LABEL);
+    plist::to_file_xml(&path, &server_plist(opts, &bin_dir, data_dir))
+        .with_context(|| format!("write {}", path.display()))?;
+    launchctl(&["bootstrap", &format!("gui/{uid}"), &path.to_string_lossy()])
+        .with_context(|| format!("bootstrap {SERVER_LABEL}"))?;
+    println!("installed {SERVER_LABEL}  ({})", path.display());
+    let port = opts.port.unwrap_or(SERVER_PORT);
+    let started = Instant::now();
+    loop {
+        match probe(port).await {
+            Ok(name) => {
+                println!(
+                    "\n{name} is up on UDP {port}; point clients at it with `slopty --server \
+                     <this Mac's tailnet name or IP>` or `server = \"…\"` under [client] in \
+                     settings.toml"
+                );
+                return Ok(());
+            }
+            Err(e) if started.elapsed() < START_TIMEOUT => {
+                tracing::debug!(error = %e, "waiting for slopty-server");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => bail!("the server did not come up ({e:#}); see {}", layout.logs.display()),
+        }
+    }
+}
+
+/// Stop the server's agent and remove its plist.
+fn uninstall_server(data_dir: &Path) -> Result<()> {
+    let path = Layout::new(data_dir).plist(SERVER_LABEL);
+    bootout(rustix::process::getuid().as_raw(), SERVER_LABEL);
+    match std::fs::remove_file(&path) {
+        Ok(()) => println!("removed {SERVER_LABEL}"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("{SERVER_LABEL} not installed");
+        }
+        Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+    }
+    Ok(())
+}
+
+/// Installed or not, launchd's pid, and whether the server answers on loopback.
+async fn server_status(data_dir: &Path) {
+    let path = Layout::new(data_dir).plist(SERVER_LABEL);
+    let uid = rustix::process::getuid().as_raw();
+    let pid = launchctl(&["print", &format!("gui/{uid}/{SERVER_LABEL}")])
+        .ok()
+        .and_then(|out| launchd_pid(&out));
+    let state = match (path.is_file(), pid) {
+        (_, Some(pid)) => format!("running (pid {pid})"),
+        (true, None) => "installed, not running".to_owned(),
+        (false, None) => "not installed".to_owned(),
+    };
+    println!("{SERVER_LABEL}  {state}");
+    let port = installed_port(&path);
+    match probe(port).await {
+        Ok(name) => println!("{name} answers on UDP {port}"),
+        Err(e) => println!("nothing answers on UDP {port}: {e:#}"),
+    }
+}
+
+/// Where to copy binaries from: `--bin-dir`, else this binary's directory.
+fn binaries_source(bin_dir: Option<&Path>) -> Result<PathBuf> {
+    let source = match bin_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_exe()
+            .context("current exe")?
+            .parent()
+            .context("exe dir")?
+            .to_path_buf(),
+    };
+    source.canonicalize().with_context(|| format!("{}", source.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +525,38 @@ mod tests {
         assert_eq!(hostd["ProcessType"].as_string(), Some("Interactive"));
         let ptyd = list[0].1.as_dictionary().unwrap();
         assert_eq!(ptyd["Label"].as_string(), Some(PTYD_LABEL));
+    }
+
+    #[test]
+    fn the_server_plist_runs_slopty_server_on_its_port() {
+        let opts = ServerInstallOpts { bin_dir: None, port: Some(45561), log: "debug".to_owned() };
+        let value = server_plist(&opts, Path::new("/opt/slopty/bin"), Path::new("/data/slopty"));
+        let d = value.as_dictionary().unwrap();
+        assert_eq!(d["Label"].as_string(), Some(SERVER_LABEL));
+        let argv: Vec<String> = d["ProgramArguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_string().unwrap().to_owned())
+            .collect();
+        assert_eq!(argv, ["/opt/slopty/bin/slopty-server", "--port", "45561"]);
+        assert_eq!(port_arg(&argv), Some(45561));
+        let env = d["EnvironmentVariables"].as_dictionary().unwrap();
+        assert_eq!(env["SLOPTY_DATA_DIR"].as_string(), Some("/data/slopty"));
+        assert_eq!(env["RUST_LOG"].as_string(), Some("debug"));
+        assert_eq!(d["KeepAlive"].as_boolean(), Some(true));
+        assert!(
+            d["StandardErrorPath"].as_string().unwrap().ends_with("Logs/Slopty/slopty-server.log"),
+            "{:?}",
+            d["StandardErrorPath"]
+        );
+        assert!(!d.contains_key("LimitLoadToSessionType"), "the server needs no GUI session");
+    }
+
+    #[test]
+    fn an_installed_server_without_a_port_flag_uses_the_default() {
+        assert_eq!(port_arg(&["/bin/slopty-server".to_owned()]), None);
+        assert_eq!(installed_port(Path::new("/nonexistent.plist")), SERVER_PORT);
     }
 
     #[test]
