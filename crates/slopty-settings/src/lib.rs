@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+pub use slopty_net::HostAddr;
 
 /// File name inside the data directory.
 pub const FILE_NAME: &str = "settings.toml";
@@ -290,6 +291,38 @@ pub struct WorkerSettings {
     pub server: String,
 }
 
+/// `[client]`: how the app and the `slopty` CLI find the workers.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientSettings {
+    /// The server whose directory lists the workers, `host[:port]` with
+    /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
+    /// empty string in the file) reaches only the workers added by address.
+    #[serde(with = "server_address")]
+    pub server: Option<HostAddr>,
+}
+
+/// `Option<HostAddr>` as the string a person types, `""` for none, the port defaulting to
+/// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT).
+mod server_address {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+    use slopty_net::HostAddr;
+    use slopty_net::endpoint::SERVER_PORT;
+
+    #[expect(clippy::ref_option, reason = "serde's `with` hands the field over by reference")]
+    pub fn serialize<S: Serializer>(addr: &Option<HostAddr>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&addr.as_ref().map(ToString::to_string).unwrap_or_default())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HostAddr>, D::Error> {
+        let text = String::deserialize(d)?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        HostAddr::parse_with_port(&text, SERVER_PORT).map(Some).map_err(serde::de::Error::custom)
+    }
+}
+
 /// The whole file.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -308,6 +341,8 @@ pub struct Settings {
     pub host: HostSettings,
     /// The host daemon as a worker of a server.
     pub worker: WorkerSettings,
+    /// The app and the CLI as clients of a server.
+    pub client: ClientSettings,
 }
 
 /// Why a file could not be used.
@@ -480,6 +515,12 @@ allow = []
 # (port 45560 when absent). Empty runs it on its own. Read when slopty-hostd
 # starts; --server and SLOPTY_SERVER override it.
 server = \"\"
+
+[client]
+# The server whose directory lists the workers this app and the slopty CLI
+# reach, \"host\" or \"host:port\" (port 45560 when absent). Empty reaches only
+# the workers added by address.
+server = \"\"
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
@@ -518,6 +559,60 @@ server = \"\"
         std::fs::write(path, Self::default_file())?;
         Ok(true)
     }
+}
+
+/// `text` (a `settings.toml`, the commented defaults when there is none) with
+/// `[client] server` set to `server`, every other line kept as it was, comments included.
+///
+/// # Errors
+///
+/// When `text` does not parse, since editing a broken file would bury the mistake.
+pub fn with_client_server(text: &str, server: Option<&HostAddr>) -> Result<String, String> {
+    if let Some(error) = Settings::parse(text).error {
+        return Err(error.to_string());
+    }
+    let value = toml_string(&server.map(ToString::to_string).unwrap_or_default());
+    let line = format!("server = {value}");
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let header = lines.iter().position(|l| table_header(l) == Some("client"));
+    if let Some(at) = header {
+        let end = lines
+            .iter()
+            .skip(at.saturating_add(1))
+            .position(|l| table_header(l).is_some())
+            .map_or(lines.len(), |n| at.saturating_add(1).saturating_add(n));
+        let key = (at.saturating_add(1)..end).find(|&i| {
+            lines
+                .get(i)
+                .and_then(|l| l.trim_start().strip_prefix("server"))
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        });
+        match key.and_then(|i| lines.get_mut(i)) {
+            Some(existing) => *existing = line,
+            None => lines.insert(at.saturating_add(1), line),
+        }
+    } else {
+        if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("[client]".to_owned());
+        lines.push(line);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    match Settings::parse(&out) {
+        Loaded { error: None, settings, .. } if settings.client.server.as_ref() == server => {
+            Ok(out)
+        }
+        _ => Err("could not set [client] server in settings.toml".to_owned()),
+    }
+}
+
+/// The table a `[name]` line opens.
+fn table_header(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+    (!inner.starts_with('[')).then_some(inner.trim())
 }
 
 impl Loaded {
@@ -807,6 +902,45 @@ mod tests {
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
+    }
+
+    #[test]
+    fn client_keys() {
+        let loaded = Settings::parse("[client]\nserver = \"studio.tail1234.ts.net\"\n");
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let server = loaded.settings.client.server.unwrap();
+        assert_eq!((server.host(), server.port()), ("studio.tail1234.ts.net", 45560));
+        let explicit = Settings::parse("[client]\nserver = \"[fd7a:115c:a1e0::1]:7\"\n");
+        assert_eq!(explicit.settings.client.server.map(|s| s.port()), Some(7));
+        assert_eq!(Settings::default().client.server, None, "workers by address only");
+        let bad = Settings::parse("[client]\nserver = \"studio:x\"\n");
+        assert!(bad.error.is_some_and(|e| e.to_string().contains("bad port")));
+        let blank = Settings::parse("[client]\nserver = \"  \"\n");
+        assert_eq!(blank.settings.client.server, None);
+        assert!(blank.warnings.is_empty(), "the key is known even when empty");
+    }
+
+    #[test]
+    fn setting_the_server_keeps_the_rest_of_the_file() {
+        let studio = HostAddr::parse_with_port("studio", 45560).unwrap();
+        let text = with_client_server(&Settings::default_file(), Some(&studio)).unwrap();
+        assert!(text.contains("server = \"studio:45560\""), "{text}");
+        assert!(text.contains("# The server whose directory"), "comments stay");
+        let loaded = Settings::parse(&text);
+        assert_eq!(loaded.settings.client.server.as_ref(), Some(&studio));
+        assert_eq!(loaded.settings.worker.server, "", "the worker's key is another table's");
+
+        let custom = "[font]\nmono_size = 15.0 # mine\n";
+        let set = with_client_server(custom, Some(&studio)).unwrap();
+        assert_eq!(set, "[font]\nmono_size = 15.0 # mine\n\n[client]\nserver = \"studio:45560\"\n");
+        let cleared = with_client_server(&set, None).unwrap();
+        assert!(cleared.ends_with("[client]\nserver = \"\"\n"), "{cleared}");
+
+        let keyless = "[client]\n[font]\nmono_size = 15.0\n";
+        let set = with_client_server(keyless, Some(&studio)).unwrap();
+        assert!(set.starts_with("[client]\nserver = \"studio:45560\"\n[font]"), "{set}");
+
+        with_client_server("[font\n", Some(&studio)).unwrap_err();
     }
 
     #[test]

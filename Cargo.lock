@@ -6990,6 +6990,7 @@ dependencies = [
  "slopty-media",
  "slopty-net",
  "slopty-proto",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -7310,6 +7311,7 @@ version = "0.1.0"
 dependencies = [
  "pretty_assertions",
  "serde",
+ "slopty-net",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",

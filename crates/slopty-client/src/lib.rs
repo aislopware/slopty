@@ -4,6 +4,9 @@
 //!   the viewport (scrolled or following), and says what to ask the host for.
 //! * [`link`] — [`link::HostLink`]: one connection to a host; fans control and session streams into
 //!   a single event channel and queues outbound messages.
+//! * [`directory`] — [`directory::Directory`]: the worker directory the server keeps, as last heard
+//!   (cached for degraded mode), and whether to dial each worker.
+//! * [`server`] — [`server::spawn`]: the one link to the server, redialled after every drop.
 //! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
 //!   optimistically.
 //! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
@@ -15,11 +18,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod directory;
 pub mod items;
 pub mod layout;
 pub mod link;
 pub mod pacing;
 pub mod screen;
+pub mod server;
 pub mod term;
 
 pub use items::{ItemChange, ItemDoc};
