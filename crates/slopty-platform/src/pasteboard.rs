@@ -1,6 +1,10 @@
 //! The client's pasteboard behind a small trait: the system's general pasteboard in the app, a
 //! uniquely named one in the self-tests, an in-memory one for pure logic.
 //!
+//! On iOS reading another app's contents shows the paste prompt unless a paste the person
+//! started does the reading, so [`Pasteboard::reads_ask`] tells the caller to read only on
+//! their intent (a paste into a remote tile). The change count is always free to read.
+//!
 //! A write puts one item on the pasteboard: the representations that are here now, and promises
 //! for the rest, which the pasteboard asks [`Write::provide`] for when something pastes them
 //! (on the main thread, and the bytes must be there before the call returns). Every write carries
@@ -59,6 +63,11 @@ pub trait Pasteboard {
     fn data(&self, uti: &str) -> Option<Vec<u8>>;
     /// Replace the contents; returns the change count this write produced.
     fn write(&self, write: Write) -> i64;
+    /// Whether reading the contents may ask the person first (iOS): read them only when they
+    /// paste, never to keep something in step.
+    fn reads_ask(&self) -> bool {
+        false
+    }
 }
 
 /// A pasteboard in memory, for tests of what is written and read.
@@ -69,6 +78,8 @@ pub struct Memory {
     promised: RefCell<Vec<String>>,
     provide: RefCell<Option<WriteProvide>>,
     order: RefCell<Vec<String>>,
+    asks: bool,
+    reads: Cell<usize>,
 }
 
 struct WriteProvide(Provide);
@@ -80,6 +91,18 @@ impl std::fmt::Debug for WriteProvide {
 }
 
 impl Memory {
+    /// One whose reads ask first, as iOS's general pasteboard does.
+    #[must_use]
+    pub fn asking() -> Self {
+        Self { asks: true, ..Self::default() }
+    }
+
+    /// How many times contents were read ([`Pasteboard::data`]).
+    #[must_use]
+    pub const fn reads(&self) -> usize {
+        self.reads.get()
+    }
+
     /// Put `data` on it as someone else would (no origin), as a copy in another app does.
     pub fn copy(&self, data: &[(&str, &[u8])]) {
         self.write(Write {
@@ -107,6 +130,7 @@ impl Pasteboard for Memory {
     }
 
     fn data(&self, uti: &str) -> Option<Vec<u8>> {
+        self.reads.set(self.reads.get().saturating_add(1));
         if let Some(bytes) = self.now.borrow().get(uti) {
             return Some(bytes.clone());
         }
@@ -133,6 +157,10 @@ impl Pasteboard for Memory {
         *self.provide.borrow_mut() = write.provide.map(WriteProvide);
         self.count.set(self.count.get().saturating_add(1));
         self.count.get()
+    }
+
+    fn reads_ask(&self) -> bool {
+        self.asks
     }
 }
 
@@ -305,6 +333,167 @@ mod mac {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub use ios::IosPasteboard;
+
+#[cfg(target_os = "ios")]
+mod ios {
+    use std::ptr::NonNull;
+    use std::sync::Arc;
+
+    use block2::{DynBlock, RcBlock};
+    use objc2::rc::Retained;
+    use objc2_foundation::{
+        NSArray, NSData, NSError, NSItemProvider, NSItemProviderRepresentationVisibility,
+        NSProgress, NSString,
+    };
+    use objc2_ui_kit::UIPasteboard;
+
+    use super::{ORIGIN_TYPE, Pasteboard, Provide, Write};
+
+    /// A `UIPasteboard`: the general one, or one of its own name.
+    #[derive(Debug)]
+    pub struct IosPasteboard {
+        board: Retained<UIPasteboard>,
+        /// The name it was made with; `None` for the general one.
+        name: Option<String>,
+    }
+
+    /// A representation handed over at once or fetched when a paste loads it: the item
+    /// provider asks from a queue of its own and waits on the completion.
+    fn register(
+        provider: &NSItemProvider,
+        uti: &str,
+        load: impl Fn() -> Option<Vec<u8>> + Send + 'static,
+    ) {
+        let uti_name = uti.to_owned();
+        let handler = RcBlock::new(
+            move |done: NonNull<DynBlock<dyn Fn(*mut NSData, *mut NSError)>>| -> *mut NSProgress {
+                // SAFETY: Foundation rule: the completion block the load handler gets is valid
+                // until it is called, and it is called here, before the handler returns.
+                let done = unsafe { done.as_ref() };
+                if let Some(bytes) = load() {
+                    let data = NSData::with_bytes(&bytes);
+                    done.call((Retained::as_ptr(&data).cast_mut(), std::ptr::null_mut()));
+                } else {
+                    tracing::debug!(uti = %uti_name, "promise not kept");
+                    let domain = NSString::from_str("com.aislopware.slopty");
+                    // SAFETY: Foundation rule: any domain, any code and a nil user info make a
+                    // valid error.
+                    let error = unsafe { NSError::errorWithDomain_code_userInfo(&domain, 1, None) };
+                    done.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                }
+                // A null progress: the load is done by the time the handler returns.
+                std::ptr::null_mut()
+            },
+        );
+        // SAFETY: Foundation rule: a type identifier string, a visibility constant and a load
+        // handler that calls its completion exactly once. The handler is called on a queue of
+        // the system's choosing, which it may be: `load` is `Send`, and so is what it holds.
+        unsafe {
+            provider.registerDataRepresentationForTypeIdentifier_visibility_loadHandler(
+                &NSString::from_str(uti),
+                NSItemProviderRepresentationVisibility::All,
+                &handler,
+            );
+        }
+    }
+
+    impl IosPasteboard {
+        /// The system's general pasteboard: what Copy and Paste use in every app.
+        #[must_use]
+        pub fn general() -> Self {
+            Self { board: UIPasteboard::generalPasteboard(), name: None }
+        }
+
+        /// The app's pasteboard called `name`, made on first use. A test's own: the person's
+        /// clipboard is not touched.
+        #[must_use]
+        pub fn named(name: &str) -> Option<Self> {
+            let board = UIPasteboard::pasteboardWithName_create(&NSString::from_str(name), true)?;
+            Some(Self { board, name: Some(name.to_owned()) })
+        }
+
+        /// Give a named pasteboard back to the system (a test's, when it is done).
+        pub fn release(self) {
+            if let Some(name) = &self.name {
+                UIPasteboard::removePasteboardWithName(&NSString::from_str(name));
+            }
+        }
+
+        /// Put `data` on it as a copy in another app does: no origin, no promises. Returns the
+        /// change count the copy produced.
+        pub fn copy(&self, data: &[(&str, &[u8])]) -> i64 {
+            let provider = NSItemProvider::new();
+            for (uti, bytes) in data {
+                let bytes = bytes.to_vec();
+                register(&provider, uti, move || Some(bytes.clone()));
+            }
+            self.board.setItemProviders_localOnly_expirationDate(
+                &NSArray::from_retained_slice(&[provider]),
+                true,
+                None,
+            );
+            self.change_count()
+        }
+
+        /// Its text, when it has any.
+        #[must_use]
+        pub fn text(&self) -> Option<String> {
+            // SAFETY: UIKit rule: `string` reads the pasteboard's text from any thread; nil
+            // when it holds none, which `Option` covers.
+            unsafe { self.board.string() }.map(|s| s.to_string())
+        }
+    }
+
+    impl Pasteboard for IosPasteboard {
+        fn change_count(&self) -> i64 {
+            // SAFETY: UIKit rule: `changeCount` is a counter any thread may read, and reading
+            // it never shows the paste prompt.
+            i64::try_from(unsafe { self.board.changeCount() }).unwrap_or(i64::MAX)
+        }
+
+        fn types(&self) -> Vec<String> {
+            // SAFETY: UIKit rule: `pasteboardTypes` lists the first item's types from any
+            // thread, without its contents.
+            unsafe { self.board.pasteboardTypes() }.iter().map(|t| t.to_string()).collect()
+        }
+
+        fn data(&self, uti: &str) -> Option<Vec<u8>> {
+            self.board.dataForPasteboardType(&NSString::from_str(uti)).map(|d| d.to_vec())
+        }
+
+        /// One item provider: the representations here now handed over at once, the promised
+        /// ones loaded through `provide` when something pastes them. Local only, so the
+        /// system's Universal Clipboard does not fetch every promise to hand it to another
+        /// device.
+        fn write(&self, write: Write) -> i64 {
+            let provider = NSItemProvider::new();
+            let Write { origin, data, promised, provide } = write;
+            for (uti, bytes) in data {
+                register(&provider, &uti, move || Some(bytes.clone()));
+            }
+            register(&provider, ORIGIN_TYPE, move || Some(origin.clone()));
+            if let Some(provide) = provide {
+                for uti in promised {
+                    let (provide, asked): (Provide, String) = (Arc::clone(&provide), uti.clone());
+                    register(&provider, &uti, move || provide(&asked));
+                }
+            }
+            self.board.setItemProviders_localOnly_expirationDate(
+                &NSArray::from_retained_slice(&[provider]),
+                true,
+                None,
+            );
+            self.change_count()
+        }
+
+        fn reads_ask(&self) -> bool {
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +543,7 @@ mod tests {
         assert_eq!(board.data("public.tiff"), Some(vec![1]));
         assert_eq!(board.data(TEXT_UTI), None, "replaced");
         assert_eq!(board.data(ORIGIN_TYPE), Some(b"me".to_vec()));
+        assert_eq!(board.reads(), 3, "each read counted");
+        assert!(!board.reads_ask() && Memory::asking().reads_ask());
     }
 }

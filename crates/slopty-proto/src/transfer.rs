@@ -241,12 +241,15 @@ pub enum XferMsg {
         /// The transfer.
         xfer: XferId,
     },
-    /// Client → worker: send this file or directory down as transfer `xfer`, from the start (a
-    /// download does not resume).
+    /// Client → worker: send this file or directory down as transfer `xfer`. A retried fetch
+    /// names what the client already holds, and each of those files resumes where it stopped.
     Fetch {
         /// The transfer the client names.
         xfer: XferId,
         /// Absolute path, or `~/…`.
         path: String,
+        /// Files already partly here: name (as in its bulk header) and the bytes durable on
+        /// the client's disk.
+        held: Vec<(String, u64)>,
     },
 }

@@ -149,6 +149,30 @@ fn the_worker_clipboard_is_watched_only_while_its_tile_has_the_keyboard(cx: &mut
     assert_eq!(view.read_with(cx, |v, _| v.watching()), [studio.key]);
 }
 
+/// Where reading the clipboard asks the person first (iOS), a tile taking the keyboard reads
+/// nothing of it: the worker's clipboard still comes here, and this one goes to the worker only
+/// when a paste into its window reads it.
+#[gpui::test]
+fn a_clipboard_that_asks_is_read_only_for_a_paste(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, _calls, _unused) = connect_remote(&view, cx);
+    let board = Rc::new(Memory::asking());
+    let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
+    view.update_in(cx, |v, _window, _cx| v.set_pasteboard(shared));
+    board.copy(&[(TEXT_UTI, b"copied on the phone")]);
+    let shell = SessionId::new();
+    opens(&view, cx, &studio, shell, studio.me, 1);
+    let sent = studio.drain();
+    assert_eq!(watches(&sent), [true], "the worker's clipboard is still wanted here");
+    assert!(offers(&sent).is_empty(), "{sent:?}");
+    assert_eq!(board.reads(), 0, "nothing read on focus");
+
+    let hook = view.read_with(cx, |v, _| v.paste_hook(studio.key)).unwrap();
+    let Some(ClientMsg::Clip(ClipMsg::Offer(offer))) = hook() else { panic!("an offer to paste") };
+    assert_eq!(offer.items[0].inline.as_deref(), Some(&b"copied on the phone"[..]));
+    assert!(board.reads() > 0, "read for the paste");
+}
+
 /// The worker's announcement lands here as text and promises; its fetch of this client's
 /// offer is answered with the bytes, and a fetch of a stale offer with `Unavailable`.
 #[gpui::test]

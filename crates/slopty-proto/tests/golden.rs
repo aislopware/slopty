@@ -508,6 +508,14 @@ mod golden {
             }),
         );
         snap(
+            "client_xfer_fetch_resumed",
+            &ClientMsg::Xfer(XferMsg::Fetch {
+                xfer,
+                path: "~/project/out".to_owned(),
+                held: vec![("out/big.bin".to_owned(), 1 << 20)],
+            }),
+        );
+        snap(
             "worker_xfer_finished",
             &WorkerMsg::Xfer(XferMsg::Finished { xfer, paths: vec!["/Users/c/p/src".to_owned()] }),
         );

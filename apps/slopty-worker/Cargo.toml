@@ -19,6 +19,8 @@ doc = false
 
 [dependencies]
 anyhow.workspace = true
+# A download's digest, sent in `Done` (`xfer`).
+blake3.workspace = true
 bytes.workspace = true
 clap.workspace = true
 noq.workspace = true
@@ -38,7 +40,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-blake3.workspace = true
 objc2-application-services.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true

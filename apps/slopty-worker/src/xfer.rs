@@ -1,15 +1,16 @@
 //! The unidirectional streams a client opens (files and clipboard data coming up) and the
 //! files it fetches (going down).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use slopty_core::{ClientId, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
-use slopty_proto::transfer::{BulkHeader, INLINE_CLIP_BYTES, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, XferMsg};
 use slopty_worker::clip::MAX_REP_BYTES;
-use slopty_worker::xfer::{Landed, Receiving, XferError, outgoing};
+use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
@@ -126,7 +127,7 @@ async fn receive(
     let _sent = out.send(WorkerMsg::Xfer(done)).await;
     let Some(finished) = daemon.transfers.landed(xfer, &name, landed) else { return };
     if finished.staging {
-        let clip = std::sync::Arc::clone(&daemon.clip);
+        let clip = Arc::clone(&daemon.clip);
         let paths = finished.paths.clone();
         let _written = tokio::task::spawn_blocking(move || clip.write_files(&paths)).await;
     }
@@ -210,23 +211,38 @@ async fn write(
 }
 
 /// Send the file or directory at `path` down as transfer `xfer`: a `Begin`, then one bulk
-/// stream per file. Failures are reported as `Failed`.
-pub async fn download(conn: Connection, out: mpsc::Sender<WorkerMsg>, xfer: XferId, path: String) {
+/// stream per file, each followed by its `Done` with the digest of the whole file. A file the
+/// client holds part of (`held`) resumes where [`Transfers::resume_points`] says. Failures are
+/// reported as `Failed`.
+pub async fn download(
+    transfers: Arc<Transfers>,
+    conn: Connection,
+    out: mpsc::Sender<WorkerMsg>,
+    xfer: XferId,
+    path: String,
+    held: Vec<(String, u64)>,
+) {
     let at = slopty_worker::file::expand_home(std::path::Path::new(&path));
-    let listed = tokio::task::spawn_blocking(move || outgoing(&at)).await;
+    let listed = tokio::task::spawn_blocking(move || {
+        let files = outgoing(&at)?;
+        let from = transfers.resume_points(&files, &held);
+        Ok::<_, std::io::Error>(files.into_iter().zip(from).collect::<Vec<_>>())
+    })
+    .await;
     let files = match listed {
         Ok(Ok(files)) => files,
         Ok(Err(e)) => return fail(&out, xfer, None, &e.to_string()).await,
         Err(e) => return fail(&out, xfer, None, &e.to_string()).await,
     };
-    let bytes = files.iter().map(|f| f.size).sum();
+    let bytes = files.iter().map(|(f, _from)| f.size).sum();
     let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
-    tracing::info!(%xfer, %path, files = count, bytes, "download");
+    let resumed = files.iter().filter(|(_f, from)| *from > 0).count();
+    tracing::info!(%xfer, %path, files = count, bytes, resumed, "download");
     let begin = XferMsg::Begin { xfer, dest: None, files: count, bytes };
     if out.send(WorkerMsg::Xfer(begin)).await.is_err() {
         return;
     }
-    for file in files {
+    for (file, offset) in files {
         let header = BulkHeader {
             xfer,
             purpose: Purpose::Download,
@@ -234,11 +250,20 @@ pub async fn download(conn: Connection, out: mpsc::Sender<WorkerMsg>, xfer: Xfer
             size: file.size,
             mtime_ms: file.mtime_ms,
             mode: file.mode,
-            offset: 0,
+            offset,
         };
-        if let Err(e) = send_file(&conn, header, &file.path).await {
-            tracing::info!(%xfer, name = %file.name, error = %e, "download failed");
-            return fail(&out, xfer, Some(file.name), &e.to_string()).await;
+        match send_file(&conn, header, &file.path).await {
+            Ok(hash) => {
+                let path = file.path.to_string_lossy().into_owned();
+                let done = XferMsg::Done { xfer, name: file.name, path, hash };
+                if out.send(WorkerMsg::Xfer(done)).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::info!(%xfer, name = %file.name, error = %e, "download failed");
+                return fail(&out, xfer, Some(file.name), &e.to_string()).await;
+            }
         }
     }
 }
@@ -248,30 +273,43 @@ async fn fail(out: &mpsc::Sender<WorkerMsg>, xfer: XferId, name: Option<String>,
     let _sent = out.send(WorkerMsg::Xfer(failed)).await;
 }
 
-/// One file down a bulk stream: exactly the bytes its header announces.
+/// One file down a bulk stream: exactly the bytes its header announces, from its offset.
+/// Returns the digest of the whole file, the bytes before the offset read from disk.
 async fn send_file(
     conn: &Connection,
     header: BulkHeader,
     path: &std::path::Path,
-) -> Result<(), NetError> {
-    let size = header.size;
-    let mut file =
-        tokio::fs::File::open(path).await.map_err(|e| NetError::Stream(e.to_string()))?;
-    let mut send = streams::open_bulk(conn, header).await?;
+) -> Result<Hash, NetError> {
+    let io = |e: std::io::Error| NetError::Stream(e.to_string());
+    let (size, offset) = (header.size, header.offset);
+    let mut file = tokio::fs::File::open(path).await.map_err(io)?;
+    let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0_u8; CHUNK];
-    let mut sent = 0_u64;
+    let mut read = 0_u64;
+    while read < offset {
+        let want = usize::try_from(offset.saturating_sub(read)).unwrap_or(CHUNK).min(CHUNK);
+        let n = file.read(buf.get_mut(..want).unwrap_or_default()).await.map_err(io)?;
+        if n == 0 {
+            return Err(NetError::Stream(format!("the file is shorter than {offset} bytes")));
+        }
+        hasher.update(buf.get(..n).unwrap_or_default());
+        read = read.saturating_add(n as u64);
+    }
+    let mut send = streams::open_bulk(conn, header).await?;
+    let mut sent = offset;
     while sent < size {
-        let n = file.read(&mut buf).await.map_err(|e| NetError::Stream(e.to_string()))?;
+        let n = file.read(&mut buf).await.map_err(io)?;
         if n == 0 {
             break;
         }
         let n = usize::try_from((n as u64).min(size.saturating_sub(sent))).unwrap_or(n);
-        send.write_all(buf.get(..n).unwrap_or_default())
-            .await
-            .map_err(|e| NetError::Stream(e.to_string()))?;
+        let bytes = buf.get(..n).unwrap_or_default();
+        hasher.update(bytes);
+        send.write_all(bytes).await.map_err(|e| NetError::Stream(e.to_string()))?;
         sent = sent.saturating_add(n as u64);
     }
-    send.finish().map_err(|e| NetError::Stream(e.to_string()))
+    send.finish().map_err(|e| NetError::Stream(e.to_string()))?;
+    Ok(hasher.finalize().into())
 }
 
 /// Answer a client's fetch of the worker's clipboard: inline when it fits, a bulk stream when

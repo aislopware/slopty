@@ -1,7 +1,7 @@
 //! The client's link against a scripted worker in-process, over UDP on loopback: an upload
-//! resumed after the worker cut its stream, a download, a clipboard representation fetched on
-//! paste, a port forwarded to a real local connection, and one port of the worker served by
-//! two clients on this machine at two local ports.
+//! resumed after the worker cut its stream, a download and one resumed after a cut, a clipboard
+//! representation fetched on paste, a port forwarded to a real local connection, and one port of
+//! the worker served by two clients on this machine at two local ports.
 
 #[cfg(test)]
 mod tests {
@@ -143,11 +143,12 @@ mod tests {
         let target = into.path().to_owned();
         let waiting =
             std::thread::spawn(move || remote.download("~/notes/todo.txt".to_owned(), target));
-        let (xfer, path) = expect(&mut client, |m| match m {
-            ClientMsg::Xfer(XferMsg::Fetch { xfer, path }) => Some((xfer, path)),
+        let (xfer, path, held) = expect(&mut client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Fetch { xfer, path, held }) => Some((xfer, path, held)),
             _ => None,
         })
         .await;
+        assert!(held.is_empty(), "a first fetch holds nothing");
         assert_eq!(path, "~/notes/todo.txt");
         let body = b"milk\neggs\n";
         let header = BulkHeader {
@@ -164,12 +165,134 @@ mod tests {
         send.finish().unwrap();
         let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: body.len() as u64 };
         client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(xfer, "todo.txt", body))).await.unwrap();
         let landed =
             tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap().unwrap();
         let expected = into.path().join("todo.txt");
         assert_eq!(landed, std::slice::from_ref(&expected));
         assert_eq!(std::fs::read(&expected).unwrap(), body);
         assert!(!PathBuf::from(format!("{}.partial", expected.display())).exists());
+    }
+
+    /// The worker's word that `name` is sent, with the digest of all of it.
+    fn done(xfer: XferId, name: &str, whole: &[u8]) -> XferMsg {
+        let (name, path) = (name.to_owned(), format!("/w/{name}"));
+        XferMsg::Done { xfer, name, path, hash: *blake3::hash(whole).as_bytes() }
+    }
+
+    fn download_header(xfer: XferId, name: &str, size: usize, offset: u64) -> BulkHeader {
+        BulkHeader {
+            xfer,
+            purpose: Purpose::Download,
+            name: name.to_owned(),
+            size: size as u64,
+            mtime_ms: 1_700_000_000_000,
+            mode: 0o644,
+            offset,
+        }
+    }
+
+    async fn fetched(client: &mut AcceptedClient) -> (XferId, Vec<(String, u64)>) {
+        expect(client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Fetch { xfer, held, .. }) => Some((xfer, held)),
+            _ => None,
+        })
+        .await
+    }
+
+    /// A download whose stream the worker cuts part way fetches again under a new transfer,
+    /// naming what it holds; the rest comes from there and the file lands whole, checked
+    /// against the digest. A file already landed is held whole and not sent again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_cut_part_way_resumes_from_what_the_client_holds() {
+        let (mut client, link, _events) = pair().await;
+        let into = tempfile::tempdir().unwrap();
+        let remote = link.remote();
+        let target = into.path().to_owned();
+        let waiting = std::thread::spawn(move || remote.download("~/out".to_owned(), target));
+        let (first, held) = fetched(&mut client).await;
+        assert!(held.is_empty());
+        let small = b"landed first".to_vec();
+        let big: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 249) as u8).collect();
+        let bytes = (small.len() + big.len()) as u64;
+        let begin = XferMsg::Begin { xfer: first, dest: None, files: 2, bytes };
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+
+        let header = download_header(first, "out/small.txt", small.len(), 0);
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&small).await.unwrap();
+        send.finish().unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(first, "out/small.txt", &small))).await.unwrap();
+
+        // The big file: a third of it, then the worker's stream is reset.
+        let header = download_header(first, "out/big.bin", big.len(), 0);
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&big[..1_000_000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        send.reset(0_u32.into()).unwrap();
+
+        let cancelled = expect(&mut client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Cancel { xfer }) => Some(xfer),
+            _ => None,
+        })
+        .await;
+        assert_eq!(cancelled, first, "the cut attempt is called off");
+        let (second, mut held) = fetched(&mut client).await;
+        assert_ne!(second, first, "a retry is a transfer of its own");
+        held.sort();
+        assert_eq!(held[1], ("out/small.txt".to_owned(), small.len() as u64), "landed: whole");
+        let (name, durable) = held[0].clone();
+        assert_eq!(name, "out/big.bin");
+        assert!(durable > 0 && durable <= 1_000_000, "held {durable}");
+        let partial = into.path().join("out/big.bin.partial");
+        assert_eq!(std::fs::metadata(&partial).unwrap().len(), durable, "durable on disk");
+
+        let begin = XferMsg::Begin { xfer: second, dest: None, files: 2, bytes };
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+        let header = download_header(second, "out/small.txt", small.len(), small.len() as u64);
+        streams::open_bulk(&client.conn, header).await.unwrap().finish().unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(second, "out/small.txt", &small))).await.unwrap();
+        let header = download_header(second, "out/big.bin", big.len(), durable);
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&big[usize::try_from(durable).unwrap()..]).await.unwrap();
+        send.finish().unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(second, "out/big.bin", &big))).await.unwrap();
+
+        let landed =
+            tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap().unwrap();
+        let small_at = into.path().join("out/small.txt");
+        let big_at = into.path().join("out/big.bin");
+        assert_eq!(landed, [small_at.clone(), big_at.clone()]);
+        assert_eq!(std::fs::read(&small_at).unwrap(), small);
+        assert!(std::fs::read(&big_at).unwrap() == big, "whole across the cut");
+        assert!(!partial.exists());
+        let mtime = std::fs::metadata(&big_at).unwrap().modified().unwrap();
+        let ms = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        assert_eq!(ms, 1_700_000_000_000, "the worker's modification time");
+    }
+
+    /// Bytes that do not match the worker's digest never land under the file's name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_that_fails_its_digest_does_not_land() {
+        let (mut client, link, _events) = pair().await;
+        let into = tempfile::tempdir().unwrap();
+        let remote = link.remote();
+        let target = into.path().to_owned();
+        let waiting = std::thread::spawn(move || remote.download("~/a.txt".to_owned(), target));
+        for _attempt in 0..3 {
+            let (xfer, _held) = fetched(&mut client).await;
+            let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: 3 };
+            client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+            let header = download_header(xfer, "a.txt", 3, 0);
+            let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+            send.write_all(b"bad").await.unwrap();
+            send.finish().unwrap();
+            client.tx.send(&WorkerMsg::Xfer(done(xfer, "a.txt", b"abc"))).await.unwrap();
+        }
+        let failed = tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap();
+        assert!(failed.unwrap_err().contains("digest"), "three tries, then the reason");
+        assert!(!into.path().join("a.txt").exists());
+        assert!(!into.path().join("a.txt.partial").exists(), "bad bytes are not kept to resume");
     }
 
     #[tokio::test(flavor = "multi_thread")]

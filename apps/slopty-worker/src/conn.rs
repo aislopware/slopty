@@ -604,10 +604,14 @@ impl Peer<'_> {
                     task.abort();
                 }
             }
-            XferMsg::Fetch { xfer, path } => {
+            XferMsg::Fetch { xfer, path, held } => {
                 self.downloads.retain(|_xfer, task| !task.is_finished());
-                let task = crate::xfer::download(self.conn.clone(), self.out.clone(), xfer, path);
-                self.downloads.insert(xfer, tokio::spawn(task));
+                let transfers = Arc::clone(&self.daemon.transfers);
+                let (conn, out) = (self.conn.clone(), self.out.clone());
+                let task = crate::xfer::download(transfers, conn, out, xfer, path, held);
+                if let Some(earlier) = self.downloads.insert(xfer, tokio::spawn(task)) {
+                    earlier.abort();
+                }
             }
             other @ (XferMsg::Begin { dest: None, .. }
             | XferMsg::Offset { .. }

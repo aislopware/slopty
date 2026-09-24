@@ -7177,6 +7177,7 @@ name = "slopty-platform"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "dispatch2",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-audio-toolbox",
@@ -7186,7 +7187,9 @@ dependencies = [
  "objc2-game-controller",
  "objc2-ui-kit",
  "objc2-web-kit",
+ "parking_lot",
  "slopty-proto",
+ "tempfile",
  "tracing",
 ]
 

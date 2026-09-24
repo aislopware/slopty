@@ -1353,7 +1353,6 @@ pub fn open_workspace(
         let mut view = WorkspaceView::new(Theme::default(), saved, cx);
         view.extend_palette(app_palette_items());
         view.set_layout_path(layout_path());
-        #[cfg(target_os = "macos")]
         view.set_pasteboard(pasteboard());
         #[cfg(feature = "e2e")]
         view.set_animation(false);
@@ -1448,6 +1447,7 @@ pub fn open_workspace(
     window.update(cx, |_root, window, cx| {
         workspace.update(cx, |ws, cx| {
             ws.window = Some(window.window_handle());
+            ws.view.update(cx, |_v, cx| WorkspaceView::accept_dropped_files(window, cx));
             for worker in known {
                 ws.add_worker(worker.worker_id, worker.name, true, cx);
             }
@@ -1484,6 +1484,24 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
         }
         _ => Rc::new(MacPasteboard::general()),
     }
+}
+
+/// [`pasteboard`] on iOS: `UIPasteboard`, the app's own named one under the self-test. A
+/// self-test that names none still gets one of its own: the simulator's general pasteboard
+/// follows the Mac's.
+#[cfg(target_os = "ios")]
+fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
+    use slopty_platform::pasteboard::IosPasteboard;
+    let named =
+        std::env::var("SLOPTY_PASTEBOARD").ok().filter(|name| !name.is_empty()).or_else(|| {
+            std::env::var_os(slopty_e2e::SOCKET_ENV)
+                .map(|_| format!("com.aislopware.slopty.self-test.{}", std::process::id()))
+        });
+    if let Some(board) = named.as_deref().and_then(IosPasteboard::named) {
+        tracing::info!(name = ?named, "clipboard on a named pasteboard");
+        return Rc::new(board);
+    }
+    Rc::new(IosPasteboard::general())
 }
 
 /// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),

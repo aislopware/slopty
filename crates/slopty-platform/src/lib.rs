@@ -12,6 +12,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod drag;
+pub mod file_drop;
 pub mod pasteboard;
 pub mod web;
 

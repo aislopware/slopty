@@ -7,6 +7,10 @@
 //! choice is made once per entry, on its first file. A file is written to `name.partial`
 //! ([`Receiving`]), synced, and renamed into place, so a retried file resumes from the bytes the
 //! partial holds ([`durable`]).
+//!
+//! A download goes the other way, and resumes the same way: a retried fetch names the bytes the
+//! client holds of each file, and [`Transfers::resume_points`] sends a file from there when
+//! this worker sent that very version of it before, from the start otherwise.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -123,11 +127,43 @@ impl Transfer {
     }
 }
 
+/// Most file versions remembered for resuming downloads; the oldest goes first.
+pub const REMEMBERED_SENDS: usize = 4096;
+
+/// Which version of each file downloads sent, so a resume only continues the bytes of the
+/// same version.
+#[derive(Debug, Default)]
+struct Sent {
+    /// By path on this worker: the size and modification time sent, and when (a sequence).
+    files: HashMap<PathBuf, ((u64, u64), u64)>,
+    next: u64,
+}
+
+impl Sent {
+    fn same(&self, file: &Outgoing) -> bool {
+        self.files
+            .get(&file.path)
+            .is_some_and(|(version, _at)| *version == (file.size, file.mtime_ms))
+    }
+
+    fn record(&mut self, file: &Outgoing) {
+        self.next = self.next.saturating_add(1);
+        self.files.insert(file.path.clone(), ((file.size, file.mtime_ms), self.next));
+        if self.files.len() > REMEMBERED_SENDS
+            && let Some(oldest) =
+                self.files.iter().min_by_key(|(_path, (_version, at))| *at).map(|(p, _)| p.clone())
+        {
+            self.files.remove(&oldest);
+        }
+    }
+}
+
 /// The transfers in flight.
 #[derive(Debug)]
 pub struct Transfers {
     drop_root: PathBuf,
     inner: Mutex<HashMap<XferId, Transfer>>,
+    sent: Mutex<Sent>,
     /// Woken on every [`Transfers::begin`]: a file's stream can overtake its transfer's
     /// `Begin`, which rides the control stream.
     begun: Notify,
@@ -171,7 +207,7 @@ impl Transfers {
     /// Transfers whose clashing and staged entries go under `drop_root/<xfer>/`.
     #[must_use]
     pub fn new(drop_root: PathBuf) -> Self {
-        Self { drop_root, inner: Mutex::default(), begun: Notify::new() }
+        Self { drop_root, inner: Mutex::default(), sent: Mutex::default(), begun: Notify::new() }
     }
 
     /// `~/.slopty/drop`.
@@ -269,6 +305,26 @@ impl Transfers {
         if let Some(t) = self.inner.lock().get(&xfer) {
             t.cancel.send_replace(true);
         }
+    }
+
+    /// Where each of `files` starts in a download: at the bytes the client holds of it (`held`,
+    /// by name) when this worker sent the same version of it (size and modification time)
+    /// before, else at 0, so a file that changed since starts over. Remembers the versions
+    /// sent now for the next resume.
+    pub fn resume_points(&self, files: &[Outgoing], held: &[(String, u64)]) -> Vec<u64> {
+        let mut sent = self.sent.lock();
+        files
+            .iter()
+            .map(|file| {
+                let holds = held.iter().find(|(name, _)| *name == file.name).map(|(_, n)| *n);
+                let at = match holds {
+                    Some(n) if n <= file.size && sent.same(file) => n,
+                    _ => 0,
+                };
+                sent.record(file);
+                at
+            })
+            .collect()
     }
 
     /// Changes to `true` when `xfer` is cancelled.
@@ -546,6 +602,32 @@ mod tests {
         t.begin(XferId::new(), &Dest::Staging, None, 1);
         t.begin(xfer, &Dest::Staging, None, 1);
         assert!(waiter.await.unwrap());
+    }
+
+    /// A retried download continues a held file only when it is the version sent before; a
+    /// changed one, one past its size, or one this worker never sent starts over.
+    #[test]
+    fn a_download_resumes_only_the_version_it_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = transfers(dir.path());
+        let file = |name: &str, size: u64, mtime_ms: u64| Outgoing {
+            name: name.to_owned(),
+            path: dir.path().join(name),
+            size,
+            mtime_ms,
+            mode: 0o644,
+        };
+        let first = [file("a", 100, 1), file("b", 50, 1), file("c", 10, 1)];
+        let held = [("a".to_owned(), 40), ("b".to_owned(), 50), ("c".to_owned(), 3)];
+        assert_eq!(t.resume_points(&first, &held), [0, 0, 0], "never sent: from the start");
+        let again = [file("a", 100, 1), file("b", 50, 2), file("c", 10, 1), file("d", 5, 1)];
+        let held = [("a".to_owned(), 40), ("b".to_owned(), 50), ("c".to_owned(), 11)];
+        assert_eq!(
+            t.resume_points(&again, &held),
+            [40, 0, 0, 0],
+            "the same version resumes; a newer one, a claim past the end, an unheld one do not"
+        );
+        assert_eq!(t.resume_points(&again, &[("b".to_owned(), 50)]), [0, 50, 0, 0]);
     }
 
     #[test]

@@ -16,6 +16,10 @@ objc2-audio-toolbox.workspace = true
 # The clipboard origin marker's type and format (`transfer::ORIGIN_TYPE`), shared with the worker.
 slopty-proto.workspace = true
 block2.workspace = true
+# A drop's files, received off the main thread, reach the app on it (`file_drop`).
+dispatch2.workspace = true
+# A drop's landing, shared by the callbacks its files arrive on (`file_drop`).
+parking_lot.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSURL",
     "NSURLRequest",
@@ -23,6 +27,10 @@ objc2-foundation = { workspace = true, features = [
     "NSDictionary",
     "NSOperation",
     "NSError",
+    # The iOS pasteboard's promises and the iPad's drops (`pasteboard`, `file_drop`).
+    "NSItemProvider",
+    "NSProgress",
+    "block2",
     # A page's ⌘Z and ⇧⌘Z go to its own undo manager (`web`).
     "NSUndoManager",
 ] }
@@ -32,6 +40,8 @@ tracing.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",
     "NSFilePromiseProvider",
+    # Drops from Mail and Photos, which promise files rather than name them (`file_drop`).
+    "NSFilePromiseReceiver",
     "NSDragging",
     "NSDraggingItem",
     "NSDraggingSession",
@@ -60,6 +70,12 @@ objc2-ui-kit = { workspace = true, features = [
     "UIApplication",
     "UIResponder",
     "block2",
+    # The clipboard (`pasteboard`) and the iPad's file drops (`file_drop`).
+    "UIPasteboard",
+    "UIDropInteraction",
+    "UIDragItem",
+    "UIDragSession",
+    "UIInteraction",
     # The browser tile (`web`): its views, the tap that focuses it, the snapshot.
     "UIView",
     "UIEvent",
@@ -73,3 +89,6 @@ objc2-web-kit = { workspace = true, features = [
     "WKSnapshotConfiguration",
     "WKWebViewConfiguration",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true

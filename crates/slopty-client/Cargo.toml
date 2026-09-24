@@ -11,6 +11,8 @@ description = "Slopty client core: terminal session state, line cache, connectio
 workspace = true
 
 [dependencies]
+# A download's end-to-end check against the worker's digest (`xfer`).
+blake3.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 slopty-codec.workspace = true
@@ -29,6 +31,5 @@ tracing.workspace = true
 headless = [  ]
 
 [dev-dependencies]
-blake3.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true

@@ -4,8 +4,10 @@
 //! An upload announces itself with [`XferMsg::Begin`], then sends one bulk stream per file,
 //! one after another, at bulk priority. A stream cut short is resumed: the sender asks the worker
 //! how much of the file is durable ([`XferMsg::Resume`] → [`XferMsg::Offset`]) and sends the rest.
-//! A download is the worker's bulk streams landing in a directory as `name.partial`, renamed when
-//! whole.
+//! A download is the worker's bulk streams landing in a directory as `name.partial`, synced as
+//! they go, checked against the digest in the worker's [`XferMsg::Done`] and renamed when whole.
+//! A cut download fetches again, naming what it holds of each file, and each file resumes from
+//! there ([`download`]).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -16,9 +18,9 @@ use parking_lot::Mutex;
 use slopty_core::XferId;
 use slopty_net::streams::RawRecv;
 use slopty_net::{ClientMsg, Connection, NetError};
-use slopty_proto::transfer::{BulkHeader, Dest, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, Dest, Hash, Purpose, XferMsg};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 /// Bytes read from disk per write to a bulk stream.
 const CHUNK: usize = 256 * 1024;
@@ -146,17 +148,53 @@ struct Tables {
     offsets: HashMap<(XferId, String), oneshot::Sender<u64>>,
     /// Uploads that were cancelled; their tasks stop at the next chunk.
     cancelled: std::collections::HashSet<XferId>,
-    /// Downloads being received.
-    downloads: HashMap<XferId, Download>,
+    /// Download attempts being received, by the transfer each fetch named.
+    downloads: HashMap<XferId, Attempt>,
 }
 
+/// One fetch of a download: a first one, or a retry after a cut.
 #[derive(Debug)]
-struct Download {
+struct Attempt {
     into: PathBuf,
+    /// The download across its attempts.
+    fetch: Arc<Fetch>,
     /// Files the worker said it sends ([`XferMsg::Begin`]), once it has said.
     expected: Option<u32>,
+    /// Files of this attempt in place.
+    arrived: u32,
+    /// The digest of each file, from the worker's [`XferMsg::Done`].
+    digests: HashMap<String, Hash>,
+    done: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+/// A download across its attempts: what each file came to, and who is still writing.
+#[derive(Debug, Default)]
+struct Fetch {
+    state: Mutex<FetchState>,
+    /// Woken when a digest arrives or a writer ends.
+    changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct FetchState {
+    /// Every file a header named, and where it landed once whole and checked.
+    files: HashMap<String, Option<PathBuf>>,
+    /// The landed files, in the order they landed.
     landed: Vec<PathBuf>,
-    done: Option<oneshot::Sender<Result<Vec<PathBuf>, String>>>,
+    /// Streams being written now.
+    writing: usize,
+}
+
+/// A stream being written into a download; the count drops when it ends.
+struct Writing(Arc<Fetch>);
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.writing = state.writing.saturating_sub(1);
+        drop(state);
+        self.0.changed.notify_waiters();
+    }
 }
 
 impl Table {
@@ -193,19 +231,46 @@ impl Table {
         &self,
         xfer: XferId,
         into: PathBuf,
-    ) -> oneshot::Receiver<Result<Vec<PathBuf>, String>> {
+        fetch: Arc<Fetch>,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
-        let download = Download { into, expected: None, landed: Vec::new(), done: Some(tx) };
-        self.inner.lock().downloads.insert(xfer, download);
+        let attempt = Attempt {
+            into,
+            fetch,
+            expected: None,
+            arrived: 0,
+            digests: HashMap::new(),
+            done: Some(tx),
+        };
+        self.inner.lock().downloads.insert(xfer, attempt);
         rx
     }
 
-    fn download_dir(&self, xfer: XferId) -> Option<PathBuf> {
-        self.inner.lock().downloads.get(&xfer).map(|d| d.into.clone())
+    /// A stream of `xfer` starts being written: where to, and its download. Counted under the
+    /// table's lock, so an attempt given up after this waits for the stream to end.
+    fn start_writing(&self, xfer: XferId) -> Option<(PathBuf, Writing)> {
+        let inner = self.inner.lock();
+        let attempt = inner.downloads.get(&xfer)?;
+        let mut state = attempt.fetch.state.lock();
+        state.writing = state.writing.saturating_add(1);
+        drop(state);
+        let started = (attempt.into.clone(), Writing(Arc::clone(&attempt.fetch)));
+        drop(inner);
+        Some(started)
+    }
+
+    /// Whether `xfer` is still an attempt being received.
+    fn current(&self, xfer: XferId) -> bool {
+        self.inner.lock().downloads.contains_key(&xfer)
+    }
+
+    fn digest(&self, xfer: XferId, name: &str) -> Option<Hash> {
+        self.inner.lock().downloads.get(&xfer)?.digests.get(name).copied()
     }
 
     /// A control message about a transfer this link knows. Returns `true` when it was only
-    /// the tasks' business (an [`XferMsg::Offset`]), so the UI need not hear it.
+    /// the tasks' business (an [`XferMsg::Offset`], a download's own), so the UI need not
+    /// hear it.
     pub fn on_control(&self, msg: &XferMsg) -> bool {
         match msg {
             XferMsg::Offset { xfer, name, durable } => {
@@ -222,40 +287,58 @@ impl Table {
                 finish(whole);
                 true
             }
+            XferMsg::Done { xfer, name, hash, .. } => {
+                let mut inner = self.inner.lock();
+                let Some(d) = inner.downloads.get_mut(xfer) else { return false };
+                d.digests.insert(name.clone(), *hash);
+                let fetch = Arc::clone(&d.fetch);
+                drop(inner);
+                fetch.changed.notify_waiters();
+                true
+            }
             XferMsg::Failed { xfer, error, .. } => {
-                let failed = self.inner.lock().downloads.remove(xfer);
-                if let Some(done) = failed.and_then(|d| d.done) {
+                let Some(failed) = self.inner.lock().downloads.remove(xfer) else { return false };
+                // A stream waiting for a digest of this attempt stops waiting.
+                failed.fetch.changed.notify_waiters();
+                if let Some(done) = failed.done {
                     let _gone = done.send(Err(error.clone()));
-                    return true;
                 }
-                false
+                true
             }
             _ => false,
         }
     }
 
-    fn landed(&self, xfer: XferId, path: PathBuf) {
+    /// One more file of attempt `xfer` is in place.
+    fn arrived(&self, xfer: XferId) {
         let mut inner = self.inner.lock();
         if let Some(d) = inner.downloads.get_mut(&xfer) {
-            d.landed.push(path);
+            d.arrived = d.arrived.saturating_add(1);
         }
         let whole = take_if_whole(&mut inner, xfer);
         drop(inner);
         finish(whole);
     }
+
+    /// Give attempt `xfer` up: its streams stop at their next chunk.
+    fn abandon(&self, xfer: XferId) {
+        let gone = self.inner.lock().downloads.remove(&xfer);
+        if let Some(gone) = gone {
+            gone.fetch.changed.notify_waiters();
+        }
+    }
 }
 
-/// The download, taken out of the table, when every file it promised has landed.
-fn take_if_whole(inner: &mut Tables, xfer: XferId) -> Option<Download> {
-    let whole = inner.downloads.get(&xfer).is_some_and(|d| {
-        d.expected.is_some_and(|n| usize::try_from(n).is_ok_and(|n| d.landed.len() >= n))
-    });
+/// The attempt, taken out of the table, when every file it promised has landed.
+fn take_if_whole(inner: &mut Tables, xfer: XferId) -> Option<Attempt> {
+    let whole =
+        inner.downloads.get(&xfer).is_some_and(|d| d.expected.is_some_and(|n| d.arrived >= n));
     if whole { inner.downloads.remove(&xfer) } else { None }
 }
 
-fn finish(whole: Option<Download>) {
-    if let Some(Download { done: Some(done), landed, .. }) = whole {
-        let _gone = done.send(Ok(landed));
+fn finish(whole: Option<Attempt>) {
+    if let Some(Attempt { done: Some(done), .. }) = whole {
+        let _gone = done.send(Ok(()));
     }
 }
 
@@ -371,65 +454,271 @@ async fn send_file(up: &Uplink, xfer: XferId, entry: &Entry, offset: u64) -> Res
 }
 
 /// Ask the worker for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
-/// wait until every file of it has landed in `into`. Returns the top-level paths landed.
+/// wait until every file of it has landed in `into`. Returns the files landed.
+///
+/// An attempt cut short (a stream ended early, a digest that does not match, the worker's
+/// `Failed`) is given up and fetched again under a new transfer, naming what is held of each
+/// file, three attempts in all.
 pub async fn download(
     up: &Uplink,
     xfer: XferId,
     path: String,
     into: PathBuf,
 ) -> Result<Vec<PathBuf>, String> {
-    let done = up.table.expect_download(xfer, into);
-    send(up, XferMsg::Fetch { xfer, path }).await?;
-    done.await.map_err(|_dropped| "link closed".to_owned())?
+    let fetch = Arc::new(Fetch::default());
+    let mut current = xfer;
+    let mut attempt = 0_u32;
+    loop {
+        attempt = attempt.saturating_add(1);
+        let held = held(&fetch, &into).await;
+        let done = up.table.expect_download(current, into.clone(), Arc::clone(&fetch));
+        send(up, XferMsg::Fetch { xfer: current, path: path.clone(), held }).await?;
+        let error = match done.await.map_err(|_dropped| "link closed".to_owned())? {
+            Ok(()) => return Ok(fetch.state.lock().landed.clone()),
+            Err(error) => error,
+        };
+        if up.table.cancelled(xfer) || up.table.cancelled(current) || attempt >= ATTEMPTS {
+            return Err(error);
+        }
+        tracing::info!(%current, %path, %error, "download cut; fetching the rest");
+        up.table.abandon(current);
+        send(up, XferMsg::Cancel { xfer: current }).await?;
+        settle(&fetch).await?;
+        current = XferId::new();
+    }
 }
 
-/// A bulk stream of a download: written to `name.partial` in the transfer's directory, synced,
-/// and renamed into place.
+/// How long a given-up attempt's streams have to stop before the next one starts.
+const SETTLE_WAIT: Duration = Duration::from_secs(10);
+
+/// Wait until no stream of the download is being written.
+async fn settle(fetch: &Fetch) -> Result<(), String> {
+    let settled = async {
+        loop {
+            let changed = fetch.changed.notified();
+            let mut changed = std::pin::pin!(changed);
+            changed.as_mut().enable();
+            if fetch.state.lock().writing == 0 {
+                return;
+            }
+            changed.await;
+        }
+    };
+    tokio::time::timeout(SETTLE_WAIT, settled)
+        .await
+        .map_err(|_elapsed| "an earlier stream did not stop".to_owned())
+}
+
+/// What a retry says it holds: every landed file whole, and the durable bytes of each partial.
+async fn held(fetch: &Fetch, into: &Path) -> Vec<(String, u64)> {
+    let files: Vec<(String, Option<PathBuf>)> =
+        fetch.state.lock().files.iter().map(|(n, l)| (n.clone(), l.clone())).collect();
+    let mut held = Vec::with_capacity(files.len());
+    for (name, landed) in files {
+        let bytes = match landed {
+            Some(path) => tokio::fs::metadata(&path).await.map_or(0, |m| m.len()),
+            None => match safe_relative(&name) {
+                Some(rel) => durable(&partial_of(&into.join(rel))).await,
+                None => 0,
+            },
+        };
+        if bytes > 0 {
+            held.push((name, bytes));
+        }
+    }
+    held
+}
+
+/// Bytes held durably in a partial file, synced now; 0 when there is none.
+async fn durable(partial: &Path) -> u64 {
+    let Ok(file) = tokio::fs::OpenOptions::new().write(true).open(partial).await else { return 0 };
+    if file.sync_all().await.is_err() {
+        return 0;
+    }
+    file.metadata().await.map_or(0, |m| m.len())
+}
+
+/// Where `target`'s bytes are written until it is whole and checked.
+#[must_use]
+pub fn partial_of(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(".partial");
+    PathBuf::from(name)
+}
+
+/// A download's partial file is synced after this many bytes, so what a retry claims to hold
+/// is on the disk.
+const SYNC_EVERY: u64 = 8 << 20;
+
+/// How long a whole file waits for the worker's digest, which rides the control stream.
+const DIGEST_WAIT: Duration = Duration::from_secs(10);
+
+/// A bulk stream of a download, landed in the transfer's directory.
+///
+/// It is written to `name.partial`, synced, checked against the worker's digest and renamed
+/// into place. A stream of an attempt no longer wanted is stopped.
 pub async fn receive(table: &Table, header: BulkHeader, mut rx: RawRecv) {
-    let Some(dir) = table.download_dir(header.xfer) else {
-        tracing::debug!(xfer = %header.xfer, "bulk for no download here; stopping it");
+    let xfer = header.xfer;
+    let Some((dir, writing)) = table.start_writing(xfer) else {
+        tracing::debug!(%xfer, "bulk for no download here; stopping it");
         rx.stop();
         return;
     };
-    let xfer = header.xfer;
-    match write_file(&dir, &header, &mut rx).await {
-        Ok(path) => table.landed(xfer, path),
+    match write_file(table, &writing.0, &dir, &header, &mut rx).await {
+        Ok(()) => table.arrived(xfer),
         Err(error) => {
             rx.stop();
+            tracing::debug!(%xfer, name = %header.name, %error, "download stream failed");
             let failed = XferMsg::Failed { xfer, name: Some(header.name), error };
             table.on_control(&failed);
         }
     }
+    drop(writing);
 }
 
-async fn write_file(dir: &Path, header: &BulkHeader, rx: &mut RawRecv) -> Result<PathBuf, String> {
+async fn write_file(
+    table: &Table,
+    fetch: &Fetch,
+    dir: &Path,
+    header: &BulkHeader,
+    rx: &mut RawRecv,
+) -> Result<(), String> {
+    let io = |e: std::io::Error| format!("{}: {e}", header.name);
     let rel = safe_relative(&header.name).ok_or_else(|| format!("bad name {:?}", header.name))?;
     let target = dir.join(rel);
+    let had = fetch.state.lock().files.get(&header.name).cloned().flatten();
+    if header.offset == header.size && had.as_ref() == Some(&target) {
+        // Landed on an earlier attempt, and the worker still has that version.
+        return match rx.chunk(1).await.map_err(|e| e.to_string())? {
+            None => Ok(()),
+            Some(_) => Err(format!("{}: more than announced", header.name)),
+        };
+    }
     if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent).await.map_err(io)?;
     }
-    let mut partial_name = target.clone().into_os_string();
-    partial_name.push(".partial");
-    let partial = PathBuf::from(partial_name);
-    let mut file = tokio::fs::File::create(&partial).await.map_err(|e| e.to_string())?;
-    let mut got = 0_u64;
-    while let Some(chunk) = rx.chunk(CHUNK).await.map_err(|e| e.to_string())? {
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        got = got.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-    }
+    let partial = partial_of(&target);
+    let (mut file, mut hasher) = open_partial(&partial, header.offset).await.map_err(io)?;
+    fetch.state.lock().files.insert(header.name.clone(), None);
     let expected = header.size.saturating_sub(header.offset);
+    let (mut got, mut unsynced) = (0_u64, 0_u64);
+    let cut = loop {
+        if !table.current(header.xfer) {
+            break Some("given up".to_owned());
+        }
+        let chunk = match rx.chunk(CHUNK).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break None,
+            Err(e) => break Some(e.to_string()),
+        };
+        let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        if got.saturating_add(n) > expected {
+            break Some("more than announced".to_owned());
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            break Some(e.to_string());
+        }
+        hasher.update(&chunk);
+        got = got.saturating_add(n);
+        unsynced = unsynced.saturating_add(n);
+        if unsynced >= SYNC_EVERY {
+            file.sync_data().await.map_err(io)?;
+            unsynced = 0;
+        }
+    };
+    file.sync_all().await.map_err(io)?;
+    if let Some(why) = cut {
+        return Err(format!("{}: cut at {got} of {expected} bytes: {why}", header.name));
+    }
     if got != expected {
         return Err(format!("{}: {got} of {expected} bytes", header.name));
     }
-    file.sync_all().await.map_err(|e| e.to_string())?;
-    drop(file);
+    let want = wait_digest(table, fetch, header.xfer, &header.name).await?;
+    if want != *hasher.finalize().as_bytes() {
+        drop(file);
+        let _gone = tokio::fs::remove_file(&partial).await;
+        return Err(format!("{}: the digest does not match the worker's", header.name));
+    }
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::Permissions::from_mode(header.mode & 0o777);
-        tokio::fs::set_permissions(&partial, mode).await.map_err(|e| e.to_string())?;
+        file.set_permissions(mode).await.map_err(io)?;
     }
-    tokio::fs::rename(&partial, &target).await.map_err(|e| e.to_string())?;
-    Ok(target)
+    let mtime =
+        std::time::SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(header.mtime_ms));
+    if let Some(mtime) = mtime.filter(|_| header.mtime_ms > 0) {
+        file.into_std().await.set_modified(mtime).map_err(io)?;
+    }
+    tokio::fs::rename(&partial, &target).await.map_err(io)?;
+    if let Some(parent) = target.parent()
+        && let Ok(parent) = tokio::fs::File::open(parent).await
+    {
+        let _synced = parent.sync_all().await;
+    }
+    let mut state = fetch.state.lock();
+    state.files.insert(header.name.clone(), Some(target.clone()));
+    if !state.landed.contains(&target) {
+        state.landed.push(target);
+    }
+    drop(state);
+    Ok(())
+}
+
+/// The partial file, ready to take bytes at `offset`: made afresh at 0, else cut back to
+/// `offset` (which it must hold) with a hasher over what it keeps.
+async fn open_partial(
+    partial: &Path,
+    offset: u64,
+) -> std::io::Result<(tokio::fs::File, blake3::Hasher)> {
+    let mut hasher = blake3::Hasher::new();
+    if offset == 0 {
+        return Ok((tokio::fs::File::create(partial).await?, hasher));
+    }
+    let mut file = tokio::fs::OpenOptions::new().read(true).write(true).open(partial).await?;
+    let held = file.metadata().await?.len();
+    if held < offset {
+        return Err(std::io::Error::other(format!("resume at {offset}, but {held} bytes held")));
+    }
+    file.set_len(offset).await?;
+    let mut buf = vec![0_u8; CHUNK];
+    let mut left = offset;
+    while left > 0 {
+        let want = usize::try_from(left).unwrap_or(CHUNK).min(CHUNK);
+        let n = file.read(buf.get_mut(..want).unwrap_or_default()).await?;
+        if n == 0 {
+            return Err(std::io::Error::other("the partial file shrank"));
+        }
+        hasher.update(buf.get(..n).unwrap_or_default());
+        left = left.saturating_sub(n as u64);
+    }
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    Ok((file, hasher))
+}
+
+/// The worker's digest of `name`, waiting for its `Done` if it has not come yet.
+async fn wait_digest(
+    table: &Table,
+    fetch: &Fetch,
+    xfer: XferId,
+    name: &str,
+) -> Result<Hash, String> {
+    let waited = async {
+        loop {
+            let changed = fetch.changed.notified();
+            let mut changed = std::pin::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(hash) = table.digest(xfer, name) {
+                return Ok(hash);
+            }
+            if !table.current(xfer) {
+                return Err(format!("{name}: given up"));
+            }
+            changed.await;
+        }
+    };
+    tokio::time::timeout(DIGEST_WAIT, waited)
+        .await
+        .map_err(|_elapsed| format!("{name}: the worker sent no digest"))?
 }
 
 #[cfg(test)]
@@ -477,12 +766,16 @@ mod tests {
     fn a_download_is_whole_when_the_files_the_worker_promised_have_landed_in_any_order() {
         let table = Table::default();
         let xfer = XferId::new();
-        let mut done = table.expect_download(xfer, PathBuf::from("/tmp"));
-        table.landed(xfer, PathBuf::from("/tmp/a"));
+        let mut done = table.expect_download(xfer, PathBuf::from("/tmp"), Arc::default());
+        table.arrived(xfer);
         assert!(done.try_recv().is_err(), "the count is not known yet");
         assert!(table.on_control(&XferMsg::Begin { xfer, dest: None, files: 2, bytes: 3 }));
         assert!(done.try_recv().is_err(), "one of two");
-        table.landed(xfer, PathBuf::from("/tmp/b"));
-        assert_eq!(done.try_recv().unwrap().unwrap().len(), 2);
+        let digest =
+            XferMsg::Done { xfer, name: "b".to_owned(), path: "/b".to_owned(), hash: [7; 32] };
+        assert!(table.on_control(&digest), "a download's digest is not the UI's business");
+        assert_eq!(table.digest(xfer, "b"), Some([7; 32]));
+        table.arrived(xfer);
+        done.try_recv().unwrap().unwrap();
     }
 }

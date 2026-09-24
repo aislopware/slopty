@@ -113,6 +113,10 @@ impl WorkspaceView {
             return;
         }
         self.send(key, ClientMsg::Clip(ClipMsg::Watch(true)));
+        // Where reading asks the person first (iOS), their clipboard waits for their paste.
+        if self.clip.as_ref().is_some_and(|clip| clip.borrow().board().reads_ask()) {
+            return;
+        }
         if let Some(offer) = self.offer_for(key) {
             self.send(key, ClientMsg::Clip(ClipMsg::Offer(offer)));
         }
@@ -188,6 +192,46 @@ impl WorkspaceView {
         self.uploads.insert(xfer, Upload { tile, session, total, done: 0 });
         remote.upload(xfer, paths.to_vec(), dest);
         cx.notify();
+    }
+
+    /// Take drops of files that apps promise rather than name (Mail, Photos) and, on iPad,
+    /// every drop: the platform lands them in a temporary directory, and they go to the tile
+    /// under the drop as a file drop of their paths, which uploads them. A file that did not
+    /// arrive is named in a notice. Once, with the app's window.
+    pub fn accept_dropped_files(window: &Window, cx: &Context<Self>) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::AppKit(handle)) => handle.ns_view,
+            Ok(RawWindowHandle::UiKit(handle)) => handle.ui_view,
+            _ => return,
+        };
+        let (handle, view, app) = (window.window_handle(), cx.entity().downgrade(), cx.to_async());
+        let sink = Rc::new(move |dropped: slopty_platform::file_drop::Dropped| {
+            let mut app = app.clone();
+            let delivered = handle.update(&mut app, |_root, window, cx| {
+                #[expect(clippy::cast_possible_truncation, reason = "points in a window")]
+                let position = gpui::point(gpui::px(dropped.x as f32), gpui::px(dropped.y as f32));
+                if !dropped.paths.is_empty() {
+                    let paths = gpui::ExternalPaths(dropped.paths.iter().cloned().collect());
+                    for event in [
+                        gpui::FileDropEvent::Entered { position, paths },
+                        gpui::FileDropEvent::Pending { position },
+                        gpui::FileDropEvent::Submit { position },
+                    ] {
+                        let _handled =
+                            window.dispatch_event(gpui::PlatformInput::FileDrop(event), cx);
+                    }
+                }
+                if !dropped.failed.is_empty() {
+                    let text = format!("Not sent: {}", dropped.failed.join("; "));
+                    let _gone = view.update(cx, |v, cx| v.show_notice(text, cx));
+                }
+            });
+            if let Err(e) = delivered {
+                tracing::warn!(error = %e, "a drop for a window that is gone");
+            }
+        });
+        slopty_platform::file_drop::install(host, sink);
     }
 
     /// The upload in flight on `tile`, if any.
