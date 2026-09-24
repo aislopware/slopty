@@ -3335,3 +3335,37 @@ A keystroke's echo pays nothing measurable. A full 64 KiB read in a flood pays 7
 a few percent of what the engine spends on the same read (10 024 coloured lines, about 600 KiB,
 take 2.8 ms, see "the host hot paths" above).
 
+## 2026-09-25 — submit to glass: the drawable queue a vsync-driven window keeps (zed fork)
+
+`Window::on_frame_presented` (zed fork bd43a00) reports when each frame reached the display.
+With it, a window that animates continuously measured about 3 refreshes from submit to glass.
+This display runs at 75 Hz, 13.3 ms per refresh. `CAMetalLayer` presents drawables in order,
+and a window that draws once per vsync keeps any queue it ever builds: one late tick, a slow
+first frame or a compositor hiccup adds a frame of queue, and every later frame waits a
+refresh behind it. The fork's fix (22e4c6a) is a pacer in `gpui_apple`. It skips one display
+link tick when frames reach the glass a refresh later than the pipeline's recent floor, and it
+never starts two frames within half a refresh. An idle macOS window marked dirty now draws on
+the next main-queue turn instead of the next vsync, as iOS already did.
+
+The rows below are release-fast, mac-studio, with a load average of 7–10 from other sessions,
+900 refreshes a run, in milliseconds:
+
+```
+cd .research/zed-main && MACOSX_DEPLOYMENT_TARGET=26.5 IPHONEOS_DEPLOYMENT_TARGET= \
+  cargo run -p gpui --example frame_latency --profile release-fast -- continuous|heavy|idle
+```
+
+| case | before p50 / p99 | after p50 / p99 | repeated refreshes before → after |
+| --- | --- | --- | --- |
+| continuous | 31.1 / 33.1 | 18.1 / 32.3 | 0–4 → 8–9 (the pacer's skips) |
+| heavy (≈ 9 ms of work per frame) | 22.6 / 25.0 | 22.7 / 25.1 | 0 → 0 |
+| idle, notify → glass | 26 / 32–44 | 20–22 / 28–29 | — |
+
+No frame was dropped in any run. The floor that remains, about 17.8 ms (1.3 refreshes), is the
+macOS compositor. Measured and rejected:
+- `maximumDrawableCount = 2`: p50 24.7, still queued, and able to block the main thread.
+- `CAMetalDisplayLink` with frame latency 1 or 2: p50 39.6.
+- `displaySyncEnabled = NO`: it reported 5.7 ms, but the timestamp no longer means the glass,
+  and motion repeated 153 refreshes.
+
+The iOS side runs the same pacer and only builds so far; it has no number yet.
