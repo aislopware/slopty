@@ -6,6 +6,8 @@
 //!   a single event channel and queues outbound messages.
 //! * [`canvas`] — [`canvas::CanvasDoc`] (host-authoritative item layout, applied optimistically)
 //!   and [`canvas::Camera`] (pan/zoom mapping).
+//! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
+//!   (workspaces of columns of tiles), with its springs and gestures; pure, clocked by the caller.
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
 //!   published as its newest frame plus the host's cursor position.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
@@ -15,6 +17,7 @@
 
 pub mod arrange;
 pub mod canvas;
+pub mod layout;
 pub mod link;
 pub mod pacing;
 pub mod screen;

@@ -6876,6 +6876,8 @@ dependencies = [
  "bytes",
  "parking_lot",
  "pretty_assertions",
+ "serde",
+ "serde_json",
  "slopty-codec",
  "slopty-core",
  "slopty-grid",
