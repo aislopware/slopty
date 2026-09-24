@@ -8,8 +8,8 @@
 //! The behaviours, one test each, in the order of the brief: (a) a terminal opened on A is on B
 //! within a round trip with the same title, size and rows; (b) typing on both into one session
 //! is serialised, nothing lost or reordered, and the PTY size follows the "take" pill; (c) an
-//! agent's attention badges both, "go" on A reveals A's terminal and only the host reporting the
-//! agent moved on clears the count, on both at once;
+//! agent's attention badges both, its badge on A reveals A's terminal and only the host
+//! reporting the agent moved on clears the count, on both at once;
 //! (d) a display streams to both (needs `SLOPTY_SCREEN_E2E`), and the host's `screens` listing
 //! says how many times it encodes; (e) the items are shared while each client arranges them
 //! in its own layout; (f) A dying leaves B streaming, and a relaunched A catches up; (g) closing on
@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// (c) An agent's attention (a hook played to hostd) badges both clients and both count one
-    /// waiting. "go" on A reveals A's terminal, where the TUI's own prompt takes the answer —
+    /// waiting. The badge on A reveals A's terminal, where the TUI's own prompt takes the answer —
     /// Slopty never answers for the human, so nothing is cleared until the host says the agent
     /// moved on, and then it clears on both at once.
     #[tokio::test]
@@ -406,11 +406,13 @@ mod tests {
             start.elapsed().as_secs_f64() * 1e3
         );
         let bounds = da.item_for_session(&session).unwrap().bounds;
-        assert!(button_in(&db, "go", db.item_for_session(&session).unwrap().bounds).is_some());
+        assert!(
+            button_in(&db, "allow? Bash", db.item_for_session(&session).unwrap().bounds).is_some()
+        );
 
-        // "go" on A reveals A's terminal and does no more: the answer belongs to the TUI's own
+        // The badge on A reveals A's terminal and does no more: the answer belongs to the TUI's own
         // prompt, so both clients go on counting one until the host says otherwise.
-        let (x, y) = button_in(&da, "go", bounds).unwrap();
+        let (x, y) = button_in(&da, "allow? Bash", bounds).unwrap();
         a.click(x, y).await.unwrap();
         let want = format!("terminal:{session}");
         let da = a.wait_for("A's terminal revealed", STEP, |d| d.focused == want).await.unwrap();

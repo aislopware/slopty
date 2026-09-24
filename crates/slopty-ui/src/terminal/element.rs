@@ -1178,7 +1178,15 @@ impl Element for TerminalElement {
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
             // "took 3.2 s" at the right end of a prompt row whose command took a while.
             let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
+            // Nothing but blank rows from the terminal's first line down to here: a prompt
+            // in that stretch opens the terminal rather than following a command, and a rule
+            // over it would only double the tile header's hairline.
+            let mut blank_from_start = rows_view.first().is_some_and(|r| r.index.0 == 0);
             for (i, row) in rows_view.iter().enumerate() {
+                let opens_terminal = blank_from_start;
+                if row.line.is_some_and(|l| l.cells.iter().any(|c| !plain_space(c))) {
+                    blank_from_start = false;
+                }
                 let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
                 let y = origin.y + line_height * f32::from(screen_row);
                 if !row_in_band(y, line_height, overhang, clip_top, clip_bottom) {
@@ -1310,8 +1318,13 @@ impl Element for TerminalElement {
                     .filter(|&(at, ..)| at == index)
                     .map(|(_, start, end)| (start, end.min(grid_cols)));
                 // A prompt starts here: rule off the command above it, red when it failed.
-                let separator = (line.mark.starts_prompt() && index.0 > 0)
-                    .then(|| separator_color(theme, line.mark.exit()));
+                // On the grid's top edge a neutral rule would lie a padding under the tile
+                // header's hairline and read as a double line; a failed command's red one still
+                // says something there.
+                let failed = line.mark.exit().is_some_and(|code| code != 0);
+                let separator =
+                    (line.mark.starts_prompt() && !opens_terminal && (screen_row > 0 || failed))
+                        .then(|| separator_color(theme, line.mark.exit()));
                 if line.mark.starts_prompt()
                     && let Some(elapsed) = view.took(index)
                 {

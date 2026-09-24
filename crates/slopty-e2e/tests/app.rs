@@ -6,6 +6,10 @@
 //! skips without `SLOPTY_SCREEN_E2E`.
 
 #[cfg(test)]
+#[path = "app/gallery.rs"]
+mod gallery;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -758,14 +762,19 @@ mod tests {
         }
     }
 
-    /// The app launched with only `[client] server` in its settings: `slopty-app` from this
-    /// build with its data in `dir`, its test socket beside it, and a driver on the socket.
+    /// The app launched with only `[client] server` (and the pinned appearance) in its settings:
+    /// `slopty-app` from this build with its data in `dir`, its test socket beside it, and a
+    /// driver on the socket.
     async fn launch_app_for(
         dir: &std::path::Path,
         server: &str,
     ) -> anyhow::Result<(tokio::process::Child, slopty_e2e::Driver)> {
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("settings.toml"), format!("[client]\nserver = \"{server}\"\n"))?;
+        let appearance = slopty_e2e::harness::APPEARANCE;
+        std::fs::write(
+            dir.join("settings.toml"),
+            format!("[client]\nserver = \"{server}\"\n\n[theme]\nappearance = \"{appearance}\"\n"),
+        )?;
         let sock = dir.with_extension("sock");
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let mut app =
@@ -862,8 +871,9 @@ mod tests {
         let dump = drv.dump().await.unwrap();
         assert_eq!(dump.workers.len(), 1, "{dump:#?}");
         assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
-        let frame = drv.render(&artifacts_dir().join("server-unreachable.png")).await.unwrap();
+        let frame = drv.render(&stack.path("server-unreachable.png")).await.unwrap();
         assert!(foreground_fraction(&frame) > 0.01, "the degraded frame is blank");
+        assert_matches("server-unreachable", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // Back on the same port: the app links again, and the terminal never noticed.
         let mut server = restart_server(&stack.server).unwrap();
@@ -881,7 +891,7 @@ mod tests {
 
     /// The first shell, prompted and focused, moved into a directory of the run's own (typed,
     /// as the human would): where a drop on it lands.
-    async fn shell_in(drv: &mut slopty_e2e::Driver, dir: &std::path::Path) -> slopty_e2e::Dump {
+    pub async fn shell_in(drv: &mut slopty_e2e::Driver, dir: &std::path::Path) -> slopty_e2e::Dump {
         drv.wait_for("the first shell with a prompt", STEP, |d| {
             d.status == "connected"
                 && d.focus.as_deref() == Some("terminal")

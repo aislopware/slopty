@@ -2994,7 +2994,8 @@ mod tests {
     }
 
     /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport; the block separator
-    /// is drawn on every prompt-start row but the first line, red after a failed command.
+    /// is drawn on every prompt-start row but the first line, red after a failed command, and
+    /// on the viewport's top row only when red.
     #[gpui::test]
     fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
@@ -3016,7 +3017,11 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3));
-        assert_eq!(separators(&view, cx), vec![(0, ok), (1, failed)]);
+        assert_eq!(
+            separators(&view, cx),
+            vec![(1, failed)],
+            "a neutral rule on the top edge would double the tile header's hairline"
+        );
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0));
@@ -3031,6 +3036,51 @@ mod tests {
         cx.simulate_keystrokes("cmd-down");
         assert_eq!(top_line(&view, cx), LineIndex(6), "the newest prompt cannot go higher");
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
+    }
+
+    /// A shell whose prompt opens with a blank line (a common prompt theme) draws no rule over
+    /// that first prompt: only blank rows are above it, and a rule there would sit right under
+    /// the tile header's hairline. The prompt after a command still gets its rule.
+    #[gpui::test]
+    fn the_prompt_that_opens_a_terminal_has_no_rule_over_it(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let screen = [
+            ("", SemanticMark::Output),
+            ("$ echo hi", prompt(None)),
+            ("hi", SemanticMark::Output),
+            ("$ ", prompt(Some(0))),
+        ];
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 4,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 4,
+                    input_ack: 0,
+                    images: Vec::new(),
+                    updates: screen
+                        .iter()
+                        .enumerate()
+                        .map(|(row, (text, mark))| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: marked(text, *mark),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let ok = separator_color(&Theme::default(), Some(0));
+        assert_eq!(separators(&view, cx), vec![(3, ok)], "only the prompt after `echo hi`");
     }
 
     /// A block whose prompt rows have scrolled above the viewport keeps its command in a

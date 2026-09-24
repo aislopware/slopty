@@ -12,9 +12,9 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::Driver;
     use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
+    use slopty_e2e::{Command, Driver};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
@@ -22,6 +22,8 @@ mod tests {
     const PHONE_BELOW: f32 = 700.0;
     /// Fraction of pixels allowed to differ from a golden (hinting, RTT readout, cursor).
     const TOLERANCE: f64 = 0.01;
+    /// Long enough for a spring or the soft keyboard to come to rest before a golden.
+    const SETTLE: Duration = Duration::from_millis(600);
     /// Foreground below this is a blank frame: a fitted terminal's few lines are under 1 % of
     /// an iPad's 2064×2752 pixels.
     const BLANK: f64 = 0.002;
@@ -65,11 +67,42 @@ mod tests {
         Some(Simulator { udid, bundle_id })
     }
 
+    /// Render the frame and hold it against `golden/ios-<device>-<state>.png`; `crop` keeps
+    /// only the top-left `(width, height)` points, the app's own area in a split view.
+    async fn golden(
+        drv: &mut Driver,
+        dir: &std::path::Path,
+        device: &str,
+        state: &str,
+        crop: Option<(f32, f32)>,
+    ) {
+        tokio::time::sleep(SETTLE).await;
+        let name = format!("ios-{device}-{state}");
+        let mut frame = drv.render(&dir.join(format!("{name}.png"))).await.unwrap();
+        if let Some((w, h)) = crop {
+            let scale = drv.dump().await.unwrap().window.scale;
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+            let (w, h) = ((w * scale).round() as u32, (h * scale).round() as u32);
+            frame = image::imageops::crop_imm(&frame, 0, 0, w, h).to_image();
+        }
+        assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+    }
+
     #[tokio::test]
     async fn a_shell_on_the_simulator_echoes_and_is_sized_for_its_screen() {
         let Some(simulator) = simulator() else { return };
-        let mut stack = Stack::launch_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let mut stack =
+            Stack::launch_first_run_on_simulator("e2e-ios-host", simulator).await.unwrap();
+        let dir = stack.dir.path().to_path_buf();
         let render_path = stack.path("terminal.png");
+
+        // The first run: the way in and nothing else, on this device's screen.
+        let dump = stack.driver.wait_for("the connect panel", STEP, |d| d.adding).await.unwrap();
+        let dev = device(dump.window.width);
+        assert!(dump.a11y_node("Heading", Some("Connect to a server")).is_some(), "{dump:#?}");
+        assert!(dump.a11y_node("Button", Some("More")).is_none(), "{:#?}", dump.a11y);
+        golden(&mut stack.driver, &dir, dev, "first-run", None).await;
+        stack.add_worker().await.unwrap();
         let drv = &mut stack.driver;
 
         let dump = drv
@@ -200,6 +233,31 @@ mod tests {
         })
         .await
         .unwrap();
+
+        // The shell and the note side by side, the note focused: columns and their marks.
+        golden(drv, &dir, dev, "columns", None).await;
+        // The palette as the phone reaches it, from "…".
+        open_palette(drv).await;
+        golden(drv, &dir, dev, "palette", None).await;
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the palette closed", STEP, |d| {
+            d.a11y_node("Dialog", Some("Commands")).is_none()
+        })
+        .await
+        .unwrap();
+        if dev == "pad" {
+            // Split View, the app on half the screen: under 700 pt it is laid out as a phone.
+            let (w, h) = (dump.window.width / 2.0 - 5.0, dump.window.height);
+            drv.ok(&Command::Resize { width: w, height: h }).await.unwrap();
+            let split = drv
+                .wait_for("the half-width layout", STEP, |d| {
+                    d.items.iter().any(|i| i.active && i.bounds[2] > w * 0.85 && i.bounds[2] < w)
+                })
+                .await
+                .unwrap();
+            assert!(split.items.iter().all(|i| i.bounds[0] + i.bounds[2] <= w + 1.0 || !i.active));
+            golden(drv, &dir, dev, "split", Some((w, h))).await;
+        }
         stack.shutdown().await;
     }
 }

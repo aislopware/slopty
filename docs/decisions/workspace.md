@@ -116,11 +116,13 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   that need you, "+" (shell, agent, note, window, file) and "…" (palette, overview, stream
   stats, then the app's: settings, add a worker, forget each worker). The top bar's text
   buttons, the zoom percentage, the minimap, arrange headings and other clients' outlines are
-  gone. A tile is a hairline border on the theme radius, 8 pt apart; its 28 pt header has a
-  status dot, the title, the agent badge and, on hover or focus only, its actions; the focused
-  tile wears a 2 pt accent ring drawn over the tile (so the content never moves by a point),
-  an agent waiting on the human a warn ring. The add-worker panel is an overlay. Reduce Motion
-  lands every animation at once. Theme tokens only (`kit.rs` lint tests).
+  gone. A tile is a hairline border on the theme radius, 8 pt apart; its 28 pt header has the
+  title, the agent badge and, on hover or focus only, its actions (a dot before the title only
+  while the tile's worker is away); the focused tile's hairline turns accent, drawn over the
+  tile (so the content never moves by a point), an agent waiting on the human's warn. The
+  add-worker panel is an overlay, except on the first run (ui.md, 2026-09-25). Reduce Motion
+  lands every animation at once. Theme tokens only (`kit.rs` lint tests). The column marks
+  became dots and the ring a hairline on 2026-09-25 (ui.md, "The de-slop pass").
 
 - ✅ **Only what is near the view costs anything** (2026-09-24). A tile is laid out only when
   its column meets the viewport, is next to one that does, or is focused: an off-screen

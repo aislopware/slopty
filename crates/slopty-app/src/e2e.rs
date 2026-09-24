@@ -547,6 +547,11 @@ fn apply(
             view.update(cx, slopty_ui::workspace::WorkspaceView::add_first_display);
             Reply::Ok
         }
+        Command::PickWindow { window, title } => {
+            let view = workspace.read(cx).view.clone();
+            view.update(cx, |v, cx| v.pick_window(slopty_core::WindowId(window), title, cx));
+            Reply::Ok
+        }
         Command::NotificationResponse { tag } => {
             let Ok(session) = tag.parse::<SessionId>() else {
                 return Reply::Error { message: format!("not a session id: {tag}") };
@@ -557,7 +562,17 @@ fn apply(
             Reply::Ok
         }
         Command::Resize { width, height } => {
-            window.resize(size(px(width), px(height)));
+            if cfg!(target_os = "ios") {
+                // UIKit sizes the window; the app lays itself out in the size asked for.
+                let full = window.viewport_size();
+                let asked = size(px(width), px(height));
+                workspace.update(cx, |ws, cx| {
+                    ws.split_view = (asked != full).then_some(asked);
+                    cx.notify();
+                });
+            } else {
+                window.resize(size(px(width), px(height)));
+            }
             Reply::Ok
         }
         Command::Dump
@@ -754,6 +769,7 @@ impl Workspace {
             notice: view.toast_text(cx),
             workspace: view.workspace_name(),
             overview: view.layout().overview_open(),
+            dark: self.theme.variant() == slopty_theme::Variant::Dark,
             frames: frame_info(slopty_ui::frames::stats(cx)),
             ..Dump::default()
         };

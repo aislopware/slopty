@@ -986,3 +986,59 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   answer and was used here. The sharp one is an assertion over the bar's text through the app's
   own dump socket, at layer 3, where a word appearing or vanishing is a string comparison and not
   a pixel count. Not written yet.
+
+- ✅ **The de-slop pass: every state is a golden, and the chrome says less** (2026-09-25). The
+  user judged the app's UI and UX to be AI slop and asked for it to be minimal and genuinely
+  beautiful, in the Warp and Zed school. The tokens were already clean; the slop was in the
+  composition, and only four goldens existed, so most of the UI had never been looked at.
+  `crates/slopty-e2e/tests/app/gallery.rs` now renders every state worth a look through the
+  self-test socket, each asserted through the accessibility tree as well (the tolerance cannot
+  see a word): `first-run`, `add-worker`, `workspace` and `workspace-dark`, `overview`,
+  `palette` and `palette-dark`, `settings`, `empty-workspace`, `agent-needs-you`,
+  `remote-window`, `transfers` (upload pill and port chip) and `server-unreachable`; the iOS
+  test adds `ios-<device>-first-run`, `-columns`, `-palette` and `ios-pad-split` (not yet
+  rendered: since the frame-pacer pin the simulator app aborts in `MetalRenderer::draw` on an
+  unrecognised selector, so they are written on the first green run). Reaching two
+  of them took a socket command each: `PickWindow` (a window id that names no window, so a
+  remote tile's placeholder renders without the capture grant, and no screen ever lands in a
+  golden) and `Resize` on iOS, which lays the app out in the size asked at the window's top
+  left, the stand-in for Split View since a UIKit window cannot be resized from inside. The
+  harness pins `appearance = "light"`: under the `system` default every golden depended on the
+  machine's appearance that day. What the review found and what changed, worst first:
+  - The column indicator, a 160 pt track with the view bracketed and the active column
+    filled, read as a progress bar. It is a dot per column now, the focused one in the text
+    colour, the ones in view muted, the rest faint, and nothing for a single column.
+  - The first run was a four-line form over a dimmed app whose titlebar still offered "+" and
+    "…". It is the whole window now: a heading, one line ("Slopty finds your workers through a
+    server on your tailnet or VPN."), the field, one primary button and the other way in as a
+    quiet link. The port and encryption paragraph went; the phone keeps a "Paste".
+  - "point" was the one visible action on every focused tile, and "go" sat beside an agent's
+    badge doing what a click on the tile does. Both went: pointing is in the palette ("Point
+    other devices at this tile") and ⌘⇧O, and a waiting agent's badge is itself the button.
+  - Toasts landed at the top, over the headers whose pills they were about (the port notice
+    hid the upload pill); they sit at the foot of the strip now, and "take back ⌘Z" is "Undo".
+  - Chords were printed on buttons ("Cancel esc", "Save ⌘↩") and were an empty workspace's
+    only content. The empty workspace is two buttons, "New terminal" and "Add a window";
+    `kit::a_chord_is_spelled_only_by_the_key_tables` fails on any chrome literal holding a
+    chord, and menus read their keys from the binding tables (`palette::keys_for`), since the
+    "+" menu had spelled `⌘⇧T` where the palette said `⇧⌘T`.
+  - The settings dialog's title was a seventy-character temp path; it is the file name, the
+    path its accessible name.
+  - A fresh shell showed two hairlines, the header's and a command-block rule over the first
+    prompt. No rule is drawn over a prompt with only blank lines above it, nor a neutral one
+    on the viewport's top row (`the_prompt_that_opens_a_terminal_has_no_rule_over_it`).
+  - The focus ring was 2 pt of saturated accent against 1 pt hairlines; it is the accent
+    hairline the token ruling always named. The status dot, accent when focused, said what the
+    ring says; it now shows only while the tile's worker is away.
+  - The overview drew the empty trailing workspace as a solid white slab; it is a dashed
+    outline. A remote tile waiting for its picture sits in a canvas-coloured well instead of
+    looking like an empty terminal. A ticked task is an accent box with a tick, not a grey
+    square. The palette's field lost its second frame. "+" and "…" are drawn from quads,
+    centred in square buttons, rather than set on a text baseline.
+  - The phone key bar crowded fourteen equal caps into 402 pt ("paste" and "find" ran into
+    their edges). Caps now have a floor (36 pt, 52 for a word) and the row scrolls past it;
+    the keys the soft keyboard cannot type come first and the clipboard key follows the
+    arrows, so both are in view before the row scrolls.
+  Left for later: a lone column still sits at the left half of a wide window (niri's
+  `always-center-single-column` would centre it; the layout is `slopty-client`'s), and the
+  overview zooms about the view, so a strip that starts at the view sits right of centre.

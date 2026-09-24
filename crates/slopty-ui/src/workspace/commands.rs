@@ -485,6 +485,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Put window `window` of the focused tile's worker in the strip, titled `title`, as
+    /// picking it in the ⌘O picker does.
+    pub fn pick_window(
+        &mut self,
+        window: slopty_core::WindowId,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.context_worker() else { return };
+        self.add_screen_item(key, CaptureTarget::Window(window), title, cx);
+    }
+
     /// Put a window or display item on `key`; the reconcile opens its stream.
     pub(super) fn add_screen_item(
         &mut self,

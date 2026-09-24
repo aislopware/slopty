@@ -35,8 +35,14 @@ const LEADING_INSET: f32 = 12.0;
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
 
-/// The strip indicator's width at most, and its height.
-const INDICATOR: (f32, f32) = (160.0, 12.0);
+/// The column marks: a dot's diameter and the room it takes, at most this many dots at full
+/// size before they shrink to fit.
+const DOT: f32 = 6.0;
+const DOTS_AT_FULL_SIZE: usize = 12;
+
+/// The side of the square "+" and "…" buttons, and the stroke their glyphs are drawn with.
+const ICON_BUTTON: f32 = 24.0;
+const ICON_STROKE: f32 = 1.5;
 
 /// Which of the bar's menus is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,8 +83,10 @@ impl WorkspaceView {
         let safe = window.insets().effective();
         let small = theme.typography.small();
         let hint_theme = Rc::new(theme.clone());
+        // A square button around a glyph drawn from quads, so "+" and "…" sit on the button's
+        // centre in any font rather than on a text baseline.
         let button =
-            |id: &'static str, text: &'static str, label: &'static str, hint: &'static str| {
+            |id: &'static str, glyph: gpui::AnyElement, label: &'static str, hint: &'static str| {
                 let hint_theme = Rc::clone(&hint_theme);
                 let pill = div()
                     .id(id)
@@ -86,15 +94,15 @@ impl WorkspaceView {
                     .role(Role::Button)
                     .aria_label(label)
                     .flex_none()
-                    .px(px(spacing.sm))
-                    .py(px(spacing.xxs))
+                    .size(px(ICON_BUTTON))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .rounded(px(radii.sm))
-                    .text_size(px(theme.typography.ui_size))
-                    .text_color(hsla(s.text_secondary))
-                    .hover(move |el| el.bg(hsla(s.panel)))
-                    .active(move |el| el.bg(hsla(s.raised)))
+                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .active(move |el| el.bg(hsla(s.overlay)))
                     .cursor_pointer()
-                    .child(text)
+                    .child(glyph)
                     .when(SHORTCUT_HINTS && !hint.is_empty(), |el| {
                         el.tooltip(move |_window, cx| {
                             cx.new(|_| kit::Hint::new(label, hint, Rc::clone(&hint_theme))).into()
@@ -102,6 +110,43 @@ impl WorkspaceView {
                     });
                 tab_stop(pill, s.accent)
             };
+        let ink = hsla(s.text_secondary);
+        let plus = div()
+            .relative()
+            .size(px(spacing.md))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px((spacing.md - ICON_STROKE) / 2.0))
+                    .w_full()
+                    .h(px(ICON_STROKE))
+                    .rounded_full()
+                    .bg(ink),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px((spacing.md - ICON_STROKE) / 2.0))
+                    .h_full()
+                    .w(px(ICON_STROKE))
+                    .rounded_full()
+                    .bg(ink),
+            )
+            .into_any_element();
+        let dot = || div().size(px(ICON_STROKE * 2.0)).rounded_full().bg(ink);
+        let ellipsis = div()
+            .flex()
+            .items_center()
+            .gap(px(spacing.xxs))
+            .child(dot())
+            .child(dot())
+            .child(dot())
+            .into_any_element();
+        // Nothing to open, no column to mark and no one to point at before the first worker:
+        // the bar keeps only "…", where settings and the ways to add one live.
+        let has_workers = !self.workers.is_empty();
 
         // Left: where the human is, and which workers are not there with them.
         let down: Vec<gpui::AnyElement> = self
@@ -193,12 +238,15 @@ impl WorkspaceView {
                 this.next_attention(&super::actions::NextAttention, window, cx);
             }))
         });
-        let add = button("add", "+", "Open", "").on_click(cx.listener(|this, _ev, _w, cx| {
-            this.toggle_menu(MenuKind::Add, cx);
-        }));
-        let more = button("more", "…", "More", "").on_click(cx.listener(|this, _ev, _w, cx| {
-            this.toggle_menu(MenuKind::More, cx);
-        }));
+        let add = has_workers.then(|| {
+            button("add", plus, "Open", "").on_click(cx.listener(|this, _ev, _w, cx| {
+                this.toggle_menu(MenuKind::Add, cx);
+            }))
+        });
+        let more =
+            button("more", ellipsis, "More", "").on_click(cx.listener(|this, _ev, _w, cx| {
+                this.toggle_menu(MenuKind::More, cx);
+            }));
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
@@ -222,18 +270,18 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .gap(px(spacing.md))
-                    .child(name)
+                    .when(has_workers, |el| el.child(name))
                     .when_some(server, gpui::ParentElement::child)
                     .children(down),
             )
-            .child(self.render_indicator(cx))
+            .children(self.render_indicator(cx))
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(px(spacing.sm))
+                    .gap(px(spacing.xs))
                     .when_some(rtt, |el, rtt| {
                         el.child(
                             div()
@@ -246,48 +294,52 @@ impl WorkspaceView {
                         )
                     })
                     .when_some(needs_you, gpui::ParentElement::child)
-                    .child(add)
+                    .when_some(add, gpui::ParentElement::child)
                     .child(more),
             )
             .into_any_element()
     }
 
-    /// One mark per column of the active workspace, the active one filled and the part of
-    /// the strip in view bracketed; a click on a mark goes to that column.
-    fn render_indicator(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    /// One dot per column of the active workspace: the focused column's in the text colour,
+    /// those in view a step quieter, the rest faint; a click on one goes to that column.
+    /// Nothing for a workspace of one column, where there is nowhere to go.
+    ///
+    /// Dots, not a scaled map of the strip: a track with the view bracketed and the active
+    /// column filled read as a progress bar, the loudest thing in the bar saying the least.
+    fn render_indicator(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let strip = self.layout.frame().strip;
-        let (max_w, h) = INDICATOR;
-        let span = strip
-            .columns
-            .last()
-            .map_or(0.0, |(x, w)| x + w)
-            .max(strip.view.0 + strip.view.1)
-            .max(1.0);
-        let left = strip.view.0.min(0.0);
-        let total = span - left;
-        let k = max_w / total.max(self.layout.viewport().0);
-        let width = (total * k).max(1.0);
+        let count = strip.columns.len();
+        if count < 2 {
+            return None;
+        }
+        let (view_x, view_w) = strip.view;
+        let size = if count > DOTS_AT_FULL_SIZE { DOT - theme.spacing.xxs } else { DOT };
         let marks: Vec<gpui::AnyElement> = strip
             .columns
             .iter()
             .enumerate()
             .map(|(i, (x, w))| {
                 let active = strip.active == Some(i);
+                let in_view = x + w > view_x + 1.0 && *x < view_x + view_w - 1.0;
+                let ink = if active {
+                    hsla(s.text)
+                } else if in_view {
+                    hsla(s.text_muted)
+                } else {
+                    hsla_alpha(s.text_muted, alpha::PRESSED)
+                };
                 div()
                     .id(("column", i))
                     .debug_selector(move || format!("column-{i}"))
                     .role(Role::Button)
                     .aria_label(SharedString::from(format!("Column {}", i.saturating_add(1))))
-                    .absolute()
-                    .left(px((x - left) * k))
-                    .top(px(2.0))
-                    .w(px((w * k - 1.0).max(2.0)))
-                    .h(px(h - 4.0))
-                    .rounded(px(theme.radii.xs))
-                    .bg(if active { hsla(s.accent) } else { hsla_alpha(s.text_muted, alpha::TINT) })
+                    .flex_none()
+                    .py(px(theme.spacing.sm))
+                    .px(px(theme.spacing.xxs))
                     .cursor_pointer()
+                    .child(div().size(px(size)).rounded_full().bg(ink))
                     .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.tick();
@@ -299,27 +351,18 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
-        let view = div()
-            .absolute()
-            .left(px((strip.view.0 - left) * k))
-            .top_0()
-            .w(px(strip.view.1 * k))
-            .h(px(h))
-            .rounded(px(theme.radii.xs))
-            .border_1()
-            .border_color(hsla(s.text_secondary));
-        div()
-            .id("indicator")
-            .debug_selector(|| "indicator".to_owned())
-            .role(Role::Group)
-            .aria_label("Columns")
-            .relative()
-            .flex_none()
-            .w(px(width))
-            .h(px(h))
-            .children(marks)
-            .when(!strip.columns.is_empty(), |el| el.child(view))
-            .into_any_element()
+        Some(
+            div()
+                .id("indicator")
+                .debug_selector(|| "indicator".to_owned())
+                .role(Role::Group)
+                .aria_label("Columns")
+                .flex_none()
+                .flex()
+                .items_center()
+                .children(marks)
+                .into_any_element(),
+        )
     }
 
     /// The open menu, anchored under its button at the right of the bar.
@@ -337,8 +380,16 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let entity = cx.entity().downgrade();
-        let action = |label: &'static str, detail: &'static str, run: Run| {
+        let bindings = super::key_bindings();
+        // The row's keys come from the binding table, spelled as the palette spells them; a
+        // phone's menu shows none, as its bar shows no hints.
+        let action = |label: &'static str, bound: &dyn gpui::Action, run: Run| {
             let entity = entity.clone();
+            let detail = if SHORTCUT_HINTS {
+                crate::palette::keys_for(bound, &bindings)
+            } else {
+                String::new()
+            };
             MenuEntry {
                 label: label.into(),
                 detail: detail.into(),
@@ -349,23 +400,23 @@ impl WorkspaceView {
         };
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Add => vec![
-                action("Shell", "⌘T", |this, w, cx| this.new_terminal(&NewTerminal, w, cx)),
-                action("Agent", "⌘⇧T", |this, w, cx| this.new_agent(&NewAgent, w, cx)),
-                action("Note", "⌘⇧N", |this, w, cx| this.new_note(&NewNote, w, cx)),
-                action("Window", "⌘O", |this, w, cx| this.add_window(&AddWindow, w, cx)),
-                action("File", "", |this, w, cx| this.open_file_palette(&OpenFile, w, cx)),
+                action("Shell", &NewTerminal, |this, w, cx| this.new_terminal(&NewTerminal, w, cx)),
+                action("Agent", &NewAgent, |this, w, cx| this.new_agent(&NewAgent, w, cx)),
+                action("Note", &NewNote, |this, w, cx| this.new_note(&NewNote, w, cx)),
+                action("Window", &AddWindow, |this, w, cx| this.add_window(&AddWindow, w, cx)),
+                action("File", &OpenFile, |this, w, cx| this.open_file_palette(&OpenFile, w, cx)),
             ],
             MenuKind::More => {
                 let mut entries = vec![
-                    action("Command palette", "⌘⇧P", |this, w, cx| {
+                    action("Command palette", &OpenPalette, |this, w, cx| {
                         this.open_palette(&OpenPalette, w, cx);
                     }),
-                    action("Overview", "⌘⌥O", |this, _w, cx| {
+                    action("Overview", &super::actions::ToggleOverview, |this, _w, cx| {
                         this.tick();
                         this.layout.toggle_overview();
                         cx.notify();
                     }),
-                    action("Stream stats", "⌘⇧I", |this, w, cx| {
+                    action("Stream stats", &ToggleStats, |this, w, cx| {
                         this.toggle_stats(&ToggleStats, w, cx);
                     }),
                 ];

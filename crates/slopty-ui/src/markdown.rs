@@ -261,9 +261,20 @@ pub fn task_row(
         .size(px(side))
         .mt(px(spacing.xs * scale * 0.5))
         .rounded(px(theme.radii.xs * 0.5))
+        .flex()
+        .items_center()
+        .justify_center()
         .border_1()
-        .border_color(hsla(s.text_muted))
-        .when(done, |b| b.bg(hsla(s.text_muted)));
+        .border_color(hsla(if done { s.accent } else { s.text_muted }))
+        // A ticked box is the accent with a tick in it; a filled grey square read as a glyph
+        // the font was missing.
+        .when(done, |b| {
+            b.bg(hsla(s.accent))
+                .text_color(hsla(s.accent_fg))
+                .text_size(px(theme.typography.caption() * scale))
+                .line_height(px(side))
+                .child("\u{2713}")
+        });
     if let Some(toggle) = toggle {
         boxed = boxed
             .cursor_pointer()

@@ -13,7 +13,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Bounds, Context, DispatchPhase, InteractiveElement as _, IntoElement as _, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, Styled as _, TouchPhase, Window, canvas, div, px,
+    ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, TouchPhase,
+    Window, canvas, div, px,
 };
 use slopty_client::layout::{Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK};
 use slopty_core::ItemId;
@@ -502,21 +503,37 @@ impl WorkspaceView {
             .map(|c| self.render_closing(c.rect, c.alpha, c.scale, frame.zoom))
             .collect();
         let theme = &self.theme;
-        // In the overview each workspace is a panel the tiles sit on.
+        // In the overview each workspace is a panel the tiles sit on; an empty one (the one
+        // kept at the end for what comes next) is only its dashed outline, a place and not a
+        // blank slab.
         let backdrops: Vec<gpui::AnyElement> = if frame.overview > 0.0 {
+            let workspaces = self.layout.workspaces();
             frame
                 .workspaces
                 .iter()
-                .map(|(_, r)| {
-                    div()
+                .map(|(ix, r)| {
+                    let empty = workspaces.get(*ix).is_none_or(|ws| ws.columns().is_empty());
+                    let panel = div()
                         .absolute()
                         .left(px(r.x))
                         .top(px(r.y))
                         .w(px(r.w))
                         .h(px(r.h))
-                        .rounded(px(theme.radii.md))
-                        .bg(hsla_alpha(theme.surfaces.panel, frame.overview * alpha::VEIL))
-                        .into_any_element()
+                        .rounded(px(theme.radii.md));
+                    if empty {
+                        panel
+                            .border_1()
+                            .border_dashed()
+                            .border_color(hsla_alpha(
+                                theme.surfaces.text_muted,
+                                frame.overview * alpha::TINT,
+                            ))
+                            .into_any_element()
+                    } else {
+                        panel
+                            .bg(hsla_alpha(theme.surfaces.panel, frame.overview * alpha::VEIL))
+                            .into_any_element()
+                    }
                 })
                 .collect()
         } else {
@@ -541,12 +558,7 @@ impl WorkspaceView {
         )
         .absolute()
         .inset_0();
-        let empty = self.layout.tiles().next().is_none();
-        let hint_text = if self.workers.is_empty() {
-            "No workers yet: add one from the … menu"
-        } else {
-            "⌘T opens a shell · ⌘O adds a window"
-        };
+        let empty = self.layout.tiles().next().is_none().then(|| self.render_empty(cx));
         div()
             .id("strip")
             .debug_selector(|| "strip".to_owned())
@@ -564,20 +576,61 @@ impl WorkspaceView {
             .children(tiles)
             .children(handles)
             .children(hint)
-            .when(empty, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(theme.typography.ui_size))
-                        .text_color(hsla(theme.surfaces.text_muted))
-                        .font_family(theme.typography.ui_family.clone())
-                        .child(hint_text),
-                )
-            })
+            .children(empty)
+            .into_any_element()
+    }
+
+    /// An empty workspace: the two ways to put something in it, as buttons. Their keys are
+    /// the palette's and the buttons' hints to list, not this screen's to print. With no
+    /// worker there is nothing to open, and the line says only that.
+    fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (spacing, radii) = (theme.spacing, theme.radii);
+        let body = if self.workers.is_empty() {
+            div().text_color(hsla(s.text_muted)).child("No workers yet").into_any_element()
+        } else {
+            let button = |id: &'static str, label: &'static str, primary: bool| {
+                let el = div()
+                    .id(id)
+                    .debug_selector(move || id.to_owned())
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label(label)
+                    .px(px(spacing.md))
+                    .py(px(spacing.xs))
+                    .rounded(px(radii.sm))
+                    .cursor_pointer()
+                    .when(primary, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
+                    .when(!primary, |el| {
+                        el.bg(hsla(s.raised))
+                            .text_color(hsla(s.text))
+                            .hover(move |el| el.bg(hsla(s.overlay)))
+                    })
+                    .child(label);
+                crate::a11y::tab_stop(el, s.accent)
+            };
+            div()
+                .flex()
+                .gap(px(spacing.sm))
+                .child(button("empty-terminal", "New terminal", true).on_click(cx.listener(
+                    |this, _ev, window, cx| {
+                        this.new_terminal(&super::actions::NewTerminal, window, cx);
+                    },
+                )))
+                .child(button("empty-window", "Add a window", false).on_click(cx.listener(
+                    |this, _ev, window, cx| this.add_window(&super::actions::AddWindow, window, cx),
+                )))
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .child(body)
             .into_any_element()
     }
 }

@@ -54,6 +54,8 @@ const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool 
 }
 /// Key bar height in points.
 const KEY_BAR_H: f32 = 40.0;
+/// The add-worker panel's width: a line of help and an address field, not a document.
+const ADD_PANEL_W: f32 = 400.0;
 
 /// Whether a hardware keyboard is attached. The e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1`
 /// decide instead of the platform: on the simulator `GameController` reports the Mac's keyboard
@@ -71,21 +73,28 @@ fn hardware_keyboard_attached() -> bool {
 const LINK_BATCH: usize = 256;
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
-/// non-printing keys).
+/// non-printing keys). In the order a phone shows them before the row scrolls: the keys the
+/// soft keyboard has no way to type come first, the punctuation it only hides after.
 const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
     ("esc", "escape", None),
     ("tab", "tab", None),
     ("⌃", "", None),
-    ("⌘", "cmd", None),
     ("←", "left", None),
     ("↑", "up", None),
     ("↓", "down", None),
     ("→", "right", None),
-    ("-", "-", Some("-")),
-    ("/", "/", Some("/")),
-    ("|", "|", Some("|")),
     ("~", "~", Some("~")),
+    ("|", "|", Some("|")),
+    ("/", "/", Some("/")),
+    ("-", "-", Some("-")),
+    ("⌘", "cmd", None),
 ];
+/// Where the arrows end in [`BAR_KEYS`]: the clipboard key follows them.
+const ARROWS_END: usize = 7;
+/// The narrowest a key cap gets: a symbol's, and a word's. Below these a finger misses; past
+/// them the row scrolls instead of crowding.
+const KEY_W: f32 = 36.0;
+const KEY_WORD_W: f32 = 52.0;
 /// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
 /// punctuation goes.
 const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
@@ -162,6 +171,10 @@ pub struct Workspace {
     settings_editor: Option<Entity<SettingsEditor>>,
     /// Focus the editor's field on the next frame (it needs a frame to exist).
     pending_focus_editor: bool,
+    /// The self-test's stand-in for iPad Split View and Stage Manager: the app laid out in
+    /// this size at the window's top left. A UIKit window cannot be resized from inside the
+    /// app, and the layout only needs the size it is given to be the size it lays out in.
+    split_view: Option<gpui::Size<gpui::Pixels>>,
 }
 
 impl Workspace {
@@ -369,12 +382,19 @@ impl Workspace {
     fn refresh_menu(&self, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let mut entries = Vec::new();
-        let hint = |hint: &'static str| if cfg!(target_os = "macos") { hint } else { "" };
+        let bindings = app_key_bindings();
+        let hint = |action: &dyn gpui::Action| {
+            if cfg!(target_os = "macos") {
+                slopty_ui::palette::keys_for(action, &bindings)
+            } else {
+                String::new()
+            }
+        };
         {
             let this = this.clone();
             entries.push(MenuEntry {
                 label: "Settings".into(),
-                detail: hint("⌘,").into(),
+                detail: hint(&OpenSettings).into(),
                 run: Rc::new(move |window, cx| {
                     let _gone = this.update(cx, |ws, cx| ws.open_settings(window, cx));
                 }),
@@ -405,7 +425,7 @@ impl Workspace {
             let this = this.clone();
             entries.push(MenuEntry {
                 label: "Add a worker".into(),
-                detail: hint("⌘⇧H").into(),
+                detail: hint(&AddWorker).into(),
                 run: Rc::new(move |window, cx| {
                     let _gone =
                         this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
@@ -572,7 +592,7 @@ impl Workspace {
             return;
         }
         let address =
-            cx.new(|cx| InputState::new(window, cx).placeholder("studio, 100.64.0.3 or host:port"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("mac-studio or 100.64.0.3"));
         self.subscriptions.push(cx.subscribe(&address, |this, _input, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.add_from_panel(cx);
@@ -715,6 +735,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Whether the panel is the whole window: nothing to go back to, so no workspace behind
+    /// it and no way to dismiss it. The first run, and after the last worker is forgotten.
+    const fn welcome(&self) -> bool {
+        self.adding.is_some() && self.workers.is_empty() && self.server.is_none()
+    }
+
+    /// The way in: a heading, one line on what it is, the address, one primary action, and the
+    /// other way in as a quiet link. On the first run it stands alone on the canvas; later
+    /// ("Add a worker…", "Connect to a server…") it is a dialog over the workspace with a
+    /// Cancel. The phone gets a Paste, since it has no ⌘V; the Mac's field takes ⌘V.
     fn add_worker_panel(&self, adding: &Adding, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -724,6 +754,7 @@ impl Workspace {
                 .id(id)
                 .role(Role::Button)
                 .aria_label(text)
+                .flex_none()
                 .px(px(spacing.md))
                 .py(px(spacing.xs))
                 .rounded(px(radii.sm))
@@ -735,31 +766,30 @@ impl Workspace {
                 .child(text);
             tab_stop(pill, s.accent)
         };
-        let (title, blurb, field, go, paste, other, other_mode) = match adding.mode {
+        let (title, blurb, field, go, other, other_mode) = match adding.mode {
             Panel::Server => (
                 "Connect to a server",
-                "The server lists your workers; terminals and screens still go to each worker \
-                 directly. Its Tailscale name, LAN name or IP, with :port unless it listens on \
-                 45560. Slopty does not encrypt: the tailnet or VPN is the boundary.",
+                "Slopty finds your workers through a server on your tailnet or VPN.",
                 "Server address",
                 "Connect",
-                "Paste & connect",
                 "Add a worker by address instead",
                 Panel::Worker,
             ),
             Panel::Worker => (
                 "Add a worker",
-                "For a setup without a server. Its Tailscale name, LAN name or IP, with :port \
-                 unless it listens on 45550. Slopty does not encrypt: the tailnet or VPN is the \
-                 boundary.",
+                "A Mac running the Slopty worker, on your tailnet or VPN.",
                 "Worker address",
                 "Add",
-                "Paste & add",
                 "Connect to a server instead",
                 Panel::Server,
             ),
         };
-        let can_cancel = !self.workers.is_empty() || self.server.is_some();
+        let welcome = self.welcome();
+        let status = match (&adding.error, adding.busy) {
+            (Some(e), _) => Some((e.clone(), s.error)),
+            (None, true) => Some(("Connecting…".to_owned(), s.text_muted)),
+            (None, false) => None,
+        };
         let switch = div()
             .id("panel-switch")
             .role(Role::Button)
@@ -772,70 +802,102 @@ impl Workspace {
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.show_add_worker(other_mode, window, cx);
             }));
-        div()
-            .id("add-worker")
-            .occlude()
-            .flex()
-            .flex_col()
-            .gap(px(spacing.md))
-            .w(px(420.0))
-            .max_w_full()
-            .p(px(spacing.xl))
-            .rounded(px(radii.md))
-            .bg(hsla(s.panel))
-            .border_1()
-            .border_color(hsla(s.border))
-            .child(
-                div()
-                    .id("add-worker-title")
-                    .role(Role::Heading)
-                    .aria_label(title)
-                    .text_size(px(theme.typography.title()))
-                    .text_color(hsla(s.text))
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(blurb),
-            )
-            .child(Input::new(&adding.address).aria_label(field))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(spacing.sm))
-                    .items_center()
-                    .child(
-                        button("add", go, true).on_click(
-                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
+        let panel =
+            div()
+                .id("add-worker")
+                .occlude()
+                .flex()
+                .flex_col()
+                .gap(px(spacing.md))
+                .w(px(ADD_PANEL_W))
+                .max_w_full()
+                .font_family(theme.typography.ui_family.clone())
+                .when(!welcome, |el| {
+                    el.p(px(spacing.xl))
+                        .rounded(px(radii.md))
+                        .bg(hsla(s.panel))
+                        .border_1()
+                        .border_color(hsla(s.border))
+                        .shadow_sm()
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(spacing.xs))
+                        .child(
+                            div()
+                                .id("add-worker-title")
+                                .role(Role::Heading)
+                                .aria_label(title)
+                                .text_size(px(theme.typography.title()))
+                                .text_color(hsla(s.text))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme.typography.small()))
+                                .text_color(hsla(s.text_muted))
+                                .child(blurb),
                         ),
-                    )
-                    .child(button("paste-address", paste, false).on_click(
-                        cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
-                    ))
-                    .when(can_cancel, |row| {
-                        row.child(button("cancel-add", "Cancel", false).on_click(
-                            cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
-                        ))
-                    })
-                    .child(div().flex_1())
-                    .child(
+                )
+                .child(Input::new(&adding.address).aria_label(field))
+                .when_some(status, |el, (text, tone)| {
+                    el.child(
                         div()
+                            .id("add-worker-status")
+                            .role(Role::Status)
+                            .aria_label(SharedString::from(text.clone()))
                             .text_size(px(theme.typography.small()))
-                            .text_color(hsla(if adding.error.is_some() {
-                                s.error
-                            } else {
-                                s.text_muted
-                            }))
-                            .child(SharedString::from(match (&adding.error, adding.busy) {
-                                (Some(e), _) => e.clone(),
-                                (None, true) => "connecting…".to_owned(),
-                                (None, false) => String::new(),
-                            })),
-                    ),
-            )
-            .child(tab_stop(switch, s.accent))
+                            .text_color(hsla(tone))
+                            .child(SharedString::from(text)),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(spacing.sm))
+                        .items_center()
+                        .child(button("add", go, true).on_click(
+                            cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)),
+                        ))
+                        .when(KEY_BAR, |row| {
+                            row.child(button("paste-address", "Paste", false).on_click(
+                                cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)),
+                            ))
+                        })
+                        .child(div().flex_1())
+                        .when(!welcome, |row| {
+                            row.child(button("cancel-add", "Cancel", false).on_click(cx.listener(
+                                |this, _ev, window, cx| this.cancel_add_worker(window, cx),
+                            )))
+                        }),
+                )
+                .child(tab_stop(switch, s.accent));
+        if welcome {
+            // Not a dialog over an app that does nothing yet: the page itself, the content a
+            // third of the way down where the eye starts.
+            div()
+                .id("welcome")
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(gpui::relative(0.28))
+                .px(px(spacing.lg))
+                .bg(hsla(s.canvas))
+                .child(panel)
+                .into_any_element()
+        } else {
+            kit::backdrop(theme)
+                .id("add-worker-backdrop")
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(theme.spacing.lg))
+                .child(panel)
+                .into_any_element()
+        }
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
@@ -849,12 +911,21 @@ impl Workspace {
 
     /// A key cap of the bar: `raised` on the `panel` bar, `overlay` while pressed, the accent
     /// with its foreground when `lit` (armed or toggled on).
-    fn key_cap(&self, id: String, lit: bool, text_size: f32) -> gpui::Stateful<gpui::Div> {
+    fn key_cap(
+        &self,
+        id: String,
+        label: &str,
+        lit: bool,
+        text_size: f32,
+    ) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
         let pressed = if lit { s.accent } else { s.overlay };
+        let min = if label.chars().count() > 1 { KEY_WORD_W } else { KEY_W };
         div()
             .id(SharedString::from(id))
             .flex_1()
+            .flex_shrink_0()
+            .min_w(px(min))
             .h(px(KEY_BAR_H - self.theme.spacing.sm))
             .flex()
             .items_center()
@@ -875,8 +946,13 @@ impl Workspace {
         on_click: impl Fn(&mut Window, &mut App) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
         let accent = self.theme.surfaces.accent;
+        let size = if label.chars().count() > 1 {
+            self.theme.typography.small()
+        } else {
+            self.theme.typography.ui_size
+        };
         let key = self
-            .key_cap(id, lit, self.theme.typography.ui_size)
+            .key_cap(id, label, lit, size)
             .role(Role::Button)
             .aria_label(SharedString::from(key_label(label, lit)))
             .child(SharedString::from(label));
@@ -889,11 +965,12 @@ impl Workspace {
         let view = screen.read(cx);
         let (control, command) = (view.sticky(Sticky::Control), view.sticky(Sticky::Command));
         let mut bar = div()
+            .id("key-bar")
             .h(px(KEY_BAR_H))
             .w_full()
             .flex()
             .items_center()
-            .justify_between()
+            .overflow_x_scroll()
             .px(px(self.theme.spacing.xs))
             .gap(px(self.theme.spacing.xs))
             .bg(hsla(s.panel))
@@ -947,12 +1024,13 @@ impl Workspace {
         let armed = terminal.read(cx).sticky_control();
         let armed_command = terminal.read(cx).sticky_command();
         let has_selection = terminal.read(cx).selection().is_some();
-        let mut bar = div()
+        let bar = div()
+            .id("key-bar")
             .h(px(KEY_BAR_H))
             .w_full()
             .flex()
             .items_center()
-            .justify_between()
+            .overflow_x_scroll()
             .px(px(self.theme.spacing.xs))
             .gap(px(self.theme.spacing.xs))
             .bg(hsla(s.panel))
@@ -961,17 +1039,19 @@ impl Workspace {
             .font_family(self.theme.typography.ui_family.clone());
         let ui = self.theme.typography.ui_size;
         let small = self.theme.typography.small();
+        let mut keys: Vec<gpui::AnyElement> = Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
         for (label, key, typed) in BAR_KEYS {
             let is_control = key.is_empty();
             let is_command = key == "cmd";
             let lit = (is_control && armed) || (is_command && armed_command);
             let target = terminal.clone();
+            let size = if label.chars().count() > 1 { small } else { ui };
             let key_el = self
-                .key_cap(format!("key-{label}"), lit, ui)
+                .key_cap(format!("key-{label}"), label, lit, size)
                 .role(Role::Button)
                 .aria_label(SharedString::from(key_label(label, lit)))
                 .child(SharedString::from(label));
-            bar = bar.child(tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
+            let key_el = tab_stop(key_el, s.accent).on_click(move |_ev, _window, cx| {
                 target.update(cx, |t, cx| {
                     if is_control {
                         let on = !t.sticky_control();
@@ -990,16 +1070,18 @@ impl Workspace {
                         );
                     }
                 });
-            }));
+            });
+            keys.push(key_el.into_any_element());
         }
         // The phone has no ⌘C/⌘V: while text is selected the bar offers copy, otherwise paste.
         let target = terminal.clone();
+        let clip_label = if has_selection { "copy" } else { "paste" };
         let clipboard = self
-            .key_cap("key-clipboard".to_owned(), has_selection, small)
+            .key_cap("key-clipboard".to_owned(), clip_label, has_selection, small)
             .role(Role::Button)
             .aria_label(if has_selection { "Copy" } else { "Paste" })
-            .child(if has_selection { "copy" } else { "paste" });
-        bar = bar.child(tab_stop(clipboard, s.accent).on_click(move |_ev, window, cx| {
+            .child(clip_label);
+        let clipboard = tab_stop(clipboard, s.accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if has_selection {
                     // Copy, then the key reads "paste" again.
@@ -1009,16 +1091,18 @@ impl Workspace {
                     t.paste_clipboard(&slopty_ui::terminal::Paste, window, cx);
                 }
             });
-        }));
+        });
+        // Right after the arrows: on a phone it is in view before the row scrolls.
+        keys.insert(ARROWS_END.min(keys.len()), clipboard.into_any_element());
         // No ⌘F either: "find" opens the search bar, or closes it while it is open.
         let target = terminal.clone();
         let finding = terminal.read(cx).finding();
         let find = self
-            .key_cap("key-find".to_owned(), finding, small)
+            .key_cap("key-find".to_owned(), "find", finding, small)
             .role(Role::Button)
             .aria_label(if finding { "Close find" } else { "Find" })
             .child("find");
-        bar = bar.child(tab_stop(find, s.accent).on_click(move |_ev, window, cx| {
+        let find = tab_stop(find, s.accent).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if finding {
                     t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
@@ -1026,8 +1110,9 @@ impl Workspace {
                     t.find(&slopty_ui::terminal::Find, window, cx);
                 }
             });
-        }));
-        bar.into_any_element()
+        });
+        keys.push(find.into_any_element());
+        bar.children(keys).into_any_element()
     }
 }
 
@@ -1068,18 +1153,13 @@ impl Render for Workspace {
             editor.update(cx, |e, cx| e.focus(window, cx));
         }
         let settings_editor = self.settings_editor.clone();
-        let adding = self.adding.as_ref().map(|adding| {
-            kit::backdrop(&self.theme)
-                .id("add-worker-backdrop")
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(self.theme.spacing.lg))
-                .child(self.add_worker_panel(adding, cx))
-        });
-        div()
-            .size_full()
-            .relative()
+        let welcome = self.welcome();
+        let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, cx));
+        let root = match self.split_view {
+            Some(size) => div().w(size.width).h(size.height),
+            None => div().size_full(),
+        };
+        root.relative()
             .flex()
             .flex_col()
             .bg(hsla(surfaces.canvas))
@@ -1095,9 +1175,13 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
-            .child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
-            .when_some(key_bar, |el, bar| el.child(div().w_full().px(insets.left).child(bar)))
-            .child(div().w_full().h(insets.bottom))
+            .when(!welcome, |el| {
+                el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
+                    .when_some(key_bar, |el, bar| {
+                        el.child(div().w_full().px(insets.left).child(bar))
+                    })
+                    .child(div().w_full().h(insets.bottom))
+            })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
             .child(slopty_ui::frames::probe())
@@ -1297,6 +1381,7 @@ pub fn open_workspace(
             settings_path: settings_path.clone(),
             settings_editor: None,
             pending_focus_editor: false,
+            split_view: None,
         }
     });
     let root_view = workspace.clone();

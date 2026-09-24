@@ -478,20 +478,26 @@ target affords, a ladder of the client's ceiling then 60/30/15 chosen on bytes p
 `heartbeat_datagram` → a bare
 `Kind::Heartbeat` header the host sends after `HEARTBEAT_AFTER` of silence so a still screen
 or a capture gap does not read as a link stall at the receiver), `slopty-host::screen`
-(`ScreenStream`: capture → encode → packetize into a bounded queue; `DatagramBudget` tracks the
-path's datagram limit, how many bytes QUIC is holding in its send buffer and how wide the
-congestion window is, and a captured frame is dropped rather than encoded while more than two
+(`ScreenStream`: capture → encode → packetize → a `DatagramSink`, one call per frame from the
+thread that produced it; the sink answers the path's datagram limit, how many bytes QUIC is
+holding in its send buffer and how wide the congestion window is, and a captured frame is
+dropped rather than encoded while more than two
 frames' worth at the rate in force wait there, or one window, whichever is larger
 (`frame_fits`); `warm_up` runs one throwaway capture when hostd comes online and `shareable()`
-keeps its enumeration for 2 s; a cursor sampler whose window-server calls all go through the
-blocking pool, and a heartbeat on its own task beside it — a promise about time must not share a
+keeps its enumeration for 2 s; the geometry split in two, `prober()` for the window-server
+reads off the runtime and `check_geometry(&Probe)` for the decision; a cursor sampler that reads
+the bounds the last probe left and asks for the pointer on the blocking pool only when it
+moved, and a heartbeat on its own task beside it — a promise about time must not share a
 task with a call that takes it (DECISIONS.md, "The heartbeat has its own task"); input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
 activates the owner before clicks and keys because macOS only delivers keyboard events to the
-active app). `slopty-hostd` owns one datagram pump
-per connection (it also measures the QUIC hold and logs every stretch of it) and maps
-`ScreenRequest`s onto the streams it opened for that client. Client side, `HostLink::start`
+active app). `slopty-hostd` gives each stream a task of its own (`screens.rs`: the open,
+input, quality, resize, the geometry tick and the close, in the order asked) and a `QuicSink`
+over the connection; its connection loop only routes, with loss feedback and reports going
+straight to the stream's `StreamControl` and everything slow (session open and close, file
+reads and quick open, the pasteboard write behind a paste) on tasks that report back, so no
+request waits in front of a terminal's echo. Client side, `HostLink::start`
 warms VideoToolbox's decoder up once per process, the router stamps each datagram with its
 arrival, and the stream worker drains what is queued before running the reassembler's timers
 and pushes whatever the timers released straight into the decoder (a frame freed by a loss can
@@ -523,9 +529,9 @@ off screen, and asks for frames only while something moves. Two-finger swipes dr
 swallowed), ⌘⌥ and the wheel step columns, a header drag moves a tile, the gap right of a
 column resizes it, a pinch opens the overview. The keys are niri's on ⌘⌥ (the table is in the
 decision), bound in `Workspace && !Screen`: a focused remote window gets them all, ⌃Tab is the
-way back. The titlebar is the workspace name and any worker that is down, a strip indicator,
+way back. The titlebar is the workspace name and any worker that is down, a dot per column (none for one column),
 the round trip, the agents that need you, "+" and "…". ⌘W on any tile takes it off and offers it
-back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's button put the
+back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Undo" (toasts sit at the foot of the strip) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
 untouched and `forget_closed` sends the host `Close`; every other card is its item, so the
@@ -601,9 +607,10 @@ own actions (find, the prompts) reach the terminal that had the focus.
 
 **Pointing.** ⌘⇧O points the other clients of the focused tile's worker at it
 (`ClientMsg::Point`, relayed as `ItemSync::Pointed`): they get a toast naming the pointer and
-the tile that goes there on a click and leaves by itself after 8 s; a tile's header carries a
-"point" pill on hover (`docs/decisions/multi-client.md`). Nothing tells a client where another
-one is looking any more: each device's layout is its own.
+the tile that goes there on a click and leaves by itself after 8 s; on a phone the palette's
+"Point other devices at this tile" does the same (the header's "point" pill went in the
+2026-09-25 de-slop pass). Nothing tells a client where another one is looking any more: each
+device's layout is its own.
 
 ## 5. Agents
 
@@ -673,7 +680,7 @@ when a payload has none of these but names a transcript, the daemon reads the JS
 `slopty_agent::transcript` — off the blocking pool and fills the detail in). The daemon
 broadcasts each change as `HostMsg::Agent` and replays the table to joining clients. The workspace shows the status
 as a pill in the terminal's title bar and outlines the item when the agent needs the human.
-A blocked badge (permission, question or elicitation) carries one "go" button, which reveals
+A blocked badge (permission, question or elicitation) is itself the button: a click reveals
 and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never
 answers for them. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
 next waiting terminal in reading order, cycling from the active item; the top bar shows an
@@ -788,7 +795,9 @@ row's words shaped once at the base size and cached by content hash, their glyph
 by one at the zoomed size through `Window::paint_glyph` from the fork's `ShapedLine::layout`,
 so a zoom step shapes nothing; background quads, cursor, selection, underlines — the curly one
 as GPUI's wave — and strikethroughs at the offsets §2's metrics derive, ⌘-hover link
-underline) with a hairline over every prompt-start row but the first line: the
+underline) with a hairline over every prompt-start row but one with only blank lines above it
+since the first line, and on the viewport's top row only when the command failed (a neutral
+rule there would double the tile header's hairline): the
 command-block separator, the foreground at `alpha::FAINT` (12 %), or the theme's `surfaces.error` token
 at `alpha::STRONG` (70 %) when the row's `Prompt { exit }` is non-zero
 (`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
@@ -926,9 +935,11 @@ a session, which the workspace finds on whichever worker runs it. The known work
 worker_id }` keyed by the id, so a worker that moves keeps its row and its tiles; a dial that
 reaches another id at a stored address says so instead of mixing tiles.
 
-**Adding a worker.** An installation with no worker shows the add-worker panel over the
-workspace, as does "Add worker" (with a Cancel): type or paste an address (`mac-studio`,
-`100.64.0.3`, `host:45551`; "Paste & add" reads the clipboard, the practical path on a phone).
+**Adding a worker.** An installation with no worker and no server opens on the first-run
+page, which is the whole window: "Connect to a server", one line on what that is, the address
+field, "Connect", and "Add a worker by address instead" as a quiet link (no titlebar, no
+workspace behind it). Later, "Connect to a server" and "Add a worker" (⌘⇧H) show the same panel
+as a dialog over the workspace with a Cancel. The phone adds "Paste", since it has no ⌘V.
 `slopty_app::net::add_worker` connects, says `Hello`, and stores the worker under the id its
 `HelloAck` carries, the same as `slopty add` on the CLI.
 

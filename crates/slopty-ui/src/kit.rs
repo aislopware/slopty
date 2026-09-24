@@ -243,6 +243,11 @@ mod tests {
             let entries = std::fs::read_dir(dir).expect("the crate's sources are readable");
             for entry in entries.flatten() {
                 let path = entry.path();
+                // Test modules in files of their own are not chrome either.
+                let is_tests = path.file_stem().is_some_and(|n| n == "tests");
+                if is_tests {
+                    continue;
+                }
                 if path.is_dir() {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") {
@@ -315,6 +320,70 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The string literals on a line of Rust, escapes left as written.
+    fn literals(line: &str) -> Vec<String> {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut current: Option<String> = None;
+        let mut escaped = false;
+        for c in code.chars() {
+            match current.as_mut() {
+                None if c == '"' => current = Some(String::new()),
+                None => {}
+                Some(text) if escaped => {
+                    text.push(c);
+                    escaped = false;
+                }
+                Some(text) if c == '\\' => {
+                    text.push(c);
+                    escaped = true;
+                }
+                Some(_) if c == '"' => out.extend(current.take()),
+                Some(text) => text.push(c),
+            }
+        }
+        out
+    }
+
+    /// A chord written into chrome text: a literal holding a modifier glyph and anything
+    /// else. A lone glyph is a key cap on the phone's bar, not a chord.
+    fn literal_chord(line: &str) -> Option<String> {
+        literals(line)
+            .into_iter()
+            .find(|text| text.contains(['⌘', '⌥', '⌃', '⇧']) && text.chars().count() > 1)
+    }
+
+    /// The ruling in `docs/decisions/ui.md`: keys live in the palette, the menus and the
+    /// hints, all of which read them from the binding tables through `palette::keys_for`.
+    /// A chord typed into a button, an empty state or a menu row by hand drifts from the
+    /// binding (the "+" menu said `⌘⇧T` while the palette said `⇧⌘T`) and puts keys where
+    /// the palette should be, so none compiles.
+    #[test]
+    fn a_chord_is_spelled_only_by_the_key_tables() {
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            for (file, line_no, line) in chrome_lines(dir) {
+                if let Some(text) = literal_chord(&line) {
+                    wrong.push(format!("{file}:{line_no}: a chord written by hand: {text:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn the_chord_check_knows_a_chord_from_a_key_cap() {
+        assert!(literal_chord(r#"button("Save", "⌘↩", true)"#).is_some());
+        assert!(literal_chord(r#".child("⌘T opens a shell")"#).is_some());
+        assert!(literal_chord(r#"("⌘", "cmd", None),"#).is_none(), "a key cap");
+        assert!(literal_chord("/// ⌘⌥← walks the columns").is_none(), "a comment");
+        assert!(literal_chord(r#"out.push('⌘'); label("a")"#).is_none(), "a char, not text");
+        assert!(literal_chord(r#"f("a\"b", "⇧x")"#).is_some(), "past an escaped quote");
     }
 
     /// The spacing check catches what it is for and leaves alone what it is not.

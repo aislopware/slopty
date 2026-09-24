@@ -400,7 +400,7 @@ impl Render for WindowPicker {
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(theme.surfaces.border))
-                            .child(Input::new(input).aria_label("Filter"))
+                            .child(Input::new(input).appearance(false).aria_label("Filter"))
                     }))
                     .child(
                         div()

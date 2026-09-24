@@ -138,11 +138,7 @@ impl PaletteItem {
     /// An item for `action`, its keys read from `bindings` (the first binding for it).
     #[must_use]
     pub fn new(label: &str, action: Box<dyn Action>, bindings: &[KeyBinding]) -> Self {
-        let keys = bindings
-            .iter()
-            .find(|b| b.action().partial_eq(action.as_ref()))
-            .map(|b| b.keystrokes().iter().map(|k| keys_label(k.inner())).collect::<String>())
-            .unwrap_or_default();
+        let keys = keys_for(action.as_ref(), bindings);
         Self { label: label.to_owned(), keys, run: PaletteRun::Action(action) }
     }
 
@@ -292,6 +288,19 @@ impl std::fmt::Debug for PaletteItem {
             .field("run", &self.run)
             .finish()
     }
+}
+
+/// The keys that run `action` in `bindings`, spelled as [`keys_label`] spells them.
+///
+/// The first binding wins; empty when nothing binds it. The one way chrome learns a shortcut,
+/// so a menu and the palette never spell the same chord two ways.
+#[must_use]
+pub fn keys_for(action: &dyn Action, bindings: &[KeyBinding]) -> String {
+    bindings
+        .iter()
+        .find(|b| b.action().partial_eq(action))
+        .map(|b| b.keystrokes().iter().map(|k| keys_label(k.inner())).collect::<String>())
+        .unwrap_or_default()
 }
 
 /// A keystroke as the palette shows it, the same on every platform: the modifiers in the
@@ -657,7 +666,7 @@ impl Render for CommandPalette {
                             .py(px(theme.spacing.sm))
                             .border_b_1()
                             .border_color(hsla(s.border))
-                            .child(Input::new(&self.input).aria_label("Command")),
+                            .child(Input::new(&self.input).appearance(false).aria_label("Command")),
                     )
                     .child(
                         div()

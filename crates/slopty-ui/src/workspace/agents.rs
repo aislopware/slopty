@@ -377,52 +377,24 @@ impl WorkspaceView {
             AgentStatus::Done => (agent_status_text(agent), theme.surfaces.success),
         };
         let item = tile.item;
-        let go = match &agent.status {
+        // An agent waiting on the human is the one state worth a click: the badge itself
+        // goes to it. No second "go" beside it — a click on the tile did the same.
+        let waiting = matches!(
+            agent.status,
             AgentStatus::Blocked(
                 BlockReason::Permission { .. } | BlockReason::Question | BlockReason::Elicitation,
-            ) => {
-                let tone = theme.surfaces.accent;
-                let pad = if cfg!(target_os = "ios") { theme.spacing.md } else { theme.spacing.sm };
-                let pill = div()
-                    .id("go")
-                    .debug_selector(move || format!("go-{}", item.as_uuid()))
-                    .role(Role::Button)
-                    .aria_label("go")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .px(px(pad * k))
-                    .py(px(theme.spacing.xxs * k))
-                    .rounded(px(theme.radii.xs * k))
-                    .bg(hsla_alpha(tone, alpha::TINT))
-                    .text_size(px(theme.typography.small() * k))
-                    .text_color(hsla(theme.surfaces.text))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla_alpha(tone, alpha::PRESSED)))
-                    .child(
-                        ChromeText::new("go", px(theme.typography.small()), k)
-                            .zooming(chrome.zooming),
-                    );
-                Some(
-                    tab_stop(pill, theme.surfaces.accent)
-                        .on_click(
-                            cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)),
-                        )
-                        .into_any_element(),
-                )
-            }
-            _ => None,
-        };
+            )
+        );
         let ui_size = theme.typography.small() * k;
         let pill = div()
             .id("agent")
             .debug_selector(move || format!("agent-{}", item.as_uuid()))
-            .role(Role::Status)
+            .role(if waiting { Role::Button } else { Role::Status })
             .aria_label(SharedString::from(label.clone()))
             .flex()
             .items_center()
             .flex_none()
-            .max_w(px(ui_size * if go.is_some() { 14.0 } else { 22.0 }))
+            .max_w(px(ui_size * 22.0))
             .overflow_hidden()
             .gap(px(theme.spacing.xs * k))
             .px(px(theme.spacing.sm * k))
@@ -445,15 +417,22 @@ impl WorkspaceView {
                         .zooming(chrome.zooming),
                 ),
             );
+        let pill = if waiting {
+            tab_stop(
+                pill.cursor_pointer().hover(move |el| el.bg(hsla_alpha(color, alpha::TINT))),
+                theme.surfaces.accent,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)))
+        } else {
+            pill
+        };
         div()
             .id("badge")
             .debug_selector(move || format!("badge-{}", item.as_uuid()))
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(theme.spacing.xs * k))
             .child(pill)
-            .children(go)
             .into_any_element()
     }
 

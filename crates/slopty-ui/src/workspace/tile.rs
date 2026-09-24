@@ -24,8 +24,12 @@ use crate::colors::{hsla, hsla_alpha};
 /// A tile's header height, in points at zoom 1.
 pub(super) const HEADER_H: f32 = 28.0;
 
-/// The width of the focus ring, in points at zoom 1.
-const RING: f32 = 2.0;
+/// The width of the focus ring, in points at zoom 1: the one accent hairline of the design
+/// system, laid over the tile's own hairline, so the focused tile's frame turns accent.
+const RING: f32 = 1.0;
+
+/// The height of an upload's progress bar along the bottom of the header.
+const PROGRESS: f32 = 2.0;
 
 /// The group every tile's header actions hover with.
 const TILE_GROUP: &str = "tile";
@@ -318,7 +322,7 @@ impl WorkspaceView {
                 .absolute()
                 .left_0()
                 .bottom_0()
-                .h(px(RING * k))
+                .h(px(PROGRESS * k))
                 .w(gpui::relative(upload.fraction()))
                 .bg(hsla(theme.surfaces.accent));
             let pill = tab_stop(pill, theme.surfaces.accent)
@@ -464,16 +468,6 @@ impl WorkspaceView {
             }
             ItemKind::Note { .. } => {}
         }
-        if worker_up {
-            let point = pill("point", id, "point", theme.surfaces.text_secondary, theme, chrome)
-                .role(Role::Button)
-                .aria_label("Point the others at this tile");
-            actions.push(
-                tab_stop(point, theme.surfaces.accent)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.point_at(tile, cx)))
-                    .into_any_element(),
-            );
-        }
         // The actions stay out of sight until the tile is hovered or focused: a wall of tiles
         // reads as titles, not buttons. Touch has no hover, so the focused tile shows them.
         let actions = div()
@@ -490,13 +484,15 @@ impl WorkspaceView {
                 k,
             ))
         });
-        let dot = if !worker_up {
-            theme.surfaces.warn
-        } else if focused {
-            theme.surfaces.accent
-        } else {
-            theme.surfaces.text_muted
-        };
+        // The dot says one thing, that the tile's worker is away; the ring already says which
+        // tile has the focus.
+        let away = (!worker_up).then(|| {
+            div()
+                .flex_none()
+                .size(px(theme.spacing.xs * k))
+                .rounded_full()
+                .bg(hsla(theme.surfaces.warn))
+        });
         let renaming = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.input.clone());
         let heading = SharedString::from(if kind == title {
             title.clone()
@@ -536,7 +532,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             )
-            .child(div().flex_none().size(px(theme.spacing.xs * k)).rounded_full().bg(hsla(dot)))
+            .when_some(away, gpui::ParentElement::child)
             .child(match renaming {
                 // The name field takes the title's place; a click in it must not start a move.
                 Some(input) => div()
@@ -607,6 +603,17 @@ impl WorkspaceView {
                 .child(text)
                 .into_any_element()
         };
+        // A remote picture that has not arrived waits in a well of the canvas colour, so it
+        // reads as a screen still to come and not as an empty shell.
+        let picture_wait = |text: SharedString| {
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .bg(hsla(theme.surfaces.canvas))
+                .child(muted_line(text))
+                .into_any_element()
+        };
         let reconnecting = || -> SharedString {
             let worker = self.workers.get(&placed.tile.worker);
             let name = worker.map_or("worker", |w| w.name.as_str());
@@ -650,12 +657,12 @@ impl WorkspaceView {
                         };
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
-                    None if !worker_up => muted_line(reconnecting()),
-                    None if item.sleeping => muted_line("sleeping".into()),
+                    None if !worker_up => picture_wait(reconnecting()),
+                    None if item.sleeping => picture_wait("sleeping".into()),
                     None if self.parked.contains(&item.id) => {
-                        muted_line("paused off screen".into())
+                        picture_wait("paused off screen".into())
                     }
-                    None => muted_line("opening…".into()),
+                    None => picture_wait("opening…".into()),
                 }
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {

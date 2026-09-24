@@ -163,6 +163,15 @@ pub enum Command {
     /// Add the host's first display to the active canvas, as picking it would (the host
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
+    /// Put a window of the worker in the strip, as picking it in the ⌘O picker does. The id
+    /// need not name a live window: one that never sends a frame is how a remote tile's
+    /// placeholder is reached on a machine that has granted no screen capture.
+    PickWindow {
+        /// The worker's window id.
+        window: u32,
+        /// The title the tile shows.
+        title: String,
+    },
     /// Drive the app's system-notification response path with `tag` (a session UUID),
     /// exactly as `cx.on_system_notification_response` would when the user activates an
     /// agent banner: find the host whose canvas holds the session, switch to it, then reveal
@@ -172,7 +181,9 @@ pub enum Command {
         /// The banner's tag, which is the session UUID.
         tag: String,
     },
-    /// Resize the window's content area.
+    /// Resize the window's content area. iOS cannot resize its window from inside the app, so
+    /// there the app lays itself out in this size at the window's top left: the stand-in for
+    /// Split View and Stage Manager (the full size ends it).
     Resize {
         /// Width in points.
         width: f32,
@@ -410,6 +421,8 @@ pub struct Dump {
     /// The overview is open.
     #[serde(default)]
     pub overview: bool,
+    /// The theme is the dark variant (`[theme] appearance`, or the system's under `system`).
+    pub dark: bool,
     /// Every tile, workspace by workspace, column by column, top to bottom.
     pub items: Vec<ItemInfo>,
     /// Terminals with a view.

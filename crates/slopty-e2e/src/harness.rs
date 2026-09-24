@@ -353,6 +353,7 @@ async fn spawn_app(
 ) -> Result<(Child, Driver)> {
     let app_dir = root.join(name);
     std::fs::create_dir_all(&app_dir)?;
+    pin_appearance(&app_dir)?;
     let app_sock = root.join(format!("{name}.sock"));
     let mut app = Command::new(bin("slopty-app")?)
         .env("RUST_LOG", log)
@@ -371,6 +372,20 @@ async fn spawn_app(
     wait_for_path(&app_sock, &mut app, "slopty-app").await?;
     let driver = connect_with_retry(&app_sock, &mut app).await?;
     Ok((app, driver))
+}
+
+/// The appearance every app under test starts in, whatever the machine's is: the default
+/// (`system`) would make each golden depend on System Settings on the day it runs.
+pub const APPEARANCE: &str = "light";
+
+/// Write a `settings.toml` into `app_dir` that pins [`APPEARANCE`], unless a test already
+/// put one there.
+fn pin_appearance(app_dir: &Path) -> Result<()> {
+    let path = app_dir.join("settings.toml");
+    if !path.exists() {
+        std::fs::write(&path, format!("[theme]\nappearance = \"{APPEARANCE}\"\n"))?;
+    }
+    Ok(())
 }
 
 /// Connect to `sock`, retrying for a few seconds: under heavy load the listener may not accept
@@ -406,6 +421,7 @@ async fn spawn_simulator_app(
 ) -> Result<Driver> {
     let app_dir = root.join(name);
     std::fs::create_dir_all(&app_dir)?;
+    pin_appearance(&app_dir)?;
     let app_sock = root.join(format!("{name}.sock"));
     let launch = Command::new("xcrun")
         .args(["simctl", "launch", "--terminate-running-process"])
@@ -521,8 +537,40 @@ impl Stack {
         Self::launch_in(dir, host_name, env).await
     }
 
+    /// [`Self::launch`] up to the app's first frame, before it knows any worker: what someone
+    /// opening the app for the first time sees. [`Self::add_worker`] goes on from there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_first_run(host_name: &str) -> Result<Self> {
+        let dir = tempfile::Builder::new().prefix("slopty-e2e-").tempdir()?;
+        let mut stack = Self::spawn_in(dir, host_name, &[]).await?;
+        stack.driver.ok(&crate::Command::Ping).await?;
+        Ok(stack)
+    }
+
+    /// Add the stack's worker in the app, as the panel would, and wait for it to connect.
+    ///
+    /// # Errors
+    ///
+    /// When the worker does not connect in time.
+    pub async fn add_worker(&mut self) -> Result<()> {
+        let address = self.address.clone();
+        add_host(&mut self.driver, &address).await
+    }
+
     /// `env` goes to the daemons and the app alike, on top of the defaults.
     async fn launch_in(
+        dir: tempfile::TempDir,
+        host_name: &str,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
+        Self::add(Self::spawn_in(dir, host_name, env).await?).await
+    }
+
+    /// The daemons and the app, the worker not yet added.
+    async fn spawn_in(
         dir: tempfile::TempDir,
         host_name: &str,
         env: &[(&str, &str)],
@@ -534,8 +582,7 @@ impl Stack {
         let app_ix = Some(children.len());
         children.push(app);
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::add(Self { dir, address, driver, children, app_ix, simulator: None, log, app_env })
-            .await
+        Ok(Self { dir, address, driver, children, app_ix, simulator: None, log, app_env })
     }
 
     /// Kill the app (SIGKILL: no goodbye to the host, as a crash or a dead battery would
@@ -643,13 +690,37 @@ impl Stack {
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
+        Self::add(Self::spawn_on_simulator(host_name, simulator, env).await?).await
+    }
+
+    /// [`Self::launch_on_simulator`] up to the first frame, before the app knows any worker,
+    /// as [`Self::launch_first_run`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_on_simulator`].
+    pub async fn launch_first_run_on_simulator(
+        host_name: &str,
+        simulator: Simulator,
+    ) -> Result<Self> {
+        let mut stack = Self::spawn_on_simulator(host_name, simulator, &[]).await?;
+        stack.driver.ok(&crate::Command::Ping).await?;
+        Ok(stack)
+    }
+
+    /// The daemons here and the app in the simulator, the worker not yet added.
+    async fn spawn_on_simulator(
+        host_name: &str,
+        simulator: Simulator,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("slopty-e2e-ios-").tempdir()?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let (children, address) = daemons(root, host_name, &log, &[]).await?;
         let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Self::add(Self {
+        Ok(Self {
             dir,
             address,
             driver,
@@ -659,7 +730,6 @@ impl Stack {
             log,
             app_env,
         })
-        .await
     }
 
     /// Ping, add the host and wait for the connection.
@@ -673,6 +743,18 @@ impl Stack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
+    /// `settings.toml`, as a person editing the file would; the app sees it within a second.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written.
+    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
+        let path = self.path("app").join("settings.toml");
+        std::fs::write(&path, format!("[theme]\nappearance = \"{appearance}\"\n"))?;
+        Ok(())
     }
 
     /// One request over hostd's control socket (`{"cmd": …}`), and its reply.
@@ -1669,6 +1751,18 @@ impl ServerStack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
+    /// `settings.toml`, as a person editing the file would; the app sees it within a second.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written.
+    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
+        let path = self.path("app").join("settings.toml");
+        std::fs::write(&path, format!("[theme]\nappearance = \"{appearance}\"\n"))?;
+        Ok(())
     }
 
     /// `slopty <args> --server <this server> --json`, parsed.

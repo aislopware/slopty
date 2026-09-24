@@ -1,4 +1,4 @@
-//! The one-line notice at the top of the strip: another client's pointing, a closed tile to
+//! The one-line notice at the foot of the strip: another client's pointing, a closed tile to
 //! take back, a word to this client.
 
 use std::time::Duration;
@@ -117,9 +117,10 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
 
-    /// The toast, centred at the top of the strip. One surface for every kind: a toast is a
+    /// The toast, centred at the foot of the strip. One surface for every kind: a toast is a
     /// notice that happens to be clickable, not a primary action, so the accent is only on
-    /// the words that name what a click does.
+    /// the words that name what a click does. At the foot because the top of the strip is
+    /// where the tiles' headers are, and a notice must not sit on the badge it is about.
     pub(super) fn render_toast(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
@@ -163,10 +164,10 @@ impl WorkspaceView {
                 let pill = style(div().id("closed"))
                     .debug_selector(|| "closed".to_owned())
                     .role(Role::Button)
-                    .aria_label(format!("Closed {title}, take it back"))
+                    .aria_label(format!("Closed {title}, undo"))
                     .cursor_pointer()
                     .child(SharedString::from(format!("Closed {title}")))
-                    .child(offer("· take back ⌘Z"));
+                    .child(offer("· Undo"));
                 tab_stop(pill, theme.surfaces.accent)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)))
                     .into_any_element()
@@ -181,7 +182,7 @@ impl WorkspaceView {
         Some(
             div()
                 .absolute()
-                .top(px(theme.spacing.md))
+                .bottom(px(theme.spacing.lg))
                 .left_0()
                 .right_0()
                 .flex()

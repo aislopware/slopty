@@ -37,7 +37,10 @@ pub enum SettingsEditorEvent {
 #[derive(Debug)]
 pub struct SettingsEditor {
     text: Entity<TextareaState>,
-    /// Where the file lives, shown under the title.
+    /// The file's name, shown beside the title; the whole path is its accessible name. A temp
+    /// or sandbox path is seventy characters of noise to read and wraps on a phone.
+    file_name: SharedString,
+    /// Where the file lives.
     path: SharedString,
     /// Offer "Open in editor" (the Mac; the phone has nothing to open it with).
     external: bool,
@@ -70,6 +73,11 @@ impl SettingsEditor {
         });
         Self {
             text: state,
+            file_name: SharedString::from(
+                std::path::Path::new(path)
+                    .file_name()
+                    .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned()),
+            ),
             path: SharedString::from(path.to_owned()),
             external,
             error: None,
@@ -139,8 +147,8 @@ impl Render for SettingsEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let (s, spacing, radii) = (theme.surfaces, theme.spacing, theme.radii);
-        let small = theme.typography.small();
-        let button = move |id: &'static str, label: &'static str, hint: &'static str, accent| {
+        // A button says what it does; the keys (Esc, ⌘↩) are the palette's to list.
+        let button = move |id: &'static str, label: &'static str, accent| {
             let row = div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -148,25 +156,16 @@ impl Render for SettingsEditor {
                 .aria_label(label)
                 .flex()
                 .items_center()
-                .gap(px(spacing.xs))
-                .px(px(spacing.sm))
-                .py(px(spacing.xxs))
-                .rounded(px(radii.xs))
+                .px(px(spacing.md))
+                .py(px(spacing.xs))
+                .rounded(px(radii.sm))
                 .cursor_pointer()
                 .when(accent, |el| el.bg(hsla(s.accent)).text_color(hsla(s.accent_fg)))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 })
-                .child(label)
-                .when(!hint.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_size(px(small))
-                            .text_color(hsla(if accent { s.accent_fg } else { s.text_muted }))
-                            .child(hint),
-                    )
-                });
+                .child(label);
             tab_stop(row, s.accent)
         };
         let error = self.error.clone().map(|error| {
@@ -224,9 +223,11 @@ impl Render for SettingsEditor {
                             .child("Settings")
                             .child(
                                 div()
+                                    .id("settings-path")
+                                    .aria_label(self.path.clone())
                                     .text_size(px(theme.typography.small()))
                                     .text_color(hsla(s.text_muted))
-                                    .child(self.path.clone()),
+                                    .child(self.file_name.clone()),
                             ),
                     )
                     .child(
@@ -258,19 +259,20 @@ impl Render for SettingsEditor {
                             .border_color(hsla(s.border))
                             .when(self.external, |el| {
                                 el.child(
-                                    button("settings-open-external", "Open in editor", "", false)
+                                    button("settings-open-external", "Open in editor", false)
                                         .on_click(cx.listener(|_this, _ev, _w, cx| {
                                             cx.emit(SettingsEditorEvent::OpenExternally);
                                         })),
                                 )
                             })
-                            .child(button("settings-cancel", "Cancel", "esc", false).on_click(
+                            .when(self.external, |el| el.child(div().flex_1()))
+                            .child(button("settings-cancel", "Cancel", false).on_click(
                                 cx.listener(|_this, _ev, _w, cx| {
                                     cx.emit(SettingsEditorEvent::Dismiss);
                                 }),
                             ))
                             .child(
-                                button("settings-save", "Save", "⌘↩", true)
+                                button("settings-save", "Save", true)
                                     .on_click(cx.listener(|this, _ev, _w, cx| this.save(cx))),
                             ),
                     ),
