@@ -172,6 +172,30 @@ pub fn get_size(fd: impl AsFd) -> Result<(u16, u16), PtyError> {
     Ok((ws.ws_col, ws.ws_row))
 }
 
+/// How the tty's line discipline treats input right now: what a client needs to know before it
+/// draws a keystroke it has not seen echoed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LineDiscipline {
+    /// `ECHO`: the tty echoes what is typed. Off at a password prompt.
+    pub echo: bool,
+    /// `ICANON`: input is edited a line at a time (a shell's `read`, `cat`), not handed to the
+    /// program key by key.
+    pub canonical: bool,
+}
+
+/// The line discipline of the tty behind `fd`.
+///
+/// On a master this is the slave's: the two ends share one termios, which is how a program's
+/// `stty -echo` shows up here (one `tcgetattr`, no round trip to the program).
+pub fn line_discipline(fd: impl AsFd) -> Result<LineDiscipline, PtyError> {
+    use rustix::termios::LocalModes;
+    let termios = rustix::termios::tcgetattr(fd).map_err(|e| PtyError::os("tcgetattr", e))?;
+    Ok(LineDiscipline {
+        echo: termios.local_modes.contains(LocalModes::ECHO),
+        canonical: termios.local_modes.contains(LocalModes::ICANON),
+    })
+}
+
 /// Async master end.
 #[derive(Debug)]
 pub struct PtyMaster {
@@ -233,6 +257,11 @@ impl PtyMaster {
     #[must_use]
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.get_ref().as_fd()
+    }
+
+    /// The slave's [`LineDiscipline`] now ([`line_discipline`] on this master).
+    pub fn line_discipline(&self) -> Result<LineDiscipline, PtyError> {
+        line_discipline(self.as_fd())
     }
 }
 
@@ -363,6 +392,62 @@ mod tests {
         assert!(text.contains("10 40"), "stty should see our size: {text}");
         let status = child.wait().await.unwrap();
         assert!(status.success());
+    }
+
+    /// Read `master` until `needle` has come.
+    async fn read_until(master: &PtyMaster, needle: &[u8]) {
+        let mut out = Vec::new();
+        let mut buf = [0_u8; 1024];
+        let deadline =
+            tokio::time::Instant::now().checked_add(std::time::Duration::from_secs(10)).unwrap();
+        while !out.windows(needle.len()).any(|w| w == needle) {
+            let n =
+                tokio::time::timeout_at(deadline, master.read(&mut buf)).await.unwrap().unwrap();
+            assert_ne!(n, 0, "EOF before {needle:?}");
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    /// The master reads the slave's termios: a program that turns echo off for a password, or
+    /// canonical input off for a TUI, is seen doing so from the master alone.
+    #[tokio::test]
+    async fn the_master_sees_the_programs_echo_and_canonical_modes() {
+        let pty = Pty::open(size()).unwrap();
+        let script = "stty -echo; echo password; read x; stty echo -icanon; echo keys; sleep 30";
+        let mut child = pty
+            .spawn(&SpawnSpec {
+                command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                cwd: None,
+                env: Vec::new(),
+                size: size(),
+            })
+            .unwrap();
+        let master = PtyMaster::new(pty.into_master()).unwrap();
+        read_until(&master, b"password").await;
+        let at_password = master.line_discipline().unwrap();
+        assert_eq!(at_password, LineDiscipline { echo: false, canonical: true });
+        master.write_all(b"secret\n").await.unwrap();
+        read_until(&master, b"keys").await;
+        let in_a_tui = master.line_discipline().unwrap();
+        assert_eq!(in_a_tui, LineDiscipline { echo: true, canonical: false });
+        child.kill().await.unwrap();
+    }
+
+    /// What reading the line discipline costs the session actor after each read. Run with
+    /// `cargo nextest run -p slopty-pty --release --run-ignored only line_discipline_cost
+    /// --no-capture`.
+    #[tokio::test]
+    #[ignore = "measurement, run by hand"]
+    async fn line_discipline_cost() {
+        let pty = Pty::open(size()).unwrap();
+        let master = PtyMaster::new(pty.into_master()).unwrap();
+        let reads = 100_000_u32;
+        let started = std::time::Instant::now();
+        for _ in 0..reads {
+            std::hint::black_box(master.line_discipline().unwrap());
+        }
+        let each = started.elapsed() / reads;
+        eprintln!("line_discipline_cost: {} ns per tcgetattr on a master", each.as_nanos());
     }
 
     #[tokio::test]

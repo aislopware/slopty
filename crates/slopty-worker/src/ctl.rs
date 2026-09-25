@@ -43,7 +43,7 @@ pub struct Health {
     pub allow: Vec<String>,
     /// Clients connected right now.
     pub clients: usize,
-    /// Sessions ptyd holds.
+    /// Sessions the worker runs, exited ones kept for their last screen included.
     pub sessions: usize,
     /// Seconds since the daemon started.
     pub uptime_secs: u64,

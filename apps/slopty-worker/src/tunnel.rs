@@ -10,21 +10,26 @@ use tokio::net::TcpStream;
 /// Bytes moved at a time each way.
 const CHUNK: usize = 64 << 10;
 
-/// Accept the client's tunnels until the connection ends.
+/// Accept the client's tunnels until the connection ends. Each header is read on the tunnel's
+/// own task: one whose header was lost holds up no tunnel opened after it.
 pub async fn accept(conn: Connection, client: ClientId) {
     loop {
-        match streams::accept_tunnel(&conn).await {
-            Ok((open, send, rx)) => {
-                tracing::debug!(%client, port = open.port, "tunnel");
-                drop(tokio::spawn(splice(open.port, send, rx)));
-            }
+        let (send, recv) = match conn.accept_bi().await {
+            Ok(pair) => pair,
             Err(e) => {
-                if conn.close_reason().is_some() {
-                    break;
-                }
-                tracing::debug!(%client, error = %e, "tunnel refused");
+                tracing::debug!(%client, error = %e, "tunnels end");
+                break;
             }
-        }
+        };
+        drop(tokio::spawn(async move {
+            match streams::read_tunnel(send, recv).await {
+                Ok((open, send, rx)) => {
+                    tracing::debug!(%client, port = open.port, "tunnel");
+                    splice(open.port, send, rx).await;
+                }
+                Err(e) => tracing::debug!(%client, error = %e, "tunnel refused"),
+            }
+        }));
     }
 }
 

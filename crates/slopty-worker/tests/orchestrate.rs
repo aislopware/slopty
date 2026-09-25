@@ -8,19 +8,52 @@ mod orchestrate {
 
     use slopty_core::SessionId;
     use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+    use slopty_proto::agent::{
+        AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
+    };
     use slopty_proto::input::CellMetrics;
     use slopty_proto::orchestration::{Command, ErrorCode, Input, Screen, WaitUntil, Waited};
     use slopty_proto::terminal::TermSize;
     use slopty_pty::shell_integration::{self, ShellIntegration};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::{
-        AgentFeed, list_commands, read_output, read_screen, send_input, wait_for,
+        AgentFeed, Agents, list_commands, read_output, read_screen, send_input, wait_for,
     };
     use slopty_worker::session::{self, SessionHandle, SessionStart};
     use tokio::sync::{broadcast, mpsc};
 
     const WAIT: Duration = Duration::from_secs(20);
+
+    /// An agent table that holds one status for every session.
+    #[derive(Default)]
+    struct Table(parking_lot::Mutex<Option<AgentStatus>>);
+
+    impl Table {
+        fn with(status: AgentStatus) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self(parking_lot::Mutex::new(Some(status))))
+        }
+    }
+
+    impl Agents for Table {
+        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
+            let status = self.0.lock().clone()?;
+            Some(SessionAgent { kind: AgentKind::ClaudeCode, status, source: AgentSource::Hook })
+        }
+
+        fn forget(&self, _session: SessionId) {}
+    }
+
+    fn agent_event(session: SessionId, status: AgentStatus) -> WorkerMsg {
+        WorkerMsg::Agent(AgentEvent {
+            session,
+            kind: AgentKind::ClaudeCode,
+            status,
+            agent_session: None,
+            detail: None,
+            attention: true,
+            source: AgentSource::Hook,
+        })
+    }
 
     struct Shell {
         handle: SessionHandle,
@@ -250,19 +283,9 @@ mod orchestrate {
         let sh = shell().await;
         let h = &sh.handle;
         let (events, rx) = broadcast::channel(8);
-        let feed = AgentFeed { events: rx, now: Some(AgentStatus::Working) };
+        let feed = AgentFeed { events: rx, agents: Table::with(AgentStatus::Working) };
         let waiting = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed));
-        let event = |session, status| {
-            WorkerMsg::Agent(AgentEvent {
-                session,
-                kind: AgentKind::ClaudeCode,
-                status,
-                agent_session: None,
-                detail: None,
-                attention: true,
-                source: AgentSource::Hook,
-            })
-        };
+        let event = agent_event;
         let report = async {
             let other = SessionId::new();
             events.send(event(other, AgentStatus::Idle)).unwrap();
@@ -275,9 +298,38 @@ mod orchestrate {
 
         let (_events, rx) = broadcast::channel::<WorkerMsg>(8);
         let blocked = AgentStatus::Blocked(BlockReason::Question);
-        let feed = AgentFeed { events: rx, now: Some(blocked) };
+        let feed = AgentFeed { events: rx, agents: Table::with(blocked) };
         let at_once = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed)).await;
         assert_eq!(at_once.unwrap(), Waited::Met { line: None }, "already blocked");
+    }
+
+    /// A wait that falls behind the daemon's events may have missed the very report it waits
+    /// for; it reads the status the missed reports left in the table.
+    #[tokio::test]
+    async fn a_wait_that_fell_behind_the_events_reads_the_status_they_left() {
+        let sh = shell().await;
+        let h = &sh.handle;
+        let (events, rx) = broadcast::channel(2);
+        let table = Table::with(AgentStatus::Working);
+        let feed = AgentFeed { events: rx, agents: std::sync::Arc::<Table>::clone(&table) };
+        // The agent finished its turn; the report is pushed out by other sessions' reports
+        // before the wait reads any.
+        *table.0.lock() = Some(AgentStatus::Idle);
+        events.send(agent_event(h.id(), AgentStatus::Idle)).unwrap();
+        for _ in 0..3 {
+            events.send(agent_event(SessionId::new(), AgentStatus::Working)).unwrap();
+        }
+        let waited = wait_for(h, &WaitUntil::AgentNeedsInput, Duration::from_secs(2), Some(feed));
+        assert_eq!(waited.await.unwrap(), Waited::Met { line: None });
+
+        let (events, rx) = broadcast::channel(2);
+        let feed = AgentFeed { events: rx, agents: Table::with(AgentStatus::Working) };
+        for _ in 0..3 {
+            events.send(agent_event(SessionId::new(), AgentStatus::Idle)).unwrap();
+        }
+        let still =
+            wait_for(h, &WaitUntil::AgentNeedsInput, Duration::from_millis(300), Some(feed));
+        assert_eq!(still.await.unwrap(), Waited::TimedOut, "still working: the wait goes on");
     }
 
     #[tokio::test]

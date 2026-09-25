@@ -331,6 +331,11 @@ async fn main() -> Result<()> {
     // closes it (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"). The
     // exit reaches the viewers on the session stream and everyone else as the session's changed
     // summary. Nobody watching it for `EXITED_UNWATCHED` closes it here.
+    //
+    // The exits end when ptyd's connection does. A worker without ptyd can spawn nothing and
+    // hands its sessions to nobody, so it goes down (`ptyd_gone`) and launchd starts one that
+    // connects again.
+    let (ptyd_gone_tx, mut ptyd_gone) = tokio::sync::oneshot::channel::<()>();
     if let Some(mut exits) = daemon.worker.take_exits() {
         let daemon = daemon.clone();
         tokio::spawn(async move {
@@ -342,6 +347,7 @@ async fn main() -> Result<()> {
                     let _sent = daemon.events.send(slopty_proto::WorkerMsg::SessionOpened(summary));
                 }
             }
+            let _sent = ptyd_gone_tx.send(());
         });
     }
     tokio::spawn(close_stale_exits(daemon.clone()));
@@ -399,22 +405,26 @@ async fn main() -> Result<()> {
     // terminal with SIGINT. Both go down the same way.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listen for SIGTERM")?;
-    loop {
+    let ended = loop {
         tokio::select! {
             client = daemon.listener.accept() => {
-                let Some(client) = client else { break };
+                let Some(client) = client else { break Ok(()) };
                 tokio::spawn(conn::serve(daemon.clone(), client));
             }
             _signal = tokio::signal::ctrl_c() => {
                 tracing::info!("SIGINT: shutting down");
-                break;
+                break Ok(());
             }
             _signal = terminate.recv() => {
                 tracing::info!("SIGTERM: shutting down");
-                break;
+                break Ok(());
+            }
+            _gone = &mut ptyd_gone => {
+                tracing::error!("lost slopty-ptyd: shutting down for a worker that connects again");
+                break Err(anyhow::anyhow!("slopty-ptyd hung up"));
             }
         }
-    }
+    };
     let _sent = daemon
         .events
         .send(slopty_proto::WorkerMsg::Rejected(slopty_proto::handshake::Rejection::Busy));
@@ -430,7 +440,7 @@ async fn main() -> Result<()> {
     if !matches!(released, Ok(true)) {
         tracing::warn!("an input thread did not let go in time; a key or button may stay down");
     }
-    Ok(())
+    ended
 }
 
 #[cfg(test)]

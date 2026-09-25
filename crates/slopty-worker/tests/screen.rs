@@ -66,8 +66,8 @@ mod tests {
         assert_eq!(stats.encoded, frames.len() as u64);
 
         // Bitrate-only change applies in place; a scale change rebuilds capture and encoder.
-        stream.set_quality(&Quality { bitrate_bps: 4_000_000, ..quality }).unwrap();
-        stream.set_quality(&Quality { scale: 0.25, ..quality }).unwrap();
+        stream.set_quality(&Quality { bitrate_bps: 4_000_000, ..quality }).await.unwrap();
+        stream.set_quality(&Quality { scale: 0.25, ..quality }).await.unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
         let mut after = 0_u32;
         while let Ok(Some(_datagram)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -199,6 +199,7 @@ mod crop_path {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _event = stream
                 .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+                .await
                 .unwrap();
         }
 
@@ -207,6 +208,7 @@ mod crop_path {
         let reason = loop {
             let _event = stream
                 .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+                .await
                 .unwrap();
             if let Ok(Some(reason)) =
                 tokio::time::timeout(Duration::from_millis(100), stopped_rx.recv()).await
@@ -224,6 +226,7 @@ mod crop_path {
         // Once: further ticks stay quiet.
         let _event = stream
             .check_geometry(&tokio::task::spawn_blocking(stream.prober()).await.unwrap())
+            .await
             .unwrap();
         tokio::time::timeout(Duration::from_millis(200), stopped_rx.recv()).await.unwrap_err();
         stream.close().await;
@@ -528,4 +531,63 @@ fn channel() -> (
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     (std::sync::Arc::new(Channel(tx)), rx)
+}
+
+/// What building a VideoToolbox session costs the runtime it is built from. Run with
+/// `cargo nextest run -p slopty-worker --release --test screen --run-ignored only
+/// encoder_build_stall --no-capture`.
+#[cfg(test)]
+mod encoder_build {
+    use std::time::{Duration, Instant};
+
+    use slopty_codec::{EncoderConfig, VideoEncoder as _, VideoToolbox};
+    use slopty_proto::screen::VideoCodec;
+
+    /// A Retina display's worth, as a full-screen stream asks for.
+    const CONFIG: EncoderConfig = EncoderConfig {
+        width: 3024,
+        height: 1964,
+        codec: VideoCodec::Hevc,
+        fps: 60,
+        bitrate_bps: 20_000_000,
+    };
+
+    fn build() {
+        drop(VideoToolbox::new(CONFIG, |_packet| {}).unwrap());
+    }
+
+    /// How long the runtime's thread is held per build, median and worst of twenty: the whole
+    /// build when it runs there, only the hand-off when it runs on the blocking pool.
+    async fn held(inline: bool) -> (Duration, Duration) {
+        let mut held = Vec::new();
+        for _ in 0..20 {
+            let started = Instant::now();
+            if inline {
+                build();
+                held.push(started.elapsed());
+            } else {
+                let task = tokio::task::spawn_blocking(build);
+                held.push(started.elapsed());
+                task.await.unwrap();
+            }
+        }
+        held.sort_unstable();
+        (held[held.len() / 2], *held.last().unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "measurement, run by hand"]
+    async fn encoder_build_stall() {
+        build();
+        let (on_p50, on_max) = held(true).await;
+        let (off_p50, off_max) = held(false).await;
+        eprintln!(
+            "encoder_build_stall: runtime thread held per build, built on it p50 {} us max {} us; \
+             built on the blocking pool p50 {} us max {} us",
+            on_p50.as_micros(),
+            on_max.as_micros(),
+            off_p50.as_micros(),
+            off_max.as_micros()
+        );
+    }
 }

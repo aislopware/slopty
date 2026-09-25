@@ -211,6 +211,11 @@ mod tests {
     /// The address of a worker we did not start, read from its control socket (`doctor` reports
     /// where it listens).
     async fn listening(ctl_sock: &std::path::Path) -> SocketAddr {
+        dialable(doctor(ctl_sock).await.listen.parse().unwrap())
+    }
+
+    /// The worker's `doctor` report, from its control socket.
+    async fn doctor(ctl_sock: &std::path::Path) -> slopty_worker::ctl::Health {
         use tokio::io::AsyncWriteExt as _;
         let stream = tokio::net::UnixStream::connect(ctl_sock).await.unwrap();
         let (rd, mut wr) = stream.into_split();
@@ -227,9 +232,7 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(rd).read_line(&mut reply).await.unwrap();
         match serde_json::from_str(reply.trim()).unwrap() {
-            slopty_worker::ctl::CtlReply::Doctor(health) => {
-                dialable(health.listen.parse().unwrap())
-            }
+            slopty_worker::ctl::CtlReply::Doctor(health) => health,
             other => panic!("unexpected ctl reply: {other:?}"),
         }
     }
@@ -239,6 +242,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
         assert!(worker.ack.sessions.is_empty());
+        let health = doctor(&dir.path().join("worker.sock")).await;
+        assert_eq!((health.clients, health.sessions), (1, 0), "this client, no terminal yet");
 
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
         // `~` as the directory: the client does not know the worker's home.
@@ -3737,6 +3742,46 @@ mod tests {
         let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();
         assert!(echoed == request, "the bytes come back whole and in order");
         tokio::time::timeout(STEP, server).await.unwrap().unwrap();
+    }
+
+    /// A tunnel whose header has not arrived (lost, and waiting for its retransmission) holds
+    /// up no tunnel the client opens after it.
+    #[tokio::test]
+    async fn a_tunnel_whose_header_is_late_holds_up_no_other() {
+        use tokio::io::AsyncWriteExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _peer) = echo.accept().await.unwrap();
+            let (mut rd, mut wr) = socket.split();
+            tokio::io::copy(&mut rd, &mut wr).await.unwrap();
+            wr.shutdown().await.unwrap();
+        });
+        // One byte of a four-byte length prefix: the worker has the stream, not its header.
+        let (mut stalled, _stalled_rx) = worker.conn.open_bi().await.unwrap();
+        stalled.write_all(&[1]).await.unwrap();
+        let (mut send, mut rx) = streams::open_tunnel(&worker.conn, port).await.unwrap();
+        send.write_all(b"after the stalled one").await.unwrap();
+        send.finish().unwrap();
+        let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();
+        assert_eq!(echoed, b"after the stalled one");
+        tokio::time::timeout(STEP, server).await.unwrap().unwrap();
+    }
+
+    /// A worker that loses ptyd goes down with a failure, so launchd starts one that connects
+    /// again, rather than serving on with nothing to spawn into and nobody keeping its shells.
+    #[tokio::test]
+    async fn a_worker_that_loses_ptyd_exits_to_be_restarted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, _addr) = daemons(dir.path()).await;
+        guard.0[0].start_kill().unwrap();
+        let status = tokio::time::timeout(STEP, guard.0[1].wait())
+            .await
+            .expect("the worker exits once ptyd is gone")
+            .unwrap();
+        assert!(!status.success(), "{status}");
     }
 
     /// `nc -l` typed into a real shell is announced as its session's port, and the set is

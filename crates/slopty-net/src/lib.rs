@@ -13,6 +13,7 @@
 //! * [`client`] — connect to a worker by address.
 //! * [`server`] — links to the server: its accept loop, and the dial to it.
 //! * [`known`] — the client's id and the workers it has added.
+//! * [`redial`] — when a dropped link is dialled again.
 //!
 //! The endpoint and the crypto provider know nothing of the roles: the same plaintext QUIC
 //! serves client ↔ worker and worker, client or agent ↔ server links.
@@ -32,6 +33,8 @@ pub mod echo;
 pub mod endpoint;
 pub mod framed;
 pub mod known;
+mod listen;
+pub mod redial;
 pub mod server;
 pub mod streams;
 pub mod worker;

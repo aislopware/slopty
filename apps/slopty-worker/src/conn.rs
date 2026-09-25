@@ -604,6 +604,13 @@ fn copy_frame(
     wire: &[u8],
 ) {
     let body = wire.get(slopty_proto::codec::PREFIX_BYTES..).unwrap_or_default();
+    // The copy is at least its header and the event. A frame past what the path carries (a
+    // screenful redrawn) is not copied at all, rather than copied, held for the delay and
+    // dropped at the send.
+    let least = slopty_proto::media::HEADER_BYTES.saturating_add(body.len());
+    if !slopty_net::echo::path_takes(conn, least) {
+        return;
+    }
     match slopty_proto::datagram::term_datagram(session, body) {
         Ok(datagram) => copies.send(conn, datagram),
         Err(e) => tracing::debug!(%session, error = %e, "echo copy not encoded"),
@@ -786,7 +793,7 @@ impl Peer<'_> {
                 self.tasks.spawn(crate::files::find(self.out.clone(), root, query));
             }
             ClientMsg::ReadFile { path } => {
-                // A paired client already has a shell here; a read is nothing it could not do.
+                // An admitted client can open a shell here; a read is nothing it could not do.
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
                     crate::files::send_file(client, &out, path).await;

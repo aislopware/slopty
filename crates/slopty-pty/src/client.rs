@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{PtydEvent, PtydRequest, SessionInfo};
+use crate::protocol::{OutputFrame, PtydEvent, PtydRequest, SessionInfo};
 use crate::pty::SpawnSpec;
 use crate::{PtyError, fdpass};
 
@@ -57,6 +57,10 @@ impl Drop for PtydClient {
 
 impl PtydClient {
     /// Connect and complete the hello exchange.
+    ///
+    /// The receiver yields each child exit as ptyd reports it, and ends once the connection to
+    /// ptyd is gone: the worker then holds masters nobody keeps for the next worker, and can
+    /// spawn nothing more.
     pub async fn connect(
         path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<(SessionId, i32)>), PtyError> {
@@ -92,11 +96,12 @@ impl PtydClient {
         }
     }
 
-    /// Hand ptyd a copy of output just read from an attached master. Fire-and-forget: ptyd
-    /// never replies, so this only waits for the socket to take the bytes.
+    /// Hand ptyd a copy of output just read from an attached master, as the frame the reader
+    /// built. Fire-and-forget: ptyd never replies, so this only waits for the socket to take
+    /// the bytes.
     #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
-    pub async fn output(&mut self, id: SessionId, bytes: &[u8]) -> Result<(), PtyError> {
-        self.send(&crate::protocol::output_frame(id, bytes)?).await
+    pub async fn output(&mut self, frame: &OutputFrame) -> Result<(), PtyError> {
+        self.send(frame.as_bytes()).await
     }
 
     /// Hand ptyd the session's current terminal state; it replaces the previous checkpoint and

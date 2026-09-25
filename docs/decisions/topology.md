@@ -217,9 +217,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     because a fresh registration carries the whole state. Every forwarded verb runs in a task
     of its own, so a long `WaitFor` holds up nothing. A dead or absent server costs the
     terminals and the clients nothing.
-  - **Redial.** After a link ends the worker dials again after 250 ms, doubling to 5 s, forever.
-    A link that lived 10 s resets the delay. A `DuplicateWorker` refusal (the server still
-    holds the link a restart dropped) is retried every second. The lease's keep-alive is the
+  - **Redial.** After a link ends the worker dials again by the rule every link follows
+    (`slopty_net::redial`, since 2026-09-26): 250 ms, doubling to 2 s, forever, and a link
+    that held 10 s starts again from 250 ms. A `DuplicateWorker` refusal (the server still
+    holds the link a restart dropped) is one more failed dial. Until then the worker had
+    constants of its own (a 5 s cap and a 1 s duplicate retry), and a duplicate retry doubled
+    the backoff whenever the backoff happened to equal it. The lease's keep-alive is the
     server's, so the worker adds no pings of its own.
   - **Capabilities.** OS, CPUs, memory and encoders are fixed. The agents come from one
     `claude --version` at start, through the login shell when the daemon's `PATH` lacks it.

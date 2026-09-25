@@ -77,6 +77,13 @@ impl Copies {
     }
 }
 
+/// Whether `conn`'s path carries a datagram of `len` bytes at all: a copy that could not go is
+/// better not built.
+#[must_use]
+pub fn path_takes(conn: &Connection, len: usize) -> bool {
+    conn.max_datagram_size().is_some_and(|max| len <= max)
+}
+
 fn send_now(conn: &Connection, datagram: Bytes) {
     let queued = DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
     if !fits(datagram.len(), conn.max_datagram_size(), queued) {

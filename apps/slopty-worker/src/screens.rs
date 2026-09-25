@@ -131,13 +131,13 @@ pub async fn run(
             command = commands.recv() => match command {
                 None => break false,
                 Some(Command::Close) => break true,
-                Some(command) => apply(&mut stream, client, command),
+                Some(command) => apply(&mut stream, client, command).await,
             },
             probe = async { probing.as_mut()?.await.ok() }, if probing.is_some() => {
                 probing = None;
                 let Some(probe) = probe else { continue };
                 let mut events = Vec::new();
-                match stream.check_geometry(&probe) {
+                match stream.check_geometry(&probe).await {
                     Ok(Some(event)) => events.push(event),
                     Ok(None) => {}
                     Err(e) => tracing::warn!(%client, stream = %id, error = %e, "geometry"),
@@ -175,7 +175,7 @@ pub async fn run(
     let _told = told.send(Told::Gone(id));
 }
 
-fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
+async fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
     let id = stream.id();
     match command {
         Command::Input(input) => {
@@ -189,7 +189,7 @@ fn apply(stream: &mut ScreenStream, client: ClientId, command: Command) {
             }
         }
         Command::SetQuality(quality) => {
-            if let Err(e) = stream.set_quality(&quality) {
+            if let Err(e) = stream.set_quality(&quality).await {
                 tracing::warn!(%client, stream = %id, error = %e, "set quality");
             }
         }

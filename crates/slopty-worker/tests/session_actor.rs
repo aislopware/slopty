@@ -51,6 +51,15 @@ mod actor {
         (handle, child, tap_rx)
     }
 
+    /// The output a tap carries, decoded as ptyd decodes it.
+    fn tapped(frame: &slopty_pty::protocol::OutputFrame) -> Vec<u8> {
+        let mut buf = bytes::BytesMut::from(frame.as_bytes());
+        match slopty_proto::codec::try_decode(&mut buf).unwrap() {
+            Some(slopty_pty::protocol::PtydRequest::Output { bytes, .. }) => bytes,
+            other => panic!("not an output tap: {other:?}"),
+        }
+    }
+
     /// The event an actor sent, decoded from the wire as the client would.
     fn event(out: &Outbound) -> TermEvent {
         let mut buf = bytes::BytesMut::from(out.wire());
@@ -224,7 +233,7 @@ mod actor {
         let mut output = Vec::new();
         let checkpoint = loop {
             match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
-                Tap::Output { bytes, .. } => output.extend_from_slice(&bytes),
+                Tap::Output(frame) => output.extend_from_slice(&tapped(&frame)),
                 Tap::Checkpoint { state, .. }
                     if output.windows(11).any(|w| w == b"tapped-line") =>
                 {
@@ -650,8 +659,8 @@ mod actor {
         let mut checkpoints_while_open = 0;
         loop {
             match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
-                Tap::Output { bytes, .. } => {
-                    output.extend_from_slice(&bytes);
+                Tap::Output(frame) => {
+                    output.extend_from_slice(&tapped(&frame));
                     if output.windows(4).any(|w| w == b"done") {
                         break;
                     }
@@ -921,6 +930,67 @@ done
         let _killed = child.kill().await;
     }
 
+    /// A password prompt turns the tty's echo off before it prints; the frame that shows the
+    /// prompt says so, and the one after echo comes back says that too.
+    #[tokio::test]
+    async fn the_frames_say_when_the_tty_stops_echoing() {
+        use slopty_grid::TermModes;
+        let script = "stty -echo; echo Password:; read x; stty echo; echo back; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let modes = |ev: &TermEvent| match ev {
+            TermEvent::Frame(f) => Some(f.modes),
+            _ => None,
+        };
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("Password:")).await;
+        let at_prompt = events.iter().filter_map(modes).next_back().unwrap();
+        assert!(at_prompt.contains(TermModes::ECHO_OFF | TermModes::CANONICAL), "{at_prompt:?}");
+        session.request(me, TermRequest::Raw(b"hunter2\n".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("back")).await;
+        let after = events.iter().filter_map(modes).next_back().unwrap();
+        assert!(!after.contains(TermModes::ECHO_OFF), "{after:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A program that stops reading has 16 MiB of input queued for it and no more: the request
+    /// past that is refused whole, the viewer that sent it is told, and the actor goes on
+    /// answering.
+    #[tokio::test]
+    async fn input_past_the_queue_bound_is_refused_and_its_sender_told() {
+        let (session, mut child) =
+            start(&["/bin/sh", "-c", "stty raw -echo; echo ready; sleep 60"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        // Raw mode: the tty takes a queue's worth, then refuses the master until it is read.
+        let chunk = vec![b'x'; 4 << 20];
+        for _ in 0..4 {
+            session.request(me, TermRequest::Raw(chunk.clone())).unwrap();
+        }
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1);
+        while let Ok(out) = rx.rx.try_recv() {
+            assert!(
+                !matches!(event(&out), TermEvent::Error(_)),
+                "16 MiB are queued without a word"
+            );
+        }
+        session.request(me, TermRequest::Raw(chunk)).unwrap();
+        let (events, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Error(_)))).await;
+        let refused = events.iter().find_map(|e| match e {
+            TermEvent::Error(message) => Some(message.clone()),
+            _ => None,
+        });
+        assert!(refused.unwrap().contains("not reading"));
+        assert_eq!(session.snapshot().await.unwrap().viewers, 1, "the actor answers");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// The exit the viewers are told is the status the child exited with, once its reaper
     /// says so, not a guess at the end of its output.
     #[tokio::test]
@@ -990,7 +1060,7 @@ done
             match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
                 Tap::Resize { size, .. } => told = Some(size),
                 Tap::Checkpoint { .. } if told.is_some() => break,
-                Tap::Checkpoint { .. } | Tap::Output { .. } => {}
+                Tap::Checkpoint { .. } | Tap::Output(_) => {}
             }
         }
         assert_eq!(told, Some(size(50, 8)));

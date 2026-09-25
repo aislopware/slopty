@@ -18,6 +18,7 @@ use slopty_proto::terminal::{
     TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
+use slopty_pty::protocol::OutputFrame;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
@@ -436,13 +437,9 @@ impl SessionHandle {
 /// the master, now and then the engine's whole state (see `Actor::checkpoint`), and the size.
 #[derive(Debug)]
 pub enum Tap {
-    /// Output just read from the master.
-    Output {
-        /// The session it is of.
-        id: SessionId,
-        /// The bytes.
-        bytes: Vec<u8>,
-    },
+    /// Output just read from the master, framed for ptyd where it was read: one copy of the
+    /// bytes between the read and the socket.
+    Output(OutputFrame),
     /// The terminal state, replacing everything tapped before it.
     Checkpoint {
         /// The session it is of.
@@ -658,6 +655,16 @@ struct Input {
     ends: VecDeque<(u64, Origin)>,
 }
 
+/// Input waiting for the PTY is held to this: a program that stops reading (a stopped job, a
+/// hung TUI) would otherwise have a looping paste or a script's input grow the queue without
+/// bound. Several full pastes of a large file fit.
+const INPUT_MAX_BYTES: usize = 16 << 20;
+
+/// Input refused because [`INPUT_MAX_BYTES`] already wait for the program.
+#[derive(Debug, thiserror::Error)]
+#[error("the terminal's program is not reading its input; {} MiB are waiting already", INPUT_MAX_BYTES >> 20)]
+struct InputFull;
+
 /// Where one keystroke is on its way through the actor, for the trace that takes the echo
 /// round trip apart (MEASUREMENTS.md, "the keystroke path, stage by stage"). Three stamps at
 /// trace level and nothing else: the cost when tracing is off is two `Option` writes.
@@ -745,9 +752,9 @@ const CHECKPOINT_AFTER: Duration = Duration::from_millis(500);
 /// A checkpoint is also taken once this many bytes were tapped since the last one, so ptyd's
 /// ring (4 MiB by default) never overflows under a flood and the replay stays bounded.
 const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
-/// Larger states are not sent: the ptyd frame codec caps a frame, and a state this size means
-/// a history far past any configured scrollback.
-const CHECKPOINT_MAX_BYTES: usize = 12 << 20;
+/// Larger states are not sent: ptyd hands the state and its ring over in one frame, and a
+/// state this size means a history far past any configured scrollback.
+const CHECKPOINT_MAX_BYTES: usize = slopty_pty::protocol::MAX_CHECKPOINT_BYTES;
 
 /// When the frame for output that arrived at `now` should go out: now, or at the end of the
 /// previous frame's `MIN_FRAME_INTERVAL` if that is later.
@@ -845,6 +852,7 @@ impl Actor {
         // The replay answered nothing yet: take its title and cwd, then checkpoint at once.
         // ptyd handed us its ring with the master, so until this lands another restart would
         // have nothing but the previous checkpoint.
+        self.read_line_discipline();
         self.after_output();
         self.checkpoint(true);
         loop {
@@ -914,6 +922,7 @@ impl Actor {
             tracing::trace!(session = %self.id, n = bytes.len(), bytes = %shown.escape_debug(), "pty read");
         }
         self.engine.write(bytes);
+        self.read_line_discipline();
         self.hint_ports(bytes);
         self.tap_output(bytes);
         self.after_output();
@@ -935,6 +944,21 @@ impl Actor {
             self.flush_frame();
         } else if self.frame_due.is_none() {
             self.frame_due = Some(due);
+        }
+    }
+
+    /// Tell the engine whether the tty echoes and edits lines now, so the next frame's modes
+    /// say so and a client never draws a guess at a password. A program changes them (`stty
+    /// -echo`) before it prints the prompt they are for, so reading them after each read of its
+    /// output is in time: one `tcgetattr`, about a microsecond (MEASUREMENTS.md, "the line
+    /// discipline per read").
+    fn read_line_discipline(&mut self) {
+        match self.master.line_discipline() {
+            Ok(d) => self.engine.set_line_discipline(slopty_engine::LineDiscipline {
+                echo: d.echo,
+                canonical: d.canonical,
+            }),
+            Err(e) => tracing::debug!(session = %self.id, error = %e, "line discipline unread"),
         }
     }
 
@@ -983,7 +1007,11 @@ impl Actor {
         self.boundary.feed(bytes);
         if !self.tap_lost {
             self.tapped_since_checkpoint = self.tapped_since_checkpoint.saturating_add(bytes.len());
-            if let Err(e) = self.tap.try_send(Tap::Output { id: self.id, bytes: bytes.to_vec() }) {
+            let sent = match OutputFrame::new(self.id, bytes) {
+                Ok(frame) => self.tap.try_send(Tap::Output(frame)).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            if let Err(e) = sent {
                 // Full or gone: the ring has a hole. The next checkpoint replaces the ring, so
                 // pull it forward rather than leaving a replay that would misparse mid-sequence.
                 tracing::warn!(session = %self.id, error = %e, "output tap dropped; checkpointing early");
@@ -1064,7 +1092,10 @@ impl Actor {
     fn after_output(&mut self) {
         for ev in self.engine.drain_events() {
             match ev {
-                EngineEvent::PtyWrite(bytes) => self.queue_input(&bytes, Origin::Engine),
+                // An answer to a query the program will not read is lost with nobody to tell.
+                EngineEvent::PtyWrite(bytes) => {
+                    let _refused = self.queue_input(&bytes, Origin::Engine);
+                }
                 EngineEvent::Bell => self.broadcast(&TermEvent::Bell),
                 EngineEvent::Colors(colors) => {
                     self.program_colors = colors.clone();
@@ -1098,15 +1129,26 @@ impl Actor {
     }
 
     /// Queue bytes for the PTY behind whatever is still waiting, and write what fits now. A
-    /// key sequence number they carry is acknowledged once they are all written.
-    fn queue_input(&mut self, bytes: &[u8], origin: Origin) {
+    /// key sequence number they carry is acknowledged once they are all written. Bytes that
+    /// would take the queue past [`INPUT_MAX_BYTES`] are refused whole.
+    fn queue_input(&mut self, bytes: &[u8], origin: Origin) -> Result<(), InputFull> {
         if bytes.is_empty() || self.pty_closed {
-            return;
+            return Ok(());
+        }
+        if self.input.pending.len().saturating_add(bytes.len()) > INPUT_MAX_BYTES {
+            tracing::warn!(
+                session = %self.id,
+                bytes = bytes.len(),
+                queued = self.input.pending.len(),
+                "input refused: the program is not reading"
+            );
+            return Err(InputFull);
         }
         self.input.pending.extend_from_slice(bytes);
         self.input.queued = self.input.queued.saturating_add(bytes.len() as u64);
         self.input.ends.push_back((self.input.queued, origin));
         self.write_input();
+        Ok(())
     }
 
     /// Write as much of the queued input as the tty takes without waiting.
@@ -1707,9 +1749,11 @@ impl Actor {
                 Ok(())
             }
         };
-        match result {
-            Ok(()) => self.queue_input(&bytes, Origin::Viewer { key }),
-            Err(e) => self.send_to(client, &TermEvent::Error(e.to_string())),
+        let queued = result.map_err(|e| e.to_string()).and_then(|()| {
+            self.queue_input(&bytes, Origin::Viewer { key }).map_err(|full| full.to_string())
+        });
+        if let Err(e) = queued {
+            self.send_to(client, &TermEvent::Error(e));
         }
     }
 }

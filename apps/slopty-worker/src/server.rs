@@ -4,15 +4,15 @@
 //! The link is one task beside everything else the daemon does. Terminals and clients never
 //! wait on it: it hears the daemon's events on its own broadcast subscription (falling behind
 //! costs only this link a re-registration), answers every request in a task of its own (a
-//! long `WaitFor` holds up nothing), and when the server is down it dials again with capped
-//! backoff, forever.
+//! long `WaitFor` holds up nothing), and when the server is down it dials again by the one
+//! redial rule every link follows ([`slopty_net::redial`]), forever.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use slopty_core::SessionId;
 use slopty_net::framed::FramedSend;
+use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink};
 use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
@@ -26,15 +26,6 @@ use tokio::task::JoinSet;
 
 use crate::Daemon;
 
-/// First wait before dialing again, doubled after each failure up to [`MAX_BACKOFF`].
-const MIN_BACKOFF: Duration = Duration::from_millis(250);
-/// Longest wait between dials: a server that comes back is found within this.
-const MAX_BACKOFF: Duration = Duration::from_secs(5);
-/// A link that lived this long was healthy: the next dial starts from [`MIN_BACKOFF`] again.
-const HEALTHY: Duration = Duration::from_secs(10);
-/// Between dials while the server still holds this worker's previous connection (a restart
-/// inside the lease's idle timeout): it lets go within the timeout, so the retry is steady.
-const DUPLICATE_RETRY: Duration = Duration::from_secs(1);
 /// Messages queued for the server before the link applies backpressure to itself.
 const OUT_DEPTH: usize = 256;
 
@@ -77,31 +68,22 @@ pub async fn run(
     addr: HostAddr,
     caps: watch::Receiver<WorkerCaps>,
 ) -> ! {
-    let mut backoff = MIN_BACKOFF;
+    let mut redial = Redial::default();
     loop {
-        let started = tokio::time::Instant::now();
-        let ended = session(&daemon, &orchestrator, &endpoint, &addr, caps.clone()).await;
-        if started.elapsed() >= HEALTHY {
-            backoff = MIN_BACKOFF;
-        }
-        let wait = match ended {
-            Ok(why) => {
-                tracing::info!(server = %addr, why, "server link ended");
-                backoff
-            }
+        let ended =
+            session(&daemon, &orchestrator, &endpoint, &addr, caps.clone(), &mut redial).await;
+        match ended {
+            Ok(why) => tracing::info!(server = %addr, why, "server link ended"),
+            // It lets go of that link within the lease's idle timeout; the redials, two
+            // seconds apart at most, find it gone.
             Err(Ended::Duplicate) => {
                 tracing::info!(server = %addr, "the server still holds our last link; retrying");
-                DUPLICATE_RETRY
             }
             Err(Ended::Failed(e)) => {
                 tracing::info!(server = %addr, error = %e, "server link failed");
-                backoff
             }
-        };
-        tokio::time::sleep(wait).await;
-        if wait == backoff {
-            backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
         }
+        tokio::time::sleep(redial.next(std::time::Instant::now())).await;
     }
 }
 
@@ -127,6 +109,7 @@ async fn session(
     endpoint: &slopty_net::Endpoint,
     addr: &HostAddr,
     mut caps: watch::Receiver<WorkerCaps>,
+    redial: &mut Redial,
 ) -> Result<&'static str, Ended> {
     // Subscribed before the registration is taken: whatever happens after it is sent after it.
     let mut events = daemon.events.subscribe();
@@ -144,6 +127,7 @@ async fn session(
         Err(DialError::Net(e)) => return Err(e.into()),
     };
     let ServerLink { conn, remote, name, tx, mut rx } = link;
+    redial.linked(std::time::Instant::now());
     tracing::info!(server = %name, %remote, "registered with the server");
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
     let mut writer = tokio::spawn(write(tx, out_rx));

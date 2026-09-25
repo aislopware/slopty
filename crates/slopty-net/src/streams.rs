@@ -117,8 +117,17 @@ pub async fn open_bulk(conn: &Connection, header: BulkHeader) -> Result<SendStre
 }
 
 /// Accept the next unidirectional stream the peer opens and read its header.
+///
+/// The header may be lost and retransmitted; an accept loop that must not wait on one stream's
+/// loss for the next accepts with [`Connection::accept_uni`] and reads each header with
+/// [`read_uni`] on a task of its own.
 pub async fn accept_uni(conn: &Connection) -> Result<Uni, NetError> {
     let recv = conn.accept_uni().await.map_err(|e| NetError::stream(&e))?;
+    read_uni(recv).await
+}
+
+/// Read the header of a unidirectional stream the peer opened.
+pub async fn read_uni(recv: RecvStream) -> Result<Uni, NetError> {
     let mut head = FramedRecv::<UniHead>::new(recv);
     Ok(match head.recv().await? {
         UniHead::Session { session } => Uni::Session { session, rx: head.retype() },
@@ -135,12 +144,22 @@ pub async fn open_tunnel(conn: &Connection, port: u16) -> Result<(SendStream, Ra
     Ok((head.into_inner(), RawRecv::new(BytesMut::new(), recv)))
 }
 
-/// Worker: accept the next tunnel a client opens (every bidirectional stream after the control
-/// stream is one), and put its send half at [`TUNNEL_PRIORITY`].
+/// Worker: accept the next tunnel a client opens and read the port it asks for.
+///
+/// Every bidirectional stream after the control stream is one. As with [`accept_uni`], an
+/// accept loop reads each header with [`read_tunnel`] on a task of its own.
 pub async fn accept_tunnel(
     conn: &Connection,
 ) -> Result<(TunnelOpen, SendStream, RawRecv), NetError> {
     let (send, recv) = conn.accept_bi().await.map_err(|e| NetError::stream(&e))?;
+    read_tunnel(send, recv).await
+}
+
+/// Worker: put a tunnel's send half at [`TUNNEL_PRIORITY`] and read the port it asks for.
+pub async fn read_tunnel(
+    send: SendStream,
+    recv: RecvStream,
+) -> Result<(TunnelOpen, SendStream, RawRecv), NetError> {
     send.set_priority(TUNNEL_PRIORITY).map_err(|e| NetError::stream(&e))?;
     let mut head = FramedRecv::<TunnelOpen>::new(recv);
     let open = head.recv().await?;

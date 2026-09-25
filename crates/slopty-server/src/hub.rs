@@ -404,6 +404,9 @@ impl Hub {
             Ok(pending) => pending,
             Err(outcome) => return outcome,
         };
+        // However this call ends, answered, timed out or dropped by its caller mid-wait, the
+        // request stops waiting on the link.
+        let _pending = Pending { hub: self, worker, generation, id };
         if tx.send(FromServer::Request { id, verb }).await.is_err() {
             return error(ErrorCode::WorkerUnreachable, "the worker's link closed");
         }
@@ -413,11 +416,15 @@ impl Hub {
                 ErrorCode::WorkerUnreachable,
                 "the worker disconnected before it answered; it may have done the work",
             ),
-            Err(_elapsed) => {
-                self.forget(worker, generation, id);
-                error(ErrorCode::Failed, "the worker did not answer in time")
-            }
+            Err(_elapsed) => error(ErrorCode::Failed, "the worker did not answer in time"),
         }
+    }
+
+    /// Requests waiting on `worker`'s link.
+    #[cfg(test)]
+    fn pending(&self, worker: WorkerId) -> usize {
+        let state = self.inner.state.lock();
+        state.workers.get(&worker).and_then(|e| e.link.as_ref()).map_or(0, |l| l.pending.len())
     }
 
     /// A new request id pending on `worker`'s link, with the link's generation, its queue and
@@ -628,6 +635,20 @@ impl Lease {
         }
         // Announced under the lock, so every link hears changes in the order they were made.
         drop(state);
+    }
+}
+
+/// A forwarded request's place on its link, given up when the forward ends.
+struct Pending<'h> {
+    hub: &'h Hub,
+    worker: WorkerId,
+    generation: u64,
+    id: RequestId,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.hub.forget(self.worker, self.generation, self.id);
     }
 }
 
@@ -879,6 +900,29 @@ pub(crate) mod tests {
             matches!(offline, Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }),
             "{offline:?}"
         );
+    }
+
+    /// A caller that gives up on a forwarded verb (an MCP client that went away) takes its
+    /// request off the link, so a lease that lives for weeks does not collect them.
+    #[tokio::test]
+    async fn a_forward_its_caller_dropped_leaves_nothing_pending() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        let term = TermRef { worker, session: SessionId::new() };
+        let asked = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.dispatch(Verb::ReadScreen { term }).await }
+        });
+        let Some(FromServer::Request { id, .. }) = rx.recv().await else { panic!("no request") };
+        assert_eq!(hub.pending(worker), 1);
+        asked.abort();
+        assert!(asked.await.unwrap_err().is_cancelled());
+        assert_eq!(hub.pending(worker), 0, "the dropped call took its request with it");
+        // The worker's late answer is to nothing, and harmless.
+        lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
+        assert_eq!(hub.pending(worker), 0);
     }
 
     #[tokio::test(start_paused = true)]

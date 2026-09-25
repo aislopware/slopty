@@ -17,10 +17,12 @@
 //! - `AgentNeedsInput` holds at once when the agent is blocked on a human, else at the next report
 //!   of it blocked, idle at its prompt or done with its turn. An agent already idle when the call
 //!   starts counts only once it reports again: the caller has usually just typed to it, and its
-//!   idle status is the one from before.
+//!   idle status is the one from before. A wait that fell behind the broadcast reads the status the
+//!   reports it missed left in the table, and holds if that one needs input.
 //!
 //! Every condition but `Exit` ends as [`Waited::Closed`] when the program exits first.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use slopty_engine::ghostty::Position;
@@ -30,16 +32,22 @@ use slopty_proto::orchestration::{ErrorCode, Line, WaitUntil, Waited};
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
 
-use super::Failure;
+use super::{Agents, Failure};
 use crate::session::{Activity, Read, SessionHandle, Text};
 
-/// The agent side of a wait: the status when the call started and the events after it.
-#[derive(Debug)]
+/// The agent side of a wait: the events after the call started, and the table they come from.
 pub struct AgentFeed {
     /// The daemon's broadcast, subscribed when the call started.
     pub events: broadcast::Receiver<WorkerMsg>,
-    /// The agent's status then, if one runs.
-    pub now: Option<AgentStatus>,
+    /// The daemon's agent table: the status when the call starts, and again whenever the
+    /// broadcast lagged past events the wait may have needed.
+    pub agents: Arc<dyn Agents>,
+}
+
+impl std::fmt::Debug for AgentFeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentFeed").field("events", &self.events).finish_non_exhaustive()
+    }
 }
 
 /// What woke a waiter.
@@ -217,17 +225,25 @@ async fn agent_input(
     activity: &mut watch::Receiver<Activity>,
     deadline: Instant,
 ) -> Result<Waited, Failure> {
-    if matches!(feed.now, Some(AgentStatus::Blocked(_))) {
+    let session = handle.id();
+    let status = |agents: &dyn Agents| agents.status(session).map(|a| a.status);
+    if matches!(status(&*feed.agents), Some(AgentStatus::Blocked(_))) {
         return Ok(Waited::Met { line: None });
     }
-    let session = handle.id();
     loop {
         tokio::select! {
             ev = feed.events.recv() => match ev {
                 Ok(WorkerMsg::Agent(ev)) if ev.session == session && needs_input(&ev.status) => {
                     return Ok(Waited::Met { line: None });
                 }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                // The report the wait is for may be among the ones missed: the table has
+                // the status they left behind.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if status(&*feed.agents).is_some_and(|s| needs_input(&s)) {
+                        return Ok(Waited::Met { line: None });
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => return Ok(Waited::Closed),
             },
             wake = changed(activity, deadline) => match wake {

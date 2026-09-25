@@ -4908,3 +4908,63 @@ cargo nextest run -p slopty-engine --release --run-ignored only \
 ```
 
 Logs: `target/logs/term-bench-before.log`, `target/logs/term-bench-after.log` (one run each).
+
+## 2026-09-26 — the ptyd tap, framed once
+
+mac-studio (M1 Max), release build, while other builds ran on the machine (the spread below is
+theirs). Each read the session actor takes from a master is copied to ptyd (the tap), and now
+and then the whole terminal state follows (the checkpoint). Before: the actor copied the read
+into a `Vec`, the tap task copied it into the frame, and serde wrote a `Vec<u8>` one call per
+byte, both ways. After: the actor builds the frame where it read (`OutputFrame::new`), and
+every byte field of the ptyd protocol is a byte string, the same bytes on the wire
+(`byte_strings_keep_the_wire_of_a_sequence_of_bytes`, `the_borrowed_output_frame_is_the_requests_frame`).
+
+```sh
+cargo nextest run -p slopty-pty -p slopty-ptyd --release --run-ignored only \
+  -E 'test(tap_copy_cost) | test(checkpoint_transfer_cost) | test(line_discipline_cost)' --no-capture
+```
+
+| | before | after (3 runs) |
+| --- | --- | --- |
+| one 64 KiB read made a tap frame, on the actor's thread | 213, 83, 72 µs (copied, then per byte) | **5.4, 3.7, 1.2 µs** (framed once) |
+| 4 MiB `Checkpoint` to ptyd, then `List`, p50 | 14 / 11 / 18 ms (2026-09-06 entry above) | **0.97 / 0.81 / 0.97 ms** |
+| same, max of 20 | 87 / 38 / 138 ms | 2.6 / 2.6 / 2.7 ms |
+| `tcgetattr` on a master, per read (new) | — | 282, 283, 284 ns |
+
+The per-byte encoding was the cost, not the copies: about 1.5 ms per MiB. A flood of 64 KiB
+reads spent more time building taps than feeding the engine. The last row is the price of the
+line discipline the actor now reads after every read (`docs/decisions/terminal.md`, "The frames
+say when the tty stops echoing"): one syscall, well under a microsecond.
+
+## 2026-09-26 — encoder sessions off the runtime
+
+mac-studio (M1 Max), release build, busy machine. A window stream builds a VideoToolbox session
+when it opens, on every quality change that is not a bitrate alone, and when its window is
+resized; the old session is invalidated in the swap. All three ran on the stream's task, on a
+runtime worker thread, and held that thread for the whole build. They now run on the blocking
+pool (`build_encoder`, `retire` in `crates/slopty-worker/src/screen.rs`). One build and drop of
+a 3024 × 1964 HEVC session, twenty times each way:
+
+```sh
+cargo nextest run -p slopty-worker --release --test screen --run-ignored only \
+  -E 'test(encoder_build_stall)' --no-capture
+```
+
+| runtime thread held per build | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| built on it, p50 / max | 3.5 / 42 ms | 4.3 / 5.1 ms | 3.7 / 4.3 ms |
+| built on the blocking pool, p50 / max | **3 / 24 µs** | **3 / 38 µs** | **2 / 40 µs** |
+
+A worker thread held for 4 ms is every task queued behind it held too: another client's session
+pump, a heartbeat, a receiver report.
+
+## 2026-09-26 — an echo copy too large for the path is not built
+
+A datagram copy of an echo frame (`slopty_net::echo`) was built for every echo frame: the frame
+copied into a new datagram, a task spawned, a 2 ms timer, and only then the check that the path
+carries a datagram that large, which a screenful redraw never passes. The worker now checks the
+least the copy can be (media header plus the frame) against `max_datagram_size` before it builds
+anything (`copy_frame` in `apps/slopty-worker/src/conn.rs`). Per echo frame over the path's
+limit (about 1.2 kB): one allocation and copy of the frame, one task and one timer before; none
+after. Nothing changes for a frame that fits. No bench: the saving is the work removed, counted
+above.

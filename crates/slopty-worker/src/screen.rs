@@ -1319,13 +1319,18 @@ impl<P: Platform> Shared<P> {
     /// session with the old one's requests, and none of the new session's packets can be filed
     /// in the old book. The old session is invalidated in the swap, which ends its callbacks,
     /// so none of its packets lands after the reset either. The held capture is the old size.
-    fn install(&self, encoder: P::Video) {
+    ///
+    /// Returns the old session for the caller to drop off the runtime: invalidating it waits for
+    /// its callbacks to finish.
+    #[must_use = "the old session is dropped off the runtime"]
+    fn install(&self, encoder: P::Video) -> Option<P::Video> {
         let mut slot = self.encoder.write();
-        *slot = Some(encoder);
+        let old = slot.replace(encoder);
         self.rebuilt();
         drop(slot);
         // Outside the write lock: an encode takes the held capture's lock before the encoder's.
         self.forget_held();
+        old
     }
 
     /// A new encoder session replaced the old one: its references, the acknowledgements still
@@ -1937,17 +1942,29 @@ const fn send_ms_lo(now_us: u64) -> u8 {
     lo
 }
 
-/// Build an encoder whose packets flow back into `shared`.
-fn build_encoder<P: Platform>(
+/// Build an encoder whose packets flow back into `shared`, on the blocking pool: creating a
+/// VideoToolbox session holds the calling thread for milliseconds, which on a runtime worker
+/// holds up every task queued behind it (MEASUREMENTS.md, "encoder sessions off the runtime").
+async fn build_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
-) -> Result<P::Video, CodecError> {
+) -> Result<P::Video, ScreenError> {
     let weak = Weak::clone(shared);
-    P::Video::new(config, move |packet| {
-        if let Some(shared) = weak.upgrade() {
-            shared.on_packet(&packet);
-        }
-    })
+    let build = move || {
+        P::Video::new(config, move |packet| {
+            if let Some(shared) = weak.upgrade() {
+                shared.on_packet(&packet);
+            }
+        })
+    };
+    Ok(tokio::task::spawn_blocking(build).await.map_err(|_cancelled| ScreenError::Closed)??)
+}
+
+/// Drop a replaced encoder session on the blocking pool ([`Shared::install`]).
+fn retire<V: Send + 'static>(old: Option<V>) {
+    if let Some(old) = old {
+        drop(tokio::task::spawn_blocking(move || drop(old)));
+    }
 }
 
 /// How a window target is served by ScreenCaptureKit.
@@ -2298,17 +2315,16 @@ impl<P: Platform> Pipeline<P> {
     /// ([`warm_up`]).
     pub async fn warm_up() -> Result<Duration, ScreenError> {
         let started = Instant::now();
-        let encoder = P::Video::new(
-            EncoderConfig {
-                width: 64,
-                height: 64,
-                codec: VideoCodec::Hevc,
-                fps: 1,
-                bitrate_bps: 100_000,
-            },
-            |_packet| {},
-        )?;
-        drop(encoder);
+        let config = EncoderConfig {
+            width: 64,
+            height: 64,
+            codec: VideoCodec::Hevc,
+            fps: 1,
+            bitrate_bps: 100_000,
+        };
+        tokio::task::spawn_blocking(move || P::Video::new(config, |_packet| {}).map(drop))
+            .await
+            .map_err(|_cancelled| ScreenError::Closed)??;
         let content = Self::shareable().await?;
         let display =
             Source::<P>::displays(&content).into_iter().next().ok_or(ScreenError::Closed)?;
@@ -2399,9 +2415,9 @@ impl<P: Platform> Pipeline<P> {
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
         shared.zoom.store(zoom.to_bits(), Ordering::Relaxed);
         let t_encoder = Instant::now();
-        let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config)?;
+        let encoder = build_encoder(&Arc::downgrade(&shared), encoder_config).await?;
         let encoder_built = t_encoder.elapsed();
-        shared.install(encoder);
+        retire(shared.install(encoder));
         let start = shared.rate.lock().target_bps();
         shared.apply_bitrate(start);
         shared.apply_cadence(start);
@@ -2526,7 +2542,7 @@ impl<P: Platform> Pipeline<P> {
 
     /// Change quality. A size, rate or codec change rebuilds the encoder and reconfigures the
     /// capture; a bitrate-only change is applied in place, cadence included.
-    pub fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
+    pub async fn set_quality(&mut self, quality: &Quality) -> Result<(), ScreenError> {
         self.quality = *quality;
         let (capture_config, encoder_config) = configs(self.native, quality);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
@@ -2545,7 +2561,7 @@ impl<P: Platform> Pipeline<P> {
             }
             return Ok(());
         }
-        self.reconfigure(desired, encoder_config)
+        self.reconfigure(desired, encoder_config).await
     }
 
     /// Follow the target: a window the user resized on the worker gets a stream of its new
@@ -2557,7 +2573,10 @@ impl<P: Platform> Pipeline<P> {
     ///
     /// The probe's bounds are also what the input sink maps the pointer through from here on,
     /// so input never reads them in front of an event.
-    pub fn check_geometry(&mut self, probe: &Probe) -> Result<Option<ScreenEvent>, ScreenError> {
+    pub async fn check_geometry(
+        &mut self,
+        probe: &Probe,
+    ) -> Result<Option<ScreenEvent>, ScreenError> {
         self.injector.set_bounds(probe.bounds, probe.at);
         let Some(rect) = probe.bounds else {
             self.window_gone();
@@ -2578,7 +2597,7 @@ impl<P: Platform> Pipeline<P> {
         self.native = native;
         let (capture_config, encoder_config) = configs(native, &self.quality);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
-        self.reconfigure(desired, encoder_config)?;
+        self.reconfigure(desired, encoder_config).await?;
         Ok(Some(ScreenEvent::Geometry {
             stream: self.id,
             width: self.desired.width,
@@ -2774,14 +2793,14 @@ impl<P: Platform> Pipeline<P> {
 
     /// Rebuild the encoder for a new size, rate or codec and ask the capture for `desired`.
     /// The new session's long-term references start from nothing ([`Shared::rebuilt`]).
-    fn reconfigure(
+    async fn reconfigure(
         &mut self,
         desired: CaptureConfig,
         encoder_config: EncoderConfig,
     ) -> Result<(), ScreenError> {
         let weak = Arc::downgrade(&self.shared);
-        let encoder = build_encoder(&weak, encoder_config)?;
-        self.shared.install(encoder);
+        let encoder = build_encoder(&weak, encoder_config).await?;
+        retire(self.shared.install(encoder));
         let target = {
             let mut rate = self.shared.rate.lock();
             rate.set_max(encoder_config.bitrate_bps);
@@ -4306,7 +4325,7 @@ mod tests {
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
-        shared.install(Recorder { session: 1, log: Arc::clone(&log) });
+        let _none = shared.install(Recorder { session: 1, log: Arc::clone(&log) });
         shared.pending.lock().keyframe = false;
         *shared.held.lock() = Some(a_frame());
         shared.owed.store(true, Ordering::Relaxed);
@@ -4315,7 +4334,7 @@ mod tests {
         let rebuild = std::thread::spawn({
             let shared = Arc::clone(&shared);
             let log = Arc::clone(&log);
-            move || shared.install(Recorder { session: 2, log })
+            move || drop(shared.install(Recorder { session: 2, log }))
         });
         let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
         let swapping = || {

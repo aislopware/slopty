@@ -19,7 +19,7 @@ pub mod shell_integration;
 pub mod terminfo;
 
 pub use client::PtydClient;
-pub use pty::{Pty, PtyMaster, SpawnSpec};
+pub use pty::{LineDiscipline, Pty, PtyMaster, SpawnSpec};
 pub use ring::Ring;
 
 /// PTY errors.

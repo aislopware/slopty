@@ -35,7 +35,9 @@ pub struct ClipData {
 }
 
 /// Accept the client's unidirectional streams until the connection ends: files are written
-/// where their transfer says, clipboard data goes to the connection's loop on `clips`.
+/// where their transfer says, clipboard data goes to the connection's loop on `clips`. Each
+/// header is read on the stream's own task: one whose header was lost holds up no stream opened
+/// after it.
 pub async fn accept(
     daemon: Daemon,
     conn: Connection,
@@ -44,38 +46,47 @@ pub async fn accept(
     clips: mpsc::Sender<ClipData>,
 ) {
     loop {
-        let uni = match streams::accept_uni(&conn).await {
-            Ok(uni) => uni,
+        let recv = match conn.accept_uni().await {
+            Ok(recv) => recv,
             Err(e) => {
-                if conn.close_reason().is_some() {
-                    break;
-                }
-                tracing::debug!(%client, error = %e, "unidirectional stream refused");
-                continue;
+                tracing::debug!(%client, error = %e, "unidirectional streams end");
+                break;
             }
         };
-        match uni {
-            Uni::Session { session, .. } => {
-                tracing::debug!(%client, %session, "a client opened a session stream; ignored");
+        let (daemon, out, clips) = (daemon.clone(), out.clone(), clips.clone());
+        drop(tokio::spawn(async move {
+            match streams::read_uni(recv).await {
+                Ok(uni) => take(daemon, client, uni, out, clips).await,
+                Err(e) => tracing::debug!(%client, error = %e, "unidirectional stream refused"),
             }
-            Uni::Bulk { header, mut rx } => match header.purpose.clone() {
-                Purpose::Upload => {
-                    drop(tokio::spawn(receive(daemon.clone(), header, rx, out.clone())));
-                }
-                Purpose::Clip { generation, uti } => {
-                    let clips = clips.clone();
-                    drop(tokio::spawn(async move {
-                        if let Some(bytes) = read_clip(&header, &mut rx).await {
-                            let _sent = clips.send(ClipData { generation, uti, bytes }).await;
-                        }
-                    }));
-                }
-                Purpose::Download => {
-                    tracing::debug!(%client, "a download sent up; refused");
-                    rx.stop();
-                }
-            },
+        }));
+    }
+}
+
+/// Serve one unidirectional stream whose header has been read.
+async fn take(
+    daemon: Daemon,
+    client: ClientId,
+    uni: Uni,
+    out: mpsc::Sender<WorkerMsg>,
+    clips: mpsc::Sender<ClipData>,
+) {
+    match uni {
+        Uni::Session { session, .. } => {
+            tracing::debug!(%client, %session, "a client opened a session stream; ignored");
         }
+        Uni::Bulk { header, mut rx } => match header.purpose.clone() {
+            Purpose::Upload => receive(daemon, header, rx, out).await,
+            Purpose::Clip { generation, uti } => {
+                if let Some(bytes) = read_clip(&header, &mut rx).await {
+                    let _sent = clips.send(ClipData { generation, uti, bytes }).await;
+                }
+            }
+            Purpose::Download => {
+                tracing::debug!(%client, "a download sent up; refused");
+                rx.stop();
+            }
+        },
     }
 }
 

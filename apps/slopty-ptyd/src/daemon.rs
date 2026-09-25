@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use slopty_core::SessionId;
 use slopty_proto::codec;
 use slopty_pty::fdpass;
-use slopty_pty::protocol::{PtydEvent, PtydRequest};
+use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, PtydEvent, PtydRequest};
 use slopty_pty::shell_integration::ShellIntegration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
@@ -126,6 +126,21 @@ struct Connection {
     greeted: bool,
 }
 
+/// Whatever a connection held goes back to ptyd's care when it goes, however it went: the
+/// worker hung up, died mid-reply, or sent a frame that does not decode. A session left claimed
+/// would refuse every later attach, and one left paused would stop draining its child.
+impl Drop for Connection {
+    fn drop(&mut self) {
+        for id in std::mem::take(&mut self.attached) {
+            let session = self.state.sessions.lock().get(&id).cloned();
+            if let Some(s) = session {
+                *s.attached_by.lock() = None;
+                s.resume_reader();
+            }
+        }
+    }
+}
+
 impl Connection {
     fn new(id: u64, stream: UnixStream, state: Arc<State>) -> Self {
         Self {
@@ -138,28 +153,20 @@ impl Connection {
         }
     }
 
+    /// Serve until the worker hangs up or the connection fails. However it ends, dropping the
+    /// connection hands back what it held (see its `Drop`).
     async fn serve(mut self) -> Result<()> {
         let mut events = self.state.events.subscribe();
-        let result = loop {
+        loop {
             tokio::select! {
                 read = self.inbox.recv(&self.stream) => {
-                    match read {
-                        Ok(0) => break Ok(()),
-                        Ok(_) => {}
-                        Err(e) => break Err(e.into()),
+                    if read? == 0 {
+                        return Ok(());
                     }
                     // Stray fds from a client are closed on drop; we never expect any.
                     self.inbox.close_fds();
-                    loop {
-                        let req = match self.inbox.decode::<PtydRequest>() {
-                            Ok(Some(req)) => req,
-                            Ok(None) => break,
-                            Err(e) => return Err(e.into()),
-                        };
-                        if let Err(e) = self.handle(req).await {
-                            tracing::debug!(conn = self.id, error = %e, "request failed");
-                            return Err(e);
-                        }
+                    while let Some(req) = self.inbox.decode::<PtydRequest>()? {
+                        self.handle(req).await?;
                     }
                 }
                 ev = events.recv() => match ev {
@@ -169,19 +176,10 @@ impl Connection {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(conn = self.id, lagged = n, "event stream lagged");
                     }
-                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 },
             }
-        };
-        // Whatever we held goes back to ptyd's care.
-        for id in std::mem::take(&mut self.attached) {
-            let session = self.state.sessions.lock().get(&id).cloned();
-            if let Some(s) = session {
-                *s.attached_by.lock() = None;
-                s.resume_reader();
-            }
         }
-        result
     }
 
     async fn reply(&self, ev: &PtydEvent, fd: Option<std::os::fd::BorrowedFd<'_>>) -> Result<()> {
@@ -247,8 +245,10 @@ impl Connection {
                 if !claimed {
                     return self.error(Some(id), "attached by another connection").await;
                 }
-                let (backlog, dropped) = session.pause_reader().await;
+                // Held from the claim on, so the connection's drop lets go of it whatever
+                // happens from here.
                 self.attached.insert(id);
+                let (backlog, dropped) = session.pause_reader().await;
                 let size = *session.size.lock();
                 let checkpoint = session.checkpoint.lock().clone();
                 let ev = PtydEvent::Attached { id, checkpoint, backlog, dropped, size };
@@ -267,6 +267,12 @@ impl Connection {
                 Ok(())
             }
             PtydRequest::Checkpoint { id, state } => {
+                if state.len() > MAX_CHECKPOINT_BYTES {
+                    // It and the backlog would not fit the next `Attached`; the ring keeps
+                    // everything since the checkpoint that did.
+                    tracing::warn!(session = %id, bytes = state.len(), "checkpoint too large; ignored");
+                    return Ok(());
+                }
                 if let Some(session) = self.session(id)
                     && *session.attached_by.lock() == Some(self.id)
                 {

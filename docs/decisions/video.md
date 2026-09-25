@@ -1061,3 +1061,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and raised the rate the slice is sized from. `Shared::send` now returns what the transport
   took (`Taken`), and both the lane and the straight path add only those bytes. Test:
   `a_refused_datagram_is_not_counted_as_sent`.
+
+- ✅ **Encoder sessions are built and dropped off the runtime** (2026-09-26). A stream built its
+  VideoToolbox session on its own task, on a runtime worker thread: at open, at a quality
+  change that is more than a bitrate, and when its window is resized. The swap also
+  invalidated the old session there, which waits for its callbacks. Each held the thread for
+  3.5 to 4.3 ms at the median, 42 ms at worst, and everything queued behind it waited too. Both
+  now run on the blocking pool (`build_encoder`, `retire`), so `set_quality` and
+  `check_geometry` are async, and the thread is held for 2 to 3 µs (MEASUREMENTS, "encoder
+  sessions off the runtime").

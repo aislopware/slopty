@@ -66,9 +66,8 @@ async fn dispatch(daemon: &Daemon, req: CtlRequest) -> CtlReply {
             post_events: slopty_input::can_post(),
             listen: daemon.listen.to_string(),
             allow: daemon.listener.admission().ranges().iter().map(ToString::to_string).collect(),
-            // Every connection subscribes to the event broadcast, plus the daemon's own keep.
-            clients: daemon.events.receiver_count().saturating_sub(1),
-            sessions: daemon.worker.summaries().await.len(),
+            clients: daemon.wake.lock().counts().0,
+            sessions: daemon.worker.session_count(),
             uptime_secs: daemon.started_at.elapsed().as_secs(),
         }),
         CtlRequest::Screens => {

@@ -198,7 +198,7 @@ impl Orchestrator {
                 let handle = self.session(term)?;
                 let feed = matches!(until, WaitUntil::AgentNeedsInput).then(|| AgentFeed {
                     events: inner.events.subscribe(),
-                    now: inner.worker.agents().status(term.session).map(|a| a.status),
+                    agents: inner.worker.shared_agents(),
                 });
                 let timeout = Duration::from_millis(u64::from(timeout_ms));
                 Ok(Outcome::Waited(wait_for(&handle, &until, timeout, feed).await?))
@@ -318,8 +318,8 @@ impl Orchestrator {
         let handle = self.open(&req, ORCHESTRATOR).await?;
         let session = handle.id();
         if let Some(prompt) = prompt {
-            let now = self.inner.worker.agents().status(session).map(|a| a.status);
-            tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, now }));
+            let agents = self.inner.worker.shared_agents();
+            tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, agents }));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
     }
@@ -415,7 +415,12 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
                 {
                     return;
                 }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if feed.agents.status(session).is_some_and(|a| ready(&a.status, a.source)) {
+                        return;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => return,
             }
         }

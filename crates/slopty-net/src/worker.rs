@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use noq::{Connection, Endpoint};
 use slopty_proto::handshake::Hello;
@@ -12,9 +11,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::NetError;
 use crate::admission::Admission;
 use crate::framed::{FramedRecv, FramedSend};
-
-/// How long a client has to send `Hello` after connecting.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::listen::Greeted;
 
 /// QUIC close codes.
 pub mod close_code {
@@ -29,7 +26,7 @@ pub mod close_code {
 pub struct WorkerListener {
     endpoint: Endpoint,
     admission: Admission,
-    greeted: Arc<Mutex<mpsc::Receiver<AcceptedClient>>>,
+    greeted: Arc<Mutex<mpsc::Receiver<Greeted<WorkerMsg, ClientMsg, Hello>>>>,
 }
 
 /// A client that said `Hello`. The caller answers with a `HelloAck`.
@@ -52,8 +49,11 @@ impl WorkerListener {
     /// Must be called on a tokio runtime: the accept loop runs as a task of its own.
     pub fn bind(local: SocketAddr, admission: Admission) -> Result<Self, NetError> {
         let endpoint = crate::endpoint::bind(local, true)?;
-        let (tx, rx) = mpsc::channel(8);
-        tokio::spawn(admit(endpoint.clone(), admission.clone(), tx));
+        let hello = |first| match first {
+            ClientMsg::Hello(hello) => Some(hello),
+            _ => None,
+        };
+        let rx = crate::listen::spawn(endpoint.clone(), admission.clone(), hello, "client");
         Ok(Self { endpoint, admission, greeted: Arc::new(Mutex::new(rx)) })
     }
 
@@ -76,49 +76,7 @@ impl WorkerListener {
 
     /// The next client that said `Hello`; `None` once the endpoint is closed.
     pub async fn accept(&self) -> Option<AcceptedClient> {
-        self.greeted.lock().await.recv().await
+        let Greeted { conn, remote, hello, tx, rx } = self.greeted.lock().await.recv().await?;
+        Some(AcceptedClient { conn, remote, hello, tx, rx })
     }
-}
-
-/// The accept loop: refuse peers outside `admission` before any connection state exists, and
-/// greet the rest each on a task of its own, so a peer that connects and says nothing holds up
-/// nobody behind it. Refused, malformed and silent connections are logged and dropped.
-async fn admit(endpoint: Endpoint, admission: Admission, greeted: mpsc::Sender<AcceptedClient>) {
-    while let Some(incoming) = endpoint.accept().await {
-        let peer = crate::endpoint::canonical(incoming.remote_address());
-        if !admission.admits(peer.ip()) {
-            tracing::info!(%peer, "refused: outside the admitted ranges");
-            incoming.refuse();
-            continue;
-        }
-        let greeted = greeted.clone();
-        tokio::spawn(async move {
-            match greet(incoming).await {
-                Ok(client) => {
-                    let _sent = greeted.send(client).await;
-                }
-                Err(e) => tracing::info!(%peer, error = %e, "client dropped"),
-            }
-        });
-    }
-}
-
-/// Finish the handshake and read the client's `Hello`.
-async fn greet(incoming: noq::Incoming) -> Result<AcceptedClient, NetError> {
-    let remote = crate::endpoint::canonical(incoming.remote_address());
-    let conn = incoming.await.map_err(|e| NetError::Connect(e.to_string()))?;
-    let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
-        .await
-        .map_err(|_elapsed| NetError::Protocol("no control stream"))?
-        .map_err(|e| NetError::stream(&e))?;
-    let tx = FramedSend::<WorkerMsg>::new(send);
-    let mut rx = FramedRecv::<ClientMsg>::new(recv);
-    let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
-        .await
-        .map_err(|_elapsed| NetError::Protocol("hello timeout"))??;
-    let ClientMsg::Hello(hello) = first else {
-        conn.close(close_code::PROTOCOL.into(), b"hello first");
-        return Err(NetError::Protocol("first message must be Hello"));
-    };
-    Ok(AcceptedClient { conn, remote, hello, tx, rx })
 }

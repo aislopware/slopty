@@ -20,7 +20,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for the worker's answer to `Hello`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Errors from the handshake, distinguished so the UI can react (retry vs. update).
+/// Errors from the handshake: the worker said no, or the transport failed.
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
     /// The worker refused.
@@ -59,19 +59,31 @@ pub async fn connect(
     addr: &HostAddr,
     hello: Hello,
 ) -> Result<WorkerConn, HandshakeError> {
+    let (conn, remote) = dial_any(endpoint, addr, None).await?;
+    greet(conn, remote, hello).await
+}
+
+/// The QUIC handshake with the first address `addr` resolves to that completes one, IPv4 first
+/// (a tailnet's IPv4 address is the one every peer has), on `config` or the endpoint's default.
+/// The error is the last address's.
+pub(crate) async fn dial_any(
+    endpoint: &Endpoint,
+    addr: &HostAddr,
+    config: Option<noq::ClientConfig>,
+) -> Result<(Connection, SocketAddr), NetError> {
     let mut candidates = addr.resolve().await?;
     candidates.sort_by_key(SocketAddr::is_ipv6);
     let mut last = NetError::Connect(format!("{addr}: no address"));
     for candidate in candidates {
-        match dial(endpoint, candidate, addr.host(), None).await {
-            Ok(conn) => return greet(conn, candidate, hello).await,
+        match dial(endpoint, candidate, addr.host(), config.clone()).await {
+            Ok(conn) => return Ok((conn, candidate)),
             Err(e) => {
                 tracing::debug!(%addr, %candidate, error = %e, "address did not answer");
                 last = e;
             }
         }
     }
-    Err(last.into())
+    Err(last)
 }
 
 /// Connect to one socket address.

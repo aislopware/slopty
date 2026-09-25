@@ -23,13 +23,25 @@ struct Args {
     #[arg(long)]
     socket: Option<PathBuf>,
     /// Bytes of output retained per session: what came in while no worker held it, or what the
-    /// worker tapped since its last checkpoint.
-    #[arg(long, default_value_t = slopty_pty::protocol::DEFAULT_BACKLOG_BYTES)]
+    /// worker tapped since its last checkpoint. At most 4 MiB: the backlog and the checkpoint
+    /// go to the next worker in one frame.
+    #[arg(long, default_value_t = slopty_pty::protocol::DEFAULT_BACKLOG_BYTES,
+          value_parser = backlog_bytes)]
     backlog_bytes: usize,
     /// Where the shell integration scripts are written (default: `$SLOPTY_DATA_DIR/shell`, else
     /// `shell/` next to the socket). `SLOPTY_NO_SHELL_INTEGRATION=1` leaves shells untouched.
     #[arg(long)]
     shell_dir: Option<PathBuf>,
+}
+
+/// `--backlog-bytes`, refused past [`slopty_pty::protocol::MAX_BACKLOG_BYTES`].
+fn backlog_bytes(text: &str) -> Result<usize, String> {
+    let max = slopty_pty::protocol::MAX_BACKLOG_BYTES;
+    match text.parse::<usize>() {
+        Ok(bytes) if bytes <= max => Ok(bytes),
+        Ok(bytes) => Err(format!("{bytes} is more than the {max} one attach carries")),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]

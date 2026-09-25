@@ -21,7 +21,7 @@ pub struct Cidr {
 }
 
 impl Cidr {
-    /// `net/prefix`, with the worker bits of `net` cleared.
+    /// `net/prefix`, with the host bits of `net` cleared.
     pub fn new(net: IpAddr, prefix: u8) -> Result<Self, NetError> {
         let bits = if net.is_ipv4() { 32 } else { 128 };
         if prefix > bits {
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn ranges_parse_normalise_and_refuse_nonsense() {
         let c: Cidr = "10.1.2.3/8".parse().unwrap();
-        assert_eq!(c.to_string(), "10.0.0.0/8", "worker bits cleared");
+        assert_eq!(c.to_string(), "10.0.0.0/8", "host bits cleared");
         assert_eq!(
             "fd7a:115c:a1e0::5/48".parse::<Cidr>().unwrap().to_string(),
             "fd7a:115c:a1e0::/48"

@@ -19,10 +19,9 @@ use crate::NetError;
 use crate::addr::HostAddr;
 use crate::admission::Admission;
 use crate::framed::{FramedRecv, FramedSend};
+use crate::listen::Greeted;
 use crate::worker::close_code;
 
-/// How long a dialer has to open its stream and say `Hello`.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a dialer waits for `Welcome`.
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a refused dialer gets to read its `Refused` before the close.
@@ -33,7 +32,7 @@ const REFUSE_LINGER: Duration = Duration::from_secs(2);
 pub struct ServerListener {
     endpoint: Endpoint,
     admission: Admission,
-    greeted: Arc<Mutex<mpsc::Receiver<AcceptedLink>>>,
+    greeted: Arc<Mutex<mpsc::Receiver<Greeted<FromServer, ToServer, Role>>>>,
 }
 
 /// A dialer that said `Hello`. The caller answers it:
@@ -57,8 +56,11 @@ impl ServerListener {
     /// Must be called on a tokio runtime: the accept loop runs as a task of its own.
     pub fn bind(local: SocketAddr, admission: Admission) -> Result<Self, NetError> {
         let endpoint = crate::endpoint::bind_lease(local)?;
-        let (tx, rx) = mpsc::channel(8);
-        tokio::spawn(admit(endpoint.clone(), admission.clone(), tx));
+        let hello = |first| match first {
+            ToServer::Hello { role } => Some(role),
+            _ => None,
+        };
+        let rx = crate::listen::spawn(endpoint.clone(), admission.clone(), hello, "dialer");
         Ok(Self { endpoint, admission, greeted: Arc::new(Mutex::new(rx)) })
     }
 
@@ -81,7 +83,8 @@ impl ServerListener {
 
     /// The next dialer that said `Hello`; `None` once the endpoint is closed.
     pub async fn accept(&self) -> Option<AcceptedLink> {
-        self.greeted.lock().await.recv().await
+        let Greeted { conn, remote, hello, tx, rx } = self.greeted.lock().await.recv().await?;
+        Some(AcceptedLink { conn, remote, role: hello, tx, rx })
     }
 }
 
@@ -93,48 +96,6 @@ impl AcceptedLink {
         let _closed_by_peer = tokio::time::timeout(REFUSE_LINGER, self.conn.closed()).await;
         self.conn.close(close_code::PROTOCOL.into(), b"refused");
     }
-}
-
-/// Refuse peers outside `admission` at their first packet and greet the rest each on a task of
-/// its own, so a silent dialer holds up nobody.
-async fn admit(endpoint: Endpoint, admission: Admission, greeted: mpsc::Sender<AcceptedLink>) {
-    while let Some(incoming) = endpoint.accept().await {
-        let peer = crate::endpoint::canonical(incoming.remote_address());
-        if !admission.admits(peer.ip()) {
-            tracing::info!(%peer, "refused: outside the admitted ranges");
-            incoming.refuse();
-            continue;
-        }
-        let greeted = greeted.clone();
-        tokio::spawn(async move {
-            match greet(incoming).await {
-                Ok(link) => {
-                    let _sent = greeted.send(link).await;
-                }
-                Err(e) => tracing::info!(%peer, error = %e, "dialer dropped"),
-            }
-        });
-    }
-}
-
-/// Finish the handshake and read the `Hello`.
-async fn greet(incoming: noq::Incoming) -> Result<AcceptedLink, NetError> {
-    let remote = crate::endpoint::canonical(incoming.remote_address());
-    let conn = incoming.await.map_err(|e| NetError::Connect(e.to_string()))?;
-    let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
-        .await
-        .map_err(|_elapsed| NetError::Protocol("no control stream"))?
-        .map_err(|e| NetError::stream(&e))?;
-    let tx = FramedSend::<FromServer>::new(send);
-    let mut rx = FramedRecv::<ToServer>::new(recv);
-    let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
-        .await
-        .map_err(|_elapsed| NetError::Protocol("hello timeout"))??;
-    let ToServer::Hello { role } = first else {
-        conn.close(close_code::PROTOCOL.into(), b"hello first");
-        return Err(NetError::Protocol("first message must be Hello"));
-    };
-    Ok(AcceptedLink { conn, remote, role, tx, rx })
 }
 
 /// Why a dial to the server failed.
@@ -183,20 +144,9 @@ pub async fn connect(
     addr: &HostAddr,
     role: Role,
 ) -> Result<ServerLink, DialError> {
-    let mut candidates = addr.resolve().await?;
-    candidates.sort_by_key(SocketAddr::is_ipv6);
-    let mut last = NetError::Connect(format!("{addr}: no address"));
-    for candidate in candidates {
-        let config = crate::endpoint::lease_client_config();
-        match crate::client::dial(endpoint, candidate, addr.host(), Some(config)).await {
-            Ok(conn) => return hello(conn, candidate, role).await,
-            Err(e) => {
-                tracing::debug!(%addr, %candidate, error = %e, "server address did not answer");
-                last = e;
-            }
-        }
-    }
-    Err(last.into())
+    let config = crate::endpoint::lease_client_config();
+    let (conn, remote) = crate::client::dial_any(endpoint, addr, Some(config)).await?;
+    hello(conn, remote, role).await
 }
 
 /// `Hello` on a fresh stream and the server's answer.

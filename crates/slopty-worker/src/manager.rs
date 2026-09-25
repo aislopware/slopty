@@ -106,7 +106,15 @@ impl Worker {
         &*self.inner.agents
     }
 
-    /// Take the exit-notification receiver (once); the caller pumps it into `on_exit`.
+    /// The daemon's agent table, to keep.
+    #[must_use]
+    pub fn shared_agents(&self) -> Arc<dyn Agents> {
+        Arc::clone(&self.inner.agents)
+    }
+
+    /// Take the exit-notification receiver (once); the caller pumps it into `on_exit`. It ends
+    /// when the connection to ptyd does: the worker can then neither spawn nor hand its sessions
+    /// on, and should exit so a fresh one connects again.
     #[must_use]
     pub fn take_exits(&self) -> Option<mpsc::UnboundedReceiver<(SessionId, i32)>> {
         self.inner.exits.lock().take()
@@ -175,6 +183,12 @@ impl Worker {
         })?;
         self.inner.sessions.lock().insert(id, Entry { handle: handle.clone(), command, exited });
         Ok(handle)
+    }
+
+    /// How many sessions the worker runs, exited ones included.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.inner.sessions.lock().len()
     }
 
     /// The running session `id`.
@@ -318,21 +332,28 @@ const TAP_QUEUE: usize = 1024;
 /// Forward output copies, checkpoints and sizes to ptyd on the worker's connection until the
 /// worker goes away. The taps ride the same connection as the requests, and only that connection
 /// may tap (ptyd checks it holds the master), so a dying worker's last taps and its EOF reach ptyd
-/// in order. A failed send is logged and the loop goes on: the next request will notice a dead
-/// ptyd, and a rejected frame (too large) must not stop the other sessions' taps.
+/// in order. A failed send is logged once and the loop goes on: a dead ptyd ends the worker
+/// through the exits channel ([`Worker::take_exits`]), and a rejected frame (too large) must not
+/// stop the other sessions' taps.
 async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
+    let mut failing = false;
     while let Some(tap) = rx.recv().await {
         let Some(inner) = inner.upgrade() else { return };
         let sent = send_tap(&mut *inner.ptyd.lock().await, tap).await;
-        if let Err(e) = sent {
-            tracing::warn!(error = %e, "ptyd tap not sent");
+        match sent {
+            Err(e) if !failing => {
+                tracing::warn!(error = %e, "ptyd tap not sent");
+                failing = true;
+            }
+            Err(e) => tracing::debug!(error = %e, "ptyd tap not sent"),
+            Ok(()) => failing = false,
         }
     }
 }
 
 async fn send_tap(ptyd: &mut PtydClient, tap: Tap) -> Result<(), slopty_pty::PtyError> {
     match tap {
-        Tap::Output { id, bytes } => ptyd.output(id, &bytes).await,
+        Tap::Output(frame) => ptyd.output(&frame).await,
         Tap::Checkpoint { id, state } => ptyd.checkpoint(id, state).await,
         Tap::Resize { id, size } => ptyd.resize(id, size).await,
     }

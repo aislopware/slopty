@@ -1567,3 +1567,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   an OSC 8 run carried on at the next row's start is one link, the underline spans the rows,
   and three clicks select the whole logical line. Tests: url `a_wrapped_link_or_path_is_one`;
   view `a_wrapped_link_is_one_and_three_clicks_take_the_wrapped_line`.
+
+- ✅ **ptyd takes a session back however its holder goes, and an attach always fits one frame**
+  (2026-09-26). A connection released what it held only when its loop ended cleanly. A worker
+  that died while ptyd wrote its `Attached` reply, or a frame that did not decode, returned
+  early and left the session claimed and its reader paused, so no later worker could attach
+  and the child's output stopped draining. The release now lives in the connection's `Drop`,
+  and the claim is recorded before the reader pauses. The reply itself could also outgrow the
+  16 MiB frame: a 12 MiB checkpoint and a 4 MiB ring plus the envelope. The ring is now capped
+  at 4 MiB (`--backlog-bytes` refuses more) and a checkpoint at what is left of a frame
+  (`MAX_CHECKPOINT_BYTES`, about 12 MiB less 4 KiB). The worker sends nothing larger, and ptyd
+  ignores a larger one and keeps the ring. Tests (ptyd):
+  `a_worker_that_dies_mid_attach_leaves_the_session_to_the_next`,
+  `a_frame_that_does_not_decode_hands_the_session_back`; `the_largest_attach_fits_one_frame`
+  (`slopty-pty`).
+
+- ✅ **A worker that loses ptyd exits** (2026-09-26). The reader of the ptyd connection ended
+  quietly, and the worker served on with masters nobody kept for its successor and nothing to
+  spawn into, logging a warning per tap. The channel of exits now ends with the connection,
+  and the worker takes that as the end: it shuts down as it does on SIGTERM and exits with a
+  failure, and launchd starts one that connects to ptyd again. The tap loop warns once, not
+  per read. Tests: `the_exit_channel_ends_when_ptyd_goes` (ptyd),
+  `a_worker_that_loses_ptyd_exits_to_be_restarted` (worker e2e).
+
+- ✅ **Input waiting for a program is held to 16 MiB** (2026-09-26). The actor queues what the
+  tty cannot take yet, so a paste into a program that echoes as it reads never deadlocks. A
+  program that stops reading (a stopped job, a hung TUI) let that queue grow without bound.
+  A request that would take it past 16 MiB is now refused whole, and the viewer that sent it
+  gets a `TermEvent::Error` saying the program is not reading. An answer the engine owes a
+  query is dropped with a warning, since nobody asked for it. Test:
+  `input_past_the_queue_bound_is_refused_and_its_sender_told`.
+
+- ✅ **The frames say when the tty stops echoing** (2026-09-26). Predictive echo must never
+  draw a password. The engine's escape sequences cannot tell, but the tty can: a master shares
+  its slave's termios, so one `tcgetattr` on it reads `ECHO` and `ICANON`
+  (`slopty_pty::line_discipline`). The actor reads them after every read of output, since a
+  program turns echo off before it prints the prompt it is for, and hands them to the engine
+  (`GhosttyEngine::set_line_discipline`), which puts `TermModes::ECHO_OFF` and `CANONICAL` in
+  the next frame's modes. It costs 0.28 µs a read (MEASUREMENTS, "the ptyd tap, framed
+  once"). Tests: `the_master_sees_the_programs_echo_and_canonical_modes` (`slopty-pty`),
+  `the_frames_say_when_the_tty_stops_echoing` (actor).
+
+- ✅ **The ptyd tap is framed once, as byte strings** (2026-09-26). Each read went to ptyd as
+  a copy into a `Vec`, then a copy into the frame, and serde wrote a `Vec<u8>` one call per
+  byte. The actor now builds the frame where it read, and the protocol's byte fields are
+  byte strings. Postcard writes those as it wrote the sequence, so the wire is unchanged. A
+  64 KiB tap costs 1 to 5 µs instead of 70 to 210, and a 4 MiB checkpoint reaches ptyd in
+  1 ms instead of 11 to 18 (MEASUREMENTS, "the ptyd tap, framed once"). Tests:
+  `byte_strings_keep_the_wire_of_a_sequence_of_bytes`,
+  `the_borrowed_output_frame_is_the_requests_frame`.

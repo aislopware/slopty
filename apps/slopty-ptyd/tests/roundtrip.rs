@@ -8,7 +8,9 @@ mod roundtrip {
     use slopty_core::SessionId;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::terminal::TermSize;
+    use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, OutputFrame, PtydRequest};
     use slopty_pty::{PtyMaster, PtydClient, SpawnSpec};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     struct Daemon {
         child: std::process::Child,
@@ -56,6 +58,54 @@ mod roundtrip {
             panic!("ptyd socket not ready after 60 s");
         }
         Daemon { child, socket, _dir: dir }
+    }
+
+    fn tap(id: SessionId, bytes: &[u8]) -> OutputFrame {
+        OutputFrame::new(id, bytes).unwrap()
+    }
+
+    /// A session running `sleep 60`, spawned on a connection of its own.
+    async fn sleeper(daemon: &Daemon) -> SessionId {
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), "sleep 60".into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(id, spec).await.unwrap();
+        id
+    }
+
+    /// Attach `id` on a fresh connection, retrying while another connection is still letting go
+    /// of it.
+    async fn attach_when_free(daemon: &Daemon, id: SessionId) -> slopty_pty::client::Attached {
+        let (mut next, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match next.attach(id).await {
+                    Ok(attached) => break attached,
+                    Err(e) => {
+                        assert!(e.to_string().contains("another connection"), "{e}");
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the session is handed back")
+    }
+
+    /// A raw connection that has said `Hello` and asked for `id`, its requests written as
+    /// `extra` follows them.
+    async fn raw_attach(daemon: &Daemon, id: SessionId, extra: &[u8]) -> tokio::net::UnixStream {
+        let mut raw = tokio::net::UnixStream::connect(&daemon.socket).await.unwrap();
+        let mut out = slopty_proto::codec::encode(&PtydRequest::Hello).unwrap().to_vec();
+        out.extend_from_slice(&slopty_proto::codec::encode(&PtydRequest::Attach { id }).unwrap());
+        out.extend_from_slice(extra);
+        raw.write_all(&out).await.unwrap();
+        raw
     }
 
     fn size() -> TermSize {
@@ -232,9 +282,9 @@ mod roundtrip {
         assert!(attached.checkpoint.is_empty(), "a fresh session has no checkpoint");
         let master = PtyMaster::new(attached.master).unwrap();
 
-        client.output(id, b"before-the-checkpoint").await.unwrap();
+        client.output(&tap(id, b"before-the-checkpoint")).await.unwrap();
         client.checkpoint(id, b"STATE".to_vec()).await.unwrap();
-        client.output(id, b"after-the-checkpoint").await.unwrap();
+        client.output(&tap(id, b"after-the-checkpoint")).await.unwrap();
         // Taps carry no reply; a request that does orders them before its reply.
         let info = client.list().await.unwrap();
         assert_eq!(info.len(), 1);
@@ -242,7 +292,7 @@ mod roundtrip {
 
         // Another connection cannot tap a session it does not hold.
         let (mut stranger, _) = PtydClient::connect(&daemon.socket).await.unwrap();
-        stranger.output(id, b"ignored").await.unwrap();
+        stranger.output(&tap(id, b"ignored")).await.unwrap();
         stranger.checkpoint(id, b"IGNORED".to_vec()).await.unwrap();
         assert_eq!(stranger.list().await.unwrap()[0].checkpoint, b"STATE".len());
 
@@ -269,6 +319,80 @@ mod roundtrip {
             "backlog: {backlog:?}"
         );
         next.shutdown().await.unwrap();
+    }
+
+    /// A worker that dies while ptyd is still writing its `Attached` reply (a 12 MB checkpoint
+    /// is many socket buffers) leaves the session to the next worker: ptyd's write fails, and the
+    /// claim and the paused reader go with the connection.
+    #[tokio::test]
+    async fn a_worker_that_dies_mid_attach_leaves_the_session_to_the_next() {
+        let daemon = start().await;
+        let id = sleeper(&daemon).await;
+        let (mut first, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let _held = first.attach(id).await.unwrap();
+        let state = vec![b'.'; MAX_CHECKPOINT_BYTES];
+        first.checkpoint(id, state).await.unwrap();
+        first.checkpoint(id, vec![b'!'; MAX_CHECKPOINT_BYTES + 1]).await.unwrap();
+        let info = first.list().await.unwrap();
+        assert_eq!(
+            info[0].checkpoint, MAX_CHECKPOINT_BYTES,
+            "one too large for an attach is ignored"
+        );
+        drop(first);
+
+        let mut dying = attach_when_free_raw(&daemon, id).await;
+        // Some of the reply, then gone while ptyd still has megabytes to write.
+        let mut some = vec![0_u8; 64 << 10];
+        dying.read_exact(&mut some).await.unwrap();
+        drop(dying);
+
+        let attached = attach_when_free(&daemon, id).await;
+        assert_eq!(
+            attached.checkpoint.len(),
+            MAX_CHECKPOINT_BYTES,
+            "the whole state, in one frame"
+        );
+        let (mut last, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        last.shutdown().await.unwrap();
+    }
+
+    /// A raw connection that holds `id` once the connection before it let go.
+    async fn attach_when_free_raw(daemon: &Daemon, id: SessionId) -> tokio::net::UnixStream {
+        let (mut probe, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while probe.list().await.unwrap().iter().any(|s| s.id == id && s.attached) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first connection lets go");
+        raw_attach(daemon, id, &[]).await
+    }
+
+    /// A frame that does not decode ends the connection that sent it, and the session it held
+    /// goes back to ptyd even while that socket is still open on the worker's side.
+    #[tokio::test]
+    async fn a_frame_that_does_not_decode_hands_the_session_back() {
+        let daemon = start().await;
+        let id = sleeper(&daemon).await;
+        // A whole frame whose body names no request.
+        let garbage = [1, 0, 0, 0, 0x7f];
+        let _still_open = raw_attach(&daemon, id, &garbage).await;
+        let attached = attach_when_free(&daemon, id).await;
+        assert!(attached.checkpoint.is_empty());
+        let (mut last, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        last.shutdown().await.unwrap();
+    }
+
+    /// The worker learns that ptyd is gone: its channel of exits ends.
+    #[tokio::test]
+    async fn the_exit_channel_ends_when_ptyd_goes() {
+        let daemon = start().await;
+        let (_client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let (mut other, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        other.shutdown().await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(10), exits.recv()).await;
+        assert_eq!(ended.expect("the channel ends"), None);
     }
 
     /// What handing ptyd a checkpoint costs: a 4 MiB state sent 20 times, each followed by a
