@@ -1,9 +1,10 @@
 //! `xtask bundle`: the macOS app bundle.
 //!
-//! `Slopty.app` carries the app and, beside it, the worker daemons and the CLI, so one bundle
-//! serves both roles: launch it for the workspace, or run `Contents/MacOS/slopty worker install`
-//! to turn the machine into a worker. `Info.plist` is generated from the workspace version;
-//! signing is ad hoc unless `--sign` names a Developer ID identity.
+//! `Slopty.app` carries the app and, beside it, the worker daemons, the server and the CLI, so
+//! one bundle serves every role: launch it for the workspace, or run
+//! `Contents/MacOS/slopty worker install` (or `server install`) to turn the machine into a worker
+//! (or the server). `Info.plist` is generated from the workspace version; signing is ad hoc unless
+//! `--sign` names a Developer ID identity.
 
 use anyhow::{Result, bail};
 use camino::Utf8PathBuf;
@@ -19,7 +20,8 @@ const PRODUCT: &str = "Slopty";
 /// Floor, as `LSMinimumSystemVersion`.
 const MACOS_VERSION: &str = "26.5";
 /// Binaries copied into `Contents/MacOS`, the app first.
-const BINARIES: [&str; 4] = ["slopty-app", "slopty-worker", "slopty-ptyd", "slopty"];
+const BINARIES: [&str; 5] =
+    ["slopty-app", "slopty-worker", "slopty-ptyd", "slopty-server", "slopty"];
 
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone)]
@@ -43,7 +45,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
         &format!("cargo build ({profile})"),
         &cmd!(
             sh,
-            "cargo build {flags...} -p slopty -p slopty-workerd -p slopty-ptyd -p slopty-cli"
+            "cargo build {flags...} -p slopty -p slopty-workerd -p slopty-ptyd -p slopty-serverd -p slopty-cli"
         ),
     )?;
     let built = root.join("target").join(profile);
