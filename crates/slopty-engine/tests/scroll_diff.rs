@@ -104,9 +104,8 @@ mod diffs {
 
     #[test]
     fn every_diff_applied_by_index_shows_the_terminal() {
-        for seed in 1..=12_u64 {
+        for seed in 1..=20_u64 {
             let mut rng = Lcg(seed);
-            let mut joins = Lcg(seed.wrapping_add(1_000));
             let (mut subject, mut mirror) = (engine(30, 8), engine(30, 8));
             let mut viewers = vec![Viewer::default()];
             viewers[0].apply(&subject.full_frame(0).unwrap());
@@ -118,9 +117,8 @@ mod diffs {
                 subject.write(&bytes);
                 mirror.write(&bytes);
                 if rng.next(3) == 0 {
-                    // Nobody takes a diff; someone may join meanwhile (a separate generator,
-                    // so the output stays the same for a seed).
-                    if joins.next(4) == 0 {
+                    // Nobody takes a diff; someone may join meanwhile.
+                    if rng.next(4) == 0 {
                         viewers.push(join(&mut subject));
                     }
                     continue;

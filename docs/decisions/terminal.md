@@ -1414,3 +1414,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `every_diff_applied_by_index_shows_the_terminal` now also joining while no diff is taken;
   client `a_diff_in_a_numbering_not_held_asks_for_every_row`; view
   `a_marker_answer_waits_for_room_in_a_full_outbound_queue`.
+
+- ✅ **A mark that changes a prompt's status without touching its cells resends the prompt's
+  row** (2026-09-25). A prompt row's `Prompt { exit }` is not in the grid. The engine derives
+  it from its own `prompt_starts` and `exit_marks` when it builds the row. The status is that
+  of the newest `133;D` up to `EXIT_LOOKBACK_ROWS` above, unless an `133;A` in between took
+  it. A `D` or an `A` written on a row above a prompt the viewers already hold changes that
+  prompt's status, but libghostty dirties no row for it, and a diff builds only dirty rows.
+  The viewers kept the old status. This came before the scroll deltas. Every change to the
+  marks now goes through `remark`, which compares each row the change can reach (the marked
+  line and the `EXIT_LOOKBACK_ROWS` below it) before and after, and puts the rows that changed
+  in `remarked_rows`. That covers a new `A` or `D`, pruning below `base`, and a prompt erased
+  in place. The next diff builds those rows, reads their prompt flag from the live grid as it
+  does for `forced_rows`, and sends the ones that differ from `Shown`. A joiner reads the set
+  and leaves it for the diff, and a hold keeps it until the hold ends. Rejected: forcing every
+  row a mark reaches into the frame. Most marks change nothing below them, and each prompt
+  would send four more rows. Found by `every_diff_applied_by_index_shows_the_terminal` once
+  its joins were drawn from the main generator (seed 10, step 431). The harness now draws them
+  there and runs 20 seeds; 60 more passed by hand. The build time did not move. A one-line
+  scroll at 200 × 60 took 356–385 µs before and 352–365 µs after, six interleaved release
+  runs each, and echo and Enter bytes are unchanged. Test: engine
+  `a_mark_above_a_sent_prompt_resends_its_status`.

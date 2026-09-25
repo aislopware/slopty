@@ -130,6 +130,10 @@ pub struct GhosttyEngine {
     /// row out of the prompt without writing to it, and the client's command tracking waits
     /// on that row (a silent `sleep` was not seen running until its output or its end).
     forced_rows: BTreeSet<u64>,
+    /// Rows whose prompt mark changed with the marks alone: a `D` or an `A` on a row above a
+    /// prompt gives it a status or takes it, which dirties no row in libghostty. The next
+    /// frame reads them again and sends those the viewers hold otherwise.
+    remarked_rows: BTreeSet<u64>,
     /// The OSC 133 command blocks of the active screen, oldest first (see [`read`]).
     commands: std::collections::VecDeque<read::Block>,
     /// The primary screen's blocks while the alternate screen is up, as `primary_anchor`.
@@ -288,6 +292,7 @@ impl GhosttyEngine {
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
+            remarked_rows: BTreeSet::new(),
             commands: std::collections::VecDeque::new(),
             primary_commands: std::collections::VecDeque::new(),
             commands_ended: 0,
@@ -451,6 +456,7 @@ impl GhosttyEngine {
         self.exit_marks.clear();
         self.prompt_starts.clear();
         self.forced_rows.clear();
+        self.remarked_rows.clear();
         self.commands.clear();
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }
@@ -517,14 +523,28 @@ impl GhosttyEngine {
         let col = self.term.cursor_x().unwrap_or(0);
         self.note_command_mark(line, col, mark);
         // Evicted history can never be read again; drop its marks with it.
-        self.exit_marks = self.exit_marks.split_off(&self.base);
-        self.prompt_starts = self.prompt_starts.split_off(&self.base);
+        let base = self.base;
+        if self.exit_marks.first_key_value().is_some_and(|(&l, _)| l < base)
+            || self.prompt_starts.first().is_some_and(|&l| l < base)
+        {
+            let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
+            remark(marks, starts, &mut self.remarked_rows, base, |marks, starts| {
+                *marks = marks.split_off(&base);
+                *starts = starts.split_off(&base);
+            });
+        }
         match mark {
             osc133::Mark::PromptStart => {
-                self.prompt_starts.insert(line);
+                let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
+                remark(marks, starts, &mut self.remarked_rows, line, |_, starts| {
+                    starts.insert(line);
+                });
             }
             osc133::Mark::CommandEnd { exit } => {
-                self.exit_marks.insert(line, exit);
+                let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
+                remark(marks, starts, &mut self.remarked_rows, line, |marks, _| {
+                    marks.insert(line, exit);
+                });
             }
             osc133::Mark::OutputStart => {
                 self.forced_rows.insert(line);
@@ -557,6 +577,7 @@ impl GhosttyEngine {
             self.anchor = self.primary_anchor.take();
             self.commands = std::mem::take(&mut self.primary_commands);
             self.forced_rows.clear();
+            self.remarked_rows.clear();
             match self.primary_marks.take() {
                 Some(parked) if self.anchor.is_some() => {
                     self.epoch = parked.epoch;
@@ -650,13 +671,15 @@ impl GhosttyEngine {
         let rebuild = take != Take::Diff || dirty == Dirty::Full;
         let full = rebuild && !(take == Take::Diff && self.shown.holds(self.epoch, cols, rows));
         // A placement added or deleted moves no cell, but the frame must say so. Rows forced
-        // by a prompt mark are read from the live grid, so they wait for the hold to end.
+        // or remarked by a prompt mark are read from the live grid, so they wait for the hold
+        // to end.
         let graphics_gen = self.term.kitty_graphics()?.generation()?;
         let forcing = hold.is_none() && !self.forced_rows.is_empty();
         if !rebuild
             && dirty == Dirty::Clean
             && (graphics_gen == self.graphics_gen || hold.is_some())
             && !forcing
+            && (hold.is_some() || self.remarked_rows.is_empty())
         {
             return Ok(None);
         }
@@ -691,7 +714,14 @@ impl GhosttyEngine {
                 } else {
                     self.forced_rows.remove(&abs)
                 };
-            let build = rebuild || row.dirty()? || forced;
+            // Looked up row by row: erasing a prompt below remarks the rows under it.
+            let remarked = hold.is_none()
+                && if take == Take::Joiner {
+                    self.remarked_rows.contains(&abs)
+                } else {
+                    self.remarked_rows.remove(&abs)
+                };
+            let build = rebuild || row.dirty()? || forced || remarked;
             if !build && take != Take::Joiner {
                 shown.push(if known { self.shown.take(abs) } else { None });
             }
@@ -753,9 +783,9 @@ impl GhosttyEngine {
                 }
                 line.links = links.finish(x);
                 line.flags.set(LineFlags::WRAPPED, raw.is_wrap_continuation()?);
-                // The render state copies a row when the terminal dirtied it; a forced row
-                // was not, so its prompt flag is read from the live grid.
-                let semantic = if forced {
+                // The render state copies a row when the terminal dirtied it; a forced or
+                // remarked row was not, so its prompt flag is read from the live grid.
+                let semantic = if forced || remarked {
                     self.term
                         .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: u32::from(y) }))?
                         .row()?
@@ -768,9 +798,13 @@ impl GhosttyEngine {
                 // prompt drawn below would read as a continuation of a start that no longer
                 // exists.
                 if semantic != libghostty_vt::screen::RowSemanticPrompt::Prompt
-                    && self.prompt_starts.remove(&abs)
+                    && self.prompt_starts.contains(&abs)
                 {
-                    self.exit_marks.remove(&abs);
+                    let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
+                    remark(marks, starts, &mut self.remarked_rows, abs, |marks, starts| {
+                        starts.remove(&abs);
+                        marks.remove(&abs);
+                    });
                 }
                 line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
                     convert::semantic_mark(
@@ -841,6 +875,9 @@ impl GhosttyEngine {
                 if forcing {
                     // A forced row that is no longer on the screen has nothing left to say.
                     self.forced_rows.clear();
+                }
+                if hold.is_none() {
+                    self.remarked_rows.clear();
                 }
                 snapshot.set_dirty(Dirty::Clean)?;
                 self.seq = self.seq.wrapping_add(1);
@@ -1196,6 +1233,35 @@ fn exit_for(marks: &BTreeMap<u64, Option<u8>>, starts: &BTreeSet<u64>, line: u64
         return None;
     }
     exit
+}
+
+/// Whether a prompt starts on absolute `line`, and the status it carries if so.
+fn prompt_at(
+    marks: &BTreeMap<u64, Option<u8>>,
+    starts: &BTreeSet<u64>,
+    line: u64,
+) -> (bool, Option<u8>) {
+    let start = starts.contains(&line);
+    (start, if start { exit_for(marks, starts, line) } else { None })
+}
+
+/// Change the marks on `line`, adding to `remarked` the rows whose prompt that changed: `line`
+/// and the rows below it a status on it reaches.
+fn remark(
+    marks: &mut BTreeMap<u64, Option<u8>>,
+    starts: &mut BTreeSet<u64>,
+    remarked: &mut BTreeSet<u64>,
+    line: u64,
+    change: impl FnOnce(&mut BTreeMap<u64, Option<u8>>, &mut BTreeSet<u64>),
+) {
+    let reach = line..=line.saturating_add(EXIT_LOOKBACK_ROWS);
+    let before: Vec<_> = reach.clone().map(|l| prompt_at(marks, starts, l)).collect();
+    change(marks, starts);
+    for (l, was) in reach.zip(before) {
+        if prompt_at(marks, starts, l) != was {
+            remarked.insert(l);
+        }
+    }
 }
 
 /// Collects the OSC 8 runs of one row while its cells are walked left to right.
@@ -1575,6 +1641,7 @@ impl GhosttyEngine {
     /// frame does not, without building it.
     pub fn discard_frame(&mut self) {
         self.forced_rows.clear();
+        self.remarked_rows.clear();
         self.uploads.clear();
     }
 
@@ -2644,6 +2711,32 @@ mod tests {
         e.write(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
         let _prompt = e.take_frame(0).unwrap().expect("the prompt");
         assert!(e.take_frame(0).unwrap().is_none());
+    }
+
+    /// A prompt's status comes from the marks above it, not from its cells: a `D`, then an
+    /// `A`, written on the row above a prompt the viewers hold (the cursor moved back up)
+    /// change that prompt's status without dirtying its row. Each change is in the next frame.
+    #[test]
+    fn a_mark_above_a_sent_prompt_resends_its_status() {
+        let mut e = engine(20, 4);
+        e.write(b"out\r\n\x1b]133;A\x07$ \x1b]133;B\x07\r\n");
+        let _prompt = e.take_frame(0).unwrap().expect("the prompt");
+        let marks = |f: &Frame| -> Vec<(u16, SemanticMark)> {
+            f.updates.iter().map(|u| (u.row, u.line.mark)).collect()
+        };
+        e.write(b"\x1b[1;1H\x1b]133;D;1\x07\x1b[3;1H");
+        let f = e.take_frame(0).unwrap().expect("the status moved");
+        assert_eq!(marks(&f), [(1, SemanticMark::Prompt { exit: Some(1), input: None })]);
+        e.write(b"\x1b[1;1H\x1b]133;A\x07\x1b[3;1H");
+        let f = e.take_frame(0).unwrap().expect("the status was taken");
+        assert_eq!(
+            marks(&f),
+            [
+                (0, SemanticMark::Prompt { exit: Some(1), input: None }),
+                (1, SemanticMark::Prompt { exit: None, input: None }),
+            ]
+        );
+        assert!(e.take_frame(0).unwrap().is_none(), "sent once");
     }
 
     /// Bytes captured from a real zsh with the integration loaded (synchronized output,
