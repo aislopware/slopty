@@ -292,12 +292,27 @@ pub fn pasteboard_name(root: &Path, who: &str) -> String {
     format!("com.aislopware.slopty.e2e.{run}.{who}")
 }
 
+/// The shells' zsh configuration: a fixed prompt and nothing else, in `root/zsh`, which ptyd's
+/// bootstrap hands its shells as their `ZDOTDIR`.
+///
+/// A login shell otherwise reads the developer's own rc files. Their prompt landed in every
+/// golden, and a plugin run on every key (syntax highlighting) put 2 to 19 ms of its own between
+/// a key and its echo (MEASUREMENTS, "keystroke to glass"): numbers about one person's zsh.
+fn zsh_env(root: &Path) -> Result<(&'static str, PathBuf)> {
+    let dir = root.join("zsh");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(".zshrc"), "PROMPT='%~ %# '\n")?;
+    Ok(("ZDOTDIR", dir))
+}
+
 /// ptyd on `root/ptyd.sock`, up once its socket is.
 async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Child> {
     let ptyd_sock = root.join("ptyd.sock");
+    let (zdotdir, zsh) = zsh_env(root)?;
     let mut ptyd = Command::new(bin("slopty-ptyd")?)
         .arg("--socket")
         .arg(&ptyd_sock)
+        .env(zdotdir, zsh)
         .envs(env.iter().copied())
         .envs(terminfo_env(root))
         .env("RUST_LOG", log)
