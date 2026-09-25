@@ -13,8 +13,10 @@ use crate::framed::{FramedRecv, FramedSend};
 
 /// How long the QUIC handshake may take before the address counts as unreachable. A path that
 /// answers at all answers in one round trip; without this a dead address waits out the 45 s idle
-/// timeout.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// timeout. Kept short because a dial is how a worker that comes back is found: noq's Initial
+/// probes back off to 2 s apart, so a longer dial only adds a gap in which the worker is not
+/// asked, where a new dial after the redial backoff asks it again at once.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for the worker's answer to `Hello`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 

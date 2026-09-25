@@ -117,7 +117,7 @@ pub enum WorkerStatus {
     Connecting,
     /// Link up.
     Connected,
-    /// Link up but nothing heard for this many seconds (keep-alives come every few).
+    /// Link up but nothing heard for this many seconds (keep-alives come every second).
     Silent(u64),
     /// Link lost or the attempt failed; retrying, with the reason.
     Reconnecting(String),

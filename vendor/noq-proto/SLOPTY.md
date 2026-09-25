@@ -1,4 +1,4 @@
-# noq-proto, vendored with four patches
+# noq-proto, vendored with five patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -38,6 +38,17 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    draft-ietf-ccwg-bbr-06 section 5.6.3); above the lowest rates the rate's own budget is
    larger and nothing changes. Test: `a_low_rate_lets_the_send_quantum_out_together`
    (docs/MEASUREMENTS.md, "datagram copies of a keystroke and its echo").
+
+5. `fix(proto): Pad an Initial close to the header protection sample`
+
+   `Endpoint::initial_close` (a refused or failed first packet) wrote the CONNECTION_CLOSE and
+   the tag and nothing more, counting on a 16-byte AEAD tag to cover the header protection
+   sample 4 bytes past the packet number. Slopty's null crypto has no tag and claims a 16-byte
+   sample, so every packet is long enough to draw a stateless reset (docs/decisions/transport.md,
+   "The stateless reset a restarted host sends now arrives"). The close fell short of it, and
+   the client dropped it as too short to decode. It now pads with PADDING frames up to the
+   sample, which a real AEAD's tag already covers, so nothing changes for TLS. Test:
+   `an_initial_close_holds_the_header_sample_when_the_tag_is_shorter`.
 
 Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what

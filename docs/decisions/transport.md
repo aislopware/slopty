@@ -1224,3 +1224,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   are history. Tests: the `client_hello` and `server_worker_hello` goldens re-accepted, each one
   byte shorter. The ptyd socket follows the same rule: `PTYD_PROTOCOL` and
   `PtyError::ProtocolMismatch` are gone, and `Hello` carries nothing.
+
+- ✅ **The stateless reset a restarted host sends now arrives** (2026-09-26). The null crypto
+  ruling above claimed that one reset key in every process makes a restarted host reset the
+  old connection. No reset ever went out. noq drops a short-header packet whose connection ID
+  its generator does not recognise, and the generator's key was random per process. A packet
+  shorter than 22 bytes also draws no reset, and a PING with a zero-byte tag is 13 to about 20.
+  `crypto::endpoint_config` now gives every process one connection-ID key (`CID_KEY`), and the
+  plain header key claims a 16-byte sample that nothing reads (`SAMPLE`), so noq pads every
+  packet to at least 29 bytes. That costs up to 16 bytes on a bare ACK or PING and nothing on
+  a packet that is already that long. noq padded every packet but one to the sample: the close
+  it sends for a refused first packet counted on a 16-byte tag, so a refused client dropped it
+  as too short and waited out its dial. That is the fifth vendored patch
+  (`vendor/noq-proto/SLOPTY.md`). `docs/decisions/workers.md`, "A worker that dies shows down
+  in seconds and one that comes back is found in one", has what this does for a restart. Tests:
+  `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` (no reset within 3 s with
+  the sample at 0), `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake`, and
+  `an_initial_close_holds_the_header_sample_when_the_tag_is_shorter` in noq-proto.

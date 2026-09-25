@@ -4744,3 +4744,54 @@ rerun: measurements run on this Mac alone (2026-09-25 ruling), so the shaped loo
 the number of record, and its lossy link models the tailnet path these runs measured.
 
 The bulk connection's pacing is worth tracing beside it, to explain its goodput.
+
+## 2026-09-26 — a dead worker shown down and a restarted one found again
+
+`cargo xtask e2e workers`: one app and two workers on this Mac, with worker B behind the
+`slopty-shape` relay shaped like the tailnet (`harness::TAILNET`: 8 to 12 ms round trip, 3 %
+loss). Worker B is killed with SIGKILL mid-stream and started again on its port. The test
+restarts it as soon as the app shows it down. The new last scenario kills it again, waits for
+the app to give the link up, keeps it away 3 s more and then restarts it. Three runs each, on
+the tree before this change and after it (`docs/decisions/workers.md`, "A worker that dies
+shows down in seconds and one that comes back is found in one").
+
+```sh
+cargo xtask e2e workers            # the MEASURE lines; RUST_LOG via --log
+cargo xtask e2e workers --log "info,noq_proto::endpoint=debug"   # shows the stateless resets
+cargo nextest run -p slopty-net --test loopback restarted ping --no-capture
+```
+
+| | before (8 s / 15 s bars, 5 s keep-alive, 1 s → 10 s backoff) | after |
+| --- | --- | --- |
+| shown down after the kill | 9.6, 8.7, 8.8 s | 3.3, 3.5, 3.4 s |
+| connected again after a restart while shown down | 8.4, 8.2, 8.2 s | 0.8, 0.6, 0.8 s |
+| link given up after the kill | (15 s bar) | 5.7, 5.6, 5.7 s |
+| connected again after a restart 3 s past the drop | (not run) | 0.6, 0.6, 0.5 s |
+| whole run | 22.8, 20.7, 20.8 s | 17.6, 16.6, 16.6 s |
+
+Logs: `target/logs/workers-before-{1,2,3}.log`, `target/logs/workers-after2-{1,2,3}.log`. Two
+more runs on the final tree, with the refused-close patch and the tick policy factored out,
+read 3.7 / 3.4 s down, 0.8 / 0.7 s back, 5.6 / 5.7 s given up and 0.6 / 0.5 s back past the
+drop (`target/logs/reconnect-e2e-workers.log`, `target/logs/reconnect-e2e2-workers.log`).
+
+**Where the 8 s went.** The worker's keep-alive was 5 s and the app's silence bars 8 s (shown
+down) and 15 s (given up), so a restarted worker was found only after the 15 s bar and the 1 s
+redial. The diagnostic run (`workers-diag.log`) showed the restarted worker dropping the old
+connection's packets as `dropping packet with invalid CID`: noq's connection-ID generator takes
+a random key per process, so the stateless reset `docs/decisions/transport.md` counted on never
+went out. With a fixed key, a PING under the null crypto was still only 13 to about 20 bytes,
+and noq answers nothing shorter than 22 bytes with a reset. The loopback test fails the same way with the
+header sample set back to 0 (no reset within 3 s) and passes with it: a bare keep-alive draws
+the reset about 0.5 s after the restart, and a ping draws it at once.
+
+**Intermediate run.** With the 5 s handshake timeout still in place, the scenario 3 s past the
+drop reconnected in 1.3, 1.4 and 1.3 s (`workers-after-{1,2,3}.log`), while the other numbers
+matched the table. The dial that was running when the worker came back had backed its Initial
+probes off to 2 s apart. A 2 s timeout ends that dial and the next one asks at once. How much
+this gains depends on where in the dial the restart lands, so the run measures one point of
+it. The bound is the part that holds: at most about 2 s between two probes, where it was about
+3 s.
+
+**Cost on a healthy link.** One keep-alive PING a second from whichever side's timer fires
+first, and its ACK, each at least 29 bytes of UDP payload, on a link with nothing else to send.
+A link that carries anything sends no keep-alives at all.

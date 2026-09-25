@@ -15,7 +15,9 @@
 //!    focuses B's waiting session; the banner's tag (the session UUID) drives
 //!    `notification_response` to it;
 //! 4. killing worker B mid-stream shows it as down while its tiles stay and worker A keeps
-//!    streaming, and a restart brings it back with the shell reattached.
+//!    streaming, and a restart brings it back with the shell reattached;
+//! 5. a worker down past the app's drop bar, whose link the app has given up, is found again by the
+//!    redial once it restarts.
 //!
 //! The agent is never a real Claude session and nothing is typed into a shell to fake one: the
 //! hook JSON is piped into `slopty hook`'s stdin, exactly what Claude Code does.
@@ -28,9 +30,13 @@ mod tests {
     use slopty_e2e::{Command, Dump};
 
     /// A worker round trip (open a shell, run a command, badge a hook) may take this long over the
-    /// shaped link. Noticing a killed worker takes the app's silence bound (8 s) and redialling a
-    /// restarted one its drop bound (15 s), both inside this.
+    /// shaped link. Noticing a killed worker (the app's 3 s silence bar), giving its link up (the
+    /// 5 s drop bar) and finding it restarted all fit well inside this.
     const STEP: Duration = Duration::from_secs(30);
+
+    /// How long worker B stays away in the last scenario after the app gives its link up: long
+    /// enough that the first redials have failed and the backoff is what finds it.
+    const AWAY: Duration = Duration::from_secs(3);
 
     /// Worker A, the stack's own.
     const A: &str = "studio";
@@ -308,6 +314,37 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // (5) Down for longer: the app gives the link up at its drop bar and redials on its
+        // backoff while the worker stays away; a restart is found by the next dial.
+        worker_b.kill_worker().await;
+        let killed = Instant::now();
+        stack
+            .driver
+            .wait_for("worker B's link given up", STEP, |d| {
+                worker(d, B).is_some_and(|w| w.status.ends_with("reconnecting…"))
+            })
+            .await
+            .unwrap();
+        println!(
+            "MEASURE workers: worker B's link given up {:.1} s after the kill",
+            killed.elapsed().as_secs_f64()
+        );
+        tokio::time::sleep(AWAY).await;
+        worker_b.restart_worker().await.unwrap();
+        let restarted = Instant::now();
+        stack
+            .driver
+            .wait_for("worker B back after a long absence", STEP, |d| {
+                worker(d, B).is_some_and(|w| w.status == "connected")
+            })
+            .await
+            .unwrap();
+        println!(
+            "MEASURE workers: worker B connected again {:.1} s after a restart {} s past the drop",
+            restarted.elapsed().as_secs_f64(),
+            AWAY.as_secs()
+        );
 
         println!(
             "MEASURE workers: full two-worker run in {:.1} s",

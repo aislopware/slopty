@@ -315,6 +315,12 @@ impl WorkerLink {
         slopty_net::endpoint::received_datagrams(&self.conn)
     }
 
+    /// Probe the worker now ([`slopty_net::endpoint::ping`]): a restarted one answers with a
+    /// reset, which ends the link.
+    pub fn ping(&self) {
+        slopty_net::endpoint::ping(&self.conn);
+    }
+
     /// Where the worker is and the round trip to it, for diagnostics.
     #[must_use]
     pub fn path(&self) -> String {

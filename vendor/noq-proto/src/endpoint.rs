@@ -922,7 +922,13 @@ impl Endpoint {
         let max_len =
             INITIAL_MTU as usize - partial_encode.header_len - crypto.packet.local.tag_len();
         frame::Close::from(reason).encoder(max_len).encode(buf);
-        buf.resize(buf.len() + crypto.packet.local.tag_len(), 0);
+        // The header protection sample starts 4 bytes after the packet number's first byte. A
+        // 16-byte AEAD tag always covers it, a shorter tag may not: pad with PADDING frames.
+        let tag_len = crypto.packet.local.tag_len();
+        let sampled =
+            partial_encode.header_len - number.len() + 4 + crypto.header.local.sample_size();
+        buf.resize(buf.len().max(sampled.saturating_sub(tag_len)), 0);
+        buf.resize(buf.len() + tag_len, 0);
         partial_encode.finish(
             buf,
             &*crypto.header.local,
@@ -1606,6 +1612,70 @@ impl ResetTokenTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{CryptoError, KeyPair};
+
+    /// Packet keys with no tag, and header keys that sample 16 bytes and change nothing.
+    struct Untagged;
+
+    impl crypto::PacketKey for Untagged {
+        fn encrypt(&self, _: PathId, _: u64, _: &mut [u8], _: usize) {}
+        fn decrypt(
+            &self,
+            _: PathId,
+            _: u64,
+            _: &[u8],
+            _: &mut BytesMut,
+        ) -> Result<(), CryptoError> {
+            Ok(())
+        }
+        fn tag_len(&self) -> usize {
+            0
+        }
+        fn confidentiality_limit(&self) -> u64 {
+            u64::MAX
+        }
+        fn integrity_limit(&self) -> u64 {
+            u64::MAX
+        }
+    }
+
+    impl crypto::HeaderKey for Untagged {
+        fn decrypt(&self, _: usize, _: &mut [u8]) {}
+        fn encrypt(&self, _: usize, _: &mut [u8]) {}
+        fn sample_size(&self) -> usize {
+            16
+        }
+    }
+
+    #[test]
+    fn an_initial_close_holds_the_header_sample_when_the_tag_is_shorter() {
+        let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+        let keys = Keys {
+            header: KeyPair {
+                local: Box::new(Untagged),
+                remote: Box::new(Untagged),
+            },
+            packet: KeyPair {
+                local: Box::new(Untagged),
+                remote: Box::new(Untagged),
+            },
+        };
+        let remote = FourTuple::new(SocketAddr::from(([127, 0, 0, 1], 4433)), None);
+        let mut buf = Vec::new();
+        let reason = TransportError::CONNECTION_REFUSED("");
+        let sent = endpoint.initial_close(
+            1,
+            remote,
+            &keys,
+            ConnectionId::new(&[7; 8]),
+            reason,
+            &mut buf,
+        );
+        // Initial header: flags, version, both CIDs with their lengths, an empty token, a 2-byte
+        // length and a 1-byte packet number, then the sample 4 bytes past the number's start.
+        let pn_pos = 1 + 4 + 1 + 8 + 1 + 8 + 1 + 2;
+        assert!(sent.size >= pn_pos + 4 + 16, "{} bytes", sent.size);
+    }
 
     #[test]
     fn assemble_contiguous() {

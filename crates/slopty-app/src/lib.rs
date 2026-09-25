@@ -43,7 +43,7 @@ use slopty_ui::workspace::{
     KeyTarget, MenuEntry, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
 };
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
-use workers::{WorkerSlot, retry_delay};
+use workers::{Hearing, Tick, WorkerSlot};
 
 /// A row of keys the soft keyboard lacks (Esc, Tab, Control, arrows, shell symbols).
 const KEY_BAR: bool = cfg!(target_os = "ios");
@@ -109,14 +109,6 @@ const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("→", "right", None),
     ("/", "/", Some("/")),
 ];
-/// Nothing heard from the worker for this long is shown as a warning (keep-alives run every
-/// 5 s).
-const SILENCE_WARN: std::time::Duration = std::time::Duration::from_secs(8);
-/// Nothing heard for this long and the connection is given up so the reconnect loop takes
-/// over: a restarted worker is back in ~1 s instead of after the transport's 45 s idle
-/// timeout. Three missed keep-alives, the same bar noq uses to abandon a path.
-const SILENCE_DROP: std::time::Duration = std::time::Duration::from_secs(15);
-
 /// What the panel over the workspace connects to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Panel {
@@ -448,14 +440,15 @@ impl Workspace {
     }
 
     /// Connect to `id` and keep it connected: each drop (worker restart, network change,
-    /// silence) is retried with a capped backoff; the loop ends when the worker is dropped.
+    /// silence) is redialled on the shared backoff ([`slopty_client::redial`]); the loop ends
+    /// when the worker is dropped.
     /// While the server says the worker is away the loop waits for it to come back online
     /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it).
     fn spawn_worker_loop(&self, id: WorkerId, cx: &Context<Self>) {
         let handle = self.runtime.clone();
         let view = self.view.clone();
         cx.spawn(async move |this, cx| {
-            let mut failures: u32 = 0;
+            let mut redial = slopty_client::redial::Redial::default();
             let mut held = false;
             loop {
                 let Ok(Some(plan)) = this.update(cx, |ws, _cx| ws.plan(id)) else {
@@ -484,13 +477,12 @@ impl Workspace {
                     let Ok(status) = this.update(cx, |ws, _cx| ws.failure_status(id, why)) else {
                         break;
                     };
-                    failures = failures.saturating_add(1);
-                    let delay = retry_delay(failures);
+                    let delay = redial.next(std::time::Instant::now());
                     view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                     wait_or_wake(cx, &wake, delay).await;
                     continue;
                 };
-                failures = 0;
+                redial.linked(std::time::Instant::now());
                 let net::Connected { me, ack, sender, mut events, link } = connected;
                 let link = std::sync::Arc::new(link);
                 let screen_link = std::sync::Arc::clone(&link);
@@ -512,34 +504,43 @@ impl Workspace {
                 if !matches!(alive, Ok(true)) {
                     break;
                 }
-                // Once a second: RTT for the bar and the predictors, and a liveness check.
-                // QUIC keep-alives make the worker send something every few seconds; when the
-                // received datagram count stops moving the worker is gone or unreachable, and
-                // the bar says so long before the transport's idle timeout drops the
-                // connection.
+                // Twice a keep-alive: RTT for the bar and the predictors, and whether the
+                // worker is heard (`workers::Hearing`). The bar says "silent" long before the
+                // transport's idle timeout, and past the drop bar the link is given up so the
+                // redial takes over. A wake while the link is up is the server saying the worker
+                // is back or moved: a link that is silent then is the dead one, given up at once.
                 let rtt_link = std::sync::Arc::downgrade(&link);
                 let rtt_view = view.clone();
+                let rtt_wake = std::sync::Arc::clone(&wake);
                 cx.spawn(async move |cx| {
-                    let mut heard = (0_u64, std::time::Instant::now());
+                    let mut hearing = Hearing::new(std::time::Instant::now());
                     loop {
-                        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                        let Some(link) = rtt_link.upgrade() else { break };
+                        let woken = wait_or_wake(cx, &rtt_wake, workers::HEARING_TICK).await;
+                        let Some(link) = rtt_link.upgrade() else {
+                            if woken {
+                                // The wake was for the connect loop, which is past this link.
+                                rtt_wake.notify_one();
+                            }
+                            break;
+                        };
                         let rtt = link.rtt();
                         let received = link.received_datagrams();
-                        if received != heard.0 {
-                            heard = (received, std::time::Instant::now());
-                        }
-                        let gap = heard.1.elapsed();
                         tracing::debug!(worker = %id, path = %link.path(), received, "link path");
-                        if gap >= SILENCE_DROP {
-                            tracing::warn!(worker = %id, ?gap, path = %link.path(), "worker silent; reconnecting");
-                            link.abandon("worker silent");
-                            break;
-                        }
-                        let status = if gap >= SILENCE_WARN {
-                            WorkerStatus::Silent(gap.as_secs())
-                        } else {
-                            WorkerStatus::Connected
+                        let heard = hearing.sample(received, std::time::Instant::now());
+                        let status = match heard.tick(woken) {
+                            Tick::Show(status) => status,
+                            Tick::Ping(status) => {
+                                link.ping();
+                                status
+                            }
+                            Tick::GiveUp { at_once } => {
+                                tracing::warn!(worker = %id, ?heard, woken, path = %link.path(), "worker silent; reconnecting");
+                                link.abandon("worker silent");
+                                if at_once {
+                                    rtt_wake.notify_one();
+                                }
+                                break;
+                            }
                         };
                         // Both notify only when what the bar shows changed.
                         rtt_view.update(cx, |v, cx| {
@@ -574,7 +575,7 @@ impl Workspace {
                 }
                 // Dropping the link closes the connection; the endpoint stays for the retry.
                 drop(link);
-                wait_or_wake(cx, &wake, retry_delay(0)).await;
+                wait_or_wake(cx, &wake, redial.next(std::time::Instant::now())).await;
             }
         })
         .detach();

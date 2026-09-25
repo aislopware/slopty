@@ -22,9 +22,13 @@ pub const SERVER_PORT: u16 = 45560;
 /// TCP port the server's MCP endpoint (Streamable HTTP) listens on unless told otherwise.
 pub const MCP_PORT: u16 = 45561;
 
-/// Keep-alive on a server link (worker, client or agent ↔ server): the server's pings keep a
-/// healthy link busy both ways, so [`LEASE_IDLE_TIMEOUT`] only fires on a dead path.
-pub const LEASE_KEEP_ALIVE: Duration = Duration::from_secs(1);
+/// Keep-alive on every link, the server's and a worker's.
+///
+/// An idle link still carries a ping and its ACK each second, so a peer that stops answering is
+/// noticed in a few seconds (a client's silence bars are multiples of this), NAT bindings
+/// survive and the RTT stays measured. That is two packets of at least 29 bytes a second, and
+/// none on a link that carries anything else.
+pub const KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Silence after which a server link is dead; for a worker this ends its lease and the
 /// directory marks it unreachable (`docs/decisions/topology.md`).
 pub const LEASE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,8 +36,6 @@ pub const LEASE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle timeout before a silent connection is dropped. Generous: a phone in a pocket keeps its
 /// session across brief radio gaps; QUIC migration handles the address change.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Keep-alive so NAT bindings survive and RTT stays measured while idle.
-const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// Datagram buffers: a few frames of 4K video at 60 fps.
 ///
 /// The worker's capture guard skips a frame while the transport still holds the last one's bytes,
@@ -125,16 +127,14 @@ fn streams_ahead_of_datagrams() -> Option<i32> {
     (!datagrams_first).then_some(crate::streams::AHEAD_OF_DATAGRAMS)
 }
 
-/// Transport config for server links: [`transport_config`] with the lease's timings.
+/// Transport config for server links: [`transport_config`] with the lease's idle timeout.
 ///
 /// The idle timeout is negotiated down to the smaller side's, so a server endpoint on this
 /// config holds every link to it to [`LEASE_IDLE_TIMEOUT`].
 #[must_use]
 pub fn lease_transport_config() -> TransportConfig {
     let mut config = transport_config();
-    config
-        .max_idle_timeout(IdleTimeout::try_from(LEASE_IDLE_TIMEOUT).ok())
-        .keep_alive_interval(Some(LEASE_KEEP_ALIVE));
+    config.max_idle_timeout(IdleTimeout::try_from(LEASE_IDLE_TIMEOUT).ok());
     config
 }
 
@@ -270,12 +270,23 @@ pub fn rtt(conn: &Connection) -> Option<Duration> {
 
 /// UDP datagrams received on the connection so far.
 ///
-/// With `KEEP_ALIVE` pings from the other side a healthy connection moves this counter every
-/// few seconds; a counter that stands still is the earliest sign the peer is gone, long before
-/// `IDLE_TIMEOUT`.
+/// With [`KEEP_ALIVE`] pings a healthy connection moves this counter every second or so; a
+/// counter that stands still is the earliest sign the peer is gone, long before `IDLE_TIMEOUT`.
 #[must_use]
 pub fn received_datagrams(conn: &Connection) -> u64 {
     conn.stats().udp_rx.datagrams
+}
+
+/// Send the peer an ACK-eliciting packet now, whatever the keep-alive timer says.
+///
+/// After a peer stops answering, noq probes it with a backoff that reaches 2 s between probes.
+/// A peer restarted since answers any packet with a stateless reset, so a client that has
+/// stopped hearing its worker pings it on its own tick to find a restart sooner.
+pub fn ping(conn: &Connection) {
+    if let Some(path) = conn.path(PathId::ZERO) {
+        // A closed path has nobody to ping; the connection's end reports that.
+        let _closed = path.ping();
+    }
 }
 
 /// Where the peer is now (it moves when the peer migrates), as an IPv4 address when it is one;

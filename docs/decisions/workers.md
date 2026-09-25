@@ -272,3 +272,45 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   nothing, which would mean the traffic did not go through the shaper. Supersedes the two
   "Two-host harness" hardening entries above, whose ssh teardown, gate and address helpers are
   gone.
+
+- ✅ **A worker that dies shows down in seconds and one that comes back is found in one**
+  (2026-09-26). The two-worker e2e measured 8.5 s from a SIGKILL to the worker shown down and
+  8.2 s from its restart to the link back up, and a remote Mac cannot feel local at that. Each
+  delay had its own cause, and each is fixed where it lives:
+  - Every link, a worker's included, runs the 1 s keep-alive the server leases already used
+    (`slopty_net::endpoint::KEEP_ALIVE`, one constant for both). The app's bars are multiples
+    of it: silent at three missed keep-alives (`SILENCE_WARN`, 3 s), given up at five
+    (`SILENCE_DROP`, 5 s). It samples the received-datagram count twice a keep-alive
+    (`workers::Hearing`, `HEARING_TICK`). The transport's 45 s idle timeout stays, for the
+    worker's side of a phone that sleeps.
+  - A restarted worker now resets the old connection. The reset `transport.md` relied on never
+    went out, because noq's connection-ID generator takes a random key per process, and a PING
+    under the null crypto is shorter than the 22 bytes noq needs before it answers with a reset.
+    Both are fixed in `slopty_net::crypto`: one connection-ID key for every process, and a
+    16-byte header sample, so every packet is at least 29 bytes. While the app hears nothing it
+    also pings on each tick (`WorkerLink::ping`), so a worker that comes back is found within
+    half a second, not at noq's probe backoff of up to 2 s.
+  - Redials follow one rule for the server link and every worker link
+    (`slopty_client::redial`): 250 ms after a drop, doubling to 2 s, back to 250 ms after a
+    link that held for 10 s. The worker links waited 1 s and backed off to 10 s. The server
+    link's cap drops from 5 s to 2 s.
+  - A dial gives up after 2 s instead of 5 (`HANDSHAKE_TIMEOUT`). noq's Initial probes back off
+    to 2 s apart, so the end of a long dial left a worker that had just come up unasked, where
+    the next dial asks it at once.
+  - When the server's directory says a worker is back online (or moved), the wake that already
+    cut the connect loop's wait short now also reaches a link that is still up. If that link
+    is silent, it is the dead one: it is given up and redialled at once.
+
+  After, three runs each (`docs/MEASUREMENTS.md`, "a dead worker shown down and a restarted one
+  found again"): shown down 3.3 to 3.5 s after the kill. A restart while it is shown down
+  connects 0.6 to 0.8 s later. The link is given up 5.6 to 5.7 s after the kill, and a restart
+  3 s after that connects 0.5 to 0.6 s later. Tests: `redials_back_off_from_a_quarter_second_to_two`
+  and `a_steady_link_starts_the_backoff_again_and_a_flapping_one_does_not`
+  (`slopty_client::redial`), `the_silence_bars_are_three_and_five_keep_alives`, the two `Hearing`
+  tests and
+  `a_silent_link_pings_and_is_given_up_at_once_when_the_server_says_the_worker_is_back`
+  (`slopty_app::workers`), and
+  `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` and
+  `a_ping_draws_a_restarted_worker_s_reset_at_once` (`slopty-net` loopback, through an
+  in-test front that swaps the worker behind one address). The e2e gained the scenario past
+  the drop bar.

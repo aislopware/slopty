@@ -7,6 +7,7 @@
 //! * [`directory`] — [`directory::Directory`]: the worker directory the server keeps, as last heard
 //!   (cached for degraded mode), and whether to dial each worker.
 //! * [`server`] — [`server::spawn`]: the one link to the server, redialled after every drop.
+//! * [`redial`] — [`redial::Redial`]: when a dropped link, server or worker, is dialled again.
 //! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
 //!   optimistically.
 //! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
@@ -31,6 +32,7 @@ pub mod items;
 pub mod layout;
 pub mod link;
 pub mod pacing;
+pub mod redial;
 pub mod remote;
 pub mod screen;
 pub mod server;

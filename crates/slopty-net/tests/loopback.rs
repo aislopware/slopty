@@ -279,6 +279,102 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     }
 
+    /// One address in front of a worker that can be swapped for another, which is how a worker
+    /// killed and started again on its port looks to a client: the old one goes unheard (a
+    /// SIGKILL says no goodbye) and the new one answers. Returns the front's address and the
+    /// switch.
+    async fn front(first: SocketAddr) -> (SocketAddr, tokio::sync::watch::Sender<SocketAddr>) {
+        let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+        let front = tokio::net::UdpSocket::bind(loopback).await.unwrap();
+        let addr = front.local_addr().unwrap();
+        let (swap, mut target) = tokio::sync::watch::channel(first);
+        tokio::spawn(async move {
+            let mut client = None;
+            let (mut up, mut down) = ([0_u8; 2048], [0_u8; 2048]);
+            loop {
+                // A socket per worker: what the old one still sends reaches a socket nobody reads.
+                let behind = tokio::net::UdpSocket::bind(loopback).await.unwrap();
+                let to = *target.borrow_and_update();
+                behind.connect(to).await.unwrap();
+                loop {
+                    tokio::select! {
+                        Ok((n, from)) = front.recv_from(&mut up) => {
+                            client = Some(from);
+                            let _sent = behind.send(&up[..n]).await;
+                        }
+                        Ok(n) = behind.recv(&mut down), if client.is_some() => {
+                            if let Some(client) = client {
+                                let _sent = front.send_to(&down[..n], client).await;
+                            }
+                        }
+                        changed = target.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        (addr, swap)
+    }
+
+    /// A client idle on a worker behind [`front`]; the worker, and the switch to put another
+    /// one there.
+    async fn idle_on_a_worker()
+    -> (slopty_net::client::WorkerConn, WorkerListener, tokio::sync::watch::Sender<SocketAddr>)
+    {
+        let (old, old_port, id) = worker(Admission::default());
+        answer_every_hello(&old, id);
+        let (addr, swap) = front(SocketAddr::from(([127, 0, 0, 1], old_port))).await;
+        let endpoint = bind_client().unwrap();
+        let conn = connect_addr(&endpoint, addr, hello()).await.unwrap();
+        // Idle, so the next packet the client sends is its keep-alive.
+        tokio::time::sleep(slopty_net::endpoint::KEEP_ALIVE.checked_div(2).unwrap()).await;
+        (conn, old, swap)
+    }
+
+    /// The worker behind `swap` killed and started again: a new one answers at its address.
+    fn restart(swap: &tokio::sync::watch::Sender<SocketAddr>) -> WorkerListener {
+        let (new, new_port, _) = worker(Admission::default());
+        swap.send(SocketAddr::from(([127, 0, 0, 1], new_port))).unwrap();
+        new
+    }
+
+    /// A worker killed and started again at the same address answers the old connection's next
+    /// packet, a bare keep-alive, with a stateless reset, so the client knows within a
+    /// keep-alive instead of at its silence bar. Both halves are needed: every Slopty process
+    /// takes the same connection IDs as its own, and every packet is long enough to draw a
+    /// reset.
+    #[tokio::test]
+    async fn a_restarted_worker_resets_the_old_connection_within_a_keep_alive() {
+        let (conn, _old, swap) = idle_on_a_worker().await;
+        let _new = restart(&swap);
+        let restarted = Instant::now();
+        let keep_alive = slopty_net::endpoint::KEEP_ALIVE;
+        let why = tokio::time::timeout(keep_alive.saturating_mul(3), conn.conn.closed()).await;
+        let elapsed = restarted.elapsed();
+        assert!(matches!(why, Ok(noq::ConnectionError::Reset)), "{why:?} after {elapsed:?}");
+        assert!(elapsed < keep_alive.saturating_mul(2), "reset {elapsed:?} after the restart");
+        println!("MEASURE restart: reset {elapsed:?} after the restart, on the keep-alive");
+    }
+
+    /// A ping goes out at once, not on the keep-alive or probe timer: a client that has stopped
+    /// hearing its worker finds a restarted one on its next tick.
+    #[tokio::test]
+    async fn a_ping_draws_a_restarted_worker_s_reset_at_once() {
+        let (conn, _old, swap) = idle_on_a_worker().await;
+        let _new = restart(&swap);
+        let restarted = Instant::now();
+        slopty_net::endpoint::ping(&conn.conn);
+        let keep_alive = slopty_net::endpoint::KEEP_ALIVE;
+        let why = tokio::time::timeout(keep_alive, conn.conn.closed()).await;
+        let elapsed = restarted.elapsed();
+        assert!(matches!(why, Ok(noq::ConnectionError::Reset)), "{why:?} after {elapsed:?}");
+        assert!(elapsed < keep_alive.checked_div(10).unwrap(), "reset {elapsed:?} after the ping");
+    }
+
     /// Datagrams queued ahead of a session frame, over a link that takes 1.4 s to carry them: the
     /// frame leaves in the next packet. With `SLOPTY_DATAGRAMS_FIRST=1` it waits for all of them.
     #[tokio::test(flavor = "multi_thread")]

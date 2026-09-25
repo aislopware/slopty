@@ -5,28 +5,13 @@
 //! path: while this link is down the workers are still dialled directly
 //! ([`crate::directory`]).
 
-use std::time::{Duration, Instant};
-
 use slopty_net::HostAddr;
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_proto::server::{FromServer, Role};
 use tokio::sync::mpsc;
 
-/// The first redial waits this long.
-const REDIAL_FIRST: Duration = Duration::from_millis(250);
-/// Redials back off to this at most.
-const REDIAL_MAX: Duration = Duration::from_secs(5);
-/// A link that lived this long was healthy: the next redial starts from the shortest delay.
-const STEADY: Duration = Duration::from_secs(10);
 /// Server messages queued for the UI at most.
 const EVENT_DEPTH: usize = 256;
-
-/// The wait before redial number `failures` (0 for the first after a drop): 250 ms doubling to
-/// 5 s.
-#[must_use]
-pub fn redial_delay(failures: u32) -> Duration {
-    REDIAL_FIRST.saturating_mul(1_u32 << failures.min(5)).min(REDIAL_MAX)
-}
 
 /// What the link says.
 #[derive(Debug)]
@@ -80,7 +65,7 @@ async fn run(
     mut first: Option<ServerLink>,
     tx: mpsc::Sender<ServerEvent>,
 ) {
-    let mut failures: u32 = 0;
+    let mut redial = crate::redial::Redial::default();
     loop {
         let dialled = match first.take() {
             Some(link) => Ok(link),
@@ -88,22 +73,18 @@ async fn run(
         };
         let why = match dialled {
             Ok(link) => {
-                let began = Instant::now();
+                redial.linked(std::time::Instant::now());
                 let Some(why) = pump(link, &tx).await else { return };
-                if began.elapsed() >= STEADY {
-                    failures = 0;
-                }
                 why
             }
             Err(DialError::Refused(why)) => format!("refused: {why:?}"),
             Err(DialError::Net(e)) => e.to_string(),
         };
-        tracing::debug!(server = %addr, %why, failures, "server link down");
+        tracing::debug!(server = %addr, %why, "server link down");
         if tx.send(ServerEvent::Unlinked { why }).await.is_err() {
             return;
         }
-        tokio::time::sleep(redial_delay(failures)).await;
-        failures = failures.saturating_add(1);
+        tokio::time::sleep(redial.next(std::time::Instant::now())).await;
     }
 }
 
@@ -125,17 +106,5 @@ async fn pump(mut link: ServerLink, tx: &mpsc::Sender<ServerEvent>) -> Option<St
             }
             Err(e) => return Some(e.to_string()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redials_back_off_from_a_quarter_second_to_five() {
-        let delays: Vec<u128> = (0..8).map(|n| redial_delay(n).as_millis()).collect();
-        assert_eq!(delays, [250, 500, 1000, 2000, 4000, 5000, 5000, 5000]);
-        assert_eq!(redial_delay(u32::MAX), REDIAL_MAX);
     }
 }

@@ -51,6 +51,21 @@ const MAX_PARAMS: usize = 4096;
 /// Length of the retry integrity tag and of an HMAC signature.
 const TAG_LEN: usize = 16;
 
+/// The header-protection sample the plain header key claims, which nothing reads.
+///
+/// noq pads every packet to hold one after the packet number, so a PING is 29 bytes rather
+/// than 13. A peer answers a packet for a connection it does not know with a stateless reset
+/// only when that packet is at least 22 bytes (RFC 9000 section 10.3: the reset must be
+/// shorter than what incited it and still look like a packet). Without the padding, the
+/// keep-alive a client sends to a restarted worker drew no reset, and the client learnt the
+/// worker was gone only from its silence bar.
+const SAMPLE: usize = 16;
+
+/// The key of the connection-ID generator, the same in every Slopty process: a restarted worker
+/// takes the connection IDs it handed out before as its own, and answers them with a stateless
+/// reset instead of dropping them as noise.
+const CID_KEY: u64 = u64::from_be_bytes(*b"slopcids");
+
 /// A packet key and a header key that leave every byte as it is.
 #[derive(Clone, Copy, Debug)]
 struct Plain;
@@ -87,7 +102,7 @@ impl HeaderKey for Plain {
     fn encrypt(&self, _: usize, _: &mut [u8]) {}
 
     fn sample_size(&self) -> usize {
-        0
+        SAMPLE
     }
 }
 
@@ -432,11 +447,14 @@ pub fn server_config() -> noq::ServerConfig {
     config
 }
 
-/// The endpoint config: Slopty's QUIC version only, and the shared reset key.
+/// The endpoint config: Slopty's QUIC version only, and the shared reset and connection-ID
+/// keys.
 #[must_use]
 pub fn endpoint_config() -> noq::EndpointConfig {
     let mut config = noq::EndpointConfig::new(Arc::new(Keyed));
-    config.supported_versions(vec![QUIC_VERSION]);
+    config.supported_versions(vec![QUIC_VERSION]).cid_generator(Arc::new(|| {
+        Box::new(noq_proto::HashedConnectionIdGenerator::from_key(CID_KEY))
+    }));
     config
 }
 
@@ -539,7 +557,7 @@ mod tests {
         PacketKey::decrypt(&k, PathId::ZERO, 7, b"hdr", &mut buf).unwrap();
         assert_eq!(&*buf, b"payload");
         assert_eq!(k.tag_len(), 0);
-        assert_eq!(k.sample_size(), 0);
+        assert_eq!(k.sample_size(), SAMPLE);
         assert_eq!(k.confidentiality_limit(), u64::MAX);
         assert_eq!(k.integrity_limit(), u64::MAX);
         assert!(Server.initial_keys(1, ConnectionId::new(&[1; 8])).is_err(), "QUIC v1 is refused");

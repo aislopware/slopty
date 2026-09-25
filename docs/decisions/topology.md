@@ -167,7 +167,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The server's lease timings, state file and MCP endpoint** (2026-09-25).
   - **Lease.** Every server link runs a 1 s QUIC keep-alive and a 5 s idle timeout
-    (`LEASE_KEEP_ALIVE` and `LEASE_IDLE_TIMEOUT` in `slopty-net`). QUIC negotiates the idle
+    (`KEEP_ALIVE` and `LEASE_IDLE_TIMEOUT` in `slopty-net`). QUIC negotiates the idle
     timeout down to the smaller side's, so client and agent links get it too. That costs
     nothing, because the server is off the data path and a dropped client just redials.
     - A worker whose link ends turns *unreachable*. A clean close does it at once, a silent
